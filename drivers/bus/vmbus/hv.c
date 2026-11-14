@@ -17,12 +17,30 @@
 #define HV_PAGE_INTERRUPT 5
 #define HV_PAGE_COUNT     6
 
+#ifdef _M_IX86
+/* The page the hypervisor overlays, and the stub that loads the i386 hypercall registers */
+extern UCHAR HvHypercallCode[];
+
+ULONG64
+NTAPI
+HvHypercallX86(
+    _In_ ULONG64 Control,
+    _In_ ULONG64 Input,
+    _In_ ULONG64 Output);
+
+#define HV_HYPERCALL_CODE_PAGE ((PVOID)HvHypercallCode)
+#define HvHypercall HvHypercallX86
+#else
 ULONG64
 NTAPI
 HvHypercallPage(
     _In_ ULONG64 Control,
     _In_ ULONG64 Input,
     _In_ ULONG64 Output);
+
+#define HV_HYPERCALL_CODE_PAGE ((PVOID)HvHypercallPage)
+#define HvHypercall HvHypercallPage
+#endif
 
 static PVOID HvPages;
 
@@ -59,7 +77,7 @@ HvInitialize(
     ULONG64 Value;
     PUCHAR Pages;
 
-    if (((ULONG_PTR)HvHypercallPage & (PAGE_SIZE - 1)) != 0)
+    if (((ULONG_PTR)HV_HYPERCALL_CODE_PAGE & (PAGE_SIZE - 1)) != 0)
     {
         DPRINT1("VMBUS: hypercall page is not page aligned\n");
         return STATUS_DATA_ERROR;
@@ -80,7 +98,7 @@ HvInitialize(
     Bus->InterruptPage = Pages + HV_PAGE_INTERRUPT * PAGE_SIZE;
 
     PagesPa = MmGetPhysicalAddress(Pages);
-    HypercallPa = MmGetPhysicalAddress((PVOID)HvHypercallPage);
+    HypercallPa = MmGetPhysicalAddress(HV_HYPERCALL_CODE_PAGE);
 
     OldAffinity = KeSetSystemAffinityThreadEx((KAFFINITY)1);
 
@@ -157,7 +175,7 @@ HvPostMessage(
         Bus->PostInput->PayloadSize = Size;
         RtlCopyMemory(Bus->PostInput->Payload, Message, Size);
 
-        Status = HvHypercallPage(HVCALL_POST_MESSAGE, (ULONG64)Bus->PostInputPa.QuadPart, 0) & 0xFFFF;
+        Status = HvHypercall(HVCALL_POST_MESSAGE, (ULONG64)Bus->PostInputPa.QuadPart, 0) & 0xFFFF;
         if (Status == HV_STATUS_SUCCESS)
             return STATUS_SUCCESS;
 
@@ -176,7 +194,7 @@ VOID
 HvSignalEvent(
     _In_ ULONG ConnectionId)
 {
-    HvHypercallPage(HVCALL_SIGNAL_EVENT | HV_HYPERCALL_FAST, ConnectionId, 0);
+    HvHypercall(HVCALL_SIGNAL_EVENT | HV_HYPERCALL_FAST, ConnectionId, 0);
 }
 
 VOID
