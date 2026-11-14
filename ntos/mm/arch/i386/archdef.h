@@ -28,3 +28,6 @@
 #define MI_ARCH_L3_BITS        0
 #define MI_ARCH_L4_SHIFT       0
 #define MI_ARCH_L4_BITS        0
+
+/* Session space: 8 page directory entries (32 MB), all page tables pinned when a session is created */
+#define MI_I386_SESSION_TOP_ENTRIES 8

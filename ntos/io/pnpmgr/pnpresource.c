@@ -592,6 +592,37 @@ IopSelectAlternativeList(
     return List;
 }
 
+/* A bridge window the firmware places wholly above what this system can address
+ * (a 64-bit PCI hole seen by a 32-bit kernel) cannot be decoded by any child,
+ * so it is left out instead of failing the whole bus */
+static
+BOOLEAN
+IopIsUnreachableWindow(
+    _In_ PIO_RESOURCE_DESCRIPTOR Requirement)
+{
+    ULONGLONG Alignment;
+    ULONGLONG Minimum;
+    ULONGLONG Maximum;
+
+    if (!(Requirement->Flags & CM_RESOURCE_MEMORY_WINDOW_DECODE)) return FALSE;
+
+    switch (Requirement->Type)
+    {
+        case CmResourceTypeMemory:
+            Minimum = (ULONGLONG)Requirement->u.Memory.MinimumAddress.QuadPart;
+            break;
+
+        case CmResourceTypeMemoryLarge:
+            if (RtlIoDecodeMemIoResource(Requirement, &Alignment, &Minimum, &Maximum) == 0) return FALSE;
+            break;
+
+        default:
+            return FALSE;
+    }
+
+    return (Minimum >= MmGetPhysicalAddressLimit());
+}
+
 NTSTATUS
 NTAPI
 IopFixupResourceListWithRequirements(
@@ -668,7 +699,20 @@ IopFixupResourceListWithRequirements(
                                               &Partial[Count]);
             }
 
-            if (!NT_SUCCESS(Status)) break;
+            if (!NT_SUCCESS(Status))
+            {
+                for (Choice = Index; Choice < Next; Choice++)
+                {
+                    if (!IopIsUnreachableWindow(&List->Descriptors[Choice])) break;
+                }
+
+                if (Choice < Next) break;
+
+                DPRINT1("PnP: leaving out a memory window above the addressable limit for %wZ\n",
+                        DeviceNode != NULL ? &DeviceNode->InstancePath : NULL);
+                Status = STATUS_SUCCESS;
+                continue;
+            }
 
             Count++;
         }

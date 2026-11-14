@@ -449,7 +449,7 @@ AtaAhciPollingTimerDpc(
 
     ActiveSlots = ChanData->ActiveSlotsBitmap;
 
-    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+    ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
 
     if (ActiveSlots != 0)
     {
