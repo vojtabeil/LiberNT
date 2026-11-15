@@ -171,10 +171,14 @@ IopDecrementDeviceObjectRef(
             ObReferenceObject(DeviceObject);
         }
 
-        if ((UnloadIfUnused ||
-             (Extension->ExtensionFlags & DOE_UNLOAD_PENDING)) &&
-            DriverObject->DeviceObject == DeviceObject &&
-            DeviceObject->NextDevice == NULL)
+        /* A pending unload is retried for any device of the driver: the retry checks all of them */
+        if (Extension->ExtensionFlags & DOE_UNLOAD_PENDING)
+        {
+            Unload = TRUE;
+        }
+        else if (UnloadIfUnused &&
+                 DriverObject->DeviceObject == DeviceObject &&
+                 DeviceObject->NextDevice == NULL)
         {
             Unload = TRUE;
         }

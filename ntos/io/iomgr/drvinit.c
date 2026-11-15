@@ -582,6 +582,7 @@ IopInitializeDriverModule(
 
     if (!NT_SUCCESS(*DriverEntryStatus))
     {
+        DPRINT1("IO: DriverEntry of %wZ failed with 0x%lx\n", &Created->DriverName, *DriverEntryStatus);
         if (HoldPnpUnloadBarrier) IopReleasePnpUnloadBarrier(Created);
 
         Created->DriverSection = NULL;
