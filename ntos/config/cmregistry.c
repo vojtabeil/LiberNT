@@ -101,6 +101,8 @@ static ULONG CmpDpcQueueDepthLength = sizeof(ULONG);
 static ULONG CmpMinimumDpcRateLength = sizeof(ULONG);
 static ULONG CmpAdjustDpcThresholdLength = sizeof(ULONG);
 static ULONG CmpIdealDpcRateLength = sizeof(ULONG);
+static ULONG CmpEnforceWriteProtectionLength = sizeof(ULONG);
+extern ULONG MmEnforceWriteProtection;
 
 /* GLOBALS ********************************************************************/
 
@@ -169,6 +171,13 @@ CM_SYSTEM_CONTROL_VECTOR CmControlVector[] =
         L"IdealDpcRate",
         &KiIdealDpcRate,
         &CmpIdealDpcRateLength,
+        &DummyData
+    },
+    {
+        L"Session Manager\\Memory Management",
+        L"EnforceWriteProtection",
+        &MmEnforceWriteProtection,
+        &CmpEnforceWriteProtectionLength,
         &DummyData
     },
     {

@@ -15,7 +15,7 @@
 
 #define MI_EXPORT_FORWARD_DEPTH 8
 
-extern BOOLEAN MmEnforceWriteProtection;
+extern ULONG MmEnforceWriteProtection;
 
 VOID
 MiLockSystemImages(VOID);

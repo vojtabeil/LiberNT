@@ -12,7 +12,8 @@
 #define MI_DEFAULT_GS_COOKIE ((sizeof(ULONG_PTR) == 8) ? (ULONG_PTR)0x00002B992DDFA232ULL : (ULONG_PTR)0xBB40E64EUL)
 #define MI_GS_COOKIE_MASK ((sizeof(ULONG_PTR) == 8) ? (ULONG_PTR)0x0000FFFFFFFFFFFFULL : (ULONG_PTR)MAXULONG)
 
-BOOLEAN MmEnforceWriteProtection = TRUE;
+/* Session Manager\Memory Management\EnforceWriteProtection, read by the configuration manager */
+ULONG MmEnforceWriteProtection = TRUE;
 
 static volatile LONG64 MiSessionImageCursor;
 
