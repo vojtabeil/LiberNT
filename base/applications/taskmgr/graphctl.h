@@ -41,8 +41,10 @@ typedef struct _TM_GRAPH_CONTROL
     BOOL     DrawSecondaryPlot;
 
     PBYTE    CpuBuffer;
+    PBYTE    CpuKernelBuffer;
     UINT32   CpuSeries;
     UINT32   CpuRegionWidth;
+    BOOL     PerCpuMode;
 }
 TM_GRAPH_CONTROL, *PTM_GRAPH_CONTROL;
 
@@ -65,7 +67,10 @@ BOOL GraphCtrl_Create(PTM_GRAPH_CONTROL inst, HWND hWnd, HWND hParentWnd, PTM_FO
 void GraphCtrl_Dispose(PTM_GRAPH_CONTROL inst);
 void GraphCtrl_AddPoint(PTM_GRAPH_CONTROL inst, BYTE val0, BYTE val1);
 BOOL GraphCtrl_EnablePerCpu(PTM_GRAPH_CONTROL inst, UINT32 nCpus);
-void GraphCtrl_AddPointsPerCpu(PTM_GRAPH_CONTROL inst, const BYTE *vals, UINT32 nCpus);
+void GraphCtrl_AddPointsPerCpu(PTM_GRAPH_CONTROL inst, BYTE Total, BYTE Kernel,
+                               const BYTE *vals, const BYTE *kvals, UINT32 nCpus);
+void GraphCtrl_SetPerCpuMode(PTM_GRAPH_CONTROL inst, BOOL PerCpu);
+void GraphCtrl_Redraw(PTM_GRAPH_CONTROL inst);
 void GraphCtrl_RedrawOnHeightChange(PTM_GRAPH_CONTROL inst, INT nh);
 void GraphCtrl_RedrawBitmap(PTM_GRAPH_CONTROL inst, INT h);
 
