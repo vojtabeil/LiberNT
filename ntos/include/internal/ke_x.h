@@ -1941,6 +1941,45 @@ KiWaitForThreadSwapOut(IN PKTHREAD Thread)
     KeMemoryBarrier();
 }
 
+//
+// Settles which thread a processor switches to when it gives up OldThread for
+// Candidate, which the caller has just taken off this processor's standby slot
+// or ready queues. Call with the PRCB lock held.
+//
+// A thread can be made ready, placed and picked while the processor it last
+// ran on is still on its stack. A processor that is itself leaving a thread
+// must not wait for that: the other processor may have picked the thread being
+// left here and be waiting for this one in turn, and then neither stack is ever
+// let go. The candidate goes back to standing by instead and the idle thread
+// takes the processor. No other processor ever waits for an idle thread, so
+// the idle loop can do the waiting.
+//
+FORCEINLINE
+PKTHREAD
+KiSettleIncomingThread(IN PKPRCB Prcb,
+                       IN PKTHREAD OldThread,
+                       IN PKTHREAD Candidate)
+{
+#if KI_THREAD_HANDOFF_USES_RUNNING
+    if ((OldThread != Prcb->IdleThread) &&
+        (Candidate != Prcb->IdleThread) &&
+        *(volatile BOOLEAN *)&Candidate->Running)
+    {
+        ASSERT(Prcb->NextThread == NULL);
+        ASSERT(Candidate != OldThread);
+
+        Candidate->State = Standby;
+        Candidate->NextProcessor = Prcb->Number;
+        Prcb->NextThread = Candidate;
+        return Prcb->IdleThread;
+    }
+#else
+    UNREFERENCED_PARAMETER(Prcb);
+    UNREFERENCED_PARAMETER(OldThread);
+#endif
+    return Candidate;
+}
+
 #if KI_THREAD_HANDOFF_USES_RUNNING
 /* Called on the incoming stack after the architecture switch has completed. */
 FORCEINLINE

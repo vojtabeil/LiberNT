@@ -277,6 +277,7 @@ KiExitDispatcher(
     }
 
     Prcb->NextThread = NULL;
+    NextThread = KiSettleIncomingThread(Prcb, Thread, NextThread);
     Prcb->CurrentThread = NextThread;
     NextThread->State = Running;
 

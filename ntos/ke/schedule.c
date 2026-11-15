@@ -721,6 +721,7 @@ KiSwapThread(
     }
     else
     {
+        NextThread = KiSettleIncomingThread(Prcb, Thread, NextThread);
         NextThread->State = Running;
         Prcb->CurrentThread = NextThread;
 
@@ -1100,6 +1101,7 @@ KiSwitchToStandbyThread(
     }
 
     Prcb->NextThread = NULL;
+    NextThread = KiSettleIncomingThread(Prcb, Thread, NextThread);
     Prcb->CurrentThread = NextThread;
     NextThread->State = Running;
 

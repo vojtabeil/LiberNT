@@ -340,9 +340,13 @@ KiIdleLoop(VOID)
             NewThread->State = Running;
             KiReleasePrcbLock(Prcb);
 
+            /*
+             * The processor the thread is leaving may need this one to answer
+             * an IPI before it gets that far, so the wait is interruptible.
+             */
+            _enable();
             KiWaitForThreadSwapOut(NewThread);
 
-            _enable();
             KiSwapContext(APC_LEVEL, OldThread);
 
 #ifdef CONFIG_SMP
@@ -601,6 +605,7 @@ KiDispatchInterrupt(VOID)
 
         /* Set new thread data */
         Prcb->NextThread = NULL;
+        NewThread = KiSettleIncomingThread(Prcb, OldThread, NewThread);
         Prcb->CurrentThread = NewThread;
 
         /* The thread is now running */
