@@ -619,6 +619,7 @@ int main(int argc, char **argv)
     SET_PROVIDER_PATH setProviderPath;
     freerdp_listener *listener;
     HANDLE events[32], singleton;
+    BOOL LanListening = FALSE;
     DWORD count, status;
     WSADATA winsock;
     DebugPrint = (DEBUG_PRINT)(void *)GetProcAddress(GetModuleHandleA("ntdll.dll"), "DbgPrint");
@@ -699,11 +700,8 @@ int main(int argc, char **argv)
     listener->PeerAccepted = Accepted;
     if (!WTSRegisterWtsApiFunctionTable(FreeRDP_InitWtsApi())) return 1;
     Log("Starting console server; waiting for %s:3389", BindAddress);
-    /* Autostart may run before PnP has finished configuring Ethernet. */
-    while (!EnsureAddress() || !listener->Open(listener, BindAddress, 3389))
-        if (WaitForSingleObject(StopEvent, 2000) != WAIT_TIMEOUT) goto done;
-    Log("Listening on %s:3389; TLS; allowed controller %s", BindAddress, AllowedPeer);
-    /* hvsockbridge forwards the enhanced session of Virtual Machine Connection to 127.0.0.1 */
+    /* hvsockbridge forwards the enhanced session of Virtual Machine Connection to
+     * 127.0.0.1. It does not depend on the test LAN, so serve it right away. */
     if (Loopback)
     {
         if (listener->Open(listener, "127.0.0.1", 3389))
@@ -713,15 +711,22 @@ int main(int argc, char **argv)
     }
     for (;;)
     {
+        /* Autostart may run before PnP has finished configuring Ethernet, and the
+         * configured interface may not exist at all: keep trying every 2 s. */
+        if (!LanListening && EnsureAddress() && listener->Open(listener, BindAddress, 3389))
+        {
+            LanListening = TRUE;
+            Log("Listening on %s:3389; TLS; allowed controller %s", BindAddress, AllowedPeer);
+        }
         events[0] = StopEvent;
         count = listener->GetEventHandles(listener, events + 1, 31);
-        if (!count) break;
-        status = WaitForMultipleObjects(count + 1, events, FALSE, INFINITE);
+        if (!count && LanListening) break;
+        status = WaitForMultipleObjects(count + 1, events, FALSE, LanListening ? INFINITE : 2000);
         if (status == WAIT_OBJECT_0 || status == WAIT_FAILED) break;
+        if (status == WAIT_TIMEOUT) continue;
         if (!listener->CheckFileDescriptor(listener)) break;
     }
     listener->Close(listener);
-done:
     SetEvent(StopEvent);
     while (InterlockedCompareExchange(&ClientConnected, 0, 0)) Sleep(50);
     freerdp_listener_free(listener);
