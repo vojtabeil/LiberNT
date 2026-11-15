@@ -38,6 +38,7 @@ static ULONG64 HalpApicTimerFrequency;
 
 extern LARGE_INTEGER HalpCpuClockFrequency;
 extern BOOLEAN HalIsProfiling;
+extern BOOLEAN HalpUsePlatformTick;
 
 static
 BOOLEAN
@@ -213,7 +214,8 @@ HalpInitializeClock(VOID)
     EFlags = __readeflags();
     _disable();
 
-    if (HalpCanUseApicTimerClock())
+    /* The RTC drives the clock where the local APIC timer cannot, or where the boot options keep it free */
+    if (!HalpUsePlatformTick && HalpCanUseApicTimerClock())
     {
         HalpApicTimerClock = TRUE;
         KeSetProfileIrql(max(PROFILE_LEVEL, CLOCK_LEVEL));
@@ -232,16 +234,6 @@ HalpInitializeClock(VOID)
     }
 
     // TODO: disable NMI
-
-    /* Acquire CMOS lock */
-    HalpAcquireCmosSpinLock();
-
-    /* Enable the periodic interrupt in the CMOS */
-    RegisterB = HalpReadCmos(RTC_REGISTER_B);
-    HalpWriteCmos(RTC_REGISTER_B, RegisterB | RTC_REG_B_PI);
-
-    /* Release CMOS lock */
-    HalpReleaseCmosSpinLock();
 
     /* Set initial rate */
     RtcSetClockRate(HalpCurrentClockRate);
@@ -263,6 +255,17 @@ HalpInitializeClock(VOID)
      * fresh edge. Keep CPU interrupts disabled until the RTC is rearmed.
      */
     HalpAcquireCmosSpinLock();
+
+    /*
+     * The periodic interrupt is enabled last, once the rate is set, and by
+     * turning it off and on: the order the RTC is programmed in. Hyper-V's
+     * RTC starts its periodic timer on that transition only, and enabled
+     * before the rate was written it never raised an interrupt.
+     */
+    RegisterB = HalpReadCmos(RTC_REGISTER_B);
+    HalpWriteCmos(RTC_REGISTER_B, RegisterB & ~RTC_REG_B_PI);
+    HalpWriteCmos(RTC_REGISTER_B, RegisterB | RTC_REG_B_PI);
+
     HalpReadCmos(RTC_REGISTER_C);
     HalpReleaseCmosSpinLock();
 
@@ -283,14 +286,13 @@ HalpRestoreClock(VOID)
         return;
     }
 
-    HalpAcquireCmosSpinLock();
-    RegisterB = HalpReadCmos(RTC_REGISTER_B);
-    HalpWriteCmos(RTC_REGISTER_B, RegisterB | RTC_REG_B_PI);
-    HalpReleaseCmosSpinLock();
-
+    /* As at boot: the rate first, then the periodic interrupt turned off and on */
     RtcSetClockRate(HalpCurrentClockRate);
 
     HalpAcquireCmosSpinLock();
+    RegisterB = HalpReadCmos(RTC_REGISTER_B);
+    HalpWriteCmos(RTC_REGISTER_B, RegisterB & ~RTC_REG_B_PI);
+    HalpWriteCmos(RTC_REGISTER_B, RegisterB | RTC_REG_B_PI);
     HalpReadCmos(RTC_REGISTER_C);
     HalpReleaseCmosSpinLock();
 }
