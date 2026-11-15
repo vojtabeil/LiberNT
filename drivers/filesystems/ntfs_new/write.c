@@ -314,6 +314,10 @@ NtfsCachedWrite(_In_ PVolumeContextBlock VolCB,
     if (EndOffset <= Header->ValidDataLength.QuadPart || Extending)
     {
         Handled = TRUE;
+        /* Before the data reaches the cache, so no lazy write of it can
+         * stamp the times late. */
+        if (FileCB->StreamCB)
+            FileCB->StreamCB->HandleWriteTimes = TRUE;
         _SEH2_TRY
         {
             if (FileObj->PrivateCacheMap == NULL)
@@ -336,6 +340,7 @@ NtfsCachedWrite(_In_ PVolumeContextBlock VolCB,
                 Header->ValidDataLength.QuadPart = EndOffset;
             FileObj->Flags |= FO_FILE_MODIFIED;
             FileCB->NotifyFilter |= FILE_NOTIFY_CHANGE_LAST_WRITE;
+            FileCB->DataWritten = TRUE;
             if (FileObj->Flags & FO_SYNCHRONOUS_IO)
                 FileObj->CurrentByteOffset.QuadPart = ByteOffset->QuadPart + Length;
             Irp->IoStatus.Information = Length;
@@ -600,7 +605,19 @@ NtfsFsdWrite(_In_ PDEVICE_OBJECT VolumeDeviceObject,
     }
     else
     {
+        /*
+         * Like Windows NTFS, the times of data written through a handle are
+         * set by that handle (at the write and at cleanup). The cache writes
+         * the data back later, often after the handle is closed; stamping
+         * then would move the last write time after the application already
+         * saw the file closed. Paging writes of mapped-only data still stamp.
+         */
+        BOOLEAN KeepTimes = PagingIo && FileCB->StreamCB &&
+                            FileCB->StreamCB->HandleWriteTimes;
+
         Status = NtfsRefreshDirectoryRecord(VolCB, FileCB);
+        if (NT_SUCCESS(Status) && KeepTimes)
+            Status = NtfsFileRecordSetAutomaticTimestampMask(FileRec, 0);
         if (NT_SUCCESS(Status))
             Status = NtfsFileRecordWriteFileData(FileRec,
                                                  RequestedType,
@@ -608,6 +625,11 @@ NtfsFsdWrite(_In_ PDEVICE_OBJECT VolumeDeviceObject,
                                                  Buffer,
                                                  &Length,
                                                  &ByteOffset);
+        if (KeepTimes)
+        {
+            (void)NtfsFileRecordSetAutomaticTimestampMask(FileRec,
+                                                          FileCB->AutomaticTimestampMask);
+        }
 
         /* The library updates duplicated $FILE_NAME information through a
          * separate parent record. Invalidate parsed directory snapshots
@@ -643,6 +665,12 @@ NtfsFsdWrite(_In_ PDEVICE_OBJECT VolumeDeviceObject,
             FO_FILE_SIZE_CHANGED;
         if (!PagingIo)
             FileCB->NotifyFilter |= FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE;
+        if (!PagingIo && Length != 0 && RequestedType == TypeData)
+        {
+            FileCB->DataWritten = TRUE;
+            if (FileCB->StreamCB)
+                FileCB->StreamCB->HandleWriteTimes = TRUE;
+        }
 
         /* A cache flush must not change the application's file pointer. */
         if (!PagingIo && (IrpSp->FileObject->Flags & FO_SYNCHRONOUS_IO))

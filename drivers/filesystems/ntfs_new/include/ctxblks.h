@@ -332,6 +332,10 @@ typedef struct _SCB
     BOOLEAN DeletePending;
     BOOLEAN Unlinked;
     BOOLEAN PagingFile;
+    /* Data was written through a handle, which stamps the write times itself
+     * (at the write and at cleanup). The cache's later paging writes of that
+     * data then must not stamp them again. */
+    BOOLEAN HandleWriteTimes;
     LONG UncleanCount;
     NTFS_NATIVE_SCB NativeScb;
 } StreamContextBlock, *PStreamContextBlock;
@@ -388,6 +392,8 @@ typedef struct _FCB
     BOOLEAN DeletePending;
     BOOLEAN PosixDelete;
     BOOLEAN WriteTimesStamped;
+    /* This handle wrote file data; its cleanup stamps the last write time. */
+    BOOLEAN DataWritten;
     BOOLEAN ShareAccessSet;
     BOOLEAN PagingFileOpen;
 
