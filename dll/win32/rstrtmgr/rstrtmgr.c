@@ -14,6 +14,7 @@
 #include <psapi.h>
 #include <rpc.h>
 #define NTOS_MODE_USER
+#include <ndk/iofuncs.h>
 #include <ndk/psfuncs.h>
 #include <ndk/rtlfuncs.h>
 #include <restartmanager.h>
@@ -722,6 +723,72 @@ RmpCollectServices(PRM_SESSION Session, PRM_LIST List)
     return Error;
 }
 
+/* Same layout as the DDK's FILE_PROCESS_IDS_USING_FILE_INFORMATION (class 47). */
+typedef struct _RM_FILE_PROCESS_IDS
+{
+    ULONG NumberOfProcessIdsInList;
+    ULONG_PTR ProcessIdList[1];
+} RM_FILE_PROCESS_IDS;
+
+/*
+ * Processes with an open handle to a registered file. The module scan above
+ * only finds files mapped as images; documents, logs and databases are held
+ * through handles, and the kernel names their holders.
+ */
+static DWORD
+RmpCollectHandleUsers(PRM_SESSION Session, PRM_LIST List)
+{
+    ULONG Size = FIELD_OFFSET(RM_FILE_PROCESS_IDS, ProcessIdList) + 256 * sizeof(ULONG_PTR);
+    RM_FILE_PROCESS_IDS *Ids;
+    IO_STATUS_BLOCK IoStatus;
+    DWORD Error = ERROR_SUCCESS, Self = GetCurrentProcessId();
+    NTSTATUS Status;
+    HANDLE File;
+    UINT i;
+    ULONG j;
+
+    Ids = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (!Ids)
+        return ERROR_OUTOFMEMORY;
+
+    for (i = 0; i < Session->FileCount && Error == ERROR_SUCCESS; i++)
+    {
+        File = CreateFileW(Session->Files[i], FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+        if (File == INVALID_HANDLE_VALUE)
+            continue;
+
+        for (;;)
+        {
+            Status = NtQueryInformationFile(File, &IoStatus, Ids, Size, FileProcessIdsUsingFileInformation);
+            if (Status != STATUS_INFO_LENGTH_MISMATCH || Size >= 0x100000)
+                break;
+            HeapFree(GetProcessHeap(), 0, Ids);
+            Size *= 2;
+            Ids = HeapAlloc(GetProcessHeap(), 0, Size);
+            if (!Ids)
+            {
+                CloseHandle(File);
+                return ERROR_OUTOFMEMORY;
+            }
+        }
+        CloseHandle(File);
+        if (!NT_SUCCESS(Status))
+            continue;
+
+        /* The handle opened for the question is our own; it does not hold the file. */
+        for (j = 0; j < Ids->NumberOfProcessIdsInList && Error == ERROR_SUCCESS; j++)
+        {
+            if (Ids->ProcessIdList[j] && Ids->ProcessIdList[j] != Self)
+                Error = RmpAddProcess(List, (DWORD)Ids->ProcessIdList[j], NULL, NULL, NULL);
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, Ids);
+    return Error;
+}
+
 static DWORD
 RmpBuildList(PRM_SESSION Session, PRM_LIST List)
 {
@@ -738,6 +805,8 @@ RmpBuildList(PRM_SESSION Session, PRM_LIST List)
     }
     if (Error == ERROR_SUCCESS)
         Error = RmpCollectFileUsers(Session, List);
+    if (Error == ERROR_SUCCESS)
+        Error = RmpCollectHandleUsers(Session, List);
     if (Error == ERROR_SUCCESS)
         Error = RmpCollectServices(Session, List);
     return Error;

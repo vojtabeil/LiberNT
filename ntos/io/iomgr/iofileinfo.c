@@ -44,6 +44,7 @@ UCHAR IopQueryOperationLength[FileMaximumInformation] =
     [FileHardLinkInformation] = sizeof(FILE_LINKS_INFORMATION),
     [FileNormalizedNameInformation] = sizeof(FILE_NAME_INFORMATION),
     [FileNumaNodeInformation] = sizeof(FILE_NUMA_NODE_INFORMATION),
+    [FileProcessIdsUsingFileInformation] = sizeof(FILE_PROCESS_IDS_USING_FILE_INFORMATION),
     [FileIdInformation] = sizeof(FILE_ID_INFORMATION),
     [FileStatInformation] = sizeof(FILE_STAT_INFORMATION),
     [FileStatLxInformation] = sizeof(FILE_STAT_LX_INFORMATION),
@@ -103,6 +104,7 @@ ACCESS_MASK IopQueryOperationAccess[FileMaximumInformation] =
     [FilePipeRemoteInformation] = FILE_READ_ATTRIBUTES,
     [FileNetworkOpenInformation] = FILE_READ_ATTRIBUTES,
     [FileAttributeTagInformation] = FILE_READ_ATTRIBUTES,
+    [FileProcessIdsUsingFileInformation] = FILE_READ_ATTRIBUTES,
     [FileStatInformation] = FILE_READ_ATTRIBUTES,
     [FileStatLxInformation] = FILE_READ_ATTRIBUTES | FILE_READ_EA,
     [FileCaseSensitiveInformation] = FILE_READ_ATTRIBUTES
@@ -232,6 +234,128 @@ IopSetIoStatusBlockRange(
 
     /* TODO: completion does not yet write status blocks inside the locked range directly */
     return STATUS_SUCCESS;
+}
+
+/*
+ * FileProcessIdsUsingFileInformation: the processes that have a handle open
+ * on the same file (stream) as the given file object. Every handle table is
+ * walked; a file object names the same file when it shares the file system's
+ * FsContext on the same device. The Restart Manager asks this to find who
+ * holds a file open.
+ */
+typedef struct _IOP_FILE_USERS_WALK
+{
+    PFILE_OBJECT Target;
+    ULONG_PTR ProcessId;
+    BOOLEAN FoundInTable;
+    ULONG Count;
+    ULONG Capacity;
+    PULONG_PTR ProcessIds;
+} IOP_FILE_USERS_WALK, *PIOP_FILE_USERS_WALK;
+
+VOID NTAPI ExpEnumHandleTableList(
+    _In_ VOID (NTAPI *)(_In_ PHANDLE_TABLE, _In_opt_ PVOID), _In_opt_ PVOID);
+
+static
+BOOLEAN
+NTAPI
+IopFileUsersEntry(
+    _In_ PHANDLE_TABLE_ENTRY HandleTableEntry,
+    _In_ HANDLE Handle,
+    _In_opt_ PVOID Context)
+{
+    PIOP_FILE_USERS_WALK Walk = Context;
+    POBJECT_HEADER Header;
+    PFILE_OBJECT File;
+
+    UNREFERENCED_PARAMETER(Handle);
+
+    if (Walk->FoundInTable)
+        return FALSE;
+
+    Header = (POBJECT_HEADER)((ULONG_PTR)HandleTableEntry->Object &
+                              ~(ULONG_PTR)OBJ_HANDLE_ATTRIBUTES);
+    if (Header == NULL || ObpGetObjectTypeFromHeader(Header) != IoFileObjectType)
+        return FALSE;
+
+    File = (PFILE_OBJECT)&Header->Body;
+    if (File != Walk->Target &&
+        (Walk->Target->FsContext == NULL ||
+         File->FsContext != Walk->Target->FsContext ||
+         File->DeviceObject != Walk->Target->DeviceObject))
+    {
+        return FALSE;
+    }
+
+    Walk->FoundInTable = TRUE;
+    if (Walk->Count < Walk->Capacity)
+        Walk->ProcessIds[Walk->Count] = Walk->ProcessId;
+    Walk->Count++;
+    return FALSE;
+}
+
+static
+VOID
+NTAPI
+IopFileUsersTable(
+    _In_ PHANDLE_TABLE HandleTable,
+    _In_opt_ PVOID Context)
+{
+    PIOP_FILE_USERS_WALK Walk = Context;
+
+    Walk->ProcessId = (ULONG_PTR)HandleTable->UniqueProcessId;
+    Walk->FoundInTable = FALSE;
+    ExEnumHandleTable(HandleTable, IopFileUsersEntry, Walk, NULL);
+}
+
+static
+NTSTATUS
+IopQueryProcessIdsUsingFile(
+    _In_ PFILE_OBJECT FileObject,
+    _Out_writes_bytes_(Length) PFILE_PROCESS_IDS_USING_FILE_INFORMATION Information,
+    _In_ ULONG Length,
+    _Out_ PULONG ReturnedLength)
+{
+    IOP_FILE_USERS_WALK Walk;
+    ULONG Fits, Written, i;
+    NTSTATUS Status;
+
+    PAGED_CODE();
+
+    /* The list is gathered with the handle tables locked, away from the caller's pages. */
+    Fits = (Length - FIELD_OFFSET(FILE_PROCESS_IDS_USING_FILE_INFORMATION, ProcessIdList)) / sizeof(ULONG_PTR);
+    RtlZeroMemory(&Walk, sizeof(Walk));
+    Walk.Target = FileObject;
+    Walk.Capacity = min(Fits, 4096);
+    if (Walk.Capacity != 0)
+    {
+        Walk.ProcessIds = ExAllocatePoolWithTag(NonPagedPool, Walk.Capacity * sizeof(ULONG_PTR), TAG_IO);
+        if (Walk.ProcessIds == NULL)
+            return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    ExpEnumHandleTableList(IopFileUsersTable, &Walk);
+
+    Written = min(Walk.Count, Walk.Capacity);
+    Status = (Walk.Count > Written) ? STATUS_INFO_LENGTH_MISMATCH : STATUS_SUCCESS;
+    _SEH2_TRY
+    {
+        Information->NumberOfProcessIdsInList = Written;
+        for (i = 0; i < Written; i++)
+            Information->ProcessIdList[i] = Walk.ProcessIds[i];
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    if (Walk.ProcessIds != NULL)
+        ExFreePoolWithTag(Walk.ProcessIds, TAG_IO);
+
+    *ReturnedLength = FIELD_OFFSET(FILE_PROCESS_IDS_USING_FILE_INFORMATION, ProcessIdList) +
+                      Written * sizeof(ULONG_PTR);
+    return Status;
 }
 
 static
@@ -845,6 +969,24 @@ NtQueryInformationFile(
     {
         ObDereferenceObject(FileObject);
         return STATUS_NO_SUCH_DEVICE;
+    }
+
+    if (FileInformationClass == FileProcessIdsUsingFileInformation)
+    {
+        Status = IopQueryProcessIdsUsingFile(FileObject, FileInformation, Length, &ReturnedLength);
+        _SEH2_TRY
+        {
+            IoStatusBlock->Status = Status;
+            IoStatusBlock->Information = ReturnedLength;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+
+        ObDereferenceObject(FileObject);
+        return Status;
     }
 
     if (FileInformationClass == FilePositionInformation &&
