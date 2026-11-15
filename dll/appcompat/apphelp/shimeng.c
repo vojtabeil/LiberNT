@@ -1035,17 +1035,21 @@ VOID SeiHookImports(PLDR_DATA_TABLE_ENTRY LdrEntry)
 
     SHIMENG_INFO("Hooking module 0x%p \"%wZ\"\n", LdrEntry->DllBase, &LdrEntry->BaseDllName);
 
-    HasImportNameTable = ImportDescriptor->OriginalFirstThunk;
-    if (!HasImportNameTable)
-    {
-        /* Some PEs (eg. built with Borland toolchain or compressed with UPX) may not have an import name table.
-         * In that case we have to rely solely on an import address table. */
-        SHIMENG_INFO("Module 0x%p \"%wZ\" does not have an import name table\n", LdrEntry->DllBase, &LdrEntry->BaseDllName);
-    }
-
-    for ( ;ImportDescriptor->Name && (HasImportNameTable ? ImportDescriptor->OriginalFirstThunk : ImportDescriptor->FirstThunk); ImportDescriptor++)
+    for ( ;ImportDescriptor->Name && ImportDescriptor->FirstThunk; ImportDescriptor++)
     {
         PHOOKMODULEINFO HookModuleInfo;
+
+        /* Some PEs (eg. built with Borland toolchain, compressed with UPX, or InstallShield's ISSetup.dll)
+         * have no import name table for a descriptor, or one that is the import address table itself and
+         * holds resolved addresses once the module is loaded. Decide per descriptor and fall back to
+         * matching by address in those cases. */
+        HasImportNameTable = ImportDescriptor->OriginalFirstThunk &&
+                             ImportDescriptor->OriginalFirstThunk != ImportDescriptor->FirstThunk;
+        if (!HasImportNameTable)
+        {
+            SHIMENG_INFO("Module 0x%p \"%wZ\" has no separate import name table for this descriptor\n",
+                         LdrEntry->DllBase, &LdrEntry->BaseDllName);
+        }
 
         /* Do we have hooks for this module? */
         HookModuleInfo = SeiFindHookModuleInfoForImportDescriptor(DllBase, ImportDescriptor);
