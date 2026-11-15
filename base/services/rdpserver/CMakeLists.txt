@@ -60,3 +60,5 @@ set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
 add_cd_file(FILE ${_rdpserver_config} DESTINATION reactos/system32/rdpserver FOR livecd preinstall)
 
 add_registry_inf(rdpserver_reg.inf)
+
+add_subdirectory(hvsockbridge)
