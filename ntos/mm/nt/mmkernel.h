@@ -77,7 +77,7 @@ extern BOOLEAN MmTrackPtes;
 extern BOOLEAN MmTrackLockedPages;
 extern BOOLEAN MmLargeSystemCache;
 extern BOOLEAN MmMakeLowMemory;
-extern BOOLEAN MmEnforceWriteProtection;
+extern ULONG MmEnforceWriteProtection;
 extern BOOLEAN MmZeroPageFile;
 
 NTSTATUS

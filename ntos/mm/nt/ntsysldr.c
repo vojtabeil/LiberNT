@@ -25,7 +25,8 @@ PVOID MmUnloadedDrivers;
 PVOID MmLastUnloadedDrivers;
 
 BOOLEAN MmMakeLowMemory;
-BOOLEAN MmEnforceWriteProtection = TRUE;
+/* Session Manager\Memory Management\EnforceWriteProtection, read by the configuration manager */
+ULONG MmEnforceWriteProtection = TRUE;
 extern UCHAR MmDisablePagingExecutive;
 
 static ULONG64 MiKernelResourceStart, MiKernelResourceEnd;
