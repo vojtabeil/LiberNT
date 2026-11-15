@@ -200,6 +200,9 @@ VmbusAddOffer(
 
     if (Invalidate)
         IoInvalidateDeviceRelations(Bus->Pdo, BusRelations);
+
+    if (Channel->HvSocket)
+        HvsOnOffer(Channel, Offer->UserDefined);
 }
 
 static
@@ -218,6 +221,9 @@ VmbusRescindOffer(
 
     if (Channel == NULL)
         return;
+
+    if (Channel->HvSocket)
+        HvsOnRescind(Channel);
 
     /* A device goes away through PnP first; anything else can be released now */
     if (Channel->Pdo != NULL)
@@ -253,7 +259,7 @@ VmbusReleaseWorker(
         {
             PVMBUS_CHANNEL Candidate = CONTAINING_RECORD(Entry, VMBUS_CHANNEL, ListEntry);
 
-            if (Candidate->Rescinded && Candidate->Pdo == NULL && !Candidate->Open)
+            if (Candidate->Rescinded && Candidate->Pdo == NULL && Candidate->Owner == NULL && !Candidate->Open)
             {
                 RemoveEntryList(&Candidate->ListEntry);
                 Channel = Candidate;
@@ -1220,6 +1226,22 @@ VmbusDispatchSystemControl(
 static
 NTSTATUS
 NTAPI
+VmbusDispatchHvSocket(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp)
+{
+    if (HvsIsDevice(DeviceObject))
+        return HvsDispatch(DeviceObject, Irp);
+
+    Irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_INVALID_DEVICE_REQUEST;
+}
+
+static
+NTSTATUS
+NTAPI
 VmbusAddDevice(
     _In_ PDRIVER_OBJECT DriverObject,
     _In_ PDEVICE_OBJECT PhysicalDeviceObject)
@@ -1292,5 +1314,16 @@ DriverEntry(
     DriverObject->MajorFunction[IRP_MJ_PNP] = VmbusDispatchPnp;
     DriverObject->MajorFunction[IRP_MJ_POWER] = VmbusDispatchPower;
     DriverObject->MajorFunction[IRP_MJ_SYSTEM_CONTROL] = VmbusDispatchSystemControl;
+
+    /* \\.\HvSocket: Hyper-V socket connections for host services */
+    DriverObject->MajorFunction[IRP_MJ_CREATE] = VmbusDispatchHvSocket;
+    DriverObject->MajorFunction[IRP_MJ_CLOSE] = VmbusDispatchHvSocket;
+    DriverObject->MajorFunction[IRP_MJ_CLEANUP] = VmbusDispatchHvSocket;
+    DriverObject->MajorFunction[IRP_MJ_READ] = VmbusDispatchHvSocket;
+    DriverObject->MajorFunction[IRP_MJ_WRITE] = VmbusDispatchHvSocket;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = VmbusDispatchHvSocket;
+    if (!NT_SUCCESS(HvsInitialize(DriverObject)))
+        DPRINT1("VMBUS: no Hyper-V socket device\n");
+
     return STATUS_SUCCESS;
 }

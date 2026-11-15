@@ -235,6 +235,7 @@ typedef struct _VMBUS_CHANNEL
     BOOLEAN Rescinded;
     BOOLEAN Open;
     BOOLEAN HvSocket;
+    PVOID Owner;        /* Hyper-V socket connection using the channel */
     PVOID RingBuffer;
     ULONG RingBufferSize;
     ULONG RingGpadl;
@@ -360,3 +361,26 @@ VmbusChannelInterrupt(
 VOID
 VmbusQueueRelease(
     _Inout_ PVMBUS_FDO_EXTENSION Bus);
+
+/* hvsock.c */
+NTSTATUS
+HvsInitialize(
+    _In_ PDRIVER_OBJECT DriverObject);
+
+BOOLEAN
+HvsIsDevice(
+    _In_ PDEVICE_OBJECT DeviceObject);
+
+NTSTATUS
+HvsDispatch(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp);
+
+VOID
+HvsOnOffer(
+    _In_ PVMBUS_CHANNEL Channel,
+    _In_reads_bytes_(8) const UCHAR *PipeUserDefined);
+
+VOID
+HvsOnRescind(
+    _In_ PVMBUS_CHANNEL Channel);
