@@ -254,8 +254,18 @@ ScmGetDriverStatus(PSERVICE lpService,
 
         dwPreviousState = lpService->Status.dwCurrentState;
 
-        /* It is running */
-        lpService->Status.dwCurrentState = SERVICE_RUNNING;
+        /*
+         * A driver that was told to stop while its devices are still open
+         * stays loaded until the last of them is closed: the unload is only
+         * pending, and the service stays in STOP_PENDING as on Windows.
+         * Reporting it as running again would keep it "running" in the
+         * database after it is gone, and a later start would be refused.
+         */
+        if (dwPreviousState != SERVICE_STOP_PENDING)
+        {
+            /* It is running */
+            lpService->Status.dwCurrentState = SERVICE_RUNNING;
+        }
 
         if (dwPreviousState == SERVICE_STOPPED)
         {

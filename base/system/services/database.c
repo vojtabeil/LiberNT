@@ -2573,6 +2573,14 @@ ScmLoadService(PSERVICE Service,
     DPRINT("ScmLoadService() called\n");
     DPRINT("Start Service %p (%S)\n", Service, Service->lpServiceName);
 
+    /*
+     * The state of a driver is what the object directory says, not what was
+     * recorded last: a driver whose unload had to wait for open handles has
+     * gone by itself since, and must be loaded again when asked for.
+     */
+    if (Service->Status.dwServiceType & SERVICE_DRIVER)
+        ScmControlDriver(Service, SERVICE_CONTROL_INTERROGATE, NULL);
+
     if (Service->Status.dwCurrentState != SERVICE_STOPPED)
     {
         DPRINT("Service %S is already running\n", Service->lpServiceName);
