@@ -76,6 +76,9 @@
 #define VMBUS_MSGTYPE_INITIATE_CONTACT      14
 #define VMBUS_MSGTYPE_VERSION_RESPONSE      15
 
+/* Offer flags */
+#define VMBUS_OFFER_FLAG_TLNPI_PROVIDER     0x2000  /* Hyper-V socket (hv_sock) connection */
+
 typedef struct _HV_MESSAGE
 {
     ULONG MessageType;
@@ -231,6 +234,7 @@ typedef struct _VMBUS_CHANNEL
     ULONG MmioMegabytes;
     BOOLEAN Rescinded;
     BOOLEAN Open;
+    BOOLEAN HvSocket;
     PVOID RingBuffer;
     ULONG RingBufferSize;
     ULONG RingGpadl;
@@ -290,6 +294,11 @@ typedef struct _VMBUS_FDO_EXTENSION
     KSPIN_LOCK ChannelLock;
     LIST_ENTRY Channels;
     LONG NextGpadl;
+
+    /* Rescinded channels are freed and their IDs released at PASSIVE_LEVEL */
+    KEVENT EnumLock;
+    PIO_WORKITEM ReleaseWorkItem;
+    volatile LONG ReleaseQueued;
 } VMBUS_FDO_EXTENSION, *PVMBUS_FDO_EXTENSION;
 
 extern PDRIVER_OBJECT VmbusDriverObject;
@@ -347,3 +356,7 @@ VmbusSendControl(
 VOID
 VmbusChannelInterrupt(
     _In_ PVMBUS_CHANNEL Channel);
+
+VOID
+VmbusQueueRelease(
+    _Inout_ PVMBUS_FDO_EXTENSION Bus);

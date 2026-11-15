@@ -191,6 +191,7 @@ VmbusAddOffer(
     Channel->ChildRelId = Offer->ChildRelId;
     Channel->ConnectionId = Offer->ConnectionId;
     Channel->MmioMegabytes = Offer->MmioMegabytes;
+    Channel->HvSocket = (Offer->Flags & VMBUS_OFFER_FLAG_TLNPI_PROVIDER) != 0;
 
     KeAcquireSpinLockAtDpcLevel(&Bus->ChannelLock);
     InsertTailList(&Bus->Channels, &Channel->ListEntry);
@@ -215,8 +216,80 @@ VmbusRescindOffer(
         Channel->Rescinded = TRUE;
     KeReleaseSpinLockFromDpcLevel(&Bus->ChannelLock);
 
-    if (Channel != NULL && Channel->Pdo != NULL)
+    if (Channel == NULL)
+        return;
+
+    /* A device goes away through PnP first; anything else can be released now */
+    if (Channel->Pdo != NULL)
         IoInvalidateDeviceRelations(Bus->Pdo, BusRelations);
+    else
+        VmbusQueueRelease(Bus);
+}
+
+static
+VOID
+NTAPI
+VmbusReleaseWorker(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_opt_ PVOID Context)
+{
+    PVMBUS_FDO_EXTENSION Bus = Context;
+    VMBUS_MSG_CHILD_RELID Released;
+    PLIST_ENTRY Entry;
+    PVMBUS_CHANNEL Channel;
+    KIRQL Irql;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    InterlockedExchange(&Bus->ReleaseQueued, 0);
+
+    for (;;)
+    {
+        Channel = NULL;
+        KeEnterCriticalRegion();
+        KeWaitForSingleObject(&Bus->EnumLock, Executive, KernelMode, FALSE, NULL);
+        KeAcquireSpinLock(&Bus->ChannelLock, &Irql);
+        for (Entry = Bus->Channels.Flink; Entry != &Bus->Channels; Entry = Entry->Flink)
+        {
+            PVMBUS_CHANNEL Candidate = CONTAINING_RECORD(Entry, VMBUS_CHANNEL, ListEntry);
+
+            if (Candidate->Rescinded && Candidate->Pdo == NULL && !Candidate->Open)
+            {
+                RemoveEntryList(&Candidate->ListEntry);
+                Channel = Candidate;
+                break;
+            }
+        }
+        KeReleaseSpinLock(&Bus->ChannelLock, Irql);
+        KeSetEvent(&Bus->EnumLock, IO_NO_INCREMENT, FALSE);
+        KeLeaveCriticalRegion();
+
+        if (Channel == NULL)
+            return;
+
+        /* The DPC may still hold a pointer it looked up before the channel left the list */
+        KeFlushQueuedDpcs();
+
+        /* The host reuses the ID only after the guest released it */
+        if (Bus->Connected)
+        {
+            RtlZeroMemory(&Released, sizeof(Released));
+            Released.Header.MessageType = VMBUS_MSGTYPE_REL_ID_RELEASED;
+            Released.ChildRelId = Channel->ChildRelId;
+            VmbusSendControl(Bus, &Released, sizeof(Released), 0, 0, NULL, 0);
+        }
+        DPRINT("VMBUS: released relid %lu%s\n", Channel->ChildRelId, Channel->HvSocket ? " (hv_sock)" : "");
+
+        ExFreePoolWithTag(Channel, VMBUS_TAG);
+    }
+}
+
+VOID
+VmbusQueueRelease(
+    _Inout_ PVMBUS_FDO_EXTENSION Bus)
+{
+    if (Bus->ReleaseWorkItem != NULL && InterlockedExchange(&Bus->ReleaseQueued, 1) == 0)
+        IoQueueWorkItem(Bus->ReleaseWorkItem, VmbusReleaseWorker, DelayedWorkQueue, Bus);
 }
 
 static
@@ -619,7 +692,7 @@ VmbusCreatePdo(
 
 static
 NTSTATUS
-VmbusQueryBusRelations(
+VmbusQueryBusRelationsLocked(
     _Inout_ PVMBUS_FDO_EXTENSION Bus,
     _Inout_ PIRP Irp)
 {
@@ -691,6 +764,23 @@ VmbusQueryBusRelations(
 
     Irp->IoStatus.Information = (ULONG_PTR)Relations;
     return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+VmbusQueryBusRelations(
+    _Inout_ PVMBUS_FDO_EXTENSION Bus,
+    _Inout_ PIRP Irp)
+{
+    NTSTATUS Status;
+
+    /* Keep the release worker from freeing channels while the snapshot is in use */
+    KeEnterCriticalRegion();
+    KeWaitForSingleObject(&Bus->EnumLock, Executive, KernelMode, FALSE, NULL);
+    Status = VmbusQueryBusRelationsLocked(Bus, Irp);
+    KeSetEvent(&Bus->EnumLock, IO_NO_INCREMENT, FALSE);
+    KeLeaveCriticalRegion();
+    return Status;
 }
 
 static
@@ -977,6 +1067,8 @@ VmbusPdoPnp(
                 Irp->IoStatus.Status = Status;
                 IoCompleteRequest(Irp, IO_NO_INCREMENT);
                 IoDeleteDevice(DeviceObject);
+                if (Channel->Rescinded)
+                    VmbusQueueRelease(Channel->Bus);
                 return Status;
             }
             break;
@@ -1157,6 +1249,8 @@ VmbusAddDevice(
     KeInitializeEvent(&Bus->OffersEvent, NotificationEvent, FALSE);
     KeInitializeSpinLock(&Bus->ChannelLock);
     InitializeListHead(&Bus->Channels);
+    KeInitializeEvent(&Bus->EnumLock, SynchronizationEvent, TRUE);
+    Bus->ReleaseWorkItem = IoAllocateWorkItem(Fdo);
     KeInitializeDpc(&Bus->Dpc, VmbusDpcRoutine, Bus);
     KeSetTargetProcessorDpc(&Bus->Dpc, 0);
     KeInitializeDpc(&Bus->PollDpc, VmbusDpcRoutine, Bus);
