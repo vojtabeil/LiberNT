@@ -76,9 +76,10 @@ static void Log(const char *fmt, ...)
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     va_end(args);
     buffer[sizeof(buffer) - 1] = 0;
+    /* The debugger line first: it does not depend on the console window. */
+    if (DebugPrint) DebugPrint("RDPTEST: %s\n", buffer);
     fprintf(stdout, "RDPTEST: %s\n", buffer);
     fflush(stdout);
-    if (DebugPrint) DebugPrint("RDPTEST: %s\n", buffer);
 }
 
 static BOOL InputReady(rdpInput *input)
@@ -154,7 +155,11 @@ static BOOL Keyboard(rdpInput *input, UINT16 flags, UINT8 code)
     event.ki.dwFlags = KEYEVENTF_SCANCODE;
     if (flags & KBD_FLAGS_EXTENDED) event.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
     if (flags & KBD_FLAGS_RELEASE) event.ki.dwFlags |= KEYEVENTF_KEYUP;
-    if (SendInput(1, &event, sizeof(event)) != 1) return FALSE;
+    if (SendInput(1, &event, sizeof(event)) != 1)
+    {
+        Log("Keyboard injection failed: scancode 0x%x flags 0x%x error=%lu", code, flags, GetLastError());
+        return FALSE;
+    }
     ctx->Keys[index] = !(flags & KBD_FLAGS_RELEASE);
     ++ctx->Inputs;
     return TRUE;
@@ -198,7 +203,11 @@ static BOOL Mouse(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y)
         if (down) ctx->MouseButtons |= flags & (PTR_FLAGS_BUTTON1 | PTR_FLAGS_BUTTON2 | PTR_FLAGS_BUTTON3);
         else ctx->MouseButtons &= ~(flags & (PTR_FLAGS_BUTTON1 | PTR_FLAGS_BUTTON2 | PTR_FLAGS_BUTTON3));
     }
-    if (SendInput(1, &event, sizeof(event)) != 1) return FALSE;
+    if (SendInput(1, &event, sizeof(event)) != 1)
+    {
+        Log("Mouse injection failed: flags 0x%x error=%lu", flags, GetLastError());
+        return FALSE;
+    }
     ++ctx->Inputs;
     return TRUE;
 }
@@ -443,12 +452,12 @@ static DWORD WINAPI ClientThread(void *arg)
         events[++count] = WTSVirtualChannelManagerGetEventHandle(ctx->Vcm);
         status = WaitForMultipleObjects(count + 1, events, FALSE, 100);
         if (status == WAIT_OBJECT_0 || status == WAIT_FAILED) break;
-        if (!peer->CheckFileDescriptor(peer)) break;
-        if (!WTSVirtualChannelManagerCheckFileDescriptor(ctx->Vcm)) break;
+        if (!peer->CheckFileDescriptor(peer)) { Log("Session ended by the RDP transport"); break; }
+        if (!WTSVirtualChannelManagerCheckFileDescriptor(ctx->Vcm)) { Log("Session ended by a virtual channel error"); break; }
         if (!ctx->Authorized && GetTickCount() - started > 30000) break;
         if (ctx->Active && peer->activated && GetTickCount() - lastFrame >= 100)
         {
-            if (!Capture(ctx)) break;
+            if (!Capture(ctx)) { Log("Session ended: desktop update failed"); break; }
             lastFrame = GetTickCount();
         }
     }
@@ -498,6 +507,11 @@ int main(int argc, char **argv)
     if (argc != 2 || !GetFullPathNameA(argv[1], sizeof(config), config, NULL))
     { Log("Usage: rdpserver.exe path-to-test-config.ini"); return 2; }
     if (!GetPrivateProfileIntA("server", "enabled", 0, config)) return 0;
+    /* On the interactive desktop the console window can take the focus from
+     * the application a client types into, and a Ctrl+C typed into it stops
+     * the server: keep it hidden unless console=1. */
+    if (!GetPrivateProfileIntA("server", "console", 0, config) && GetConsoleWindow())
+        ShowWindow(GetConsoleWindow(), SW_HIDE);
     GetPrivateProfileStringA("server", "bind", "", BindAddress, sizeof(BindAddress), config);
     GetPrivateProfileStringA("server", "allow", "", AllowedPeer, sizeof(AllowedPeer), config);
     GetPrivateProfileStringA("server", "username", "", Username, sizeof(Username), config);

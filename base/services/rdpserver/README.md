@@ -94,6 +94,10 @@ transfer_root=C:\
   address is not ready yet.
 - `transfer_root` enables file transfers below that local directory after
   authentication. Leave it out to disable transfers.
+- `console=1` keeps the server's console window visible. By default the
+  server hides it: on the interactive desktop it could take the keyboard
+  focus from the application a client types into, and a Ctrl+C typed into
+  it would stop the server.
 
 Authentication, the first frame and disconnects are logged as `RDPTEST`
 lines on the kernel debugger and on stdout. An idle server captures nothing;
