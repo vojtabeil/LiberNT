@@ -53,6 +53,9 @@ static ULONG AddressContext;
 static BOOL AddressAdded;
 static WCHAR TransferRoot[MAX_PATH];
 static BOOL ClipboardEnabled;
+static BOOL Loopback, HvSocketTrust;
+/* The session's peer is the Hyper-V socket bridge (one session at a time) */
+static BOOL ClientIsLoopback;
 
 typedef struct DESKTOP_CONTEXT
 {
@@ -294,7 +297,12 @@ static BOOL PostConnect(freerdp_peer *peer)
     rdpSettings *settings = ctx->rdp.settings;
     const char *user = freerdp_settings_get_string(settings, FreeRDP_Username);
     const char *password = freerdp_settings_get_string(settings, FreeRDP_Password);
-    if (!user || !password || strcmp(user, Username) || strcmp(password, Password))
+    /* The enhanced session sends no guest credentials. With hvsock_trust=1 the verified
+     * bridge is trusted: only the Hyper-V host can open its channel, and like the basic
+     * console of Virtual Machine Connection the session is open to whoever may connect
+     * to the VM there. */
+    if (!(ClientIsLoopback && HvSocketTrust) &&
+        (!user || !password || strcmp(user, Username) || strcmp(password, Password)))
     {
         Log("Authentication rejected for peer %s", peer->hostname);
         return FALSE;
@@ -478,9 +486,21 @@ static DWORD WINAPI ClientThread(void *arg)
     { freerdp_key_free(key); freerdp_certificate_free(cert); goto cleanup; }
     if (!freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerCertificate, cert, 1))
     { freerdp_certificate_free(cert); goto cleanup; }
-    if (!freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, FALSE) ||
-        !freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE) ||
-        !freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE) ||
+    /* Virtual Machine Connection's enhanced session, through hvsockbridge, closes the
+     * connection when the server picks TLS; it accepts standard RDP security, as with
+     * xrdp. The Hyper-V socket never leaves the host, so the loopback leg is unencrypted. */
+    if (ClientIsLoopback &&
+        (!freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, TRUE) ||
+         !freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, FALSE) ||
+         !freerdp_settings_set_bool(settings, FreeRDP_UseRdpSecurityLayer, TRUE) ||
+         !freerdp_settings_set_uint32(settings, FreeRDP_EncryptionLevel, ENCRYPTION_LEVEL_NONE) ||
+         !freerdp_settings_set_uint32(settings, FreeRDP_EncryptionMethods, ENCRYPTION_METHOD_NONE)))
+        goto cleanup;
+    if (!ClientIsLoopback &&
+        (!freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, FALSE) ||
+         !freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE)))
+        goto cleanup;
+    if (!freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_ExtSecurity, FALSE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_RemoteFxCodec, FALSE) ||
         !freerdp_settings_set_bool(settings, FreeRDP_NSCodec, FALSE) ||
@@ -522,6 +542,40 @@ done:
     return 0;
 }
 
+/* A loopback peer must be the Hyper-V socket bridge service: find the process that owns
+ * the client end of the TCP connection and compare it with the service's process. */
+static BOOL PeerIsBridge(const struct sockaddr_in *peer)
+{
+    MIB_TCPTABLE_OWNER_PID *table = NULL;
+    SERVICE_STATUS_PROCESS status;
+    SC_HANDLE manager, service;
+    DWORD size = 0, owner = 0, i;
+    BOOL bridge = FALSE;
+    if (GetExtendedTcpTable(NULL, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_CONNECTIONS, 0) != ERROR_INSUFFICIENT_BUFFER)
+        return FALSE;
+    table = malloc(size);
+    if (!table) return FALSE;
+    if (GetExtendedTcpTable(table, &size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_CONNECTIONS, 0) == NO_ERROR)
+        for (i = 0; i < table->dwNumEntries; ++i)
+            if (table->table[i].dwLocalAddr == peer->sin_addr.s_addr &&
+                (USHORT)table->table[i].dwLocalPort == peer->sin_port &&
+                (USHORT)table->table[i].dwRemotePort == htons(3389))
+            { owner = table->table[i].dwOwningPid; break; }
+    free(table);
+    if (!owner) return FALSE;
+    manager = OpenSCManagerA(NULL, NULL, SC_MANAGER_CONNECT);
+    if (!manager) return FALSE;
+    service = OpenServiceA(manager, "hvsockbridge", SERVICE_QUERY_STATUS);
+    if (service)
+    {
+        if (QueryServiceStatusEx(service, SC_STATUS_PROCESS_INFO, (BYTE *)&status, sizeof(status), &size))
+            bridge = status.dwProcessId == owner;
+        CloseServiceHandle(service);
+    }
+    CloseServiceHandle(manager);
+    return bridge;
+}
+
 static BOOL Accepted(freerdp_listener *listener, freerdp_peer *peer)
 {
     HANDLE thread;
@@ -529,8 +583,20 @@ static BOOL Accepted(freerdp_listener *listener, freerdp_peer *peer)
     int length = sizeof(address);
     (void)listener;
     if (getpeername((SOCKET)peer->sockfd, (struct sockaddr *)&address, &length) ||
-        address.sin_family != AF_INET || address.sin_addr.s_addr != inet_addr(AllowedPeer)) return FALSE;
+        address.sin_family != AF_INET) return FALSE;
+    /* The controller, or with loopback=1 the Hyper-V socket bridge on this machine */
+    if (address.sin_addr.s_addr != inet_addr(AllowedPeer))
+    {
+        if (!Loopback || address.sin_addr.s_addr != htonl(INADDR_LOOPBACK)) return FALSE;
+        if (!PeerIsBridge(&address))
+        {
+            Log("Loopback connection from a process other than hvsockbridge refused");
+            return FALSE;
+        }
+    }
     if (InterlockedCompareExchange(&ClientConnected, 1, 0)) return FALSE;
+    /* The transport owns the socket once the client thread runs */
+    ClientIsLoopback = address.sin_addr.s_addr == htonl(INADDR_LOOPBACK);
     thread = CreateThread(NULL, 0, ClientThread, peer, 0, NULL);
     if (!thread) { InterlockedExchange(&ClientConnected, 0); return FALSE; }
     CloseHandle(thread);
@@ -573,6 +639,8 @@ int main(int argc, char **argv)
     GetPrivateProfileStringA("server", "interface_mac", "", mac, sizeof(mac), config);
     GetPrivateProfileStringA("server", "netmask", "", mask, sizeof(mask), config);
     ClipboardEnabled = GetPrivateProfileIntA("server", "clipboard", 1, config) != 0;
+    Loopback = GetPrivateProfileIntA("server", "loopback", 0, config) != 0;
+    HvSocketTrust = Loopback && GetPrivateProfileIntA("server", "hvsock_trust", 0, config) != 0;
     {
         char root[MAX_PATH];
         GetPrivateProfileStringA("server", "transfer_root", "", root, sizeof(root), config);
@@ -635,6 +703,14 @@ int main(int argc, char **argv)
     while (!EnsureAddress() || !listener->Open(listener, BindAddress, 3389))
         if (WaitForSingleObject(StopEvent, 2000) != WAIT_TIMEOUT) goto done;
     Log("Listening on %s:3389; TLS; allowed controller %s", BindAddress, AllowedPeer);
+    /* hvsockbridge forwards the enhanced session of Virtual Machine Connection to 127.0.0.1 */
+    if (Loopback)
+    {
+        if (listener->Open(listener, "127.0.0.1", 3389))
+            Log("Listening on 127.0.0.1:3389 for the Hyper-V socket bridge");
+        else
+            Log("Cannot listen on 127.0.0.1:3389");
+    }
     for (;;)
     {
         events[0] = StopEvent;

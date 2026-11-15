@@ -95,6 +95,9 @@ transfer_root=C:\
 - `transfer_root` enables file transfers below that local directory after
   authentication. Leave it out to disable transfers.
 - `clipboard=0` turns clipboard redirection off; it is on by default.
+- `loopback=1` also listens on 127.0.0.1:3389 for `hvsockbridge`, which
+  carries the enhanced session of Hyper-V Virtual Machine Connection (see
+  below). `hvsock_trust=1` lets those sessions in without credentials.
 - `console=1` keeps the server's console window visible. By default the
   server hides it: on the interactive desktop it could take the keyboard
   focus from the application a client types into, and a Ctrl+C typed into
@@ -117,6 +120,31 @@ crosses the channel only when an application pastes it. A copy in the VM is
 announced to the client, which then fetches the formats it needs. Clipboard
 events are logged on the kernel debugger only: console output from the
 clipboard window can block while the console itself pastes.
+
+## Enhanced session (Hyper-V)
+
+Virtual Machine Connection opens its enhanced session to a guest through a
+Hyper-V socket on the RDP service GUID, as for Linux guests with xrdp.
+vmbus.sys accepts it on `\\.\HvSocket`, and the `hvsockbridge` service,
+installed with the server, forwards each connection to 127.0.0.1:3389. The
+bridge listens only while the server answers there, because the host offers
+the enhanced session as soon as the guest accepts its probe. Set the VM's
+transport on the host with
+`Set-VM <vm> -EnhancedSessionTransportType HvSocket`.
+
+With `loopback=1` the server takes loopback connections only from the
+bridge: it looks up the process that owns the client end of the TCP
+connection and compares it with the `hvsockbridge` service process. Only
+that peer gets standard RDP security without encryption, which is what
+Virtual Machine Connection uses here; the Hyper-V socket never leaves the
+host. Network clients keep TLS and the configured credentials.
+
+Virtual Machine Connection sends no guest credentials. `hvsock_trust=1`
+(off by default) trusts the bridge instead: only the Hyper-V host can open
+the channel, so, like the basic console of Virtual Machine Connection, the
+session is open to whoever may connect to the VM on the host. Without it
+the enhanced session is refused. The session mirrors the console at its
+current resolution.
 
 ## Client and file transfer
 
