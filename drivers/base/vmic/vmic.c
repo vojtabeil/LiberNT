@@ -88,7 +88,33 @@
 #define HV_FEATURE_TIME_REF_COUNT       0x00000002
 #define HV_X64_MSR_TIME_REF_COUNT       0x40000020
 
-#define VMIC_TIME_STEP_THRESHOLD (2LL * 10000000)
+/* Further out than this the clock is set, nearer it is walked */
+#define VMIC_TIME_STEP_THRESHOLD (1LL * 10000000)
+/* Nearer than this it is left alone: the samples are no better */
+#define VMIC_TIME_SLEW_DEADBAND  (1LL * 10000)
+/* The host sends a sample every five seconds */
+#define VMIC_TIME_SAMPLE_SECONDS 5
+/* The most the clock is run fast or slow by */
+#define VMIC_TIME_MAX_PPM        50000
+/* Within this many microseconds of the host the clock's own rate error is learnt */
+#define VMIC_TIME_LEARN_US       100000
+
+#define VMIC_SYSTEM_TIME_ADJUSTMENT_INFORMATION 28
+
+/* SYSTEM_SET_TIME_ADJUST_INFORMATION; the flag carries SetSystemTimeAdjustment's "disabled" */
+typedef struct _VMIC_SET_TIME_ADJUST
+{
+    ULONG TimeAdjustment;
+    BOOLEAN Disable;
+} VMIC_SET_TIME_ADJUST;
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwSetSystemInformation(
+    _In_ ULONG SystemInformationClass,
+    _In_reads_bytes_(SystemInformationLength) PVOID SystemInformation,
+    _In_ ULONG SystemInformationLength);
 
 typedef enum _VMIC_KIND
 {
@@ -135,6 +161,7 @@ typedef struct _VMIC_EXTENSION
     LONG WorkQueued;
     KEVENT WorkIdle;
     BOOLEAN TimeSynced;
+    LONG TimeRatePpm;
     PVMIC_FROZEN_VOLUME FrozenVolumes;
     ULONG FrozenCount;
     UCHAR Packet[VMIC_PACKET_MAX];
@@ -677,6 +704,63 @@ VmicReferenceTimeAvailable(VOID)
     return (CpuInfo[0] & HV_FEATURE_TIME_REF_COUNT) != 0;
 }
 
+/*
+ * Runs the system clock fast or slow by so many parts per million, which is
+ * how it is walked towards the host's time without ever stepping back.
+ */
+static
+VOID
+VmicSetClockRate(
+    _In_ LONG Ppm)
+{
+    VMIC_SET_TIME_ADJUST Adjust;
+    ULONG Period = KeQueryTimeIncrement();
+    NTSTATUS Status;
+
+    /* The adjustment is the time one default clock period is worth */
+    Adjust.TimeAdjustment = (ULONG)((LONG)Period + (LONG)(((LONG64)Period * Ppm) / 1000000));
+    Adjust.Disable = (Ppm == 0);
+
+    Status = ZwSetSystemInformation(VMIC_SYSTEM_TIME_ADJUSTMENT_INFORMATION, &Adjust, sizeof(Adjust));
+    if (!NT_SUCCESS(Status))
+        DPRINT1("VMIC: setting the clock rate failed with 0x%lx\n", Status);
+}
+
+/*
+ * One sample of host time minus guest time, in 100 ns. The rate has two parts:
+ * what the clock has turned out to be wrong by in the long run, learnt slowly
+ * from the samples, and what takes the offset still left away over the next
+ * few samples.
+ */
+static
+VOID
+VmicSlewClock(
+    _Inout_ PVMIC_EXTENSION Extension,
+    _In_ LONG64 Drift)
+{
+    LONG DriftUs = (LONG)(Drift / 10);
+    LONG Rate;
+
+    if (Drift < VMIC_TIME_SLEW_DEADBAND && Drift > -VMIC_TIME_SLEW_DEADBAND)
+        DriftUs = 0;
+
+    /*
+     * The long-run part, learnt only near the host's time: a large offset is
+     * a clock that was set wrong, not one that runs wrong. A sixty-fourth of
+     * what closing the offset in one sample period would take is the share
+     * that settles without swinging past.
+     */
+    if (DriftUs < VMIC_TIME_LEARN_US && DriftUs > -VMIC_TIME_LEARN_US)
+        Extension->TimeRatePpm += DriftUs / (VMIC_TIME_SAMPLE_SECONDS * 64);
+    Extension->TimeRatePpm = max(-VMIC_TIME_MAX_PPM, min(VMIC_TIME_MAX_PPM, Extension->TimeRatePpm));
+
+    /* The offset itself goes over the next four sample periods */
+    Rate = Extension->TimeRatePpm + DriftUs / (VMIC_TIME_SAMPLE_SECONDS * 4);
+    Rate = max(-VMIC_TIME_MAX_PPM, min(VMIC_TIME_MAX_PPM, Rate));
+
+    VmicSetClockRate(Rate);
+}
+
 static
 VOID
 VmicHandleTimeSync(
@@ -719,23 +803,34 @@ VmicHandleTimeSync(
 
     KeQuerySystemTime(&GuestTime);
     Drift = HostTime.QuadPart - GuestTime.QuadPart;
-    if (!(Flags & TIMESYNC_FLAG_SYNC) && Extension->TimeSynced &&
-        Drift < VMIC_TIME_STEP_THRESHOLD && Drift > -VMIC_TIME_STEP_THRESHOLD)
+
+    /*
+     * The host sets the clock outright when it says so, when the guest has
+     * not been set yet and when the two are too far apart to walk. Everything
+     * else is walked: a clock that was only ever set, and only once it was two
+     * seconds out, spent its life up to two seconds wrong.
+     */
+    if ((Flags & TIMESYNC_FLAG_SYNC) || !Extension->TimeSynced ||
+        Drift >= VMIC_TIME_STEP_THRESHOLD || Drift <= -VMIC_TIME_STEP_THRESHOLD)
     {
+        if (Drift < VMIC_TIME_SLEW_DEADBAND && Drift > -VMIC_TIME_SLEW_DEADBAND)
+        {
+            Extension->TimeSynced = TRUE;
+            return;
+        }
+
+        Status = ZwSetSystemTime(&HostTime, NULL);
+        if (NT_SUCCESS(Status))
+            Extension->TimeSynced = TRUE;
+        else
+            DPRINT1("VMIC: ZwSetSystemTime failed with 0x%lx\n", Status);
+
+        /* What the clock has been found to run fast or slow by still holds */
+        VmicSetClockRate(Extension->TimeRatePpm);
         return;
     }
 
-    if (Drift < VMIC_TIME_STEP_THRESHOLD / 2 && Drift > -VMIC_TIME_STEP_THRESHOLD / 2)
-    {
-        Extension->TimeSynced = TRUE;
-        return;
-    }
-
-    Status = ZwSetSystemTime(&HostTime, NULL);
-    if (NT_SUCCESS(Status))
-        Extension->TimeSynced = TRUE;
-    else
-        DPRINT1("VMIC: ZwSetSystemTime failed with 0x%lx\n", Status);
+    VmicSlewClock(Extension, Drift);
 }
 
 static
