@@ -256,10 +256,16 @@ SepInitSystemDacls(VOID)
         {&SeAliasAdminsSid, GENERIC_ALL},
         {&SeRestrictedCodeSid, GENERIC_READ},
     };
+    /*
+     * Like Windows (D:(A;;GA;;;SY)(A;;GRGXRC;;;BA)): administrators may also
+     * wait on, and query the limited information of, what the system runs,
+     * which is how tools such as the Restart Manager or Task Manager name
+     * the services that hold a file without the debug privilege.
+     */
     static const SEP_DACL_ACE SystemDefault[] =
     {
         {&SeLocalSystemSid, GENERIC_ALL},
-        {&SeAliasAdminsSid, GENERIC_READ},
+        {&SeAliasAdminsSid, GENERIC_READ | GENERIC_EXECUTE | READ_CONTROL},
     };
     /* The holder of a token and the system may do as they like with it */
     static const SEP_DACL_ACE SystemAnonymousLogon[] =
