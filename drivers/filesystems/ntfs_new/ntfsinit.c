@@ -995,6 +995,36 @@ NtfsFsdCleanup(_In_ PDEVICE_OBJECT VolumeDeviceObject,
             KeLeaveCriticalRegion();
         }
 
+        /*
+         * Windows NTFS sets the last write time of data written through a
+         * handle when that handle is cleaned up. The cache's later write-back
+         * leaves it alone (see NtfsFsdWrite), so the time an application sees
+         * right after CloseHandle stays. Times the handle set explicitly are
+         * kept through its automatic-timestamp mask.
+         */
+        if (FirstCleanup && FileCB->DataWritten && FileCB->FileRec &&
+            !FileCB->DeletePending && !(FileCB->CreateOptions & FILE_DELETE_ON_CLOSE) &&
+            !(FileCB->StreamCB && (FileCB->StreamCB->Deleted || FileCB->StreamCB->DeletePending)) &&
+            VolCB->DiskVolume && !NtfsVolumeIsReadOnly(VolCB->DiskVolume))
+        {
+            NTSTATUS TimestampStatus;
+
+            FileCB->DataWritten = FALSE;
+            KeEnterCriticalRegion();
+            ExAcquireResourceExclusiveLite(NtfsGetMainResource(FileCB), TRUE);
+            NtfsAcquireMetadata(VolCB);
+            TimestampStatus = NtfsRefreshDirectoryRecord(VolCB, FileCB);
+            if (NT_SUCCESS(TimestampStatus))
+                TimestampStatus = NtfsFileRecordUpdateAutomaticTimestamps(
+                    FileCB->FileRec,
+                    NTFS_BASIC_INFO_LAST_WRITE_TIME | NTFS_BASIC_INFO_CHANGE_TIME);
+            if (NT_SUCCESS(TimestampStatus))
+                InterlockedIncrement(&VolCB->DirGeneration);
+            NtfsReleaseMetadata(VolCB);
+            ExReleaseResourceLite(NtfsGetMainResource(FileCB));
+            KeLeaveCriticalRegion();
+        }
+
         /* The handle is going away, so a requested delete happens now. */
         if (FirstCleanup &&
             (DeleteLink || (FileCB->StreamCB
