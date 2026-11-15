@@ -65,6 +65,11 @@ typedef struct _SOCKET_INFORMATION {
 	struct _SOCKET_INFORMATION *NextSocket;
 	BOOL RandomizePort;
 	LONG RefCount;
+	/* A nonblocking connect is in flight (cleared under SocketListLock when it completes).
+	 * select() reports its outcome even if the socket was made blocking meanwhile. */
+	BOOL ConnectPending;
+	/* That connect failed; select() keeps reporting it in exceptfds. */
+	BOOL ConnectFailed;
 } SOCKET_INFORMATION, *PSOCKET_INFORMATION;
 
 

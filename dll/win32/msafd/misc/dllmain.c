@@ -1370,6 +1370,9 @@ WSPListen(SOCKET Handle,
 }
 
 
+DWORD
+GetCurrentTimeInSeconds(VOID);
+
 int
 WSPAPI
 WSPSelect(IN int nfds,
@@ -1555,7 +1558,10 @@ WSPSelect(IN int nfds,
             }
             PollInfo->Handles[j].Handle = writefds->fd_array[i];
             PollInfo->Handles[j].Events |= AFD_EVENT_SEND;
-            if (Socket->SharedData->NonBlocking != 0)
+            /* A connect started while nonblocking is reported even if the
+             * socket was switched back to blocking before select (Rust's
+             * TcpStream::connect_timeout does exactly that). */
+            if (Socket->SharedData->NonBlocking != 0 || Socket->ConnectPending)
                 PollInfo->Handles[j].Events |= AFD_EVENT_CONNECT;
         }
     }
@@ -1588,7 +1594,7 @@ WSPSelect(IN int nfds,
             PollInfo->Handles[j].Handle = exceptfds->fd_array[i];
             if (Socket->SharedData->OobInline == 0)
                 PollInfo->Handles[j].Events |= AFD_EVENT_OOB_RECEIVE;
-            if (Socket->SharedData->NonBlocking != 0)
+            if (Socket->SharedData->NonBlocking != 0 || Socket->ConnectPending || Socket->ConnectFailed)
                 PollInfo->Handles[j].Events |= AFD_EVENT_CONNECT_FAIL;
         }
     }
@@ -1680,7 +1686,23 @@ WSPSelect(IN int nfds,
                     TRACE("Event %x on handle %x\n",
                         Events,
                         Handle);
-                    if( writefds && Socket->SharedData->NonBlocking != 0 )
+                    /* Only requested for a connect in flight (see above). AFD
+                     * has connected the socket; mark it so right away, the
+                     * completion worker may not have run yet and calls such
+                     * as getpeername would fail with WSAENOTCONN. */
+                    if (Socket->ConnectPending)
+                    {
+                        EnterCriticalSection(&SocketListLock);
+                        if (Socket->ConnectPending &&
+                            (Socket->SharedData->State == SocketOpen || Socket->SharedData->State == SocketBound))
+                        {
+                            Socket->SharedData->SocketLastError = NO_ERROR;
+                            Socket->SharedData->State = SocketConnected;
+                            Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
+                        }
+                        LeaveCriticalSection(&SocketListLock);
+                    }
+                    if( writefds )
                         FD_SET(Handle, writefds);
                     break;
                 case AFD_EVENT_OOB_RECEIVE:
@@ -1698,7 +1720,7 @@ WSPSelect(IN int nfds,
                         Handle);
                     Socket->SharedData->SocketLastError =
                         TranslateNtStatusError(PollInfo->Handles[i].Status);
-                    if( exceptfds && Socket->SharedData->NonBlocking != 0 )
+                    if( exceptfds )
                         FD_SET(Handle, exceptfds);
                     break;
             }
@@ -2177,6 +2199,9 @@ MsafdCompleteConnect(
     while (Socket && Socket->Handle != Context->lpSocket)
         Socket = Socket->NextSocket;
 
+    if (Socket)
+        Socket->ConnectPending = FALSE;
+
     if (Socket && Socket->SharedData->State != SocketClosed)
     {
         if (IoStatusBlock->Status == STATUS_SUCCESS)
@@ -2185,6 +2210,12 @@ MsafdCompleteConnect(
             Socket->SharedData->State = SocketConnected;
             Socket->TdiConnectionHandle = (HANDLE)IoStatusBlock->Information;
             Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
+        }
+        else
+        {
+            /* SO_ERROR reports why the connect failed. */
+            Socket->SharedData->SocketLastError = TranslateNtStatusError(IoStatusBlock->Status);
+            Socket->ConnectFailed = TRUE;
         }
 
         /* Re-enable Async Event */
@@ -2417,6 +2448,10 @@ WSPConnect(SOCKET Handle,
     {
         if (Status == STATUS_PENDING)
         {
+            EnterCriticalSection(&SocketListLock);
+            Socket->ConnectPending = TRUE;
+            Socket->ConnectFailed = FALSE;
+            LeaveCriticalSection(&SocketListLock);
             if (QueueUserWorkItem(MsafdConnectWorker,
                                   ConnectContext,
                                   WT_EXECUTELONGFUNCTION))
