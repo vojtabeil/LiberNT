@@ -1638,11 +1638,11 @@ KiFlushTargetEntireTb(IN PKIPI_CONTEXT PacketContext,
                       IN PVOID Ignored2,
                       IN PVOID Ignored3)
 {
-    /* Signal this packet as done */
-    KiIpiSignalPacketDone(PacketContext);
-
     /* Flush the TB for the Current CPU */
     KeFlushCurrentTb();
+
+    /* Signal this packet as done: the sender expects the flush to be over */
+    KiIpiSignalPacketDone(PacketContext);
 }
 
 /*

@@ -35,26 +35,6 @@ ULONGLONG BootCycles, BootCyclesEnd;
 
 /* FUNCTIONS *****************************************************************/
 
-/* The i386 AP path below does not yet bring secondary CPUs into the scheduler.
- * Keep their parking code outside INIT, and acknowledge startup only after
- * entering this resident routine: the BSP may then reclaim all INIT pages. */
-static
-DECLSPEC_NORETURN
-DECLSPEC_NOINLINE
-VOID
-NTAPI
-KiParkUninitializedProcessor(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
-{
-    _disable();
-    KeMemoryBarrier();
-    LoaderBlock->Prcb = 0;
-
-    for (;;)
-    {
-        __halt();
-    }
-}
-
 CODE_SEG("INIT")
 VOID
 NTAPI
@@ -285,6 +265,9 @@ KiInitMachineDependent(VOID)
                 /* Now set the kernel mask */
                 KiMXCsrMask &= MXCsrMask;
             }
+
+            /* Set CR0 features based on detected CPU, on every CPU */
+            KiSetCR0Bits();
         }
     }
 
@@ -297,9 +280,6 @@ KiInitMachineDependent(VOID)
         /* FIXME: TODO */
         DPRINT1("ISR Time Limit not yet supported\n");
     }
-
-    /* Set CR0 features based on detected CPU */
-    KiSetCR0Bits();
 }
 
 CODE_SEG("INIT")
@@ -562,8 +542,10 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
     }
     else
     {
-        /* FIXME */
-        DPRINT1("Starting CPU#%u - you are brave\n", Number);
+        DPRINT1("Starting CPU#%u\n", Number);
+
+        /* Lower to APC_LEVEL, as the boot CPU does */
+        KeLowerIrql(APC_LEVEL);
     }
 
     /* Setup the Idle Thread */
@@ -578,6 +560,9 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
     InitThread->NextProcessor = Number;
     InitThread->Priority = HIGH_PRIORITY;
     InitThread->State = Running;
+#if KI_THREAD_HANDOFF_USES_RUNNING
+    InitThread->Running = TRUE;
+#endif
 #if (NTDDI_VERSION >= NTDDI_WIN7)
     InitThread->Affinity.Mask = 1 << Number;
     InitThread->Affinity.Group = 0;
@@ -626,7 +611,16 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
     Prcb->IdleThread = InitThread;
 
     /* Initialize the Kernel Executive */
-    ExpInitializeExecutive(Number, LoaderBlock);
+    if (!Number)
+    {
+        ExpInitializeExecutive(Number, LoaderBlock);
+    }
+    else
+    {
+        /* The HAL set this processor up in HalInitializeProcessor; running
+           its phase 0 again would reprogram the shared interrupt hardware */
+        ExInitPoolLookasidePointers();
+    }
 
     /* Only do this on the boot CPU */
     if (!Number)
@@ -670,6 +664,7 @@ KiInitializeKernel(IN PKPROCESS InitProcess,
 
     /* Raise back to HIGH_LEVEL and clear the PRCB for the loader block */
     KeRaiseIrql(HIGH_LEVEL, &DummyIrql);
+    KeMemoryBarrier();
     LoaderBlock->Prcb = 0;
 }
 
@@ -721,13 +716,14 @@ NTAPI
 KiSystemStartupBootStack(VOID)
 {
     PKTHREAD Thread;
+    PKPRCB Prcb = (PKPRCB)__readfsdword(KPCR_PRCB);
 
     /* Initialize the kernel for the current CPU */
     KiInitializeKernel(&KiInitialProcess.Pcb,
                        (PKTHREAD)KeLoaderBlock->Thread,
                        (PVOID)(KeLoaderBlock->KernelStack & ~3),
-                       (PKPRCB)__readfsdword(KPCR_PRCB),
-                       KeNumberProcessors - 1,
+                       Prcb,
+                       Prcb->Number,
                        KeLoaderBlock);
 
     /* Set the priority of this thread to 0 */
@@ -737,6 +733,12 @@ KiSystemStartupBootStack(VOID)
     /* Force interrupts enabled and lower IRQL back to DISPATCH_LEVEL */
     _enable();
     KeLowerIrql(DISPATCH_LEVEL);
+
+    /* Active means it can answer an IPI: publish after interrupts are enabled */
+    if (Prcb->Number != 0)
+    {
+        KiPublishActiveProcessor(Prcb);
+    }
 
     /* Set the right wait IRQL */
     Thread->WaitIrql = DISPATCH_LEVEL;
@@ -859,18 +861,16 @@ KiSystemStartup(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
     RtlCopyMemory(&Idt[8], &DoubleFaultEntry, sizeof(KIDTENTRY));
 
 AppCpuInit:
-    //TODO: We don't setup IPIs yet so freeze other processors here.
     if (Cpu)
     {
-        KiParkUninitializedProcessor(LoaderBlock);
-    }
+        /* An application processor was numbered when its PCR was built */
+        Pcr = (PKIPCR)KeGetPcr();
+        Cpu = Pcr->PrcbData.Number;
 
-    /* Loop until we can release the freeze lock */
-    do
-    {
-        /* Loop until execution can continue */
-        while (*(volatile PKSPIN_LOCK*)&KiFreezeExecutionLock == (PVOID)1);
-    } while(InterlockedBitTestAndSet((PLONG)&KiFreezeExecutionLock, 0));
+        /* Load Ring 3 selectors for DS/ES */
+        Ke386SetDs(KGDT_R3_DATA | RPL_MASK);
+        Ke386SetEs(KGDT_R3_DATA | RPL_MASK);
+    }
 
     /* Setup CPU-related fields */
     __writefsdword(KPCR_NUMBER, Cpu);
@@ -883,13 +883,18 @@ AppCpuInit:
     /* Initialize the Processor with HAL */
     HalInitializeProcessor(Cpu, KeLoaderBlock);
 
-    /* Set active processors */
-    KeActiveProcessors |= __readfsdword(KPCR_SET_MEMBER);
-    KeNumberProcessors++;
+    /* Publish the PRCB before counting: [0, KeNumberProcessors) must be valid */
+    ASSERT(KiProcessorBlock[Cpu] == Pcr->Prcb);
+    KeMemoryBarrier();
+    if ((CCHAR)(Cpu + 1) > KeNumberProcessors)
+        KeNumberProcessors = (CCHAR)(Cpu + 1);
 
     /* Check if this is the boot CPU */
     if (!Cpu)
     {
+        /* An application processor becomes active only once it can take an IPI */
+        KeActiveProcessors |= __readfsdword(KPCR_SET_MEMBER);
+
         /* Initialize debugging system */
         KdInitSystem(0, KeLoaderBlock);
 

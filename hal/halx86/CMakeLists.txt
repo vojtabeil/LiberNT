@@ -47,6 +47,14 @@ include(acpi.cmake)
 include(apic.cmake)
 include(smp.cmake)
 
+if(ARCH STREQUAL "i386")
+    # The i386 HAL is the SMP one: every component has to reach the PCR through
+    # FS rather than at the boot processor's address, and take real spinlocks.
+    target_compile_definitions(lib_hal_generic PRIVATE CONFIG_SMP)
+    target_compile_definitions(lib_hal_acpi PRIVATE CONFIG_SMP)
+    target_compile_definitions(lib_hal_apic PRIVATE CONFIG_SMP)
+endif()
+
 if(ARCH STREQUAL "i386" AND (SARCH STREQUAL "pc98" OR SARCH STREQUAL "xbox"))
     message(FATAL_ERROR "The SMP HAL does not support ${SARCH}")
 endif()

@@ -375,6 +375,12 @@ KiSwapContextExit(IN PKTHREAD OldThread,
     NewProcess = NewThread->ApcState.Process;
     if (OldProcess != NewProcess)
     {
+#ifdef CONFIG_SMP
+        /* Update the active processor masks: they are the TB flush targets */
+        InterlockedXor((PLONG)&NewProcess->ActiveProcessors, (LONG)Pcr->PrcbData.SetMember);
+        InterlockedXor((PLONG)&OldProcess->ActiveProcessors, (LONG)Pcr->PrcbData.SetMember);
+#endif
+
         /* Check if there is a different LDT */
         if (*(PULONGLONG)&OldProcess->LdtDescriptor != *(PULONGLONG)&NewProcess->LdtDescriptor)
         {
@@ -426,6 +432,15 @@ KiSwapContextExit(IN PKTHREAD OldThread,
                      (ULONG_PTR)OldThread->InitialStack,
                      0);
     }
+
+    /* Complete the outgoing thread handoff after leaving its stack. */
+#if KI_THREAD_HANDOFF_USES_RUNNING
+    KiCompleteThreadSwitch(OldThread, NewThread);
+
+    KiCheckDeferredReadyList(&Pcr->PrcbData);
+    if (Pcr->PrcbData.NextThread)
+        KiRequestDispatchInterrupt(&Pcr->PrcbData);
+#endif
 
     /* Kernel APCs may be pending */
     if (NewThread->ApcState.KernelApcPending)
@@ -573,6 +588,15 @@ KiDispatchInterrupt(VOID)
 
         /* Capture current thread data */
         OldThread = Prcb->CurrentThread;
+
+        /* Another processor may have taken the thread back, or handed us our own */
+        if ((Prcb->NextThread == NULL) ||
+            KiConsumeSelfNextThread(Prcb, OldThread))
+        {
+            KiReleasePrcbLock(Prcb);
+            return;
+        }
+
         NewThread = Prcb->NextThread;
 
         /* Set new thread data */
@@ -585,6 +609,9 @@ KiDispatchInterrupt(VOID)
 
         /* Make the old thread ready */
         KxQueueReadyThread(OldThread, Prcb);
+
+        /* A thread placed here by another processor may still be leaving it */
+        KiWaitForThreadSwapOut(NewThread);
 
         /* Swap to the new thread */
         KiSwapContext(APC_LEVEL, OldThread);
