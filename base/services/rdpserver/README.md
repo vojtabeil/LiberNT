@@ -103,7 +103,7 @@ transfer_root=C:\
 Authentication, the first frame and disconnects are logged as `RDPTEST`
 lines on the kernel debugger and on stdout. An idle server captures nothing;
 a connected session captures at most ten frames per second and sends the
-changed 64x32 tiles.
+changed 64x32 tiles, planar (RDP 6.0) compressed.
 
 ## Clipboard
 
