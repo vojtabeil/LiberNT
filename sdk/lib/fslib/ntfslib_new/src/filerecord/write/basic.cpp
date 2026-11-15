@@ -290,6 +290,55 @@ FileRecord::TouchDirectory()
 }
 
 /*
+ * Automatic timestamps only change $STANDARD_INFORMATION. Like Windows NTFS
+ * updating the duplicated information when a handle is cleaned up, this
+ * copies the current times and attributes into the $FILE_NAME attributes
+ * and their parent index entries, so directory listings report them.
+ */
+NTSTATUS
+FileRecord::SynchronizeDuplicatedInformation()
+{
+    PUCHAR RecordBackup;
+    NTSTATUS Status;
+
+    if (!DiskVolume)
+        return STATUS_INVALID_DEVICE_STATE;
+    if (DiskVolume->IsReadOnly)
+        return STATUS_ACCESS_DENIED;
+    if (!Header || Header->BaseFileRecord != 0)
+        return STATUS_INVALID_PARAMETER;
+
+    RecordBackup =
+        new(PagedPool, TAG_FILE_RECORD)
+            UCHAR[RecordBufferSize];
+    if (!RecordBackup)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    RtlCopyMemory(RecordBackup,
+                  Data,
+                  RecordBufferSize);
+
+    Status = SynchronizeFileNameInformation(
+        NTFS_FILE_NAME_UPDATE_BASIC, 0, 0, 0, 0, 0);
+    if (NT_SUCCESS(Status))
+    {
+        Status = DiskVolume->MFT->
+            WriteFileRecordToMFT(this);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        RtlCopyMemory(Data,
+                      RecordBackup,
+                      RecordBufferSize);
+        Header =
+            reinterpret_cast<PFileRecordHeader>(Data);
+        ClearDataRunCache();
+    }
+
+    delete[] RecordBackup;
+    return Status;
+}
+
+/*
  * Stamps $STANDARD_INFORMATION's change time in memory. The caller commits
  * the record; this only refreshes the timestamp inside a larger mutation.
  */

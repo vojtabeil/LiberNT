@@ -1001,25 +1001,36 @@ NtfsFsdCleanup(_In_ PDEVICE_OBJECT VolumeDeviceObject,
          * leaves it alone (see NtfsFsdWrite), so the time an application sees
          * right after CloseHandle stays. Times the handle set explicitly are
          * kept through its automatic-timestamp mask.
+         *
+         * The times only change $STANDARD_INFORMATION. Like Windows, a handle
+         * that changed the file then also updates the duplicated information
+         * in the $FILE_NAME attributes and the parent index entries, which
+         * directory listings (FindFirstFile, dir) return.
          */
-        if (FirstCleanup && FileCB->DataWritten && FileCB->FileRec &&
+        if (FirstCleanup && FileCB->FileRec && !FileCB->IsVolumeOpen && !FileCB->PagingFileOpen &&
+            (FileCB->DataWritten ||
+             (IrpSp->FileObject->Flags & (FO_FILE_MODIFIED | FO_FILE_SIZE_CHANGED))) &&
             !FileCB->DeletePending && !(FileCB->CreateOptions & FILE_DELETE_ON_CLOSE) &&
             !(FileCB->StreamCB && (FileCB->StreamCB->Deleted || FileCB->StreamCB->DeletePending)) &&
             VolCB->DiskVolume && !NtfsVolumeIsReadOnly(VolCB->DiskVolume))
         {
             NTSTATUS TimestampStatus;
+            BOOLEAN DataWritten = FileCB->DataWritten;
 
             FileCB->DataWritten = FALSE;
             KeEnterCriticalRegion();
             ExAcquireResourceExclusiveLite(NtfsGetMainResource(FileCB), TRUE);
             NtfsAcquireMetadata(VolCB);
             TimestampStatus = NtfsRefreshDirectoryRecord(VolCB, FileCB);
-            if (NT_SUCCESS(TimestampStatus))
+            if (NT_SUCCESS(TimestampStatus) && DataWritten)
                 TimestampStatus = NtfsFileRecordUpdateAutomaticTimestamps(
                     FileCB->FileRec,
                     NTFS_BASIC_INFO_LAST_WRITE_TIME | NTFS_BASIC_INFO_CHANGE_TIME);
             if (NT_SUCCESS(TimestampStatus))
-                InterlockedIncrement(&VolCB->DirGeneration);
+                TimestampStatus = NtfsFileRecordSynchronizeDuplicatedInformation(FileCB->FileRec);
+            if (!NT_SUCCESS(TimestampStatus))
+                DPRINT1("NtfsFsdCleanup: updating times failed 0x%08lx\n", TimestampStatus);
+            InterlockedIncrement(&VolCB->DirGeneration);
             NtfsReleaseMetadata(VolCB);
             ExReleaseResourceLite(NtfsGetMainResource(FileCB));
             KeLeaveCriticalRegion();
