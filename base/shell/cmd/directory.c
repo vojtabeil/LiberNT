@@ -370,8 +370,11 @@ static RETURN_CODE WCMD_list_directory (DIRECTORY_STACK *inputparms, int level, 
   /* Handle case where everything is filtered out */
   if (entry_count > 0) {
 
-    /* Sort the list of files */
-    qsort (fd, entry_count, sizeof(WIN32_FIND_DATAW), WCMD_dir_sort);
+    /* Sort the list of files. Without /O the order is the file system's,
+     * as on Windows: qsort is not stable, so with a comparison that finds
+     * every entry equal it would shuffle them. */
+    if (dirOrder != Unspecified || orderGroupDirs)
+        qsort (fd, entry_count, sizeof(WIN32_FIND_DATAW), WCMD_dir_sort);
 
     /* Work out the number of columns */
     WINE_TRACE("%d entries, maxwidth=%d, widest=%d\n", entry_count, max_width, widest);
