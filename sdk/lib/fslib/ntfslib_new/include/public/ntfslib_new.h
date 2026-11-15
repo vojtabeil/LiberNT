@@ -423,6 +423,15 @@ NtfsFileRecordUpdateAutomaticTimestamps(
     _In_ UINT32 Fields);
 
 /*
+ * Copies the times and attributes of $STANDARD_INFORMATION into the
+ * duplicated information of every $FILE_NAME of the record and of the
+ * matching parent $I30 index entries, which directory listings return.
+ */
+NTSTATUS
+NtfsFileRecordSynchronizeDuplicatedInformation(
+    _In_ NtfsFileRecord *FileRecord);
+
+/*
  * Returns the complete on-disk $REPARSE_POINT value. BufferLength is a byte
  * capacity on input and the required/returned byte count on output. A NULL
  * or undersized buffer returns STATUS_BUFFER_TOO_SMALL.

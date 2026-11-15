@@ -241,6 +241,16 @@ NtfsFileRecordUpdateAutomaticTimestamps(
         UpdateAutomaticTimestamps(Fields);
 }
 
+NTSTATUS
+NtfsFileRecordSynchronizeDuplicatedInformation(
+    _In_ PNtfsFileRecord Fr)
+{
+    if (!Fr)
+        return STATUS_INVALID_PARAMETER;
+    return reinterpret_cast<PFileRecord>(Fr)->
+        SynchronizeDuplicatedInformation();
+}
+
 BOOLEAN
 NtfsFileRecordIsWofBacked(
     _In_ PNtfsFileRecord Fr)

@@ -991,6 +991,9 @@ public:
     TouchDirectory();
 
     NTSTATUS
+    SynchronizeDuplicatedInformation();
+
+    NTSTATUS
     StampChangeTime();
 
     // ./write.cpp
