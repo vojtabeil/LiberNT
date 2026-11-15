@@ -28,6 +28,7 @@
 #include <freerdp/channels/wtsvc.h>
 #include <freerdp/channels/channels.h>
 #include "transfer.h"
+#include "clipboard.h"
 
 /* OpenSSL names its x86_64 MinGW DLLs with an -x64 suffix. */
 #ifdef _WIN64
@@ -50,6 +51,7 @@ static IPMask InterfaceMask;
 static ULONG AddressContext;
 static BOOL AddressAdded;
 static WCHAR TransferRoot[MAX_PATH];
+static BOOL ClipboardEnabled;
 
 typedef struct DESKTOP_CONTEXT
 {
@@ -66,6 +68,7 @@ typedef struct DESKTOP_CONTEXT
     ULONGLONG Frames, Updates, Inputs;
     HANDLE Vcm;
     RDP_TRANSFER *Transfer;
+    RDP_CLIPBOARD *Clipboard;
 } DESKTOP_CONTEXT;
 
 static void Log(const char *fmt, ...)
@@ -80,6 +83,21 @@ static void Log(const char *fmt, ...)
     if (DebugPrint) DebugPrint("RDPTEST: %s\n", buffer);
     fprintf(stdout, "RDPTEST: %s\n", buffer);
     fflush(stdout);
+}
+
+/* Clipboard events go to the kernel debugger only. Writing to the console
+ * from the clipboard window while it renders data for another application
+ * (WM_RENDERFORMAT) blocks in LiberNT and stalls that application. */
+static void DebugLog(const char *fmt, ...)
+{
+    char buffer[1024];
+    va_list args;
+    if (!DebugPrint) return;
+    va_start(args, fmt);
+    vsnprintf(buffer, sizeof(buffer), fmt, args);
+    va_end(args);
+    buffer[sizeof(buffer) - 1] = 0;
+    DebugPrint("RDPTEST: %s\n", buffer);
 }
 
 static BOOL InputReady(rdpInput *input)
@@ -283,6 +301,9 @@ static BOOL PostConnect(freerdp_peer *peer)
         ctx->Transfer = TransferStart(ctx->Vcm, &ctx->rdp, TransferRoot, Log);
         if (!ctx->Transfer) { Log("File transfer channel failed to start"); return FALSE; }
     }
+    /* Clipboard redirection is optional: the session goes on without it. */
+    if (ClipboardEnabled && WTSVirtualChannelManagerIsChannelJoined(ctx->Vcm, "cliprdr"))
+        ctx->Clipboard = ClipboardStart(ctx->Vcm, &ctx->rdp, DebugLog);
     Log("Authenticated peer %s; console desktop %dx%d", peer->hostname, ctx->Width, ctx->Height);
     return TRUE;
 }
@@ -381,6 +402,7 @@ static void ContextFree(freerdp_peer *peer, rdpContext *rdp)
     unsigned i;
     INPUT event = {0};
     (void)peer;
+    ClipboardStop(ctx->Clipboard);
     TransferStop(ctx->Transfer);
     if (ctx->Vcm) WTSCloseServer(ctx->Vcm);
     /* A disconnected controller must not leave Ctrl/Alt or mouse buttons held. */
@@ -520,6 +542,7 @@ int main(int argc, char **argv)
     GetPrivateProfileStringA("server", "privatekey", "", PrivateKey, sizeof(PrivateKey), config);
     GetPrivateProfileStringA("server", "interface_mac", "", mac, sizeof(mac), config);
     GetPrivateProfileStringA("server", "netmask", "", mask, sizeof(mask), config);
+    ClipboardEnabled = GetPrivateProfileIntA("server", "clipboard", 1, config) != 0;
     {
         char root[MAX_PATH];
         GetPrivateProfileStringA("server", "transfer_root", "", root, sizeof(root), config);

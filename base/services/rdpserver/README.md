@@ -94,6 +94,7 @@ transfer_root=C:\
   address is not ready yet.
 - `transfer_root` enables file transfers below that local directory after
   authentication. Leave it out to disable transfers.
+- `clipboard=0` turns clipboard redirection off; it is on by default.
 - `console=1` keeps the server's console window visible. By default the
   server hides it: on the interactive desktop it could take the keyboard
   focus from the application a client types into, and a Ctrl+C typed into
@@ -103,6 +104,19 @@ Authentication, the first frame and disconnects are logged as `RDPTEST`
 lines on the kernel debugger and on stdout. An idle server captures nothing;
 a connected session captures at most ten frames per second and sends the
 changed 64x32 tiles.
+
+## Clipboard
+
+While a client is connected, the `cliprdr` channel redirects the console
+clipboard in both directions. Text (`CF_UNICODETEXT`, `CF_TEXT`,
+`CF_OEMTEXT` and `CF_LOCALE`), device-independent bitmaps (`CF_DIB`,
+`CF_DIBV5`) and registered memory formats such as `HTML Format` travel; GDI
+handle formats and file copies do not. A copy on the client makes the server
+the owner of the console clipboard with delayed rendering, so the data
+crosses the channel only when an application pastes it. A copy in the VM is
+announced to the client, which then fetches the formats it needs. Clipboard
+events are logged on the kernel debugger only: console output from the
+clipboard window can block while the console itself pastes.
 
 ## Client and file transfer
 
