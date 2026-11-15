@@ -29,6 +29,13 @@
 #include <freerdp/channels/channels.h>
 #include "transfer.h"
 
+/* OpenSSL names its x86_64 MinGW DLLs with an -x64 suffix. */
+#ifdef _WIN64
+#define LIBCRYPTO_DLL "libcrypto-3-x64.dll"
+#else
+#define LIBCRYPTO_DLL "libcrypto-3.dll"
+#endif
+
 typedef ULONG (__cdecl *DEBUG_PRINT)(const char *, ...);
 static DEBUG_PRINT DebugPrint;
 static HANDLE StopEvent;
@@ -545,7 +552,7 @@ int main(int argc, char **argv)
     /* OpenSSL's CRT may cache its environment before main. Set its provider
      * path directly so ReactOS does not fall back to the build-machine path. */
     setProviderPath = (SET_PROVIDER_PATH)(void *)GetProcAddress(
-        GetModuleHandleA("libcrypto-3-x64.dll"), "OSSL_PROVIDER_set_default_search_path");
+        GetModuleHandleA(LIBCRYPTO_DLL), "OSSL_PROVIDER_set_default_search_path");
     if (!setProviderPath || !setProviderPath(NULL, modules))
     { Log("Cannot configure the bundled OpenSSL provider directory"); return 1; }
     if (!winpr_InitializeSSL(WINPR_SSL_INIT_DEFAULT)) return 1;
