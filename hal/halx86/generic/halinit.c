@@ -18,6 +18,7 @@
 BOOLEAN HalpOnlyBootProcessor;
 //#endif
 BOOLEAN HalpPciLockSettings;
+BOOLEAN HalpUsePlatformTick;
 BOOLEAN HalBootViaEfi;
 ULONG HalpStallScaleFactor = INITIAL_STALL_COUNT;
 
@@ -44,6 +45,14 @@ HalpGetParameters(
         /* Check if PCI is locked */
         if (strstr(CommandLine, "PCILOCK"))
             HalpPciLockSettings = TRUE;
+
+        /*
+         * USEPLATFORMTICK (bcdedit /set useplatformtick yes on Windows) keeps
+         * the clock on the platform timer and leaves the local APIC timer
+         * alone, for software that programs that timer itself.
+         */
+        if (strstr(CommandLine, "USEPLATFORMTICK"))
+            HalpUsePlatformTick = TRUE;
 
         /* Check for initial breakpoint */
         if (strstr(CommandLine, "BREAK"))
