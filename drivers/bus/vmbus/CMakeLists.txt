@@ -5,6 +5,7 @@ add_asm_files(vmbus_asm hvcall.S)
 list(APPEND SOURCE
     channel.c
     hv.c
+    hvsock.c
     vmbus.c
     vmbus.h)
 
