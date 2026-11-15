@@ -788,6 +788,9 @@ KeUpdateSystemTime(
     KiTickClockOwner(InterruptTime);
 }
 
+/* The interrupt time the debugger's line was last polled at */
+static ULONGLONG KiBreakInPollTime;
+
 static
 VOID
 KiTickClockOwner(
@@ -800,8 +803,21 @@ KiTickClockOwner(
 
     KdpLogWatchdogCheck(InterruptTime);
 
-    if (KdDebuggerEnabled && KdPollBreakIn())
-        DbgBreakPointWithStatus(DBG_STATUS_CONTROL_C);
+    /*
+     * The debugger's line is looked at once per default clock period, not once
+     * per interrupt: with the clock at a millisecond that is sixteen times as
+     * many looks, each a port read with every interrupt held off. A serial port
+     * a hypervisor emulates takes its time over some of them (10 to 24 ms a few
+     * times a second on Hyper-V with COM1 on a named pipe), and a driver
+     * that counts its own timer interrupts lost those milliseconds.
+     */
+    if (KdDebuggerEnabled &&
+        (InterruptTime - KiBreakInPollTime >= KeMaximumIncrement))
+    {
+        KiBreakInPollTime = InterruptTime;
+        if (KdPollBreakIn())
+            DbgBreakPointWithStatus(DBG_STATUS_CONTROL_C);
+    }
 
     if (KeMaximumIncrement == 0)
         return;
