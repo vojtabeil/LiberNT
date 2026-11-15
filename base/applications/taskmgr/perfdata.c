@@ -39,6 +39,7 @@ static LARGE_INTEGER                       liOldPerCpuIdle[PERF_MAX_CPUS];
 static LARGE_INTEGER                       liOldPerCpuKernel[PERF_MAX_CPUS];
 static LARGE_INTEGER                       liOldPerCpuUser[PERF_MAX_CPUS];
 static BYTE                                PerCpuUsage[PERF_MAX_CPUS];
+static BYTE                                PerCpuKernelUsage[PERF_MAX_CPUS];
 
 typedef BOOL (WINAPI *PFN_GetProcessInformation)(HANDLE, PROCESS_INFORMATION_CLASS, PVOID, DWORD);
 static PFN_GetProcessInformation pGetProcessInformation;
@@ -313,17 +314,26 @@ void PerfDataRefresh(void)
         LONGLONG TotalDelta = KernelDelta + UserDelta;
 
         if (liOldPerCpuKernel[Idx].QuadPart != 0 && TotalDelta > 0) {
+            /* The kernel time of a processor includes its idle time */
             LONGLONG BusyDelta = TotalDelta - IdleDelta;
-            LONGLONG Usage;
+            LONGLONG KernelBusyDelta = KernelDelta - IdleDelta;
+            LONGLONG Usage, KernelUsage;
 
             if (BusyDelta < 0)
                 BusyDelta = 0;
+            if (KernelBusyDelta < 0)
+                KernelBusyDelta = 0;
             Usage = (BusyDelta * 100) / TotalDelta;
+            KernelUsage = (KernelBusyDelta * 100) / TotalDelta;
             if (Usage > 100)
                 Usage = 100;
+            if (KernelUsage > Usage)
+                KernelUsage = Usage;
             PerCpuUsage[Idx] = (BYTE)Usage;
+            PerCpuKernelUsage[Idx] = (BYTE)KernelUsage;
         } else {
             PerCpuUsage[Idx] = 0;
+            PerCpuKernelUsage[Idx] = 0;
         }
 
         liOldPerCpuKernel[Idx] = SystemProcessorTimeInfo[Idx].KernelTime;
@@ -578,6 +588,17 @@ ULONG PerfDataGetProcessorUsagePerCpu(ULONG Cpu)
     EnterCriticalSection(&PerfDataCriticalSection);
     if (Cpu < PERF_MAX_CPUS)
         Result = PerCpuUsage[Cpu];
+    LeaveCriticalSection(&PerfDataCriticalSection);
+    return Result;
+}
+
+ULONG PerfDataGetProcessorKernelUsagePerCpu(ULONG Cpu)
+{
+    ULONG Result = 0;
+
+    EnterCriticalSection(&PerfDataCriticalSection);
+    if (Cpu < PERF_MAX_CPUS)
+        Result = PerCpuKernelUsage[Cpu];
     LeaveCriticalSection(&PerfDataCriticalSection);
     return Result;
 }

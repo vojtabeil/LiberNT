@@ -166,6 +166,7 @@ PerformancePageWndProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
                 EndDialog(hDlg, 0);
                 return FALSE;
             }
+            PerformancePageCpuUsageHistoryGraph.PerCpuMode = TaskManagerSettings.CPUHistory_OneGraphPerCPU;
 
             fmt.clrPlot0 = RGB(255, 255, 0);
             fmt.clrPlot1 = RGB(100, 255, 255);
@@ -441,20 +442,24 @@ DWORD WINAPI PerformancePageRefreshThread(PVOID Parameter)
             PhysicalMemoryAvailable = PerfDataGetPhysicalMemoryAvailableK();
             nBarsUsed2 = PhysicalMemoryTotal ? ((PhysicalMemoryAvailable * 100) / PhysicalMemoryTotal) : 0;
 
-            if (TaskManagerSettings.CPUHistory_OneGraphPerCPU &&
-                PerfDataGetProcessorCount() > 1)
+            if (PerfDataGetProcessorCount() > 1)
             {
-                BYTE  PerCpuVals[64];
+                BYTE  PerCpuVals[64], PerCpuKernelVals[64];
                 ULONG CpuCount = PerfDataGetProcessorCount();
                 ULONG Cpu;
 
                 if (CpuCount > 64)
                     CpuCount = 64;
                 for (Cpu = 0; Cpu < CpuCount; Cpu++)
+                {
                     PerCpuVals[Cpu] = (BYTE)PerfDataGetProcessorUsagePerCpu(Cpu);
+                    PerCpuKernelVals[Cpu] = (BYTE)PerfDataGetProcessorKernelUsagePerCpu(Cpu);
+                }
 
+                /* Both views keep their history; the selected one is drawn */
                 GraphCtrl_AddPointsPerCpu(&PerformancePageCpuUsageHistoryGraph,
-                                          PerCpuVals, CpuCount);
+                                          (BYTE)CpuUsage, (BYTE)CpuKernelUsage,
+                                          PerCpuVals, PerCpuKernelVals, CpuCount);
             }
             else
             {
@@ -490,7 +495,8 @@ void PerformancePage_OnViewShowKernelTimes(void)
         PerformancePageCpuUsageHistoryGraph.DrawSecondaryPlot = TRUE;
     }
 
-    GraphCtrl_RedrawBitmap(&PerformancePageCpuUsageHistoryGraph, PerformancePageCpuUsageHistoryGraph.BitmapHeight);
+    GraphCtrl_Redraw(&PerformancePageCpuUsageHistoryGraph);
+    InvalidateRect(hPerformancePageCpuUsageHistoryGraph, NULL, FALSE);
     RefreshPerformancePage();
 }
 
@@ -506,6 +512,8 @@ void PerformancePage_OnViewCPUHistoryOneGraphAll(void)
 
     TaskManagerSettings.CPUHistory_OneGraphPerCPU = FALSE;
     CheckMenuRadioItem(hCPUHistoryMenu, ID_VIEW_CPUHISTORY_ONEGRAPHALL, ID_VIEW_CPUHISTORY_ONEGRAPHPERCPU, ID_VIEW_CPUHISTORY_ONEGRAPHALL, MF_BYCOMMAND);
+    GraphCtrl_SetPerCpuMode(&PerformancePageCpuUsageHistoryGraph, FALSE);
+    InvalidateRect(hPerformancePageCpuUsageHistoryGraph, NULL, FALSE);
 }
 
 void PerformancePage_OnViewCPUHistoryOneGraphPerCPU(void)
@@ -520,4 +528,6 @@ void PerformancePage_OnViewCPUHistoryOneGraphPerCPU(void)
 
     TaskManagerSettings.CPUHistory_OneGraphPerCPU = TRUE;
     CheckMenuRadioItem(hCPUHistoryMenu, ID_VIEW_CPUHISTORY_ONEGRAPHALL, ID_VIEW_CPUHISTORY_ONEGRAPHPERCPU, ID_VIEW_CPUHISTORY_ONEGRAPHPERCPU, MF_BYCOMMAND);
+    GraphCtrl_SetPerCpuMode(&PerformancePageCpuUsageHistoryGraph, TRUE);
+    InvalidateRect(hPerformancePageCpuUsageHistoryGraph, NULL, FALSE);
 }
