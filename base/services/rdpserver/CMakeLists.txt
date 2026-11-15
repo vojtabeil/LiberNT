@@ -3,20 +3,30 @@
 # PURPOSE:     Stage a MinGW build of the RDP console server into the images
 # COPYRIGHT:   Copyright 2026 Ahmed ARIF <arif193@gmail.com>
 
-if(NOT ARCH_64BIT)
-    message(FATAL_ERROR "RDPSERVER_DIR holds an x86_64 build; it can only be staged into 64-bit images.")
-endif()
-
 set(_rdpserver_bin "${RDPSERVER_DIR}/bin")
+if(ARCH STREQUAL "i386")
+    # i686 MinGW (win32 threads, DWARF-2 unwinding): OpenSSL keeps unsuffixed
+    # DLL names and the GCC runtime needs no libwinpthread.
+    set(_rdpserver_arch_files
+        "${_rdpserver_bin}/libssl-3.dll"
+        "${_rdpserver_bin}/libcrypto-3.dll"
+        "${_rdpserver_bin}/libgcc_s_dw2-1.dll")
+elseif(ARCH_64BIT)
+    # x86_64 MinGW; arm64 and riscv64 run the server as x64 code.
+    set(_rdpserver_arch_files
+        "${_rdpserver_bin}/libssl-3-x64.dll"
+        "${_rdpserver_bin}/libcrypto-3-x64.dll"
+        "${_rdpserver_bin}/libgcc_s_seh-1.dll"
+        "${_rdpserver_bin}/libwinpthread-1.dll")
+else()
+    message(FATAL_ERROR "RDPSERVER_DIR holds an x86_64 or i686 build; it cannot be staged into ${ARCH} images.")
+endif()
 set(_rdpserver_files
     "${_rdpserver_bin}/rdpserver.exe"
     "${_rdpserver_bin}/libfreerdp3.dll"
     "${_rdpserver_bin}/libfreerdp-server3.dll"
     "${_rdpserver_bin}/libwinpr3.dll"
-    "${_rdpserver_bin}/libssl-3-x64.dll"
-    "${_rdpserver_bin}/libcrypto-3-x64.dll"
-    "${_rdpserver_bin}/libgcc_s_seh-1.dll"
-    "${_rdpserver_bin}/libwinpthread-1.dll")
+    ${_rdpserver_arch_files})
 set(_rdpserver_modules "${_rdpserver_bin}/ossl-modules/legacy.dll")
 set(_rdpserver_licenses
     "${RDPSERVER_DIR}/licenses/FreeRDP-LICENSE"

@@ -10,7 +10,8 @@ file transfers to a configured local directory.
 ## Building
 
 The server is built outside the LiberNT toolchain, with an x86_64 MinGW
-compiler, against FreeRDP 3.32.0 and OpenSSL 3:
+compiler for 64-bit images or an i686 one for i386 images, against FreeRDP
+3.32.0 and OpenSSL 3 built with the same compiler:
 
 1. Apply `freerdp-rdpdr.patch` to FreeRDP 3.32.0 and build and install it
    with MinGW (`WITH_SERVER=ON`, `WITH_CHANNELS=ON`, `WITH_SERVER_CHANNELS=ON`
@@ -32,7 +33,18 @@ compiler, against FreeRDP 3.32.0 and OpenSSL 3:
    licenses/FreeRDP-LICENSE  licenses/OpenSSL-LICENSE
    ```
 
-Point a 64-bit build directory at it (arm64 and riscv64 run the server as x64 code) (or set *System > RDP console server
+   An i686 build holds `bin/libssl-3.dll`, `bin/libcrypto-3.dll` and
+   `bin/libgcc_s_dw2-1.dll` instead of the x64 OpenSSL and GCC runtime
+   DLLs. Use a compiler with win32 threads (for example Ubuntu's
+   `i686-w64-mingw32-gcc-win32`), which needs no `libwinpthread-1.dll`.
+   When cross-compiling FreeRDP for i686, also pass
+   `-DCMAKE_C_FLAGS=-D__STDC_NO_THREADS__=1`, `-DUSE_UNWIND=OFF` and
+   `-DHAVE_SSIZE_T=0 -DSSIZE_T= -DHAVE_WIN_SSIZE_T=1 -DWIN_SSIZE_T=4`: the
+   `ssize_t` and `BaseTsd.h` checks give a wrong `SSIZE_T` on a
+   case-sensitive host.
+
+Point a build directory of the matching architecture at it (arm64 and
+riscv64 run the server as x64 code) (or set *System > RDP console server
 build directory* in rosconfig):
 
 ```sh
