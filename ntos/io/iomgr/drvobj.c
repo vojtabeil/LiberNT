@@ -721,7 +721,11 @@ IopTryUnloadDriver(
 
         KeReleaseSpinLock(&IopDeviceTreeLock, OldIrql);
 
-        if (Busy) return STATUS_SUCCESS;
+        if (Busy)
+        {
+            DPRINT1("IO: unload of %wZ waits for its devices to be released\n", &DriverObject->DriverName);
+            return STATUS_SUCCESS;
+        }
     }
 
     DriverObject->Flags |= DRVO_UNLOAD_INVOKED;
