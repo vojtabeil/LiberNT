@@ -24,6 +24,7 @@
 #include <freerdp/constants.h>
 #include <freerdp/crypto/certificate.h>
 #include <freerdp/crypto/privatekey.h>
+#include <freerdp/codec/planar.h>
 #include <winpr/ssl.h>
 #include <freerdp/channels/wtsvc.h>
 #include <freerdp/channels/channels.h>
@@ -63,6 +64,8 @@ typedef struct DESKTOP_CONTEXT
     HGDIOBJ OldBitmap;
     BYTE *Pixels, *Previous;
     BYTE Tile[64 * 32 * 4];
+    BITMAP_PLANAR_CONTEXT *Planar;
+    BYTE PlanarTile[2 * 64 * 32 * 4];
     BOOL Keys[512];
     DWORD MouseButtons;
     ULONGLONG Frames, Updates, Inputs;
@@ -271,6 +274,8 @@ static BOOL AllocateCapture(DESKTOP_CONTEXT *ctx)
     ctx->OldBitmap = SelectObject(ctx->MemoryDC, ctx->Bitmap);
     if (!ctx->OldBitmap || ctx->OldBitmap == HGDI_ERROR) { ctx->OldBitmap = NULL; return FALSE; }
     ctx->Previous = calloc((size_t)ctx->Width * ctx->Height, 4);
+    if (!ctx->Planar)
+        ctx->Planar = freerdp_bitmap_planar_context_new(PLANAR_FORMAT_HEADER_RLE, 64, 32);
     ctx->Refresh = TRUE;
     return ctx->Previous != NULL;
 }
@@ -380,13 +385,36 @@ static BOOL Capture(DESKTOP_CONTEXT *ctx)
                 changed = memcmp(ctx->Pixels + offset, ctx->Previous + offset, width * 4) != 0;
             }
             if (!changed) continue;
-            for (row = 0; row < height; ++row)
-                memcpy(ctx->Tile + (size_t)row * width * 4,
-                       ctx->Pixels + ((size_t)(y + height - 1 - row) * ctx->Width + x) * 4, width * 4);
             rectangle.destLeft = x; rectangle.destTop = y;
             rectangle.destRight = x + width - 1; rectangle.destBottom = y + height - 1;
             rectangle.width = width; rectangle.height = height;
-            rectangle.bitmapLength = width * height * 4;
+            /* Planar (RDP 6.0) compression: Microsoft clients end the session with a
+             * protocol error on uncompressed 32 bpp bitmap updates. */
+            rectangle.compressed = FALSE;
+            if (ctx->Planar && width >= 4 && height >= 4)
+            {
+                UINT32 size = 0;
+                BYTE *planar = freerdp_bitmap_compress_planar(
+                    ctx->Planar, ctx->Pixels + ((size_t)y * ctx->Width + x) * 4, PIXEL_FORMAT_BGRX32,
+                    width, height, ctx->Width * 4, ctx->PlanarTile, &size);
+                if (planar == ctx->PlanarTile && size && size <= sizeof(ctx->PlanarTile))
+                {
+                    rectangle.compressed = TRUE;
+                    rectangle.bitmapDataStream = ctx->PlanarTile;
+                    rectangle.bitmapLength = size;
+                    rectangle.cbCompMainBodySize = size;
+                    rectangle.cbScanWidth = width * 4;
+                    rectangle.cbUncompressedSize = width * height * 4;
+                }
+            }
+            if (!rectangle.compressed)
+            {
+                for (row = 0; row < height; ++row)
+                    memcpy(ctx->Tile + (size_t)row * width * 4,
+                           ctx->Pixels + ((size_t)(y + height - 1 - row) * ctx->Width + x) * 4, width * 4);
+                rectangle.bitmapDataStream = ctx->Tile;
+                rectangle.bitmapLength = width * height * 4;
+            }
             if (!ctx->rdp.update->BitmapUpdate(&ctx->rdp, &update)) return FALSE;
             ++ctx->Updates;
         }
@@ -423,6 +451,8 @@ static void ContextFree(freerdp_peer *peer, rdpContext *rdp)
     if (event.mi.dwFlags) SendInput(1, &event, sizeof(event));
     Log("Session closed: frames=%llu updates=%llu input events=%llu", ctx->Frames, ctx->Updates, ctx->Inputs);
     FreeDesktopCapture(ctx);
+    freerdp_bitmap_planar_context_free(ctx->Planar);
+    ctx->Planar = NULL;
 }
 
 static DWORD WINAPI ClientThread(void *arg)
