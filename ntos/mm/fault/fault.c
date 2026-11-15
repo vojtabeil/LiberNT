@@ -225,7 +225,9 @@ MiResolveValidFault(
             return STATUS_EXECUTABLE_MEMORY_WRITE;
         }
 
-        if (!MiArchPteIsDirty(Pte))
+        /* A processor writing through a stale translation sets the dirty
+           bit of an entry that no longer allows the write: enable it too */
+        if (!MiArchPteIsDirty(Pte) || !MiArchPteIsHardwareWritable(Pte))
         {
             Updated = MiArchPteSetDirty(Updated, TRUE);
             MiPfnSetModified(&Space->System->Pfn, Frame);

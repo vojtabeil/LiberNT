@@ -103,7 +103,8 @@ KiX86ExecutePacket(VOID)
 {
     PKIPI_WORKER Worker;
 
-    ASSERT(KeGetCurrentIrql() == IPI_LEVEL);
+    /* A frozen processor serves packets at HIGH_LEVEL */
+    ASSERT(KeGetCurrentIrql() >= IPI_LEVEL);
     KeMemoryBarrier();
     Worker = KiX86IpiCall.Worker;
     ASSERT((Worker != NULL) && (KiX86IpiCall.Busy != 0));
@@ -125,9 +126,6 @@ KiIpiServiceRoutine(
     UNREFERENCED_PARAMETER(ExceptionFrame);
     ASSERT(KeGetCurrentIrql() == IPI_LEVEL);
 
-    /* TODO: the x86 freeze is not implemented, so nothing sends IPI_FREEZE yet */
-    ASSERT((Prcb->RequestSummary & IPI_FREEZE) == 0);
-
     if (InterlockedAnd((PLONG)&Prcb->RequestSummary, ~IPI_APC) & IPI_APC)
         HalRequestSoftwareInterrupt(APC_LEVEL);
 
@@ -143,7 +141,28 @@ KiIpiServiceRoutine(
     if (InterlockedAnd((PLONG)&Prcb->RequestSummary, ~IPI_SYNCH_REQUEST) & IPI_SYNCH_REQUEST)
         KiX86ExecuteGenericCall(TrapFrame);
 
+    /* The freeze comes last: the other requests may be what its owner waits for */
+    if (InterlockedAnd((PLONG)&Prcb->RequestSummary, ~IPI_FREEZE) & IPI_FREEZE)
+    {
+        if (TrapFrame != NULL)
+            KiProcessorFreezeHandler(TrapFrame, ExceptionFrame);
+    }
+
+    /* Also complete a freeze whose request was taken by a polling loop */
+    KiFreezeIfRequested();
+
     return TRUE;
+}
+
+/* A frozen processor serves only the packets: the freeze owner may flush the TB */
+VOID
+NTAPI
+KiIpiServiceFrozenRequests(VOID)
+{
+    PKPRCB Prcb = KeGetCurrentPrcb();
+
+    if (InterlockedAnd((PLONG)&Prcb->RequestSummary, ~IPI_PACKET_READY) & IPI_PACKET_READY)
+        KiX86ExecutePacket();
 }
 
 static

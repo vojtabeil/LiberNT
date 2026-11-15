@@ -246,6 +246,12 @@ KiSwapContextExit(
     NewProcess = NewThread->ApcState.Process;
     if (OldProcess != NewProcess)
     {
+#ifdef CONFIG_SMP
+        /* The active processor masks are the TB flush targets */
+        InterlockedOr((PLONG)&NewProcess->ActiveProcessors, (LONG)Pcr->PrcbData.SetMember);
+        InterlockedAnd((PLONG)&OldProcess->ActiveProcessors, ~(LONG)Pcr->PrcbData.SetMember);
+#endif
+
         if (*(PULONGLONG)&OldProcess->LdtDescriptor != *(PULONGLONG)&NewProcess->LdtDescriptor)
         {
             if (NewProcess->LdtDescriptor.LimitLow)
@@ -288,6 +294,15 @@ KiSwapContextExit(
                      (ULONG_PTR)OldThread->InitialStack,
                      0);
     }
+
+    /* Complete the outgoing thread handoff after leaving its stack. */
+#if KI_THREAD_HANDOFF_USES_RUNNING
+    KiCompleteThreadSwitch(OldThread, NewThread);
+
+    KiCheckDeferredReadyList(&Pcr->PrcbData);
+    if (Pcr->PrcbData.NextThread)
+        KiRequestDispatchInterrupt(&Pcr->PrcbData);
+#endif
 
     if (NewThread->ApcState.KernelApcPending)
     {

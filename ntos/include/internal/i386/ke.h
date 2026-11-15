@@ -4,6 +4,9 @@
 #define KI_EMPTY_YIELD_STALL_NS 700
 #define KiEmulationProcessorArchitecture(Process) KeProcessorArchitecture
 
+/* The switch backend completes the outgoing-thread handoff on the new stack. */
+#define KI_ARCH_THREAD_HANDOFF_USES_RUNNING 1
+
 #include "intrin_i.h"
 
 #define KeGetCurrentProcessorNumber() KeGetCurrentProcessorIndex()
@@ -369,7 +372,9 @@ FORCEINLINE
 PRKTHREAD
 KeGetCurrentThread(VOID)
 {
-    return ((PKIPCR)KeGetPcr())->PrcbData.CurrentThread;
+    /* One FS-relative read: a thread moved to another processor between reading
+       the PCR and its field would get the thread now running on the processor it left */
+    return (PRKTHREAD)__readfsdword(FIELD_OFFSET(KIPCR, PrcbData.CurrentThread));
 }
 
 CODE_SEG("INIT")
@@ -399,6 +404,41 @@ KiSetTebBase(PKPCR Pcr, PNT_TIB TebAddress)
     Pcr->NtTib.Self = TebAddress;
     Ke386SetGdtEntryBase(&Pcr->GDT[KGDT_R3_TEB / sizeof(KGDTENTRY)], TebAddress);
 }
+
+BOOLEAN
+KiProcessorFreezeHandler(
+    _In_ PKTRAP_FRAME TrapFrame,
+    _In_opt_ PKEXCEPTION_FRAME ExceptionFrame);
+
+VOID
+NTAPI
+KiFreezeIfRequested(
+    VOID);
+
+VOID
+NTAPI
+KiIpiServiceFrozenRequests(
+    VOID);
+
+CODE_SEG("INIT")
+VOID
+NTAPI
+KiPublishActiveProcessor(
+    _In_ PKPRCB Prcb);
+
+CODE_SEG("INIT")
+VOID
+NTAPI
+KiInitializeTSS2(
+    IN PKTSS Tss,
+    IN PKGDTENTRY TssEntry OPTIONAL
+);
+
+VOID
+NTAPI
+KiInitializeTSS(
+    IN PKTSS Tss
+);
 
 CODE_SEG("INIT")
 VOID
