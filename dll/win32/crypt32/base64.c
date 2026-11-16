@@ -1026,10 +1026,11 @@ static LONG string_to_hex(const void* str, BOOL wide, DWORD len, BYTE *hex, DWOR
 
         ++byte_idx;
 
+        /* Windows takes blanks and line breaks between the bytes as well, so dumps of several lines decode */
         do
         {
             c = wchar_from_str(wide, &str, &len);
-        } while (c == '-' || c == ',');
+        } while (is_hex_string_special_char(c));
     }
 
     while (c)
@@ -1057,6 +1058,16 @@ static LONG string_to_hex(const void* str, BOOL wide, DWORD len, BYTE *hex, DWOR
 static LONG string_to_hexA(const char *str, DWORD len, BYTE *hex, DWORD *hex_len, DWORD *skipped, DWORD *ret_flags)
 {
     return string_to_hex(str, FALSE, len, hex, hex_len, skipped, ret_flags);
+}
+
+/* Windows decodes CRYPT_STRING_HEXRAW as CRYPT_STRING_HEX and reports the type it was asked for */
+static LONG string_to_hexrawA(const char *str, DWORD len, BYTE *hex, DWORD *hex_len, DWORD *skipped, DWORD *ret_flags)
+{
+    LONG ret = string_to_hex(str, FALSE, len, hex, hex_len, skipped, ret_flags);
+
+    if (ret == ERROR_SUCCESS && ret_flags)
+        *ret_flags = CRYPT_STRING_HEXRAW;
+    return ret;
 }
 
 BOOL WINAPI CryptStringToBinaryA(LPCSTR pszString,
@@ -1105,6 +1116,9 @@ BOOL WINAPI CryptStringToBinaryA(LPCSTR pszString,
         break;
     case CRYPT_STRING_HEX:
         decoder = string_to_hexA;
+        break;
+    case CRYPT_STRING_HEXRAW:
+        decoder = string_to_hexrawA;
         break;
     case CRYPT_STRING_HEXASCII:
     case CRYPT_STRING_HEXADDR:
@@ -1277,6 +1291,15 @@ static LONG string_to_hexW(const WCHAR *str, DWORD len, BYTE *hex, DWORD *hex_le
     return string_to_hex(str, TRUE, len, hex, hex_len, skipped, ret_flags);
 }
 
+static LONG string_to_hexrawW(const WCHAR *str, DWORD len, BYTE *hex, DWORD *hex_len, DWORD *skipped, DWORD *ret_flags)
+{
+    LONG ret = string_to_hex(str, TRUE, len, hex, hex_len, skipped, ret_flags);
+
+    if (ret == ERROR_SUCCESS && ret_flags)
+        *ret_flags = CRYPT_STRING_HEXRAW;
+    return ret;
+}
+
 BOOL WINAPI CryptStringToBinaryW(LPCWSTR pszString,
  DWORD cchString, DWORD dwFlags, BYTE *pbBinary, DWORD *pcbBinary,
  DWORD *pdwSkip, DWORD *pdwFlags)
@@ -1323,6 +1346,9 @@ BOOL WINAPI CryptStringToBinaryW(LPCWSTR pszString,
         break;
     case CRYPT_STRING_HEX:
         decoder = string_to_hexW;
+        break;
+    case CRYPT_STRING_HEXRAW:
+        decoder = string_to_hexrawW;
         break;
     case CRYPT_STRING_HEXASCII:
     case CRYPT_STRING_HEXADDR:
