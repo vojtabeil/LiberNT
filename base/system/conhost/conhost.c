@@ -4431,7 +4431,13 @@ static int main_loop( struct console *console, HANDLE signal )
             {
                 BOOL translated = FALSE;
                 if (msg.message == WM_QUIT) return 0;
+#ifdef __REACTOS__
+                /* Typed-in text (SendInput KEYEVENTF_UNICODE, the Hyper-V keyboard's text) is a
+                 * VK_PACKET key whose character, as on Windows, only TranslateMessage hands out */
+                if (is_key_message( &msg ) && (msg.wParam == VK_PROCESSKEY || msg.wParam == VK_PACKET))
+#else
                 if (is_key_message( &msg ) && msg.wParam == VK_PROCESSKEY)
+#endif
                     translated = TranslateMessage( &msg );
                 if (!translated || msg.hwnd != console->win)
                     DispatchMessageW( &msg );
