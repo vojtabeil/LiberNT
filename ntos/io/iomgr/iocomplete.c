@@ -80,12 +80,32 @@ IopReturnRequestBuffers(
     IopFreeMdlChain(Irp);
 }
 
+/* The driver of a request that would not cancel is named in the error log, as Windows does */
+static
 VOID
-IopDeadIrp(VOID)
+IopLogCancelTimeout(
+    _In_ PIRP Irp)
 {
-    KeBugCheckEx(NO_MORE_IRP_STACK_LOCATIONS, 0, 0, 0, 0);
+    PIO_ERROR_LOG_PACKET Entry;
+    PIO_STACK_LOCATION StackPtr;
+
+    if (Irp->CurrentLocation > Irp->StackCount) return;
+
+    StackPtr = IoGetCurrentIrpStackLocation(Irp);
+    if (StackPtr->DeviceObject == NULL) return;
+
+    DPRINT1("I/O: request %p of driver %p did not cancel in time; the thread exits without it\n",
+            Irp, StackPtr->DeviceObject->DriverObject);
+
+    Entry = IoAllocateErrorLogEntry(StackPtr->DeviceObject, sizeof(IO_ERROR_LOG_PACKET));
+    if (Entry == NULL) return;
+
+    Entry->ErrorCode = IO_DRIVER_CANCEL_TIMEOUT;
+    Entry->MajorFunctionCode = StackPtr->MajorFunction;
+    IoWriteErrorLogEntry(Entry);
 }
 
+/* Lets the exiting thread go without its requests; whoever completes one later finishes it alone */
 VOID
 IopDisassociateThreadIrp(VOID)
 {
@@ -101,11 +121,50 @@ IopDisassociateThreadIrp(VOID)
         Entry = RemoveHeadList(&Thread->IrpList);
         Irp = CONTAINING_RECORD(Entry, IRP, ThreadListEntry);
 
+        ASSERT(Irp->Tail.Overlay.Thread == Thread);
+        IopLogCancelTimeout(Irp);
         InitializeListHead(&Irp->ThreadListEntry);
         Irp->Tail.Overlay.Thread = NULL;
     }
 
     KeReleaseSpinLock(&Thread->IrpListLock, OldIrql);
+}
+
+static
+VOID
+IopFreeCompletedIrp(
+    _Inout_ PIRP Irp);
+
+/*
+ * A request completed after its thread gave it up reports to nobody: the
+ * issuer is gone, so its status block, buffers and event are not touched.
+ * What the I/O manager took for the request goes back.
+ */
+static
+VOID
+IopDropOrphanedIrp(
+    _Inout_ PIRP Irp,
+    _In_opt_ PFILE_OBJECT FileObject)
+{
+    ASSERT(Irp->Tail.Overlay.Thread == NULL);
+    ASSERT(IsListEmpty(&Irp->ThreadListEntry));
+
+    IopReturnRequestBuffers(Irp, FALSE);
+
+    if (FileObject != NULL)
+    {
+        FileObject->FinalStatus = Irp->IoStatus.Status;
+
+        /* An event named by the caller's handle was referenced for the request */
+        if (Irp->UserEvent != NULL && !(Irp->Flags & IRP_SYNCHRONOUS_API))
+        {
+            ObDereferenceObjectDeferDelete(Irp->UserEvent);
+        }
+
+        ObDereferenceObjectDeferDelete(FileObject);
+    }
+
+    IopFreeCompletedIrp(Irp);
 }
 
 /* A port-bound request with no event and no APC belongs to its file, not to the thread that issued it */
@@ -651,7 +710,6 @@ IofCompleteRequest(
     }
 
     Thread = Irp->Tail.Overlay.Thread;
-    if (Thread == NULL) IopDeadIrp();
 
     FileObject = Irp->Tail.Overlay.OriginalFileObject;
 
@@ -663,6 +721,13 @@ IofCompleteRequest(
     }
 
     if (Irp->Tail.Overlay.IrpExtension != NULL) IopFreeIrpExtension(Irp);
+
+    /* The thread gave the request up when it would not cancel (IoCancelThreadIo) */
+    if (Thread == NULL)
+    {
+        IopDropOrphanedIrp(Irp, FileObject);
+        return;
+    }
 
     if (IopTakeThreadAgnosticIrp(Irp, FileObject))
     {

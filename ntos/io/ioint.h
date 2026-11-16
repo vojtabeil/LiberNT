@@ -209,7 +209,6 @@ NTSTATUS NTAPI IopSynchronousCompletion(_In_ PDEVICE_OBJECT DeviceObject,
 
 /* iocomplete.c */
 
-VOID IopDeadIrp(VOID);
 BOOLEAN IopIsThreadAgnosticIrp(_In_ PIRP Irp, _In_opt_ PFILE_OBJECT FileObject);
 VOID IopFinishPortIrp(_In_ PIRP Irp, _In_ BOOLEAN Report, _Out_opt_ PIO_STATUS_BLOCK IoStatus);
 VOID IopCleanupAfterException(_In_ PFILE_OBJECT FileObject,
