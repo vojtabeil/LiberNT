@@ -139,6 +139,72 @@ static void usage(void)
  *   'a\b'   == 'a\b'
  *   'a\\b'  == 'a\\b'
  */
+#ifdef __REACTOS__
+/*
+ * Windows start hands the program the rest of its command line as it was
+ * typed: /f1"C:\x.iss" keeps its quotes. Rebuilding the parameters from argv
+ * drops them, so the raw text after the first Skip arguments is passed on.
+ * The arguments are skipped by the rules the C runtime split them with.
+ */
+static WCHAR *get_raw_parameters( int skip )
+{
+    const WCHAR *p = GetCommandLineW();
+    int n;
+
+    for (n = 0; n < skip && *p; n++)
+    {
+        if (n == 0)
+        {
+            /* The program name ends at the closing quote or at the first blank */
+            if (*p == '"')
+            {
+                for (p++; *p && *p != '"'; p++) ;
+                if (*p) p++;
+            }
+            else
+            {
+                while (*p && *p != ' ' && *p != '\t') p++;
+            }
+        }
+        else
+        {
+            BOOL in_quotes = FALSE;
+
+            while (*p && (in_quotes || (*p != ' ' && *p != '\t')))
+            {
+                if (*p == '\\')
+                {
+                    int bcount = 0;
+
+                    while (*p == '\\') { bcount++; p++; }
+                    /* 2n backslashes and a quote are n backslashes and a quote mark; 2n+1 escape it */
+                    if (*p == '"')
+                    {
+                        if (!(bcount & 1)) in_quotes = !in_quotes;
+                        p++;
+                    }
+                    continue;
+                }
+                if (*p == '"')
+                {
+                    /* Two quotes inside quotes are one literal quote */
+                    if (in_quotes && p[1] == '"') p += 2;
+                    else
+                    {
+                        in_quotes = !in_quotes;
+                        p++;
+                    }
+                    continue;
+                }
+                p++;
+            }
+        }
+        while (*p == ' ' || *p == '\t') p++;
+    }
+
+    return wcsdup( p );
+}
+#else
 static WCHAR *build_command_line( WCHAR **wargv )
 {
     int len;
@@ -194,6 +260,7 @@ static WCHAR *build_command_line( WCHAR **wargv )
     *p = 0;
     return ret;
 }
+#endif
 
 static WCHAR *get_parent_dir(const WCHAR* path)
 {
@@ -544,7 +611,11 @@ static void parse_command_line( int argc, WCHAR *argv[] )
     }
     else file = argv[i++];
 
+#ifdef __REACTOS__
+    opts.sei.lpParameters = get_raw_parameters( i );
+#else
     opts.sei.lpParameters = build_command_line( &argv[i] );
+#endif
 
     if ((unix_mode || progid_open) && file[0] == '/')
     {
