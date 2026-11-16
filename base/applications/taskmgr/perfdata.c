@@ -24,7 +24,6 @@ double                                     dbIdleTime;
 double                                     dbKernelTime;
 double                                     dbSystemTime;
 LARGE_INTEGER                              liOldIdleTime = {{0,0}};
-double                                     OldKernelTime = 0;
 LARGE_INTEGER                              liOldSystemTime = {{0,0}};
 SYSTEM_PERFORMANCE_INFORMATION             SystemPerfInfo;
 SYSTEM_BASIC_INFORMATION                   SystemBasicInfo;
@@ -213,7 +212,7 @@ void PerfDataRefresh(void)
     SYSTEM_FILECACHE_INFORMATION               SysCacheInfo;
     SYSTEM_HANDLE_INFORMATION                  SysHandleInfoData;
     PSYSTEM_PROCESSOR_PERFORMANCE_INFORMATION  SysProcessorTimeInfo;
-    double                                     CurrentKernelTime;
+    LONGLONG                                   SumKernelBusy = 0, SumTotal = 0;
     PSECURITY_DESCRIPTOR                       ProcessSD;
     PSID                                       ProcessUser;
     ULONG                                      Buffer[64]; /* must be 4 bytes aligned! */
@@ -301,12 +300,6 @@ void PerfDataRefresh(void)
      */
     SystemNumberOfHandles = SysHandleInfoData.NumberOfHandles;
 
-    for (CurrentKernelTime=0, Idx=0; Idx<(ULONG)SystemBasicInfo.NumberOfProcessors; Idx++) {
-        CurrentKernelTime += Li2Double(SystemProcessorTimeInfo[Idx].KernelTime);
-        CurrentKernelTime += Li2Double(SystemProcessorTimeInfo[Idx].DpcTime);
-        CurrentKernelTime += Li2Double(SystemProcessorTimeInfo[Idx].InterruptTime);
-    }
-
     for (Idx = 0; Idx < (ULONG)SystemBasicInfo.NumberOfProcessors && Idx < PERF_MAX_CPUS; Idx++) {
         LONGLONG KernelDelta = SystemProcessorTimeInfo[Idx].KernelTime.QuadPart - liOldPerCpuKernel[Idx].QuadPart;
         LONGLONG UserDelta = SystemProcessorTimeInfo[Idx].UserTime.QuadPart - liOldPerCpuUser[Idx].QuadPart;
@@ -331,6 +324,8 @@ void PerfDataRefresh(void)
                 KernelUsage = Usage;
             PerCpuUsage[Idx] = (BYTE)Usage;
             PerCpuKernelUsage[Idx] = (BYTE)KernelUsage;
+            SumKernelBusy += KernelBusyDelta;
+            SumTotal += TotalDelta;
         } else {
             PerCpuUsage[Idx] = 0;
             PerCpuKernelUsage[Idx] = 0;
@@ -345,22 +340,25 @@ void PerfDataRefresh(void)
     if (liOldIdleTime.QuadPart != 0) {
         /*  CurrentValue = NewValue - OldValue */
         dbIdleTime = Li2Double(SysPerfInfo.IdleProcessTime) - Li2Double(liOldIdleTime);
-        dbKernelTime = CurrentKernelTime - OldKernelTime;
         dbSystemTime = Li2Double(SysTimeInfo.CurrentTime) - Li2Double(liOldSystemTime);
 
         /*  CurrentCpuIdle = IdleTime / SystemTime */
         dbIdleTime = dbIdleTime / dbSystemTime;
-        dbKernelTime = dbKernelTime / dbSystemTime;
 
         /*  CurrentCpuUsage% = 100 - (CurrentCpuIdle * 100) / NumberOfProcessors */
         dbIdleTime = 100.0 - dbIdleTime * 100.0 / (double)SystemBasicInfo.NumberOfProcessors; /* + 0.5; */
-        dbKernelTime = 100.0 - dbKernelTime * 100.0 / (double)SystemBasicInfo.NumberOfProcessors; /* + 0.5; */
     }
+
+    /*
+     * The kernel time of a processor includes its idle time and its DPC and
+     * interrupt time, so the kernel share of all processors is their kernel
+     * time less idle over their kernel and user time, as for each one above.
+     */
+    dbKernelTime = SumTotal > 0 ? (double)SumKernelBusy * 100.0 / (double)SumTotal : 0.0;
 
     /* Store new CPU's idle and system time */
     liOldIdleTime = SysPerfInfo.IdleProcessTime;
     liOldSystemTime = SysTimeInfo.CurrentTime;
-    OldKernelTime = CurrentKernelTime;
 
     /* Determine the process count
      * We loop through the data we got from NtQuerySystemInformation
