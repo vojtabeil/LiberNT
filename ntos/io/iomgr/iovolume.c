@@ -816,7 +816,9 @@ IoVerifyVolume(
     StackPtr->MinorFunction = IRP_MN_VERIFY_VOLUME;
     StackPtr->Flags = AllowRawMount ? SL_ALLOW_RAW_MOUNT : 0;
     StackPtr->Parameters.VerifyVolume.Vpb = Vpb;
-    StackPtr->Parameters.VerifyVolume.DeviceObject = DeviceObject;
+    /* The file system is handed its own volume device object, the one the VPB names, not the storage device */
+    ASSERT(FileSystem == Vpb->DeviceObject);
+    StackPtr->Parameters.VerifyVolume.DeviceObject = FileSystem;
 
     Status = IoCallDriver(FileSystem, Irp);
     if (Status == STATUS_PENDING)

@@ -195,6 +195,10 @@ Bus_FDO_Power (
                 break;
 
             case PowerSystemShutdown:
+                /* A restart is done by the HAL once every device has been told (HalReturnToFirmware);
+                 * entering S5 here would switch the machine off instead */
+                if (stack->Parameters.Power.ShutdownType == PowerActionShutdownReset)
+                    break;
                 if (ACPI_FAILURE(AcpiGetSleepTypeData(ACPI_STATE_S5, &SleepTypeA, &SleepTypeB)))
                     break;
                 AcpiStatus = acpi_suspend(ACPI_STATE_S5);

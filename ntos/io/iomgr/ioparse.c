@@ -1019,6 +1019,25 @@ IopAttachCreateTransaction(
     return STATUS_SUCCESS;
 }
 
+/* Only IopDeleteFile frees the name of a file object, and a failed open never sends a local one there */
+static
+VOID
+IopFreeLocalFileObjectName(
+    _In_ POPEN_PACKET OpenPacket,
+    _In_ PFILE_OBJECT FileObject)
+{
+    PAGED_CODE();
+
+    ASSERT(OpenPacket->QueryOnly || OpenPacket->DeleteOnly);
+
+    if (FileObject->FileName.Buffer == NULL) return;
+
+    ExFreePoolWithTag(FileObject->FileName.Buffer, TAG_IO_NAME);
+    FileObject->FileName.Buffer = NULL;
+    FileObject->FileName.Length = 0;
+    FileObject->FileName.MaximumLength = 0;
+}
+
 static
 VOID
 IopDetachLocalFileObjectExtension(
@@ -1031,6 +1050,10 @@ IopDetachLocalFileObjectExtension(
 
     /* A local file object the driver never opened is never closed, so what it holds goes back here */
     if (!OpenPacket->QueryOnly && !OpenPacket->DeleteOnly) return;
+    ASSERT(FileObject == (PFILE_OBJECT)&OpenPacket->LocalFileObject->FileObjectBody);
+
+    IopFreeLocalFileObjectName(OpenPacket, FileObject);
+
     if (!(FileObject->Flags & FO_FILE_OBJECT_HAS_EXTENSION)) return;
 
     TxnParameters = IoGetTransactionParameterBlock(FileObject);
@@ -1202,6 +1225,10 @@ IopParseDeviceEx(
             {
                 FileObject->DeviceObject = NULL;
                 ObDereferenceObject(FileObject);
+            }
+            else
+            {
+                IopFreeLocalFileObjectName(OpenPacket, FileObject);
             }
             FileObject = NULL;
         }

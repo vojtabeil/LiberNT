@@ -76,13 +76,28 @@ Read8254Timer(VOID)
     return Count;
 }
 
+/*
+ * The counter wraps every 10 ms, a few thousand reads apart. On Hyper-V the
+ * calibration below sometimes never sees half a period pass after a cold
+ * start (the counter read after the stall stays high), so it doubled the
+ * stall until delay_count overflowed to 0 and then looped for good, after
+ * "Starting FreeLoader...". Every wait is bounded and a failed calibration
+ * is tried again, then replaced by a generous default.
+ */
+#define WRAPAROUND_MAX_READS    0x100000
+#define CALIBRATION_ATTEMPTS    3
+/* Loops per millisecond assumed when the counter cannot be used: a loop of
+ * one nanosecond or longer only makes the stalls longer than asked */
+#define DEFAULT_DELAY_COUNT     1000000
+
 static
-VOID
+BOOLEAN
 WaitFor8254Wraparound(VOID)
 {
     ULONG CurCount;
     ULONG PrevCount = ~0;
     LONG Delta;
+    ULONG Reads = 0;
 
     CurCount = Read8254Timer();
 
@@ -92,6 +107,9 @@ WaitFor8254Wraparound(VOID)
         CurCount = Read8254Timer();
         Delta = CurCount - PrevCount;
 
+        if (++Reads == WRAPAROUND_MAX_READS)
+            return FALSE;
+
         /*
          * This limit for delta seems arbitrary, but it isn't, it's
          * slightly above the level of error a buggy Mercury/Neptune
@@ -99,19 +117,17 @@ WaitFor8254Wraparound(VOID)
          */
     }
     while (Delta < 300);
+
+    return TRUE;
 }
 
-VOID
-HalpCalibrateStallExecution(VOID)
+static
+BOOLEAN
+CalibrateStallOnce(VOID)
 {
     ULONG i;
     ULONG calib_bit;
     ULONG CurCount;
-
-    /* Initialise timer interrupt with MILLISECOND ms interval        */
-    WRITE_PORT_UCHAR((PUCHAR)0x43, 0x34);  /* binary, mode 2, LSB/MSB, ch 0 */
-    WRITE_PORT_UCHAR((PUCHAR)0x40, LATCH & 0xff); /* LSB */
-    WRITE_PORT_UCHAR((PUCHAR)0x40, LATCH >> 8); /* MSB */
 
     /* Stage 1:  Coarse calibration                                   */
 
@@ -119,10 +135,15 @@ HalpCalibrateStallExecution(VOID)
 
     do
     {
+        /* Half a period never passed even with the longest stall */
+        if (delay_count >= 0x80000000)
+            return FALSE;
+
         /* Next delay count to try */
         delay_count <<= 1;
 
-        WaitFor8254Wraparound();
+        if (!WaitFor8254Wraparound())
+            return FALSE;
 
         /* Do the delay */
         __StallExecutionProcessor(delay_count);
@@ -150,7 +171,8 @@ HalpCalibrateStallExecution(VOID)
         /* Set the bit in delay_count */
         delay_count |= calib_bit;
 
-        WaitFor8254Wraparound();
+        if (!WaitFor8254Wraparound())
+            return FALSE;
 
         /* Do the delay */
         __StallExecutionProcessor(delay_count);
@@ -165,6 +187,30 @@ HalpCalibrateStallExecution(VOID)
 
     /* Calculate delay_count for 1ms */
     delay_count /= (MILLISEC / 2);
+
+    return delay_count != 0;
+}
+
+VOID
+HalpCalibrateStallExecution(VOID)
+{
+    ULONG Attempt;
+
+    /* Initialise timer interrupt with MILLISECOND ms interval        */
+    WRITE_PORT_UCHAR((PUCHAR)0x43, 0x34);  /* binary, mode 2, LSB/MSB, ch 0 */
+    WRITE_PORT_UCHAR((PUCHAR)0x40, LATCH & 0xff); /* LSB */
+    WRITE_PORT_UCHAR((PUCHAR)0x40, LATCH >> 8); /* MSB */
+
+    for (Attempt = 0; Attempt < CALIBRATION_ATTEMPTS; Attempt++)
+    {
+        if (CalibrateStallOnce())
+            return;
+
+        WARN("Stall calibration attempt %lu failed\n", Attempt + 1);
+    }
+
+    ERR("The 8254 timer did not calibrate the stall; assuming %u loops per ms\n", DEFAULT_DELAY_COUNT);
+    delay_count = DEFAULT_DELAY_COUNT;
 }
 
 
