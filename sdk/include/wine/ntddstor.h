@@ -266,10 +266,43 @@ typedef struct _DEVICE_SEEK_PENALTY_DESCRIPTOR {
     BOOLEAN                     IncursSeekPenalty;
 } DEVICE_SEEK_PENALTY_DESCRIPTOR, *PDEVICE_SEEK_PENALTY_DESCRIPTOR;
 
+typedef struct _DEVICE_TRIM_DESCRIPTOR {
+    DWORD                       Version;
+    DWORD                       Size;
+    BOOLEAN                     TrimEnabled;
+} DEVICE_TRIM_DESCRIPTOR, *PDEVICE_TRIM_DESCRIPTOR;
+
 typedef struct _STORAGE_DESCRIPTOR_HEADER {
     ULONG                       Version;
     ULONG                       Size;
 } STORAGE_DESCRIPTOR_HEADER, *PSTORAGE_DESCRIPTOR_HEADER;
+
+#ifdef __REACTOS__
+#define STORAGE_TEMPERATURE_VALUE_NOT_REPORTED 0x8000
+
+typedef struct _STORAGE_TEMPERATURE_INFO {
+    USHORT                      Index;
+    SHORT                       Temperature;
+    SHORT                       OverThreshold;
+    SHORT                       UnderThreshold;
+    BOOLEAN                     OverThresholdChangable;
+    BOOLEAN                     UnderThresholdChangable;
+    BOOLEAN                     EventGenerated;
+    UCHAR                       Reserved0;
+    ULONG                       Reserved1;
+} STORAGE_TEMPERATURE_INFO, *PSTORAGE_TEMPERATURE_INFO;
+
+typedef struct _STORAGE_TEMPERATURE_DATA_DESCRIPTOR {
+    ULONG                       Version;
+    ULONG                       Size;
+    SHORT                       CriticalTemperature;
+    SHORT                       WarningTemperature;
+    USHORT                      InfoCount;
+    UCHAR                       Reserved0[2];
+    ULONG                       Reserved1[2];
+    STORAGE_TEMPERATURE_INFO    TemperatureInfo[ANYSIZE_ARRAY];
+} STORAGE_TEMPERATURE_DATA_DESCRIPTOR, *PSTORAGE_TEMPERATURE_DATA_DESCRIPTOR;
+#endif
 
 typedef enum _STORAGE_BUS_TYPE {
     BusTypeUnknown = 0x00,
@@ -281,6 +314,19 @@ typedef enum _STORAGE_BUS_TYPE {
     BusTypeFibre,
     BusTypeUsb,
     BusTypeRAID,
+    BusTypeiScsi,
+    BusTypeSas,
+    BusTypeSata,
+    BusTypeSd,
+    BusTypeMmc,
+    BusTypeVirtual,
+    BusTypeFileBackedVirtual,
+    BusTypeSpaces,
+    BusTypeNvme,
+    BusTypeSCM,
+    BusTypeUfs,
+    BusTypeNvmeof,
+    BusTypeMax,
     BusTypeMaxReserved = 0x7F
 } STORAGE_BUS_TYPE, *PSTORAGE_BUS_TYPE;
 

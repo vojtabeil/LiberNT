@@ -1,82 +1,36 @@
 /*
  * PROJECT:     ReactOS API tests
- * LICENSE:     MIT (https://spdx.org/licenses/MIT)
- * PURPOSE:     Test for NtUserSBGetParms
- * COPYRIGHT:   Copyright 2026 Max Korostil <mrmks04@yandex.ru>
+ * LICENSE:     GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later)
+ * PURPOSE:     Tests for NtUserSBGetParms
+ * COPYRIGHT:   Copyright 2026 Ahmed ARIF <arif.ing@outlook.com>
  */
-
-#include <apitest.h>
-#include <wincon.h>
 
 #include "../win32nt.h"
 
 START_TEST(NtUserSBGetParms)
 {
-    BOOL ret;
-    DWORD error;
-    SBDATA sbData;
-    SCROLLINFO si;
-    HWND hWnd = GetConsoleWindow();
-    
-    // 1
-    SetLastError(0);
-    ret = NtUserSBGetParms(hWnd, SB_CTL, &sbData, &si);
-    error = GetLastError();
+    SCROLLINFO Info;
+    SBDATA Data;
+    HWND hWnd;
 
-    ok_int(ret, TRUE);
-    ok_int(error, ERROR_SUCCESS);
+    hWnd = CreateWindowExW(0, L"STATIC", L"", WS_POPUP | WS_VSCROLL, 0, 0, 100, 100,
+                           NULL, NULL, GetModuleHandleW(NULL), NULL);
+    ok(hWnd != NULL, "CreateWindowExW failed: %lu\n", GetLastError());
+    if (!hWnd) return;
 
-    // 2
-    SetLastError(0);
-    ret = NtUserSBGetParms(hWnd, SB_CTL, &sbData, NULL);
-    error = GetLastError();
+    ZeroMemory(&Info, sizeof(Info));
+    Data.posMin = 3;
+    Data.posMax = 90;
+    Data.page = 7;
+    Data.pos = 11;
+    Info.cbSize = sizeof(Info);
+    Info.fMask = SIF_ALL;
+    ok(NtUserSBGetParms(hWnd, SB_VERT, &Data, &Info), "NtUserSBGetParms failed\n");
+    ok_int(Info.nMin, 3);
+    ok_int(Info.nMax, 90);
+    ok_int(Info.nPage, 7);
+    ok_int(Info.nPos, 11);
+    ok_int(Info.nTrackPos, 11);
 
-    ok_int(ret, FALSE);
-    ok_int(error, ERROR_NOACCESS);
-
-    // 3
-    SetLastError(0);
-    ret = NtUserSBGetParms(hWnd, SB_CTL, &sbData, (LPSCROLLINFO)(ULONG_PTR)0xDEADBEEF);
-    error = GetLastError();
-
-    ok_int(ret, FALSE);
-    ok_int(error, ERROR_NOACCESS);
-    
-    // 4
-    SetLastError(0);
-    ret = NtUserSBGetParms(hWnd, SB_CTL, NULL, &si);
-    error = GetLastError();
-
-    ok_int(ret, FALSE);
-    ok_int(error, ERROR_NOACCESS);
-
-    // 5
-    SetLastError(0);
-    ret = NtUserSBGetParms(hWnd, SB_CTL, (PSBDATA)(ULONG_PTR)0xDEADBEEF, &si);
-    error = GetLastError();
-
-    ok_int(ret, FALSE);
-    ok_int(error, ERROR_NOACCESS);
-
-    // 6
-    SetLastError(0);
-    ret = NtUserSBGetParms(NULL, SB_CTL, &sbData, &si);
-    error = GetLastError();
-
-    ok_int(ret, FALSE);
-    ok_int(error, ERROR_INVALID_WINDOW_HANDLE);
-
-    // 7
-    ret = NtUserSBGetParms(hWnd, SB_CTL, &sbData, (LPSCROLLINFO)MAXULONG_PTR);
-    error = GetLastError();
-
-    ok_int(ret, FALSE);
-    ok_int(error, ERROR_NOACCESS);
-
-    // 8
-    ret = NtUserSBGetParms(hWnd, SB_CTL, (PSBDATA)(ULONG_PTR)MAXULONG_PTR, &si);
-    error = GetLastError();
-
-    ok_int(ret, FALSE);
-    ok_int(error, ERROR_NOACCESS);
+    DestroyWindow(hWnd);
 }

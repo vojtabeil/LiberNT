@@ -38,7 +38,7 @@
 
 #define MBR_MAGIC 0xAA55
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 typedef struct _PARTITION
 {
@@ -63,7 +63,7 @@ typedef struct _PARTITION_SECTOR
     USHORT Magic;                            /* 0x1FE */
 } PARTITION_SECTOR, *PPARTITION_SECTOR;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 
 /* GLOBALS ********************************************************************/
@@ -195,6 +195,15 @@ AlignDown(
     Temp = Value / Alignment;
 
     return Temp * Alignment;
+}
+
+static
+BOOL
+IsUefiFirmware(VOID)
+{
+    FIRMWARE_TYPE FirmwareType;
+
+    return GetFirmwareType(&FirmwareType) && FirmwareType == FirmwareTypeUefi;
 }
 
 static
@@ -1128,6 +1137,7 @@ AddDiskToList(
     ULONG DiskNumber)
 {
     DISK_GEOMETRY DiskGeometry;
+    GET_LENGTH_INFORMATION LengthInfo;
     SCSI_ADDRESS ScsiAddress;
     PDISKENTRY DiskEntry;
     IO_STATUS_BLOCK Iosb;
@@ -1402,7 +1412,7 @@ AddDiskToList(
         ListEntry = ListEntry->Flink;
     }
 
-    if (!DiskEntry->BiosFound)
+    if (!DiskEntry->BiosFound && !IsUefiFirmware())
     {
 #if 0
         RtlFreeHeap(ProcessHeap, 0, DiskEntry);
@@ -1428,6 +1438,19 @@ AddDiskToList(
     DiskEntry->SectorCount.QuadPart = DiskGeometry.Cylinders.QuadPart *
                                       (ULONGLONG)DiskGeometry.TracksPerCylinder *
                                       (ULONGLONG)DiskGeometry.SectorsPerTrack;
+
+    Status = NtDeviceIoControlFile(FileHandle,
+                                   NULL,
+                                   NULL,
+                                   NULL,
+                                   &Iosb,
+                                   IOCTL_DISK_GET_LENGTH_INFO,
+                                   NULL,
+                                   0,
+                                   &LengthInfo,
+                                   sizeof(LengthInfo));
+    if (NT_SUCCESS(Status) && DiskGeometry.BytesPerSector != 0)
+        DiskEntry->SectorCount.QuadPart = (ULONGLONG)LengthInfo.Length.QuadPart / DiskGeometry.BytesPerSector;
 
 //    DiskEntry->SectorAlignment = DiskGeometry.SectorsPerTrack;
 //    DiskEntry->CylinderAlignment = DiskGeometry.SectorsPerTrack * DiskGeometry.TracksPerCylinder;
@@ -1513,8 +1536,9 @@ AddDiskToList(
         /* Calculate the number of usable sectors */
         DiskEntry->StartSector.QuadPart = AlignDown(DiskEntry->LayoutBuffer->Gpt.StartingUsableOffset.QuadPart / DiskEntry->BytesPerSector,
                                                     DiskEntry->SectorAlignment) + (ULONGLONG)DiskEntry->SectorAlignment;
-        DiskEntry->EndSector.QuadPart = AlignDown(DiskEntry->StartSector.QuadPart + (DiskEntry->LayoutBuffer->Gpt.UsableLength.QuadPart / DiskEntry->BytesPerSector) - 1,
-                                                  DiskEntry->SectorAlignment);
+        DiskEntry->EndSector.QuadPart = AlignDown((DiskEntry->LayoutBuffer->Gpt.StartingUsableOffset.QuadPart +
+                                                   DiskEntry->LayoutBuffer->Gpt.UsableLength.QuadPart) / DiskEntry->BytesPerSector,
+                                                  DiskEntry->SectorAlignment) - 1;
 
         if (DiskEntry->LayoutBuffer->PartitionCount == 0)
         {
@@ -1829,7 +1853,6 @@ GetVolumeSize(
 }
 
 
-static
 PDISKENTRY
 GetDiskForVolume(
     _In_ PVOLENTRY VolumeEntry)
@@ -1865,7 +1888,6 @@ GetDiskForVolume(
 }
 
 
-static
 PPARTENTRY
 GetPartitionForVolume(
     _In_ PVOLENTRY VolumeEntry)
@@ -2031,6 +2053,7 @@ AddVolumeToList(
     WCHAR szPathNames[MAX_PATH + 1];
     WCHAR szVolumeName[MAX_PATH + 1];
     WCHAR szFilesystem[MAX_PATH + 1];
+    WCHAR RootName[MAX_PATH + 1];
 
     DWORD  CharCount            = 0;
     size_t Index                = 0;
@@ -2075,18 +2098,48 @@ AddVolumeToList(
                                NULL,
                                NULL);
 
+    /* The volume device answers the extents, the file system on it only through its root directory */
+    Status = NtOpenFile(&VolumeHandle,
+                        SYNCHRONIZE | FILE_READ_ATTRIBUTES,
+                        &ObjectAttributes,
+                        &Iosb,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT);
+    if (NT_SUCCESS(Status))
+    {
+        GetVolumeExtents(VolumeHandle, VolumeEntry);
+        NtClose(VolumeHandle);
+    }
+    else
+    {
+        DPRINT1("Volume %S not opened (0x%08lx)\n", VolumeEntry->DeviceName, Status);
+    }
+
+    wcscpy(RootName, VolumeEntry->DeviceName);
+    wcscat(RootName, L"\\");
+    RtlInitUnicodeString(&Name, RootName);
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &Name,
+                               0,
+                               NULL,
+                               NULL);
+
     Status = NtOpenFile(&VolumeHandle,
                         SYNCHRONIZE,
                         &ObjectAttributes,
                         &Iosb,
-                        0,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                         FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT);
     if (NT_SUCCESS(Status))
     {
         GetVolumeType(VolumeHandle, VolumeEntry);
-        GetVolumeExtents(VolumeHandle, VolumeEntry);
         GetVolumeSize(VolumeHandle, VolumeEntry);
         NtClose(VolumeHandle);
+    }
+    else
+    {
+        DPRINT1("Root directory of %S not opened (0x%08lx)\n", VolumeEntry->DeviceName, Status);
     }
 
     if (GetVolumeInformationW(pszVolumeName,
@@ -3011,9 +3064,10 @@ GetVolumeFromPartition(
     while (Entry != &VolumeListHead)
     {
         VolumeEntry = CONTAINING_RECORD(Entry, VOLENTRY, ListEntry);
+        Entry = Entry->Flink;
 
         if (VolumeEntry->pExtents == NULL)
-            return NULL;
+            continue;
 
         for (i = 0; i < VolumeEntry->pExtents->NumberOfDiskExtents; i++)
         {
@@ -3024,8 +3078,56 @@ GetVolumeFromPartition(
                     return VolumeEntry;
             }
         }
+    }
 
-        Entry = Entry->Flink;
+    return NULL;
+}
+
+
+VOID
+RefreshVolumeList(VOID)
+{
+    PLIST_ENTRY Entry;
+    PVOLENTRY VolumeEntry;
+    ULONG ulVolumeNumber;
+
+    ulVolumeNumber = (CurrentVolume != NULL) ? CurrentVolume->VolumeNumber : MAXULONG;
+
+    DestroyVolumeList();
+    CreateVolumeList();
+
+    for (Entry = VolumeListHead.Flink; Entry != &VolumeListHead; Entry = Entry->Flink)
+    {
+        VolumeEntry = CONTAINING_RECORD(Entry, VOLENTRY, ListEntry);
+        if (VolumeEntry->VolumeNumber == ulVolumeNumber)
+        {
+            CurrentVolume = VolumeEntry;
+            break;
+        }
+    }
+}
+
+
+PVOLENTRY
+RefreshPartitionVolume(
+    _In_ PPARTENTRY PartEntry)
+{
+    PVOLENTRY VolumeEntry;
+    ULONG Attempt;
+
+    if (PartEntry == NULL)
+        return NULL;
+
+    for (Attempt = 0; Attempt < 40; Attempt++)
+    {
+        DestroyVolumeList();
+        CreateVolumeList();
+
+        VolumeEntry = GetVolumeFromPartition(PartEntry);
+        if (VolumeEntry != NULL)
+            return VolumeEntry;
+
+        Sleep(250);
     }
 
     return NULL;

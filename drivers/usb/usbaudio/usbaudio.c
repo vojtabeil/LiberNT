@@ -1,11 +1,11 @@
 /*
-* PROJECT:     ReactOS Universal Audio Class Driver
-* LICENSE:     GPL - See COPYING in the top level directory
-* FILE:        drivers/usb/usbaudio/usbaudio.c
-* PURPOSE:     USB Audio device driver.
-* PROGRAMMERS:
-*              Johannes Anderwald (johannes.anderwald@reactos.org)
-*/
+ * PROJECT:     ReactOS Universal Audio Class Driver
+ * LICENSE:     GPL - See COPYING in the top level directory
+ * FILE:        drivers/usb/usbaudio/usbaudio.c
+ * PURPOSE:     USB Audio Class 1.0 / 2.0 device driver
+ * PROGRAMMERS:
+ *              Johannes Anderwald (johannes.anderwald@reactos.org)
+ */
 
 #include "usbaudio.h"
 
@@ -29,7 +29,7 @@ static KSDEVICE_DESCRIPTOR KsDeviceDescriptor = {
     &KsDeviceDispatch,
     0,
     NULL,
-    0x100, //KSDEVICE_DESCRIPTOR_VERSION,
+    0x100,
     0
 };
 
@@ -44,46 +44,120 @@ SubmitUrbSync(
     PIO_STACK_LOCATION IoStack;
     NTSTATUS Status;
 
-    // init event
     KeInitializeEvent(&Event, NotificationEvent, FALSE);
 
-    // build irp
     Irp = IoBuildDeviceIoControlRequest(IOCTL_INTERNAL_USB_SUBMIT_URB,
         DeviceObject,
-        NULL,
-        0,
-        NULL,
-        0,
+        NULL, 0,
+        NULL, 0,
         TRUE,
         &Event,
         &IoStatus);
 
     if (!Irp)
-    {
-        //
-        // no memory
-        //
         return STATUS_INSUFFICIENT_RESOURCES;
-    }
 
-    // get next stack location
     IoStack = IoGetNextIrpStackLocation(Irp);
-
-    // store urb
     IoStack->Parameters.Others.Argument1 = Urb;
 
-    // call driver
     Status = IoCallDriver(DeviceObject, Irp);
 
-    // wait for the request to finish
     if (Status == STATUS_PENDING)
     {
         KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
         Status = IoStatus.Status;
     }
 
-    // done
     return Status;
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ *  Select USB configuration — claims audio control + MIDI interfaces
+ * ────────────────────────────────────────────────────────────────── */
+
+static
+VOID
+USBAudioAppendInterface(
+    IN PUSBD_INTERFACE_LIST_ENTRY InterfaceList,
+    IN ULONG Capacity,
+    IN OUT PULONG Count,
+    IN PUSB_INTERFACE_DESCRIPTOR InterfaceDescriptor,
+    IN PDEVICE_EXTENSION DeviceExtension)
+{
+    if (*Count >= Capacity)
+        return;
+
+    InterfaceList[*Count].InterfaceDescriptor = InterfaceDescriptor;
+    (*Count)++;
+
+    if (InterfaceDescriptor->bInterfaceSubClass == 0x03)
+        DeviceExtension->HasMidiInterface = TRUE;
+}
+
+static
+PUSB_INTERFACE_DESCRIPTOR
+USBAudioFindInterfaceDescriptor(
+    IN PUSB_CONFIGURATION_DESCRIPTOR ConfigurationDescriptor,
+    IN UCHAR InterfaceNumber,
+    IN UCHAR AlternateSetting)
+{
+    PUCHAR Cursor = (PUCHAR)ConfigurationDescriptor;
+    PUCHAR End = Cursor + ConfigurationDescriptor->wTotalLength;
+
+    while (Cursor + sizeof(USB_COMMON_DESCRIPTOR) <= End)
+    {
+        PUSB_COMMON_DESCRIPTOR Common = (PUSB_COMMON_DESCRIPTOR)Cursor;
+
+        if (Common->bLength < sizeof(USB_COMMON_DESCRIPTOR) ||
+            Cursor + Common->bLength > End)
+            break;
+
+        if (Common->bDescriptorType == USB_INTERFACE_DESCRIPTOR_TYPE)
+        {
+            PUSB_INTERFACE_DESCRIPTOR Interface = (PUSB_INTERFACE_DESCRIPTOR)Common;
+
+            if (Interface->bInterfaceNumber == InterfaceNumber &&
+                Interface->bAlternateSetting == AlternateSetting)
+                return Interface;
+        }
+
+        Cursor += Common->bLength;
+    }
+
+    return NULL;
+}
+
+static
+PUSB_INTERFACE_ASSOCIATION_DESCRIPTOR
+USBAudioFindInterfaceAssociation(
+    IN PUSB_CONFIGURATION_DESCRIPTOR ConfigurationDescriptor,
+    IN UCHAR InterfaceNumber)
+{
+    PUCHAR Cursor = (PUCHAR)ConfigurationDescriptor;
+    PUCHAR End = Cursor + ConfigurationDescriptor->wTotalLength;
+
+    while (Cursor + sizeof(USB_COMMON_DESCRIPTOR) <= End)
+    {
+        PUSB_COMMON_DESCRIPTOR Common = (PUSB_COMMON_DESCRIPTOR)Cursor;
+
+        if (Common->bLength < sizeof(USB_COMMON_DESCRIPTOR) ||
+            Cursor + Common->bLength > End)
+            break;
+
+        if (Common->bDescriptorType == USB_INTERFACE_ASSOCIATION_DESCRIPTOR_TYPE)
+        {
+            PUSB_INTERFACE_ASSOCIATION_DESCRIPTOR Association =
+                (PUSB_INTERFACE_ASSOCIATION_DESCRIPTOR)Common;
+
+            if (InterfaceNumber >= Association->bFirstInterface &&
+                InterfaceNumber < Association->bFirstInterface + Association->bInterfaceCount)
+                return Association;
+        }
+
+        Cursor += Common->bLength;
+    }
+
+    return NULL;
 }
 
 NTSTATUS
@@ -98,73 +172,384 @@ USBAudioSelectConfiguration(
     PURB Urb;
     NTSTATUS Status;
     ULONG InterfaceDescriptorCount;
+    ULONG Capacity;
 
-    /* alloc item for configuration request */
-    InterfaceList = AllocFunction(sizeof(USBD_INTERFACE_LIST_ENTRY) * (ConfigurationDescriptor->bNumInterfaces + 1));
+    InterfaceList = AllocFunction(sizeof(USBD_INTERFACE_LIST_ENTRY) *
+                                  (ConfigurationDescriptor->bNumInterfaces + 1));
     if (!InterfaceList)
-    {
-        /* insufficient resources*/
         return USBD_STATUS_INSUFFICIENT_RESOURCES;
-    }
 
-    /* grab interface descriptor */
-    InterfaceDescriptor = USBD_ParseConfigurationDescriptorEx(ConfigurationDescriptor, ConfigurationDescriptor, -1, -1, USB_DEVICE_CLASS_AUDIO, -1, -1);
-    if (!InterfaceDescriptor)
-    {
-        /* no such interface */
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    /* lets enumerate the interfaces */
+    DeviceExtension = Device->Context;
+    DeviceExtension->HasMidiInterface = FALSE;
     InterfaceDescriptorCount = 0;
-    while (InterfaceDescriptor != NULL)
-    {
-        if (InterfaceDescriptor->bInterfaceSubClass == 0x01) /* AUDIO_CONTROL*/
-        {
-            InterfaceList[InterfaceDescriptorCount++].InterfaceDescriptor = InterfaceDescriptor;
-        }
-        else if (InterfaceDescriptor->bInterfaceSubClass == 0x03) /* MIDI_STREAMING*/
-        {
-            InterfaceList[InterfaceDescriptorCount++].InterfaceDescriptor = InterfaceDescriptor;
-        }
+    Capacity = ConfigurationDescriptor->bNumInterfaces;
 
-        InterfaceDescriptor = USBD_ParseConfigurationDescriptorEx(ConfigurationDescriptor, (PVOID)((ULONG_PTR)InterfaceDescriptor + InterfaceDescriptor->bLength), -1, -1, USB_DEVICE_CLASS_AUDIO, -1, -1);
+    /* Audio 1.0 names its streaming interfaces in the audio control header */
+    if (DeviceExtension->AudioVersion == USB_AUDIO_VERSION_1)
+    {
+        PUSB_INTERFACE_DESCRIPTOR ControlInterface;
+        PUSB_AUDIO_CONTROL_INTERFACE_HEADER_DESCRIPTOR Header;
+
+        ControlInterface = USBAudioFindInterfaceDescriptor(ConfigurationDescriptor,
+                                                          DeviceExtension->AudioControlInterfaceNumber,
+                                                          0);
+        Header = ControlInterface ?
+                 (PUSB_AUDIO_CONTROL_INTERFACE_HEADER_DESCRIPTOR)
+                 USBD_ParseDescriptors(ConfigurationDescriptor,
+                                       ConfigurationDescriptor->wTotalLength,
+                                       ControlInterface,
+                                       USB_AUDIO_CONTROL_TERMINAL_DESCRIPTOR_TYPE) : NULL;
+
+        if (Header && Header->bLength >= 8 + Header->bInCollection)
+        {
+            ULONG Index;
+
+            USBAudioAppendInterface(InterfaceList, Capacity, &InterfaceDescriptorCount,
+                                    ControlInterface, DeviceExtension);
+            for (Index = 0; Index < Header->bInCollection; Index++)
+            {
+                InterfaceDescriptor = USBAudioFindInterfaceDescriptor(ConfigurationDescriptor,
+                                                                     Header->baInterfaceNr[Index],
+                                                                     0);
+                if (InterfaceDescriptor)
+                    USBAudioAppendInterface(InterfaceList, Capacity, &InterfaceDescriptorCount,
+                                            InterfaceDescriptor, DeviceExtension);
+            }
+        }
     }
 
-    /* build urb */
+    /* Audio 2.0/3.0 groups the interfaces with an interface association */
+    if (InterfaceDescriptorCount == 0)
+    {
+        PUSB_INTERFACE_ASSOCIATION_DESCRIPTOR Association;
+
+        Association = USBAudioFindInterfaceAssociation(ConfigurationDescriptor,
+                                                       DeviceExtension->AudioControlInterfaceNumber);
+        if (Association)
+        {
+            ULONG Index;
+
+            for (Index = 0; Index < Association->bInterfaceCount; Index++)
+            {
+                InterfaceDescriptor = USBAudioFindInterfaceDescriptor(ConfigurationDescriptor,
+                                                                     (UCHAR)(Association->bFirstInterface + Index),
+                                                                     0);
+                if (InterfaceDescriptor)
+                    USBAudioAppendInterface(InterfaceList, Capacity, &InterfaceDescriptorCount,
+                                            InterfaceDescriptor, DeviceExtension);
+            }
+        }
+    }
+
+    /* Fallback: every audio interface the configuration contains */
+    if (InterfaceDescriptorCount == 0)
+    {
+        PUCHAR Cursor = (PUCHAR)ConfigurationDescriptor;
+        PUCHAR End = Cursor + ConfigurationDescriptor->wTotalLength;
+
+        while (Cursor + sizeof(USB_COMMON_DESCRIPTOR) <= End)
+        {
+            PUSB_COMMON_DESCRIPTOR Common = (PUSB_COMMON_DESCRIPTOR)Cursor;
+
+            if (Common->bLength < sizeof(USB_COMMON_DESCRIPTOR) ||
+                Cursor + Common->bLength > End)
+                break;
+
+            if (Common->bDescriptorType == USB_INTERFACE_DESCRIPTOR_TYPE)
+            {
+                InterfaceDescriptor = (PUSB_INTERFACE_DESCRIPTOR)Common;
+
+                if ((InterfaceDescriptor->bInterfaceSubClass == 0x01 ||
+                     InterfaceDescriptor->bInterfaceSubClass == 0x02 ||
+                     InterfaceDescriptor->bInterfaceSubClass == 0x03) &&
+                    InterfaceDescriptor->bAlternateSetting == 0)
+                {
+                    USBAudioAppendInterface(InterfaceList, Capacity, &InterfaceDescriptorCount,
+                                            InterfaceDescriptor, DeviceExtension);
+                }
+            }
+
+            Cursor += Common->bLength;
+        }
+    }
+
+    if (InterfaceDescriptorCount == 0)
+    {
+        FreeFunction(InterfaceList);
+        return STATUS_NOT_SUPPORTED;
+    }
+
     Urb = USBD_CreateConfigurationRequestEx(ConfigurationDescriptor, InterfaceList);
     if (!Urb)
     {
-        /* no memory */
         FreeFunction(InterfaceList);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    /* device extension */
     DeviceExtension = Device->Context;
 
-    /* submit configuration urb */
     Status = SubmitUrbSync(DeviceExtension->LowerDevice, Urb);
     if (!NT_SUCCESS(Status))
     {
-        /* free resources */
         ExFreePool(Urb);
         FreeFunction(InterfaceList);
         return Status;
     }
 
-    /* store configuration handle */
-    DeviceExtension->ConfigurationHandle = Urb->UrbSelectConfiguration.ConfigurationHandle;
+    DeviceExtension->ConfigurationHandle =
+        Urb->UrbSelectConfiguration.ConfigurationHandle;
 
-    /* alloc interface info */
-    DeviceExtension->InterfaceInfo = AllocFunction(Urb->UrbSelectConfiguration.Interface.Length);
+    DeviceExtension->InterfaceInfo = AllocFunction(
+        Urb->UrbSelectConfiguration.Interface.Length);
     if (DeviceExtension->InterfaceInfo)
     {
-        /* copy interface info */
-        RtlCopyMemory(DeviceExtension->InterfaceInfo, &Urb->UrbSelectConfiguration.Interface, Urb->UrbSelectConfiguration.Interface.Length);
+        RtlCopyMemory(DeviceExtension->InterfaceInfo,
+                      &Urb->UrbSelectConfiguration.Interface,
+                      Urb->UrbSelectConfiguration.Interface.Length);
     }
+
+    ExFreePool(Urb);
+    FreeFunction(InterfaceList);
     return STATUS_SUCCESS;
 }
+
+/* ──────────────────────────────────────────────────────────────────
+ *  Detect USB Audio version from control interface header
+ *  For UAC3, also reads the BADD (Basic Audio Device Definition)
+ *  profile from the IAD or CS_INTERFACE category field.
+ * ────────────────────────────────────────────────────────────────── */
+
+static ULONG
+USBAudioDetectVersion(
+    IN PDEVICE_EXTENSION DeviceExtension)
+{
+    PUSB_AUDIO_CONTROL_INTERFACE_HEADER_DESCRIPTOR Header;
+    PUSB_AUDIO3_CONTROL_INTERFACE_HEADER_DESCRIPTOR Header3;
+    PUSB_INTERFACE_DESCRIPTOR InterfaceDesc;
+
+    DeviceExtension->BaddProfile = 0;
+
+    InterfaceDesc = USBD_ParseConfigurationDescriptorEx(
+        DeviceExtension->ConfigurationDescriptor,
+        DeviceExtension->ConfigurationDescriptor,
+        -1, -1, USB_DEVICE_CLASS_AUDIO, 0x01, -1);
+    if (!InterfaceDesc)
+        return USB_AUDIO_VERSION_1;
+
+    DeviceExtension->AudioControlInterfaceNumber = InterfaceDesc->bInterfaceNumber;
+
+    Header = (PUSB_AUDIO_CONTROL_INTERFACE_HEADER_DESCRIPTOR)
+        USBD_ParseDescriptors(
+            DeviceExtension->ConfigurationDescriptor,
+            DeviceExtension->ConfigurationDescriptor->wTotalLength,
+            InterfaceDesc,
+            USB_AUDIO_CONTROL_TERMINAL_DESCRIPTOR_TYPE);
+
+    /* an unknown protocol is Audio 1.0, the same fallback the class driver takes */
+    switch (InterfaceDesc->bInterfaceProtocol)
+    {
+        case USB_AUDIO_PROTOCOL_VERSION_2:
+            return USB_AUDIO_VERSION_2;
+
+        case USB_AUDIO_PROTOCOL_VERSION_3:
+            if (Header && Header->bLength >= sizeof(*Header) && Header->bcdADC >= 0x0300)
+            {
+                Header3 = (PUSB_AUDIO3_CONTROL_INTERFACE_HEADER_DESCRIPTOR)Header;
+
+                if (Header3->bCategory >= UAC3_FUNCTION_SUBCLASS_GENERIC_IO &&
+                    Header3->bCategory <= UAC3_FUNCTION_SUBCLASS_SPEAKERPHONE)
+                {
+                    DeviceExtension->BaddProfile = Header3->bCategory;
+                }
+            }
+
+            return USB_AUDIO_VERSION_3;
+
+        case USB_AUDIO_PROTOCOL_VERSION_1:
+            return USB_AUDIO_VERSION_1;
+
+        default:
+            return USB_AUDIO_VERSION_1;
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ *  Device quirk table
+ *
+ *  add entries for devices that need non-standard handling.
+ *  format: { VID, PID, Flags, "description" }
+ * ────────────────────────────────────────────────────────────────── */
+
+static const USBAUDIO_DEVICE_QUIRK UsbAudioQuirkTable[] =
+{
+    /*
+     * Common USB audio chipsets that report valid HID descriptors
+     * but need relaxed error checking on control requests.
+     */
+    { 0x08BB, 0x2702, USBAUDIO_QUIRK_IGNORE_CTL_ERROR,
+      "Texas Instruments PCM2702" },
+    { 0x08BB, 0x2902, USBAUDIO_QUIRK_IGNORE_CTL_ERROR,
+      "Texas Instruments PCM2902" },
+    { 0x08BB, 0x2904, USBAUDIO_QUIRK_IGNORE_CTL_ERROR,
+      "Texas Instruments PCM2904" },
+    { 0x0D8C, 0x0102, USBAUDIO_QUIRK_IGNORE_CTL_ERROR,
+      "C-Media CM106" },
+    { 0x0D8C, 0x0103, USBAUDIO_QUIRK_IGNORE_CTL_ERROR,
+      "C-Media CM108" },
+
+    /*
+     * Devices that lack a usable feedback endpoint (async mode)
+     * and must use adaptive synchronization.
+     */
+    { 0x046D, 0x0A01, USBAUDIO_QUIRK_NO_FEEDBACK,
+      "Logitech USB Headset" },
+    { 0x046D, 0x0A02, USBAUDIO_QUIRK_NO_FEEDBACK,
+      "Logitech USB Headset H340" },
+    { 0x046D, 0x0A44, USBAUDIO_QUIRK_NO_FEEDBACK,
+      "Logitech USB Headset H540" },
+
+    /*
+     * Devices with non-functional volume controls on the feature unit.
+     * Mute-only or nothing — skip the volume node.
+     */
+    { 0x046D, 0x0990, USBAUDIO_QUIRK_NO_VOLUME,
+      "Logitech QuickCam Pro 9000" },
+
+    /* Terminator */
+    { 0, 0, 0, NULL }
+};
+
+static PUSBAUDIO_DEVICE_QUIRK
+USBAudioLookupQuirk(
+    IN USHORT VendorId,
+    IN USHORT ProductId)
+{
+    PUSBAUDIO_DEVICE_QUIRK Quirk = (PUSBAUDIO_DEVICE_QUIRK)UsbAudioQuirkTable;
+
+    while (Quirk->VendorId)
+    {
+        if (Quirk->VendorId == VendorId && Quirk->ProductId == ProductId)
+            return Quirk;
+        Quirk++;
+    }
+
+    return NULL;
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ *  Scan for feedback endpoint
+ * ────────────────────────────────────────────────────────────────── */
+
+static VOID
+USBAudioDetectFeedbackEndpoint(
+    IN PDEVICE_EXTENSION DeviceExtension)
+{
+    PUSB_INTERFACE_DESCRIPTOR InterfaceDesc;
+    PUSB_COMMON_DESCRIPTOR CommonDesc;
+    PUSB_ENDPOINT_DESCRIPTOR EndpointDesc;
+    PUCHAR DescriptorEnd;
+
+    DeviceExtension->HasFeedbackEndpoint = FALSE;
+    DeviceExtension->FeedbackPipeHandle = NULL;
+
+    if (!DeviceExtension->ConfigurationDescriptor)
+        return;
+
+    DescriptorEnd = (PUCHAR)DeviceExtension->ConfigurationDescriptor +
+                    DeviceExtension->ConfigurationDescriptor->wTotalLength;
+
+    /* Scan all audio streaming interfaces for a feedback endpoint */
+    InterfaceDesc = USBD_ParseConfigurationDescriptorEx(
+        DeviceExtension->ConfigurationDescriptor,
+        DeviceExtension->ConfigurationDescriptor,
+        -1, -1, USB_DEVICE_CLASS_AUDIO, 2, -1);
+
+    while (InterfaceDesc)
+    {
+        CommonDesc = (PUSB_COMMON_DESCRIPTOR)((PUCHAR)InterfaceDesc +
+                                              InterfaceDesc->bLength);
+
+        while ((PUCHAR)CommonDesc + sizeof(USB_COMMON_DESCRIPTOR) <= DescriptorEnd &&
+               CommonDesc->bLength != 0 &&
+               (PUCHAR)CommonDesc + CommonDesc->bLength <= DescriptorEnd)
+        {
+            if (CommonDesc->bDescriptorType == USB_INTERFACE_DESCRIPTOR_TYPE)
+                break;
+
+            if (CommonDesc->bDescriptorType == USB_ENDPOINT_DESCRIPTOR_TYPE)
+            {
+                EndpointDesc = (PUSB_ENDPOINT_DESCRIPTOR)CommonDesc;
+                if ((EndpointDesc->bmAttributes & USB_ENDPOINT_TYPE_MASK) ==
+                        USB_ENDPOINT_TYPE_ISOCHRONOUS &&
+                    USB_ENDPOINT_DIRECTION_IN(EndpointDesc->bEndpointAddress) &&
+                    (EndpointDesc->bmAttributes & 0x30) == 0x10)
+                {
+                    DeviceExtension->HasFeedbackEndpoint = TRUE;
+                    return;
+                }
+            }
+
+            CommonDesc = (PUSB_COMMON_DESCRIPTOR)((PUCHAR)CommonDesc +
+                                                  CommonDesc->bLength);
+        }
+
+        InterfaceDesc = USBD_ParseConfigurationDescriptorEx(
+            DeviceExtension->ConfigurationDescriptor,
+            (PVOID)((ULONG_PTR)InterfaceDesc + InterfaceDesc->bLength),
+            -1, -1, USB_DEVICE_CLASS_AUDIO, 2, -1);
+    }
+}
+
+static
+BOOLEAN
+USBAudioIsHighSpeed(
+    IN PDEVICE_OBJECT LowerDevice)
+{
+    USB_BUS_INTERFACE_USBDI_V1 BusInterface;
+    IO_STATUS_BLOCK IoStatus;
+    PIO_STACK_LOCATION IoStack;
+    BOOLEAN HighSpeed = FALSE;
+    NTSTATUS Status;
+    KEVENT Event;
+    PIRP Irp;
+
+    RtlZeroMemory(&BusInterface, sizeof(BusInterface));
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP, LowerDevice, NULL, 0, NULL, &Event, &IoStatus);
+    if (!Irp)
+        return FALSE;
+
+    Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+    IoStack = IoGetNextIrpStackLocation(Irp);
+    IoStack->MinorFunction = IRP_MN_QUERY_INTERFACE;
+    IoStack->Parameters.QueryInterface.InterfaceType = &USB_BUS_INTERFACE_USBDI_GUID;
+    IoStack->Parameters.QueryInterface.Size = sizeof(BusInterface);
+    IoStack->Parameters.QueryInterface.Version = USB_BUSIF_USBDI_VERSION_1;
+    IoStack->Parameters.QueryInterface.Interface = (PINTERFACE)&BusInterface;
+    IoStack->Parameters.QueryInterface.InterfaceSpecificData = NULL;
+
+    Status = IoCallDriver(LowerDevice, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = IoStatus.Status;
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("USBAudio: the bus interface is not available (%lx); full speed assumed\n", Status);
+        return FALSE;
+    }
+
+    if (BusInterface.IsDeviceHighSpeed)
+        HighSpeed = BusInterface.IsDeviceHighSpeed(BusInterface.BusContext);
+    if (BusInterface.InterfaceDereference)
+        BusInterface.InterfaceDereference(BusInterface.BusContext);
+    return HighSpeed;
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ *  Start device — probe USB descriptors, detect UAC version
+ * ────────────────────────────────────────────────────────────────── */
 
 NTSTATUS
 NTAPI
@@ -178,153 +563,164 @@ USBAudioStartDevice(
     NTSTATUS Status;
     ULONG Length;
 
-    /* get device extension */
     DeviceExtension = Device->Context;
 
-    /* allocate urb */
     Urb = AllocFunction(sizeof(struct _URB_CONTROL_DESCRIPTOR_REQUEST));
     if (!Urb)
-    {
-        /* no memory */
         return STATUS_INSUFFICIENT_RESOURCES;
-    }
 
-    /* alloc buffer for device descriptor */
     DeviceDescriptor = AllocFunction(sizeof(USB_DEVICE_DESCRIPTOR));
     if (!DeviceDescriptor)
     {
-        /* insufficient resources */
         FreeFunction(Urb);
-       return STATUS_INSUFFICIENT_RESOURCES;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    /* build descriptor request */
-    UsbBuildGetDescriptorRequest(Urb, sizeof(struct _URB_CONTROL_DESCRIPTOR_REQUEST), USB_DEVICE_DESCRIPTOR_TYPE, 0, 0, DeviceDescriptor, NULL, sizeof(USB_DEVICE_DESCRIPTOR), NULL);
+    UsbBuildGetDescriptorRequest(Urb,
+        sizeof(struct _URB_CONTROL_DESCRIPTOR_REQUEST),
+        USB_DEVICE_DESCRIPTOR_TYPE, 0, 0,
+        DeviceDescriptor, NULL,
+        sizeof(USB_DEVICE_DESCRIPTOR), NULL);
 
-    /* submit urb */
     Status = SubmitUrbSync(DeviceExtension->LowerDevice, Urb);
     if (!NT_SUCCESS(Status))
     {
-        /* free resources */
         FreeFunction(Urb);
         FreeFunction(DeviceDescriptor);
         return Status;
     }
 
-    /* now allocate some space for partial configuration descriptor */
     ConfigurationDescriptor = AllocFunction(sizeof(USB_CONFIGURATION_DESCRIPTOR));
     if (!ConfigurationDescriptor)
     {
-        /* free resources */
         FreeFunction(Urb);
         FreeFunction(DeviceDescriptor);
-        return Status;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    /* build descriptor request */
-    UsbBuildGetDescriptorRequest(Urb, sizeof(struct _URB_CONTROL_DESCRIPTOR_REQUEST), USB_CONFIGURATION_DESCRIPTOR_TYPE, 0, 0, ConfigurationDescriptor, NULL, sizeof(USB_CONFIGURATION_DESCRIPTOR), NULL);
+    UsbBuildGetDescriptorRequest(Urb,
+        sizeof(struct _URB_CONTROL_DESCRIPTOR_REQUEST),
+        USB_CONFIGURATION_DESCRIPTOR_TYPE, 0, 0,
+        ConfigurationDescriptor, NULL,
+        sizeof(USB_CONFIGURATION_DESCRIPTOR), NULL);
 
-    /* submit urb */
     Status = SubmitUrbSync(DeviceExtension->LowerDevice, Urb);
     if (!NT_SUCCESS(Status))
     {
-        /* free resources */
         FreeFunction(Urb);
         FreeFunction(DeviceDescriptor);
         FreeFunction(ConfigurationDescriptor);
         return Status;
     }
 
-    /* backup length */
     Length = ConfigurationDescriptor->wTotalLength;
-
-    /* free old descriptor */
     FreeFunction(ConfigurationDescriptor);
 
-    /* now allocate some space for full configuration descriptor */
     ConfigurationDescriptor = AllocFunction(Length);
     if (!ConfigurationDescriptor)
     {
-        /* free resources */
         FreeFunction(Urb);
         FreeFunction(DeviceDescriptor);
-        return Status;
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    /* build descriptor request */
-    UsbBuildGetDescriptorRequest(Urb, sizeof(struct _URB_CONTROL_DESCRIPTOR_REQUEST), USB_CONFIGURATION_DESCRIPTOR_TYPE, 0, 0, ConfigurationDescriptor, NULL, Length, NULL);
+    UsbBuildGetDescriptorRequest(Urb,
+        sizeof(struct _URB_CONTROL_DESCRIPTOR_REQUEST),
+        USB_CONFIGURATION_DESCRIPTOR_TYPE, 0, 0,
+        ConfigurationDescriptor, NULL, Length, NULL);
 
-    /* submit urb */
     Status = SubmitUrbSync(DeviceExtension->LowerDevice, Urb);
-
-    /* free urb */
     FreeFunction(Urb);
+
     if (!NT_SUCCESS(Status))
     {
-        /* free resources */
         FreeFunction(DeviceDescriptor);
         FreeFunction(ConfigurationDescriptor);
         return Status;
     }
 
-    /* lets add to object bag */
-    KsAddItemToObjectBag(Device->Bag, DeviceDescriptor, ExFreePool);
-    KsAddItemToObjectBag(Device->Bag, ConfigurationDescriptor, ExFreePool);
+    if (!NT_SUCCESS(KsAddItemToObjectBag(Device->Bag, DeviceDescriptor, ExFreePool)))
+    {
+        FreeFunction(DeviceDescriptor);
+        FreeFunction(ConfigurationDescriptor);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    if (!NT_SUCCESS(KsAddItemToObjectBag(Device->Bag, ConfigurationDescriptor, ExFreePool)))
+    {
+        FreeFunction(ConfigurationDescriptor);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    DeviceExtension->DeviceDescriptor = DeviceDescriptor;
+    DeviceExtension->ConfigurationDescriptor = ConfigurationDescriptor;
+    DeviceExtension->AudioVersion = USBAudioDetectVersion(DeviceExtension);
+    DeviceExtension->HighSpeed = USBAudioIsHighSpeed(DeviceExtension->LowerDevice);
+    DeviceExtension->QuirkFlags = 0;
+    USBAudioDetectFeedbackEndpoint(DeviceExtension);
+
+    /* Look up any device-specific quirks */
+    {
+        PUSBAUDIO_DEVICE_QUIRK Quirk = USBAudioLookupQuirk(
+            DeviceDescriptor->idVendor,
+            DeviceDescriptor->idProduct);
+        if (Quirk)
+        {
+            DeviceExtension->QuirkFlags = Quirk->Flags;
+        }
+    }
 
     Status = USBAudioSelectConfiguration(Device, ConfigurationDescriptor);
-    if (NT_SUCCESS(Status))
-    {
 
-        DeviceExtension->ConfigurationDescriptor = ConfigurationDescriptor;
-        DeviceExtension->DeviceDescriptor = DeviceDescriptor;
-    }
     return Status;
 }
 
+/* ──────────────────────────────────────────────────────────────────
+ *  PnP dispatch
+ * ────────────────────────────────────────────────────────────────── */
 
 NTSTATUS
 NTAPI
 USBAudioAddDevice(
-  _In_ PKSDEVICE Device)
+    _In_ PKSDEVICE Device)
 {
-    /* no op */
-    DPRINT1("USBAudioAddDevice\n");
+    UNREFERENCED_PARAMETER(Device);
+
     return STATUS_SUCCESS;
 }
 
 NTSTATUS
 NTAPI
 USBAudioPnPStart(
-  _In_     PKSDEVICE         Device,
-  _In_     PIRP              Irp,
-  _In_opt_ PCM_RESOURCE_LIST TranslatedResourceList,
-  _In_opt_ PCM_RESOURCE_LIST UntranslatedResourceList)
+    _In_     PKSDEVICE         Device,
+    _In_     PIRP              Irp,
+    _In_opt_ PCM_RESOURCE_LIST TranslatedResourceList,
+    _In_opt_ PCM_RESOURCE_LIST UntranslatedResourceList)
 {
     NTSTATUS Status = STATUS_SUCCESS;
     PDEVICE_EXTENSION DeviceExtension;
 
+    UNREFERENCED_PARAMETER(TranslatedResourceList);
+    UNREFERENCED_PARAMETER(UntranslatedResourceList);
+
     if (!Device->Started)
     {
-        /* alloc context  */
         DeviceExtension = AllocFunction(sizeof(DEVICE_EXTENSION));
-        if (DeviceExtension == NULL)
-        {
-             /* insufficient resources */
-             return STATUS_INSUFFICIENT_RESOURCES;
-        }
+        if (!DeviceExtension)
+            return STATUS_INSUFFICIENT_RESOURCES;
 
-        /* init context */
         Device->Context = DeviceExtension;
         DeviceExtension->LowerDevice = Device->NextDeviceObject;
 
-        /* add to object bag*/
-        KsAddItemToObjectBag(Device->Bag, Device->Context, ExFreePool);
+        if (!NT_SUCCESS(KsAddItemToObjectBag(Device->Bag, Device->Context, ExFreePool)))
+        {
+            Device->Context = NULL;
+            FreeFunction(DeviceExtension);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
 
-        /* init device*/
         Status = USBAudioStartDevice(Device);
         if (NT_SUCCESS(Status))
         {
-            /* TODO retrieve interface */
             Status = USBAudioCreateFilterContext(Device);
         }
     }
@@ -335,110 +731,156 @@ USBAudioPnPStart(
 NTSTATUS
 NTAPI
 USBAudioPnPQueryStop(
-  _In_ PKSDEVICE Device,
-  _In_ PIRP      Irp)
+    _In_ PKSDEVICE Device,
+    _In_ PIRP      Irp)
 {
-    /* no op */
+    UNREFERENCED_PARAMETER(Device);
+    UNREFERENCED_PARAMETER(Irp);
     return STATUS_SUCCESS;
 }
 
 VOID
 NTAPI
 USBAudioPnPCancelStop(
-  _In_ PKSDEVICE Device,
-  _In_ PIRP      Irp)
+    _In_ PKSDEVICE Device,
+    _In_ PIRP      Irp)
 {
-    /* no op */
+    UNREFERENCED_PARAMETER(Device);
+    UNREFERENCED_PARAMETER(Irp);
 }
 
 VOID
 NTAPI
 USBAudioPnPStop(
-  _In_ PKSDEVICE Device,
-  _In_ PIRP      Irp)
+    _In_ PKSDEVICE Device,
+    _In_ PIRP      Irp)
 {
-    /* TODO: stop device */
-	UNIMPLEMENTED;
+    PDEVICE_EXTENSION DeviceExtension = Device->Context;
+
+    UNREFERENCED_PARAMETER(Irp);
+
+    if (DeviceExtension && DeviceExtension->InterfaceInfo)
+    {
+        FreeFunction(DeviceExtension->InterfaceInfo);
+        DeviceExtension->InterfaceInfo = NULL;
+    }
 }
 
 NTSTATUS
 NTAPI
 USBAudioPnPQueryRemove(
-  _In_ PKSDEVICE Device,
-  _In_ PIRP      Irp)
+    _In_ PKSDEVICE Device,
+    _In_ PIRP      Irp)
 {
-    /* no op */
+    UNREFERENCED_PARAMETER(Device);
+    UNREFERENCED_PARAMETER(Irp);
     return STATUS_SUCCESS;
 }
-
 
 VOID
 NTAPI
 USBAudioPnPCancelRemove(
-  _In_ PKSDEVICE Device,
-  _In_ PIRP      Irp)
+    _In_ PKSDEVICE Device,
+    _In_ PIRP      Irp)
 {
-    /* no op */
+    UNREFERENCED_PARAMETER(Device);
+    UNREFERENCED_PARAMETER(Irp);
 }
 
 VOID
 NTAPI
 USBAudioPnPRemove(
-  _In_ PKSDEVICE Device,
-  _In_ PIRP      Irp)
+    _In_ PKSDEVICE Device,
+    _In_ PIRP      Irp)
 {
-    /* TODO: stop device */
-	UNIMPLEMENTED;
+    PDEVICE_EXTENSION DeviceExtension = Device->Context;
+
+    UNREFERENCED_PARAMETER(Irp);
+
+    if (DeviceExtension && DeviceExtension->InterfaceInfo)
+    {
+        FreeFunction(DeviceExtension->InterfaceInfo);
+        DeviceExtension->InterfaceInfo = NULL;
+    }
 }
 
 NTSTATUS
 NTAPI
 USBAudioPnPQueryCapabilities(
-  _In_    PKSDEVICE            Device,
-  _In_    PIRP                 Irp,
-  _Inout_ PDEVICE_CAPABILITIES Capabilities)
+    _In_    PKSDEVICE            Device,
+    _In_    PIRP                 Irp,
+    _Inout_ PDEVICE_CAPABILITIES Capabilities)
 {
-    /* TODO: set caps */
-	UNIMPLEMENTED;
-	return STATUS_SUCCESS;
+    UNREFERENCED_PARAMETER(Device);
+    UNREFERENCED_PARAMETER(Irp);
+
+    if (!Capabilities)
+        return STATUS_INVALID_PARAMETER;
+
+    Capabilities->SilentInstall = TRUE;
+    Capabilities->UniqueID = TRUE;
+    Capabilities->SurpriseRemovalOK = TRUE;
+
+    return STATUS_SUCCESS;
 }
 
 VOID
 NTAPI
 USBAudioPnPSurpriseRemoval(
-  _In_ PKSDEVICE Device,
-  _In_ PIRP      Irp)
+    _In_ PKSDEVICE Device,
+    _In_ PIRP      Irp)
 {
-    /* TODO: stop streams */
-	UNIMPLEMENTED;
+    UNREFERENCED_PARAMETER(Device);
+    UNREFERENCED_PARAMETER(Irp);
 }
 
 NTSTATUS
 NTAPI
 USBAudioPnPQueryPower(
-  _In_ PKSDEVICE          Device,
-  _In_ PIRP               Irp,
-  _In_ DEVICE_POWER_STATE DeviceTo,
-  _In_ DEVICE_POWER_STATE DeviceFrom,
-  _In_ SYSTEM_POWER_STATE SystemTo,
-  _In_ SYSTEM_POWER_STATE SystemFrom,
-  _In_ POWER_ACTION       Action)
+    _In_ PKSDEVICE          Device,
+    _In_ PIRP               Irp,
+    _In_ DEVICE_POWER_STATE DeviceTo,
+    _In_ DEVICE_POWER_STATE DeviceFrom,
+    _In_ SYSTEM_POWER_STATE SystemTo,
+    _In_ SYSTEM_POWER_STATE SystemFrom,
+    _In_ POWER_ACTION       Action)
 {
-    /* no op */
+    UNREFERENCED_PARAMETER(Device);
+    UNREFERENCED_PARAMETER(Irp);
+    UNREFERENCED_PARAMETER(DeviceTo);
+    UNREFERENCED_PARAMETER(DeviceFrom);
+    UNREFERENCED_PARAMETER(SystemTo);
+    UNREFERENCED_PARAMETER(SystemFrom);
+    UNREFERENCED_PARAMETER(Action);
+
     return STATUS_SUCCESS;
 }
 
 VOID
 NTAPI
 USBAudioPnPSetPower(
-  _In_ PKSDEVICE          Device,
-  _In_ PIRP               Irp,
-  _In_ DEVICE_POWER_STATE To,
-  _In_ DEVICE_POWER_STATE From)
+    _In_ PKSDEVICE          Device,
+    _In_ PIRP               Irp,
+    _In_ DEVICE_POWER_STATE To,
+    _In_ DEVICE_POWER_STATE From)
 {
-    /* TODO: stop streams */
-	UNIMPLEMENTED;
+    PDEVICE_EXTENSION DeviceExtension = Device->Context;
+
+    UNREFERENCED_PARAMETER(Irp);
+
+    if (To == PowerDeviceD3 && From == PowerDeviceD0)
+    {
+        if (DeviceExtension && DeviceExtension->InterfaceInfo)
+        {
+            FreeFunction(DeviceExtension->InterfaceInfo);
+            DeviceExtension->InterfaceInfo = NULL;
+        }
+    }
 }
+
+/* ──────────────────────────────────────────────────────────────────
+ *  DriverEntry
+ * ────────────────────────────────────────────────────────────────── */
 
 NTSTATUS
 NTAPI
@@ -448,13 +890,12 @@ DriverEntry(
 {
     NTSTATUS Status;
 
-    // initialize driver
     Status = KsInitializeDriver(DriverObject, RegistryPath, &KsDeviceDescriptor);
     if (!NT_SUCCESS(Status))
     {
-        // failed to initialize driver
-        DPRINT1("Failed to initialize driver with %x\n", Status);
+        DPRINT1("USBAudio: KsInitializeDriver failed %x\n", Status);
         return Status;
     }
+
     return Status;
 }

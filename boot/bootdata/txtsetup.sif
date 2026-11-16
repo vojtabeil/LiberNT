@@ -2,178 +2,61 @@
 Signature = "$Windows NT$"
 ;Signature = "$ReactOS$"
 
-;
-; The [SourceDisksNames] section lists all the available installation media
-; where the installation files can be found. It can specifies media common
-; to all architectures, or media specific to a given architecture (x86, amd64,
-; and so on...) within [SourceDisksNames.x86] (etc...) sections.
-;
-; The format of each line is as follows:
-; <disk_id> = <description>,<tagfile>,<unused>,<subdirectory>,<flags>,<tagfile>
-;
-[SourceDisksNames]
-_1 = %cdname%,%cdtagfile%,,""
+[SystemTrees]
+Windows = "\"
+"Program Files" = "\Program Files"
 
-[SourceDisksNames.x86]
-1 = %cdname%,%cdtagfilei%,,\i386
+; A directory listed here is created empty.
+[SystemTrees.Exclude]
+"Windows\system32\config" = 1
+"Windows\SysWOW64\config" = 1
+"Windows\TEMP" = 1
+"Windows\SystemTemp" = 1
+"Windows\system32\applaunch.exe" = 1
+"Windows\unattend.inf" = 1
 
-[SourceDisksNames.amd64]
-1 = %cdname%,%cdtagfilea%,,\amd64
-
-;
-; The directories listed in the [Directories] or [WinntDirectories] sections
-; are relative to the installation source or destination directories.
-;
-; The format of each line is as follows:
-; <directory_id> = <path>
-;
-; For specifying absolute directories, use the SystemPartitionFiles section,
-; or use names starting with \.
-;
-[Directories]
-1 = "\"
-2 = system32
-3 = system32\config
-4 = system32\drivers
-5 = media
-6 = Fonts
-7 = bin
+; A file listed here keeps its installed copy when Setup upgrades LiberNT,
+; and is copied only when it is missing.
+[SystemTrees.Preserve]
+"Windows\system.ini" = 1
+"Windows\win.ini" = 1
+"Windows\system32\drivers\etc\hosts" = 1
+"Windows\system32\drivers\etc\KDBinit" = 1
+"Windows\system32\drivers\etc\networks" = 1
+"Windows\system32\drivers\etc\protocol" = 1
+"Windows\system32\drivers\etc\services" = 1
 
 [DiskSpaceRequirements]
 ; Required free system partition disk space in MB
 FreeSysPartDiskSpace = 450
 
-;
-; The [SourceDisksFiles] section lists all the files available to the
-; installer. It can specifies files common to all architectures, or files
-; specific to a given architecture (x86, amd64, and so on...) within
-; [SourceDisksFiles.x86] (etc...) sections.
-;
-; Each line provides the location of a file in the installation media
-; and its destination when being installed on a target architecture.
-; The format of each line is as follows:
-;
-; <source_filename> =
-;     <disk_id>,<subdirectory>,<file_size>,<checksum>,<unused>,<unused>,
-; NT-specific fields:
-;     <boot_media_id>,<destination_dir_id>,<upgrade_dispo>,<install_dispo>,
-;     <destination_filename>,
-; WinPE(MiniNT)-specific optional fields:
-;     <WinPE_disk_id>,<WinPE_directory_id>
-;
-; The 'disk_id', 'boot_media_id' and 'WinPE_disk_id' media IDs refer to
-; source media listed in the [SourceDisksNames] section. The 'boot_media_id'
-; value specifies any additional boot/installation media.
-;
-; The values for the disposition flags 'upgrade_dispo' (used when upgrading)
-; or 'install_dispo' (used when installing, usually by the text-mode installer)
-; are:
-;   0: always copy (default);
-;   1: copy if present;
-;   2: copy if not present;
-;   3: never copy.
-;
-; The 'destination_dir_id' and 'WinPE_directory_id' directory IDs refer to
-; the directories listed in the [Directories] section.
-;
-; ReactOS-specific: we don't use 'boot_media_id' yet and instead, we use
-; an identifier 'x' to signal the SetupLdr that it has to load the file.
-; This must be replaced by handling the "DiskDrivers.Load", "FileSystems.Load",
-; ("Hal.Load", "Display.Load"), "SCSI.Load", "BootBusExtenders.Load",
-; "BusExtenders.Load", "InputDevicesSupport.Load", "Keyboard.Load",
-; "ScsiClass.Load", "FloppyDrivers.Load", "CdRomDrivers.Load", and
-; "MouseDrivers.Load" sections.
-;
-[SourceDisksFiles]
-nmidebug.sys = 1,,,,,,x,4,,,,1,4
-sacdrv.sys   = 1,,,,,,x,4,,,,1,4
-;uniata.sys   = 1,,,,,,x,4,,,,1,4
-atapi.sys    = 1,,,,,,x,4,,,,1,4
-buslogic.sys = 1,,,,,,x,4,,,,1,4
-blue.sys     = 1,,,,,,x,4,,,,1,4
-vgafonts.cab = 1,,,,,,,1,,,,1,1
-bootvid.dll  = 1,,,,,,,2,,,,1,2
-c_437.nls    = 1,,,,,,,2,,,,1,2
-c_1252.nls   = 1,,,,,,,2,,,,1,2
-cdfs.sys     = 1,,,,,,x,4,,,,1,4
-cdrom.sys    = 1,,,,,,x,4,,,,1,4
-classpnp.sys = 1,,,,,,,4,,,,1,4
-isapnp.sys   = 1,,,,,,x,4,,,,1,4
-kdcom.dll    = 1,,,,,,,2,,,,1,2
-kdvbox.dll   = 1,,,,,,,2,,,,1,2
-disk.sys     = 1,,,,,,x,4,,,,1,4
-floppy.sys   = 1,,,,,,x,4,,,,1,4
-i8042prt.sys = 1,,,,,,,4,,,,1,4
-hidclass.sys = 1,,,,,,,4,,,,1,4
-hidparse.sys = 1,,,,,,,4,,,,1,4
-hidusb.sys   = 1,,,,,,,4,,,,1,4
-usbccgp.sys  = 1,,,,,,x,4,,,,1,4
-usbd.sys     = 1,,,,,,,4,,,,1,4
-usbhub.sys   = 1,,,,,,x,4,,,,1,4
-usbport.sys  = 1,,,,,,,4,,,,1,4
-usbuhci.sys  = 1,,,,,,x,4,,,,1,4
-usbohci.sys  = 1,,,,,,x,4,,,,1,4
-usbehci.sys  = 1,,,,,,x,4,,,,1,4
-usbstor.sys  = 1,,,,,,x,4,,,,1,4
-kbdhid.sys   = 1,,,,,,,4,,,,1,4
-kbdclass.sys = 1,,,,,,x,4,,,,1,4
-l_intl.nls   = 1,,,,,,,2,,,,1,2
-pci.sys      = 1,,,,,,x,4,,,,1,4
-scsiport.sys = 1,,,,,,,4,,,,1,4
-storport.sys = 1,,,,,,,4,,,,1,4
-fastfat.sys  = 1,,,,,,x,4,,,,1,4
-btrfs.sys    = 1,,,,,,x,4,,,,1,4
-ramdisk.sys  = 1,,,,,,x,4,,,,1,4
-pciide.sys   = 1,,,,,,x,4,,,,1,4
-pciidex.sys  = 1,,,,,,,4,,,,1,4
-pcix.sys     = 1,,,,,,,4,,,,1,4
-pcmcia.sys   = 1,,,,,,,4,,,,1,4
-swenum.sys   = 1,,,,,,,4,,,,1,4
-ntdll.dll    = 1,,,,,,,2,,,,1,2
-wmilib.sys   = 1,,,,,,,4,,,,1,4
-ksecdd.sys   = 1,,,,,,,4,,,,1,4
-mountmgr.sys = 1,,,,,,x,4,,,,1,4
-partmgr.sys  = 1,,,,,,x,4,,,,1,4
-wdfldr.sys   = 1,,,,,,,4,,,,1,4
-wdf01000.sys = 1,,,,,,x,4,,,,1,4
-
-[SourceDisksFiles.x86]
-acpi.sys     = 1,,,,,,,4,1,,,1,4
-legide.sys   = 1,,,,,,,4,,,,1,4
-
-[SourceDisksFiles.amd64]
-acpi.sys     = 1,,,,,,x,4,,,,1,4
-
-;
-; The [SystemPartitionFiles] section lists all the files
-; that should be installed in the System Partition.
-;
-[SystemPartitionFiles]
-
 [HardwareIdsDatabase]
-*PNP0A00 = isapnp
 *PNP0A03 = pci
 *PNP0A08 = pci
 *PNP0C08 = acpi
-PCI\CC_0601 = isapnp
 PCI\CC_0604 = pci
 PCI\VEN_104B&CC_0100 = buslogic
-PCI\CC_0101 = pciide
 ;PCI\CC_0104 = uniata
 ;PCI\CC_0105 = uniata
 ;PCI\CC_0106 = uniata
-PCI\CC_0104 = pciide
-PCI\CC_0105 = pciide
-PCI\CC_0106 = pciide
-;PCI\CC_0106 = storahci
+PCI\CC_010601 = storahci
+ACPI\CLS_0001&SUBCLS_0006&PI_01 = storahci
+PCI\VEN_1000&DEV_0050 = lsi_sas
+PCI\VEN_1000&DEV_0054 = lsi_sas
+PCI\VEN_1000&DEV_0056 = lsi_sas
+PCI\VEN_1000&DEV_0058 = lsi_sas
+PCI\VEN_1000&DEV_0030 = lsi_sas
 ;*PNP0600 = uniata
-*PNP0600 = atapi
 USB\CLASS_09 = usbhub
 USB\ROOT_HUB = usbhub
 USB\ROOT_HUB20 = usbhub
+USB\ROOT_HUB30 = usbhub
 PCI\CC_0C0300 = usbuhci
 PCI\CC_0C0310 = usbohci
 PCI\CC_0C0320 = usbehci
+PCI\CC_0C0330 = usbxhci
+PCI\VEN_1DE4&DEV_0001 = rp1
+RP1\GEM = rp1gem
 USB\Class_08&SubClass_06&Prot_50 = usbstor
 USB\Class_08&SubClass_05&Prot_50 = usbstor
 HID_DEVICE_SYSTEM_KEYBOARD = kbdhid,{4D36E96B-E325-11CE-BFC1-08002BE10318}
@@ -181,20 +64,48 @@ USB\COMPOSITE = usbccgp
 GenDisk = disk,{4D36E967-E325-11CE-BFC1-08002BE10318}
 USB\Class_03 = hidusb
 GENERIC_HID_DEVICE = hidusb
+ROOT\SWENUM = swenum
+
+[HardwareIdsDatabase.x86]
+*PNP0A00 = isapnp
+PCI\CC_0601 = isapnp
+PCI\CC_0101 = pciide
+PCI\CC_0104 = pciide
+PCI\CC_0105 = pciide
+PCI\CC_0106 = pciide
+*PNP0600 = atapi
 *PNP0303 = i8042prt,{4D36E96B-E325-11CE-BFC1-08002BE10318}
 *PNP030B = i8042prt,{4D36E96B-E325-11CE-BFC1-08002BE10318}
 *nEC1F00 = inport,{4D36E96F-E325-11CE-BFC1-08002BE10318}
-ROOT\SWENUM = swenum
+
+[HardwareIdsDatabase.amd64]
+*PNP0A00 = isapnp
+PCI\CC_0601 = isapnp
+PCI\CC_0101 = pciide
+PCI\CC_0104 = pciide
+PCI\CC_0105 = pciide
+PCI\CC_0106 = pciide
+*PNP0600 = atapi
+*PNP0303 = i8042prt,{4D36E96B-E325-11CE-BFC1-08002BE10318}
+*PNP030B = i8042prt,{4D36E96B-E325-11CE-BFC1-08002BE10318}
+*nEC1F00 = inport,{4D36E96F-E325-11CE-BFC1-08002BE10318}
 
 [BootBusExtenders.Load]
 acpi = acpi.sys
 pci = pci.sys
+rp1 = rp1.sys
+
+[BootBusExtenders.Load.x86]
+isapnp = isapnp.sys
+
+[BootBusExtenders.Load.amd64]
 isapnp = isapnp.sys
 
 [InputDevicesSupport.Load]
 usbehci = usbehci.sys
 usbohci = usbohci.sys
 usbuhci = usbuhci.sys
+usbxhci = usbxhci.sys
 usbhub = usbhub.sys
 usbccgp = usbccgp.sys
 hidusb = hidusb.sys
@@ -202,29 +113,48 @@ usbstor = usbstor.sys
 
 [Keyboard.Load]
 kbdhid = kbdhid.sys
+
+[Keyboard.Load.x86]
+i8042prt = i8042prt.sys
+
+[Keyboard.Load.amd64]
 i8042prt = i8042prt.sys
 
 [BusExtenders.Load]
+
+[BusExtenders.Load.x86]
+pciide = pciide.sys
+atapi = atapi.sys
+
+[BusExtenders.Load.amd64]
 pciide = pciide.sys
 atapi = atapi.sys
 
 [SCSI.Load]
 ;uniata = uniata.sys
-atapi = atapi.sys
 buslogic = buslogic.sys
 storahci = storahci.sys
+lsi_sas = lsi_sas.sys
 disk = disk.sys
 
+[SCSI.Load.x86]
+atapi = atapi.sys
+
+[SCSI.Load.amd64]
+atapi = atapi.sys
+
 [MouseDrivers.Load]
+
+[MouseDrivers.Load.x86]
 inport = inport.sys
 
-[Cabinets]
-Cabinet = reactos.cab
+[MouseDrivers.Load.amd64]
+inport = inport.sys
 
 [SetupData]
-DefaultPath = \ReactOS
+DefaultPath = \Windows
 SetupDebugOptions = "/DEBUG /KDSERIAL /DEBUGPORT=COM1 /FIRSTCHANCE"
-;SetupDebugOptions = "/DEBUG /SOS /DEBUGPORT=SCREEN"
+;SetupDebugOptions = "/DEBUG /DEBUGPORT=SCREEN"
 OsLoadOptions = "/FASTDETECT /NOGUIBOOT /NODEBUG"
 
 [NLS]
@@ -235,74 +165,20 @@ DefaultLayout    = 00000409
 DefaultLanguage  = 00000409
 
 [Computer.NTx86]
-pci_up = "Standard PC Uniprocessor"
-;pci_mp = "Standard PC Multiprocessor"
-acpi_up = "ACPI PC Uniprocessor"
-acpi_mp = "ACPI PC Multiprocessor"
-apic_up = "Standard APIC PC Uniprocessor"
-aacpi_up = "ACPI APIC PC Uniprocessor"
-xbox = "Original Xbox (x86 based)"
-pc98_up = "NEC PC-98 Uniprocessor"
+acpi_mp = "ACPI PC"
 
 [Computer.NTamd64]
-x64_up = "Standard x64 Uniprocessor"
-x64_mp = "Standard x64 Multiprocessor"
+x64_mp = "Standard x64 PC"
 
 [Map.Computer.NTx86]
-;<id> = <pnp id string>
-pci_up = "PC UP"
-;pci_mp = "PC MP"
-acpi_up = "ACPI UP"
 acpi_mp = "ACPI MP"
-apic_up = "APIC UP"
-aacpi_up = "AAPIC UP"
-xbox = "Xbox"
-pc98_up = "NEC PC-98 UP"
 
 [Map.Computer.NTamd64]
-x64_up = "X64 UP"
 x64_mp = "X64 MP"
 
-[Files.pci_up]
-ntoskrnl.exe = 1,,,,,,,2,,,,1,2
-hal.dll      = 1,,,,,,,2,,,,1,2
-
-;[Files.pci_mp]
-;ntkrnlmp.exe = 1,,,,,,,2,,,ntoskrnl.exe,1,2
-;halmps.dll   = 1,,,,,,,2,,,hal.dll,1,2
-
-[Files.acpi_up]
-ntoskrnl.exe = 1,,,,,,,2,,,,1,2
-halacpi.dll  = 1,,,,,,,2,,,hal.dll,1,2
-
 [Files.acpi_mp]
-ntkrnlmp.exe = 1,,,,,,,2,,,ntoskrnl.exe,1,2
-halmacpi.dll  = 1,,,,,,,2,,,hal.dll,1,2
-
-[Files.apic_up]
-ntoskrnl.exe = 1,,,,,,,2,,,,1,2
-halapic.dll  = 1,,,,,,,2,,,hal.dll,1,2
-
-[Files.aacpi_up]
-ntoskrnl.exe = 1,,,,,,,2,,,,1,2
-halaacpi.dll  = 1,,,,,,,2,,,hal.dll,1,2
-
-[Files.xbox]
-ntoskrnl.exe = 1,,,,,,,2,,,,1,2
-halxbox.dll  = 1,,,,,,,2,,,hal.dll,1,2
-vfatfs.sys   = 1,,,,,,,4,,,,1,4
-
-[Files.pc98_up]
-ntoskrnl.exe = 1,,,,,,,2,,,,1,2
-halpc98.dll  = 1,,,,,,,2,,,hal.dll,1,2
-
-[Files.x64_up]
-ntoskrnl.exe = 1,,,,,,,2,,,,1,2
-hal.dll      = 1,,,,,,,2,,,,1,2
 
 [Files.x64_mp]
-ntkrnlmp.exe = 1,,,,,,,2,,,ntoskrnl.exe,1,2
-halmp.dll    = 1,,,,,,,2,,,hal.dll,1,2
 
 [Display]
 ;<id> = <user friendly name>,<spare>,<service key name>,<width>,<height>,<bpp>
@@ -546,6 +422,7 @@ Default = "XT-, AT- or extended keyboard (83-105 keys)"
 0000042F = "Macedonian (FYRO)"
 0000044C = "Malayalam"
 00000414 = "Norwegian"
+00000429 = "Persian"
 00000415 = "Polish (programmer's)"
 00010415 = "Polish (214)"
 00010416 = "Portuguese (Brazilian ABNT2)"
@@ -646,6 +523,7 @@ Default = "XT-, AT- or extended keyboard (83-105 keys)"
 00000423 = kbdblr.dll
 00000425 = kbdest.dll
 00000426 = kbdlv.dll
+00000429 = kbdfa.dll
 00010427 = kbdlt1.dll
 0000042A = kbdvntc.dll
 0000042B = kbdarme.dll
@@ -669,13 +547,32 @@ Default = "XT-, AT- or extended keyboard (83-105 keys)"
 ; Called "HiveInfs.Fresh" on Windows
 AddReg = caroots.inf,AddReg
 AddReg = registry.inf,AddReg
+AddReg = comreg.inf,AddReg
 
 [HiveInfs.Upgrade]
-DelReg = registry.inf,DelReg
+AddReg = caroots.inf,AddReg
 AddReg = registry.inf,AddReg
+AddReg = comreg.inf,AddReg
+
+; Settings an upgrade takes back from the installed system after applying the
+; registry above: a whole key, or one value when a value name is given.
+[HiveInfs.Upgrade.Keep]
+HKLM,"SYSTEM\CurrentControlSet\Control\ComputerName"
+HKLM,"SYSTEM\CurrentControlSet\Control\TimeZoneInformation"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\CodePage","ACP"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\CodePage","MACCP"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\CodePage","OEMCP"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Language","Default"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Language","InstallLanguage"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon","AutoAdminLogon"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon","DefaultDomainName"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon","DefaultPassword"
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon","DefaultUserName"
+HKCU,"Control Panel\International"
+HKCU,"Keyboard Layout\Preload"
 
 [Strings]
-cdname      = "ReactOS Installation Media"
-productname = "ReactOS"
+cdname      = "LiberNT Installation Media"
+productname = "LiberNT"
 
 ; EOF

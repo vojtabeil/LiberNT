@@ -26,6 +26,21 @@
 
 #include "resource.h"
 
+#define D3DTEST_VERTEX_COUNT 36
+#define D3DTEST_DURATION_MS 4000
+#define D3DTEST_TEXTURE_SIZE 512
+
+typedef struct
+{
+    FLOAT x;
+    FLOAT y;
+    FLOAT z;
+    FLOAT rhw;
+    DWORD color;
+    FLOAT u;
+    FLOAT v;
+} D3DTEST_VERTEX, *PD3DTEST_VERTEX;
+
 typedef struct
 {
     HWND hDisplayWnd;
@@ -63,6 +78,11 @@ VOID DDTests(GUID *lpDevice);
 
 /* Direct3D tests */
 VOID D3DTests(GUID *lpDevice);
+BOOL D3D78BootTests(VOID);
+VOID D3DTestBuildCube(PD3DTEST_VERTEX Vertices, DWORD Elapsed, UINT Width, UINT Height);
+BOOL D3DTestLoadTexture(PVOID Bits, LONG Pitch);
+BOOL D3DTestPumpMessages(VOID);
+VOID D3DTestTraceFailure(INT TestNr, PCSTR Stage, HRESULT Result);
 
 /* DirectSound initialization */
 void InitializeDirectSoundPage(PDXDIAG_CONTEXT pContext);

@@ -31,12 +31,16 @@ CNewMenu::CNewMenu() :
     m_pLinkItem(NULL),
     m_pSite(NULL),
     m_idCmdFirst(0),
+    m_idCmdLast(0),
     m_idCmdFolder(-1),
     m_idCmdLink(-1),
+    m_bItemsInserted(FALSE),
     m_bCustomIconFolder(FALSE),
     m_bCustomIconLink(FALSE),
     m_hIconFolder(NULL),
-    m_hIconLink(NULL)
+    m_hIconLink(NULL),
+    m_hbmFolder(NULL),
+    m_hbmLink(NULL)
 {
 }
 
@@ -48,6 +52,10 @@ CNewMenu::~CNewMenu()
         DestroyIcon(m_hIconFolder);
     if (m_bCustomIconLink && m_hIconLink)
         DestroyIcon(m_hIconLink);
+    if (m_hbmFolder)
+        DeleteObject(m_hbmFolder);
+    if (m_hbmLink)
+        DeleteObject(m_hbmLink);
     if (m_pidlFolder)
         ILFree(m_pidlFolder);
 }
@@ -61,6 +69,8 @@ void CNewMenu::UnloadItem(SHELLNEW_ITEM *pItem)
 
     if (pItem->hIcon)
         DestroyIcon(pItem->hIcon);
+    if (pItem->hBitmap)
+        DeleteObject(pItem->hBitmap);
 
     HeapFree(GetProcessHeap(), 0, pItem);
 }
@@ -332,43 +342,114 @@ CNewMenu::LoadAllItems()
     return (m_pItems != NULL);
 }
 
-UINT
-CNewMenu::InsertShellNewItems(HMENU hMenu, UINT idCmdFirst, UINT Pos)
+static HBITMAP
+CreateMenuItemBitmap(HICON hIcon)
+{
+    const INT cx = GetSystemMetrics(SM_CXSMICON), cy = GetSystemMetrics(SM_CYSMICON);
+    BITMAPINFO bmi;
+    PDWORD pBits, pMask;
+    HBITMAP hbm, hbmMask;
+    HGDIOBJ hbmOld;
+    BOOL bAlpha = FALSE;
+    HDC hdc;
+
+    if (!hIcon)
+        return NULL;
+
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = cx;
+    bmi.bmiHeader.biHeight = -cy;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    hdc = CreateCompatibleDC(NULL);
+    if (!hdc)
+        return NULL;
+
+    hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, (PVOID *)&pBits, NULL, 0);
+    if (!hbm)
+    {
+        DeleteDC(hdc);
+        return NULL;
+    }
+
+    hbmOld = SelectObject(hdc, hbm);
+    DrawIconEx(hdc, 0, 0, hIcon, cx, cy, 0, NULL, DI_NORMAL);
+    GdiFlush();
+    for (INT i = 0; i < cx * cy && !bAlpha; i++)
+        bAlpha = (pBits[i] & 0xFF000000) != 0;
+
+    if (!bAlpha)
+    {
+        hbmMask = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, (PVOID *)&pMask, NULL, 0);
+        if (hbmMask)
+        {
+            SelectObject(hdc, hbmMask);
+            FillMemory(pMask, cx * cy * sizeof(DWORD), 0xFF);
+            DrawIconEx(hdc, 0, 0, hIcon, cx, cy, 0, NULL, DI_MASK);
+            GdiFlush();
+            for (INT i = 0; i < cx * cy; i++)
+                pBits[i] = (pMask[i] & 0x00FFFFFF) ? 0 : (pBits[i] | 0xFF000000);
+            SelectObject(hdc, hbm);
+            DeleteObject(hbmMask);
+        }
+    }
+
+    SelectObject(hdc, hbmOld);
+    DeleteDC(hdc);
+    return hbm;
+}
+
+void
+CNewMenu::InsertFolderItem(HMENU hMenu, UINT idCmd)
 {
     MENUITEMINFOW mii;
-    UINT idCmd = idCmdFirst;
+    WCHAR wszBuf[256];
+
+    if (!LoadStringW(shell32_hInstance, FCIDM_SHVIEW_NEWFOLDER, wszBuf, _countof(wszBuf)))
+        wszBuf[0] = 0;
+    ZeroMemory(&mii, sizeof(mii));
+    mii.cbSize = sizeof(mii);
+    mii.fMask = MIIM_ID | MIIM_BITMAP | MIIM_STRING;
+    mii.dwTypeData = wszBuf;
+    mii.cch = wcslen(mii.dwTypeData);
+    mii.wID = idCmd;
+    if (!m_hbmFolder)
+        m_hbmFolder = CreateMenuItemBitmap(m_hIconFolder);
+    mii.hbmpItem = m_hbmFolder;
+    if (InsertMenuItemW(hMenu, 0, TRUE, &mii))
+        m_idCmdFolder = idCmd;
+}
+
+void
+CNewMenu::InsertShellNewItems(HMENU hMenu, UINT idCmd, UINT Pos)
+{
+    MENUITEMINFOW mii;
     WCHAR wszBuf[256];
 
     if (m_pItems == NULL)
     {
         if (!LoadAllItems())
-            return 0;
+            return;
     }
 
     ZeroMemory(&mii, sizeof(mii));
     mii.cbSize = sizeof(mii);
 
-    m_idCmdFirst = idCmd;
-
-    /* Insert the new folder action */
-    if (!LoadStringW(shell32_hInstance, FCIDM_SHVIEW_NEWFOLDER, wszBuf, _countof(wszBuf)))
-        wszBuf[0] = 0;
-    mii.fMask = MIIM_ID | MIIM_BITMAP | MIIM_STRING;
-    mii.dwTypeData = wszBuf;
-    mii.cch = wcslen(mii.dwTypeData);
-    mii.wID = idCmd;
-    mii.hbmpItem = HBMMENU_CALLBACK;
-    if (InsertMenuItemW(hMenu, Pos++, TRUE, &mii))
-        m_idCmdFolder = idCmd++;
-
     /* Insert the new shortcut action */
-    if (m_pLinkItem)
+    if (m_pLinkItem && idCmd <= m_idCmdLast)
     {
         if (!LoadStringW(shell32_hInstance, FCIDM_SHVIEW_NEWLINK, wszBuf, _countof(wszBuf)))
             wszBuf[0] = 0;
+        mii.fMask = MIIM_ID | MIIM_BITMAP | MIIM_STRING;
         mii.dwTypeData = wszBuf;
         mii.cch = wcslen(mii.dwTypeData);
         mii.wID = idCmd;
+        if (!m_hbmLink)
+            m_hbmLink = CreateMenuItemBitmap(m_hIconLink);
+        mii.hbmpItem = m_hbmLink;
         if (InsertMenuItemW(hMenu, Pos++, TRUE, &mii))
             m_idCmdLink = idCmd++;
     }
@@ -383,7 +464,7 @@ CNewMenu::InsertShellNewItems(HMENU hMenu, UINT idCmdFirst, UINT Pos)
     mii.fMask = MIIM_ID | MIIM_BITMAP | MIIM_STRING | MIIM_DATA;
     mii.fType = 0;
 
-    for (SHELLNEW_ITEM *pCurItem = m_pItems; pCurItem; pCurItem = pCurItem->pNext)
+    for (SHELLNEW_ITEM *pCurItem = m_pItems; pCurItem && idCmd <= m_idCmdLast; pCurItem = pCurItem->pNext)
     {
         /* Skip shortcut item */
         if (pCurItem == m_pLinkItem)
@@ -394,11 +475,12 @@ CNewMenu::InsertShellNewItems(HMENU hMenu, UINT idCmdFirst, UINT Pos)
         mii.dwTypeData = pCurItem->pwszDesc;
         mii.cch = wcslen(mii.dwTypeData);
         mii.wID = idCmd;
+        if (!pCurItem->hBitmap)
+            pCurItem->hBitmap = CreateMenuItemBitmap(pCurItem->hIcon);
+        mii.hbmpItem = pCurItem->hBitmap;
         if (InsertMenuItemW(hMenu, Pos++, TRUE, &mii))
             ++idCmd;
     }
-
-    return idCmd - idCmdFirst;
 }
 
 CNewMenu::SHELLNEW_ITEM *CNewMenu::FindItemFromIdOffset(UINT IdOffset)
@@ -647,26 +729,38 @@ CNewMenu::QueryContextMenu(HMENU hMenu,
                            UINT uFlags)
 {
     MENUITEMINFOW mii;
-    UINT cItems = 0;
     WCHAR wszNew[200];
+
+    WCHAR wszPath[MAX_PATH];
 
     TRACE("%p %p %u %u %u %u\n", this,
           hMenu, indexMenu, idCmdFirst, idCmdLast, uFlags);
 
+    if (!m_pidlFolder || !SHGetPathFromIDListW(m_pidlFolder, wszPath))
+        return MAKE_HRESULT(SEVERITY_SUCCESS, 0, 0);
+
     if (!LoadStringW(shell32_hInstance, FCIDM_SHVIEW_NEW, wszNew, _countof(wszNew)))
         return E_FAIL;
+
+    if (idCmdLast < idCmdFirst)
+        return E_INVALIDARG;
 
     m_hSubMenu = CreateMenu();
     if (!m_hSubMenu)
         return E_FAIL;
 
-    cItems = InsertShellNewItems(m_hSubMenu, idCmdFirst, 0);
+    /* The file types are inserted when the submenu opens, inside the reserved range */
+    m_idCmdFirst = idCmdFirst;
+    m_idCmdLast = min(idCmdLast, idCmdFirst + 0x3F);
+    m_bItemsInserted = FALSE;
+    if (idCmdFirst < m_idCmdLast)
+        InsertFolderItem(m_hSubMenu, idCmdFirst + 1);
 
     ZeroMemory(&mii, sizeof(mii));
     mii.cbSize = sizeof(mii);
     mii.fMask = MIIM_TYPE | MIIM_ID | MIIM_STATE | MIIM_SUBMENU;
     mii.fType = MFT_STRING;
-    mii.wID = -1;
+    mii.wID = idCmdFirst;
     mii.dwTypeData = wszNew;
     mii.cch = wcslen(mii.dwTypeData);
     mii.fState = MFS_ENABLED;
@@ -675,7 +769,7 @@ CNewMenu::QueryContextMenu(HMENU hMenu,
     if (!InsertMenuItemW(hMenu, indexMenu, TRUE, &mii))
         return E_FAIL;
 
-    return MAKE_HRESULT(SEVERITY_SUCCESS, 0, cItems);
+    return MAKE_HRESULT(SEVERITY_SUCCESS, 0, m_idCmdLast - idCmdFirst + 1);
 }
 
 HRESULT
@@ -726,6 +820,15 @@ CNewMenu::HandleMenuMsg2(UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT *plRes
 {
     switch (uMsg)
     {
+    case WM_INITMENUPOPUP:
+        if ((HMENU)wParam == m_hSubMenu && !m_bItemsInserted && m_idCmdFolder != (UINT)-1)
+        {
+            m_bItemsInserted = TRUE;
+            InsertShellNewItems(m_hSubMenu, m_idCmdFolder + 1, GetMenuItemCount(m_hSubMenu));
+            if (plResult)
+                *plResult = 0;
+        }
+        break;
     case WM_MEASUREITEM:
         {
             MEASUREITEMSTRUCT* lpmis = reinterpret_cast<MEASUREITEMSTRUCT*>(lParam);
@@ -790,6 +893,9 @@ CNewMenu::Initialize(PCIDLIST_ABSOLUTE pidlFolder,
     const INT cx = GetSystemMetrics(SM_CXSMICON), cy = GetSystemMetrics(SM_CYSMICON);
     WCHAR wszIconPath[MAX_PATH];
     int icon_idx;
+
+    if (!pidlFolder)
+        return E_INVALIDARG;
 
     m_pidlFolder = ILClone(pidlFolder);
 

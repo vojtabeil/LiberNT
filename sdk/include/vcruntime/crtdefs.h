@@ -3,7 +3,7 @@
  * This file is part of the w64 mingw-runtime package.
  * No warranty is given; refer to the file DISCLAIMER within this package.
  */
-#include <vcruntime.h>
+#include "vcruntime.h"
 #include <specstrings.h>
 
 #ifndef _INC_CRTDEFS
@@ -122,7 +122,7 @@
 #endif
 
 #ifndef UNALIGNED
-#if defined(__ia64__) || defined(__x86_64) || defined(__arm__) || defined(__arm64__)
+#if !defined(_M_IX86) && !defined(__i386__)
 #define UNALIGNED __unaligned
 #else
 #define UNALIGNED
@@ -196,6 +196,15 @@
 
 #ifndef _TRUNCATE
 #define _TRUNCATE ((size_t)-1)
+#endif
+
+#ifndef _RSIZE_T_DEFINED
+#define _RSIZE_T_DEFINED
+  typedef size_t rsize_t;
+#endif
+
+#ifndef RSIZE_MAX
+#define RSIZE_MAX ((rsize_t)(-1) >> 1)
 #endif
 
 #ifndef __REACTOS__

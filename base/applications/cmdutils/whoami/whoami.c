@@ -7,6 +7,7 @@
  */
 
 #define SECURITY_WIN32
+#include <windows.h>
 #include <security.h>
 #include <sddl.h>
 #include <strsafe.h>
@@ -216,7 +217,7 @@ void WhoamiFreeTable(WhoamiTable *pTable)
 /* Print the table */
 void WhoamiPrintTable(WhoamiTable *pTable)
 {
-    UINT i, j;
+    UINT i = 0, j;
     UINT CurRow, CurCol;
     UINT SingleColLen = 0;
     PUINT ColLength = &SingleColLen;

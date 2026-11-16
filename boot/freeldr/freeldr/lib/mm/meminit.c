@@ -47,7 +47,6 @@ MmGetTotalPagesInLookupTable(VOID)
     return TotalPagesInLookupTable;
 }
 
-#if DBG
 typedef struct
 {
     TYPE_OF_MEMORY Type;
@@ -109,15 +108,6 @@ DbgDumpMemoryMap(
     }
     DbgPrint("\n");
 }
-#else
-/* Dummy, so we can export it */
-PCSTR
-MmGetSystemMemoryMapTypeString(
-    TYPE_OF_MEMORY Type)
-{
-    return "-";
-}
-#endif
 
 ULONG
 AddMemoryDescriptor(
@@ -259,7 +249,7 @@ static
 VOID
 MmCheckFreeldrImageFile(VOID)
 {
-#ifndef UEFIBOOT
+#if !defined(UEFIBOOT) && !defined(OFWBOOT)
     PIMAGE_NT_HEADERS NtHeaders;
     PIMAGE_FILE_HEADER FileHeader;
     PIMAGE_OPTIONAL_HEADER OptionalHeader;
@@ -675,6 +665,39 @@ PFN_NUMBER MmFindAvailablePagesBeforePage(PVOID PageLookupTable, PFN_NUMBER Tota
     }
 
     return 0;
+}
+
+PFN_NUMBER MmFindLargestFreeRunBeforePage(PVOID PageLookupTable, PFN_NUMBER TotalPageCount, PFN_NUMBER LastPage)
+{
+    PPAGE_LOOKUP_TABLE_ITEM        RealPageLookupTable = (PPAGE_LOOKUP_TABLE_ITEM)PageLookupTable;
+    PFN_NUMBER                    RunLength;
+    PFN_NUMBER                    LargestRun;
+    PFN_NUMBER                    Index;
+
+    if (LastPage > TotalPageCount)
+    {
+        LastPage = TotalPageCount;
+    }
+
+    RunLength = 0;
+    LargestRun = 0;
+    for (Index = 1; Index < LastPage; Index++)
+    {
+        if (RealPageLookupTable[Index].PageAllocated == LoaderFree)
+        {
+            RunLength++;
+            if (RunLength > LargestRun)
+            {
+                LargestRun = RunLength;
+            }
+        }
+        else
+        {
+            RunLength = 0;
+        }
+    }
+
+    return LargestRun;
 }
 
 VOID MmUpdateLastFreePageHint(PVOID PageLookupTable, PFN_NUMBER TotalPageCount)

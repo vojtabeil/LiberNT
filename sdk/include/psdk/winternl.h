@@ -27,10 +27,6 @@
  */
 #pragma once
 
-#ifdef __REACTOS__
-#error "Do not use this header, use NDK!"
-#endif
-
 #ifndef _WINTERNL_
 #define _WINTERNL_
 
@@ -74,13 +70,24 @@ typedef STRING OEM_STRING;
 typedef PSTRING POEM_STRING;
 typedef const STRING *PCOEM_STRING;
 
+#ifndef __UNICODE_STRING_DEFINED__
+#define __UNICODE_STRING_DEFINED__
 typedef struct _UNICODE_STRING
 {
     USHORT Length;
     USHORT MaximumLength;
     PWSTR Buffer;
 } UNICODE_STRING, *PUNICODE_STRING;
+#endif
 typedef const UNICODE_STRING *PCUNICODE_STRING;
+
+typedef LONG KPRIORITY;
+
+typedef struct _CLIENT_ID
+{
+    HANDLE UniqueProcess;
+    HANDLE UniqueThread;
+} CLIENT_ID;
 
 typedef struct _RTL_USER_PROCESS_PARAMETERS
 {
@@ -230,7 +237,9 @@ typedef struct _OBJECT_ATTRIBUTES
 #define OBJ_OPENLINK           0x00000100L
 #define OBJ_KERNEL_HANDLE      0x00000200L
 #define OBJ_FORCE_ACCESS_CHECK 0x00000400L
-#define OBJ_VALID_ATTRIBUTES   0x000007F2L
+#define OBJ_IGNORE_IMPERSONATED_DEVICEMAP 0x00000800L
+#define OBJ_DONT_REPARSE       0x00001000L
+#define OBJ_VALID_ATTRIBUTES   0x00001FF2L
 
 #ifndef InitializeObjectAttributes
 #define InitializeObjectAttributes(p, n, a, r, s) \
@@ -522,6 +531,19 @@ typedef struct _SYSTEM_PROCESS_INFORMATION
     SIZE_T PrivatePageCount;
     LARGE_INTEGER Reserved6[6];
 } SYSTEM_PROCESS_INFORMATION, *PSYSTEM_PROCESS_INFORMATION;
+
+typedef struct _SYSTEM_THREAD_INFORMATION
+{
+    LARGE_INTEGER Reserved1[3];
+    ULONG Reserved2;
+    PVOID StartAddress;
+    CLIENT_ID ClientId;
+    KPRIORITY Priority;
+    LONG BasePriority;
+    ULONG Reserved3;
+    ULONG ThreadState;
+    ULONG WaitReason;
+} SYSTEM_THREAD_INFORMATION, *PSYSTEM_THREAD_INFORMATION;
 
 typedef struct _SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION
 {

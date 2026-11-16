@@ -61,10 +61,13 @@ NTSTATUS AddUDPHeaderIPv4(
 
     RtlCopyMemory(IPPacket->Data, Data, DataLength);
 
-    UDPHeader->Checksum = UDPv4ChecksumCalculate((PIPv4_HEADER)IPPacket->Header,
-                                                 (PUCHAR)UDPHeader,
-                                                 DataLength + sizeof(UDP_HEADER));
-    UDPHeader->Checksum = WH2N(UDPHeader->Checksum);
+    if (!AddrFile->NoChecksum)
+    {
+        UDPHeader->Checksum = UDPv4ChecksumCalculate((PIPv4_HEADER)IPPacket->Header,
+                                                     (PUCHAR)UDPHeader,
+                                                     DataLength + sizeof(UDP_HEADER));
+        UDPHeader->Checksum = WH2N(UDPHeader->Checksum);
+    }
 
     TI_DbgPrint(MID_TRACE, ("Packet: %d ip %d udp %d payload\n",
 			    (PCHAR)UDPHeader - (PCHAR)IPPacket->Header,
@@ -147,6 +150,236 @@ NTSTATUS BuildUDPPacket(
     return STATUS_SUCCESS;
 }
 
+static BOOLEAN UDPClassify(
+    PADDRESS_FILE AddrFile,
+    BOOLEAN Outbound,
+    PIP_INTERFACE Interface,
+    PIP_ADDRESS LocalAddress,
+    USHORT LocalPort,
+    PIP_ADDRESS RemoteAddress,
+    USHORT RemotePort,
+    PVOID IpHeader,
+    ULONG IpHeaderSize,
+    PVOID Data,
+    ULONG DataSize,
+    const WFP_SHIM_TAG *Tag)
+{
+    WFP_SHIM_DATAGRAM Datagram;
+    UDP_HEADER UDPHeader;
+
+    if (!WfpShimDatagramActive())
+        return TRUE;
+
+    UDPHeader.SourcePort = Outbound ? LocalPort : RemotePort;
+    UDPHeader.DestPort = Outbound ? RemotePort : LocalPort;
+    UDPHeader.Length = WH2N((USHORT)(DataSize + sizeof(UDP_HEADER)));
+    UDPHeader.Checksum = 0;
+
+    RtlZeroMemory(&Datagram, sizeof(Datagram));
+    Datagram.EndpointId = AddrFile->WfpEndpointId;
+    Datagram.Outbound = Outbound;
+    Datagram.Loopback = (Interface == Loopback);
+    Datagram.Protocol = IPPROTO_UDP;
+    Datagram.LocalAddress = DN2H(LocalAddress->Address.IPv4Address);
+    Datagram.RemoteAddress = DN2H(RemoteAddress->Address.IPv4Address);
+    Datagram.LocalPort = WN2H(LocalPort);
+    Datagram.RemotePort = WN2H(RemotePort);
+    Datagram.InterfaceIndex = Interface->Index;
+    Datagram.InterfaceType = (Interface == Loopback) ? IF_TYPE_SOFTWARE_LOOPBACK : IF_TYPE_ETHERNET_CSMACD;
+    Datagram.ProcessId = AddrFile->ProcessId;
+    Datagram.IpHeader = IpHeader;
+    Datagram.IpHeaderSize = IpHeaderSize;
+    Datagram.TransportHeader = &UDPHeader;
+    Datagram.TransportHeaderSize = sizeof(UDPHeader);
+    Datagram.Data = Data;
+    Datagram.DataLength = DataSize;
+    Datagram.Tag = *Tag;
+
+    return WfpShimClassifyDatagram(&Datagram);
+}
+
+static
+BOOLEAN
+UDPIsBroadcastAddress(
+    _In_ PIP_ADDRESS Address)
+{
+    BOOLEAN IsBroadcast = FALSE;
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+
+    if (Address->Type != IP_ADDRESS_V4)
+        return FALSE;
+
+    if (Address->Address.IPv4Address == 0xFFFFFFFF)
+        return TRUE;
+
+    TcpipAcquireSpinLock(&NetTableListLock, &OldIrql);
+
+    for (Entry = NetTableListHead.Flink; Entry != &NetTableListHead; Entry = Entry->Flink) {
+        PIP_NTE Nte = CONTAINING_RECORD(Entry, IP_NTE, ListEntry);
+
+        if (Nte->Interface != Loopback && AddrIsEqual(&Nte->Broadcast, Address))
+        {
+            IsBroadcast = TRUE;
+            break;
+        }
+    }
+
+    TcpipReleaseSpinLock(&NetTableListLock, OldIrql);
+
+    return IsBroadcast;
+}
+
+static NTSTATUS UDPSendToAddress(
+    PADDRESS_FILE AddrFile,
+    IP_ADDRESS RemoteAddress,
+    USHORT RemotePort,
+    PCHAR BufferData,
+    ULONG DataSize,
+    const WFP_SHIM_TAG *Tag)
+{
+    IP_PACKET Packet;
+    IP_PACKET LoopPacket;
+    IP_ADDRESS LocalAddress;
+    USHORT LocalPort;
+    NTSTATUS Status;
+    PNEIGHBOR_CACHE_ENTRY NCE;
+    PNEIGHBOR_CACHE_ENTRY LoopNCE = NULL;
+    BOOLEAN IsBroadcast;
+    BOOLEAN IsMulticast;
+
+    IsBroadcast = UDPIsBroadcastAddress(&RemoteAddress);
+    IsMulticast = ((DN2H(RemoteAddress.Address.IPv4Address) & 0xf0000000) == 0xe0000000);
+
+    LockObject(AddrFile);
+
+    LocalAddress = AddrFile->Address;
+    if ((DN2H(RemoteAddress.Address.IPv4Address) & 0xf0000000) == 0xe0000000)
+    {
+        ULONG Selector = AddrFile->MulticastInterface;
+        if (!Selector) Selector = LocalAddress.Address.IPv4Address;
+        NCE = RouteGetMulticastRoute(&RemoteAddress, Selector);
+        if (!NCE)
+        {
+            UnlockObject(AddrFile);
+            return STATUS_NETWORK_UNREACHABLE;
+        }
+        if (AddrIsUnspecified(&LocalAddress)) GetInterfaceSourceAddress(NCE->Interface, &RemoteAddress, &NCE->Address, &LocalAddress);
+    }
+    else if (AddrFile->UnicastInterface)
+    {
+        PIP_INTERFACE Interface = GetMulticastInterface(AddrFile->UnicastInterface);
+
+        NCE = Interface ? RouteGetRouteOnInterface(&RemoteAddress, Interface) : NULL;
+        if (Interface)
+            IPDereferenceInterface(Interface);
+        if (!NCE)
+        {
+            UnlockObject(AddrFile);
+            return STATUS_INVALID_ADDRESS;
+        }
+        if (AddrIsUnspecified(&LocalAddress)) GetInterfaceSourceAddress(NCE->Interface, &RemoteAddress, &NCE->Address, &LocalAddress);
+    }
+    else if (AddrIsUnspecified(&LocalAddress))
+    {
+        /* If the local address is unspecified (0),
+         * then use the unicast address of the
+         * interface we're sending over
+         */
+        if(!(NCE = RouteGetRouteToDestination( &RemoteAddress ))) {
+            UnlockObject(AddrFile);
+            return STATUS_NETWORK_UNREACHABLE;
+        }
+
+        GetInterfaceSourceAddress(NCE->Interface, &RemoteAddress, &NCE->Address, &LocalAddress);
+    }
+    else
+    {
+        PIP_INTERFACE Interface = AddrLocateInterface(&LocalAddress);
+
+        if (!Interface) {
+            UnlockObject(AddrFile);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        NCE = RouteGetRouteFromSource(&RemoteAddress, Interface);
+        IPDereferenceInterface(Interface);
+        if (!NCE) {
+            UnlockObject(AddrFile);
+            return STATUS_NETWORK_UNREACHABLE;
+        }
+    }
+
+    LocalPort = AddrFile->Port;
+    UnlockObject(AddrFile);
+
+    if (!UDPClassify(AddrFile,
+                     TRUE,
+                     NCE->Interface,
+                     &LocalAddress,
+                     LocalPort,
+                     &RemoteAddress,
+                     RemotePort,
+                     NULL,
+                     0,
+                     BufferData,
+                     DataSize,
+                     Tag))
+    {
+        NBDereferenceNeighbor(NCE);
+        return STATUS_SUCCESS;
+    }
+
+    LockObject(AddrFile);
+
+    Status = BuildUDPPacket( AddrFile,
+							 &Packet,
+							 &RemoteAddress,
+							 RemotePort,
+							 &LocalAddress,
+							 LocalPort,
+							 BufferData,
+							 DataSize );
+
+    if (NT_SUCCESS(Status) && (IsBroadcast || IsMulticast) && Loopback != NULL && NCE->Interface != Loopback)
+    {
+        LoopNCE = NBLocateNeighbor(&Loopback->Unicast, Loopback);
+        if (LoopNCE != NULL &&
+            !NT_SUCCESS(BuildUDPPacket(AddrFile,
+                                       &LoopPacket,
+                                       &RemoteAddress,
+                                       RemotePort,
+                                       &LocalAddress,
+                                       LocalPort,
+                                       BufferData,
+                                       DataSize)))
+        {
+            NBDereferenceNeighbor(LoopNCE);
+            LoopNCE = NULL;
+        }
+    }
+
+    UnlockObject(AddrFile);
+
+    if( !NT_SUCCESS(Status) ) {
+        NBDereferenceNeighbor(NCE);
+	return Status;
+    }
+
+    Packet.WfpTag = *Tag;
+    Status = IPSendDatagram(&Packet, NCE);
+    NBDereferenceNeighbor(NCE);
+
+    if (LoopNCE != NULL)
+    {
+        LoopPacket.WfpTag = *Tag;
+        IPSendDatagram(&LoopPacket, LoopNCE);
+        NBDereferenceNeighbor(LoopNCE);
+    }
+
+    return Status;
+}
+
 NTSTATUS UDPSendDatagram(
     PADDRESS_FILE AddrFile,
     PTDI_CONNECTION_INFORMATION ConnInfo,
@@ -164,15 +397,14 @@ NTSTATUS UDPSendDatagram(
  *     Status of operation
  */
 {
-    IP_PACKET Packet;
+    static const WFP_SHIM_TAG NoTag;
     PTA_IP_ADDRESS RemoteAddressTa = (PTA_IP_ADDRESS)ConnInfo->RemoteAddress;
     IP_ADDRESS RemoteAddress;
-    IP_ADDRESS LocalAddress;
     USHORT RemotePort;
     NTSTATUS Status;
-    PNEIGHBOR_CACHE_ENTRY NCE;
-
-    LockObject(AddrFile);
+    ULONG SendMsgSize;
+    ULONG Offset;
+    ULONG Chunk;
 
     TI_DbgPrint(MID_TRACE,("Sending Datagram(%x %x %x %d)\n",
 						   AddrFile, ConnInfo, BufferData, DataSize));
@@ -186,56 +418,235 @@ NTSTATUS UDPSendDatagram(
 		RemotePort = RemoteAddressTa->Address[0].Address[0].sin_port;
 		break;
 
+    case TDI_ADDRESS_TYPE_IP6:
+        if (AddrFile->Family != TDI_ADDRESS_TYPE_IP6)
+            return STATUS_UNSUCCESSFUL;
+        Status = AddrGetAddress((PTRANSPORT_ADDRESS)RemoteAddressTa, &RemoteAddress, &RemotePort);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        if (!TCPUnmapFromDualStack(&RemoteAddress))
+            return STATUS_INVALID_ADDRESS;
+        break;
+
     default:
-		UnlockObject(AddrFile);
 		return STATUS_UNSUCCESSFUL;
     }
 
-    LocalAddress = AddrFile->Address;
-    if (AddrIsUnspecified(&LocalAddress))
+    SendMsgSize = AddrFile->SendMsgSize;
+    if (SendMsgSize == 0 || SendMsgSize >= DataSize)
+        SendMsgSize = DataSize;
+
+    Offset = 0;
+    do
     {
-        /* If the local address is unspecified (0),
-         * then use the unicast address of the
-         * interface we're sending over
-         */
-        if(!(NCE = RouteGetRouteToDestination( &RemoteAddress ))) {
-            UnlockObject(AddrFile);
-            return STATUS_NETWORK_UNREACHABLE;
-        }
-
-        LocalAddress = NCE->Interface->Unicast;
-    }
-    else
-    {
-        if(!(NCE = NBLocateNeighbor( &LocalAddress, NULL ))) {
-            UnlockObject(AddrFile);
-            return STATUS_INVALID_PARAMETER;
-        }
-    }
-
-    Status = BuildUDPPacket( AddrFile,
-							 &Packet,
-							 &RemoteAddress,
-							 RemotePort,
-							 &LocalAddress,
-							 AddrFile->Port,
-							 BufferData,
-							 DataSize );
-
-    UnlockObject(AddrFile);
-
-    if( !NT_SUCCESS(Status) )
-		return Status;
-
-    Status = IPSendDatagram(&Packet, NCE);
-    if (!NT_SUCCESS(Status))
-        return Status;
+        Chunk = min(SendMsgSize, DataSize - Offset);
+        Status = UDPSendToAddress(AddrFile, RemoteAddress, RemotePort, BufferData + Offset, Chunk, &NoTag);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        Offset += Chunk;
+    } while (Offset < DataSize);
 
     *DataUsed = DataSize;
 
     return STATUS_SUCCESS;
 }
 
+typedef struct _UDP_WFP_INJECTION
+{
+    BOOLEAN Send;
+    ULONG64 EndpointId;
+    ULONG RemoteAddress;
+    ULONG InterfaceIndex;
+    WFP_SHIM_TAG Tag;
+    PWFP_SHIM_COMPLETE Complete;
+    PVOID Context;
+    ULONG Length;
+    UCHAR Data[ANYSIZE_ARRAY];
+} UDP_WFP_INJECTION, *PUDP_WFP_INJECTION;
+
+static NTSTATUS UDPInjectReceive(
+    PUDP_WFP_INJECTION Injection)
+{
+    PIPv4_HEADER IPv4Header = (PIPv4_HEADER)Injection->Data;
+    PIP_INTERFACE Interface = NULL;
+    PNDIS_PACKET NdisPacket;
+    IP_PACKET IPPacket;
+    KIRQL OldIrql;
+    IF_LIST_ITER(CurrentIF);
+
+    if (Injection->Length < sizeof(IPv4_HEADER))
+        return STATUS_INVALID_PARAMETER;
+
+    if ((DN2H(IPv4Header->SrcAddr) >> 24) == 127 || (DN2H(IPv4Header->DstAddr) >> 24) == 127)
+        return STATUS_DATA_NOT_ACCEPTED;
+
+    TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
+    ForEachInterface(CurrentIF) {
+        if (CurrentIF->Index == Injection->InterfaceIndex) {
+            if (IPReferenceInterface(CurrentIF)) Interface = CurrentIF;
+            break;
+        }
+    } EndFor(CurrentIF);
+    TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
+    if (!Interface)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!NT_SUCCESS(AllocatePacketWithBuffer(&NdisPacket, (PCHAR)Injection->Data, Injection->Length)))
+    {
+        IPDereferenceInterface(Interface);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    IPInitializePacket(&IPPacket, 0);
+    IPPacket.NdisPacket = NdisPacket;
+    GetDataPtr(NdisPacket, 0, (PCHAR *)&IPPacket.Header, &IPPacket.TotalSize);
+    IPPacket.MappedHeader = TRUE;
+    IPPacket.WfpTag = Injection->Tag;
+
+    IPReceive(Interface, &IPPacket);
+    IPDereferenceInterface(Interface);
+
+    return IPPacket.WfpAccepted ? STATUS_SUCCESS : STATUS_DATA_NOT_ACCEPTED;
+}
+
+static VOID UDPInjectWorker(
+    PVOID Context)
+{
+    PUDP_WFP_INJECTION Injection = Context;
+    PUDP_HEADER UDPHeader = (PUDP_HEADER)Injection->Data;
+    PADDRESS_FILE AddrFile;
+    IP_ADDRESS RemoteAddress;
+    NTSTATUS Status;
+
+    if (!Injection->Send)
+    {
+        Status = UDPInjectReceive(Injection);
+    }
+    else if ((AddrFile = AddrFindByWfpEndpointId(Injection->EndpointId)) == NULL)
+    {
+        Status = STATUS_INVALID_HANDLE;
+    }
+    else
+    {
+        if (AddrFile->Protocol != IPPROTO_UDP || AddrFile->Raw || Injection->Length < sizeof(UDP_HEADER))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+        }
+        else
+        {
+            AddrInitIPv4(&RemoteAddress, DH2N(Injection->RemoteAddress));
+            Status = UDPSendToAddress(AddrFile,
+                                      RemoteAddress,
+                                      UDPHeader->DestPort,
+                                      (PCHAR)(UDPHeader + 1),
+                                      Injection->Length - sizeof(UDP_HEADER),
+                                      &Injection->Tag);
+        }
+        DereferenceObject(AddrFile);
+    }
+
+    Injection->Complete(Injection->Context, Status);
+    ExFreePoolWithTag(Injection, PACKET_BUFFER_TAG);
+}
+
+static NTSTATUS UDPQueueInjection(
+    BOOLEAN Send,
+    ULONG64 EndpointId,
+    ULONG RemoteAddress,
+    ULONG InterfaceIndex,
+    const VOID *Data,
+    ULONG Length,
+    const WFP_SHIM_TAG *Tag,
+    PWFP_SHIM_COMPLETE Complete,
+    PVOID Context)
+{
+    PUDP_WFP_INJECTION Injection;
+
+    Injection = ExAllocatePoolWithTag(NonPagedPool,
+                                      FIELD_OFFSET(UDP_WFP_INJECTION, Data) + Length,
+                                      PACKET_BUFFER_TAG);
+    if (!Injection)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Injection->Send = Send;
+    Injection->EndpointId = EndpointId;
+    Injection->RemoteAddress = RemoteAddress;
+    Injection->InterfaceIndex = InterfaceIndex;
+    Injection->Tag = *Tag;
+    Injection->Complete = Complete;
+    Injection->Context = Context;
+    Injection->Length = Length;
+    RtlCopyMemory(Injection->Data, Data, Length);
+
+    if (!ChewCreate(UDPInjectWorker, Injection))
+    {
+        ExFreePoolWithTag(Injection, PACKET_BUFFER_TAG);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS NTAPI UDPWfpInjectSend(
+    ULONG64 EndpointId,
+    ULONG RemoteAddress,
+    const VOID *Datagram,
+    ULONG Length,
+    const WFP_SHIM_TAG *Tag,
+    PWFP_SHIM_COMPLETE Complete,
+    PVOID Context)
+{
+    return UDPQueueInjection(TRUE, EndpointId, RemoteAddress, 0, Datagram, Length, Tag, Complete, Context);
+}
+
+static NTSTATUS NTAPI UDPWfpInjectReceive(
+    ULONG InterfaceIndex,
+    const VOID *Packet,
+    ULONG Length,
+    const WFP_SHIM_TAG *Tag,
+    PWFP_SHIM_COMPLETE Complete,
+    PVOID Context)
+{
+    return UDPQueueInjection(FALSE, 0, 0, InterfaceIndex, Packet, Length, Tag, Complete, Context);
+}
+
+
+static
+VOID
+UDPDeliverToAddrFile(
+    _In_ PADDRESS_FILE AddrFile,
+    _In_ PIP_INTERFACE Interface,
+    _In_ PIP_PACKET IPPacket,
+    _In_ PIPv4_HEADER IPv4Header,
+    _In_ PUDP_HEADER UDPHeader,
+    _In_ UINT DataSize)
+{
+    if (!UDPClassify(AddrFile,
+                     FALSE,
+                     Interface,
+                     &IPPacket->DstAddr,
+                     UDPHeader->DestPort,
+                     &IPPacket->SrcAddr,
+                     UDPHeader->SourcePort,
+                     IPv4Header,
+                     IPPacket->HeaderSize,
+                     IPPacket->Data,
+                     DataSize,
+                     &IPPacket->WfpTag))
+    {
+        return;
+    }
+
+    IPPacket->WfpAccepted = TRUE;
+    DGDeliverData(AddrFile,
+                  &IPPacket->SrcAddr,
+                  &IPPacket->DstAddr,
+                  UDPHeader->SourcePort,
+                  UDPHeader->DestPort,
+                  IPPacket,
+                  DataSize,
+                  Interface);
+}
 
 VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
 /*
@@ -250,10 +661,13 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
 {
   AF_SEARCH SearchContext;
   PIPv4_HEADER IPv4Header;
-  PADDRESS_FILE AddrFile;
+  PADDRESS_FILE AddrFile, Chosen = NULL;
   PUDP_HEADER UDPHeader;
   PIP_ADDRESS DstAddress, SrcAddress;
   UINT DataSize, i;
+  BOOLEAN IsMulticast, DeliverToAll, ChosenSpecific = FALSE;
+  ULONG MemberIndex;
+  PIP_INTERFACE SourceInterface;
 
   TI_DbgPrint(MAX_TRACE, ("Called.\n"));
 
@@ -301,37 +715,55 @@ VOID UDPReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
   /* Go to UDP data area */
   IPPacket->Data = (PVOID)((ULONG_PTR)IPPacket->Data + sizeof(UDP_HEADER));
 
+  IsMulticast = ((DN2H(DstAddress->Address.IPv4Address) & 0xf0000000) == 0xe0000000);
+  MemberIndex = Interface->Index;
+  if (IsMulticast && Interface == Loopback &&
+      (SourceInterface = AddrLocateInterface(SrcAddress)))
+  {
+      MemberIndex = SourceInterface->Index;
+      IPDereferenceInterface(SourceInterface);
+  }
+
   /* Locate a receive request on destination address file object
      and deliver the packet if one is found. If there is no receive
      request on the address file object, call the associated receive
      handler. If no receive handler is registered, drop the packet */
 
+  DeliverToAll = IsMulticast || UDPIsBroadcastAddress(DstAddress);
+
   AddrFile = AddrSearchFirst(DstAddress,
                              UDPHeader->DestPort,
                              IPPROTO_UDP,
                              &SearchContext);
-  if (AddrFile) {
-    do {
-      DGDeliverData(AddrFile,
-		    SrcAddress,
-                    DstAddress,
-		    UDPHeader->SourcePort,
-		    UDPHeader->DestPort,
-                    IPPacket,
-                    DataSize);
+  while (AddrFile != NULL) {
+    if (DeliverToAll) {
+      if (!IsMulticast || IGMPIsMember(AddrFile, MemberIndex, DstAddress->Address.IPv4Address))
+          UDPDeliverToAddrFile(AddrFile, Interface, IPPacket, IPv4Header, UDPHeader, DataSize);
       DereferenceObject(AddrFile);
-    } while ((AddrFile = AddrSearchNext(&SearchContext)) != NULL);
-  } else {
-    /* There are no open address files that will take this datagram */
-    /* FIXME: IPv4 only */
-    TI_DbgPrint(MID_TRACE, ("Cannot deliver IPv4 UDP datagram to address (0x%X).\n",
-      DN2H(DstAddress->Address.IPv4Address)));
+    } else if (Chosen == NULL || (!ChosenSpecific && !AddrIsUnspecified(&AddrFile->Address))) {
+      if (Chosen != NULL)
+          DereferenceObject(Chosen);
+      Chosen = AddrFile;
+      ChosenSpecific = !AddrIsUnspecified(&AddrFile->Address);
+    } else {
+      DereferenceObject(AddrFile);
+    }
+    AddrFile = AddrSearchNext(&SearchContext);
+  }
 
-    /* FIXME: Send ICMP reply */
+  if (Chosen != NULL) {
+    UDPDeliverToAddrFile(Chosen, Interface, IPPacket, IPv4Header, UDPHeader, DataSize);
+    DereferenceObject(Chosen);
   }
   TI_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 }
 
+
+static const WFP_SHIM_DISPATCH UDPWfpDispatch =
+{
+    UDPWfpInjectSend,
+    UDPWfpInjectReceive
+};
 
 NTSTATUS UDPStartup(
   VOID)
@@ -351,6 +783,7 @@ NTSTATUS UDPStartup(
 
   /* Register this protocol with IP layer */
   IPRegisterProtocol(IPPROTO_UDP, UDPReceive);
+  WfpShimRegister(&UDPWfpDispatch);
 
   UDPInitialized = TRUE;
 
@@ -370,6 +803,7 @@ NTSTATUS UDPShutdown(
       return STATUS_SUCCESS;
 
   PortsShutdown( &UDPPorts );
+  WfpShimRegister(NULL);
 
   /* Deregister this protocol with IP layer */
   IPRegisterProtocol(IPPROTO_UDP, NULL);
@@ -384,8 +818,7 @@ UINT UDPAllocatePort( UINT HintPort ) {
         if( AllocatePort( &UDPPorts, HintPort ) ) return HintPort;
         else return (UINT)-1;
     } else return AllocatePortFromRange
-               ( &UDPPorts, UDP_STARTING_PORT,
-                 UDP_STARTING_PORT + UDP_DYNAMIC_PORTS );
+               ( &UDPPorts, DYNAMIC_PORT_FIRST, DYNAMIC_PORT_LAST );
 }
 
 VOID UDPFreePort( UINT Port ) {

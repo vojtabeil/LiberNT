@@ -20,6 +20,9 @@
 SERVICE_STATUS_HANDLE ServiceStatusHandle;
 SERVICE_STATUS SvcStatus;
 static WCHAR ServiceName[] = L"WlanSvc";
+static HANDLE ScanStopEvent;
+static HANDLE ScanRequestEvent;
+static HANDLE ScanThread;
 
 DWORD WINAPI RpcThreadRoutine(LPVOID lpParameter);
 
@@ -47,7 +50,26 @@ ServiceControlHandler(DWORD dwControl,
         case SERVICE_CONTROL_SHUTDOWN:
         case SERVICE_CONTROL_STOP:
             UpdateServiceStatus(ServiceStatusHandle, SERVICE_STOP_PENDING, 1);
+            if (ScanStopEvent)
+                SetEvent(ScanStopEvent);
+            if (ScanThread)
+            {
+                WaitForSingleObject(ScanThread, INFINITE);
+                CloseHandle(ScanThread);
+                ScanThread = NULL;
+            }
+            if (ScanStopEvent)
+            {
+                CloseHandle(ScanStopEvent);
+                ScanStopEvent = NULL;
+            }
+            if (ScanRequestEvent)
+            {
+                CloseHandle(ScanRequestEvent);
+                ScanRequestEvent = NULL;
+            }
             RpcMgmtStopServerListening(NULL);
+            WlanSvcCleanup();
             UpdateServiceStatus(ServiceStatusHandle, SERVICE_STOPPED, 0);
             break;
         case SERVICE_CONTROL_INTERROGATE:
@@ -56,6 +78,81 @@ ServiceControlHandler(DWORD dwControl,
             return ERROR_CALL_NOT_IMPLEMENTED;
     }
     return NO_ERROR;
+}
+
+VOID
+WlanSvcRequestScan(VOID)
+{
+    if (ScanRequestEvent)
+        SetEvent(ScanRequestEvent);
+}
+
+static DWORD WINAPI
+ScanThreadRoutine(LPVOID lpParameter)
+{
+    HANDLE waitEvents[2] = { ScanStopEvent, ScanRequestEvent };
+    PLIST_ENTRY entry;
+    PWLANSVC_INTERFACE iface;
+    GUID *guids;
+    DOT11_SSID *ssids;
+    ULONG count, i;
+    DWORD wait;
+
+    UNREFERENCED_PARAMETER(lpParameter);
+
+    if (WaitForSingleObject(ScanStopEvent, 5000) != WAIT_TIMEOUT)
+        return 0;
+
+    do
+    {
+        guids = NULL;
+        ssids = NULL;
+        count = 0;
+
+        EnterCriticalSection(&WlanSvcLock);
+        WlanSvcRefreshInterfaces();
+        for (entry = WlanSvcInterfaceListHead.Flink;
+             entry != &WlanSvcInterfaceListHead;
+             entry = entry->Flink)
+        {
+            count++;
+        }
+        if (count != 0)
+        {
+            guids = HeapAlloc(GetProcessHeap(), 0, count * sizeof(*guids));
+            ssids = HeapAlloc(GetProcessHeap(), 0, count * sizeof(*ssids));
+        }
+        count = 0;
+        if (guids != NULL && ssids != NULL)
+        {
+            for (entry = WlanSvcInterfaceListHead.Flink;
+                 entry != &WlanSvcInterfaceListHead;
+                 entry = entry->Flink)
+            {
+                iface = CONTAINING_RECORD(entry, WLANSVC_INTERFACE, ListEntry);
+                if (!iface->RadioOn)
+                    continue;
+                guids[count] = iface->InterfaceGuid;
+                ssids[count] = iface->ScanRequestSsid;
+                iface->ScanRequestSsid.uSSIDLength = 0;
+                count++;
+            }
+        }
+        LeaveCriticalSection(&WlanSvcLock);
+
+        for (i = 0; i < count; i++)
+            WlanSvcScanInterface(&guids[i], ssids[i].uSSIDLength != 0 ? &ssids[i] : NULL);
+
+        if (guids != NULL)
+            HeapFree(GetProcessHeap(), 0, guids);
+        if (ssids != NULL)
+            HeapFree(GetProcessHeap(), 0, ssids);
+
+        /* TODO: derive the background scan interval from the active power profile instead of a fixed 60 s. */
+        wait = WaitForMultipleObjects(2, waitEvents, FALSE, 60000);
+    } while (wait == WAIT_TIMEOUT || wait == WAIT_OBJECT_0 + 1);
+
+    return 0;
 }
 
 static VOID CALLBACK
@@ -94,10 +191,23 @@ ServiceMain(DWORD argc, LPWSTR *argv)
     {
         DPRINT("Can't create RpcThread\n");
         UpdateServiceStatus(ServiceStatusHandle, SERVICE_STOPPED, 0);
+        return;
     }
     else
     {
         CloseHandle(hThread);
+    }
+
+    ScanStopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ScanRequestEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (ScanStopEvent && ScanRequestEvent)
+    {
+        ScanThread = CreateThread(NULL, 0, ScanThreadRoutine, NULL, 0, NULL);
+        if (!ScanThread)
+        {
+            CloseHandle(ScanStopEvent);
+            ScanStopEvent = NULL;
+        }
     }
 
     DPRINT("ServiceMain() done\n");

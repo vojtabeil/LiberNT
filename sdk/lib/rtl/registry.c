@@ -140,10 +140,19 @@ RtlpCallQueryRegistryRoutine(IN PRTL_QUERY_REGISTRY_TABLE QueryTable,
     NTSTATUS Status;
     BOOLEAN FoundExpander = FALSE;
     UNICODE_STRING Source, Destination;
+    ULONG DefaultType, ExpectedType;
 
     /* Setup defaults */
     InfoLength = *InfoSize;
     *InfoSize = 0;
+
+    DefaultType = QueryTable->DefaultType;
+    ExpectedType = REG_NONE;
+    if (QueryTable->Flags & RTL_QUERY_REGISTRY_TYPECHECK)
+    {
+        ExpectedType = DefaultType >> RTL_QUERY_REGISTRY_TYPECHECK_SHIFT;
+        DefaultType &= (1UL << RTL_QUERY_REGISTRY_TYPECHECK_SHIFT) - 1;
+    }
 
     /* Check if there's no data */
     if (KeyValueInfo->DataOffset == MAXULONG)
@@ -161,10 +170,10 @@ RtlpCallQueryRegistryRoutine(IN PRTL_QUERY_REGISTRY_TABLE QueryTable,
     /* Check if there's no value or data */
     if ((KeyValueInfo->Type == REG_NONE) ||
         (!(KeyValueInfo->DataLength) &&
-          (KeyValueInfo->Type == QueryTable->DefaultType)))
+          (KeyValueInfo->Type == DefaultType)))
     {
         /* Check if there's no value */
-        if (QueryTable->DefaultType == REG_NONE)
+        if (DefaultType == REG_NONE)
         {
             /* Return proper status code */
             return (QueryTable->Flags & RTL_QUERY_REGISTRY_REQUIRED) ?
@@ -173,13 +182,15 @@ RtlpCallQueryRegistryRoutine(IN PRTL_QUERY_REGISTRY_TABLE QueryTable,
 
         /* We can setup a default value... capture the defaults */
         Name = (PWCHAR)QueryTable->Name;
-        Type = QueryTable->DefaultType;
+        Type = DefaultType;
         Data = QueryTable->DefaultData;
         Length = QueryTable->DefaultLength;
         if (!Length)
         {
             /* No default length given, try to calculate it */
             p = Data;
+            if (!p && ((Type == REG_SZ) || (Type == REG_EXPAND_SZ) || (Type == REG_MULTI_SZ)))
+                return STATUS_DATA_OVERRUN;
             if ((Type == REG_SZ) || (Type == REG_EXPAND_SZ))
             {
                 /* This is a string, count the characters */
@@ -196,6 +207,12 @@ RtlpCallQueryRegistryRoutine(IN PRTL_QUERY_REGISTRY_TABLE QueryTable,
     }
     else
     {
+        if ((ExpectedType != REG_NONE) &&
+            (KeyValueInfo->Type != ExpectedType))
+        {
+            return STATUS_OBJECT_TYPE_MISMATCH;
+        }
+
         /* Check if we have length */
         if (KeyValueInfo->DataLength)
         {
@@ -1346,6 +1363,64 @@ ProcessValues:
     /* Free our buffer and return status */
     RtlpAllocDeallocQueryBuffer(NULL, KeyValueInfo, BufferSize, NULL);
     return Status;
+}
+
+NTSTATUS
+NTAPI
+RtlQueryRegistryValuesEx(IN ULONG RelativeTo,
+                         IN PCWSTR Path,
+                         IN PRTL_QUERY_REGISTRY_TABLE QueryTable,
+                         IN PVOID Context,
+                         IN PVOID Environment OPTIONAL)
+{
+    return RtlQueryRegistryValues(RelativeTo,
+                                  Path,
+                                  QueryTable,
+                                  Context,
+                                  Environment);
+}
+
+NTSTATUS
+NTAPI
+RtlCheckPortableOperatingSystem(
+    _Out_ PBOOLEAN IsPortable)
+{
+    RTL_QUERY_REGISTRY_TABLE QueryTable[2];
+    ULONG Portable = 0;
+    NTSTATUS Status;
+
+    if (NT_SUCCESS(RtlCheckRegistryKey(RTL_REGISTRY_CONTROL, L"MiniNT")))
+    {
+        *IsPortable = FALSE;
+        return STATUS_SUCCESS;
+    }
+
+    RtlZeroMemory(QueryTable, sizeof(QueryTable));
+    QueryTable[0].Flags = RTL_QUERY_REGISTRY_DIRECT | RTL_QUERY_REGISTRY_REQUIRED | RTL_QUERY_REGISTRY_TYPECHECK;
+    QueryTable[0].Name = L"PortableOperatingSystem";
+    QueryTable[0].EntryContext = &Portable;
+    QueryTable[0].DefaultType = REG_DWORD << RTL_QUERY_REGISTRY_TYPECHECK_SHIFT;
+    Status = RtlQueryRegistryValuesEx(RTL_REGISTRY_CONTROL, NULL, QueryTable, NULL, NULL);
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+        return STATUS_NOT_FOUND;
+    if (NT_SUCCESS(Status))
+        *IsPortable = Portable != 0;
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+RtlSetPortableOperatingSystem(
+    _In_ BOOLEAN IsPortable)
+{
+    ULONG Portable = IsPortable ? 1 : 0;
+
+    return RtlWriteRegistryValue(RTL_REGISTRY_CONTROL,
+                                 NULL,
+                                 L"PortableOperatingSystem",
+                                 REG_DWORD,
+                                 &Portable,
+                                 sizeof(Portable));
 }
 
 /* EOF */

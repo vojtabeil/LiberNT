@@ -9,6 +9,7 @@
  */
 
 #include "ndissys.h"
+#include "ndis6_internal.h"   /* PNDIS6_DRIVER_BLOCK + Ndis6InitializeImDeviceInstance */
 
 #include <atm.h>
 
@@ -121,18 +122,6 @@ NdisAllocateFromBlockPool(
     return NULL;
 }
 
-/*
- * @unimplemented
- */
-PVOID
-EXPORT
-NdisGetRoutineAddress(
-    IN PUNICODE_STRING  NdisRoutineName)
-{
-    UNIMPLEMENTED;
-
-    return NULL;
-}
 
 /*
  * @unimplemented
@@ -171,20 +160,6 @@ NdisCompleteQueryStatistics(
     IN  NDIS_STATUS     Status)
 {
     UNIMPLEMENTED;
-}
-
-
-/*
- * @unimplemented
- */
-NDIS_STATUS
-EXPORT
-NdisIMDeInitializeDeviceInstance(
-    IN  NDIS_HANDLE NdisMiniportHandle)
-{
-    UNIMPLEMENTED;
-
-	return NDIS_STATUS_FAILURE;
 }
 
 
@@ -410,7 +385,10 @@ NdisMSetMiniportSecondary(
 
 
 /*
- * @unimplemented
+ * @implemented
+ *
+ * No-op: NdisIMInitializeDeviceInstanceEx receives the miniport DriverHandle
+ * and device context directly, so no miniport<->protocol pairing is stored.
  */
 VOID
 EXPORT
@@ -418,13 +396,14 @@ NdisIMAssociateMiniport(
     IN  NDIS_HANDLE DriverHandle,
     IN  NDIS_HANDLE ProtocolHandle)
 /*
- * FUNCTION:
- * ARGUMENTS:
  * NOTES:
  *    NDIS 5.0
  */
 {
-    UNIMPLEMENTED;
+    NDIS_DbgPrint(MAX_TRACE, ("Called (miniport %p, protocol %p).\n",
+                              DriverHandle, ProtocolHandle));
+    UNREFERENCED_PARAMETER(DriverHandle);
+    UNREFERENCED_PARAMETER(ProtocolHandle);
 }
 
 
@@ -468,7 +447,11 @@ NdisIMDeregisterLayeredMiniport(
 
 
 /*
- * @unimplemented
+ * @implemented
+ *
+ * Instantiates an intermediate driver's upper (virtual) miniport: a
+ * LOGICAL_ADAPTER with no PnP PDO. DeviceContext is what the driver later
+ * recovers via NdisIMGetDeviceContext inside MiniportInitializeEx.
  */
 NDIS_STATUS
 EXPORT
@@ -477,15 +460,17 @@ NdisIMInitializeDeviceInstanceEx(
     IN  PNDIS_STRING    DriverInstance,
     IN  NDIS_HANDLE     DeviceContext   OPTIONAL)
 /*
- * FUNCTION:
- * ARGUMENTS:
  * NOTES:
  *    NDIS 5.0
  */
 {
-    UNIMPLEMENTED;
+    if (DriverHandle == NULL || DriverInstance == NULL)
+        return NDIS_STATUS_FAILURE;
 
-    return NDIS_STATUS_FAILURE;
+    return Ndis6InitializeImDeviceInstance(
+        (PNDIS6_DRIVER_BLOCK)DriverHandle,
+        DriverInstance,
+        DeviceContext);
 }
 
 

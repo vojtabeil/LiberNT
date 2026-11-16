@@ -31,6 +31,67 @@ const GUID KSNODETYPE_SYNTHESIZER = {0xDFF220F3, 0xF70F, 0x11D0, {0xB9, 0x17, 0x
 const GUID KSNODETYPE_LINE_CONNECTOR = {0xDFF21FE3, 0xF70F, 0x11D0, {0xB9, 0x17, 0x00, 0xA0,0xC9, 0x22, 0x31, 0x96}};
 const GUID PINNAME_VIDEO_CAPTURE  = {0xfb6c4281, 0x353, 0x11d1, {0x90, 0x5f, 0x0, 0x0, 0xc0, 0xcc, 0x16, 0xba}};
 
+static
+MIXER_STATUS
+MMixerGetPropertyDescription(
+    IN PMIXER_CONTEXT MixerContext,
+    IN HANDLE hMixer,
+    IN ULONG NodeId,
+    IN ULONG PropertyId,
+    OUT PKSPROPERTY_DESCRIPTION *OutDescription)
+{
+    KSNODEPROPERTY_AUDIO_CHANNEL Property;
+    KSPROPERTY_DESCRIPTION Description;
+    PKSPROPERTY_DESCRIPTION FullDescription;
+    ULONG BytesReturned;
+    MIXER_STATUS Status;
+
+    *OutDescription = NULL;
+    RtlZeroMemory(&Property, sizeof(Property));
+    Property.NodeProperty.NodeId = NodeId;
+    Property.NodeProperty.Property.Set = KSPROPSETID_Audio;
+    Property.NodeProperty.Property.Id = PropertyId;
+    Property.NodeProperty.Property.Flags =
+        KSPROPERTY_TYPE_BASICSUPPORT | KSPROPERTY_TYPE_TOPOLOGY;
+
+    RtlZeroMemory(&Description, sizeof(Description));
+    Status = MixerContext->Control(hMixer,
+                                   IOCTL_KS_PROPERTY,
+                                   &Property,
+                                   sizeof(Property),
+                                   &Description,
+                                   sizeof(Description),
+                                   &BytesReturned);
+    if (Status != MM_STATUS_SUCCESS ||
+        Description.DescriptionSize < sizeof(Description))
+    {
+        return MM_STATUS_UNSUCCESSFUL;
+    }
+
+    FullDescription = MixerContext->Alloc(Description.DescriptionSize);
+    if (!FullDescription)
+        return MM_STATUS_NO_MEMORY;
+
+    RtlZeroMemory(FullDescription, Description.DescriptionSize);
+    Status = MixerContext->Control(hMixer,
+                                   IOCTL_KS_PROPERTY,
+                                   &Property,
+                                   sizeof(Property),
+                                   FullDescription,
+                                   Description.DescriptionSize,
+                                   &BytesReturned);
+    if (Status != MM_STATUS_SUCCESS ||
+        FullDescription->DescriptionSize < sizeof(*FullDescription) ||
+        FullDescription->DescriptionSize > Description.DescriptionSize)
+    {
+        MixerContext->Free(FullDescription);
+        return MM_STATUS_UNSUCCESSFUL;
+    }
+
+    *OutDescription = FullDescription;
+    return MM_STATUS_SUCCESS;
+}
+
 MIXER_STATUS
 MMixerAddMixerControl(
     IN PMIXER_CONTEXT MixerContext,
@@ -39,7 +100,8 @@ MMixerAddMixerControl(
     IN PTOPOLOGY Topology,
     IN ULONG NodeIndex,
     IN LPMIXERLINE_EXT MixerLine,
-    IN ULONG MaxChannels)
+    IN ULONG MaxChannels,
+    IN ULONG MemberFlags)
 {
     LPGUID NodeType;
     KSP_NODE Node;
@@ -60,6 +122,8 @@ MMixerAddMixerControl(
     MixerControl->hDevice = hMixer;
     MixerControl->NodeID = NodeIndex;
     MixerControl->ExtraData = NULL;
+    MixerControl->ChannelCount = max(MaxChannels, 1);
+    MixerControl->MemberFlags = MemberFlags;
 
     MixerControl->Control.cbStruct = sizeof(MIXERCONTROLW);
     MixerControl->Control.dwControlID = MixerInfo->ControlId;
@@ -69,7 +133,9 @@ MMixerAddMixerControl(
     /* store control type */
     MixerControl->Control.dwControlType = MMixerGetControlTypeFromTopologyNode(NodeType);
 
-    MixerControl->Control.fdwControl = (MaxChannels > 1 ? 0 : MIXERCONTROL_CONTROLF_UNIFORM);
+    MixerControl->Control.fdwControl =
+        ((MemberFlags & KSPROPERTY_MEMBER_FLAG_BASICSUPPORT_UNIFORM) ||
+         MaxChannels <= 1) ? MIXERCONTROL_CONTROLF_UNIFORM : 0;
     MixerControl->Control.cMultipleItems = 0;
 
     /* setup request to retrieve name */
@@ -84,7 +150,8 @@ MMixerAddMixerControl(
 
     if (Status == MM_STATUS_MORE_ENTRIES)
     {
-        ASSERT(BytesReturned != 0);
+        if (BytesReturned < sizeof(WCHAR))
+            return MM_STATUS_UNSUCCESSFUL;
         Name = (LPWSTR)MixerContext->Alloc(BytesReturned);
         if (!Name)
         {
@@ -154,64 +221,96 @@ MMixerAddMixerControl(
     }
     else if (MixerControl->Control.dwControlType == MIXERCONTROL_CONTROLTYPE_VOLUME)
     {
-        KSNODEPROPERTY_AUDIO_CHANNEL Property;
-        ULONG Length;
-        PKSPROPERTY_DESCRIPTION Desc;
+        PKSPROPERTY_DESCRIPTION Desc = NULL;
         PKSPROPERTY_MEMBERSHEADER Members;
         PKSPROPERTY_STEPPING_LONG Range;
         LPMIXERVOLUME_DATA VolumeData;
+        ULONG AvailableBytes;
+        ULONG AllocationSize;
+        ULONG RangeCount = 1;
+        ULONG RangeIndex;
+        LONGLONG StepCount;
 
         MixerControl->Control.Bounds.dwMinimum = 0;
         MixerControl->Control.Bounds.dwMaximum = 0xFFFF;
-        MixerControl->Control.Metrics.cSteps = 0xC0; /* FIXME */
+        Status = MMixerGetPropertyDescription(MixerContext,
+                                              hMixer,
+                                              NodeIndex,
+                                              KSPROPERTY_AUDIO_VOLUMELEVEL,
+                                              &Desc);
+        if (Status == MM_STATUS_SUCCESS &&
+            Desc->MembersListCount != 0 &&
+            Desc->DescriptionSize >= sizeof(*Desc) + sizeof(*Members))
+        {
+            Members = (PKSPROPERTY_MEMBERSHEADER)(Desc + 1);
+            AvailableBytes = Desc->DescriptionSize - sizeof(*Desc) - sizeof(*Members);
+            if (Members->MembersFlags == KSPROPERTY_MEMBER_STEPPEDRANGES &&
+                Members->MembersSize >= sizeof(*Range) &&
+                Members->MembersCount != 0 &&
+                Members->MembersCount <= AvailableBytes / Members->MembersSize &&
+                Members->MembersCount <=
+                    (MAXULONG - FIELD_OFFSET(MIXERVOLUME_DATA, Ranges)) /
+                    sizeof(VolumeData->Ranges[0]))
+            {
+                RangeCount = Members->MembersCount;
+                MixerControl->MemberFlags = Members->Flags;
+                if (Members->Flags & KSPROPERTY_MEMBER_FLAG_BASICSUPPORT_UNIFORM)
+                    MixerControl->Control.fdwControl |= MIXERCONTROL_CONTROLF_UNIFORM;
+                else if (MixerControl->ChannelCount > 1)
+                    MixerControl->Control.fdwControl &= ~MIXERCONTROL_CONTROLF_UNIFORM;
+            }
+            else
+            {
+                Status = MM_STATUS_UNSUCCESSFUL;
+            }
+        }
 
-        Length = sizeof(KSPROPERTY_DESCRIPTION) + sizeof(KSPROPERTY_MEMBERSHEADER) + sizeof(KSPROPERTY_STEPPING_LONG);
-        Desc = (PKSPROPERTY_DESCRIPTION)MixerContext->Alloc(Length);
-        ASSERT(Desc);
-
-        /* setup the request */
-        RtlZeroMemory(&Property, sizeof(KSNODEPROPERTY_AUDIO_CHANNEL));
-
-        Property.NodeProperty.NodeId = NodeIndex;
-        Property.NodeProperty.Property.Id = KSPROPERTY_AUDIO_VOLUMELEVEL;
-        Property.NodeProperty.Property.Flags = KSPROPERTY_TYPE_BASICSUPPORT | KSPROPERTY_TYPE_TOPOLOGY;
-        Property.NodeProperty.Property.Set = KSPROPSETID_Audio;
-
-        /* get node volume level info */
-        Status = MixerContext->Control(hMixer, IOCTL_KS_PROPERTY, (PVOID)&Property, sizeof(KSNODEPROPERTY_AUDIO_CHANNEL), Desc, Length, &BytesReturned);
-
-        VolumeData = (LPMIXERVOLUME_DATA)MixerContext->Alloc(sizeof(*VolumeData));
+        AllocationSize = FIELD_OFFSET(MIXERVOLUME_DATA, Ranges) +
+                         RangeCount * sizeof(VolumeData->Ranges[0]);
+        VolumeData = (LPMIXERVOLUME_DATA)MixerContext->Alloc(AllocationSize);
         if (!VolumeData)
+        {
+            if (Desc)
+                MixerContext->Free(Desc);
             return MM_STATUS_NO_MEMORY;
+        }
 
+        RtlZeroMemory(VolumeData, AllocationSize);
+        VolumeData->Header.dwControlID = MixerControl->Control.dwControlID;
+        VolumeData->CachedMask = 0;
+        VolumeData->RangeCount = RangeCount;
         if (Status == MM_STATUS_SUCCESS)
         {
             Members = (PKSPROPERTY_MEMBERSHEADER)(Desc + 1);
-            Range = (PKSPROPERTY_STEPPING_LONG)(Members + 1);
-
-            DPRINT("NodeIndex %u Range Min %d Max %d Steps %x UMin %x UMax %x\n", NodeIndex, Range->Bounds.SignedMinimum, Range->Bounds.SignedMaximum, Range->SteppingDelta, Range->Bounds.UnsignedMinimum, Range->Bounds.UnsignedMaximum);
-
-            /* Store mixer control info there */
-            VolumeData->Header.dwControlID = MixerControl->Control.dwControlID;
-            VolumeData->SignedMinimum = Range->Bounds.SignedMinimum;
-            VolumeData->SignedMaximum = Range->Bounds.SignedMaximum;
-
-            /* Fallback to defaults if: 1) the range is not defined (typically is 0) */
-            if (VolumeData->SignedMinimum == VolumeData->SignedMaximum)
+            for (RangeIndex = 0; RangeIndex < RangeCount; ++RangeIndex)
             {
-                VolumeData->SignedMinimum = -96 * 0x10000; // -96 DB
-                VolumeData->SignedMaximum = 0; // 0 DB
+                Range = (PKSPROPERTY_STEPPING_LONG)
+                    ((PUCHAR)(Members + 1) + RangeIndex * Members->MembersSize);
+                VolumeData->Ranges[RangeIndex] = *Range;
+                if (Range->Bounds.SignedMinimum >= Range->Bounds.SignedMaximum ||
+                    Range->SteppingDelta == 0)
+                {
+                    VolumeData->Ranges[RangeIndex].SteppingDelta = 0x10000;
+                    VolumeData->Ranges[RangeIndex].Bounds.SignedMinimum = -96 * 0x10000;
+                    VolumeData->Ranges[RangeIndex].Bounds.SignedMaximum = 0;
+                }
             }
         }
         else
         {
-            /* or 2) when some failure occurs */
-            VolumeData->Header.dwControlID = MixerControl->Control.dwControlID;
-            VolumeData->SignedMinimum = -96 * 0x10000; // -96 DB
-            VolumeData->SignedMaximum = 0; // 0 DB
+            VolumeData->Ranges[0].SteppingDelta = 0x10000;
+            VolumeData->Ranges[0].Bounds.SignedMinimum = -96 * 0x10000;
+            VolumeData->Ranges[0].Bounds.SignedMaximum = 0;
         }
+
+        StepCount = ((LONGLONG)VolumeData->Ranges[0].Bounds.SignedMaximum -
+                     VolumeData->Ranges[0].Bounds.SignedMinimum) /
+                    VolumeData->Ranges[0].SteppingDelta + 1;
+        MixerControl->Control.Metrics.cSteps =
+            StepCount > MAXULONG ? MAXULONG : (ULONG)StepCount;
         MixerControl->ExtraData = VolumeData;
-        MixerContext->Free(Desc);
+        if (Desc)
+            MixerContext->Free(Desc);
     }
 
     DPRINT("Status %x Name %S\n", Status, MixerControl->Control.szName);
@@ -302,9 +401,16 @@ MMixerGetPinName(
     /* try get pin name size */
     Status = MixerContext->Control(hMixer, IOCTL_KS_PROPERTY, (PVOID)&Pin, sizeof(KSP_PIN), NULL, 0, &BytesReturned);
 
+    /* A probe that answers SUCCESS leaves no buffer behind: the caller would use an uninitialized name */
+    if (Status == MM_STATUS_SUCCESS)
+        return MM_STATUS_UNSUCCESSFUL;
+
     /* check if buffer overflowed */
     if (Status == MM_STATUS_MORE_ENTRIES)
     {
+        if (BytesReturned < sizeof(WCHAR))
+            return MM_STATUS_UNSUCCESSFUL;
+
         /* allocate buffer */
         Buffer = (LPWSTR)MixerContext->Alloc(BytesReturned);
         if (!Buffer)
@@ -392,19 +498,19 @@ MMixerBuildTopology(
 
     /* get topology node types */
     Status = MMixerGetFilterTopologyProperty(MixerContext, MixerData->hDevice, KSPROPERTY_TOPOLOGY_NODES, &NodeTypes);
-    if (Status != MM_STATUS_SUCCESS)
+    if (Status != MM_STATUS_SUCCESS || NodeTypes == NULL)
     {
         /* failed to get topology node types */
-        return Status;
+        return MM_STATUS_UNSUCCESSFUL;
     }
 
     /* get topology connections */
     Status = MMixerGetFilterTopologyProperty(MixerContext, MixerData->hDevice, KSPROPERTY_TOPOLOGY_CONNECTIONS, &NodeConnections);
-    if (Status != MM_STATUS_SUCCESS)
+    if (Status != MM_STATUS_SUCCESS || NodeConnections == NULL)
     {
         /* failed to get topology connections */
         MixerContext->Free(NodeTypes);
-        return Status;
+        return MM_STATUS_UNSUCCESSFUL;
     }
 
     /* create a topology */
@@ -463,6 +569,7 @@ MMixerCountMixerControls(
          */
         DPRINT1("MMixerCountMixerControls PinId %lu is not connected by any node\n", PinId);
         MMixerPrintTopology(Topology);
+        MixerContext->Free(Nodes);
         return MM_STATUS_UNSUCCESSFUL;
     }
 
@@ -475,6 +582,26 @@ MMixerCountMixerControls(
 
     do
     {
+        ULONG NodePosition;
+
+        for (NodePosition = 0; NodePosition < Count; NodePosition++)
+        {
+            if (OutNodes[NodePosition] == NodeIndex)
+            {
+                DPRINT1("MMixerCountMixerControls cycle at node %lu pin %lu\n",
+                        NodeIndex,
+                        PinId);
+                goto done;
+            }
+        }
+
+        if (Count >= Topology->TopologyNodesCount)
+        {
+            DPRINT1("MMixerCountMixerControls exceeded topology node count at pin %lu\n",
+                    PinId);
+            goto done;
+        }
+
         /* check if the node is a terminator */
         MMixerIsNodeTerminator(Topology, NodeIndex, &bTerminator);
 
@@ -501,7 +628,12 @@ MMixerCountMixerControls(
 
         if (NodesCount != 1)
         {
-            DPRINT("PinId %lu bInputMixer %lu bUpStream %lu NodeIndex %lu is not connected", PinId, bInputMixer, bUpStream, NodeIndex);
+            DPRINT("PinId %lu bInputMixer %lu bUpStream %lu NodeIndex %lu next node count %lu\n",
+                    PinId,
+                    bInputMixer,
+                    bUpStream,
+                    NodeIndex,
+                    NodesCount);
             break;
         }
 
@@ -512,6 +644,7 @@ MMixerCountMixerControls(
 
     }while(TRUE);
 
+done:
     /* free node index */
     MixerContext->Free(Nodes);
 
@@ -531,66 +664,44 @@ MMixerGetChannelCountEnhanced(
     IN LPMIXER_INFO MixerInfo,
     IN HANDLE hMixer,
     IN ULONG NodeId,
-    OUT PULONG MaxChannels)
+    IN ULONG PropertyId,
+    OUT PULONG MaxChannels,
+    OUT PULONG MemberFlags)
 {
-    KSPROPERTY_DESCRIPTION Description;
-    PKSPROPERTY_DESCRIPTION NewDescription;
+    PKSPROPERTY_DESCRIPTION Description;
     PKSPROPERTY_MEMBERSHEADER Header;
-    ULONG BytesReturned;
-    KSP_NODE Request;
     MIXER_STATUS Status;
+    ULONG MembersBytes;
 
-    /* try #1 obtain it via description */
-    Request.NodeId = NodeId;
-    Request.Reserved = 0;
-    Request.Property.Set = KSPROPSETID_Audio;
-    Request.Property.Flags = KSPROPERTY_TYPE_BASICSUPPORT | KSPROPERTY_TYPE_TOPOLOGY;
-    Request.Property.Id = KSPROPERTY_AUDIO_VOLUMELEVEL;
+    UNREFERENCED_PARAMETER(MixerInfo);
+    Status = MMixerGetPropertyDescription(MixerContext,
+                                          hMixer,
+                                          NodeId,
+                                          PropertyId,
+                                          &Description);
+    if (Status != MM_STATUS_SUCCESS)
+        return Status;
 
-    /* get description */
-    Status = MixerContext->Control(hMixer, IOCTL_KS_PROPERTY, (PVOID)&Request, sizeof(KSP_NODE), (PVOID)&Description, sizeof(KSPROPERTY_DESCRIPTION), &BytesReturned);
-    if (Status == MM_STATUS_SUCCESS)
+    if (Description->DescriptionSize >= sizeof(*Description) + sizeof(*Header) &&
+        Description->MembersListCount != 0)
     {
-        if (Description.DescriptionSize >= sizeof(KSPROPERTY_DESCRIPTION) + sizeof(KSPROPERTY_MEMBERSHEADER) && (Description.MembersListCount > 0))
+        Header = (PKSPROPERTY_MEMBERSHEADER)(Description + 1);
+        MembersBytes = Description->DescriptionSize -
+                       sizeof(*Description) -
+                       sizeof(*Header);
+        if (Header->MembersFlags == KSPROPERTY_MEMBER_STEPPEDRANGES &&
+            Header->MembersCount != 0 &&
+            Header->MembersSize != 0 &&
+            Header->MembersCount <= MembersBytes / Header->MembersSize)
         {
-            /* allocate new description */
-            NewDescription = MixerContext->Alloc(Description.DescriptionSize);
-
-            if (!NewDescription)
-            {
-                /* not enough memory */
-                return MM_STATUS_NO_MEMORY;
-            }
-
-            /* get description */
-            Status = MixerContext->Control(hMixer, IOCTL_KS_PROPERTY, (PVOID)&Request, sizeof(KSP_NODE), (PVOID)NewDescription, Description.DescriptionSize, &BytesReturned);
-            if (Status == MM_STATUS_SUCCESS)
-            {
-                /* get header */
-                Header = (PKSPROPERTY_MEMBERSHEADER)(NewDescription + 1);
-
-                if (Header->Flags & KSPROPERTY_MEMBER_FLAG_BASICSUPPORT_MULTICHANNEL)
-                {
-                    /* found enhanced flag */
-                    ASSERT(Header->MembersCount > 1);
-
-                    /* store channel count */
-                    *MaxChannels = Header->MembersCount;
-
-                    /* free description */
-                    MixerContext->Free(NewDescription);
-
-                    /* done */
-                    return MM_STATUS_SUCCESS;
-                }
-            }
-
-            /* free description */
-            MixerContext->Free(NewDescription);
+            *MaxChannels = Header->MembersCount;
+            *MemberFlags = Header->Flags;
+            MixerContext->Free(Description);
+            return MM_STATUS_SUCCESS;
         }
     }
 
-    /* failed to get channel count enhanced */
+    MixerContext->Free(Description);
     return MM_STATUS_UNSUCCESSFUL;
 }
 
@@ -600,37 +711,36 @@ MMixerGetChannelCountLegacy(
     IN LPMIXER_INFO MixerInfo,
     IN HANDLE hMixer,
     IN ULONG NodeId,
-    OUT PULONG MaxChannels)
+    IN ULONG PropertyId,
+    OUT PULONG MaxChannels,
+    OUT PULONG MemberFlags)
 {
     ULONG BytesReturned;
     MIXER_STATUS Status;
     KSNODEPROPERTY_AUDIO_CHANNEL Channel;
     LONG Volume;
 
-    /* setup request */
-    Channel.Reserved = 0;
+    UNREFERENCED_PARAMETER(MixerInfo);
+    RtlZeroMemory(&Channel, sizeof(Channel));
     Channel.NodeProperty.NodeId = NodeId;
-    Channel.NodeProperty.Reserved = 0;
     Channel.NodeProperty.Property.Flags = KSPROPERTY_TYPE_GET | KSPROPERTY_TYPE_TOPOLOGY;
     Channel.NodeProperty.Property.Set = KSPROPSETID_Audio;
     Channel.Channel = 0;
-    Channel.NodeProperty.Property.Id = KSPROPERTY_AUDIO_VOLUMELEVEL;
+    Channel.NodeProperty.Property.Id = PropertyId;
 
-    do
+    while (Channel.Channel < 256)
     {
-        /* get channel volume */
         Status = MixerContext->Control(hMixer, IOCTL_KS_PROPERTY, (PVOID)&Channel, sizeof(KSNODEPROPERTY_AUDIO_CHANNEL), (PVOID)&Volume, sizeof(LONG), &BytesReturned);
         if (Status != MM_STATUS_SUCCESS)
             break;
 
-        /* increment channel count */
         Channel.Channel++;
+    }
 
-    }while(TRUE);
-
-    /* store channel count */
-    *MaxChannels = Channel.Channel;
-
+    *MaxChannels = max(Channel.Channel, 1);
+    *MemberFlags = *MaxChannels > 1 ?
+        KSPROPERTY_MEMBER_FLAG_BASICSUPPORT_MULTICHANNEL :
+        KSPROPERTY_MEMBER_FLAG_BASICSUPPORT_UNIFORM;
 }
 
 VOID
@@ -639,17 +749,31 @@ MMixerGetMaxChannelsForNode(
     IN LPMIXER_INFO MixerInfo,
     IN HANDLE hMixer,
     IN ULONG NodeId,
-    OUT PULONG MaxChannels)
+    IN ULONG PropertyId,
+    OUT PULONG MaxChannels,
+    OUT PULONG MemberFlags)
 {
     MIXER_STATUS Status;
 
-    /* try to get it enhanced */
-    Status = MMixerGetChannelCountEnhanced(MixerContext, MixerInfo, hMixer, NodeId, MaxChannels);
+    *MaxChannels = 1;
+    *MemberFlags = KSPROPERTY_MEMBER_FLAG_BASICSUPPORT_UNIFORM;
+    Status = MMixerGetChannelCountEnhanced(MixerContext,
+                                           MixerInfo,
+                                           hMixer,
+                                           NodeId,
+                                           PropertyId,
+                                           MaxChannels,
+                                           MemberFlags);
 
     if (Status != MM_STATUS_SUCCESS)
     {
-        /* get it old-fashioned way */
-        MMixerGetChannelCountLegacy(MixerContext, MixerInfo, hMixer, NodeId, MaxChannels);
+        MMixerGetChannelCountLegacy(MixerContext,
+                                    MixerInfo,
+                                    hMixer,
+                                    NodeId,
+                                    PropertyId,
+                                    MaxChannels,
+                                    MemberFlags);
     }
 }
 
@@ -666,10 +790,12 @@ MMixerAddMixerControlsToMixerLineByNodeIndexArray(
     ULONG Index, Count, bReserved;
     MIXER_STATUS Status;
     LPGUID NodeType;
-    ULONG MaxChannels;
+    ULONG ControlType, MaxChannels, MemberFlags, PropertyId;
 
     /* initialize control count */
     Count = 0;
+
+    DPRINT("MMixerAddMixerControlsToMixerLine node count=%lu\n", NodesCount);
 
     for(Index = 0; Index < NodesCount; Index++)
     {
@@ -687,24 +813,46 @@ MMixerAddMixerControlsToMixerLineByNodeIndexArray(
 
         /* query node type */
         NodeType = MMixerGetNodeTypeFromTopology(Topology, Nodes[Index]);
-
-        if (IsEqualGUIDAligned(NodeType, &KSNODETYPE_VOLUME))
+        ControlType = MMixerGetControlTypeFromTopologyNode(NodeType);
+        if (ControlType == 0)
         {
-            /* calculate maximum channel count for node */
-            MMixerGetMaxChannelsForNode(MixerContext, MixerInfo, hMixer, Nodes[Index], &MaxChannels);
+            DPRINT1("MMixerAddMixerControls: skipping non-control node %lu\n",
+                    Nodes[Index]);
+            continue;
+        }
+
+        if (IsEqualGUIDAligned(NodeType, &KSNODETYPE_VOLUME) ||
+            IsEqualGUIDAligned(NodeType, &KSNODETYPE_MUTE))
+        {
+            PropertyId = IsEqualGUIDAligned(NodeType, &KSNODETYPE_VOLUME) ?
+                         KSPROPERTY_AUDIO_VOLUMELEVEL : KSPROPERTY_AUDIO_MUTE;
+            MMixerGetMaxChannelsForNode(MixerContext,
+                                        MixerInfo,
+                                        hMixer,
+                                        Nodes[Index],
+                                        PropertyId,
+                                        &MaxChannels,
+                                        &MemberFlags);
 
             DPRINT("NodeId %lu MaxChannels %lu Line %S Id %lu\n", Nodes[Index], MaxChannels, DstLine->Line.szName, DstLine->Line.dwLineID);
-            /* calculate maximum channels */
             DstLine->Line.cChannels = min(DstLine->Line.cChannels, MaxChannels);
+            MaxChannels = max(DstLine->Line.cChannels, 1);
         }
         else
         {
-            /* use default of one channel */
             MaxChannels = 1;
+            MemberFlags = KSPROPERTY_MEMBER_FLAG_BASICSUPPORT_UNIFORM;
         }
 
         /* now add the mixer control */
-        Status = MMixerAddMixerControl(MixerContext, MixerInfo, hMixer, Topology, Nodes[Index], DstLine, MaxChannels);
+        Status = MMixerAddMixerControl(MixerContext,
+                                       MixerInfo,
+                                       hMixer,
+                                       Topology,
+                                       Nodes[Index],
+                                       DstLine,
+                                       MaxChannels,
+                                       MemberFlags);
 
         if (Status == MM_STATUS_SUCCESS)
         {
@@ -715,6 +863,8 @@ MMixerAddMixerControlsToMixerLineByNodeIndexArray(
 
     /* store control count */
     DstLine->Line.cControls = Count;
+
+    DPRINT("MMixerAddMixerControlsToMixerLine done controls=%lu\n", Count);
 
     /* done */
     return MM_STATUS_SUCCESS;
@@ -1011,6 +1161,43 @@ MMixerBuildMixerSourceLine(
     return MM_STATUS_SUCCESS;
 }
 
+static
+MIXER_STATUS
+MMixerAddDirectMixerSourceLines(
+    IN PMIXER_CONTEXT MixerContext,
+    IN OUT LPMIXER_INFO MixerInfo,
+    IN HANDLE hMixer,
+    IN PTOPOLOGY Topology,
+    IN ULONG PinId,
+    IN ULONG DestinationLineID)
+{
+    PPIN Pin = &Topology->TopologyPins[PinId];
+    LPMIXERLINE_EXT DstLine, SrcLine;
+    ULONG Index, SourcePin, bReserved;
+    MIXER_STATUS Status;
+
+    DstLine = MMixerGetSourceMixerLineByLineId(MixerInfo, DestinationLineID);
+    ASSERT(DstLine);
+
+    for (Index = 0; Index < Pin->PinConnectedFromCount; Index++)
+    {
+        SourcePin = Pin->PinConnectedFrom[Index];
+        MMixerIsTopologyPinReserved(Topology, SourcePin, &bReserved);
+        if (bReserved)
+            continue;
+
+        Status = MMixerBuildMixerSourceLine(MixerContext, MixerInfo, hMixer, Topology, SourcePin, 0, NULL, DestinationLineID, &SrcLine);
+        if (Status != MM_STATUS_SUCCESS)
+            return Status;
+
+        InsertTailList(&MixerInfo->LineList, &SrcLine->Entry);
+        DstLine->Line.cConnections++;
+        MMixerSetTopologyPinReserved(Topology, SourcePin);
+    }
+
+    return MM_STATUS_SUCCESS;
+}
+
 MIXER_STATUS
 MMixerAddMixerSourceLines(
     IN PMIXER_CONTEXT MixerContext,
@@ -1025,6 +1212,9 @@ MMixerAddMixerSourceLines(
     ULONG Index, SubIndex, PinId, CurNode, bConnected;
     MIXER_STATUS Status;
     LPMIXERLINE_EXT DstLine, SrcLine;
+
+    if (LineTerminator == MAXULONG)
+        return MM_STATUS_SUCCESS;
 
     /* get destination line */
     DstLine = MMixerGetSourceMixerLineByLineId(MixerInfo, DestinationLineID);
@@ -1160,6 +1350,13 @@ MMixerAddMixerControlsToDestinationLine(
     MIXER_STATUS Status;
     LPMIXERLINE_EXT DstLine;
 
+    if ((Topology->TopologyPins[PinId].NodesConnectedFromCount == 0) &&
+        (Topology->TopologyPins[PinId].PinConnectedFromCount != 0))
+    {
+        *OutLineTerminator = MAXULONG;
+        return MMixerAddDirectMixerSourceLines(MixerContext, MixerInfo, hMixer, Topology, PinId, DestinationLineId);
+    }
+
     /* allocate nodes index array */
     Status = MMixerAllocateTopologyNodeArray(MixerContext, Topology, &Nodes);
 
@@ -1172,6 +1369,12 @@ MMixerAddMixerControlsToDestinationLine(
 
     /* get all destination line controls */
     Status = MMixerCountMixerControls(MixerContext, Topology, PinId, bInput, TRUE, &NodesCount, Nodes, &LineTerminator);
+    DPRINT("MMixerAddMixerControlsToDestinationLine pin=%lu status=%x nodes=%lu first=%lu term=%lu\n",
+            PinId,
+            Status,
+            NodesCount,
+            NodesCount ? Nodes[0] : MAXULONG,
+            LineTerminator);
 
     /* check for success */
     if (Status != MM_STATUS_SUCCESS)
@@ -1202,14 +1405,16 @@ MMixerAddMixerControlsToDestinationLine(
     /* store result */
     *OutLineTerminator = LineTerminator;
 
+    /* release node index array */
+    MixerContext->Free(Nodes);
+
     /* return result */
     return Status;
 }
 
 VOID
-MMixerApplyOutputFilterHack(
+MMixerRemoveConnectedBridgePins(
     IN PMIXER_CONTEXT MixerContext,
-    IN LPMIXER_DATA MixerData,
     IN HANDLE hMixer,
     IN OUT PULONG PinsCount,
     IN OUT PULONG Pins)
@@ -1220,7 +1425,9 @@ MMixerApplyOutputFilterHack(
 
     for(Index = 0; Index < *PinsCount; Index++)
     {
-        /* check if it has a physical connection */
+        /* Endpoint-facing bridge pins are the unconnected boundary of a KS
+         * topology.  A pin with a registered physical connection continues
+         * into another filter and is therefore not an endpoint boundary. */
         Status = MMixerGetPhysicalConnection(MixerContext, hMixer, Pins[Index], &Connection);
 
         if (Status == MM_STATUS_SUCCESS)
@@ -1262,6 +1469,8 @@ MMixerHandleTopologyFilter(
     PULONG Pins;
     PTOPOLOGY Topology;
 
+    DPRINT("MMIXER: handle local topology input=%lu pin=%lu\n", bInput, Pin);
+
     /* re-use existing topology */
     Topology = MixerData->Topology;
 
@@ -1280,6 +1489,11 @@ MMixerHandleTopologyFilter(
         */
         PinsCount = 0;
         Status = MMixerGetAllUpOrDownstreamPinsFromPinIndex(MixerContext, Topology, Pin, FALSE, &PinsCount, Pins);
+        DPRINT("MMIXER: local topology pin=%lu downstream status=%x count=%lu first=%lu\n",
+                Pin,
+                Status,
+                PinsCount,
+                PinsCount ? Pins[0] : MAXULONG);
 
         /* check for success */
         if (Status != MM_STATUS_SUCCESS)
@@ -1291,22 +1505,34 @@ MMixerHandleTopologyFilter(
             /* return error code */
             return Status;
         }
-        /* HACK:
-        * some topologies do not have strict boundaries
-        * WorkArround: remove all pin ids which have a physical connection
-        * because bridge pins may belong to different render paths
-        */
-        MMixerApplyOutputFilterHack(MixerContext, MixerData, MixerData->hDevice, &PinsCount, Pins);
+        MMixerRemoveConnectedBridgePins(
+            MixerContext, MixerData->hDevice, &PinsCount, Pins);
+        DPRINT("MMIXER: local topology pin=%lu after output filter count=%lu first=%lu\n",
+                Pin,
+                PinsCount,
+                PinsCount ? Pins[0] : MAXULONG);
 
-        /* sanity checks */
-        ASSERT(PinsCount != 0);
+        if (PinsCount == 0)
+        {
+            DPRINT1("MMixerHandleTopologyFilter no downstream pins for bridge pin %lu\n", Pin);
+            MixerContext->Free(Pins);
+            return MM_STATUS_UNSUCCESSFUL;
+        }
+
         if (PinsCount != 1)
         {
             DPRINT1("MMixerHandlePhysicalConnection Expected 1 pin but got %lu\n", PinsCount);
         }
 
         /* create destination line */
+        DPRINT("MMIXER: local topology build destination pin=%lu input=%lu begin\n",
+                Pins[0],
+                bInput);
         Status = MMixerBuildMixerDestinationLine(MixerContext, MixerInfo, MixerData->hDevice, Pins[0], bInput);
+        DPRINT("MMIXER: local topology build destination pin=%lu input=%lu status=%x\n",
+                Pins[0],
+                bInput,
+                Status);
 
         /* calculate destination line id */
         DestinationLineID = (DESTINATION_LINE + MixerInfo->MixCaps.cDestinations - 1);
@@ -1321,12 +1547,26 @@ MMixerHandleTopologyFilter(
         }
 
         /* add mixer controls to destination line */
+        DPRINT("MMIXER: local topology add controls pin=%lu dest=%lu begin\n",
+                Pins[0],
+                DestinationLineID);
         Status = MMixerAddMixerControlsToDestinationLine(MixerContext, MixerInfo, MixerData->hDevice, Topology, Pins[0], bInput, DestinationLineID, &LineTerminator);
+        DPRINT("MMIXER: local topology add controls pin=%lu dest=%lu status=%x term=%lu\n",
+                Pins[0],
+                DestinationLineID,
+                Status,
+                LineTerminator);
 
         if (Status == MM_STATUS_SUCCESS)
         {
             /* now add the rest of the source lines */
+            DPRINT("MMIXER: local topology add source lines dest=%lu term=%lu begin\n",
+                    DestinationLineID,
+                    LineTerminator);
             Status = MMixerAddMixerSourceLines(MixerContext, MixerInfo, MixerData->hDevice, Topology, DestinationLineID, LineTerminator);
+            DPRINT("MMIXER: local topology add source lines dest=%lu status=%x\n",
+                    DestinationLineID,
+                    Status);
         }
 
         /* mark pin as consumed */
@@ -1341,12 +1581,26 @@ MMixerHandleTopologyFilter(
         DestinationLineID = (DESTINATION_LINE + MixerInfo->MixCaps.cDestinations - 1);
 
         /* add mixer controls */
+        DPRINT("MMIXER: local input add controls pin=%lu dest=%lu begin\n",
+                Pin,
+                DestinationLineID);
         Status = MMixerAddMixerControlsToDestinationLine(MixerContext, MixerInfo, MixerData->hDevice, Topology, Pin, bInput, DestinationLineID, &LineTerminator);
+        DPRINT("MMIXER: local input add controls pin=%lu dest=%lu status=%x term=%lu\n",
+                Pin,
+                DestinationLineID,
+                Status,
+                LineTerminator);
 
         if (Status == MM_STATUS_SUCCESS)
         {
             /* now add the rest of the source lines */
+            DPRINT("MMIXER: local input add source lines dest=%lu term=%lu begin\n",
+                    DestinationLineID,
+                    LineTerminator);
             Status = MMixerAddMixerSourceLines(MixerContext, MixerInfo, MixerData->hDevice, Topology, DestinationLineID, LineTerminator);
+            DPRINT("MMIXER: local input add source lines dest=%lu status=%x\n",
+                    DestinationLineID,
+                    Status);
         }
     }
     return Status;
@@ -1359,12 +1613,14 @@ MMixerHandlePhysicalConnection(
     IN LPMIXER_DATA MixerData,
     IN OUT LPMIXER_INFO MixerInfo,
     IN ULONG bInput,
+    IN ULONG WavePinId,
     IN PKSPIN_PHYSICALCONNECTION OutConnection)
 {
     MIXER_STATUS Status;
     ULONG PinsCount, LineTerminator, DestinationLineID;
     PULONG Pins;
     PTOPOLOGY Topology;
+    LPMIXER_DATA WaveMixerData = MixerData;
 
     /* first try to open the connected filter */
     OutConnection->SymbolicLinkName[1] = L'\\';
@@ -1404,9 +1660,6 @@ MMixerHandlePhysicalConnection(
         Topology = MixerData->Topology;
     }
 
-    /* mark pin as consumed */
-    MMixerSetTopologyPinReserved(Topology, OutConnection->Pin);
-
     if (!bInput)
     {
         /* allocate pin index array which will hold all referenced pins */
@@ -1433,18 +1686,37 @@ MMixerHandlePhysicalConnection(
             /* return error code */
             return Status;
         }
-        /* HACK:
-         * some topologies do not have strict boundaries
-         * WorkArround: remove all pin ids which have a physical connection
-         * because bridge pins may belong to different render paths
-         */
-        MMixerApplyOutputFilterHack(MixerContext, MixerData, MixerData->hDevice, &PinsCount, Pins);
+        MMixerRemoveConnectedBridgePins(
+            MixerContext, MixerData->hDevice, &PinsCount, Pins);
 
-        /* sanity checks */
-        ASSERT(PinsCount != 0);
+        if (PinsCount == 0)
+        {
+            DPRINT1("MMixerHandlePhysicalConnection no downstream pins for connected bridge pin %lu\n",
+                    OutConnection->Pin);
+            MixerContext->Free(Pins);
+            return MM_STATUS_UNSUCCESSFUL;
+        }
+
         if (PinsCount != 1)
         {
             DPRINT1("MMixerHandlePhysicalConnection Expected 1 pin but got %lu\n", PinsCount);
+        }
+
+        MMixerSetWaveConnector(MixerList,
+                               WaveMixerData->DeviceId,
+                               WavePinId,
+                               bInput,
+                               MixerData->DeviceId,
+                               Pins[0]);
+
+        /* A direct pin-to-pin topology has an endpoint but no legacy mixer
+         * controls to construct beyond its endpoint-facing bridge pin. */
+        if (Topology->TopologyNodesCount == 0)
+        {
+            MMixerSetTopologyPinReserved(Topology, OutConnection->Pin);
+            MMixerSetTopologyPinReserved(Topology, Pins[0]);
+            MixerContext->Free(Pins);
+            return MM_STATUS_SUCCESS;
         }
 
         /* create destination line */
@@ -1479,6 +1751,35 @@ MMixerHandlePhysicalConnection(
     }
     else
     {
+        Status = MMixerAllocateTopologyPinArray(MixerContext, Topology, &Pins);
+        if (Status == MM_STATUS_SUCCESS)
+        {
+            PinsCount = 0;
+            Status = MMixerGetAllUpOrDownstreamPinsFromPinIndex(
+                MixerContext,
+                Topology,
+                OutConnection->Pin,
+                TRUE,
+                &PinsCount,
+                Pins);
+            if (Status == MM_STATUS_SUCCESS && PinsCount)
+            {
+                MMixerSetWaveConnector(MixerList,
+                                       WaveMixerData->DeviceId,
+                                       WavePinId,
+                                       bInput,
+                                       MixerData->DeviceId,
+                                       Pins[0]);
+            }
+            MixerContext->Free(Pins);
+        }
+
+        if (Topology->TopologyNodesCount == 0)
+        {
+            MMixerSetTopologyPinReserved(Topology, OutConnection->Pin);
+            return Status;
+        }
+
         /* calculate destination line id */
         DestinationLineID = (DESTINATION_LINE + MixerInfo->MixCaps.cDestinations-1);
 
@@ -1491,6 +1792,9 @@ MMixerHandlePhysicalConnection(
             Status = MMixerAddMixerSourceLines(MixerContext, MixerInfo, MixerData->hDevice, Topology, DestinationLineID, LineTerminator);
         }
     }
+
+    /* mark the physical bridge pin as consumed after its path is resolved. */
+    MMixerSetTopologyPinReserved(Topology, OutConnection->Pin);
 
     return Status;
 }
@@ -1511,7 +1815,13 @@ MMixerInitializeFilter(
     PKSPIN_PHYSICALCONNECTION OutConnection;
     ULONG * Pins;
     ULONG PinsFound;
+    ULONG WavePinId;
     ULONG NewMixerInfo = FALSE;
+
+    DPRINT("MMIXER: initialize filter node=%lu input=%lu mixerInfo=%p\n",
+            NodeIndex,
+            bInputMixer,
+            MixerInfo);
 
     if (MixerInfo == NULL)
     {
@@ -1562,8 +1872,6 @@ MMixerInitializeFilter(
     Status = MMixerAllocateTopologyPinArray(MixerContext, Topology, &Pins);
     ASSERT(Status == MM_STATUS_SUCCESS);
 
-    PinsFound = 0;
-
     /* now get all sink / source pins, which are attached to the ADC / DAC node
      * For sink pins (wave out) search up stream
      * For source pins (wave in) search down stream
@@ -1571,19 +1879,40 @@ MMixerInitializeFilter(
      */
     PinsFound = 0;
     MMixerGetAllUpOrDownstreamPinsFromNodeIndex(MixerContext, Topology, NodeIndex, !bInputMixer, &PinsFound, Pins);
+    DPRINT("MMIXER: node=%lu input=%lu wave pins found=%lu first=%lu\n",
+            NodeIndex,
+            bInputMixer,
+            PinsFound,
+            PinsFound ? Pins[0] : MAXULONG);
 
     /* if there is no pin found, we have a broken topology */
     ASSERT(PinsFound != 0);
 
     /* now create a wave info struct */
+    DPRINT("MMIXER: node=%lu input=%lu initialize wave info begin\n",
+            NodeIndex,
+            bInputMixer);
     Status = MMixerInitializeWaveInfo(MixerContext, MixerList, MixerData, MixerInfo->MixCaps.szPname, bInputMixer, PinsFound, Pins);
+    DPRINT("MMIXER: node=%lu input=%lu initialize wave info status=%x WaveIn=%lu WaveOut=%lu\n",
+            NodeIndex,
+            bInputMixer,
+            Status,
+            MixerList->WaveInListCount,
+            MixerList->WaveOutListCount);
     if (Status != MM_STATUS_SUCCESS)
     {
         /* failed to create wave info struct */
-        MixerContext->Free(MixerInfo);
+        if (NewMixerInfo)
+        {
+            DPRINT1("MMixerInitializeWaveInfo failed with %x\n", Status);
+            MixerContext->Free(MixerInfo);
+            MixerData->MixerInfo = NULL;
+        }
         MixerContext->Free(Pins);
         return Status;
     }
+
+    WavePinId = Pins[0];
 
     /* mark all found pins as reserved */
     for(Index = 0; Index < PinsFound; Index++)
@@ -1613,17 +1942,39 @@ MMixerInitializeFilter(
 
     PinsFound = 0;
     MMixerGetAllUpOrDownstreamPinsFromNodeIndex(MixerContext, Topology, NodeIndex, bInputMixer, &PinsFound, Pins);
+    DPRINT("MMIXER: node=%lu input=%lu bridge pins found=%lu first=%lu\n",
+            NodeIndex,
+            bInputMixer,
+            PinsFound,
+            PinsFound ? Pins[0] : MAXULONG);
 
-    /* if there is no pin found, we have a broken topology */
-    ASSERT(PinsFound != 0);
+    /*
+     * A wave pin does not require a topology bridge.  In particular, USB
+     * Audio filters may expose a valid streaming pin while omitting the
+     * optional mixer-control path on the other side of the ADC / DAC node.
+     * Keep the wave endpoint that was initialized above instead of indexing
+     * an empty pin array (or asserting in a debug build).
+     */
+    if (PinsFound == 0)
+    {
+        MixerContext->Free(Pins);
+        Status = MM_STATUS_SUCCESS;
+        goto Complete;
+    }
 
-    /* there should be exactly one bridge pin */
-    ASSERT(PinsFound == 1);
+    /* Use the first bridge pin, as the existing release-build path did. */
+    if (PinsFound != 1)
+        DPRINT1("MMixerInitializeFilter expected one bridge pin, got %lu\n", PinsFound);
 
     DPRINT("BridgePin %lu bInputMixer %lu\n", Pins[0], bInputMixer);
 
     /* does the pin have a physical connection */
     Status = MMixerGetPhysicalConnection(MixerContext, MixerData->hDevice, Pins[0], &OutConnection);
+    DPRINT("MMIXER: node=%lu input=%lu bridge pin=%lu physical status=%x\n",
+            NodeIndex,
+            bInputMixer,
+            Pins[0],
+            Status);
 
     if (Status == MM_STATUS_SUCCESS)
     {
@@ -1631,7 +1982,18 @@ MMixerInitializeFilter(
         MMixerSetTopologyPinReserved(Topology, Pins[0]);
 
         /* topology on the topoloy filter */
-        Status = MMixerHandlePhysicalConnection(MixerContext, MixerList, MixerData, MixerInfo, bInputMixer, OutConnection);
+        Status = MMixerHandlePhysicalConnection(
+            MixerContext,
+            MixerList,
+            MixerData,
+            MixerInfo,
+            bInputMixer,
+            WavePinId,
+            OutConnection);
+        DPRINT("MMIXER: node=%lu input=%lu physical topology status=%x\n",
+                NodeIndex,
+                bInputMixer,
+                Status);
 
         /* free physical connection data */
         MixerContext->Free(OutConnection);
@@ -1639,12 +2001,23 @@ MMixerInitializeFilter(
     else
     {
         /* topology is on the same filter */
+        MMixerSetWaveConnector(MixerList,
+                               MixerData->DeviceId,
+                               WavePinId,
+                               bInputMixer,
+                               MixerData->DeviceId,
+                               Pins[0]);
         Status = MMixerHandleTopologyFilter(MixerContext, MixerList, MixerData, MixerInfo, bInputMixer, Pins[0]);
+        DPRINT("MMIXER: node=%lu input=%lu local topology status=%x\n",
+                NodeIndex,
+                bInputMixer,
+                Status);
     }
 
     /* free pins */
     MixerContext->Free(Pins);
 
+Complete:
     if (NewMixerInfo)
     {
         /* insert mixer */
@@ -1654,6 +2027,13 @@ MMixerInitializeFilter(
     }
 
     /* done */
+    DPRINT("MMIXER: initialize filter done node=%lu input=%lu status=%x Mixer=%lu WaveIn=%lu WaveOut=%lu\n",
+            NodeIndex,
+            bInputMixer,
+            Status,
+            MixerList->MixerListCount,
+            MixerList->WaveInListCount,
+            MixerList->WaveOutListCount);
     return Status;
 }
 
@@ -1670,6 +2050,10 @@ MMixerHandleAlternativeMixers(
     LPMIXERLINE_EXT DstLine;
 
     DPRINT("DeviceName %S\n", MixerData->DeviceName);
+
+    /* A pin-to-pin topology without processing nodes has no mixer controls. */
+    if (Topology->TopologyNodesCount == 0)
+        return;
 
     /* get topology pin count */
     MMixerGetTopologyPinCount(Topology, &PinCount);
@@ -1765,6 +2149,14 @@ MMixerSetupFilter(
 
     /* check if the filter has an wave out node */
     NodeIndex = MMixerGetNodeIndexFromGuid(Topology, &KSNODETYPE_DAC);
+    if (NodeIndex == MAXULONG)
+    {
+        /* Modern WaveRT render filters use an audio-engine node instead of a
+         * legacy DAC node.  Both nodes have the same render-side topology
+         * direction for the purposes of endpoint enumeration. */
+        NodeIndex = MMixerGetNodeIndexFromGuid(Topology, &KSNODETYPE_AUDIO_ENGINE);
+    }
+    DPRINT("MMIXER: DAC node index %lu\n", NodeIndex);
     if (NodeIndex != MAXULONG)
     {
         /* it has */
@@ -1778,6 +2170,7 @@ MMixerSetupFilter(
         }
         else
         {
+            DPRINT1("MMIXER: output initialize failed %x\n", Status);
             /* reset mixer info in case of error */
             MixerInfo = NULL;
         }
@@ -1785,6 +2178,7 @@ MMixerSetupFilter(
 
     /* check if the filter has an wave in node */
     NodeIndex = MMixerGetNodeIndexFromGuid(Topology, &KSNODETYPE_ADC);
+    DPRINT("MMIXER: ADC node index %lu\n", NodeIndex);
     if (NodeIndex != MAXULONG)
     {
         /* it has */
@@ -1795,6 +2189,10 @@ MMixerSetupFilter(
         {
             /* increment mixer count */
             (*DeviceCount)++;
+        }
+        else
+        {
+            DPRINT1("MMIXER: input initialize failed %x\n", Status);
         }
 
     }

@@ -24,6 +24,24 @@
 
 #include "wine/test.h"
 
+#define IDC_PROGRESS_PAUSE 110
+
+static void pump_messages(DWORD milliseconds)
+{
+    DWORD end = GetTickCount() + milliseconds;
+    MSG msg;
+
+    do
+    {
+        while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE))
+        {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        Sleep(1);
+    } while ((LONG)(end - GetTickCount()) > 0);
+}
+
 
 static void test_IProgressDialog_QueryInterface(void)
 {
@@ -33,31 +51,97 @@ static void test_IProgressDialog_QueryInterface(void)
     IUnknown *unk;
     HRESULT hr;
 
-    hr = CoCreateInstance(&CLSID_ProgressDialog, NULL, CLSCTX_INPROC_SERVER, &IID_IProgressDialog, (void*)&dlg);
-    if (FAILED(hr)) {
-        win_skip("CoCreateInstance for IProgressDialog returned 0x%x\n", hr);
+    hr = CoCreateInstance(&CLSID_ProgressDialog, NULL, CLSCTX_INPROC_SERVER, &IID_IProgressDialog, (void **)&dlg);
+    if (FAILED(hr))
+    {
+        win_skip("ProgressDialog is not supported, hr %#lx.\n", hr);
         return;
     }
 
     hr = IProgressDialog_QueryInterface(dlg, &IID_IUnknown, NULL);
-    ok(hr == E_POINTER, "got 0x%x (expected E_POINTER)\n", hr);
+    ok(hr == E_POINTER, "Unexpected hr %#lx.\n", hr);
 
     hr = IProgressDialog_QueryInterface(dlg, &IID_IUnknown, (void**)&unk);
-    ok(hr == S_OK, "QueryInterface (IUnknown) returned 0x%x\n", hr);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
     if (SUCCEEDED(hr)) {
         IUnknown_Release(unk);
     }
 
     hr = IProgressDialog_QueryInterface(dlg, &IID_IOleWindow, (void**)&olewindow);
-    ok(hr == S_OK, "QueryInterface (IOleWindow) returned 0x%x\n", hr);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
     if (SUCCEEDED(hr)) {
         hr = IOleWindow_QueryInterface(olewindow, &IID_IProgressDialog, (void**)&dlg2);
-        ok(hr == S_OK, "QueryInterface (IProgressDialog) returned 0x%x\n", hr);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
         if (SUCCEEDED(hr)) {
             IProgressDialog_Release(dlg2);
         }
         IOleWindow_Release(olewindow);
     }
+    IProgressDialog_Release(dlg);
+}
+
+static void test_IProgressDialog_lifecycle(DWORD flags)
+{
+    IProgressDialog *dlg;
+    IOleWindow *olewindow;
+    HWND hwnd = (HWND)0xdeadbeef;
+    HRESULT hr;
+    BOOL cancelled;
+    DWORD start;
+
+    hr = CoCreateInstance(&CLSID_ProgressDialog, NULL, CLSCTX_INPROC_SERVER,
+                          &IID_IProgressDialog, (void **)&dlg);
+    ok(hr == S_OK, "CoCreateInstance failed, hr %#lx.\n", hr);
+    if (FAILED(hr))
+        return;
+
+    hr = IProgressDialog_QueryInterface(dlg, &IID_IOleWindow, (void **)&olewindow);
+    ok(hr == S_OK, "QueryInterface(IOleWindow) failed, hr %#lx.\n", hr);
+    if (FAILED(hr))
+    {
+        IProgressDialog_Release(dlg);
+        return;
+    }
+
+    IProgressDialog_SetTitle(dlg, L"progress parity title");
+    IProgressDialog_SetLine(dlg, 1, L"first line", FALSE, NULL);
+    IProgressDialog_SetLine(dlg, 2, L"second line", FALSE, NULL);
+    IProgressDialog_SetLine(dlg, 3, L"third line", FALSE, NULL);
+    IProgressDialog_SetProgress64(dlg, 0x100000001ULL, 0x200000002ULL);
+    IProgressDialog_StartProgressDialog(dlg, NULL, NULL, flags, NULL);
+    start = GetTickCount();
+    do
+    {
+        pump_messages(1);
+        hwnd = NULL;
+        IOleWindow_GetWindow(olewindow, &hwnd);
+    } while (!(hwnd && IsWindow(hwnd)) && GetTickCount() - start < 500);
+
+    hr = IOleWindow_GetWindow(olewindow, &hwnd);
+    ok(hr == S_OK, "GetWindow failed, hr %#lx.\n", hr);
+    ok(hwnd && hwnd != (HWND)0xdeadbeef && IsWindow(hwnd), "invalid window %p.\n", hwnd);
+    if (hwnd && IsWindow(hwnd))
+    {
+        ok(!GetDlgItem(hwnd, IDC_PROGRESS_PAUSE), "unexpected non-native pause control.\n");
+        if (!(flags & PROGDLG_NOCANCEL))
+        {
+            SendMessageW(hwnd, WM_CLOSE, 0, 0);
+            start = GetTickCount();
+            while (!(cancelled = IProgressDialog_HasUserCancelled(dlg)) && GetTickCount() - start < 50)
+                pump_messages(1);
+            ok(cancelled, "cancel command was not observed.\n");
+        }
+    }
+
+    IProgressDialog_StopProgressDialog(dlg);
+    pump_messages(20);
+    hwnd = (HWND)0xdeadbeef;
+    hr = IOleWindow_GetWindow(olewindow, &hwnd);
+    ok(hr == S_OK || hr == E_FAIL, "GetWindow after stop returned %#lx.\n", hr);
+    ok(!hwnd || hwnd == (HWND)0xdeadbeef || !IsWindow(hwnd),
+       "window %p survived StopProgressDialog.\n", hwnd);
+
+    IOleWindow_Release(olewindow);
     IProgressDialog_Release(dlg);
 }
 
@@ -67,6 +151,10 @@ START_TEST(progressdlg)
     CoInitialize(NULL);
 
     test_IProgressDialog_QueryInterface();
+    test_IProgressDialog_lifecycle(PROGDLG_NORMAL);
+    test_IProgressDialog_lifecycle(PROGDLG_NOCANCEL | PROGDLG_NOMINIMIZE |
+                                   PROGDLG_NOPROGRESSBAR);
+    test_IProgressDialog_lifecycle(PROGDLG_AUTOTIME);
 
     CoUninitialize();
 }

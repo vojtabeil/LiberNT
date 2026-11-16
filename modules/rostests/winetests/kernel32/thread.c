@@ -71,6 +71,8 @@
 #define ARCH "arm"
 #elif defined __aarch64__
 #define ARCH "arm64"
+#elif defined(__REACTOS__) && defined(__riscv) && (__riscv_xlen == 64)
+#define ARCH "riscv64"
 #else
 #define ARCH "none"
 #endif
@@ -326,6 +328,13 @@ static void create_function_addr_events(HANDLE events[2])
 }
 
 /* check CreateRemoteThread */
+#ifdef __REACTOS__
+/* A thread that wrongly ran would signal within milliseconds; six clock ticks still show it did not */
+#define NOT_RUN_WAIT_MS 100
+#else
+#define NOT_RUN_WAIT_MS 1000
+#endif
+
 static VOID test_CreateRemoteThread(void)
 {
     HANDLE hProcess, hThread, hEvent, hRemoteEvent;
@@ -369,7 +378,7 @@ static VOID test_CreateRemoteThread(void)
     ok(ret == 2, "ret=%lu, err=%lu\n", ret, GetLastError());
 
     /* thread still suspended, so wait times out */
-    ret = WaitForSingleObject(hEvent, 1000);
+    ret = WaitForSingleObject(hEvent, NOT_RUN_WAIT_MS);
     ok(ret == WAIT_TIMEOUT, "wait did not time out, ret=%lu\n", ret);
 
     ret = ResumeThread(hThread);
@@ -400,7 +409,7 @@ static VOID test_CreateRemoteThread(void)
     ok(hThread != NULL, "CreateRemoteThread failed, err=%lu\n", GetLastError());
 
     /* closed handle, so wait times out */
-    ret = WaitForSingleObject(hEvent, 1000);
+    ret = WaitForSingleObject(hEvent, NOT_RUN_WAIT_MS);
     ok(ret == WAIT_TIMEOUT, "wait did not time out, ret=%lu\n", ret);
 
     /* check that remote SetEvent() failed */
@@ -530,7 +539,7 @@ static VOID test_CreateThread_suspended(void)
    of a better way of checking this than just waiting.  I am not sure if this
    will work on slow computers.
 */
-  ok(WaitForSingleObject(thread,1000)==WAIT_TIMEOUT,
+  ok(WaitForSingleObject(thread,NOT_RUN_WAIT_MS)==WAIT_TIMEOUT,
      "ResumeThread should not have actually started the thread\n");
 /* Now actually resume the thread and make sure that it actually completes*/
   ok(ResumeThread(thread)==1,"Resume thread returned an invalid value\n");
@@ -1920,6 +1929,10 @@ static inline unsigned long get_fpu_cw(void)
     ULONG_PTR cw;
     __asm__ __volatile__( "mrs %0, fpcr" : "=r" (cw) );
     return cw;
+#elif defined(__REACTOS__) && defined(__riscv)
+    ULONG_PTR cw;
+    __asm__ __volatile__( "frrm %0" : "=r" (cw) );
+    return cw;
 #else
     return 0;
 #endif
@@ -2017,6 +2030,9 @@ static void test_thread_fpu_cw(void)
         { _MCW_EM | _PC_64, 0 },
         { _MCW_EM | _PC_64, 0 },
         { _MCW_EM | _PC_64, 0 }
+#elif defined(__REACTOS__) && defined(__riscv)
+        { _MCW_EM | _PC_64, 0 },
+        { _MCW_EM | _PC_64, 0 }
 #else
         { 0xdeadbeef, 0xdeadbeef }
 #endif
@@ -2036,6 +2052,20 @@ static void test_thread_fpu_cw(void)
     _control87( _EM_INEXACT | _RC_CHOP | _PC_24, _MCW_EM | _MCW_RC | _MCW_PC );
     cw = _control87( 0, 0 );
     fpu_cw = get_fpu_cw();
+#if defined(__REACTOS__) && defined(__aarch64__)
+    if (!(fpu_cw & 0x9f00))
+    {
+        skip("The processor does not implement the FPCR trap enable bits\n");
+        _control87( initial_cw, _MCW_EM | _MCW_RC | _MCW_PC );
+        _clearfp();
+        return;
+    }
+#elif defined(__REACTOS__) && defined(__riscv)
+    skip("RISC-V floating point has no exception trap enables\n");
+    _control87( initial_cw, _MCW_EM | _MCW_RC | _MCW_PC );
+    _clearfp();
+    return;
+#endif
     ok(cw == expected_cw[2].cw, "expected %#x got %#x\n", expected_cw[2].cw, cw);
     ok(fpu_cw == expected_cw[2].fpu_cw ||
             broken(expected_cw[2].fpu_cw_broken && fpu_cw == expected_cw[2].fpu_cw_broken),

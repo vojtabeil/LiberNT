@@ -48,6 +48,19 @@ void Call_NtRaiseException(PEXCEPTION_RECORD ExceptionRecord, PCONTEXT Context, 
 #endif // _M_AMD64
 #endif // __REACTOS__
 
+#if defined(__REACTOS__) && (defined(__i386__) || defined(__x86_64__))
+static BOOL is_qemu_tcg(void)
+{
+    int regs[4];
+
+    __cpuid(regs, 1);
+    if (!(regs[2] & (1u << 31)))
+        return FALSE;
+    __cpuid(regs, 0x40000000);
+    return !memcmp(&regs[1], "TCGTCGTCGTCG", 12);
+}
+#endif
+
 static void *code_mem;
 static HMODULE hntdll;
 static BOOL is_arm64ec;
@@ -319,6 +332,8 @@ static void test_hwbpt_in_syscall(void)
 #endif
 
 #ifdef __i386__
+
+#define HAVE_ARCH_EXCEPTION_TESTS 1
 
 #ifndef __WINE_WINTRNL_H
 #define ProcessExecuteFlags 0x22
@@ -814,6 +829,13 @@ static void test_prot_fault(void)
             skip( "Exception %u broken on Wow64\n", i );
             continue;
         }
+#ifdef __REACTOS__
+        if (is_qemu_tcg() && (i == 17 || i == 18))
+        {
+            skip("%u: QEMU TCG does not fault data accesses through a null selector\n", i);
+            continue;
+        }
+#endif
         got_exception = 0;
         run_exception_test(prot_fault_handler, &exceptions[i], &exceptions[i].code,
                            sizeof(exceptions[i].code), 0);
@@ -1508,6 +1530,13 @@ static void test_simd_exceptions(void)
         skip("system doesn't support SSE\n");
         return;
     }
+#ifdef __REACTOS__
+    if (is_qemu_tcg())
+    {
+        skip("QEMU TCG does not raise SIMD floating-point exceptions\n");
+        return;
+    }
+#endif
 
     /* generate a SIMD exception */
     stage = 2;
@@ -1585,6 +1614,10 @@ static void test_fpu_exceptions(void)
 
     struct fpu_exception_info info;
 
+#ifdef __REACTOS__
+    if (!is_qemu_tcg())
+    {
+#endif
     memset(&info, 0, sizeof(info));
     run_exception_test(fpu_exception_handler, &info, fpu_exception_test_ie, sizeof(fpu_exception_test_ie), 0);
     ok(info.exception_code == EXCEPTION_FLT_STACK_CHECK,
@@ -1592,11 +1625,21 @@ static void test_fpu_exceptions(void)
     ok(info.exception_offset == 0x19 || info.exception_offset == info.eip_offset,
        "Got exception offset %#lx, expected 0x19\n", info.exception_offset);
     ok(info.eip_offset == 0x1b, "Got EIP offset %#lx, expected 0x1b\n", info.eip_offset);
+#ifdef __REACTOS__
+    }
+    else
+        skip("QEMU TCG does not raise x87 stack faults\n");
+#endif
 
     memset(&info, 0, sizeof(info));
     run_exception_test(fpu_exception_handler, &info, fpu_exception_test_de, sizeof(fpu_exception_test_de), 0);
     ok(info.exception_code == EXCEPTION_FLT_DIVIDE_BY_ZERO,
             "Got exception code %#lx, expected EXCEPTION_FLT_DIVIDE_BY_ZERO\n", info.exception_code);
+#ifdef __REACTOS__
+    if (is_qemu_tcg())
+        skip("QEMU TCG saves no x87 instruction pointer with FXSAVE\n");
+    else
+#endif
     ok(info.exception_offset == 0x17 || info.exception_offset == info.eip_offset,
        "Got exception offset %#lx, expected 0x17\n", info.exception_offset);
     ok(info.eip_offset == 0x19, "Got EIP offset %#lx, expected 0x19\n", info.eip_offset);
@@ -2323,6 +2366,8 @@ static void test_instrumentation_callback(void)
 }
 
 #elif defined(__x86_64__)
+
+#define HAVE_ARCH_EXCEPTION_TESTS 1
 
 static LONG consolidate_dummy_called;
 static PVOID CALLBACK test_consolidate_dummy(EXCEPTION_RECORD *rec)
@@ -3334,6 +3379,13 @@ static void test_simd_exceptions(void)
         skip("system doesn't support SSE\n");
         return;
     }
+#ifdef __REACTOS__
+    if (is_qemu_tcg())
+    {
+        skip("QEMU TCG does not raise SIMD floating-point exceptions\n");
+        return;
+    }
+#endif
 
     /* generate a SIMD exception */
     stage = 2;
@@ -3356,6 +3408,13 @@ static void test_prot_fault(void)
 
     for (i = 0; i < ARRAY_SIZE(exceptions); i++)
     {
+#ifdef __REACTOS__
+        if (is_qemu_tcg() && (i == 14 || i == 37))
+        {
+            skip("%u: QEMU TCG does not emulate this instruction like x64 hardware\n", i);
+            continue;
+        }
+#endif
         got_exception = 0;
         run_exception_test(prot_fault_handler, &exceptions[i], &exceptions[i].code,
                            sizeof(exceptions[i].code), 0);
@@ -4383,7 +4442,11 @@ static void test_continue(void)
 
 static void test_wow64_context(void)
 {
+#ifdef __REACTOS__
+    char appname[MAX_PATH];
+#else
     const char appname[] = "C:\\windows\\syswow64\\cmd.exe";
+#endif
     char cmdline[256];
     THREAD_BASIC_INFORMATION info;
     PROCESS_INFORMATION pi;
@@ -4409,6 +4472,10 @@ static void test_wow64_context(void)
     }
 #endif
 
+#ifdef __REACTOS__
+    GetSystemWow64DirectoryA(appname, MAX_PATH);
+    strcat(appname, "\\cmd.exe");
+#endif
     memset(&ctx, 0x55, sizeof(ctx));
     ctx.ContextFlags = WOW64_CONTEXT_ALL;
     ret = pRtlWow64GetThreadContext( GetCurrentThread(), &ctx );
@@ -5915,6 +5982,8 @@ static void test_direct_syscalls(void)
 
 #elif defined(__arm__)
 
+#define HAVE_ARCH_EXCEPTION_TESTS 1
+
 static void test_thread_context(void)
 {
     CONTEXT context;
@@ -7017,6 +7086,8 @@ static void test_restore_context(void)
 
 #elif defined(__aarch64__)
 
+#define HAVE_ARCH_EXCEPTION_TESTS 1
+
 static void test_thread_context(void)
 {
     CONTEXT context;
@@ -7066,6 +7137,7 @@ static void test_thread_context(void)
      };
 
     memcpy( func_ptr, call_func, sizeof(call_func) );
+    FlushInstructionCache( GetCurrentProcess(), func_ptr, sizeof(call_func) );
 
 #define COMPARE(reg) \
     ok( context.reg == expect.reg, "wrong " #reg " %p/%p\n", (void *)(ULONG64)context.reg, (void *)(ULONG64)expect.reg )
@@ -7671,6 +7743,7 @@ static void test_KiUserExceptionDispatcher(void)
     *(void **)&hook_trampoline[4] = hook_KiUserExceptionDispatcher;
     trampoline_ptr = (char *)code_mem + 1024;
     memcpy( trampoline_ptr, hook_trampoline, sizeof(hook_trampoline));
+    FlushInstructionCache( GetCurrentProcess(), trampoline_ptr, sizeof(hook_trampoline) );
 
     ret = VirtualProtect( pKiUserExceptionDispatcher, sizeof(saved_code),
                           PAGE_EXECUTE_READWRITE, &old_protect );
@@ -7754,6 +7827,7 @@ static void test_KiUserApcDispatcher(void)
 
     *(void **)&hook_trampoline[4] = hook_KiUserApcDispatcher;
     memcpy(code_mem, hook_trampoline, sizeof(hook_trampoline));
+    FlushInstructionCache( GetCurrentProcess(), code_mem, sizeof(hook_trampoline) );
 
     ret = VirtualProtect( pKiUserApcDispatcher, sizeof(saved_code),
                           PAGE_EXECUTE_READWRITE, &old_protect );
@@ -8035,9 +8109,14 @@ static void rtlraiseexception_handler_( EXCEPTION_RECORD *rec, void *frame, CONT
 
     ok( addr == (char *)code_mem + 0x0c,
         "ExceptionAddress at %p instead of %p\n", addr, (char *)code_mem + 0x0c );
+#ifdef __REACTOS__
+    ok( context->ContextFlags == (CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS),
+        "wrong context flags %lx\n", context->ContextFlags );
+#else
     ok( context->ContextFlags == (CONTEXT_FULL | CONTEXT_UNWOUND_TO_CALL) ||
         context->ContextFlags == (CONTEXT_FULL | CONTEXT_DEBUG_REGISTERS | CONTEXT_UNWOUND_TO_CALL),
         "wrong context flags %lx\n", context->ContextFlags );
+#endif
     ok( context->Pc == (UINT_PTR)addr,
         "%d: Pc at %Ix instead of %Ix\n", test_stage, context->Pc, (UINT_PTR)addr );
 
@@ -8271,7 +8350,11 @@ static PVOID CALLBACK test_consolidate_dummy(EXCEPTION_RECORD *rec)
     return (PVOID)rec->ExceptionInformation[2];
 }
 
+#if defined(__REACTOS__) && defined(__clang__)
+__attribute__((optnone)) static void test_restore_context(void)
+#else
 static void test_restore_context(void)
+#endif
 {
     EXCEPTION_RECORD rec;
     _JUMP_BUFFER buf;
@@ -9079,7 +9162,6 @@ static void subtest_fastfail(unsigned int code)
     {
         continuestatus = DBG_CONTINUE;
         ok(WaitForDebugEvent(&de, INFINITE), "reading debug event\n");
-
         if (de.dwDebugEventCode == EXCEPTION_DEBUG_EVENT)
         {
             if (de.u.Exception.ExceptionRecord.ExceptionCode == STATUS_STACK_BUFFER_OVERRUN)
@@ -9107,7 +9189,6 @@ static void subtest_fastfail(unsigned int code)
         }
 
         ContinueDebugEvent(de.dwProcessId, de.dwThreadId, continuestatus);
-
     } while (de.dwDebugEventCode != EXIT_PROCESS_DEBUG_EVENT);
 
     ok(had_ff || broken(had_se) /* Win7 */, "fast fail did not occur\n");
@@ -9200,18 +9281,11 @@ static const DWORD breakpoint_code[] = { 0xdefe, 0x4770 };  /* udf #0xfe; bx lr 
 static const DWORD breakpoint_code[] = { 0xd43e0000, 0xd65f03c0 };  /* brk #0xf000; ret */
 #endif
 
+#ifdef HAVE_ARCH_EXCEPTION_TESTS
 static void test_breakpoint(DWORD numexc)
 {
     DWORD (CDECL *func)(void) = code_mem;
     void *vectored_handler;
-
-#if defined(__REACTOS__)
-    if (is_reactos())
-    {
-        skip("Skipping tests that crash\n");
-        return;
-    }
-#endif
 
     memcpy(code_mem, breakpoint_code, sizeof(breakpoint_code));
 #ifdef __arm__
@@ -9227,6 +9301,7 @@ static void test_breakpoint(DWORD numexc)
 
     pRtlRemoveVectoredExceptionHandler(vectored_handler);
 }
+#endif
 
 #if defined(__i386__) || defined(__x86_64__)
 static BYTE except_code_set_ymm0[] =
@@ -9466,6 +9541,8 @@ static void test_user_apc(void)
         context.R0 = 0xabacab;
 #elif defined(__aarch64__)
         context.X0 = 0xabacab;
+#elif defined(__REACTOS__) && defined(__riscv)
+        context.A0 = 0xabacab;
 #endif
 
         c[0] = context;
@@ -9859,6 +9936,9 @@ static DWORD test_extended_context_handler(EXCEPTION_RECORD *rec, EXCEPTION_REGI
     }
     else
     {
+#ifdef __REACTOS__
+        if (!is_qemu_tcg())
+#endif
         ok((xs->Mask & 7) == (xsaveopt_enabled ? 0 : 4), "Got unexpected Mask %#I64x.\n", xs->Mask);
         /* The save area has garbage if xsaveopt is available, so we can't test
          * its contents. */
@@ -10922,6 +11002,9 @@ static void test_extended_context(void)
     expected_compaction = compaction_enabled ? ((ULONG64)1 << 63) | (xstate_supported_features & ~(UINT64)3) : 0;
 
     xs = (XSTATE *)((BYTE *)context_ex + context_ex->XState.Offset);
+#ifdef __REACTOS__
+    if (!is_qemu_tcg())
+#endif
     ok((xs->Mask & supported_features) == (xsaveopt_enabled ? 0 : 4), "Got unexpected Mask %#I64x.\n", xs->Mask);
     ok((xs->CompactionMask & (supported_features | ((ULONG64)1 << 63))) == expected_compaction,
             "Got unexpected CompactionMask %s (expected %#I64x).\n", wine_dbgstr_longlong(xs->CompactionMask), expected_compaction);
@@ -11000,6 +11083,9 @@ static void test_extended_context(void)
     bret = GetThreadContext(thread, context);
     ok(bret, "Got unexpected bret %#x, GetLastError() %lu.\n", bret, GetLastError());
     todo_wine_if (!xsaveopt_enabled)
+#ifdef __REACTOS__
+    if (!is_qemu_tcg())
+#endif
     ok((xs->Mask & supported_features) == (xsaveopt_enabled ? 0 : 4), "Got unexpected Mask %#I64x.\n", xs->Mask);
     ok((xs->CompactionMask & supported_compaction_mask) == expected_compaction,
             "Got unexpected CompactionMask %I64x, expected %I64x.\n", xs->CompactionMask,
@@ -11064,6 +11150,9 @@ static void test_extended_context(void)
     memset(&xs->YmmContext, 0xcc, sizeof(xs->YmmContext));
     bret = GetThreadContext(thread, context);
     ok(bret, "Got unexpected bret %#x, GetLastError() %lu.\n", bret, GetLastError());
+#ifdef __REACTOS__
+    if (!is_qemu_tcg())
+#endif
     todo_wine_if (!xsaveopt_enabled && sizeof(void *) != 4)
         ok((xs->Mask & supported_features) == (xsaveopt_enabled ? 0 : 4)
                 || (sizeof(void *) == 4 && (xs->Mask & supported_features) == 4),
@@ -12074,6 +12163,7 @@ START_TEST(exception)
             return;
         }
 
+#ifdef HAVE_ARCH_EXCEPTION_TESTS
         if (pRtlRaiseException)
         {
             test_stage = STAGE_RTLRAISE_NOT_HANDLED;
@@ -12086,6 +12176,7 @@ START_TEST(exception)
             run_rtlraiseexception_test(EXCEPTION_INVALID_HANDLE);
         }
         else skip( "RtlRaiseException not found\n" );
+#endif
 
         test_stage = STAGE_OUTPUTDEBUGSTRINGA_CONTINUE;
 
@@ -12102,6 +12193,7 @@ START_TEST(exception)
         test_ripevent(0);
         test_stage = STAGE_RIPEVENT_NOT_HANDLED;
         test_ripevent(1);
+#ifdef HAVE_ARCH_EXCEPTION_TESTS
         test_stage = STAGE_SERVICE_CONTINUE;
         test_debug_service(0);
         test_stage = STAGE_SERVICE_NOT_HANDLED;
@@ -12110,6 +12202,7 @@ START_TEST(exception)
         test_breakpoint(0);
         test_stage = STAGE_BREAKPOINT_NOT_HANDLED;
         test_breakpoint(1);
+#endif
         test_stage = STAGE_EXCEPTION_INVHANDLE_CONTINUE;
         test_closehandle(0, (HANDLE)0xdeadbeef);
         test_closehandle(0, (HANDLE)0x7fffffff);
@@ -12203,6 +12296,7 @@ START_TEST(exception)
 
 #endif
 
+#ifdef HAVE_ARCH_EXCEPTION_TESTS
     test_KiUserExceptionDispatcher();
     test_KiUserApcDispatcher();
     test_KiUserCallbackDispatcher();
@@ -12212,6 +12306,7 @@ START_TEST(exception)
     test_debugger(DBG_EXCEPTION_HANDLED, TRUE);
     test_debugger(DBG_CONTINUE, TRUE);
     test_thread_context();
+#endif
     test_outputdebugstring(FALSE, 1, FALSE, 0, 0);
     if (pWaitForDebugEventEx)
     {
@@ -12223,7 +12318,9 @@ START_TEST(exception)
 
     test_ripevent(1);
     test_fastfail();
+#ifdef HAVE_ARCH_EXCEPTION_TESTS
     test_breakpoint(1);
+#endif
     test_closehandle(0, (HANDLE)0xdeadbeef);
     /* Call of Duty WWII writes to BeingDebugged then closes an invalid handle,
      * crashing the game if an exception is raised. */

@@ -13,6 +13,7 @@ void
 Test_ProcBasePriorityClass(void)
 {
     NTSTATUS Status;
+    BOOLEAN WasEnabled;
 
     /*
      * Assign a priority of HIGH_PRIORITY (see pstypes.h).
@@ -72,10 +73,12 @@ Test_ProcBasePriorityClass(void)
     ok_hex(Status, STATUS_DATATYPE_MISALIGNMENT);
 
     /* Set the base priority but we have lack privileges to do so */
+    RtlAdjustPrivilege(SE_INC_BASE_PRIORITY_PRIVILEGE, FALSE, FALSE, &WasEnabled);
     Status = NtSetInformationProcess(NtCurrentProcess(),
                                      ProcessBasePriority,
                                      &BasePriority,
                                      sizeof(KPRIORITY));
+    RtlAdjustPrivilege(SE_INC_BASE_PRIORITY_PRIVILEGE, WasEnabled, FALSE, &WasEnabled);
     ok_hex(Status, STATUS_PRIVILEGE_NOT_HELD);
 
     /*
@@ -221,6 +224,7 @@ void
 Test_ProcessWx86InformationClass(void)
 {
     NTSTATUS Status;
+    BOOLEAN WasEnabled;
     ULONG VdmPower = 1;
 
     /* Everything is NULL */
@@ -259,10 +263,12 @@ Test_ProcessWx86InformationClass(void)
     ok_hex(Status, STATUS_DATATYPE_MISALIGNMENT);
 
     /* We do not have privileges to set the VDM power */
+    RtlAdjustPrivilege(SE_TCB_PRIVILEGE, FALSE, FALSE, &WasEnabled);
     Status = NtSetInformationProcess(NtCurrentProcess(),
                                      ProcessWx86Information,
                                      &VdmPower,
                                      sizeof(VdmPower));
+    RtlAdjustPrivilege(SE_TCB_PRIVILEGE, WasEnabled, FALSE, &WasEnabled);
     ok_hex(Status, STATUS_PRIVILEGE_NOT_HELD);
 }
 
@@ -298,8 +304,52 @@ Test_ProcSetAlignmentProbe(void)
     }
 }
 
+static
+void
+Test_ProcessAffinity(void)
+{
+    PROCESS_BASIC_INFORMATION BasicInfo;
+    KAFFINITY Original, Mask;
+    NTSTATUS Status;
+    ULONG i;
+
+    Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessBasicInformation,
+                                       &BasicInfo, sizeof(BasicInfo), NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    Original = BasicInfo.AffinityMask;
+    ok(Original != 0, "Process has an empty affinity mask\n");
+    if (!Original)
+        return;
+
+    /* Exercise a user-mode system-call return after updating effective thread
+     * affinity. Copying KTHREAD's entire GROUP_AFFINITY would overwrite the
+     * overlaid ApcStateIndex with PreviousMode and bugcheck on this return. */
+    for (i = 0; i < 3; ++i)
+    {
+        Mask = (i == 1) ? Original & (~Original + 1) : Original;
+        Status = NtSetInformationProcess(NtCurrentProcess(), ProcessAffinityMask,
+                                         &Mask, sizeof(Mask));
+        ok_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            break;
+        Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessBasicInformation,
+                                           &BasicInfo, sizeof(BasicInfo), NULL);
+        ok_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+            ok(BasicInfo.AffinityMask == Mask, "Affinity is %Ix, expected %Ix\n",
+               (size_t)BasicInfo.AffinityMask, (size_t)Mask);
+    }
+
+    Status = NtSetInformationProcess(NtCurrentProcess(), ProcessAffinityMask,
+                                     &Original, sizeof(Original));
+    ok_hex(Status, STATUS_SUCCESS);
+}
+
 START_TEST(NtSetInformationProcess)
 {
+    Test_ProcessAffinity();
     Test_ProcForegroundBackgroundClass();
     Test_ProcBasePriorityClass();
     Test_ProcRaisePriorityClass();

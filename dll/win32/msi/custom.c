@@ -24,7 +24,9 @@
 #include <stdio.h>
 
 #include "ntstatus.h"
+#ifdef __REACTOS__
 #define WIN32_NO_STATUS
+#endif
 #include "windef.h"
 #include "winbase.h"
 #include "winerror.h"
@@ -34,15 +36,17 @@
 #include "oleauto.h"
 
 #include "msipriv.h"
+#ifdef __REACTOS__
 #include "winemsi_s.h"
+#else
+#include "winemsi.h"
+#endif
 #include "wine/asm.h"
 #include "wine/debug.h"
-#include "wine/unicode.h"
 #include "wine/exception.h"
 
 #ifdef __REACTOS__
 #undef WIN32_NO_STATUS
-#include <psdk/ntstatus.h>
 #include <ndk/mmfuncs.h>
 #endif
 
@@ -69,6 +73,18 @@ static CRITICAL_SECTION_DEBUG custom_action_cs_debug =
       0, 0, { (DWORD_PTR)(__FILE__ ": custom_action_cs") }
 };
 static CRITICAL_SECTION custom_action_cs = { &custom_action_cs_debug, -1, 0, 0, 0, 0 };
+
+#ifdef __REACTOS__
+static CRITICAL_SECTION custom_server_cs;
+static CRITICAL_SECTION_DEBUG custom_server_cs_debug =
+{
+    0, 0, &custom_server_cs,
+    { &custom_server_cs_debug.ProcessLocksList,
+      &custom_server_cs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": custom_server_cs") }
+};
+static CRITICAL_SECTION custom_server_cs = { &custom_server_cs_debug, -1, 0, 0, 0, 0 };
+#endif
 
 static struct list pending_custom_actions = LIST_INIT( pending_custom_actions );
 
@@ -104,6 +120,10 @@ UINT msi_schedule_action( MSIPACKAGE *package, UINT script, const WCHAR *action 
     if (count != 0) newbuf = realloc( package->script_actions[script],
                                       package->script_actions_count[script] * sizeof(WCHAR *) );
     else newbuf = malloc( sizeof(WCHAR *) );
+#ifdef __REACTOS__
+    if (!newbuf)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     newbuf[count] = wcsdup( action );
     package->script_actions[script] = newbuf;
@@ -122,6 +142,10 @@ UINT msi_register_unique_action( MSIPACKAGE *package, const WCHAR *action )
     if (count != 0) newbuf = realloc( package->unique_actions,
                                       package->unique_actions_count * sizeof(WCHAR *) );
     else newbuf = malloc( sizeof(WCHAR *) );
+#ifdef __REACTOS__
+    if (!newbuf)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     newbuf[count] = wcsdup( action );
     package->unique_actions = newbuf;
@@ -268,7 +292,18 @@ static MSIBINARY *create_temp_binary(MSIPACKAGE *package, LPCWSTR source)
             ERR("Failed to get stream\n");
             break;
         }
-        WriteFile( file, buffer, sz, &write, NULL );
+        if (!WriteFile( file, buffer, sz, &write, NULL ))
+        {
+            ERR("Failed to write custom action %s: error %lu\n", debugstr_w(tmpfile), GetLastError());
+            r = ERROR_FUNCTION_FAILED;
+            break;
+        }
+        if (write != sz)
+        {
+            ERR("Short write extracting custom action %s: %lu of %lu bytes\n", debugstr_w(tmpfile), write, sz);
+            r = ERROR_FUNCTION_FAILED;
+            break;
+        }
     } while (sz == sizeof buffer);
 
     CloseHandle( file );
@@ -308,6 +343,10 @@ static void file_running_action(MSIPACKAGE* package, HANDLE Handle,
     struct running_action *action;
 
     action = malloc( sizeof(*action) );
+#ifdef __REACTOS__
+    if (!action)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     action->handle = Handle;
     action->process = process;
@@ -391,6 +430,10 @@ typedef struct
     INT type;
     GUID guid;
     DWORD arch;
+#ifdef __REACTOS__
+    USHORT emulated_machine;
+    MSIHANDLE remote_handle;
+#endif
 } custom_action_info;
 
 static void free_custom_action_data( custom_action_info *info )
@@ -398,6 +441,10 @@ static void free_custom_action_data( custom_action_info *info )
     EnterCriticalSection( &custom_action_cs );
 
     list_remove( &info->entry );
+#ifdef __REACTOS__
+    if (info->remote_handle)
+        MsiCloseHandle( info->remote_handle );
+#endif
     if (info->handle)
         CloseHandle( info->handle );
     free( info->action );
@@ -468,21 +515,7 @@ static void handle_msi_break( const WCHAR *action )
     DebugBreak();
 }
 
-#if defined __i386__ && defined _MSC_VER
-__declspec(naked) UINT custom_proc_wrapper(MsiCustomActionEntryPoint entry, MSIHANDLE hinst)
-{
-    __asm
-    {
-        push ebp
-        mov ebp, esp
-        sub esp, 4
-        push [ebp+12]
-        call [ebp+8]
-        leave
-        ret
-    }
-}
-#elif defined __i386__ && defined __GNUC__
+#ifdef __i386__
 /* wrapper for apps that don't declare the thread function correctly */
 extern UINT custom_proc_wrapper( MsiCustomActionEntryPoint entry, MSIHANDLE hinst );
 __ASM_GLOBAL_FUNC(custom_proc_wrapper,
@@ -575,11 +608,11 @@ UINT CDECL __wine_msi_call_dll_function(DWORD client_pid, const GUID *guid)
         {
             r = custom_proc_wrapper( fn, hPackage );
         }
-        __EXCEPT_PAGE_FAULT
+        __EXCEPT_ALL
         {
-            ERR( "Custom action (%s:%s) caused a page fault: %#lx\n",
+            ERR( "Custom action (%s:%s) caused an exception: %#lx\n",
                  debugstr_w(dll), debugstr_a(proc), GetExceptionCode() );
-            r = ERROR_SUCCESS;
+            r = ERROR_INSTALL_FAILURE;
         }
         __ENDTRY;
     }
@@ -600,13 +633,6 @@ static HANDLE get_admin_token(void)
     TOKEN_LINKED_TOKEN linked;
     DWORD size;
 
-#ifdef __REACTOS__
-#ifndef GetCurrentThreadEffectiveToken
-#define GetCurrentProcessToken() ((HANDLE)~(ULONG_PTR)3)
-#define GetCurrentThreadEffectiveToken() GetCurrentProcessToken()
-#endif
-#endif
-
     if (!GetTokenInformation(GetCurrentThreadEffectiveToken(), TokenElevationType, &type, sizeof(type), &size)
             || type == TokenElevationTypeFull)
         return NULL;
@@ -616,49 +642,222 @@ static HANDLE get_admin_token(void)
     return linked.LinkedToken;
 }
 
+#ifdef __REACTOS__
+static USHORT get_image_machine( const WCHAR *name )
+{
+    IMAGE_DOS_HEADER dos;
+    IMAGE_FILE_HEADER file;
+    DWORD signature, size;
+    USHORT machine = 0;
+    HANDLE hfile;
+
+    hfile = CreateFileW( name, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, 0 );
+    if (hfile == INVALID_HANDLE_VALUE)
+        return 0;
+    if (ReadFile( hfile, &dos, sizeof(dos), &size, NULL ) && size == sizeof(dos) &&
+        dos.e_magic == IMAGE_DOS_SIGNATURE &&
+        SetFilePointer( hfile, dos.e_lfanew, NULL, FILE_BEGIN ) != INVALID_SET_FILE_POINTER &&
+        ReadFile( hfile, &signature, sizeof(signature), &size, NULL ) && size == sizeof(signature) &&
+        signature == IMAGE_NT_SIGNATURE &&
+        ReadFile( hfile, &file, sizeof(file), &size, NULL ) && size == sizeof(file))
+    {
+        machine = file.Machine;
+    }
+    CloseHandle( hfile );
+    return machine;
+}
+
+static BOOL get_emulated_server_path( USHORT machine, WCHAR *path, DWORD count )
+{
+    UINT len;
+
+    if (machine != IMAGE_FILE_MACHINE_AMD64)
+        return FALSE;
+    len = GetSystemWindowsDirectoryW( path, count );
+    if (!len || len >= count - ARRAY_SIZE(L"\\System32\\amd64_msiexec.exe"))
+        return FALSE;
+    lstrcatW( path, L"\\System32\\amd64_msiexec.exe" );
+    return TRUE;
+}
+
+static USHORT get_emulated_server_machine( const WCHAR *name, DWORD arch )
+{
+    USHORT process_machine, native_machine, machine;
+    MACHINE_ATTRIBUTES attributes;
+    WCHAR path[MAX_PATH];
+    DWORD attrs;
+    void *cookie;
+
+    if (arch != SCS_64BIT_BINARY ||
+        !IsWow64Process2( GetCurrentProcess(), &process_machine, &native_machine ))
+        return 0;
+    machine = get_image_machine( name );
+    if (!machine || machine == native_machine)
+        return 0;
+    if (FAILED(GetMachineTypeAttributes( machine, &attributes )) || !(attributes & UserEnabled))
+        return 0;
+    if (!get_emulated_server_path( machine, path, ARRAY_SIZE(path) ))
+        return 0;
+    if (is_wow64 && !Wow64DisableWow64FsRedirection( &cookie ))
+        return 0;
+    attrs = GetFileAttributesW( path );
+    if (is_wow64)
+        Wow64RevertWow64FsRedirection( cookie );
+    return attrs != INVALID_FILE_ATTRIBUTES ? machine : 0;
+}
+
+static BOOL custom_server_running( HANDLE *process, HANDLE *pipe )
+{
+    if (!*process)
+        return FALSE;
+    if (WaitForSingleObject( *process, 0 ) != WAIT_OBJECT_0)
+        return TRUE;
+    CloseHandle( *process );
+    CloseHandle( *pipe );
+    *process = NULL;
+    *pipe = NULL;
+    return FALSE;
+}
+
+static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch, USHORT emulated_machine)
+#else
 static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch)
+#endif
 {
     WCHAR path[MAX_PATH], cmdline[MAX_PATH + 23];
     PROCESS_INFORMATION pi = {0};
     STARTUPINFOW si = {0};
+#ifdef __REACTOS__
+    WCHAR buffer[48];
+#else
     WCHAR buffer[24];
+#endif
+    DWORD error, len;
     HANDLE token;
     void *cookie;
     HANDLE pipe;
+    BOOL ret;
 
+#ifdef __REACTOS__
+    if (emulated_machine)
+    {
+        if (custom_server_running(&package->custom_server_emulated_process, &package->custom_server_emulated_pipe))
+            return ERROR_SUCCESS;
+    }
+    else if (arch == SCS_32BIT_BINARY)
+    {
+        if (custom_server_running(&package->custom_server_32_process, &package->custom_server_32_pipe))
+            return ERROR_SUCCESS;
+    }
+    else if (custom_server_running(&package->custom_server_64_process, &package->custom_server_64_pipe))
+        return ERROR_SUCCESS;
+#else
     if ((arch == SCS_32BIT_BINARY && package->custom_server_32_process) ||
         (arch == SCS_64BIT_BINARY && package->custom_server_64_process))
         return ERROR_SUCCESS;
+#endif
 
+#ifdef __REACTOS__
+    if (emulated_machine)
+        swprintf(buffer, ARRAY_SIZE(buffer), L"\\\\.\\pipe\\msica_%x_64_%04x",
+                 GetCurrentProcessId(), emulated_machine);
+    else
+#endif
     swprintf(buffer, ARRAY_SIZE(buffer), L"\\\\.\\pipe\\msica_%x_%d",
              GetCurrentProcessId(), arch == SCS_32BIT_BINARY ? 32 : 64);
     pipe = CreateNamedPipeW(buffer, PIPE_ACCESS_DUPLEX, 0, 1, sizeof(DWORD64),
         sizeof(GUID), 0, NULL);
     if (pipe == INVALID_HANDLE_VALUE)
-        ERR("failed to create custom action client pipe: %lu\n", GetLastError());
+    {
+        error = GetLastError();
+        ERR("failed to create custom action client pipe: %lu\n", error);
+        return error;
+    }
 
     if ((sizeof(void *) == 8 || is_wow64) && arch == SCS_32BIT_BINARY)
-        GetSystemWow64DirectoryW(path, MAX_PATH - ARRAY_SIZE(L"\\msiexec.exe"));
+    {
+        len = GetSystemWow64DirectoryW(path, ARRAY_SIZE(path) - ARRAY_SIZE(L"\\msiexec.exe") + 1);
+        if (!len || len >= ARRAY_SIZE(path) - ARRAY_SIZE(L"\\msiexec.exe") + 1)
+        {
+            error = len ? ERROR_INSUFFICIENT_BUFFER : GetLastError();
+            if (!error) error = ERROR_FUNCTION_FAILED;
+            ERR("failed to get the WoW64 system directory: %lu\n", error);
+            CloseHandle(pipe);
+            return error;
+        }
+    }
+#ifdef __REACTOS__
+    else if (emulated_machine)
+    {
+        if (!get_emulated_server_path(emulated_machine, path, ARRAY_SIZE(path)))
+        {
+            CloseHandle(pipe);
+            return ERROR_INSUFFICIENT_BUFFER;
+        }
+    }
+#endif
     else
-        GetSystemDirectoryW(path, MAX_PATH - ARRAY_SIZE(L"\\msiexec.exe"));
+        wcscpy(path, sysdir);
+#ifdef __REACTOS__
+    if (!emulated_machine)
+#endif
     lstrcatW(path, L"\\msiexec.exe");
     swprintf(cmdline, ARRAY_SIZE(cmdline), L"%s -Embedding %d", path, GetCurrentProcessId());
 
     token = get_admin_token();
+    si.cb = sizeof(si);
 
     if (is_wow64 && arch == SCS_64BIT_BINARY)
     {
-        Wow64DisableWow64FsRedirection(&cookie);
-        CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
-        Wow64RevertWow64FsRedirection(cookie);
+        ret = Wow64DisableWow64FsRedirection(&cookie);
+        if (ret)
+        {
+            ret = CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+            error = ret ? ERROR_SUCCESS : GetLastError();
+            Wow64RevertWow64FsRedirection(cookie);
+        }
+        else
+            error = GetLastError();
     }
     else
-        CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+    {
+        ret = CreateProcessAsUserW(token, path, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi);
+        error = ret ? ERROR_SUCCESS : GetLastError();
+    }
 
     if (token) CloseHandle(token);
 
+    if (!ret)
+    {
+        if (!error) error = ERROR_FUNCTION_FAILED;
+        ERR("failed to start custom action server %s: %lu\n", debugstr_w(path), error);
+        if (pi.hThread) CloseHandle(pi.hThread);
+        if (pi.hProcess) CloseHandle(pi.hProcess);
+        CloseHandle(pipe);
+        return error;
+    }
+
     CloseHandle(pi.hThread);
 
+    if (!ConnectNamedPipe(pipe, NULL) && (error = GetLastError()) != ERROR_PIPE_CONNECTED)
+    {
+        if (!error) error = ERROR_FUNCTION_FAILED;
+        ERR("failed to connect to custom action server: %lu\n", error);
+        TerminateProcess(pi.hProcess, error);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pipe);
+        return error;
+    }
+
+#ifdef __REACTOS__
+    if (emulated_machine)
+    {
+        package->custom_server_emulated_process = pi.hProcess;
+        package->custom_server_emulated_pipe = pipe;
+    }
+    else
+#endif
     if (arch == SCS_32BIT_BINARY)
     {
         package->custom_server_32_process = pi.hProcess;
@@ -668,12 +867,6 @@ static DWORD custom_start_server(MSIPACKAGE *package, DWORD arch)
     {
         package->custom_server_64_process = pi.hProcess;
         package->custom_server_64_pipe = pipe;
-    }
-
-    if (!ConnectNamedPipe(pipe, NULL))
-    {
-        ERR("failed to connect to custom action server: %lu\n", GetLastError());
-        return GetLastError();
     }
 
     return ERROR_SUCCESS;
@@ -689,6 +882,18 @@ void custom_stop_server(HANDLE process, HANDLE pipe)
     CloseHandle(pipe);
 }
 
+#ifdef __REACTOS__
+static DWORD custom_start_server_locked(MSIPACKAGE *package, DWORD arch, USHORT emulated_machine)
+{
+    DWORD r;
+
+    EnterCriticalSection(&custom_server_cs);
+    r = custom_start_server(package, arch, emulated_machine);
+    LeaveCriticalSection(&custom_server_cs);
+    return r;
+}
+#endif
+
 static DWORD WINAPI custom_client_thread(void *arg)
 {
     custom_action_info *info = arg;
@@ -698,9 +903,56 @@ static DWORD WINAPI custom_client_thread(void *arg)
     HANDLE pipe;
     DWORD size;
     DWORD rc;
+#ifdef __REACTOS__
+    UINT attempt;
+#endif
 
     CoInitializeEx(NULL, COINIT_MULTITHREADED); /* needed to marshal streams */
 
+#ifdef __REACTOS__
+    for (attempt = 0;; attempt++)
+    {
+        if (info->emulated_machine)
+        {
+            process = info->package->custom_server_emulated_process;
+            pipe = info->package->custom_server_emulated_pipe;
+        }
+        else if (info->arch == SCS_32BIT_BINARY)
+        {
+            process = info->package->custom_server_32_process;
+            pipe = info->package->custom_server_32_pipe;
+        }
+        else
+        {
+            process = info->package->custom_server_64_process;
+            pipe = info->package->custom_server_64_pipe;
+        }
+
+        EnterCriticalSection(&custom_action_cs);
+        if (WriteFile(pipe, &info->guid, sizeof(info->guid), &size, NULL) && size == sizeof(info->guid))
+        {
+            if (!ReadFile(pipe, &thread64, sizeof(thread64), &size, NULL) || size != sizeof(thread64))
+            {
+                rc = GetLastError();
+                ERR("failed to read from custom action client pipe: %lu\n", rc);
+                LeaveCriticalSection(&custom_action_cs);
+                return rc;
+            }
+            LeaveCriticalSection(&custom_action_cs);
+            break;
+        }
+        rc = GetLastError();
+        LeaveCriticalSection(&custom_action_cs);
+        if (attempt || (rc != ERROR_NO_DATA && rc != ERROR_BROKEN_PIPE && rc != ERROR_PIPE_NOT_CONNECTED))
+        {
+            ERR("failed to write to custom action client pipe: %lu\n", rc);
+            return rc;
+        }
+        WaitForSingleObject(process, 5000);
+        if (custom_start_server_locked(info->package, info->arch, info->emulated_machine) != ERROR_SUCCESS)
+            return rc;
+    }
+#else
     if (info->arch == SCS_32BIT_BINARY)
     {
         process = info->package->custom_server_32_process;
@@ -729,6 +981,7 @@ static DWORD WINAPI custom_client_thread(void *arg)
     }
 
     LeaveCriticalSection(&custom_action_cs);
+#endif
 
     if (DuplicateHandle(process, (HANDLE)(DWORD_PTR)thread64, GetCurrentProcess(),
         &thread, 0, FALSE, DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE))
@@ -775,6 +1028,9 @@ static BOOL get_binary_type( const WCHAR *name, DWORD *type )
                 return TRUE;
             case IMAGE_FILE_MACHINE_AMD64:
             case IMAGE_FILE_MACHINE_ARM64:
+#ifdef __REACTOS__
+            case IMAGE_FILE_MACHINE_RISCV64:
+#endif
                 *type = SCS_64BIT_BINARY;
                 return TRUE;
             default:
@@ -806,6 +1062,10 @@ static custom_action_info *do_msidbCustomActionTypeDll(
     info->target = wcsdup( target );
     info->source = wcsdup( source );
     info->action = wcsdup( action );
+    info->handle = NULL;
+#ifdef __REACTOS__
+    info->remote_handle = 0;
+#endif
     CoCreateGuid( &info->guid );
 
     EnterCriticalSection( &custom_action_cs );
@@ -822,6 +1082,7 @@ static custom_action_info *do_msidbCustomActionTypeDll(
         if (status != RPC_S_OK)
         {
             ERR("RpcServerUseProtseqEp failed: %#lx\n", status);
+            free_custom_action_data( info );
             return NULL;
         }
 
@@ -830,6 +1091,7 @@ static custom_action_info *do_msidbCustomActionTypeDll(
         if (status != RPC_S_OK)
         {
             ERR("RpcServerRegisterIfEx failed: %#lx\n", status);
+            free_custom_action_data( info );
             return NULL;
         }
 
@@ -847,7 +1109,16 @@ static custom_action_info *do_msidbCustomActionTypeDll(
         return NULL;
     }
 
-    custom_start_server(package, info->arch);
+#ifdef __REACTOS__
+    info->emulated_machine = get_emulated_server_machine(source, info->arch);
+    if (custom_start_server_locked(package, info->arch, info->emulated_machine) != ERROR_SUCCESS)
+#else
+    if (custom_start_server(package, info->arch) != ERROR_SUCCESS)
+#endif
+    {
+        free_custom_action_data( info );
+        return NULL;
+    }
 
     info->handle = CreateThread(NULL, 0, custom_client_thread, info, 0, NULL);
     if (!info->handle)
@@ -867,17 +1138,6 @@ static UINT HANDLE_CustomType1( MSIPACKAGE *package, const WCHAR *source, const 
 
     if (!(binary = get_temp_binary(package, source)))
         return ERROR_FUNCTION_FAILED;
-
-#if defined(__REACTOS__) && defined(_M_AMD64)
-    {
-        DWORD arch;
-        get_binary_type(binary->tmpfile, &arch);
-        if (arch == SCS_32BIT_BINARY) {
-            ERR("%s is a 32 bit custom action. Returning as ERROR_SUCCESS\n", debugstr_w(source));
-            return ERROR_SUCCESS; // HACK: NO WOW64! return as executed though it's not true
-        }
-    }
-#endif
 
     TRACE("Calling function %s from %s\n", debugstr_w(target), debugstr_w(binary->tmpfile));
 
@@ -986,17 +1246,6 @@ static UINT HANDLE_CustomType17( MSIPACKAGE *package, const WCHAR *source, const
         ERR("invalid file key %s\n", debugstr_w( source ));
         return ERROR_FUNCTION_FAILED;
     }
-
-#if defined(__REACTOS__) && defined(_M_AMD64)
-    {
-        DWORD arch;
-        get_binary_type(file->TargetPath, &arch);
-        if (arch == SCS_32BIT_BINARY) {
-            ERR("%s is a 32 bit custom action. Returning as ERROR_SUCCESS\n", debugstr_w(source));
-            return ERROR_SUCCESS; // HACK: NO WOW64! return as executed though it's not true
-        }
-    }
-#endif
 
     if (!(info = do_msidbCustomActionTypeDll( package, type, file->TargetPath, target, action )))
         return ERROR_FUNCTION_FAILED;
@@ -1274,9 +1523,24 @@ static custom_action_info *do_msidbCustomActionTypeScript(
     msiobj_addref( &package->hdr );
     info->package = package;
     info->type = type;
+#ifdef __REACTOS__
+    info->target = function ? wcsdup( function ) : NULL;
+    info->source = script ? wcsdup( script ) : NULL;
+    info->action = action ? wcsdup( action ) : NULL;
+    if ((function && !info->target) || (script && !info->source) || (action && !info->action))
+    {
+        free( info->target );
+        free( info->source );
+        free( info->action );
+        msiobj_release( &package->hdr );
+        free( info );
+        return NULL;
+    }
+#else
     info->target = wcsdup( function );
     info->source = wcsdup( script );
     info->action = wcsdup( action );
+#endif
     CoCreateGuid( &info->guid );
 
     EnterCriticalSection( &custom_action_cs );
@@ -1490,6 +1754,10 @@ UINT ACTION_CustomAction(MSIPACKAGE *package, const WCHAR *action)
     const WCHAR *source, *target, *ptr, *deferred_data = NULL;
     WCHAR *deformated = NULL;
     int len;
+#ifdef __REACTOS__
+    UINT error_mode = 0;
+    BOOL system_context;
+#endif
 
     /* deferred action: [properties]Action */
     if ((ptr = wcsrchr(action, ']')))
@@ -1551,6 +1819,12 @@ UINT ACTION_CustomAction(MSIPACKAGE *package, const WCHAR *action)
         rc = ERROR_SUCCESS;
         goto end;
     }
+
+#ifdef __REACTOS__
+    system_context = (type & msidbCustomActionTypeInScript) && (type & msidbCustomActionTypeNoImpersonate);
+    if (system_context)
+        error_mode = SetErrorMode( SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX );
+#endif
 
     switch (type & CUSTOM_ACTION_TYPE_MASK)
     {
@@ -1618,6 +1892,11 @@ UINT ACTION_CustomAction(MSIPACKAGE *package, const WCHAR *action)
                debugstr_w(target) );
     }
 
+#ifdef __REACTOS__
+    if (system_context)
+        SetErrorMode( error_mode );
+#endif
+
 end:
     package->scheduled_action_running = FALSE;
     package->commit_action_running = FALSE;
@@ -1651,6 +1930,10 @@ void ACTION_FinishCustomActions(const MSIPACKAGE* package)
 
     handle_count = list_count( &pending_custom_actions );
     wait_handles = malloc( handle_count * sizeof(HANDLE) );
+#ifdef __REACTOS__
+    if (!wait_handles)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     handle_count = 0;
     LIST_FOR_EACH_ENTRY_SAFE( info, cursor, &pending_custom_actions, custom_action_info, entry )
@@ -1680,6 +1963,21 @@ void ACTION_FinishCustomActions(const MSIPACKAGE* package)
     LeaveCriticalSection( &custom_action_cs );
 }
 
+#ifdef __REACTOS__
+void custom_release_remote_handle( MSIHANDLE handle )
+{
+    custom_action_info *info;
+
+    EnterCriticalSection( &custom_action_cs );
+    LIST_FOR_EACH_ENTRY( info, &pending_custom_actions, custom_action_info, entry )
+    {
+        if (info->remote_handle == handle)
+            info->remote_handle = 0;
+    }
+    LeaveCriticalSection( &custom_action_cs );
+}
+#endif
+
 UINT __cdecl s_remote_GetActionInfo(const GUID *guid, WCHAR **name, int *type, WCHAR **dll, char **func, MSIHANDLE *hinst)
 {
     custom_action_info *info;
@@ -1691,6 +1989,11 @@ UINT __cdecl s_remote_GetActionInfo(const GUID *guid, WCHAR **name, int *type, W
     *name = wcsdup(info->action);
     *type = info->type;
     *hinst = alloc_msihandle(&info->package->hdr);
+#ifdef __REACTOS__
+    EnterCriticalSection( &custom_action_cs );
+    info->remote_handle = *hinst;
+    LeaveCriticalSection( &custom_action_cs );
+#endif
     *dll = wcsdup(info->source);
     *func = strdupWtoA(info->target);
 

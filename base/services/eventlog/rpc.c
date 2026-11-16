@@ -98,7 +98,7 @@ ElfCreateEventLogHandle(PLOGHANDLE* LogHandle,
     LogsActive = LogfListItemCount();
     if (LogsActive == 0)
     {
-        DPRINT1("EventLog service reports no log files!\n");
+        DPRINT("EventLog service reports no log files!\n");
         Status = STATUS_UNSUCCESSFUL;
         goto Done;
     }
@@ -134,6 +134,13 @@ ElfCreateEventLogHandle(PLOGHANDLE* LogHandle,
                 pLogHandle->LogFile = currentLogFile;
                 break;
             }
+        }
+
+        if (pLogHandle->LogFile == NULL)
+        {
+            pEventSource = GetEventSourceByName(LogName->Buffer);
+            if (pEventSource)
+                pLogHandle->LogFile = pEventSource->LogFile;
         }
 
         /* Use the application log if the desired log does not exist */
@@ -551,6 +558,12 @@ ElfrReadELW(
     if (ReadFlags & EVENTLOG_SEQUENTIAL_READ)
     {
         RecordNumber = pLogHandle->CurrentRecord;
+        if (RecordNumber != 0 && (ReadFlags & EVENTLOG_BACKWARDS_READ))
+        {
+            RecordNumber--;
+            if (RecordNumber == 0)
+                return STATUS_END_OF_FILE;
+        }
     }
     else // (ReadFlags & EVENTLOG_SEEK_READ)
     {
@@ -569,7 +582,7 @@ ElfrReadELW(
     /* Update the handle's CurrentRecord if success */
     if (NT_SUCCESS(Status))
     {
-        pLogHandle->CurrentRecord = RecordNumber;
+        pLogHandle->CurrentRecord = (ReadFlags & EVENTLOG_BACKWARDS_READ) ? RecordNumber + 1 : RecordNumber;
     }
 
     return Status;
@@ -961,6 +974,12 @@ ElfrReadELA(
     if (ReadFlags & EVENTLOG_SEQUENTIAL_READ)
     {
         RecordNumber = pLogHandle->CurrentRecord;
+        if (RecordNumber != 0 && (ReadFlags & EVENTLOG_BACKWARDS_READ))
+        {
+            RecordNumber--;
+            if (RecordNumber == 0)
+                return STATUS_END_OF_FILE;
+        }
     }
     else // (ReadFlags & EVENTLOG_SEEK_READ)
     {
@@ -979,7 +998,7 @@ ElfrReadELA(
     /* Update the handle's CurrentRecord if success */
     if (NT_SUCCESS(Status))
     {
-        pLogHandle->CurrentRecord = RecordNumber;
+        pLogHandle->CurrentRecord = (ReadFlags & EVENTLOG_BACKWARDS_READ) ? RecordNumber + 1 : RecordNumber;
     }
 
     return Status;

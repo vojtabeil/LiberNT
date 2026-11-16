@@ -14,6 +14,33 @@ $if (_WDMDDK_)
 
 #define ExInitializeSListHead InitializeSListHead
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+NTKERNELAPI
+NTSTATUS
+NTAPI
+ExGetFirmwareEnvironmentVariable(
+  _In_ PUNICODE_STRING VariableName,
+  _In_ LPGUID VendorGuid,
+  _Out_writes_bytes_opt_(*ValueLength) PVOID Value,
+  _Inout_ PULONG ValueLength,
+  _Out_opt_ PULONG Attributes);
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+ExSetFirmwareEnvironmentVariable(
+  _In_ PUNICODE_STRING VariableName,
+  _In_ LPGUID VendorGuid,
+  _In_reads_bytes_opt_(ValueLength) PVOID Value,
+  _In_ ULONG ValueLength,
+  _In_ ULONG Attributes);
+#endif
+
+NTKERNELAPI
+PSLIST_ENTRY
+FirstEntrySList(
+    _In_ PSLIST_HEADER SListHead);
+
 #if defined(_NTHAL_) && defined(_X86_)
 
 NTKERNELAPI
@@ -389,11 +416,175 @@ $if (_NTIFS_)
 
 #define ExDisableResourceBoost ExDisableResourceBoostLite
 
+$endif (_NTIFS_)
+$if (_WDMDDK_)
+#ifndef EX_NO_PUSH_LOCKS
+
 VOID
 NTAPI
 ExInitializePushLock(
   _Out_ PEX_PUSH_LOCK PushLock);
-$endif (_NTIFS_)
+
+#if !defined(EX_LEGACY_PUSH_LOCKS)
+
+_IRQL_requires_max_(APC_LEVEL)
+_Requires_lock_held_(_Global_critical_region_)
+NTKERNELAPI
+VOID
+FASTCALL
+ExAcquirePushLockExclusiveEx(
+  _Inout_ _Requires_lock_not_held_(*_Curr_) _Acquires_lock_(*_Curr_)
+  PEX_PUSH_LOCK PushLock,
+  _In_ ULONG Flags);
+
+_IRQL_requires_max_(APC_LEVEL)
+_Requires_lock_held_(_Global_critical_region_)
+NTKERNELAPI
+VOID
+FASTCALL
+ExAcquirePushLockSharedEx(
+  _Inout_ _Requires_lock_not_held_(*_Curr_) _Acquires_lock_(*_Curr_)
+  PEX_PUSH_LOCK PushLock,
+  _In_ ULONG Flags);
+
+_Must_inspect_result_
+_IRQL_requires_max_(APC_LEVEL)
+_Requires_lock_held_(_Global_critical_region_)
+_Post_satisfies_(return == 0 || return == 1)
+NTKERNELAPI
+BOOLEAN
+FASTCALL
+ExTryAcquirePushLockExclusiveEx(
+  _When_(return!=0, _Requires_lock_not_held_(*_Curr_) _Acquires_lock_(*_Curr_))
+  _Inout_ PEX_PUSH_LOCK PushLock,
+  _In_ ULONG Flags);
+
+_Must_inspect_result_
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_Requires_lock_held_(_Global_critical_region_)
+_Post_satisfies_(return == 0 || return == 1)
+NTKERNELAPI
+BOOLEAN
+FASTCALL
+ExTryAcquirePushLockSharedEx(
+  _When_(return!=0, _Requires_lock_not_held_(*_Curr_) _Acquires_lock_(*_Curr_))
+  _Inout_ PEX_PUSH_LOCK PushLock,
+  _In_ ULONG Flags);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_Requires_lock_held_(_Global_critical_region_)
+NTKERNELAPI
+VOID
+FASTCALL
+ExReleasePushLockExclusiveEx(
+  _Inout_ _Requires_lock_held_(*_Curr_) _Releases_lock_(*_Curr_)
+  PEX_PUSH_LOCK PushLock,
+  _In_ ULONG Flags);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_Requires_lock_held_(_Global_critical_region_)
+NTKERNELAPI
+VOID
+FASTCALL
+ExReleasePushLockSharedEx(
+  _Inout_ _Requires_lock_held_(*_Curr_) _Releases_lock_(*_Curr_)
+  PEX_PUSH_LOCK PushLock,
+  _In_ ULONG Flags);
+
+#define EX_DEFAULT_PUSH_LOCK_FLAGS 0
+
+#define ExAcquirePushLockExclusive(Lock) \
+    ExAcquirePushLockExclusiveEx(Lock, EX_DEFAULT_PUSH_LOCK_FLAGS)
+
+#define ExAcquirePushLockShared(Lock) \
+    ExAcquirePushLockSharedEx(Lock, EX_DEFAULT_PUSH_LOCK_FLAGS)
+
+#define ExTryAcquirePushLockExclusive(Lock) \
+    ExTryAcquirePushLockExclusiveEx(Lock, EX_DEFAULT_PUSH_LOCK_FLAGS)
+
+#define ExTryAcquirePushLockShared(Lock) \
+    ExTryAcquirePushLockSharedEx(Lock, EX_DEFAULT_PUSH_LOCK_FLAGS)
+
+#define ExReleasePushLockExclusive(Lock) \
+    ExReleasePushLockExclusiveEx(Lock, EX_DEFAULT_PUSH_LOCK_FLAGS)
+
+#define ExReleasePushLockShared(Lock) \
+    ExReleasePushLockSharedEx(Lock, EX_DEFAULT_PUSH_LOCK_FLAGS)
+
+#endif
+#endif
+
+$endif (_WDMDDK_)
+
+$if (_NTIFS_ || _WDMDDK_)
+NTKERNELAPI
+KIRQL
+NTAPI
+ExAcquireSpinLockExclusive(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+NTKERNELAPI
+KIRQL
+NTAPI
+ExAcquireSpinLockShared(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+NTKERNELAPI
+VOID
+NTAPI
+ExAcquireSpinLockSharedAtDpcLevel(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+NTKERNELAPI
+VOID
+NTAPI
+ExAcquireSpinLockExclusiveAtDpcLevel(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+ExTryConvertSharedSpinLockExclusive(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+ExTryAcquireSpinLockSharedAtDpcLevel(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+ExTryAcquireSpinLockExclusiveAtDpcLevel(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+NTKERNELAPI
+VOID
+NTAPI
+ExReleaseSpinLockExclusive(
+  _Inout_ PEX_SPIN_LOCK SpinLock,
+  _In_ KIRQL OldIrql);
+
+NTKERNELAPI
+VOID
+NTAPI
+ExReleaseSpinLockExclusiveFromDpcLevel(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+
+NTKERNELAPI
+VOID
+NTAPI
+ExReleaseSpinLockShared(
+  _Inout_ PEX_SPIN_LOCK SpinLock,
+  _In_ KIRQL OldIrql);
+
+NTKERNELAPI
+VOID
+NTAPI
+ExReleaseSpinLockSharedFromDpcLevel(
+  _Inout_ PEX_SPIN_LOCK SpinLock);
+$endif (_NTIFS_ || _WDMDDK_)
 
 #if (NTDDI_VERSION >= NTDDI_WIN2K)
 $if (_WDMDDK_)
@@ -573,6 +764,70 @@ ExAllocatePoolWithTagPriority(
   _In_ SIZE_T NumberOfBytes,
   _In_ ULONG Tag,
   _In_ __drv_strictTypeMatch(__drv_typeExpr) EX_POOL_PRIORITY Priority);
+
+typedef enum _DRIVER_RUNTIME_INIT_FLAGS {
+  DrvRtPoolNxOptIn = 0x00000001,
+  LastDrvRtFlag
+} DRIVER_RUNTIME_INIT_FLAGS, *PDRIVER_RUNTIME_INIT_FLAGS;
+
+typedef const enum _DRIVER_RUNTIME_INIT_FLAGS *PCDRIVER_RUNTIME_INIT_FLAGS;
+
+FORCEINLINE
+VOID
+ExInitializeDriverRuntime(
+  _In_ ULONG RuntimeFlags)
+{
+  /*
+   * ReactOS's ExAllocatePoolZero fallback always clears allocations itself.
+   * The current pool implementation does not yet expose the per-image NX
+   * opt-in variables used by the down-level Windows WDK inline.
+   */
+  UNREFERENCED_PARAMETER(RuntimeFlags);
+}
+
+#if (NTDDI_VERSION >= NTDDI_WIN10_VB) || defined(_NTOSKRNL_)
+
+__drv_allocatesMem(Mem)
+_Check_return_
+_Ret_maybenull_
+_When_((Flags & POOL_FLAG_PAGED) != 0, _IRQL_requires_max_(APC_LEVEL))
+_When_((Flags & POOL_FLAG_PAGED) == 0, _IRQL_requires_max_(DISPATCH_LEVEL))
+_Post_writable_byte_size_(NumberOfBytes)
+NTKERNELAPI
+PVOID
+NTAPI
+ExAllocatePool2(
+  _In_ POOL_FLAGS Flags,
+  _In_ SIZE_T NumberOfBytes,
+  _In_ ULONG Tag);
+
+__drv_allocatesMem(Mem)
+_Check_return_
+_Ret_maybenull_
+_When_((Flags & POOL_FLAG_PAGED) != 0, _IRQL_requires_max_(APC_LEVEL))
+_When_((Flags & POOL_FLAG_PAGED) == 0, _IRQL_requires_max_(DISPATCH_LEVEL))
+_Post_writable_byte_size_(NumberOfBytes)
+NTKERNELAPI
+PVOID
+NTAPI
+ExAllocatePool3(
+  _In_ POOL_FLAGS Flags,
+  _In_ SIZE_T NumberOfBytes,
+  _In_ ULONG Tag,
+  _In_reads_opt_(ExtendedParametersCount) PCPOOL_EXTENDED_PARAMETER ExtendedParameters,
+  _In_ ULONG ExtendedParametersCount);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+NTKERNELAPI
+VOID
+NTAPI
+ExFreePool2(
+  _Pre_notnull_ __drv_freesMem(P) PVOID P,
+  _In_ ULONG Tag,
+  _In_reads_opt_(ExtendedParametersCount) PCPOOL_EXTENDED_PARAMETER ExtendedParameters,
+  _In_ ULONG ExtendedParametersCount);
+
+#endif /* (NTDDI_VERSION >= NTDDI_WIN10_VB) || defined(_NTOSKRNL_) */
 
 FORCEINLINE
 __drv_allocatesMem(Mem)
@@ -995,7 +1250,15 @@ VOID
 ExInitializeSetTimerParameters(
   _Out_ PEXT_SET_PARAMETERS Parameters)
 {
-  ASSERT(FALSE);
+  RtlZeroMemory(Parameters, sizeof(*Parameters));
+}
+
+FORCEINLINE
+VOID
+ExInitializeDeleteTimerParameters(
+  _Out_ PEXT_DELETE_PARAMETERS Parameters)
+{
+  RtlZeroMemory(Parameters, sizeof(*Parameters));
 }
 
 #endif // NTDDI_WINBLUE
@@ -1076,6 +1339,16 @@ NTAPI
 ExSetTimerResolution(
   _In_ ULONG DesiredTime,
   _In_ BOOLEAN SetResolution);
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+NTKERNELAPI
+VOID
+NTAPI
+ExQueryTimerResolution(
+  _Out_ PULONG MaximumTime,
+  _Out_ PULONG MinimumTime,
+  _Out_ PULONG CurrentTime);
+#endif
 
 NTKERNELAPI
 VOID

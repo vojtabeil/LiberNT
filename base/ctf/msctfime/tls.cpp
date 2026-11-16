@@ -7,8 +7,6 @@
 
 #include "msctfime.h"
 
-WINE_DEFAULT_DEBUG_CHANNEL(msctfime);
-
 DWORD TLS::s_dwTlsIndex = (DWORD)-1;
 
 /// @implemented
@@ -75,6 +73,8 @@ BOOL TLS::InternalDestroyTLS()
     if (!pTLS)
         return FALSE;
 
+    if (pTLS->m_hKeyboardHook)
+        ::UnhookWindowsHookEx(pTLS->m_hKeyboardHook);
     if (pTLS->m_pBridge)
         pTLS->m_pBridge->Release();
     if (pTLS->m_pProfile)

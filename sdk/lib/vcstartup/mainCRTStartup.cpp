@@ -16,3 +16,7 @@ extern "C" unsigned long mainCRTStartup(void*)
 
     return __commonCRTStartup<decltype(main)>();
 }
+
+#if !defined(__GNUC__)
+extern "C" void __main(void) { }
+#endif

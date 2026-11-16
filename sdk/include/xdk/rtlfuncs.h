@@ -136,10 +136,6 @@ RemoveHeadList(
 
 #if !defined(NO_KERNEL_LIST_ENTRY_CHECKS) && DBG
   RtlpCheckListEntry(ListHead);
-#ifdef EXTRA_KERNEL_LIST_ENTRY_CHECKS
-  if (ListHead->Flink == ListHead || ListHead->Blink == ListHead)
-    FatalListEntryError(ListHead->Blink, ListHead, ListHead->Flink);
-#endif
 #endif
   Entry = ListHead->Flink;
   Flink = Entry->Flink;
@@ -162,10 +158,6 @@ RemoveTailList(
 
 #if !defined(NO_KERNEL_LIST_ENTRY_CHECKS) && DBG
   RtlpCheckListEntry(ListHead);
-#ifdef EXTRA_KERNEL_LIST_ENTRY_CHECKS
-  if (ListHead->Flink == ListHead || ListHead->Blink == ListHead)
-    FatalListEntryError(ListHead->Blink, ListHead, ListHead->Flink);
-#endif
 #endif
   Entry = ListHead->Blink;
   Blink = Entry->Blink;
@@ -567,7 +559,7 @@ RtlEqualUnicodeString(
   _In_ CONST UNICODE_STRING *String2,
   _In_ BOOLEAN CaseInSensitive);
 
-#if !defined(_AMD64_) && !defined(_IA64_)
+#if !defined(_WIN64)
 NTSYSAPI
 LARGE_INTEGER
 NTAPI
@@ -783,6 +775,24 @@ NTAPI
 RtlNumberOfSetBits(
   _In_ PRTL_BITMAP BitMapHeader);
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+NTSYSAPI
+ULONG
+NTAPI
+RtlNumberOfSetBitsInRange(
+  _In_ PRTL_BITMAP BitMapHeader,
+  _In_ ULONG StartingIndex,
+  _In_ ULONG Length);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlCopyBitMap(
+  _In_ PRTL_BITMAP Source,
+  _In_ PRTL_BITMAP Destination,
+  _In_range_(0, Destination->SizeOfBitMap - 1) ULONG TargetBit);
+#endif
+
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSYSAPI
 NTSTATUS
@@ -794,6 +804,20 @@ RtlQueryRegistryValues(
         PRTL_QUERY_REGISTRY_TABLE QueryTable,
     _In_opt_ PVOID Context,
     _In_opt_ PVOID Environment);
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlQueryRegistryValuesEx(
+    _In_ ULONG RelativeTo,
+    _In_ PCWSTR Path,
+    _Inout_ _At_(*(*QueryTable).EntryContext, _Pre_unknown_)
+        PRTL_QUERY_REGISTRY_TABLE QueryTable,
+    _In_opt_ PVOID Context,
+    _In_opt_ PVOID Environment);
+#endif
 
 #define SHORT_SIZE  (sizeof(USHORT))
 #define SHORT_MASK  (SHORT_SIZE - 1)
@@ -1591,7 +1615,6 @@ RtlUpcaseUnicodeToOemN(
   _In_reads_bytes_(BytesInUnicodeString) PCWCH UnicodeString,
   _In_ ULONG BytesInUnicodeString);
 
-#if (NTDDI_VERSION >= NTDDI_VISTASP1)
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSYSAPI
 NTSTATUS
@@ -1601,17 +1624,6 @@ RtlGenerate8dot3Name(
   _In_ BOOLEAN AllowExtendedCharacters,
   _Inout_ PGENERATE_NAME_CONTEXT Context,
   _Inout_ PUNICODE_STRING Name8dot3);
-#else
-_IRQL_requires_max_(PASSIVE_LEVEL)
-NTSYSAPI
-VOID
-NTAPI
-RtlGenerate8dot3Name(
-  _In_ PCUNICODE_STRING Name,
-  _In_ BOOLEAN AllowExtendedCharacters,
-  _Inout_ PGENERATE_NAME_CONTEXT Context,
-  _Inout_ PUNICODE_STRING Name8dot3);
-#endif
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
 _Must_inspect_result_
@@ -2408,7 +2420,7 @@ $endif (_NTIFS_)
 
 #endif /* (NTDDI_VERSION >= NTDDI_WINXP) */
 
-$if (_NTIFS_)
+$if (_NTIFS_ || _WDMDDK_)
 #if (NTDDI_VERSION >= NTDDI_WS03)
 _IRQL_requires_max_(DISPATCH_LEVEL)
 NTSYSAPI
@@ -2418,7 +2430,9 @@ RtlInitAnsiStringEx(
   _Out_ PANSI_STRING DestinationString,
   _In_opt_z_ __drv_aliasesMem PCSZ SourceString);
 #endif
+$endif (_NTIFS_ || _WDMDDK_)
 
+$if (_NTIFS_)
 #if (NTDDI_VERSION >= NTDDI_WS03SP1)
 
 _IRQL_requires_max_(APC_LEVEL)
@@ -2580,8 +2594,57 @@ RtlGetProductInfo(
   _In_ ULONG SpMinorVersion,
   _Out_ PULONG ReturnedProductType);
 
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS1)
+NTSYSAPI
+ULONG
+NTAPI
+RtlGetActiveConsoleId(
+  VOID);
+
+NTSYSAPI
+ULONGLONG
+NTAPI
+RtlGetConsoleSessionForegroundProcessId(
+  VOID);
+
+NTSYSAPI
+ULONG
+NTAPI
+RtlGetSuiteMask(
+  VOID);
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSYSAPI
+BOOLEAN
+NTAPI
+RtlIsMultiSessionSku(
+  VOID);
+#endif /* (NTDDI_VERSION >= NTDDI_WIN10_RS1) */
+
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS2)
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTSYSAPI
+PCWSTR
+NTAPI
+RtlGetNtSystemRoot(
+  VOID);
+#endif /* (NTDDI_VERSION >= NTDDI_WIN10_RS2) */
+
 $endif (_NTDDK_)
 $if (_NTIFS_)
+#if (NTDDI_VERSION >= NTDDI_WINTHRESHOLD)
+_IRQL_requires_max_(APC_LEVEL)
+NTSYSAPI
+NTSTATUS
+__cdecl
+RtlInitializeSidEx(
+  _Out_writes_bytes_(SECURITY_SID_SIZE(SubAuthorityCount)) PSID Sid,
+  _In_ PSID_IDENTIFIER_AUTHORITY IdentifierAuthority,
+  _In_ UCHAR SubAuthorityCount,
+  ...);
+#endif /* (NTDDI_VERSION >= NTDDI_WINTHRESHOLD) */
+
 NTSYSAPI
 NTSTATUS
 NTAPI
@@ -2999,7 +3062,7 @@ RtlInitEmptyUnicodeString(
 }
 $endif (_WDMDDK_)
 
-#if defined(_AMD64_) || defined(_IA64_)
+#if defined(_WIN64)
 
 $if (_WDMDDK_)
 
@@ -3064,7 +3127,7 @@ RtlLargeIntegerDivide(
 
 $endif (_NTDDK_)
 
-#endif /* defined(_AMD64_) || defined(_IA64_) */
+#endif /* _WIN64 */
 
 $if (_WDMDDK_)
 
@@ -3144,7 +3207,7 @@ RtlSecureZeroMemory(
   _In_ SIZE_T Size)
 {
   volatile char* vptr = (volatile char*)Pointer;
-#if defined(_M_AMD64)
+#if _VCRT_AMD64_INTRINSICS
   __stosb((PUCHAR)vptr, 0, Size);
 #else
   char * endptr = (char *)vptr + Size;
@@ -3220,9 +3283,9 @@ RtlCheckBit(
 # define __assert_annotationW(msg) __annotation(L"Debug", L"AssertFail", msg)
 #else
 # define __assert_annotationA(msg) \
-    DbgPrint("Assertion failed at %s(%d): %s\n", __FILE__, __LINE__, msg)
+    (DbgPrint)("Assertion failed at %s(%d): %s\n", __FILE__, __LINE__, msg)
 # define __assert_annotationW(msg) \
-    DbgPrint("Assertion failed at %s(%d): %S\n", __FILE__, __LINE__, msg)
+    (DbgPrint)("Assertion failed at %s(%d): %S\n", __FILE__, __LINE__, msg)
 #endif
 
 #ifdef _PREFAST_

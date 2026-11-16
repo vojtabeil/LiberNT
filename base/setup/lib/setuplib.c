@@ -5,6 +5,7 @@
  * PURPOSE:         Setup Library - Main initialization helpers
  * PROGRAMMERS:     Casper S. Hornstrup (chorns@users.sourceforge.net)
  *                  Hermes Belusca-Maito (hermes.belusca@sfr.fr)
+ *                  Whindmar Saksit <whindsaks@proton.me>
  */
 
 /* INCLUDES *****************************************************************/
@@ -24,8 +25,140 @@
 
 HANDLE ProcessHeap;
 BOOLEAN IsUnattendedSetup = FALSE;
+static PCWSTR InfUnattendSignature = L"$ReactOS$";
 
 /* FUNCTIONS ****************************************************************/
+
+static int
+CompareInfFirstLineString(
+    _In_ HINF hInf,
+    _In_ PCWSTR Section,
+    _In_ PCWSTR Name,
+    _In_ PCWSTR String)
+{
+    INFCONTEXT Context;
+    PCWSTR Value;
+    int Result = STATUS_UNSUCCESSFUL;
+
+    if (!SpInfFindFirstLine(hInf, Section, Name, &Context))
+        return Result;
+
+    if (!INF_GetData(&Context, NULL, &Value))
+        return Result;
+
+    Result = _wcsicmp(Value, String);
+
+    INF_FreeData(Value);
+    return Result;
+}
+
+static BOOLEAN
+IsInfUnattendSetupEnabled(
+    _In_ PUSETUP_DATA pSetupData,
+    _In_ PCWSTR InfPath,
+    _In_ BOOLEAN CheckDetached)
+{
+    HINF hInf;
+    UINT ErrorLine;
+    BOOLEAN Result = FALSE;
+
+    hInf = SpInfOpenInfFile(InfPath,
+                            NULL,
+                            INF_STYLE_OLDNT,
+                            pSetupData->LanguageId,
+                            &ErrorLine);
+    if (hInf == INVALID_HANDLE_VALUE)
+        return Result;
+
+    /* Verify supported inf 'Signature' key */
+    if (CompareInfFirstLineString(hInf, L"Unattend", L"Signature", InfUnattendSignature) != 0)
+    {
+        DPRINT("Signature not %ls\n", InfUnattendSignature);
+        goto Quit;
+    }
+
+    /* Check whether unattended setup is enabled */
+    if (CompareInfFirstLineString(hInf, L"Unattend", L"UnattendSetupEnabled", L"yes") != 0)
+        goto Quit;
+
+    /* Extra safety check for inf files not on the ISO */
+    if (CheckDetached && CompareInfFirstLineString(hInf, L"Unattend", L"UnattendForDetached", L"yes") != 0)
+        goto Quit;
+
+    Result = TRUE;
+Quit:
+    SpInfCloseInfFile(hInf);
+    return Result;
+}
+
+static BOOLEAN
+GetUnattendInfPath(
+    _In_ PUSETUP_DATA pSetupData,
+    _Out_writes_z_(cch) PWSTR InfPath,
+    _In_ SIZE_T cch)
+{
+    static WCHAR UnattendInfPath[MAX_PATH] = {UNICODE_NULL};
+    static BOOLEAN UnattendInfLookedUp = FALSE;
+    NTSTATUS Status;
+    USHORT Types;
+
+    /* If the unattend.inf file has already been looked for, return
+     * its cached path if it was found, or fail otherwise. */
+    if (UnattendInfLookedUp)
+        goto Quit;
+
+    UnattendInfLookedUp = TRUE;
+
+    /* Find first the default unattend.inf file on the installation media.
+     * If it specifies an unattended setup, we have found it. */
+    Status = CombinePaths(UnattendInfPath, _countof(UnattendInfPath), 2,
+                          pSetupData->SourcePath.Buffer, L"unattend.inf");
+    if (NT_SUCCESS(Status) && DoesFileExist(NULL, UnattendInfPath) &&
+        IsInfUnattendSetupEnabled(pSetupData, UnattendInfPath, FALSE))
+    {
+        return NT_SUCCESS(RtlStringCchCopyW(InfPath, cch, UnattendInfPath));
+    }
+
+    /*
+     * The default unattend.inf file does not exist, or does not enable an
+     * unattended setup. Check all DOS drives, removable first, then fixed,
+     * for an alternative unattend.inf that enables unattended setup.
+     * If we find one, use it; otherwise, return the default unattend.inf
+     * path, if it exists.
+     */
+    for (Types = 0; Types <= 1; ++Types)
+    {
+        CHAR Drive;
+        for (Drive = 'A'; Drive <= 'Z'; ++Drive)
+        {
+            UCHAR DriveType;
+            WCHAR szInf[MAX_PATH];
+            UNICODE_STRING NtDrive = {0, sizeof(szInf), szInf};
+
+            DriveType = GetNtDevicePathOfDriveNumber(Drive - 'A', &NtDrive);
+            if (DriveType <= DRIVE_NO_ROOT_DIR)
+                continue; /* Invalid drive */
+            if ((Types == 0) != (DriveType == DRIVE_REMOVABLE || DriveType == DRIVE_CDROM))
+                continue; /* Not the expected drive type */
+
+            Status = ConcatPaths(szInf, _countof(szInf), 1, L"unattend.inf");
+            if (NT_SUCCESS(Status) && DoesFileExist(NULL, szInf) &&
+                IsInfUnattendSetupEnabled(pSetupData, szInf, TRUE))
+            {
+                /* Cache the alternative unattend.inf path and return it */
+                (void)RtlStringCchCopyW(UnattendInfPath, _countof(UnattendInfPath), szInf);
+                return NT_SUCCESS(RtlStringCchCopyW(InfPath, cch, szInf));
+            }
+        }
+    }
+    /* Fall back to the default unattend.inf path */
+
+Quit:
+    /* Return the cached unattend.inf path if it was found, or fail otherwise */
+    if (*UnattendInfPath)
+        return NT_SUCCESS(RtlStringCchCopyW(InfPath, cch, UnattendInfPath));
+    return FALSE;
+}
 
 BOOLEAN
 NTAPI
@@ -39,16 +172,12 @@ CheckUnattendedSetup(
     PCWSTR Value;
     WCHAR UnattendInfPath[MAX_PATH];
 
-    CombinePaths(UnattendInfPath, ARRAYSIZE(UnattendInfPath), 2,
-                 pSetupData->SourcePath.Buffer, L"unattend.inf");
-
-    DPRINT("UnattendInf path: '%S'\n", UnattendInfPath);
-
-    if (DoesFileExist(NULL, UnattendInfPath) == FALSE)
+    if (!GetUnattendInfPath(pSetupData, UnattendInfPath, ARRAYSIZE(UnattendInfPath)))
     {
         DPRINT("Does not exist: %S\n", UnattendInfPath);
         return IsUnattendedSetup;
     }
+    DPRINT1("UnattendInf path: '%S'\n", UnattendInfPath);
 
     /* Load 'unattend.inf' from installation media */
     UnattendInf = SpInfOpenInfFile(UnattendInfPath,
@@ -77,14 +206,28 @@ CheckUnattendedSetup(
     }
 
     /* Check 'Signature' string */
-    if (_wcsicmp(Value, L"$ReactOS$") != 0)
+    if (_wcsicmp(Value, InfUnattendSignature) != 0)
     {
-        DPRINT("Signature not $ReactOS$\n");
+        DPRINT("Signature not %ls\n", InfUnattendSignature);
         INF_FreeData(Value);
         goto Quit;
     }
 
     INF_FreeData(Value);
+
+    if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"SelfTest", &Context) &&
+        INF_GetData(&Context, NULL, &Value))
+    {
+        pSetupData->SelfTest = (_wcsicmp(Value, L"yes") == 0);
+        INF_FreeData(Value);
+    }
+
+    if (SpInfFindFirstLine(UnattendInf, L"Unattend", L"Upgrade", &Context) &&
+        INF_GetData(&Context, NULL, &Value))
+    {
+        pSetupData->Upgrade = (_wcsicmp(Value, L"yes") == 0);
+        INF_FreeData(Value);
+    }
 
     /* Check if Unattend setup is enabled */
     if (!SpInfFindFirstLine(UnattendInf, L"Unattend", L"UnattendSetupEnabled", &Context))
@@ -201,189 +344,6 @@ CheckUnattendedSetup(
 Quit:
     SpInfCloseInfFile(UnattendInf);
     return IsUnattendedSetup;
-}
-
-VOID
-NTAPI
-InstallSetupInfFile(
-    IN OUT PUSETUP_DATA pSetupData)
-{
-    NTSTATUS Status;
-    PINICACHE IniCache;
-
-#if 0 // HACK FIXME!
-    PINICACHE UnattendCache;
-    PINICACHEITERATOR Iterator;
-#else
-    // WCHAR CrLf[] = {L'\r', L'\n'};
-    CHAR CrLf[] = {'\r', '\n'};
-    HANDLE FileHandle, UnattendFileHandle, SectionHandle;
-    FILE_STANDARD_INFORMATION FileInfo;
-    ULONG FileSize;
-    PVOID ViewBase;
-    UNICODE_STRING FileName;
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    IO_STATUS_BLOCK IoStatusBlock;
-#endif
-
-    PINI_SECTION IniSection;
-    WCHAR PathBuffer[MAX_PATH];
-    WCHAR UnattendInfPath[MAX_PATH];
-
-    /* Create a $winnt$.inf file with default entries */
-    IniCache = IniCacheCreate();
-    if (!IniCache)
-        return;
-
-#if 0 /* If you need to put something in this section, do it after the merge with Unattend.inf */
-    IniSection = IniAddSection(IniCache, L"SetupParams");
-    if (IniSection)
-    {
-        /* Key "skipmissingfiles" */
-        // RtlStringCchPrintfW(PathBuffer, ARRAYSIZE(PathBuffer),
-                            // L"\"%s\"", L"WinNt5.2");
-        // IniAddKey(IniSection, L"Version", PathBuffer);
-    }
-#endif
-
-    IniSection = IniAddSection(IniCache, L"Data");
-    if (IniSection)
-    {
-        RtlStringCchPrintfW(PathBuffer, ARRAYSIZE(PathBuffer),
-                            L"\"%s\"", IsUnattendedSetup ? L"yes" : L"no");
-        IniAddKey(IniSection, L"UnattendedInstall", PathBuffer);
-
-        // "floppylessbootpath" (yes/no)
-
-        RtlStringCchPrintfW(PathBuffer, ARRAYSIZE(PathBuffer),
-                            L"\"%s\"", L"winnt");
-        IniAddKey(IniSection, L"ProductType", PathBuffer);
-
-        RtlStringCchPrintfW(PathBuffer, ARRAYSIZE(PathBuffer),
-                            L"\"%s\\\"", pSetupData->SourceRootPath.Buffer);
-        IniAddKey(IniSection, L"SourcePath", PathBuffer);
-
-        // "floppyless" ("0")
-    }
-
-#if 0
-
-    /* TODO: Append the standard unattend.inf file */
-    CombinePaths(UnattendInfPath, ARRAYSIZE(UnattendInfPath), 2,
-                 pSetupData->SourcePath.Buffer, L"unattend.inf");
-    if (DoesFileExist(NULL, UnattendInfPath) == FALSE)
-    {
-        DPRINT("Does not exist: %S\n", UnattendInfPath);
-        goto Quit;
-    }
-
-    Status = IniCacheLoad(&UnattendCache, UnattendInfPath, FALSE);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("Cannot load %S as an INI file!\n", UnattendInfPath);
-        goto Quit;
-    }
-
-    IniCacheDestroy(UnattendCache);
-
-Quit:
-    CombinePaths(PathBuffer, ARRAYSIZE(PathBuffer), 2,
-                 pSetupData->DestinationPath.Buffer, L"System32\\$winnt$.inf");
-    IniCacheSave(IniCache, PathBuffer);
-    IniCacheDestroy(IniCache);
-
-#else
-
-    CombinePaths(PathBuffer, ARRAYSIZE(PathBuffer), 2,
-                 pSetupData->DestinationPath.Buffer, L"System32\\$winnt$.inf");
-    IniCacheSave(IniCache, PathBuffer);
-    IniCacheDestroy(IniCache);
-
-    /* TODO: Append the standard unattend.inf file */
-    CombinePaths(UnattendInfPath, ARRAYSIZE(UnattendInfPath), 2,
-                 pSetupData->SourcePath.Buffer, L"unattend.inf");
-    if (DoesFileExist(NULL, UnattendInfPath) == FALSE)
-    {
-        DPRINT("Does not exist: %S\n", UnattendInfPath);
-        return;
-    }
-
-    RtlInitUnicodeString(&FileName, PathBuffer);
-    InitializeObjectAttributes(&ObjectAttributes,
-                               &FileName,
-                               OBJ_CASE_INSENSITIVE | OBJ_OPENIF,
-                               NULL,
-                               NULL);
-    Status = NtOpenFile(&FileHandle,
-                        FILE_APPEND_DATA | SYNCHRONIZE,
-                        &ObjectAttributes,
-                        &IoStatusBlock,
-                        FILE_SHARE_READ,
-                        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("Cannot load %S as an INI file!\n", PathBuffer);
-        return;
-    }
-
-    /* Query the file size */
-    Status = NtQueryInformationFile(FileHandle,
-                                    &IoStatusBlock,
-                                    &FileInfo,
-                                    sizeof(FileInfo),
-                                    FileStandardInformation);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT("NtQueryInformationFile() failed (Status %lx)\n", Status);
-        FileInfo.EndOfFile.QuadPart = 0ULL;
-    }
-
-    Status = OpenAndMapFile(NULL,
-                            UnattendInfPath,
-                            &UnattendFileHandle,
-                            &FileSize,
-                            &SectionHandle,
-                            &ViewBase,
-                            FALSE);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("Cannot load %S !\n", UnattendInfPath);
-        NtClose(FileHandle);
-        return;
-    }
-
-    /* Write to the INI file */
-
-    /* "\r\n" */
-    Status = NtWriteFile(FileHandle,
-                         NULL,
-                         NULL,
-                         NULL,
-                         &IoStatusBlock,
-                         (PVOID)CrLf,
-                         sizeof(CrLf),
-                         &FileInfo.EndOfFile,
-                         NULL);
-
-    Status = NtWriteFile(FileHandle,
-                         NULL,
-                         NULL,
-                         NULL,
-                         &IoStatusBlock,
-                         ViewBase,
-                         FileSize,
-                         NULL,
-                         NULL);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT("NtWriteFile() failed (Status %lx)\n", Status);
-    }
-
-    /* Finally, unmap and close the file */
-    UnMapAndCloseFile(UnattendFileHandle, SectionHandle, ViewBase);
-
-    NtClose(FileHandle);
-#endif
 }
 
 /**
@@ -758,6 +718,9 @@ InitSystemPartition(
         ASSERT(FALSE);
     }
 
+    if (!PartitionList->SystemPartition)
+        PartitionList->SystemPartition = SystemPartition;
+
     /*
      * In all cases, whether or not we are going to perform a formatting,
      * we must perform a filesystem check of the system partition.
@@ -921,6 +884,20 @@ InitDestinationPaths(
                              PartEntry->OnDiskPartitionNumber);
 #endif
             DPRINT1("Fixed disk found by BIOS, using MULTI ARC path '%S'\n", PathBuffer);
+        }
+        else if (DiskEntry->PartList->SystemPartition == PartEntry)
+        {
+            PathBuffer[0] = UNICODE_NULL;
+            Status = STATUS_SUCCESS;
+            DPRINT1("Fixed disk not found by BIOS, using a path relative to the system partition\n");
+        }
+        else if (DiskEntry->PartList->SystemPartition &&
+                 DiskEntry->PartList->SystemPartition->DiskEntry == DiskEntry)
+        {
+            Status = RtlStringCchPrintfW(PathBuffer, ARRAYSIZE(PathBuffer),
+                             L"partition(%lu)\\",
+                             PartEntry->OnDiskPartitionNumber);
+            DPRINT1("Fixed disk not found by BIOS, using system disk relative path '%S'\n", PathBuffer);
         }
         else
         {
@@ -1172,6 +1149,7 @@ UpdateRegistry(
     BOOLEAN Success;
     BOOLEAN ShouldRepairRegistry = FALSE;
     BOOLEAN Delete;
+    PVOID KeptSettings = NULL;
 
     if (RepairUpdateFlag)
     {
@@ -1248,6 +1226,8 @@ DoUpdate:
             DPRINT1("No update needed for the registry!\n");
             goto Cleanup;
         }
+
+        KeptSettings = RegSaveKeptSettings(pSetupData->SetupInf, L"HiveInfs.Upgrade.Keep");
     }
 
     do
@@ -1367,11 +1347,11 @@ DoUpdate:
         }
 
         /* Set the default pagefile entry */
-        SetDefaultPagefile(DestinationDriveLetter);
+        SetDefaultPagefile(L'C');
 
         /* Update the mounted devices list */
         // FIXME: This should technically be done by mountmgr (if AutoMount is enabled)!
-        SetMountedDeviceValues(PartitionList);
+        SetMountedDeviceValues(PartitionList, &pSetupData->DestinationRootPath);
     }
 
 #ifdef __REACTOS__
@@ -1383,6 +1363,9 @@ DoUpdate:
 #endif
 
 Cleanup:
+    RegRestoreKeptSettings(KeptSettings);
+    KeptSettings = NULL;
+
     //
     // TODO: Unload all the registry stuff, perform cleanup,
     // and copy the created hive files into .sav files.
@@ -1402,6 +1385,21 @@ Cleanup:
     }
 
     return ErrorNumber;
+}
+
+NTSTATUS
+NTAPI
+MountTargetRegistry(
+    _In_ PUSETUP_DATA pSetupData)
+{
+    return RegMountTargetHives(&pSetupData->DestinationPath);
+}
+
+VOID
+NTAPI
+UnmountTargetRegistry(VOID)
+{
+    RegUnmountTargetHives();
 }
 
 /* EOF */

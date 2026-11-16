@@ -135,6 +135,10 @@ LsapTerminateLogon(
 NTSTATUS
 StartAuthenticationPort(VOID);
 
+BOOL
+LsapIsTrustedClient(
+    _In_ HANDLE ProcessHandle);
+
 /* database.c */
 NTSTATUS
 LsapInitDatabase(VOID);
@@ -446,6 +450,12 @@ LsapCreateTokenSd(
 VOID
 LsapInitLogonSessions(VOID);
 
+VOID
+LsapLockLogonSessions(VOID);
+
+VOID
+LsapUnlockLogonSessions(VOID);
+
 NTSTATUS
 NTAPI
 LsapCreateLogonSession(IN PLUID LogonId);
@@ -486,7 +496,8 @@ LsapSetLogonSessionData(
     _In_ ULONG LogonType,
     _In_ PUNICODE_STRING UserName,
     _In_ PUNICODE_STRING LogonDomain,
-    _In_ PSID Sid);
+    _In_ PSID Sid,
+    _In_ ULONG SessionId);
 
 NTSTATUS
 LsapEnumLogonSessions(IN OUT PLSA_API_MSG RequestMsg);

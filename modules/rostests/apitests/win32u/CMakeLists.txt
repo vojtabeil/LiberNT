@@ -1,16 +1,8 @@
 
-add_subdirectory(win32u_xpsp2)
-add_subdirectory(win32u_2k3sp2)
-add_subdirectory(win32u_vista)
-
 add_definitions(-D_DLL -D__USE_CRTIMP)
-include_directories(${REACTOS_SOURCE_DIR}/win32ss/include ../gditools)
+include_directories(${REACTOS_SOURCE_DIR}/subsystems/win/win32k/include ../gditools)
 
 list(APPEND SOURCE
-    ntdd/NtGdiDdCreateDirectDrawObject.c
-    ntdd/NtGdiDdDeleteDirectDrawObject.c
-    #ntdd/NtGdiDdQueryDirectDrawObject.c
-
     ntgdi/NtGdiArcInternal.c
     ntgdi/NtGdiBitBlt.c
     ntgdi/NtGdiCombineRgn.c
@@ -21,7 +13,6 @@ list(APPEND SOURCE
     ntgdi/NtGdiDeleteObjectApp.c
     ntgdi/NtGdiDoPalette.c
     ntgdi/NtGdiEngCreatePalette.c
-    ntgdi/NtGdiEnumFontOpen.c
     ntgdi/NtGdiExcludeClipRect.c
     ntgdi/NtGdiExtSelectClipRgn.c
     ntgdi/NtGdiExtTextOutW.c
@@ -30,10 +21,10 @@ list(APPEND SOURCE
     ntgdi/NtGdiGetDIBitsInternal.c
     #ntgdi/NtGdiGetFontResourceInfoInternalW.c
     ntgdi/NtGdiGetRandomRgn.c
-    ntgdi/NtGdiGetStockObject.c
     ntgdi/NtGdiIntersectClipRect.c
     ntgdi/NtGdiLineTo.c
     ntgdi/NtGdiOffsetClipRgn.c
+    ntgdi/NtGdiPolyPatBlt.c
     ntgdi/NtGdiPolyPolyDraw.c
     ntgdi/NtGdiRestoreDC.c
     ntgdi/NtGdiSaveDC.c
@@ -57,11 +48,11 @@ list(APPEND SOURCE
     ntuser/NtUserCountClipboardFormats.c
     ntuser/NtUserCreateAcceleratorTable.c
     ntuser/NtUserCreateWindowEx.c
-#    ntuser/NtUserEnumDisplayMonitors.c
+    ntuser/NtUserEnumDisplayMonitors.c
     ntuser/NtUserEnumDisplaySettings.c
     ntuser/NtUserFindExistingCursorIcon.c
     ntuser/NtUserGetAsyncKeyState.c
-    ntuser/NtUserGetClassInfo.c
+    ntuser/NtUserGetComboBoxInfo.c
     ntuser/NtUserGetCursorInfo.c
 #    ntuser/NtUserGetIconInfo.c
     ntuser/NtUserGetKeyboardLayoutName.c

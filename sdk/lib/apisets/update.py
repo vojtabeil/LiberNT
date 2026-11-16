@@ -21,6 +21,57 @@ REDIRECT_HOSTS = {
     'gdi32full.dll': 'gdi32.dll'
 }
 
+# These contracts are implemented by a more specific ReactOS host than the
+# module-wide fallback above. Contract overrides always take precedence.
+CONTRACT_HOST_OVERRIDES = {
+    'api-ms-win-core-com-l1-1-1.dll': 'combase.dll',
+    'api-ms-win-core-featurestaging-l1-1-0.dll': 'shcore.dll',
+    'api-ms-win-core-featurestaging-l1-1-1.dll': 'shcore.dll',
+    'api-ms-win-core-libraryloader-l1-1-0.dll': 'kernelbase.dll',
+    'api-ms-win-core-libraryloader-l1-2-0.dll': 'kernelbase.dll',
+    'api-ms-win-core-libraryloader-l1-2-1.dll': 'kernelbase.dll',
+    'api-ms-win-core-libraryloader-l1-2-2.dll': 'kernelbase.dll',
+    'api-ms-win-core-libraryloader-l2-1-0.dll': 'kernelbase.dll',
+    'api-ms-win-core-localregistry-l1-1-0.dll': 'kernelbase.dll',
+    'api-ms-win-core-perfcounters-l1-1-0.dll': 'kernelbase.dll',
+    'api-ms-win-core-processthreads-l1-1-0.dll': 'kernelbase.dll',
+    'api-ms-win-core-registry-l1-1-0.dll': 'advapi32.dll',
+    'api-ms-win-core-registry-l1-1-2.dll': 'advapi32.dll',
+    'api-ms-win-core-registryuserspecific-l1-1-0.dll': 'kernelbase.dll',
+    'api-ms-win-core-shlwapi-legacy-l1-1-0.dll': 'kernelbase.dll',
+    'api-ms-win-core-shlwapi-obsolete-l1-1-0.dll': 'kernelbase.dll',
+    'api-ms-win-core-shlwapi-obsolete-l1-2-0.dll': 'kernelbase.dll',
+    'api-ms-win-core-string-l2-1-0.dll': 'kernelbase.dll',
+    'api-ms-win-core-string-l2-1-1.dll': 'kernelbase.dll',
+    'api-ms-win-core-url-l1-1-0.dll': 'kernelbase.dll',
+    'api-ms-win-core-version-l1-1-0.dll': 'version.dll',
+    'api-ms-win-core-version-l1-1-1.dll': 'version.dll',
+    'api-ms-win-core-version-private-l1-1-0.dll': 'version.dll',
+    'api-ms-win-core-versionansi-l1-1-0.dll': 'version.dll',
+    'api-ms-win-core-versionansi-l1-1-1.dll': 'version.dll',
+    'api-ms-win-core-winrt-error-l1-1-0.dll': 'combase.dll',
+    'api-ms-win-core-winrt-error-l1-1-1.dll': 'combase.dll',
+    'api-ms-win-core-winrt-l1-1-0.dll': 'combase.dll',
+    'api-ms-win-core-winrt-registration-l1-1-0.dll': 'combase.dll',
+    'api-ms-win-core-winrt-roparameterizediid-l1-1-0.dll': 'combase.dll',
+    'api-ms-win-core-winrt-string-l1-1-0.dll': 'combase.dll',
+    'api-ms-win-core-winrt-string-l1-1-1.dll': 'combase.dll',
+    'api-ms-win-downlevel-shlwapi-l1-1-0.dll': 'kernelbase.dll',
+    'api-ms-win-eventing-classicprovider-l1-1-0.dll': 'advapi32.dll',
+    'api-ms-win-eventing-consumer-l1-1-0.dll': 'advapi32.dll',
+    'api-ms-win-eventing-controller-l1-1-0.dll': 'sechost.dll',
+    'api-ms-win-eventing-provider-l1-1-0.dll': 'kernelbase.dll',
+    'api-ms-win-security-base-l1-1-0.dll': 'advapi32.dll',
+    'api-ms-win-security-base-l1-2-0.dll': 'kernelbase.dll',
+    'api-ms-win-shcore-obsolete-l1-1-0.dll': 'shcore.dll',
+    'api-ms-win-shcore-path-l1-1-0.dll': 'shcore.dll',
+    'api-ms-win-shcore-scaling-l1-1-0.dll': 'shcore.dll',
+    'api-ms-win-shcore-scaling-l1-1-1.dll': 'shcore.dll',
+    'api-ms-win-shcore-scaling-l1-1-2.dll': 'shcore.dll',
+    'api-ms-win-shcore-stream-l1-1-0.dll': 'shcore.dll',
+    'api-ms-win-shell-shellfolders-l1-1-0.dll': 'shell32.dll',
+}
+
 OUTPUT_HEADER = """/*
  * PROJECT:     ReactOS apisets
  * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
@@ -38,6 +89,13 @@ const ROS_APISET g_Apisets[] = {
 OUTPUT_FOOTER = """};
 
 const LONG g_ApisetsCount = RTL_NUMBER_OF(g_Apisets);
+
+const ROS_APISET g_ApisetsNoHost[] = {
+"""
+
+OUTPUT_NOHOST_FOOTER = """};
+
+const LONG g_ApisetsNoHostCount = RTL_NUMBER_OF(g_ApisetsNoHost);
 """
 
 def winver_to_name(version):
@@ -68,6 +126,7 @@ class Apiset:
         version_str = ' | '.join(self.versions)
         name = self.name
         assert name[-4:].lower() == '.dll'
+        contract_name = name.lower()
         name = name[:-4]
         prefix, postfix = '', ''
         host = self.host
@@ -75,8 +134,10 @@ class Apiset:
             # Disable forwarders that have an empty host
             prefix = '// '
         else:
-            # Check to see if there is any dll we want to swap (kernelbase -> kernel32)
-            replace = REDIRECT_HOSTS.get(host.lower(), None)
+            replace = CONTRACT_HOST_OVERRIDES.get(contract_name, None)
+            if replace is None:
+                # Check to see if there is any dll we want to swap (kernelbase -> kernel32)
+                replace = REDIRECT_HOSTS.get(host.lower(), None)
             if replace:
                 postfix = ' // ' + host
                 host = replace
@@ -109,7 +170,22 @@ class CombinedSchemas:
                 apiset = self._apisets[lowername]
             apiset.add_version(schema.version)
 
+    def generate_no_host(self, output):
+        for key in sorted(self._apisets):
+            apiset = self._apisets[key]
+            if apiset.host == '':
+                version_str = ' | '.join(apiset.versions)
+                output.write(f'    {{ RTL_CONSTANT_STRING(L"{apiset.name[:-4]}"), RTL_CONSTANT_STRING(L""), {version_str} }},\n'.encode('utf-8'))
+
     def generate(self, output):
+        # The newer feature-staging contract includes the original exports.
+        # Keep the original contract available even in schema sets that only
+        # list the newer revision.
+        old = 'api-ms-win-core-featurestaging-l1-1-0.dll'
+        new = 'api-ms-win-core-featurestaging-l1-1-1.dll'
+        if old not in self._apisets and new in self._apisets:
+            source = self._apisets[new]
+            self._apisets[old] = Apiset(old, 'shcore.dll', list(source.versions))
         for key in sorted(self._apisets):
             apiset = self._apisets[key]
             output.write(f'{apiset}\n'.encode('utf-8'))
@@ -127,6 +203,8 @@ def process_apisetschemas(input_dir: Path, output_file):
     output_file.write(OUTPUT_HEADER.encode('utf-8'))
     schemas.generate(output_file)
     output_file.write(OUTPUT_FOOTER.encode('utf-8'))
+    schemas.generate_no_host(output_file)
+    output_file.write(OUTPUT_NOHOST_FOOTER.encode('utf-8'))
 
 
 def usage():

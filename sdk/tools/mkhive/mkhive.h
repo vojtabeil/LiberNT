@@ -55,13 +55,13 @@ unsigned char BitScanReverse(ULONG * const Index, unsigned long Mask);
 #define RtlFillMemoryUlong(dst, len, val) memset(dst, val, len)
 
 #ifdef _M_AMD64
-#define BitScanForward64 _BitScanForward64
-#define BitScanReverse64 _BitScanReverse64
+#include <intrin.h>
+#define BitScanForward64(idx, val) _BitScanForward64((unsigned long*)(idx), (val))
+#define BitScanReverse64(idx, val) _BitScanReverse64((unsigned long*)(idx), (val))
 #endif
 
 typedef DWORD REGSAM;
 typedef LPVOID LPSECURITY_ATTRIBUTES;
-typedef HANDLE HKEY, *PHKEY;
 
 VOID NTAPI
 RtlInitUnicodeString(

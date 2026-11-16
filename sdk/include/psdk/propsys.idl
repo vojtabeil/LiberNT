@@ -65,6 +65,10 @@ interface IInitializeWithStream : IUnknown
         [in] IStream *pstream,
         [in] DWORD grfMode
     );
+    [call_as(Initialize)] HRESULT RemoteInitialize(
+        [in] IStream *pstream,
+        [in] DWORD grfMode
+    );
 }
 
 [
@@ -807,10 +811,18 @@ cpp_quote("#define PKEYSTR_MAX (GUIDSTRING_MAX + 1 + PKEY_PIDSTR_MAX)")
 
 cpp_quote("PSSTDAPI PSCreateMemoryPropertyStore(REFIID,void **);")
 cpp_quote("PSSTDAPI PSCreatePropertyStoreFromObject(IUnknown*,DWORD,REFIID,void **);")
+cpp_quote("PSSTDAPI PSGetPropertySystem(REFIID, void**);")
 cpp_quote("PSSTDAPI PSStringFromPropertyKey(REFPROPERTYKEY,LPWSTR,UINT);")
+cpp_quote("PSSTDAPI PSGetPropertyKeyFromName(PCWSTR,PROPERTYKEY *);")
+cpp_quote("PSSTDAPI PSGetNameFromPropertyKey(REFPROPERTYKEY,LPWSTR *);")
 cpp_quote("PSSTDAPI PSPropertyKeyFromString(LPCWSTR,PROPERTYKEY*);")
 cpp_quote("PSSTDAPI PSGetPropertyDescription(REFPROPERTYKEY,REFIID,void **);")
+cpp_quote("PSSTDAPI PSGetPropertyDescriptionByName(LPCWSTR,REFIID,void **);")
 cpp_quote("PSSTDAPI PSGetPropertyDescriptionListFromString(LPCWSTR,REFIID,void **);")
+cpp_quote("PSSTDAPI PSEnumeratePropertyDescriptions(PROPDESC_ENUMFILTER,REFIID,void **);")
+cpp_quote("PSSTDAPI PSFormatForDisplay(REFPROPERTYKEY,REFPROPVARIANT,PROPDESC_FORMAT_FLAGS,LPWSTR,DWORD);")
+cpp_quote("PSSTDAPI PSFormatForDisplayAlloc(REFPROPERTYKEY,REFPROPVARIANT,PROPDESC_FORMAT_FLAGS,PWSTR *);")
+cpp_quote("PSSTDAPI PSLookupPropertyHandlerCLSID(PCWSTR,CLSID *);")
 cpp_quote("PSSTDAPI PSRefreshPropertySchema(void);")
 cpp_quote("PSSTDAPI PSRegisterPropertySchema(LPCWSTR);")
 cpp_quote("PSSTDAPI PSUnregisterPropertySchema(LPCWSTR);")

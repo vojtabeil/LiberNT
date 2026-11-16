@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 /* MS Windows 2000/XP/2003 */
 typedef struct _DELETED_FILE_RECORD
@@ -20,7 +20,7 @@ typedef struct _DELETED_FILE_RECORD
     WCHAR FileNameW[MAX_PATH];
 } DELETED_FILE_RECORD, *PDELETED_FILE_RECORD;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 /* COM interface */
 
@@ -39,7 +39,7 @@ DECLARE_INTERFACE_(IRecycleBin5, IRecycleBin)
 
     /* IRecycleBin interface */
     STDMETHOD(DeleteFile)(THIS_ IN LPCWSTR szFileName) PURE;
-    STDMETHOD(EmptyRecycleBin)(THIS);
+    STDMETHOD(EmptyRecycleBin)(THIS) PURE;
     STDMETHOD(EnumObjects)(THIS_ OUT IRecycleBinEnumList **ppEnumList) PURE;
     STDMETHOD(GetDirectory)(THIS_ LPWSTR szPath) PURE;
 

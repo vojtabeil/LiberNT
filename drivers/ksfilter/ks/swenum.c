@@ -148,7 +148,8 @@ KspRemoveDeviceAssociations(
          ASSERT(CurEntry->SymbolicLink.Buffer);
 
          /* de-register interface */
-         IoSetDeviceInterfaceState(&CurEntry->SymbolicLink, FALSE);
+         if (!NT_SUCCESS(IoSetDeviceInterfaceState(&CurEntry->SymbolicLink, FALSE)))
+             DPRINT1("IoSetDeviceInterfaceState(%wZ) failed\n", &CurEntry->SymbolicLink);
 
          /* free symbolic link buffer */
          FreeItem(CurEntry->SymbolicLink.Buffer);
@@ -272,7 +273,8 @@ KspCreateDeviceAssociation(
     RtlInitUnicodeString(&DeviceName, InterfaceString);
 
     /* first convert device name to guid */
-    RtlGUIDFromString(&DeviceName, &InterfaceGUID);
+    if (!NT_SUCCESS(RtlGUIDFromString(&DeviceName, &InterfaceGUID)))
+        return STATUS_INVALID_PARAMETER;
 
     /* check if the device is already present */
     Entry = DeviceEntry->DeviceInterfaceList.Flink;
@@ -400,7 +402,12 @@ KspCreateDeviceReference(
 
         /* copy device guid */
         RtlInitUnicodeString(&String, DeviceId);
-        RtlGUIDFromString(&String, &DeviceEntry->DeviceGuid);
+        if (!NT_SUCCESS(RtlGUIDFromString(&String, &DeviceEntry->DeviceGuid)))
+        {
+            FreeItem(DeviceEntry);
+            FreeItem(DeviceName);
+            return STATUS_INVALID_PARAMETER;
+        }
 
         /* copy device names */
         DeviceEntry->DeviceName = DeviceName;
@@ -512,7 +519,9 @@ KspScanBus(
     /* TODO clear reference marks */
 
     /* construct device entries */
+    KeWaitForSingleObject(&BusDeviceExtension->BusMutex, Executive, KernelMode, FALSE, NULL);
     Status = KspEnumerateBusRegistryKeys(hKey, NULL, KspCreateDeviceReferenceTrampoline, BusDeviceExtension, NULL);
+    KeReleaseMutex(&BusDeviceExtension->BusMutex, FALSE);
 
     /* TODO: delete unreferenced devices */
 
@@ -832,7 +841,12 @@ KspQueryBusDeviceCapabilities(
     /* get capabilities */
     Capabilities = IoStack->Parameters.DeviceCapabilities.Capabilities;
 
-    RtlZeroMemory(Capabilities, sizeof(DEVICE_CAPABILITIES));
+    if (!Capabilities ||
+        Capabilities->Size < sizeof(DEVICE_CAPABILITIES) ||
+        Capabilities->Version != 1)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
 
     /* setup capabilities */
     Capabilities->UniqueID = TRUE;
@@ -1128,6 +1142,8 @@ KspInstallBusEnumInterface(
     // FIXME: We may need to check for success here, and properly fail...
     ASSERT(NT_SUCCESS(Status));
 
+    KeWaitForSingleObject(&Context->BusDeviceExtension->BusMutex, Executive, KernelMode, FALSE, NULL);
+
     /* acquire device entry lock */
     KeAcquireSpinLock(&Context->BusDeviceExtension->Lock, &OldLevel);
 
@@ -1162,6 +1178,7 @@ KspInstallBusEnumInterface(
 
     /* release device entry lock */
     KeReleaseSpinLock(&Context->BusDeviceExtension->Lock, OldLevel);
+    KeReleaseMutex(&Context->BusDeviceExtension->BusMutex, FALSE);
 
     /* signal that bus driver relations has changed */
     IoInvalidateDeviceRelations(Context->BusDeviceExtension->PhysicalDeviceObject, BusRelations);
@@ -1182,8 +1199,7 @@ KspBusWorkerRoutine(
     PBUS_ENUM_DEVICE_EXTENSION BusDeviceExtension;
     PBUS_DEVICE_ENTRY DeviceEntry;
     PLIST_ENTRY Entry;
-    LARGE_INTEGER Time, Diff;
-    BOOLEAN DoInvalidate = FALSE;
+    LARGE_INTEGER Time;
     KIRQL OldLevel;
 
     /* get device extension */
@@ -1207,49 +1223,16 @@ KspBusWorkerRoutine(
 
         //DPRINT1("DeviceEntry %p PDO %p State %x\n", DeviceEntry, DeviceEntry->PDO, DeviceEntry->DeviceState);
 
-        if (DeviceEntry->PDO)
+        if (DeviceEntry->PDO && DeviceEntry->DeviceState == Started)
         {
-            if (DeviceEntry->DeviceState == NotStarted)
-            {
-                Diff.QuadPart = (Time.QuadPart - DeviceEntry->TimeCreated.QuadPart) * KeQueryTimeIncrement();
+            /* release spin lock */
+            KeReleaseSpinLock(&BusDeviceExtension->Lock, OldLevel);
 
-                /* wait for 15 sec */
-                if (Diff.QuadPart > Int32x32To64(15000, 10000))
-                {
-                     /* release spin lock */
-                     KeReleaseSpinLock(&BusDeviceExtension->Lock, OldLevel);
+            /* found pending irps */
+            KspCompletePendingIrps(DeviceEntry, STATUS_REPARSE);
 
-                     DPRINT1("DeviceID %S Instance %S TimeCreated %I64u Now %I64u Diff %I64u hung\n",
-                        DeviceEntry->DeviceName,
-                        DeviceEntry->Instance,
-                        DeviceEntry->TimeCreated.QuadPart * KeQueryTimeIncrement(),
-                        Time.QuadPart * KeQueryTimeIncrement(),
-                        Diff.QuadPart);
-
-                     /* deactivate interfaces */
-                     //KspEnableBusDeviceInterface(DeviceEntry, FALSE);
-
-                     /* re-acquire lock */
-                     KeAcquireSpinLock(&BusDeviceExtension->Lock, &OldLevel);
-
-                     /* pending remove device object */
-                     DeviceEntry->DeviceState = StopPending;
-
-                     /* perform invalidation */
-                     DoInvalidate = TRUE;
-                }
-            }
-            else if (DeviceEntry->DeviceState == Started)
-            {
-                /* release spin lock */
-                KeReleaseSpinLock(&BusDeviceExtension->Lock, OldLevel);
-
-                /* found pending irps */
-                KspCompletePendingIrps(DeviceEntry, STATUS_REPARSE);
-
-                /* re-acquire lock */
-                KeAcquireSpinLock(&BusDeviceExtension->Lock, &OldLevel);
-            }
+            /* re-acquire lock */
+            KeAcquireSpinLock(&BusDeviceExtension->Lock, &OldLevel);
         }
 
 
@@ -1259,12 +1242,6 @@ KspBusWorkerRoutine(
 
    /* release lock */
     KeReleaseSpinLock(&BusDeviceExtension->Lock, OldLevel);
-
-    if (DoInvalidate)
-    {
-        /* invalidate device relations */
-        IoInvalidateDeviceRelations(BusDeviceExtension->PhysicalDeviceObject, BusRelations);
-    }
 
     Time.QuadPart = Int32x32To64(5000, -10000);
     KeSetTimer(&BusDeviceExtension->Timer, Time, &BusDeviceExtension->Dpc);
@@ -1282,6 +1259,9 @@ KspBusDpcRoutine(
     PBUS_ENUM_DEVICE_EXTENSION BusDeviceExtension = (PBUS_ENUM_DEVICE_EXTENSION)DeferredContext;
 
     /* queue the item */
+
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+
     ExQueueWorkItem(&BusDeviceExtension->WorkItem, DelayedWorkQueue);
 }
 
@@ -1634,6 +1614,7 @@ KsCreateBusEnumObject(
 
     /* initialize lock */
     KeInitializeSpinLock(&BusDeviceExtension->Lock);
+    KeInitializeMutex(&BusDeviceExtension->BusMutex, 0);
 
     /* initialize timer */
     KeInitializeTimer(&BusDeviceExtension->Timer);
@@ -1658,7 +1639,8 @@ KsCreateBusEnumObject(
             DPRINT1("IoAttachDeviceToDeviceStack failed with %x\n", Status);
             if (BusDeviceExtension->DeviceInterfaceLink.Buffer)
             {
-                IoSetDeviceInterfaceState(&BusDeviceExtension->DeviceInterfaceLink, FALSE);
+                if (!NT_SUCCESS(IoSetDeviceInterfaceState(&BusDeviceExtension->DeviceInterfaceLink, FALSE)))
+                    DPRINT1("IoSetDeviceInterfaceState(%wZ) failed\n", &BusDeviceExtension->DeviceInterfaceLink);
                 RtlFreeUnicodeString(&BusDeviceExtension->DeviceInterfaceLink);
             }
 
@@ -1687,7 +1669,8 @@ KsCreateBusEnumObject(
         /* failed to scan bus */
         if (BusDeviceExtension->DeviceInterfaceLink.Buffer)
         {
-            IoSetDeviceInterfaceState(&BusDeviceExtension->DeviceInterfaceLink, FALSE);
+            if (!NT_SUCCESS(IoSetDeviceInterfaceState(&BusDeviceExtension->DeviceInterfaceLink, FALSE)))
+                DPRINT1("IoSetDeviceInterfaceState(%wZ) failed\n", &BusDeviceExtension->DeviceInterfaceLink);
             RtlFreeUnicodeString(&BusDeviceExtension->DeviceInterfaceLink);
         }
 
@@ -1703,6 +1686,8 @@ KsCreateBusEnumObject(
 
         return Status;
     }
+
+    KeWaitForSingleObject(&BusDeviceExtension->BusMutex, Executive, KernelMode, FALSE, NULL);
 
     /* acquire device entry lock */
     KeAcquireSpinLock(&BusDeviceExtension->Lock, &OldLevel);
@@ -1733,6 +1718,7 @@ KsCreateBusEnumObject(
 
     /* release device entry lock */
     KeReleaseSpinLock(&BusDeviceExtension->Lock, OldLevel);
+    KeReleaseMutex(&BusDeviceExtension->BusMutex, FALSE);
 
 
     /* invalidate device relations */
@@ -1930,7 +1916,7 @@ KsServiceBusEnumCreateRequest(
 
     ASSERT(IoStack->FileObject->FileName.Buffer);
 
-    DPRINT1("KsServiceBusEnumCreateRequest IRP %p Name %wZ\n", Irp, &IoStack->FileObject->FileName);
+    DPRINT("KsServiceBusEnumCreateRequest IRP %p Name %wZ\n", Irp, &IoStack->FileObject->FileName);
 
     /* scan list and check if it is already present */
     Entry = BusDeviceExtension->Common.Entry.Flink;
@@ -1993,7 +1979,9 @@ KsServiceBusEnumCreateRequest(
     else
     {
         /* time to create PDO */
-        Status = KspCreatePDO(BusDeviceExtension, DeviceEntry, &DeviceEntry->PDO);
+        KeWaitForSingleObject(&BusDeviceExtension->BusMutex, Executive, KernelMode, FALSE, NULL);
+        Status = DeviceEntry->PDO ? STATUS_SUCCESS : KspCreatePDO(BusDeviceExtension, DeviceEntry, &DeviceEntry->PDO);
+        KeReleaseMutex(&BusDeviceExtension->BusMutex, FALSE);
 
         if (!NT_SUCCESS(Status))
         {

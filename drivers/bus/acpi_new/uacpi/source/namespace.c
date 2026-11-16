@@ -14,8 +14,11 @@
 #define UACPI_REV_VALUE 2
 #define UACPI_OS_VALUE "Microsoft Windows NT"
 
-#define MAKE_PREDEFINED(c0, c1, c2, c3) \
-    { .name.text = { c0, c1, c2, c3 } }
+#define MAKE_PREDEFINED(c0, c1, c2, c3)          \
+    {                                            \
+        .name.text = { c0, c1, c2, c3 },         \
+        .flags = UACPI_NAMESPACE_NODE_PREDEFINED \
+    }
 
 static uacpi_namespace_node
 predefined_namespaces[UACPI_PREDEFINED_NAMESPACE_MAX + 1] = {
@@ -146,7 +149,7 @@ static void free_namespace_node(uacpi_handle handle)
         return;
     }
 
-    node->flags = 0;
+    node->flags = UACPI_NAMESPACE_NODE_PREDEFINED;
     node->object = UACPI_NULL;
     node->parent = UACPI_NULL;
     node->child = UACPI_NULL;
@@ -271,7 +274,7 @@ uacpi_namespace_node *uacpi_namespace_get_predefined(
 )
 {
     if (uacpi_unlikely(ns > UACPI_PREDEFINED_NAMESPACE_MAX)) {
-        uacpi_warn("requested invalid predefined namespace %d", ns);
+        uacpi_warn("requested invalid predefined namespace %d\n", ns);
         return UACPI_NULL;
     }
 
@@ -305,7 +308,7 @@ uacpi_status uacpi_namespace_node_install(
         parent = uacpi_namespace_root();
 
     if (uacpi_unlikely(uacpi_namespace_node_is_dangling(node))) {
-        uacpi_warn("attempting to install a dangling namespace node %.4s",
+        uacpi_warn("attempting to install a dangling namespace node %.4s\n",
                    node->name.text);
         return UACPI_STATUS_NAMESPACE_NODE_DANGLING;
     }
@@ -342,8 +345,7 @@ uacpi_bool uacpi_namespace_node_is_temporary(uacpi_namespace_node *node)
 
 uacpi_bool uacpi_namespace_node_is_predefined(uacpi_namespace_node *node)
 {
-    return node >= &predefined_namespaces[0] &&
-           node <= &predefined_namespaces[UACPI_PREDEFINED_NAMESPACE_MAX];
+    return node->flags & UACPI_NAMESPACE_NODE_PREDEFINED;
 }
 
 uacpi_status uacpi_namespace_node_uninstall(uacpi_namespace_node *node)
@@ -351,7 +353,7 @@ uacpi_status uacpi_namespace_node_uninstall(uacpi_namespace_node *node)
     uacpi_namespace_node *prev;
 
     if (uacpi_unlikely(uacpi_namespace_node_is_dangling(node))) {
-        uacpi_warn("attempting to uninstall a dangling namespace node %.4s",
+        uacpi_warn("attempting to uninstall a dangling namespace node %.4s\n",
                    node->name.text);
         return UACPI_STATUS_INTERNAL_ERROR;
     }
@@ -380,7 +382,7 @@ uacpi_status uacpi_namespace_node_uninstall(uacpi_namespace_node *node)
      */
     if (uacpi_unlikely(node->child != UACPI_NULL)) {
         uacpi_warn(
-            "refusing to uninstall node %.4s with a child (%.4s)",
+            "refusing to uninstall node %.4s with a child (%.4s)\n",
             node->name.text, node->child->name.text
         );
         return UACPI_STATUS_DENIED;
@@ -428,7 +430,7 @@ uacpi_status uacpi_namespace_node_uninstall(uacpi_namespace_node *node)
 
         if (uacpi_unlikely(prev == UACPI_NULL)) {
             uacpi_warn(
-                "trying to uninstall a node %.4s (%p) not linked to any peer",
+                "trying to uninstall a node %.4s (%p) not linked to any peer\n",
                 node->name.text, node
             );
             return UACPI_STATUS_INTERNAL_ERROR;
@@ -448,12 +450,10 @@ uacpi_namespace_node *uacpi_namespace_node_find_sub_node(
     uacpi_object_name name
 )
 {
-    uacpi_namespace_node *node;
-
     if (parent == UACPI_NULL)
         parent = uacpi_namespace_root();
 
-    node = parent->child;
+    uacpi_namespace_node *node = parent->child;
 
     while (node) {
         if (node->name.id == name.id)
@@ -594,7 +594,7 @@ uacpi_status uacpi_namespace_node_resolve(
 
 out:
     if (uacpi_unlikely(ret == UACPI_STATUS_INVALID_ARGUMENT)) {
-        uacpi_warn("invalid path '%s'", path);
+        uacpi_warn("invalid path '%s'\n", path);
         goto out_read_unlock;
     }
 
@@ -605,7 +605,7 @@ out:
 
     if (uacpi_namespace_node_is_temporary(cur_node) &&
         permanent_only == UACPI_PERMANENT_ONLY_YES) {
-        uacpi_warn("denying access to temporary namespace node '%.4s'",
+        uacpi_warn("denying access to temporary namespace node '%.4s'\n",
                    cur_node->name.text);
         ret = UACPI_STATUS_DENIED;
         goto out_read_unlock;

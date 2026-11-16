@@ -21,14 +21,6 @@
 #define EFI_DUMMY_NAMESPACE_GUID_STRING "{00000000-0000-0000-0000-000000000000}"
 #define EFI_DUMMY_VARIABLE_NAME ""
 
-typedef enum _FIRMWARE_TYPE
-{
-    FirmwareTypeUnknown,
-    FirmwareTypeBios,
-    FirmwareTypeUefi,
-    FirmwareTypeMax
-} FIRMWARE_TYPE, *PFIRMWARE_TYPE;
-
 typedef
 _Success_(return)
 BOOL
@@ -186,7 +178,7 @@ START_TEST(UEFIFirmware)
         {
             ok(dwLength == sizeof(EfiVariableValue) && dwValue == EfiVariableValue,
                "Retrieved variable different from what we set, "
-               "dwLength = %lu, dwValue = %lu, expected dwLength = %u, dwValue = %lu",
+               "dwLength = %lu, dwValue = %lu, expected dwLength = %Iu, dwValue = %lu",
                dwLength,
                dwValue,
                sizeof(EfiVariableValue),
@@ -217,7 +209,7 @@ START_TEST(UEFIFirmware)
         {
             ok(dwLength == sizeof(EfiVariableValue) && dwValue == EfiVariableValue,
                "Retrieved variable different from what we set, "
-               "dwLength = %lu, dwValue = %lu, expected dwLength = %u, dwValue = %lu",
+               "dwLength = %lu, dwValue = %lu, expected dwLength = %Iu, dwValue = %lu",
                dwLength,
                dwValue,
                sizeof(EfiVariableValue),

@@ -84,6 +84,26 @@ extern void gl_init_lists( void );
 extern void gl_destroy_list( GLcontext *ctx, GLuint list );
 
 
+/*
+ * Read-only visitor for drivers which can cache a deliberately small subset
+ * of display-list geometry.  The walk fails on every instruction which is
+ * not represented here, so a driver can always fall back to gl_CallList().
+ */
+struct gl_display_list_visitor {
+   GLboolean (*Begin)( void *user, GLenum mode );
+   GLboolean (*End)( void *user );
+   GLboolean (*Material)( void *user, GLenum face, GLenum pname,
+                          const GLfloat params[4] );
+   GLboolean (*Normal)( void *user, const GLfloat normal[3] );
+   GLboolean (*ShadeModel)( void *user, GLenum mode );
+   GLboolean (*Vertex)( void *user, const GLfloat vertex[4] );
+};
+
+extern GLboolean gl_visit_display_list(
+   GLcontext *ctx, GLuint list,
+   const struct gl_display_list_visitor *visitor, void *user );
+
+
 
 extern void gl_CallList( GLcontext *ctx, GLuint list );
 
@@ -195,6 +215,12 @@ extern void gl_save_CopyTexSubImage2D( GLcontext *ctx,
                                        GLint xoffset, GLint yoffset,
                                        GLint x, GLint y,
                                        GLsizei width, GLint height );
+
+extern void gl_save_CopyTexSubImage3D( GLcontext *ctx,
+                                       GLenum target, GLint level,
+                                       GLint xoffset, GLint yoffset,
+                                       GLint zoffset, GLint x, GLint y,
+                                       GLsizei width, GLsizei height );
 
 extern void gl_save_CullFace( GLcontext *ctx, GLenum mode );
 
@@ -397,6 +423,12 @@ extern void gl_save_TexImage2D( GLcontext *ctx, GLenum target,
                                 GLenum format, GLenum type,
                                 struct gl_image *teximage );
 
+extern void gl_save_TexImage3D( GLcontext *ctx, GLenum target,
+                                GLint level, GLint components,
+			        GLsizei width, GLsizei height, GLsizei depth,
+                                GLint border, GLenum format, GLenum type,
+                                struct gl_image *teximage );
+
 extern void gl_save_TexSubImage1D( GLcontext *ctx,
                                    GLenum target, GLint level,
                                    GLint xoffset, GLsizei width,
@@ -408,6 +440,13 @@ extern void gl_save_TexSubImage2D( GLcontext *ctx,
                                    GLenum target, GLint level,
                                    GLint xoffset, GLint yoffset,
                                    GLsizei width, GLsizei height,
+                                   GLenum format, GLenum type,
+                                   struct gl_image *image );
+
+extern void gl_save_TexSubImage3D( GLcontext *ctx,
+                                   GLenum target, GLint level,
+                                   GLint xoffset, GLint yoffset, GLint zoffset,
+                                   GLsizei width, GLsizei height, GLsizei depth,
                                    GLenum format, GLenum type,
                                    struct gl_image *image );
 

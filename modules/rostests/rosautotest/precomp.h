@@ -25,6 +25,8 @@ using namespace std;
 #include <winbase.h>
 #include <winnls.h>
 #include <reason.h>
+#include <wingdi.h>
+#include <wincon.h>
 #include <shlobj.h>
 #include <wininet.h>
 #include <winreg.h>
@@ -34,6 +36,7 @@ using namespace std;
 
 /* Class includes */
 #include "auto_array_ptr.h"
+#include "CCategories.h"
 #include "CConfiguration.h"
 #include "CFatalException.h"
 #include "CInvalidParameterException.h"

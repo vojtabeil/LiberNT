@@ -23,6 +23,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <windef.h>
 #ifndef GUID_DEFINED
 #include <guiddef.h>
@@ -32,8 +33,10 @@
 #define __RELFILE__ __FILE__
 #endif
 
+#ifndef __REACTOS__
 #ifdef __WINE_WINE_TEST_H
 #error This file should not be used in Wine tests
+#endif
 #endif
 
 #ifdef __cplusplus
@@ -143,8 +146,11 @@ extern const char *wine_dbgstr_wn( const WCHAR *s, int n );
 extern const char *wine_dbg_sprintf( const char *format, ... ) __WINE_PRINTF_ATTR(1,2);
 
 extern int wine_dbg_printf( const char *format, ... ) __WINE_PRINTF_ATTR(1,2);
+extern int wine_dbg_vlog( enum __wine_debug_class cls, struct __wine_debug_channel *ch, const char *func,
+                          const char *format, va_list args ) __WINE_PRINTF_ATTR(4,0);
 extern int wine_dbg_log( enum __wine_debug_class cls, struct __wine_debug_channel *ch, const char *func,
                          const char *format, ... ) __WINE_PRINTF_ATTR(4,5);
+extern int __cdecl __wine_dbg_output( const char *str );
 /* ReactOS compliant debug format */
 extern int ros_dbg_log( enum __wine_debug_class cls, struct __wine_debug_channel *ch, const char *file,
                          const char *func, const int line, const char *format, ... ) __WINE_PRINTF_ATTR(6,7);
@@ -178,8 +184,7 @@ static __inline const char *wine_dbgstr_guid( const GUID *id )
                              id->Data4[4], id->Data4[5], id->Data4[6], id->Data4[7] );
 }
 
-#ifdef __REACTOS__ /* wine-8.18 */
-static inline const char *wine_dbgstr_fourcc( unsigned int fourcc )
+static __inline const char *wine_dbgstr_fourcc( unsigned int fourcc )
 {
     char str[4] = { (char)fourcc, (char)(fourcc >> 8), (char)(fourcc >> 16), (char)(fourcc >> 24) };
     if (!fourcc)
@@ -188,7 +193,6 @@ static inline const char *wine_dbgstr_fourcc( unsigned int fourcc )
         return wine_dbg_sprintf( "'%.4s'", str );
     return wine_dbg_sprintf( "0x%08x", fourcc );
 }
-#endif
 
 static __inline const char *wine_dbgstr_point( const POINT *pt )
 {
@@ -358,23 +362,32 @@ static inline const char *wine_dbgstr_variant( const VARIANT *v )
 #define WINE_ERR_(ch)              __WINE_DPRINTF(_ERR,&__wine_dbch_##ch)
 #define WINE_ERR_ON(ch)            __WINE_IS_DEBUG_ON(_ERR,&__wine_dbch_##ch)
 
+#if DBG
+#define __WINE_DEFAULT_DEBUG_FLAGS ((unsigned char)~0)
+#else
+#define __WINE_DEFAULT_DEBUG_FLAGS 0
+#endif
+
 #define WINE_DECLARE_DEBUG_CHANNEL(ch) \
-    static struct __wine_debug_channel __wine_dbch_##ch = { (unsigned char)~0, #ch }
+    static struct __wine_debug_channel __wine_dbch_##ch = { __WINE_DEFAULT_DEBUG_FLAGS, #ch }
 #define WINE_DEFAULT_DEBUG_CHANNEL(ch) \
-    static struct __wine_debug_channel __wine_dbch_##ch = { (unsigned char)~0, #ch }; \
+    static struct __wine_debug_channel __wine_dbch_##ch = { __WINE_DEFAULT_DEBUG_FLAGS, #ch }; \
     static struct __wine_debug_channel * const __wine_dbch___default = &__wine_dbch_##ch
 
+#if DBG
 #define WINE_DPRINTF               wine_dbg_printf
 #define WINE_MESSAGE               wine_dbg_printf
+#else
+#define WINE_DPRINTF(...)          do { if (0) wine_dbg_printf(__VA_ARGS__); } while (0)
+#define WINE_MESSAGE(...)          do { if (0) wine_dbg_printf(__VA_ARGS__); } while (0)
+#endif
 
 /* Wine uses shorter names that are very likely to conflict with other software */
 
 static __inline const char *debugstr_an( const char * s, int n ) { return wine_dbgstr_an( s, n ); }
 static __inline const char *debugstr_wn( const WCHAR *s, int n ) { return wine_dbgstr_wn( s, n ); }
 static __inline const char *debugstr_guid( const struct _GUID *id ) { return wine_dbgstr_guid(id); }
-#ifdef __REACTOS__ /* wine-8.18 */
-static inline const char *debugstr_fourcc( unsigned int cc ) { return wine_dbgstr_fourcc( cc ); }
-#endif
+static __inline const char *debugstr_fourcc( unsigned int cc ) { return wine_dbgstr_fourcc( cc ); }
 static __inline const char *debugstr_a( const char *s )  { return wine_dbgstr_an( s, -1 ); }
 static __inline const char *debugstr_w( const WCHAR *s ) { return wine_dbgstr_wn( s, -1 ); }
 

@@ -24,6 +24,7 @@ list(APPEND _keyboard_layouts
     kbddv
     kbdeo
     kbdest
+    kbdfa
     kbdfc
     kbdfi
     kbdfr
@@ -95,14 +96,21 @@ foreach(_keyboard_layout ${_keyboard_layouts})
         ${_keyboard_layout}/${_keyboard_layout}.rc
         ${CMAKE_CURRENT_BINARY_DIR}/${_keyboard_layout}.def)
 
-    target_include_directories(${_keyboard_layout} PRIVATE ${REACTOS_SOURCE_DIR}/ntoskrnl/include)
+    target_include_directories(${_keyboard_layout} PRIVATE ${REACTOS_SOURCE_DIR}/ntos/include)
     set_entrypoint(${_keyboard_layout} 0)
-    set_image_base(${_keyboard_layout} 0x5FFF0000)
+    if(NOT (MSVC AND ARCH STREQUAL "arm64"))
+        set_image_base(${_keyboard_layout} 0x5FFF0000)
+    endif()
     set_subsystem(${_keyboard_layout} native)
 
     if(MSVC)
         # Merge the .text and .rdata section into the .data section
         target_link_options(${_keyboard_layout} PRIVATE "/ignore:4254;/SECTION:.data,ER;/MERGE:.text=.data;/MERGE:.rdata=.data;/MERGE:.bss=.data;/MERGE:.edata=.data")
+    elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        # LLD's MinGW driver already merges .edata into .rdata, which is
+        # merged into .data below.
+        target_link_options(${_keyboard_layout} PRIVATE
+            "SHELL:-Xlinker /ignore:4254 -Xlinker /SECTION:.data,ER -Xlinker /MERGE:.text=.data -Xlinker /MERGE:.rdata=.data -Xlinker /MERGE:.bss=.data")
     else()
         # Use a custom linker script
         target_link_options(${_keyboard_layout} PRIVATE "-Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/kbdlayout.lds")

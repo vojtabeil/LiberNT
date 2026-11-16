@@ -126,15 +126,23 @@ WSAAPI
 WsProcStartup(VOID)
 {
     INT ErrorCode = WSAEFAULT;
+    PWSPROCESS Process;
 
     /* Create a new process */
-    CurrentWsProcess = WsProcAllocate();
+    Process = WsProcAllocate();
 
     /* Initialize it */
-    if (CurrentWsProcess)
+    if (Process)
     {
+        CurrentWsProcess = Process;
+
         /* Initialize the process */
-        ErrorCode = WsProcInitialize(CurrentWsProcess);
+        ErrorCode = WsProcInitialize(Process);
+        if (ErrorCode != ERROR_SUCCESS)
+        {
+            WsProcDelete(Process);
+            CurrentWsProcess = NULL;
+        }
     }
     else
     {
@@ -150,7 +158,8 @@ WSAAPI
 WsProcGetTCatalog(IN PWSPROCESS Process)
 {
     /* Check if the catalogs have been modified */
-    if (WsCheckCatalogState(Process->ProtocolCatalogEvent))
+    if (!Process->ProtocolCatalog->ItemCount ||
+        WsCheckCatalogState(Process->ProtocolCatalogEvent))
     {
         /* Modification happened, reload them */
         WsTcRefreshFromRegistry(Process->ProtocolCatalog,
@@ -166,7 +175,8 @@ WSAAPI
 WsProcGetNsCatalog(IN PWSPROCESS Process)
 {
     /* Check if the catalogs have been modified */
-    if (WsCheckCatalogState(Process->NamespaceCatalogEvent))
+    if (!Process->NamespaceCatalog->ItemCount ||
+        WsCheckCatalogState(Process->NamespaceCatalogEvent))
     {
         /* Modification happened, reload them */
         WsNcRefreshFromRegistry(Process->NamespaceCatalog,

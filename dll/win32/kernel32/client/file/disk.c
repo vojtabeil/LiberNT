@@ -579,11 +579,7 @@ GetDriveTypeW(IN LPCWSTR lpRootPathName)
             {
                 return DeviceMap.Query.DriveType[Index];
             }
-            /* Otherwise, return we don't know the type */
-            else
-            {
-                return DRIVE_UNKNOWN;
-            }
+            /* Otherwise, query the mapped volume through the slow path. */
         }
 
         /* We couldn't find ourselves, do it the slow way */
@@ -639,7 +635,7 @@ GetDriveTypeW(IN LPCWSTR lpRootPathName)
          * Check we have a directory if we get farther in path
          */
         PathName.Length += sizeof(WCHAR);
-        if (IsThisARootDirectory(0, &PathName))
+        if (NT_SUCCESS(Status) && IsThisARootDirectory(0, &PathName))
         {
             /* Yes? Heh, then it's fine, keep our current handle */
             RetryOpen = FALSE;

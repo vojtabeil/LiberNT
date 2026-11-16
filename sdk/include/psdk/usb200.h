@@ -31,17 +31,19 @@
 
 #include "usb100.h"
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 typedef enum _USB_DEVICE_TYPE {
   Usb11Device = 0,
   Usb20Device
 } USB_DEVICE_TYPE;
 
+/* Keep this in sync with Windows 10 usbspec.h */
 typedef enum _USB_DEVICE_SPEED {
   UsbLowSpeed = 0,
   UsbFullSpeed,
-  UsbHighSpeed
+  UsbHighSpeed,
+  UsbSuperSpeed
 } USB_DEVICE_SPEED;
 
 #define USB_PORT_STATUS_CONNECT                       0x0001
@@ -105,6 +107,122 @@ typedef struct _USB_DEVICE_QUALIFIER_DESCRIPTOR {
   UCHAR bReserved;
 } USB_DEVICE_QUALIFIER_DESCRIPTOR, *PUSB_DEVICE_QUALIFIER_DESCRIPTOR;
 
+/*
+ * USB 3.0: 9.6.2 Binary Device Object Store (BOS), Table 9-9. BOS Descriptor.
+ */
+typedef struct _USB_BOS_DESCRIPTOR {
+  UCHAR  bLength;
+  UCHAR  bDescriptorType;
+  USHORT wTotalLength;
+  UCHAR  bNumDeviceCaps;
+} USB_BOS_DESCRIPTOR, *PUSB_BOS_DESCRIPTOR;
+
+/*
+ * Descriptor type for BOS, matches Windows and USB 3.x specifications.
+ */
+#define USB_BOS_DESCRIPTOR_TYPE                             0x0F
+#define USB_DEVICE_CAPABILITY_DESCRIPTOR_TYPE               0x10
+#define USB_SUPERSPEED_ENDPOINT_COMPANION_DESCRIPTOR_TYPE   0x30
+#define USB_SUPERSPEEDPLUS_ISOCH_ENDPOINT_COMPANION_DESCRIPTOR_TYPE 0x31
+
+C_ASSERT(sizeof(USB_BOS_DESCRIPTOR) == 5);
+
+/*
+ * USB 3.x Device Capability Type Codes (subset used by ReactOS).
+ */
+#define USB_DEVICE_CAPABILITY_WIRELESS_USB                  0x01
+#define USB_DEVICE_CAPABILITY_USB20_EXTENSION               0x02
+#define USB_DEVICE_CAPABILITY_SUPERSPEED_USB                0x03
+#define USB_DEVICE_CAPABILITY_CONTAINER_ID                  0x04
+#define USB_DEVICE_CAPABILITY_PLATFORM                      0x05
+
+/*
+ * USB 2.0 ECN: Link Power Management (LPM) / USB 3.0: USB 2.0 Extension Descriptor.
+ * Keep layout in sync with Windows 10 usbspec.h.
+ */
+typedef struct _USB_DEVICE_CAPABILITY_USB20_EXTENSION_DESCRIPTOR {
+  UCHAR bLength;
+  UCHAR bDescriptorType;
+  UCHAR bDevCapabilityType;
+  union {
+    ULONG AsUlong;
+    struct {
+      ULONG Reserved:1;
+      ULONG LPMCapable:1;
+      ULONG BESLAndAlternateHIRDSupported:1;
+      ULONG BaselineBESLValid:1;
+      ULONG DeepBESLValid:1;
+      ULONG Reserved1:3;
+      ULONG BaselineBESL:4;
+      ULONG DeepBESL:4;
+      ULONG Reserved2:16;
+    };
+  } bmAttributes;
+} USB_DEVICE_CAPABILITY_USB20_EXTENSION_DESCRIPTOR,
+  *PUSB_DEVICE_CAPABILITY_USB20_EXTENSION_DESCRIPTOR;
+
+C_ASSERT(sizeof(USB_DEVICE_CAPABILITY_USB20_EXTENSION_DESCRIPTOR) == 7);
+
+#define USB_DEVICE_CAPABILITY_USB20_EXTENSION_BMATTRIBUTES_RESERVED_MASK 0xFFFF00E1
+
+/*
+ * USB 3.0: SuperSpeed USB Device Capability descriptor.
+ */
+typedef struct _USB_DEVICE_CAPABILITY_SUPERSPEED_USB_DESCRIPTOR {
+  UCHAR  bLength;
+  UCHAR  bDescriptorType;
+  UCHAR  bDevCapabilityType;
+  UCHAR  bmAttributes;
+  USHORT wSpeedsSupported;
+  UCHAR  bFunctionalitySupport;
+  UCHAR  bU1DevExitLat;
+  USHORT wU2DevExitLat;
+} USB_DEVICE_CAPABILITY_SUPERSPEED_USB_DESCRIPTOR,
+  *PUSB_DEVICE_CAPABILITY_SUPERSPEED_USB_DESCRIPTOR;
+
+#define USB_DEVICE_CAPABILITY_SUPERSPEED_BMATTRIBUTES_RESERVED_MASK 0xFD
+#define USB_DEVICE_CAPABILITY_SUPERSPEED_BMATTRIBUTES_LTM_CAPABLE   0x02
+
+#define USB_DEVICE_CAPABILITY_SUPERSPEED_SPEEDS_SUPPORTED_RESERVED_MASK  0xFFF0
+#define USB_DEVICE_CAPABILITY_SUPERSPEED_SPEEDS_SUPPORTED_LOW            0x0001
+#define USB_DEVICE_CAPABILITY_SUPERSPEED_SPEEDS_SUPPORTED_FULL           0x0002
+#define USB_DEVICE_CAPABILITY_SUPERSPEED_SPEEDS_SUPPORTED_HIGH           0x0004
+#define USB_DEVICE_CAPABILITY_SUPERSPEED_SPEEDS_SUPPORTED_SUPER          0x0008
+
+#define USB_DEVICE_CAPABILITY_SUPERSPEED_U1_DEVICE_EXIT_MAX_VALUE 0x0A
+#define USB_DEVICE_CAPABILITY_SUPERSPEED_U2_DEVICE_EXIT_MAX_VALUE 0x07FF
+
+C_ASSERT(sizeof(USB_DEVICE_CAPABILITY_SUPERSPEED_USB_DESCRIPTOR) == 10);
+
+/*
+ * USB 3.0: Container ID Device Capability descriptor.
+ */
+typedef struct _USB_DEVICE_CAPABILITY_CONTAINER_ID_DESCRIPTOR {
+  UCHAR bLength;
+  UCHAR bDescriptorType;
+  UCHAR bDevCapabilityType;
+  UCHAR bReserved;
+  UCHAR ContainerID[16];
+} USB_DEVICE_CAPABILITY_CONTAINER_ID_DESCRIPTOR,
+  *PUSB_DEVICE_CAPABILITY_CONTAINER_ID_DESCRIPTOR;
+
+C_ASSERT(sizeof(USB_DEVICE_CAPABILITY_CONTAINER_ID_DESCRIPTOR) == 20);
+
+typedef struct _USB_DEVICE_CAPABILITY_PLATFORM_DESCRIPTOR {
+  UCHAR bLength;
+  UCHAR bDescriptorType;
+  UCHAR bDevCapabilityType;
+  UCHAR bReserved;
+  GUID PlatformCapabilityUuid;
+  UCHAR CapabililityData[1];
+} USB_DEVICE_CAPABILITY_PLATFORM_DESCRIPTOR,
+  *PUSB_DEVICE_CAPABILITY_PLATFORM_DESCRIPTOR;
+
+C_ASSERT(sizeof(USB_DEVICE_CAPABILITY_PLATFORM_DESCRIPTOR) == 21);
+
+DEFINE_GUID(GUID_USB_MSOS20_PLATFORM_CAPABILITY_ID,
+  0xD8DD60DF, 0x4589, 0x4CC7, 0x9C, 0xD2, 0x65, 0x9D, 0x9E, 0x64, 0x8A, 0x9F);
+
 typedef union _USB_HIGH_SPEED_MAXPACKET {
   struct _MP {
     USHORT MaxPacket:11;
@@ -113,6 +231,48 @@ typedef union _USB_HIGH_SPEED_MAXPACKET {
   } _MP;
   USHORT us;
 } USB_HIGH_SPEED_MAXPACKET, *PUSB_HIGH_SPEED_MAXPACKET;
+
+#define USB_ENDPOINT_SUPERSPEED_BULK_MAX_PACKET_SIZE      1024
+#define USB_ENDPOINT_SUPERSPEED_CONTROL_MAX_PACKET_SIZE   512
+#define USB_ENDPOINT_SUPERSPEED_ISO_MAX_PACKET_SIZE       1024
+#define USB_ENDPOINT_SUPERSPEED_INTERRUPT_MAX_PACKET_SIZE 1024
+
+typedef struct _USB_SUPERSPEED_ENDPOINT_COMPANION_DESCRIPTOR {
+  UCHAR bLength;
+  UCHAR bDescriptorType;
+  UCHAR bMaxBurst;
+  union {
+    UCHAR AsUchar;
+    struct {
+      UCHAR MaxStreams:5;
+      UCHAR Reserved1:3;
+    } Bulk;
+    struct {
+      UCHAR Mult:2;
+      UCHAR Reserved2:5;
+      UCHAR SspCompanion:1;
+    } Isochronous;
+  } bmAttributes;
+  USHORT wBytesPerInterval;
+} USB_SUPERSPEED_ENDPOINT_COMPANION_DESCRIPTOR,
+  *PUSB_SUPERSPEED_ENDPOINT_COMPANION_DESCRIPTOR;
+
+C_ASSERT(sizeof(USB_SUPERSPEED_ENDPOINT_COMPANION_DESCRIPTOR) == 6);
+
+#define USB_SUPERSPEED_ISOCHRONOUS_MAX_MULTIPLIER 2
+
+typedef struct _USB_SUPERSPEEDPLUS_ISOCH_ENDPOINT_COMPANION_DESCRIPTOR {
+  UCHAR bLength;
+  UCHAR bDescriptorType;
+  USHORT wReserved;
+  ULONG dwBytesPerInterval;
+} USB_SUPERSPEEDPLUS_ISOCH_ENDPOINT_COMPANION_DESCRIPTOR,
+  *PUSB_SUPERSPEEDPLUS_ISOCH_ENDPOINT_COMPANION_DESCRIPTOR;
+
+C_ASSERT(sizeof(USB_SUPERSPEEDPLUS_ISOCH_ENDPOINT_COMPANION_DESCRIPTOR) == 8);
+
+#define USB_SUPERSPEEDPLUS_ISOCHRONOUS_MIN_BYTESPERINTERVAL 0xC001
+#define USB_SUPERSPEEDPLUS_ISOCHRONOUS_MAX_BYTESPERINTERVAL 0xFFFFFF
 
 #define USB_INTERFACE_ASSOCIATION_DESCRIPTOR_TYPE     0x0B
 
@@ -266,6 +426,27 @@ typedef union _USB_HUB_CHANGE {
 
 C_ASSERT(sizeof(USB_HUB_CHANGE) == sizeof(USHORT));
 
+/*
+ * USB 3.0 Hub Descriptor
+ *
+ * Modeled after the USB 3.x specification (Hub Descriptor, Table 10-XX)
+ * and kept layout-compatible with Windows 10's internal definition.
+ * The exact bitmap semantics of the removable/power masks are not used
+ * by the current ReactOS stack; they are treated as opaque bytes.
+ */
+typedef struct _USB_30_HUB_DESCRIPTOR {
+  UCHAR  bLength;
+  UCHAR  bDescriptorType;      /* USB_30_HUB_DESCRIPTOR_TYPE (0x2A) */
+  UCHAR  bNumberOfPorts;
+  USHORT wHubCharacteristics;
+  UCHAR  bPowerOnToPowerGood;
+  UCHAR  bHubControlCurrent;
+  UCHAR  bHubHdrDecLat;
+  USHORT wHubDelay;
+  UCHAR  DeviceRemovable[64];
+} USB_30_HUB_DESCRIPTOR, *PUSB_30_HUB_DESCRIPTOR;
+
+
 typedef union _USB_HUB_STATUS_AND_CHANGE {
   ULONG AsUlong32;
   struct {
@@ -311,4 +492,4 @@ C_ASSERT(sizeof(USB_HUB_STATUS_AND_CHANGE) == sizeof(ULONG));
 #define USB_DEVICE_CLASS_APPLICATION_SPECIFIC 0xFE
 #define USB_DEVICE_CLASS_VENDOR_SPECIFIC      0xFF
 
-#include <poppack.h>
+#pragma pack(pop)

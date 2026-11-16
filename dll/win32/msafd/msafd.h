@@ -20,6 +20,7 @@
 #define NTOS_MODE_USER
 #include <ndk/exfuncs.h>
 #include <ndk/iofuncs.h>
+#include <ndk/ldrfuncs.h>
 #include <ndk/obfuncs.h>
 #include <ndk/rtlfuncs.h>
 
@@ -28,6 +29,7 @@
 #include <tdi.h>
 #include <afd/shared.h>
 #include <mswsock.h>
+#include <ws2tcpip.h>
 
 #include <wine/debug.h>
 WINE_DEFAULT_DEBUG_CHANNEL(msafd);
@@ -61,6 +63,13 @@ typedef struct _SOCKET_INFORMATION {
 	BOOL TrySAN;
 	WSAPROTOCOL_INFOW ProtocolInfo;
 	struct _SOCKET_INFORMATION *NextSocket;
+	BOOL RandomizePort;
+	LONG RefCount;
+	/* A nonblocking connect is in flight (cleared under SocketListLock when it completes).
+	 * select() reports its outcome even if the socket was made blocking meanwhile. */
+	BOOL ConnectPending;
+	/* That connect failed; select() keeps reporting it in exceptfds. */
+	BOOL ConnectFailed;
 } SOCKET_INFORMATION, *PSOCKET_INFORMATION;
 
 
@@ -68,8 +77,8 @@ typedef struct _SOCKET_CONTEXT {
 	SOCK_SHARED_INFO SharedData;
 	ULONG SizeOfHelperData;
 	ULONG Padding;
-	SOCKADDR LocalAddress;
-	SOCKADDR RemoteAddress;
+	SOCKADDR_STORAGE LocalAddress;
+	SOCKADDR_STORAGE RemoteAddress;
 	/* Plus Helper Data */
 } SOCKET_CONTEXT, *PSOCKET_CONTEXT;
 
@@ -102,11 +111,12 @@ typedef struct _MSAFD_RECV_APC_CONTEXT
     PSOCKET_INFORMATION lpSocket;
 } MSAFD_RECV_APC_CONTEXT, *PMSAFD_RECV_APC_CONTEXT;
 
-typedef struct _MSAFD_CONNECT_APC_CONTEXT
+typedef struct _MSAFD_CONNECT_CONTEXT
 {
     SOCKET lpSocket;
     IO_STATUS_BLOCK IoStatusBlock;
-} MSAFD_CONNECT_APC_CONTEXT, *PMSAFD_CONNECT_APC_CONTEXT;
+    HANDLE Event;
+} MSAFD_CONNECT_CONTEXT, *PMSAFD_CONNECT_CONTEXT;
 
 
 _Must_inspect_result_
@@ -426,6 +436,15 @@ WSPDisconnectEx(
     IN DWORD dwFlags,
     IN DWORD reserved);
 
+INT
+PASCAL
+WSPRecvMsg(
+    IN SOCKET Handle,
+    IN OUT LPWSAMSG lpMsg,
+    OUT LPDWORD lpdwNumberOfBytesRecvd,
+    IN LPWSAOVERLAPPED lpOverlapped,
+    IN LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine);
+
 VOID
 WSPAPI
 WSPGetAcceptExSockaddrs(
@@ -503,6 +522,11 @@ VOID SockProcessQueuedAsyncSelect(
 );
 
 VOID
+SockDereferenceSocket(
+	PSOCKET_INFORMATION Socket
+);
+
+VOID
 SockReenableAsyncSelectEvent (
     IN PSOCKET_INFORMATION Socket,
     IN ULONG Event
@@ -522,15 +546,15 @@ MsafdReturnWithErrno(
     {
         *Errno = TranslateNtStatusError(Status);
 
-        if (ReturnedBytes)
-            *ReturnedBytes = (*Errno == 0) ? Received : 0;
+        if (ReturnedBytes && (*Errno == 0 || Status == STATUS_BUFFER_OVERFLOW))
+            *ReturnedBytes = Received;
 
         return (*Errno == 0) ? 0 : SOCKET_ERROR;
     }
     else
     {
-        if (ReturnedBytes)
-            *ReturnedBytes = (Status == STATUS_SUCCESS) ? Received : 0;
+        if (ReturnedBytes && (Status == STATUS_SUCCESS || Status == STATUS_BUFFER_OVERFLOW))
+            *ReturnedBytes = Received;
 
         return (Status == STATUS_SUCCESS) ? 0 : SOCKET_ERROR;
     }
@@ -539,5 +563,23 @@ MsafdReturnWithErrno(
 VOID
 MsafdWaitForAlert(
     _In_ HANDLE hObject);
+
+NTSTATUS
+MsafdAcquireEvent(
+    _Out_ PHANDLE Event,
+    _Out_ PBOOLEAN Shared);
+
+VOID
+MsafdReleaseEvent(
+    _In_ HANDLE Event,
+    _In_ BOOLEAN Shared,
+    _In_ BOOLEAN Reset);
+
+NTSTATUS
+MsafdWaitForCompletion(
+    _In_ PSOCKET_INFORMATION Socket,
+    _In_ HANDLE hObject,
+    _In_ PIO_STATUS_BLOCK IoStatusBlock,
+    _In_ DWORD Timeout);
 
 #endif /* __MSAFD_H */

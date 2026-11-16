@@ -86,11 +86,13 @@ typedef struct _ERESOURCE_2K3 {
     if (!Reinit) ok_eq_pointer((Res)->ExclusiveWaiters, NULL);                                                  \
     ok_eq_ulongptr((Res)->OwnerThreads[0].OwnerThread, 0);                                                      \
     ok_eq_ulong((Res)->OwnerThreads[0].TableSize, 0LU);                                                         \
-    ok_eq_ulongptr((Res)->OwnerThreads[1].OwnerThread, 0);                                                      \
-    ok_eq_ulong((Res)->OwnerThreads[1].TableSize, 0LU);                                                         \
+    if (GetNTVersion() < _WIN32_WINNT_WIN8) {                                                                   \
+        ok_eq_ulongptr((Res)->OwnerThreads[1].OwnerThread, 0);                                                  \
+        ok_eq_ulong((Res)->OwnerThreads[1].TableSize, 0LU);                                                     \
+    }                                                                                                           \
     ok_eq_ulong((Res)->ContentionCount, 0LU);                                                                   \
-    ok_eq_uint((Res)->NumberOfSharedWaiters, 0);                                                                \
-    ok_eq_uint((Res)->NumberOfExclusiveWaiters, 0);                                                             \
+    ok_eq_ulong(ExGetSharedWaiterCount((PERESOURCE)(Res)), 0LU);                                                \
+    ok_eq_ulong(ExGetExclusiveWaiterCount((PERESOURCE)(Res)), 0LU);                                             \
     ok_eq_pointer((Res)->Address, NULL);                                                                        \
     ok_eq_ulongptr((Res)->SpinLock, 0);                                                                         \
 } while (0)
@@ -195,21 +197,21 @@ TestResourceUndocumentedShortcuts(
     /* ExEnterCriticalRegionAndAcquireResourceShared, ExEnterCriticalRegionAndAcquireSharedWaitForExclusive */
     Count = 0;
     Ret = pExEnterCriticalRegionAndAcquireResourceShared(Res); ++Count;
-    ok_eq_pointer(Ret, GetNTVersion() <= _WIN32_WINNT_WS03 ? KeGetCurrentThread()->Win32Thread : NULL);
+    ok_eq_pointer(Ret, PsGetCurrentThreadWin32Thread());
     ok_bool_true(KeAreApcsDisabled(), "KeAreApcsDisabled returned");
     if (pKeAreAllApcsDisabled)
         ok_eq_bool(pKeAreAllApcsDisabled(), AreApcsDisabled);
     CheckResourceStatus(Res, FALSE, Count, 0LU, 0LU);
 
     Ret = pExEnterCriticalRegionAndAcquireResourceShared(Res); ++Count;
-    ok_eq_pointer(Ret, GetNTVersion() <= _WIN32_WINNT_WS03 ? KeGetCurrentThread()->Win32Thread : NULL);
+    ok_eq_pointer(Ret, PsGetCurrentThreadWin32Thread());
     ok_bool_true(KeAreApcsDisabled(), "KeAreApcsDisabled returned");
     if (pKeAreAllApcsDisabled)
         ok_eq_bool(pKeAreAllApcsDisabled(), AreApcsDisabled);
     CheckResourceStatus(Res, FALSE, Count, 0LU, 0LU);
 
     pExEnterCriticalRegionAndAcquireSharedWaitForExclusive(Res); ++Count;
-    ok_eq_pointer(Ret, GetNTVersion() <= _WIN32_WINNT_WS03 ? KeGetCurrentThread()->Win32Thread : NULL);
+    ok_eq_pointer(Ret, PsGetCurrentThreadWin32Thread());
     ok_bool_true(KeAreApcsDisabled(), "KeAreApcsDisabled returned");
     if (pKeAreAllApcsDisabled)
         ok_eq_bool(pKeAreAllApcsDisabled(), AreApcsDisabled);
@@ -240,14 +242,14 @@ TestResourceUndocumentedShortcuts(
     if (pKeAreAllApcsDisabled)
         ok_eq_bool(pKeAreAllApcsDisabled(), AreApcsDisabled);
     Ret = pExEnterCriticalRegionAndAcquireResourceExclusive(Res); ++Count;
-    ok_eq_pointer(Ret, GetNTVersion() <= _WIN32_WINNT_WS03 ? KeGetCurrentThread()->Win32Thread : NULL);
+    ok_eq_pointer(Ret, PsGetCurrentThreadWin32Thread());
     ok_bool_true(KeAreApcsDisabled(), "KeAreApcsDisabled returned");
     if (pKeAreAllApcsDisabled)
         ok_eq_bool(pKeAreAllApcsDisabled(), AreApcsDisabled);
     CheckResourceStatus(Res, TRUE, Count, 0LU, 0LU);
 
     Ret = pExEnterCriticalRegionAndAcquireResourceExclusive(Res); ++Count;
-    ok_eq_pointer(Ret, GetNTVersion() <= _WIN32_WINNT_WS03 ? KeGetCurrentThread()->Win32Thread : NULL);
+    ok_eq_pointer(Ret, PsGetCurrentThreadWin32Thread());
     ok_bool_true(KeAreApcsDisabled(), "KeAreApcsDisabled returned");
     if (pKeAreAllApcsDisabled)
         ok_eq_bool(pKeAreAllApcsDisabled(), AreApcsDisabled);
@@ -404,7 +406,9 @@ TestResourceWithThreads(
     Status = StartThread(&ThreadDataShared2, NULL, FALSE, TRUE);
     ok_eq_hex(Status, STATUS_SUCCESS);
     CheckResourceStatus(Res, FALSE, 0LU, 0LU, 0LU);
-    if (GetNTVersion() <= _WIN32_WINNT_WS03)
+    /* On NT 5.x (incl. patched WS03 reporting 0x503) ActiveCount tracks
+     * acquisitions directly; Vista+ split this into ActiveCount + ActiveEntries. */
+    if (GetNTVersion() < _WIN32_WINNT_VISTA)
     {
         ok_eq_int(Res->ActiveCount, 2);
     }
@@ -450,7 +454,9 @@ TestResourceWithThreads(
     Status = StartThread(&ThreadDataSharedStarve, NULL, TRUE, TRUE);
     ok_eq_hex(Status, STATUS_SUCCESS);
     CheckResourceStatus(Res, FALSE, 0LU, 1LU, 0LU);
-    if (GetNTVersion() <= _WIN32_WINNT_WS03)
+    /* On NT 5.x (incl. patched WS03 reporting 0x503) ActiveCount tracks
+     * acquisitions directly; Vista+ split this into ActiveCount + ActiveEntries. */
+    if (GetNTVersion() < _WIN32_WINNT_VISTA)
     {
         ok_eq_int(Res->ActiveCount, 2);
     }

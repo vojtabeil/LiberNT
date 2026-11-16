@@ -36,6 +36,61 @@ KeFindConfigurationNextEntry(
 
 static ACPI_TABLE_RSDP *AcpiLoaderRsdp = NULL;
 
+#if defined(_M_ARM64)
+static
+BOOLEAN
+AcpiGetLoaderRsdpMapping(
+    _In_ ACPI_PHYSICAL_ADDRESS PhysicalAddress,
+    _In_ ACPI_SIZE Length,
+    _Out_ PVOID *Mapping)
+{
+    PHYSICAL_ADDRESS RsdpPhysical;
+    ULONGLONG Base;
+    ULONGLONG Offset;
+
+    *Mapping = NULL;
+    if ((AcpiLoaderRsdp == NULL) || (Length > sizeof(*AcpiLoaderRsdp)))
+        return FALSE;
+
+    RsdpPhysical = MmGetPhysicalAddress(AcpiLoaderRsdp);
+    Base = (ULONGLONG)RsdpPhysical.QuadPart;
+    if (((ULONGLONG)PhysicalAddress < Base) ||
+        ((ULONGLONG)PhysicalAddress >= Base + sizeof(*AcpiLoaderRsdp)))
+    {
+        return FALSE;
+    }
+
+    Offset = (ULONGLONG)PhysicalAddress - Base;
+    if ((ULONGLONG)Length > sizeof(*AcpiLoaderRsdp) - Offset)
+        return FALSE;
+
+    *Mapping = (PUCHAR)AcpiLoaderRsdp + Offset;
+    return TRUE;
+}
+
+static
+BOOLEAN
+AcpiIsLoaderRsdpMapping(
+    _In_ const VOID *VirtualAddress,
+    _In_ ACPI_SIZE Length)
+{
+    ULONG_PTR Base;
+    ULONG_PTR Address;
+    ULONG_PTR Offset;
+
+    if ((AcpiLoaderRsdp == NULL) || (Length > sizeof(*AcpiLoaderRsdp)))
+        return FALSE;
+
+    Base = (ULONG_PTR)AcpiLoaderRsdp;
+    Address = (ULONG_PTR)VirtualAddress;
+    if ((Address < Base) || (Address >= Base + sizeof(*AcpiLoaderRsdp)))
+        return FALSE;
+
+    Offset = Address - Base;
+    return ((ULONGLONG)Length <= sizeof(*AcpiLoaderRsdp) - Offset);
+}
+#endif
+
 static
 UCHAR
 AcpiChecksumBuffer(
@@ -107,7 +162,7 @@ ACPI_PHYSICAL_ADDRESS
 AcpiBuildLoaderRootPointer(VOID)
 {
     PACPI_BIOS_MULTI_NODE NodeData;
-    ACPI_TABLE_HEADER *RootTable;
+    ACPI_TABLE_HEADER *RootTable = NULL;
     PHYSICAL_ADDRESS PhysicalAddress;
 
     if (AcpiLoaderRsdp != NULL)
@@ -239,6 +294,9 @@ AcpiOsGetRootPointer (
         return (ACPI_PHYSICAL_ADDRESS)PhysicalAddress.QuadPart;
     }
 
+    if (KeLoaderBlock && KeLoaderBlock->FirmwareInformation.FirmwareTypeEfi)
+        return 0;
+
     AcpiFindRootPointer(&pa);
     return pa;
 }
@@ -302,12 +360,27 @@ AcpiOsMapMemory (
     ACPI_SIZE               length)
 {
     PHYSICAL_ADDRESS Address;
+    MEMORY_CACHING_TYPE CacheType;
     PVOID Ptr;
 
     DPRINT("AcpiOsMapMemory(phys 0x%p  size 0x%X)\n", phys, length);
 
+#if defined(_M_ARM64)
+    if (AcpiGetLoaderRsdpMapping(phys, length, &Ptr))
+        return Ptr;
+#endif
+
+    /* ACPI tables can reside above 4 GB on amd64, so keep the full address. */
     Address.QuadPart = (ULONGLONG)phys;
-    Ptr = MmMapIoSpace(Address, length, MmNonCached);
+#if defined(_M_ARM64)
+    CacheType = MmCached;
+#else
+    CacheType = MmNonCached;
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    HalGetMemoryCachingRequirements(Address, length, &CacheType);
+#endif
+#endif
+    Ptr = MmMapIoSpace(Address, length, CacheType);
     if (!Ptr)
     {
         DPRINT1("Mapping failed\n");
@@ -315,6 +388,19 @@ AcpiOsMapMemory (
 
     return Ptr;
 }
+
+#if defined(_M_ARM64)
+void *
+AcpiOsMapOperationRegion (
+    ACPI_PHYSICAL_ADDRESS   phys,
+    ACPI_SIZE               length)
+{
+    PHYSICAL_ADDRESS Address;
+
+    Address.QuadPart = (ULONGLONG)phys;
+    return MmMapIoSpace(Address, length, MmNonCached);
+}
+#endif
 
 void
 AcpiOsUnmapMemory (
@@ -324,6 +410,11 @@ AcpiOsUnmapMemory (
     DPRINT("AcpiOsMapMemory(phys 0x%p  size 0x%X)\n", virt, length);
 
     ASSERT(virt);
+
+#if defined(_M_ARM64)
+    if (AcpiIsLoaderRsdpMapping(virt, length))
+        return;
+#endif
 
     MmUnmapIoSpace(virt, length);
 }
@@ -412,35 +503,152 @@ AcpiOsGetThreadId (void)
     return (ULONG_PTR)PsGetCurrentThreadId() + 1;
 }
 
+typedef struct _OSL_EXEC_ENTRY
+{
+    SLIST_ENTRY SListEntry;
+    WORK_QUEUE_ITEM WorkItem;
+    ACPI_OSD_EXEC_CALLBACK Function;
+    void *Context;
+} OSL_EXEC_ENTRY, *POSL_EXEC_ENTRY;
+
+#define OSL_EXEC_ENTRY_COUNT 64
+
+static SLIST_HEADER OslExecFreeList;
+static SLIST_HEADER OslExecPendingList;
+static KDPC OslExecDpc;
+static POSL_EXEC_ENTRY OslExecPool;
+static BOOLEAN OslExecInitialized;
+static volatile LONG OslExecOutstanding;
+static KEVENT OslExecIdleEvent;
+
+static
+VOID
+NTAPI
+OslExecWorkRoutine(PVOID Parameter)
+{
+    POSL_EXEC_ENTRY Entry = Parameter;
+    ACPI_OSD_EXEC_CALLBACK Function = Entry->Function;
+    void *Context = Entry->Context;
+
+    InterlockedPushEntrySList(&OslExecFreeList, &Entry->SListEntry);
+
+    Function(Context);
+
+    if (InterlockedDecrement(&OslExecOutstanding) == 0)
+        KeSetEvent(&OslExecIdleEvent, IO_NO_INCREMENT, FALSE);
+}
+
+static
+VOID
+NTAPI
+OslExecDpcRoutine(PKDPC Dpc, PVOID Context, PVOID Arg1, PVOID Arg2)
+{
+    PSLIST_ENTRY SListEntry;
+    PSLIST_ENTRY NextEntry;
+    PSLIST_ENTRY ReversedList;
+    POSL_EXEC_ENTRY Entry;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(Context);
+    UNREFERENCED_PARAMETER(Arg1);
+    UNREFERENCED_PARAMETER(Arg2);
+
+    /*
+     * The pending list pops in LIFO order. Detach it in one operation and
+     * reverse the chain so callbacks reach the work queue in submission
+     * order; ACPICA notify and EC query sequencing depend on it. A push
+     * racing the flush requeues this DPC, so nothing is lost.
+     */
+    SListEntry = InterlockedFlushSList(&OslExecPendingList);
+    ReversedList = NULL;
+
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+
+    while (SListEntry != NULL)
+    {
+        NextEntry = SListEntry->Next;
+        SListEntry->Next = ReversedList;
+        ReversedList = SListEntry;
+        SListEntry = NextEntry;
+    }
+
+    while (ReversedList != NULL)
+    {
+        Entry = CONTAINING_RECORD(ReversedList, OSL_EXEC_ENTRY, SListEntry);
+        /* The work routine recycles the entry; step past it before queueing */
+        ReversedList = ReversedList->Next;
+        ExInitializeWorkItem(&Entry->WorkItem, OslExecWorkRoutine, Entry);
+        ExQueueWorkItem(&Entry->WorkItem, DelayedWorkQueue);
+    }
+}
+
+BOOLEAN
+OslInitializeExecQueue(VOID)
+{
+    ULONG i;
+
+    if (OslExecInitialized)
+        return TRUE;
+
+    OslExecPool = ExAllocatePoolWithTag(NonPagedPool,
+                                        OSL_EXEC_ENTRY_COUNT * sizeof(OSL_EXEC_ENTRY),
+                                        'QEpA');
+    if (!OslExecPool)
+        return FALSE;
+
+    InitializeSListHead(&OslExecFreeList);
+    InitializeSListHead(&OslExecPendingList);
+    KeInitializeDpc(&OslExecDpc, OslExecDpcRoutine, NULL);
+    InterlockedExchange(&OslExecOutstanding, 0);
+    KeInitializeEvent(&OslExecIdleEvent, NotificationEvent, TRUE);
+
+    for (i = 0; i < OSL_EXEC_ENTRY_COUNT; i++)
+        InterlockedPushEntrySList(&OslExecFreeList, &OslExecPool[i].SListEntry);
+
+    OslExecInitialized = TRUE;
+    return TRUE;
+}
+
 ACPI_STATUS
 AcpiOsExecute (
     ACPI_EXECUTE_TYPE       Type,
     ACPI_OSD_EXEC_CALLBACK  Function,
     void                    *Context)
 {
-    HANDLE ThreadHandle;
-    OBJECT_ATTRIBUTES ObjectAttributes;
-    NTSTATUS Status;
+    PSLIST_ENTRY SListEntry;
+    POSL_EXEC_ENTRY Entry;
 
     DPRINT("AcpiOsExecute\n");
 
-    InitializeObjectAttributes(&ObjectAttributes,
-                               NULL,
-                               OBJ_KERNEL_HANDLE,
-                               NULL,
-                               NULL);
+    if (!Function)
+        return AE_BAD_PARAMETER;
 
-    Status = PsCreateSystemThread(&ThreadHandle,
-                                  THREAD_ALL_ACCESS,
-                                  &ObjectAttributes,
-                                  NULL,
-                                  NULL,
-                                  (PKSTART_ROUTINE)Function,
-                                  Context);
-    if (!NT_SUCCESS(Status))
-        return AE_ERROR;
+    if (!OslExecInitialized)
+    {
+        DPRINT1("AcpiOsExecute called before the execution queue was ready\n");
+        return AE_NOT_EXIST;
+    }
 
-    ZwClose(ThreadHandle);
+    SListEntry = InterlockedPopEntrySList(&OslExecFreeList);
+    if (!SListEntry)
+    {
+        DPRINT1("AcpiOsExecute exhausted its entry pool\n");
+        return AE_NO_MEMORY;
+    }
+
+    Entry = CONTAINING_RECORD(SListEntry, OSL_EXEC_ENTRY, SListEntry);
+    Entry->Function = Function;
+    Entry->Context = Context;
+
+    /*
+     * The outstanding count is authoritative. The waiter clears and
+     * rechecks the event before sleeping, so a completion from an older
+     * generation cannot make a later generation appear idle.
+     */
+    InterlockedIncrement(&OslExecOutstanding);
+
+    InterlockedPushEntrySList(&OslExecPendingList, &Entry->SListEntry);
+    KeInsertQueueDpc(&OslExecDpc, NULL, NULL);
 
     return AE_OK;
 }
@@ -448,8 +656,20 @@ AcpiOsExecute (
 void
 AcpiOsSleep (UINT64 milliseconds)
 {
-    DPRINT("AcpiOsSleep %d\n", milliseconds);
-    KeStallExecutionProcessor(milliseconds*1000);
+    LARGE_INTEGER Interval;
+    UINT64 Chunk;
+
+    DPRINT("AcpiOsSleep %I64u\n", milliseconds);
+
+    ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
+
+    while (milliseconds != 0)
+    {
+        Chunk = min(milliseconds, (UINT64)MAXLONGLONG / 10000);
+        Interval.QuadPart = -((LONGLONG)Chunk * 10000);
+        KeDelayExecutionThread(KernelMode, FALSE, &Interval);
+        milliseconds -= Chunk;
+    }
 }
 
 void
@@ -463,7 +683,7 @@ ACPI_STATUS
 AcpiOsCreateMutex(
     ACPI_MUTEX *OutHandle)
 {
-    PFAST_MUTEX Mutex;
+    PKSEMAPHORE Mutex;
 
     if (!OutHandle)
     {
@@ -471,10 +691,17 @@ AcpiOsCreateMutex(
         return AE_BAD_PARAMETER;
     }
 
-    Mutex = ExAllocatePoolWithTag(NonPagedPool, sizeof(FAST_MUTEX), 'LpcA');
+    Mutex = ExAllocatePoolWithTag(NonPagedPool, sizeof(KSEMAPHORE), 'LpcA');
     if (!Mutex) return AE_NO_MEMORY;
 
-    ExInitializeFastMutex(Mutex);
+    /*
+     * ACPICA can retain a mutex while temporarily releasing its interpreter
+     * locks, and the ACPI Global Lock can be released by another thread.
+     * A FAST_MUTEX cannot support either operation because it raises IRQL to
+     * APC_LEVEL and records an owning thread. Use a binary dispatcher
+     * semaphore for the mutex contract instead.
+     */
+    KeInitializeSemaphore(Mutex, 1, 1);
 
     *OutHandle = (ACPI_MUTEX)Mutex;
 
@@ -499,23 +726,35 @@ AcpiOsAcquireMutex(
     ACPI_MUTEX Handle,
     UINT16 Timeout)
 {
+    LARGE_INTEGER WaitTime;
+    PLARGE_INTEGER WaitTimeout = NULL;
+    NTSTATUS Status;
+
     if (!Handle)
     {
         DPRINT1("Bad parameter\n");
         return AE_BAD_PARAMETER;
     }
 
-    /* Check what the caller wants us to do */
-    if (Timeout == ACPI_DO_NOT_WAIT)
+    if (Timeout != ACPI_WAIT_FOREVER)
     {
-        /* Try to acquire without waiting */
-        if (!ExTryToAcquireFastMutex((PFAST_MUTEX)Handle))
-            return AE_TIME;
+        /* ACPICA uses milliseconds; NT relative timeouts use 100-ns units. */
+        WaitTime.QuadPart = -((LONGLONG)Timeout * 10000);
+        WaitTimeout = &WaitTime;
     }
-    else
+
+    Status = KeWaitForSingleObject(Handle,
+                                   Executive,
+                                   KernelMode,
+                                   FALSE,
+                                   WaitTimeout);
+    if (Status == STATUS_TIMEOUT)
+        return AE_TIME;
+
+    if (!NT_SUCCESS(Status))
     {
-        /* Block until we get it */
-        ExAcquireFastMutex((PFAST_MUTEX)Handle);
+        DPRINT1("Mutex wait failed with status 0x%08lx\n", Status);
+        return AE_ERROR;
     }
 
     return AE_OK;
@@ -531,7 +770,10 @@ AcpiOsReleaseMutex(
         return;
     }
 
-    ExReleaseFastMutex((PFAST_MUTEX)Handle);
+    KeReleaseSemaphore((PKSEMAPHORE)Handle,
+                       IO_NO_INCREMENT,
+                       1,
+                       FALSE);
 }
 
 typedef struct _ACPI_SEM {
@@ -588,6 +830,11 @@ AcpiOsWaitSemaphore(
     UINT16 Timeout)
 {
     PACPI_SEM Sem = Handle;
+    LARGE_INTEGER WaitTime;
+    PLARGE_INTEGER WaitTimeout;
+    ULONGLONG Deadline = 0;
+    ULONGLONG CurrentTime;
+    NTSTATUS Status;
     KIRQL OldIrql;
 
     if (!Handle)
@@ -596,26 +843,47 @@ AcpiOsWaitSemaphore(
         return AE_BAD_PARAMETER;
     }
 
-    KeAcquireSpinLock(&Sem->Lock, &OldIrql);
+    WaitTimeout = NULL;
+    if (Timeout != ACPI_WAIT_FOREVER)
+        Deadline = KeQueryInterruptTime() + (ULONGLONG)Timeout * 10000;
 
-    /* Make sure we can wait if we have fewer units than we need */
-    if ((Timeout == ACPI_DO_NOT_WAIT) && (Sem->CurrentUnits < Units))
-    {
-        /* We can't so we must bail now */
-        KeReleaseSpinLock(&Sem->Lock, OldIrql);
-        return AE_TIME;
-    }
+    KeAcquireSpinLock(&Sem->Lock, &OldIrql);
 
     /* Time to block until we get enough units */
     while (Sem->CurrentUnits < Units)
     {
+        if (Timeout != ACPI_WAIT_FOREVER)
+        {
+            CurrentTime = KeQueryInterruptTime();
+            if (CurrentTime >= Deadline)
+            {
+                KeReleaseSpinLock(&Sem->Lock, OldIrql);
+                return AE_TIME;
+            }
+
+            WaitTime.QuadPart = -(LONGLONG)(Deadline - CurrentTime);
+            WaitTimeout = &WaitTime;
+        }
+
         KeReleaseSpinLock(&Sem->Lock, OldIrql);
-        KeWaitForSingleObject(&Sem->Event,
-                              Executive,
-                              KernelMode,
-                              FALSE,
-                              NULL);
+        Status = KeWaitForSingleObject(&Sem->Event,
+                                       Executive,
+                                       KernelMode,
+                                       FALSE,
+                                       WaitTimeout);
         KeAcquireSpinLock(&Sem->Lock, &OldIrql);
+
+        if (Status == STATUS_TIMEOUT && Sem->CurrentUnits < Units)
+        {
+            KeReleaseSpinLock(&Sem->Lock, OldIrql);
+            return AE_TIME;
+        }
+        else if (!NT_SUCCESS(Status))
+        {
+            KeReleaseSpinLock(&Sem->Lock, OldIrql);
+            DPRINT1("Semaphore wait failed with status 0x%08lx\n", Status);
+            return AE_ERROR;
+        }
     }
 
     Sem->CurrentUnits -= Units;
@@ -692,14 +960,8 @@ AcpiOsAcquireLock(
 {
     KIRQL OldIrql;
 
-    if ((OldIrql = KeGetCurrentIrql()) >= DISPATCH_LEVEL)
-    {
-        KeAcquireSpinLockAtDpcLevel((PKSPIN_LOCK)Handle);
-    }
-    else
-    {
-        KeAcquireSpinLock((PKSPIN_LOCK)Handle, &OldIrql);
-    }
+    KeRaiseIrql(HIGH_LEVEL, &OldIrql);
+    KeAcquireSpinLockAtDpcLevel((PKSPIN_LOCK)Handle);
 
     return (ACPI_CPU_FLAGS)OldIrql;
 }
@@ -709,16 +971,8 @@ AcpiOsReleaseLock(
     ACPI_SPINLOCK Handle,
     ACPI_CPU_FLAGS Flags)
 {
-    KIRQL OldIrql = (KIRQL)Flags;
-
-    if (OldIrql >= DISPATCH_LEVEL)
-    {
-        KeReleaseSpinLockFromDpcLevel((PKSPIN_LOCK)Handle);
-    }
-    else
-    {
-        KeReleaseSpinLock((PKSPIN_LOCK)Handle, OldIrql);
-    }
+    KeReleaseSpinLockFromDpcLevel((PKSPIN_LOCK)Handle);
+    KeLowerIrql((KIRQL)Flags);
 }
 
 BOOLEAN NTAPI
@@ -767,28 +1021,65 @@ AcpiOsInstallInterruptHandler (
         InterruptNumber,
         &DIrql,
         &Affinity);
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    {
+        IO_CONNECT_INTERRUPT_PARAMETERS Parameters;
+        HAL_INTERRUPT_TARGET_INFORMATION TargetInfo;
 
+        DIrql = HalConvertDeviceIdtToIrql(Vector);
+
+        RtlZeroMemory(&TargetInfo, sizeof(TargetInfo));
+        TargetInfo.Version = HAL_INTERRUPT_TARGET_INFORMATION_VERSION;
+        TargetInfo.TargetProcessors = Affinity;
+        HalGetInterruptTargetInformation(&TargetInfo);
+
+        AcpiIrqNumber = InterruptNumber;
+        AcpiIrqHandler = ServiceRoutine;
+        AcpiIrqContext = Context;
+        AcpiInterruptHandlerRegistered = TRUE;
+
+        RtlZeroMemory(&Parameters, sizeof(Parameters));
+        Parameters.Version = CONNECT_FULLY_SPECIFIED;
+        Parameters.FullySpecified.PhysicalDeviceObject = NULL;
+        Parameters.FullySpecified.InterruptObject = &AcpiInterrupt;
+        Parameters.FullySpecified.ServiceRoutine = OslIsrStub;
+        Parameters.FullySpecified.ServiceContext = NULL;
+        Parameters.FullySpecified.SpinLock = NULL;
+        Parameters.FullySpecified.Vector = Vector;
+        Parameters.FullySpecified.Irql = DIrql;
+        Parameters.FullySpecified.SynchronizeIrql = DIrql;
+        Parameters.FullySpecified.InterruptMode = LevelSensitive;
+        Parameters.FullySpecified.ShareVector = TRUE;
+        Parameters.FullySpecified.ProcessorEnableMask =
+            TargetInfo.TargetProcessors ? TargetInfo.TargetProcessors : Affinity;
+        Parameters.FullySpecified.FloatingSave = FALSE;
+        Parameters.FullySpecified.Group = 0;
+
+        Status = IoConnectInterruptEx(&Parameters);
+    }
+#else
     AcpiIrqNumber = InterruptNumber;
     AcpiIrqHandler = ServiceRoutine;
     AcpiIrqContext = Context;
     AcpiInterruptHandlerRegistered = TRUE;
 
-    Status = IoConnectInterrupt(
-        &AcpiInterrupt,
-        OslIsrStub,
-        NULL,
-        NULL,
-        Vector,
-        DIrql,
-        DIrql,
-        LevelSensitive,
-        TRUE,
-        Affinity,
-        FALSE);
+    Status = IoConnectInterrupt(&AcpiInterrupt,
+                                OslIsrStub,
+                                NULL,
+                                NULL,
+                                Vector,
+                                DIrql,
+                                DIrql,
+                                LevelSensitive,
+                                TRUE,
+                                Affinity,
+                                FALSE);
+#endif
 
     if (!NT_SUCCESS(Status))
     {
         DPRINT("Could not connect to interrupt %d\n", Vector);
+        AcpiInterruptHandlerRegistered = FALSE;
         return AE_ERROR;
     }
     return AE_OK;
@@ -809,7 +1100,19 @@ AcpiOsRemoveInterruptHandler (
 
     if (AcpiInterruptHandlerRegistered)
     {
+        if (InterruptNumber != AcpiIrqNumber || ServiceRoutine != AcpiIrqHandler)
+            return AE_BAD_PARAMETER;
+
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+        IO_DISCONNECT_INTERRUPT_PARAMETERS DisconnectParameters;
+
+        RtlZeroMemory(&DisconnectParameters, sizeof(DisconnectParameters));
+        DisconnectParameters.Version = CONNECT_FULLY_SPECIFIED;
+        DisconnectParameters.ConnectionContext.InterruptObject = AcpiInterrupt;
+        IoDisconnectInterruptEx(&DisconnectParameters);
+#else
         IoDisconnectInterrupt(AcpiInterrupt);
+#endif
         AcpiInterrupt = NULL;
         AcpiInterruptHandlerRegistered = FALSE;
     }
@@ -989,6 +1292,8 @@ AcpiOsReadPciConfiguration (
     UINT32                  Width)
 {
     PCI_SLOT_NUMBER slot;
+    UINT64 AllOnes;
+    ULONG BytesRead;
 
     slot.u.AsULONG = 0;
     slot.u.bits.DeviceNumber = PciId->Device;
@@ -996,16 +1301,28 @@ AcpiOsReadPciConfiguration (
 
     DPRINT("AcpiOsReadPciConfiguration, slot=0x%X, func=0x%X\n", slot.u.AsULONG, Reg);
 
+    AllOnes = (Width >= 64) ? ~(UINT64)0 : (((UINT64)1 << Width) - 1);
+
+    /*
+     * An absent device is NOT an error. PCI master-abort semantics require a
+     * config read of a non-existent function to return all ones, and AML probes
+     * for devices exactly that way: it reads the vendor ID and tests it against
+     * 0xFFFF. Failing the read instead aborts the calling AML method - and when
+     * that method runs as module-level code during table load, ACPICA aborts the
+     * whole table. That is what killed the DSDT on this hardware:
+     * \_SB.PCI0.RP01.PXSX.WIST probes an empty PCIe root port, so the DSDT load
+     * failed and the entire PCI0 namespace (and thus all PCI enumeration) was lost.
+     */
     if (!OslIsPciDevicePresent(PciId->Bus, slot.u.AsULONG))
-        return AE_NOT_FOUND;
+    {
+        *Value = AllOnes;
+        return AE_OK;
+    }
 
     /* Width is in BITS */
-    HalGetBusDataByOffset(PCIConfiguration,
-        PciId->Bus,
-        slot.u.AsULONG,
-        Value,
-        Reg,
-        (Width >> 3));
+    *Value = 0;
+    BytesRead = HalGetBusDataByOffset(PCIConfiguration, PciId->Bus, slot.u.AsULONG, Value, Reg, (Width >> 3));
+    if (BytesRead != (Width >> 3)) *Value = AllOnes;
 
     return AE_OK;
 }
@@ -1025,8 +1342,11 @@ AcpiOsWritePciConfiguration (
     slot.u.bits.FunctionNumber = PciId->Function;
 
     DPRINT("AcpiOsWritePciConfiguration, slot=0x%x\n", slot.u.AsULONG);
+
+    /* Writes to an absent device are dropped, matching master-abort behaviour.
+     * See AcpiOsReadPciConfiguration: failing here aborts the calling AML method. */
     if (!OslIsPciDevicePresent(PciId->Bus, slot.u.AsULONG))
-        return AE_NOT_FOUND;
+        return AE_OK;
 
     /* Width is in BITS */
     HalSetBusDataByOffset(PCIConfiguration,
@@ -1058,7 +1378,7 @@ AcpiOsVprintf (
     const char              *Fmt,
     va_list                 Args)
 {
-#ifndef NDEBUG
+#if DBG
     vDbgPrintEx (-1, DPFLTR_ERROR_LEVEL, Fmt, Args);
 #endif
     return;
@@ -1076,20 +1396,46 @@ UINT64
 AcpiOsGetTimer(
     void)
 {
-    LARGE_INTEGER CurrentTime;
-
-    KeQuerySystemTime(&CurrentTime);
-    return CurrentTime.QuadPart;
+    /*
+     * ACPICA expects a monotonic 100-ns timer (AML Timer opcode, internal
+     * timeouts). The system time jumps when the clock is set, so use the
+     * interrupt time instead.
+     */
+    return KeQueryInterruptTime();
 }
 
 void
 AcpiOsWaitEventsComplete(void)
 {
     /*
-     * Wait for all asynchronous events to complete.
-     * This implementation does nothing.
+     * Waiting is legal below DISPATCH_LEVEL, and ACPICA handler teardown
+     * relies on this flush actually happening, so only skip it when a
+     * blocking wait is truly impossible.
      */
-    return;
+    if (!OslExecInitialized || KeGetCurrentIrql() >= DISPATCH_LEVEL)
+        return;
+
+    for (;;)
+    {
+        if (InterlockedCompareExchange(&OslExecOutstanding, 0, 0) == 0)
+            return;
+
+        /*
+         * Arm the wait before checking the count again. If the final
+         * completion races this clear, it either sets the event afterwards
+         * or its zero count is observed by the second check.
+         */
+        KeClearEvent(&OslExecIdleEvent);
+
+        if (InterlockedCompareExchange(&OslExecOutstanding, 0, 0) != 0)
+        {
+            KeWaitForSingleObject(&OslExecIdleEvent,
+                                  Executive,
+                                  KernelMode,
+                                  FALSE,
+                                  NULL);
+        }
+    }
 }
 
 ACPI_STATUS
@@ -1102,20 +1448,34 @@ AcpiOsSignal (
     switch (Function)
     {
     case ACPI_SIGNAL_FATAL:
+        /* The AML Fatal opcode asks the OS to stop. */
         if (Info)
-            DPRINT1 ("AcpiOsBreakpoint: %d %d %d ****\n", FatalInfo->Type, FatalInfo->Code, FatalInfo->Argument);
+        {
+            DPRINT1 ("AcpiOsSignal: AML Fatal opcode: Type %u Code %u Argument %u ****\n",
+                     FatalInfo->Type, FatalInfo->Code, FatalInfo->Argument);
+        }
         else
-            DPRINT1 ("AcpiOsBreakpoint ****\n");
+        {
+            DPRINT1 ("AcpiOsSignal: AML Fatal opcode ****\n");
+        }
+        ASSERT(FALSE);
         break;
+
     case ACPI_SIGNAL_BREAKPOINT:
+        /*
+         * ACPI 6.x 19.6.10: in a non-debug interpreter the AML Breakpoint
+         * opcode is equivalent to Noop, and ACPICA only calls this hook
+         * "in case OS wants a piece of the action". Shipping firmware does
+         * execute it, so this must not be fatal.
+         */
         if (Info)
-            DPRINT1 ("AcpiOsBreakpoint: %s ****\n", Info);
-        else
-            DPRINT1 ("AcpiOsBreakpoint ****\n");
+            DPRINT1 ("AcpiOsSignal: %s\n", (PCSTR)Info);
+        break;
+
+    default:
+        DPRINT1 ("AcpiOsSignal: unknown signal %u\n", Function);
         break;
     }
-
-    ASSERT(FALSE);
 
     return (AE_OK);
 }
@@ -1126,6 +1486,12 @@ AcpiOsEnterSleep(
     UINT32 RegaValue,
     UINT32 RegbValue)
 {
+    if (AcpiPmHalSleep)
+        return AE_CTRL_TERMINATE;
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+    ASSERT((__readeflags() & 0x200) == 0);
+#endif
     DPRINT1("Entering sleep state S%u.\n", SleepState);
     return AE_OK;
 }

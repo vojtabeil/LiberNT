@@ -23,6 +23,12 @@
 
 #include <wine/debug.h>
 
-#include "mmdevapi.h"
+#ifdef __REACTOS__
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+#endif
+#endif
+
+#include "mmdevapi_private.h"
 
 #endif /* !_MMDEVAPI_PRECOMP_H_ */

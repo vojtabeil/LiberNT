@@ -62,6 +62,7 @@ PFS_MOUNT FileSystems[] =
     IsoMount,
 #endif
     FatMount,
+    ExFatMount,
     BtrFsMount,
 #ifndef _M_ARM
     NtfsMount,
@@ -227,9 +228,6 @@ ARC_STATUS ArcOpen(CHAR* Path, OPENMODE OpenMode, ULONG* FileId)
     SIZE_T Length;
     OPENMODE DeviceOpenMode;
     ULONG DeviceId;
-
-    /* Print status message */
-    TRACE("Opening file '%s'...\n", Path);
 
     *FileId = INVALID_FILE_ID;
 
@@ -631,8 +629,6 @@ ULONG FsGetNumPathParts(PCSTR Path)
     }
     num++;
 
-    TRACE("FsGetNumPathParts() Path = %s NumPathParts = %d\n", Path, num);
-
     return num;
 }
 
@@ -665,8 +661,6 @@ VOID FsGetFirstNameFromPath(PCHAR Buffer, PCSTR Path)
     }
 
     Buffer[i] = 0;
-
-    TRACE("FsGetFirstNameFromPath() Path = %s FirstName = %s\n", Path, Buffer);
 }
 
 BOOLEAN

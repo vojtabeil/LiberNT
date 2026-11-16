@@ -63,8 +63,7 @@ MempAddMemoryBlock(IN OUT PLOADER_PARAMETER_BLOCK LoaderBlock,
     TRACE("MempAddMemoryBlock(BasePage=0x%lx, PageCount=0x%lx, Type=%ld)\n",
           BasePage, PageCount, Type);
 
-    /* Check for memory block after 4GB - we don't support it yet
-       Note: Even last page before 4GB limit is not supported */
+    /* Check for memory block beyond the supported range */
     if (BasePage >= MM_MAX_PAGE)
     {
         /* Just skip this, without even adding to MAD list */
@@ -95,7 +94,7 @@ MempAddMemoryBlock(IN OUT PLOADER_PARAMETER_BLOCK LoaderBlock,
     MadCount++;
 }
 
-VOID
+BOOLEAN
 MempSetupPagingForRegion(
     PFN_NUMBER BasePage,
     PFN_NUMBER PageCount,
@@ -107,7 +106,7 @@ MempSetupPagingForRegion(
           BasePage, PageCount, Type);
 
     /* Make sure we don't map too high */
-    if (BasePage + PageCount > MmGetLoaderPagesSpanned()) return;
+    if (BasePage + PageCount > MmGetLoaderPagesSpanned()) return TRUE;
 
     switch (Type)
     {
@@ -164,6 +163,7 @@ MempSetupPagingForRegion(
     {
         ERR("Error during MempSetupPaging\n");
     }
+    return Status;
 }
 
 #ifdef _M_ARM
@@ -239,7 +239,8 @@ WinLdrSetupMemoryLayout(IN OUT PLOADER_PARAMETER_BLOCK LoaderBlock)
         if ((MemoryMap[i].PageAllocated != LastPageType) ||
             (i == NoEntries - 1))
         {
-            MempSetupPagingForRegion(LastPageIndex, i - LastPageIndex, LastPageType);
+            if (!MempSetupPagingForRegion(LastPageIndex, i - LastPageIndex, LastPageType))
+                return FALSE;
             LastPageIndex = i;
             LastPageType = MemoryMap[i].PageAllocated;
         }
@@ -308,17 +309,22 @@ WinLdrSetupMemoryLayout(IN OUT PLOADER_PARAMETER_BLOCK LoaderBlock)
 
     BiosMemoryMapEntryCount = MmGetBiosMemoryMap(&BiosMemoryMap);
 
+    TRACE("WinLdrSetupMemoryLayout: LoaderPagesSpanned=0x%Ix, HighestPhysicalPage=0x%lx, BiosMapCount=%lu\n",
+          MmGetLoaderPagesSpanned(),
+          MmGetHighestPhysicalPage(),
+          BiosMemoryMapEntryCount);
+
     /* Now we need to add high descriptors from the bios memory map */
     for (i = 0; i < BiosMemoryMapEntryCount; i++)
     {
         /* Check if its higher than the lookup table */
-        if (BiosMemoryMap->BasePage > MmGetHighestPhysicalPage())
+        if (BiosMemoryMap[i].BasePage >= MmGetHighestPhysicalPage())
         {
             /* Copy this descriptor */
             MempAddMemoryBlock(LoaderBlock,
-                               BiosMemoryMap->BasePage,
-                               BiosMemoryMap->PageCount,
-                               BiosMemoryMap->MemoryType);
+                               BiosMemoryMap[i].BasePage,
+                               BiosMemoryMap[i].PageCount,
+                               BiosMemoryMap[i].MemoryType);
         }
     }
 
@@ -326,11 +332,32 @@ WinLdrSetupMemoryLayout(IN OUT PLOADER_PARAMETER_BLOCK LoaderBlock)
 
     WinLdrpDumpMemoryDescriptors(LoaderBlock); //FIXME: Delete!
 
-#ifdef UEFIBOOT
+#if defined(UEFIBOOT)
     extern PVOID OsLoaderBase;
     extern SIZE_T OsLoaderSize;
     /* UEFILDR can be above the 2GB-ish range, we don't want to map the whole area */
     Status = MempSetupPaging((ULONG_PTR)OsLoaderBase / PAGE_SIZE, OsLoaderSize / PAGE_SIZE, FALSE);
+    if (!Status)
+    {
+        ERR("Error during MempSetupPaging of UEFI loader image\n");
+        return FALSE;
+    }
+#endif
+
+#if !defined(_M_IX86) && !defined(_M_AMD64) && !defined(_M_ARM)
+    {
+        PFN_NUMBER StartPage = (ULONG_PTR)WinLdrSystemBlock >> PAGE_SHIFT;
+        PFN_NUMBER EndPage = ((ULONG_PTR)WinLdrSystemBlock +
+                              sizeof(*WinLdrSystemBlock) +
+                              PAGE_SIZE - 1) >> PAGE_SHIFT;
+
+        Status = MempSetupPaging(StartPage, EndPage - StartPage, TRUE);
+        if (!Status)
+        {
+            ERR("Error during MempSetupPaging of loader system block\n");
+            return FALSE;
+        }
+    }
 #endif
 
     // Map our loader image, so we can continue running

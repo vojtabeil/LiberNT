@@ -22,7 +22,7 @@
 #include <wincrypt.h>
 
 
-#include <pshpack8.h>
+#pragma pack(push, 8)
 
 typedef struct WINTRUST_FILE_INFO_
 {
@@ -190,6 +190,25 @@ typedef struct _CRYPT_PROVIDER_REGDEFUSAGE
     char  *pwszLoadCallbackDataFunctionName;
     char  *pwszFreeCallbackDataFunctionName;
 } CRYPT_PROVIDER_REGDEFUSAGE, *PCRYPT_PROVIDER_REGDEFUSAGE;
+
+typedef struct _CRYPT_PROVIDER_DEFUSAGE
+{
+    DWORD  cbStruct;
+    GUID   gActionID;
+    LPVOID pDefPolicyCallbackData;
+    LPVOID pDefSIPClientData;
+} CRYPT_PROVIDER_DEFUSAGE, *PCRYPT_PROVIDER_DEFUSAGE;
+
+typedef BOOL (*PFN_ALLOCANDFILLDEFUSAGE)(const char *pszUsageOID, struct _CRYPT_PROVIDER_DEFUSAGE *psDefUsage);
+typedef BOOL (*PFN_FREEDEFUSAGE)(const char *pszUsageOID, struct _CRYPT_PROVIDER_DEFUSAGE *psDefUsage);
+
+#define DWACTION_ALLOCANDFILL 1
+#define DWACTION_FREE         2
+
+#define WT_TRUSTDBDIALOG_NO_UI_FLAG            0x00000001
+#define WT_TRUSTDBDIALOG_ONLY_PUB_TAB_FLAG     0x00000002
+#define WT_TRUSTDBDIALOG_WRITE_LEGACY_REG_FLAG 0x00000100
+#define WT_TRUSTDBDIALOG_WRITE_IEAK_STORE_FLAG 0x00000200
 
 typedef struct _CRYPT_PROVUI_DATA {
     DWORD cbStruct;
@@ -427,7 +446,7 @@ typedef struct _CRYPT_PROVUI_FUNCS {
     PFN_PROVUI_CALL pfnOnAdvancedClickDefault;
 } CRYPT_PROVUI_FUNCS, *PCRYPT_PROVUI_FUNCS;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 #define WVT_OFFSETOF(t,f)     ((ULONG)(offsetof(t, f)))
 #define WVT_ISINSTRUCT(t,s,f) (WVT_OFFSETOF(t,f) + sizeof(((t*)0)->f) <= (s))
@@ -462,8 +481,14 @@ BOOL      WINAPI WintrustAddActionID(GUID*,DWORD,CRYPT_REGISTER_ACTIONID*);
 BOOL      WINAPI WintrustRemoveActionID(GUID*);
 BOOL      WINAPI WintrustLoadFunctionPointers(GUID*,CRYPT_PROVIDER_FUNCTIONS*);
 BOOL      WINAPI WintrustAddDefaultForUsage(const char*,CRYPT_PROVIDER_REGDEFUSAGE*);
+BOOL      WINAPI WintrustGetDefaultForUsage(DWORD,const char*,CRYPT_PROVIDER_DEFUSAGE*);
+BOOL      WINAPI OpenPersonalTrustDBDialogEx(HWND,DWORD,PVOID*);
+BOOL      WINAPI OpenPersonalTrustDBDialog(HWND);
+BOOL      WINAPI WTHelperCertIsSelfSigned(DWORD,CERT_INFO*);
+HRESULT   WINAPI WTHelperCertCheckValidSignature(CRYPT_PROVIDER_DATA*);
 void      WINAPI WintrustGetRegPolicyFlags(DWORD*);
 BOOL      WINAPI WintrustSetRegPolicyFlags(DWORD);
+void      WINAPI WintrustSetDefaultIncludePEPageHashes(BOOL);
 LONG      WINAPI WinVerifyTrust(HWND,GUID*,LPVOID);
 HRESULT   WINAPI WinVerifyTrustEx(HWND,GUID*,WINTRUST_DATA*);
 
@@ -494,8 +519,15 @@ CRYPT_PROVIDER_PRIVDATA * WINAPI WTHelperGetProvPrivateDataFromChain(CRYPT_PROVI
 #define SPC_FINANCIAL_CRITERIA_OBJID "1.3.6.1.4.1.311.2.1.27"
 #define SPC_LINK_OBJID               "1.3.6.1.4.1.311.2.1.28"
 #define SPC_SIGINFO_OBJID            "1.3.6.1.4.1.311.2.1.30"
+#define SPC_PE_IMAGE_PAGE_HASHES_V1_OBJID "1.3.6.1.4.1.311.2.3.1"
+#define SPC_PE_IMAGE_PAGE_HASHES_V2_OBJID "1.3.6.1.4.1.311.2.3.2"
+#define szOID_ENHANCED_HASH          "1.3.6.1.4.1.311.2.5.1"
 #define CAT_NAMEVALUE_OBJID          "1.3.6.1.4.1.311.12.2.1"
 #define CAT_MEMBERINFO_OBJID         "1.3.6.1.4.1.311.12.2.2"
+#define CAT_MEMBERINFO2_OBJID        "1.3.6.1.4.1.311.12.2.3"
+#define szOID_INTENT_TO_SEAL         "1.3.6.1.4.1.311.2.4.2"
+#define szOID_SEALING_SIGNATURE      "1.3.6.1.4.1.311.2.4.3"
+#define szOID_SEALING_TIMESTAMP      "1.3.6.1.4.1.311.2.4.4"
 
 #define SPC_SP_AGENCY_INFO_STRUCT        ((LPCSTR) 2000)
 #define SPC_MINIMAL_CRITERIA_STRUCT      ((LPCSTR) 2001)
@@ -507,12 +539,21 @@ CRYPT_PROVIDER_PRIVDATA * WINAPI WTHelperGetProvPrivateDataFromChain(CRYPT_PROVI
 #define SPC_SP_OPUS_INFO_STRUCT          ((LPCSTR) 2007)
 #define SPC_CAB_DATA_STRUCT              ((LPCSTR) 2008)
 #define SPC_JAVA_CLASS_DATA_STRUCT       ((LPCSTR) 2009)
+#define INTENT_TO_SEAL_ATTRIBUTE_STRUCT     ((LPCSTR) 2010)
+#define SEALING_SIGNATURE_ATTRIBUTE_STRUCT  ((LPCSTR) 2011)
+#define SEALING_TIMESTAMP_ATTRIBUTE_STRUCT  ((LPCSTR) 2012)
 #define SPC_SIGINFO_STRUCT               ((LPCSTR) 2130)
 #define CAT_NAMEVALUE_STRUCT             ((LPCSTR) 2221)
 #define CAT_MEMBERINFO_STRUCT            ((LPCSTR) 2222)
+#define CAT_MEMBERINFO2_STRUCT           ((LPCSTR) 2223)
 
 #define SPC_UUID_LENGTH 16
 typedef BYTE SPC_UUID[SPC_UUID_LENGTH];
+
+#define SpcSerializedObjectAttributesClassId {0xA6, 0xB5, 0x86, 0xD5, \
+                                              0xB4, 0xA1, 0x24, 0x66, \
+                                              0xAE, 0x05, 0xA2, 0x17, \
+                                              0xDA, 0x8E, 0x60, 0xD6}
 
 typedef struct _SPC_SERIALIZED_OBJECT
 {
@@ -607,6 +648,33 @@ typedef struct _CAT_MEMBERINFO
     LPWSTR pwszSubjGuid;
     DWORD  dwCertVersion;
 } CAT_MEMBERINFO, *PCAT_MEMBERINFO;
+
+typedef struct _CAT_MEMBERINFO2
+{
+    GUID SubjectGuid;
+    DWORD dwCertVersion;
+} CAT_MEMBERINFO2, *PCAT_MEMBERINFO2;
+
+typedef struct _INTENT_TO_SEAL_ATTRIBUTE
+{
+    ULONG version;
+    BOOLEAN seal;
+} INTENT_TO_SEAL_ATTRIBUTE, *PINTENT_TO_SEAL_ATTRIBUTE;
+
+typedef struct _SEALING_SIGNATURE_ATTRIBUTE
+{
+    ULONG version;
+    ULONG signerIndex;
+    CRYPT_ALGORITHM_IDENTIFIER signatureAlgorithm;
+    CRYPT_DIGEST_BLOB encryptedDigest;
+} SEALING_SIGNATURE_ATTRIBUTE, *PSEALING_SIGNATURE_ATTRIBUTE;
+
+typedef struct _SEALING_TIMESTAMP_ATTRIBUTE
+{
+    ULONG version;
+    ULONG signerIndex;
+    CRYPT_DATA_BLOB sealTimeStampToken;
+} SEALING_TIMESTAMP_ATTRIBUTE, *PSEALING_TIMESTAMP_ATTRIBUTE;
 
 /* PSDK protects the remaining defines with WT_DEFINE_ALL_APIS, but it's
  * defined by default.  No need to protect against bad headers from old PSDKs.

@@ -10,7 +10,7 @@
 #include <wine/debug.h>
 WINE_DEFAULT_DEBUG_CHANNEL(shdocvw);
 
-static VARIANT s_vaEmpty = { VT_EMPTY };
+static VARIANT s_vaEmpty = {};
 
 static HRESULT
 InitVariantFromBuffer(
@@ -69,44 +69,17 @@ VariantClearLazy(_Inout_ LPVARIANTARG pvarg)
     return S_OK;
 }
 
-/*************************************************************************
- *    WinList_Init (SHDOCVW.110)
- *
- * Retired in NT 6.1.
- */
-EXTERN_C
-BOOL WINAPI
-WinList_Init(VOID)
+static IShellWindows *
+GetShellWindows(VOID)
 {
-    FIXME("()\n");
-    return FALSE;
-}
+    IShellWindows *pShellWindows = NULL;
 
-/*************************************************************************
- *    WinList_Terminate (SHDOCVW.111)
- *
- * NT 4.71 and higher. Retired in NT 6.1.
- */
-EXTERN_C
-VOID WINAPI
-WinList_Terminate(VOID)
-{
-    FIXME("()\n");
-}
-
-/*************************************************************************
- *    WinList_GetShellWindows (SHDOCVW.179)
- *
- * NT 5.0 and higher.
- * @see https://learn.microsoft.com/en-us/windows/win32/api/exdisp/nn-exdisp-ishellwindows
- */
-EXTERN_C
-IShellWindows* WINAPI
-WinList_GetShellWindows(
-    _In_ BOOL bCreate)
-{
-    FIXME("(%d)\n", bCreate);
-    return NULL;
+    if (FAILED(CoCreateInstance(CLSID_ShellWindows, NULL, CLSCTX_LOCAL_SERVER,
+                                IID_PPV_ARG(IShellWindows, &pShellWindows))))
+    {
+        return NULL;
+    }
+    return pShellWindows;
 }
 
 /*************************************************************************
@@ -170,7 +143,7 @@ WinList_FindFolderWindow(
         return E_UNEXPECTED;
     }
 
-    CComPtr<IShellWindows> pShellWindows(WinList_GetShellWindows(ppWebBrowserApp != NULL));
+    CComPtr<IShellWindows> pShellWindows(GetShellWindows());
     if (!pShellWindows)
     {
         ERR("!pShellWindows\n");
@@ -190,66 +163,4 @@ WinList_FindFolderWindow(
 
     VariantClearLazy(&varg);
     return hr;
-}
-
-/*************************************************************************
- *    WinList_RegisterPending (SHDOCVW.180)
- *
- * NT 5.0 and higher.
- * @see https://learn.microsoft.com/en-us/windows/win32/api/exdisp/nf-exdisp-ishellwindows-registerpending
- */
-EXTERN_C
-HRESULT WINAPI
-WinList_RegisterPending(
-    _In_ DWORD dwThreadId,
-    _In_ LPCITEMIDLIST pidl,
-    _In_ DWORD dwUnused,
-    _Out_ PLONG plCookie)
-{
-    TRACE("(%ld, %p, %ld, %p)\n", dwThreadId, pidl, dwUnused, plCookie);
-
-    if (!pidl)
-    {
-        ERR("!pidl\n");
-        return E_UNEXPECTED;
-    }
-
-    CComPtr<IShellWindows> pShellWindows(WinList_GetShellWindows(FALSE));
-    if (!pShellWindows)
-    {
-        ERR("!pShellWindows\n");
-        return E_UNEXPECTED;
-    }
-
-    VARIANTARG varg;
-    HRESULT hr = InitVariantFromIDList(&varg, pidl);
-    if (FAILED_UNEXPECTEDLY(hr))
-        return hr;
-
-    hr = pShellWindows->RegisterPending(dwThreadId, &varg, &s_vaEmpty, SWC_BROWSER, plCookie);
-    VariantClearLazy(&varg);
-    return hr;
-}
-
-/*************************************************************************
- *    WinList_Revoke (SHDOCVW.181)
- *
- * NT 5.0 and higher.
- * @see https://learn.microsoft.com/en-us/windows/win32/api/exdisp/nf-exdisp-ishellwindows-revoke
- */
-EXTERN_C
-HRESULT WINAPI
-WinList_Revoke(
-    _In_ LONG lCookie)
-{
-    TRACE("(%ld)\n", lCookie);
-
-    CComPtr<IShellWindows> pShellWindows(WinList_GetShellWindows(TRUE));
-    if (!pShellWindows)
-    {
-        ERR("!pShellWindows\n");
-        return E_FAIL;
-    }
-
-    return pShellWindows->Revoke(lCookie);
 }

@@ -68,10 +68,11 @@ static char *alloc_buffer(size_t size)
     return (char*)(buffer + 1);
 }
 
+#if DBG
 static void free_buffers(void)
 {
     int slot = find_thread_slot();
-    if (slot != -1)
+    if (slot == -1)
     {
         return;
     }
@@ -87,20 +88,27 @@ static void free_buffers(void)
     s_alloactions[slot].allocations = NULL;
     s_alloactions[slot].thread = NULL;
 }
+#endif
 
 const char *wine_dbg_vsprintf(const char *format, va_list valist)
 {
     char* buffer;
     int len;
+    va_list valist_copy;
 
-    len = vsnprintf(NULL, 0, format, valist);
+    va_copy(valist_copy, valist);
+    len = vsnprintf(NULL, 0, format, valist_copy);
+    va_end(valist_copy);
+    if (len < 0)
+    {
+        return "<formatting failed>";
+    }
     buffer = alloc_buffer(len + 1);
     if (buffer == NULL)
     {
         return "<allocation failed>";
     }
-    len = vsnprintf(buffer, len, format, valist);
-    buffer[len] = 0;
+    vsnprintf(buffer, len + 1, format, valist);
     return buffer;
 }
 
@@ -144,8 +152,20 @@ static int default_dbg_vprintf( const char *format, va_list args )
     return vDbgPrintExWithPrefix("", -1, 0, format, args);
 }
 
+static int default_dbg_printf( const char *format, ... )
+{
+    int ret;
+    va_list valist;
+
+    va_start(valist, format);
+    ret = default_dbg_vprintf(format, valist);
+    va_end(valist);
+    return ret;
+}
+
 int wine_dbg_printf(const char *format, ... )
 {
+#if DBG
     int ret;
     va_list valist;
 
@@ -154,6 +174,10 @@ int wine_dbg_printf(const char *format, ... )
     va_end(valist);
     free_buffers();
     return ret;
+#else
+    (void)format;
+    return -1;
+#endif
 }
 
 static int winefmt_default_dbg_vlog( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
@@ -161,16 +185,32 @@ static int winefmt_default_dbg_vlog( enum __wine_debug_class cls, struct __wine_
 {
     int ret = 0;
 
-    ret += wine_dbg_printf("%04x:", HandleToULong(NtCurrentTeb()->ClientId.UniqueProcess) );
-    ret += wine_dbg_printf("%04x:", HandleToULong(NtCurrentTeb()->ClientId.UniqueThread) );
+    ret += default_dbg_printf("%04x:", HandleToULong(NtCurrentTeb()->ClientId.UniqueProcess) );
+    ret += default_dbg_printf("%04x:", HandleToULong(NtCurrentTeb()->ClientId.UniqueThread) );
 
     if (format)
         ret += default_dbg_vprintf(format, args);
+#if DBG
+    free_buffers();
+#endif
     return ret;
 }
 
-#define __wine_dbg_get_channel_flags(channel) \
-    ((channel) ? (channel)->flags : 0)
+static unsigned char rtl_dbg_get_channel_flags(const struct __wine_debug_channel *channel)
+{
+#if DBG
+    unsigned char flags = channel ? channel->flags : 0;
+
+    /* RTL cannot use libwine's environment/heap-based channel initialization.
+     * An uninitialized channel is not a request to enable every TRACE. Keep
+     * warnings and errors, and honor explicitly initialized channel flags. */
+    if (flags & (1 << __WINE_DBCL_INIT)) flags &= ~(1 << __WINE_DBCL_TRACE);
+    return flags;
+#else
+    (void)channel;
+    return 0;
+#endif
+}
 
 int ros_dbg_log( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
                   const char *file, const char *func, const int line, const char *format, ... )
@@ -178,7 +218,7 @@ int ros_dbg_log( enum __wine_debug_class cls, struct __wine_debug_channel *chann
     int ret;
     va_list valist;
 
-    if (!(__wine_dbg_get_channel_flags(channel) & (1 << cls))) return -1;
+    if (!(rtl_dbg_get_channel_flags(channel) & (1 << cls))) return -1;
 
     va_start(valist, format);
     ret = winefmt_default_dbg_vlog(cls, channel, file, func, line, format, valist);

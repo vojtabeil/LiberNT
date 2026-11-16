@@ -1170,7 +1170,7 @@ void gl_Map2f( GLcontext* ctx, GLenum target,
 void gl_GetMapdv( GLcontext* ctx, GLenum target, GLenum query, GLdouble *v )
 {
    GLuint i, n;
-   GLfloat *data;
+   GLfloat *data = NULL;
 
    switch (query) {
       case GL_COEFF:
@@ -1439,7 +1439,7 @@ void gl_GetMapdv( GLcontext* ctx, GLenum target, GLenum query, GLdouble *v )
 void gl_GetMapfv( GLcontext* ctx, GLenum target, GLenum query, GLfloat *v )
 {
    GLuint i, n;
-   GLfloat *data;
+   GLfloat *data = NULL;
 
    switch (query) {
       case GL_COEFF:
@@ -1708,7 +1708,7 @@ void gl_GetMapfv( GLcontext* ctx, GLenum target, GLenum query, GLfloat *v )
 void gl_GetMapiv( GLcontext* ctx, GLenum target, GLenum query, GLint *v )
 {
    GLuint i, n;
-   GLfloat *data;
+   GLfloat *data = NULL;
 
    switch (query) {
       case GL_COEFF:
@@ -1982,6 +1982,7 @@ void gl_EvalCoord1f(GLcontext* ctx, GLfloat u)
   GLfloat fcolor[4];
   GLubyte icolor[4];
   GLubyte *colorptr;
+  GLubyte col[4];
   GLfloat texcoord[4];
   GLuint index;
   register GLfloat uu;
@@ -2026,7 +2027,6 @@ void gl_EvalCoord1f(GLcontext* ctx, GLfloat u)
      colorptr = icolor;
   }
   else {
-     GLubyte col[4];
      COPY_4V(col, ctx->Current.ByteColor );
      colorptr = col;
   }
@@ -2088,6 +2088,7 @@ void gl_EvalCoord2f( GLcontext* ctx, GLfloat u, GLfloat v )
    GLfloat fcolor[4];
    GLubyte icolor[4];
    GLubyte *colorptr;
+   GLubyte col[4];
    GLfloat texcoord[4];
    GLuint index;
    register GLfloat uu, vv;
@@ -2164,7 +2165,6 @@ void gl_EvalCoord2f( GLcontext* ctx, GLfloat u, GLfloat v )
       colorptr = icolor;
    }
    else {
-     GLubyte col[4];
      COPY_4V(col, ctx->Current.ByteColor );
      colorptr = col;
    }
@@ -2463,4 +2463,3 @@ void gl_EvalMesh2( GLcontext* ctx, GLenum mode, GLint i1, GLint i2, GLint j1, GL
 #undef I_TO_U
 #undef J_TO_V
 }
-

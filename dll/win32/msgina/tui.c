@@ -98,7 +98,11 @@ TUIDisplaySASNotice(
 {
     TRACE("TUIDisplaySASNotice()\n");
 
-    UNREFERENCED_PARAMETER(pgContext);
+    if (pgContext->bDisableCAD)
+    {
+        pgContext->pWlxFuncs->WlxSasNotify(pgContext->hWlx, WLX_SAS_TYPE_CTRL_ALT_DEL);
+        return;
+    }
 
     DisplayResourceText(IDS_LOGGEDOUTSAS, TRUE);
     DisplayResourceText(IDS_PRESSCTRLALTDELETE, TRUE);
@@ -224,11 +228,11 @@ static INT
 TUILockedSAS(
     IN OUT PGINA_CONTEXT pgContext)
 {
-    HANDLE hToken;
     WCHAR UserName[256];
     WCHAR Password[256];
     NTSTATUS SubStatus;
     NTSTATUS Status;
+    INT Action;
 
     TRACE("TUILockedSAS()\n");
 
@@ -243,34 +247,28 @@ TUILockedSAS(
     if (!ReadString(IDS_ASKFORPASSWORD, Password, _countof(Password), FALSE))
         return WLX_SAS_ACTION_NONE;
 
-    Status = ConnectToLsa(pgContext);
+    Status = DoUnlock(pgContext,
+                      UserName,
+                      NULL,
+                      Password,
+                      &SubStatus,
+                      &Action);
+    SecureZeroMemory(Password, sizeof(Password));
     if (!NT_SUCCESS(Status))
     {
-        WARN("ConnectToLsa() failed\n");
+        WARN("DoUnlock() failed (Status 0x%08lx)\n", Status);
         return WLX_SAS_ACTION_NONE;
     }
 
-    Status = MyLogonUser(pgContext->LsaHandle,
-                         pgContext->AuthenticationPackage,
-                         UserName,
-                         NULL,
-                         Password,
-                         &hToken,
-                         &SubStatus);
-    if (!NT_SUCCESS(Status))
-    {
-        WARN("MyLogonUser() failed\n");
-        return WLX_SAS_ACTION_NONE;
-    }
-
-    CloseHandle(hToken);
-    return WLX_SAS_ACTION_UNLOCK_WKSTA;
+    return Action;
 }
 
 static VOID
 TUIDisplayLockedNotice(
     IN OUT PGINA_CONTEXT pgContext)
 {
+    if (pgContext->bDisableCAD)
+        pgContext->pWlxFuncs->WlxSasNotify(pgContext->hWlx, WLX_SAS_TYPE_CTRL_ALT_DEL);
 }
 
 GINA_UI GinaTextUI = {

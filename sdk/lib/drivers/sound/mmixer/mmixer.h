@@ -122,6 +122,13 @@ ULONG
 MMixerGetWaveOutCount(
     IN PMIXER_CONTEXT MixerContext);
 
+MIXER_STATUS
+MMixerGetWaveMixerId(
+    IN PMIXER_CONTEXT MixerContext,
+    IN ULONG DeviceIndex,
+    IN ULONG bWaveIn,
+    OUT PULONG MixerId);
+
 ULONG
 MMixerGetMidiInCount(
     IN PMIXER_CONTEXT MixerContext);
@@ -198,6 +205,37 @@ MMixerWaveInCapabilities(
     OUT LPWAVEINCAPSW Caps);
 
 MIXER_STATUS
+MMixerGetWaveFormat(
+    IN PMIXER_CONTEXT MixerContext,
+    IN ULONG DeviceIndex,
+    IN ULONG bWaveIn,
+    OUT PWAVEFORMATEXTENSIBLE Format);
+
+MIXER_STATUS
+MMixerGetWaveConnectionState(
+    IN PMIXER_CONTEXT MixerContext,
+    IN ULONG DeviceIndex,
+    IN ULONG bWaveIn,
+    OUT PULONG PresenceDetection,
+    OUT PULONG IsConnected);
+
+MIXER_STATUS
+MMixerGetWaveConnector(
+    IN PMIXER_CONTEXT MixerContext,
+    IN ULONG DeviceIndex,
+    IN ULONG bWaveIn,
+    OUT LPWSTR *DevicePath,
+    OUT PULONG PinId);
+
+MIXER_STATUS
+MMixerQueryWaveFormatSupport(
+    IN PMIXER_CONTEXT MixerContext,
+    IN ULONG DeviceIndex,
+    IN ULONG bWaveIn,
+    IN LPWAVEFORMATEX WaveFormat,
+    IN ULONG WaveFormatSize);
+
+MIXER_STATUS
 MMixerOpenWave(
     IN PMIXER_CONTEXT MixerContext,
     IN ULONG DeviceIndex,
@@ -265,3 +303,32 @@ MMixerOpenMidi(
     IN PIN_CREATE_CALLBACK CreateCallback,
     IN PVOID Context,
     OUT PHANDLE PinHandle);
+
+MIXER_STATUS
+MMixerInitializeRTStreamingBuffer(
+    IN PMIXER_CONTEXT MixerContext,
+    IN HANDLE DeviceHandle,
+    IN ULONG RequestedBufferSize,
+    IN ULONG NotificationCount,
+    OUT PUCHAR *RTStreamingBuffer,
+    OUT PULONG RTStreamingBufferLength);
+
+MIXER_STATUS
+MMixerRegisterRTStreamingEvent(
+    IN PMIXER_CONTEXT MixerContext,
+    IN HANDLE DeviceHandle,
+    IN HANDLE StreamingEvent);
+
+MIXER_STATUS
+MMixerUnregisterRTStreamingEvent(
+    IN PMIXER_CONTEXT MixerContext,
+    IN HANDLE DeviceHandle,
+    IN HANDLE StreamingEvent);
+
+MIXER_STATUS
+MMixerSetRTStreamingWritePacket(
+    IN PMIXER_CONTEXT MixerContext,
+    IN HANDLE DeviceHandle,
+    IN ULONG PacketNumber,
+    IN DWORD Flags,
+    IN ULONG EosPacketLength);

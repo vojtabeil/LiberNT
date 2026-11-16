@@ -13,13 +13,23 @@ typedef struct
     ULONG Length;
     ULONG Function;
     PFILE_OBJECT FileObject;
+    PVOID OriginalSystemBuffer;
+    BOOLEAN IsWow64;
 }WDMAUD_COMPLETION_CONTEXT, *PWDMAUD_COMPLETION_CONTEXT;
+
+/*
+ * Device-control handlers traditionally complete their IRP directly through
+ * SetIrpIoStatus.  The WOW64 thunk needs to translate the native result back
+ * into the 32-bit wire layout first, so it temporarily defers completion.
+ */
+#define WDMAUD_DEFER_IRP_COMPLETION ((PVOID)(ULONG_PTR)1)
 
 
 typedef struct
 {
     HANDLE Handle;
     SOUND_DEVICE_TYPE Type;
+    ULONG DeviceIndex;
     ULONG FilterId;
     ULONG PinId;
     PRKEVENT NotifyEvent;
@@ -131,15 +141,12 @@ WdmAudControlOpenMixer(
 
 NTSTATUS
 WdmAudControlCloseMixer(
-    IN  PDEVICE_OBJECT DeviceObject,
     IN  PIRP Irp,
-    IN  PWDMAUD_DEVICE_INFO DeviceInfo,
     IN  PWDMAUD_CLIENT ClientInfo,
     IN  ULONG Index);
 
-VOID
-WdmAudCloseAllMixers(
-    IN PDEVICE_OBJECT DeviceObject,
+BOOLEAN
+WdmAudCloseMixer(
     IN PWDMAUD_CLIENT ClientInfo,
     IN ULONG Index);
 
@@ -191,6 +198,26 @@ WdmAudWaveCapabilities(
     IN  PWDMAUD_DEVICE_INFO DeviceInfo,
     IN  PWDMAUD_CLIENT ClientInfo,
     IN PWDMAUD_DEVICE_EXTENSION DeviceExtension);
+
+NTSTATUS
+WdmAudGetPreferredWaveFormat(
+    IN PIRP Irp,
+    IN PWDMAUD_DEVICE_INFO DeviceInfo);
+
+NTSTATUS
+WdmAudGetWaveMixerId(
+    IN PIRP Irp,
+    IN PWDMAUD_DEVICE_INFO DeviceInfo);
+
+NTSTATUS
+WdmAudGetEndpointState(
+    IN PIRP Irp,
+    IN PWDMAUD_DEVICE_INFO DeviceInfo);
+
+NTSTATUS
+WdmAudGetWaveConnector(
+    IN PIRP Irp,
+    IN PWDMAUD_DEVICE_INFO DeviceInfo);
 
 NTSTATUS
 WdmAudMidiCapabilities(
@@ -263,21 +290,13 @@ NTAPI
 WdmAudWaveInitialize(
     IN PDEVICE_OBJECT DeviceObject);
 
-ULONG
-ClosePin(
-    IN  PWDMAUD_CLIENT ClientInfo,
-    IN  ULONG FilterId,
-    IN  ULONG PinId,
-    IN  SOUND_DEVICE_TYPE DeviceType);
-
 NTSTATUS
 InsertPinHandle(
     IN  PWDMAUD_CLIENT ClientInfo,
     IN  ULONG FilterId,
     IN  ULONG PinId,
     IN  SOUND_DEVICE_TYPE DeviceType,
-    IN  HANDLE PinHandle,
-    IN  ULONG FreeIndex);
+    IN  HANDLE PinHandle);
 
 NTSTATUS
 GetSysAudioDevicePnpName(

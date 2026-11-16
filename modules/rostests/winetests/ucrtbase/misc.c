@@ -567,7 +567,11 @@ static void test_isblank(void)
             else
                 ok(_iswctype_l(c, _BLANK, NULL), "%d should be blank\n", c);
             ok(iswblank(c), "%d should be blank\n", c);
+#ifdef __REACTOS__
+            ok((_iswblank_l)(c, NULL), "%d should be blank\n", c);
+#else
             ok(_iswblank_l(c, NULL), "%d should be blank\n", c);
+#endif
         } else {
             ok(!_iswctype_l(c, _BLANK, NULL), "%d shouldn't be blank\n", c);
             ok(!iswblank(c), "%d shouldn't be blank\n", c);
@@ -1711,6 +1715,103 @@ static void test__get_heap_handle(void)
     ok((HANDLE)_get_heap_handle() == GetProcessHeap(), "Expected _get_heap_handle() to return GetProcessHeap()\n");
 }
 
+static void test_remainderf(void)
+{
+    static const struct { float x, y, expected; } cases[] =
+    {
+        {0.0f, 360.0f, 0.0f}, {-0.0f, 360.0f, -0.0f},
+        {5.0f, 2.0f, 1.0f}, {7.0f, 2.0f, -1.0f},
+        {-5.0f, 2.0f, -1.0f}, {-7.0f, 2.0f, 1.0f},
+        {7.0f, -2.0f, -1.0f}, {540.0f, 360.0f, -180.0f},
+        {900.0f, 360.0f, 180.0f}, {-360.0f, 360.0f, -0.0f},
+        {FLT_MAX, 1.0f, 0.0f}, {FLT_MIN, FLT_MAX, FLT_MIN}
+    };
+    HMODULE module = GetModuleHandleA("ucrtbase.dll");
+    float (__cdecl *funcs[2])(float, float);
+    union { float f; unsigned int u; } result, expected, infinity, nan, tiny;
+    unsigned int i, j;
+    funcs[0] = (void *)GetProcAddress(module, "remainderf");
+    funcs[1] = (void *)GetProcAddress(module, "_o_remainderf");
+    infinity.u = 0x7f800000;
+    nan.u = 0x7fc00001;
+    tiny.u = 1;
+    for (j = 0; j < ARRAY_SIZE(funcs); ++j)
+    {
+        ok(!!funcs[j], "missing remainderf export %u\n", j);
+        if (!funcs[j]) continue;
+        for (i = 0; i < ARRAY_SIZE(cases); ++i)
+        {
+            result.f = funcs[j](cases[i].x, cases[i].y);
+            expected.f = cases[i].expected;
+            ok(result.u == expected.u, "export %u case %u: %#x, expected %#x\n", j, i, result.u, expected.u);
+        }
+        result.f = funcs[j](3.0f * tiny.f, 2.0f * tiny.f);
+        expected.f = -tiny.f;
+        ok(result.u == expected.u, "subnormal tie: %#x\n", result.u);
+        result.f = funcs[j](1.0f, infinity.f);
+        ok(result.f == 1.0f, "finite/infinity: %g\n", result.f);
+        result.f = funcs[j](infinity.f, 1.0f);
+        ok(_isnan(result.f), "infinity numerator: %g\n", result.f);
+        result.f = funcs[j](1.0f, 0.0f);
+        ok(_isnan(result.f), "zero divisor: %g\n", result.f);
+        result.f = funcs[j](nan.f, 1.0f);
+        ok(_isnan(result.f), "NaN numerator: %g\n", result.f);
+    }
+}
+
+static void test_nearbyint(void)
+{
+    static const struct { int round; double x, expected; } cases[] =
+    {
+        {FE_TONEAREST, 2.5, 2.0}, {FE_TONEAREST, -2.5, -2.0}, {FE_TONEAREST, 3.5, 4.0},
+        {FE_TONEAREST, 1.4, 1.0}, {FE_TONEAREST, -0.4, -0.0}, {FE_UPWARD, 1.1, 2.0},
+        {FE_UPWARD, -1.9, -1.0}, {FE_DOWNWARD, 1.9, 1.0}, {FE_DOWNWARD, -1.1, -2.0},
+        {FE_TOWARDZERO, -1.9, -1.0}, {FE_TOWARDZERO, 1.9, 1.0}, {FE_TONEAREST, 4503599627370497.0, 4503599627370497.0}
+    };
+    static const char *names[2][2] = {{"nearbyint", "_o_nearbyint"}, {"nearbyintf", "_o_nearbyintf"}};
+    HMODULE module = GetModuleHandleA("ucrtbase.dll");
+    double (__cdecl *dfunc)(double);
+    float (__cdecl *ffunc)(float);
+    unsigned int i, j;
+    double result;
+
+    for (j = 0; j < 2; ++j)
+    {
+        dfunc = (void *)GetProcAddress(module, names[0][j]);
+        ffunc = (void *)GetProcAddress(module, names[1][j]);
+        ok(dfunc != NULL && ffunc != NULL, "missing %s or %s\n", names[0][j], names[1][j]);
+        if (!dfunc || !ffunc) continue;
+        for (i = 0; i < ARRAY_SIZE(cases); ++i)
+        {
+            fesetround(cases[i].round);
+            feclearexcept(FE_ALL_EXCEPT);
+            result = dfunc(cases[i].x);
+            ok(!fetestexcept(FE_INEXACT), "%s case %u raised inexact\n", names[0][j], i);
+            ok(result == cases[i].expected && signbit(result) == signbit(cases[i].expected),
+               "%s case %u: %.17g, expected %.17g\n", names[0][j], i, result, cases[i].expected);
+            if (fabs(cases[i].x) < 16777216.0)
+            {
+                volatile float x = (float)cases[i].x;
+
+                feclearexcept(FE_ALL_EXCEPT);
+                result = ffunc(x);
+                ok(!fetestexcept(FE_INEXACT), "%s case %u raised inexact\n", names[1][j], i);
+                ok(result == cases[i].expected && signbit(result) == signbit(cases[i].expected),
+                   "%s case %u: %.9g, expected %.9g\n", names[1][j], i, result, cases[i].expected);
+            }
+        }
+        fesetround(FE_TONEAREST);
+        feraiseexcept(FE_INEXACT);
+        dfunc(0.5);
+        ok(fetestexcept(FE_INEXACT) != 0, "%s cleared a raised inexact flag\n", names[0][j]);
+        feclearexcept(FE_ALL_EXCEPT);
+        ok(_isnan(dfunc(NAN)) && _isnan(ffunc(NAN)), "%s: NaN not preserved\n", names[0][j]);
+        ok(dfunc(INFINITY) == INFINITY && ffunc(-INFINITY) == -INFINITY, "%s: infinity not preserved\n", names[0][j]);
+    }
+    fesetround(FE_TONEAREST);
+    feclearexcept(FE_ALL_EXCEPT);
+}
+
 START_TEST(misc)
 {
     int arg_c;
@@ -1731,6 +1832,8 @@ START_TEST(misc)
         return;
     }
 
+    test_remainderf();
+    test_nearbyint();
     test_invalid_parameter_handler();
     test__initialize_onexit_table();
     test__register_onexit_function();

@@ -321,8 +321,19 @@ static int is_user_type(const type_t *t)
     return get_user_type(t, NULL) != NULL;
 }
 
+#ifdef __REACTOS__
+static int is_system_handle_type(const type_t *t)
+{
+    return is_aliaschain_attr(t, ATTR_SYSTEMHANDLE);
+}
+
+#endif
 enum typegen_type typegen_detect_type(const type_t *type, const attr_list_t *attrs, unsigned int flags)
 {
+#ifdef __REACTOS__
+    if (is_system_handle_type(type))
+        return TGT_SYSTEM_HANDLE;
+#endif
     if (is_user_type(type))
         return TGT_USER_TYPE;
 
@@ -449,6 +460,9 @@ static unsigned int get_stack_size( const var_t *var, unsigned int *stack_align,
     case TGT_STRUCT:
     case TGT_UNION:
     case TGT_USER_TYPE:
+#ifdef __REACTOS__
+    case TGT_SYSTEM_HANDLE:
+#endif
         stack_size = type_memsize_and_alignment( var->declspec.type, &align );
         switch (target.cpu)
         {
@@ -457,12 +471,14 @@ static unsigned int get_stack_size( const var_t *var, unsigned int *stack_align,
             by_val = (stack_size == 1 || stack_size == 2 || stack_size == 4 || stack_size == 8);
             break;
         case CPU_ARM64:
+        case CPU_RISCV64:
             by_val = (stack_size <= 2 * pointer_size);
             break;
         case CPU_ARM:
             by_val = 1;
             break;
         case CPU_i386:
+        case CPU_POWERPC:
             align = pointer_size;
             by_val = 1;
             break;
@@ -486,6 +502,25 @@ static unsigned char get_contexthandle_flags( const type_t *iface, const attr_li
     int is_out;
 
     if (is_attr(iface->attrs, ATTR_STRICTCONTEXTHANDLE)) flags |= NDR_STRICT_CONTEXT_HANDLE;
+#ifdef __REACTOS__
+    {
+        const type_t *t = type;
+
+        flags |= get_attrv( attrs, ATTR_CONTEXTHANDLE ) & (NDR_CONTEXT_HANDLE_SERIALIZE | NDR_CONTEXT_HANDLE_NOSERIALIZE);
+        for (;;)
+        {
+            if (is_attr( t->attrs, ATTR_CONTEXTHANDLE ))
+            {
+                flags |= get_attrv( t->attrs, ATTR_CONTEXTHANDLE ) &
+                         (NDR_CONTEXT_HANDLE_SERIALIZE | NDR_CONTEXT_HANDLE_NOSERIALIZE);
+                break;
+            }
+            if (type_is_alias( t )) t = type_alias_get_aliasee_type( t );
+            else if (type_is_ptr( t )) t = type_pointer_get_ref_type( t );
+            else break;
+        }
+    }
+#endif
 
     if (is_ptr(type) &&
         !is_attr( type->attrs, ATTR_CONTEXTHANDLE ) &&
@@ -516,6 +551,30 @@ static unsigned int get_rpc_flags( const attr_list_t *attrs )
     if (is_attr( attrs, ATTR_ASYNC )) flags |= 0x4000;
     return flags;
 }
+
+#ifdef __REACTOS__
+static int struct_has_correlated_pointer(const type_t *type)
+{
+    const var_list_t *fields = type_struct_get_fields(type);
+    const var_t *field;
+
+    if (fields) LIST_FOR_EACH_ENTRY( field, fields, const var_t, entry )
+    {
+        const type_t *t = field->declspec.type;
+        const expr_t *expr;
+
+        if (!is_array(t) || !type_array_is_decl_as_ptr(t))
+            continue;
+        expr = type_array_get_conformance(t);
+        if (expr && !expr->is_const)
+            return 1;
+        expr = type_array_get_variance(t);
+        if (expr && !expr->is_const)
+            return 1;
+    }
+    return 0;
+}
+#endif
 
 unsigned char get_struct_fc(const type_t *type)
 {
@@ -568,6 +627,9 @@ unsigned char get_struct_fc(const type_t *type)
     {
     case TGT_USER_TYPE:
     case TGT_IFACE_POINTER:
+#ifdef __REACTOS__
+    case TGT_SYSTEM_HANDLE:
+#endif
         return FC_BOGUS_STRUCT;
     case TGT_BASIC:
         if (type_basic_get_type(t) == TYPE_BASIC_INT3264 && pointer_size != 4)
@@ -614,6 +676,10 @@ unsigned char get_struct_fc(const type_t *type)
             break;
 
         case FC_PSTRUCT:
+#ifdef __REACTOS__
+            if (struct_has_correlated_pointer(t))
+                return FC_BOGUS_STRUCT;
+#endif
             has_pointer = 1;
             break;
 
@@ -689,6 +755,9 @@ static unsigned char get_array_fc(const type_t *type, const attr_list_t *attrs)
     switch (typegen_detect_type(elem_type, attrs, TDT_IGNORE_STRINGS))
     {
     case TGT_USER_TYPE:
+#ifdef __REACTOS__
+    case TGT_SYSTEM_HANDLE:
+#endif
         fc = FC_BOGUS_ARRAY;
         break;
     case TGT_BASIC:
@@ -747,6 +816,9 @@ static int type_has_pointers(const type_t *type, const attr_list_t *attrs)
     switch (typegen_detect_type(type, attrs, TDT_IGNORE_STRINGS))
     {
     case TGT_USER_TYPE:
+#ifdef __REACTOS__
+    case TGT_SYSTEM_HANDLE:
+#endif
         return FALSE;
     case TGT_POINTER:
         return TRUE;
@@ -828,6 +900,9 @@ static int type_has_full_pointer_recurse(const type_t *type, const attr_list_t *
     switch (typegen_detect_type(type, attrs, TDT_IGNORE_STRINGS))
     {
     case TGT_USER_TYPE:
+#ifdef __REACTOS__
+    case TGT_SYSTEM_HANDLE:
+#endif
         return FALSE;
     case TGT_POINTER:
         if (get_pointer_fc(type, attrs, toplevel_attrs, toplevel_param) == FC_FP)
@@ -942,6 +1017,9 @@ static int is_embedded_complex(const type_t *type, const attr_list_t *attrs)
     switch (typegen_detect_type(type, attrs, TDT_IGNORE_STRINGS))
     {
     case TGT_USER_TYPE:
+#ifdef __REACTOS__
+    case TGT_SYSTEM_HANDLE:
+#endif
     case TGT_STRUCT:
     case TGT_UNION:
     case TGT_ARRAY:
@@ -1101,6 +1179,9 @@ static unsigned char get_parameter_fc( const var_t *var, int is_return, unsigned
     case TGT_STRUCT:
     case TGT_UNION:
     case TGT_USER_TYPE:
+#ifdef __REACTOS__
+    case TGT_SYSTEM_HANDLE:
+#endif
         *flags |= MustFree | (is_byval ? IsByValue : IsSimpleRef);
         break;
     case TGT_IFACE_POINTER:
@@ -1162,6 +1243,9 @@ static unsigned char get_parameter_fc( const var_t *var, int is_return, unsigned
             case TGT_UNION:
             case TGT_USER_TYPE:
             case TGT_RANGE:
+#ifdef __REACTOS__
+            case TGT_SYSTEM_HANDLE:
+#endif
                 *flags |= MustFree | IsSimpleRef;
                 *typestring_offset = ref->typestring_offset;
                 if (!is_in && is_out) server_size = type_memsize( ref );
@@ -1423,16 +1507,22 @@ static unsigned int fill_params_array( const type_t *iface, const var_t *func,
         offset = ROUND_SIZE( offset, align );
         pos = offset / pointer_size;
 
-        if (target.cpu == CPU_ARM64)
+        if (target.cpu == CPU_ARM64 || target.cpu == CPU_RISCV64)
         {
             switch (type)
             {
             case TYPE_BASIC_FLOAT:
             case TYPE_BASIC_DOUBLE:
-                if (double_count >= 8) break;
-                params[pos] = 0x88 + double_count++;
-                offset += size;
-                continue;
+                /* The current RISC-V Windows target uses the soft-float
+                 * lp64 ABI: even scalar FP arguments use integer slots. */
+                if (target.cpu == CPU_ARM64)
+                {
+                    if (double_count >= 8) break;
+                    params[pos] = 0x88 + double_count++;
+                    offset += size;
+                    continue;
+                }
+                /* fall through */
 
             default:
                 reg_count = ROUND_SIZE( reg_count, align / pointer_size );
@@ -1641,6 +1731,7 @@ static void write_proc_func_interp( FILE *file, int indent, const type_t *iface,
     }
     case CPU_ARM:
     case CPU_ARM64:
+    case CPU_RISCV64:
     {
         unsigned int i, len, count = stack_size / pointer_size;
         unsigned char *params = xmalloc( count );
@@ -1662,6 +1753,7 @@ static void write_proc_func_interp( FILE *file, int indent, const type_t *iface,
         break;
     }
     case CPU_i386:
+    case CPU_POWERPC:
         print_file( file, indent, "0x%02x,\n", extra_size );
         print_file( file, indent, "0x%02x,\n", ext_flags );
         print_file( file, indent, "NdrFcShort(0x0),\n" );  /* server corr hint */
@@ -2609,6 +2701,27 @@ static unsigned int write_user_tfs(FILE *file, type_t *type, unsigned int *tfsof
     return start;
 }
 
+#ifdef __REACTOS__
+static unsigned int write_system_handle_tfs(FILE *file, type_t *type, unsigned int *tfsoff)
+{
+    const system_handle_attr_t *sh = get_aliaschain_attrp(type, ATTR_SYSTEMHANDLE);
+    unsigned int start;
+
+    if (processed(type)) return type->typestring_offset;
+
+    guard_rec(type);
+
+    start = *tfsoff;
+    update_tfsoff(type, start, file);
+    print_start_tfs_comment(file, type, start);
+    print_file(file, 2, "0x%x,\t/* FC_SYSTEM_HANDLE */\n", FC_SYSTEM_HANDLE);
+    print_file(file, 2, "0x%x,\t/* Handle type= %u */\n", sh->handle_type, sh->handle_type);
+    print_file(file, 2, "NdrFcLong(0x%x),\t/* Access= %u */\n", sh->access, sh->access);
+    *tfsoff += 6;
+    return start;
+}
+
+#endif
 static void write_member_type(FILE *file, const type_t *cont,
                               int cont_is_complex, const attr_list_t *attrs,
                               const type_t *type, unsigned int *corroff,
@@ -2734,6 +2847,10 @@ static int write_pointer_description_offsets(
 {
     int written = 0;
 
+#ifdef __REACTOS__
+    if (is_system_handle_type(type))
+        return 0;
+#endif
     if ((is_ptr(type) && type_get_type(type_pointer_get_ref_type(type)) != TYPE_INTERFACE) ||
         (is_array(type) && type_array_is_decl_as_ptr(type)))
     {
@@ -2833,6 +2950,10 @@ static int write_no_repeat_pointer_descriptions(
 {
     int written = 0;
 
+#ifdef __REACTOS__
+    if (is_system_handle_type(type))
+        return 0;
+#endif
     if (is_ptr(type) ||
         (is_conformant_array(type) && type_array_is_decl_as_ptr(type)))
     {
@@ -3569,7 +3690,7 @@ static unsigned int write_union_tfs(FILE *file, const attr_list_t *attrs,
     unsigned int nbranch = 0;
     type_t *deftype = NULL;
     short nodeftype = 0xffff;
-    unsigned int dummy;
+    unsigned int dummy = 0;
     var_t *f;
 
     if (processed(type) &&
@@ -3859,6 +3980,10 @@ static unsigned int write_type_tfs(FILE *file, const attr_list_t *attrs, int top
         return write_contexthandle_tfs(file, attrs, type, context, typeformat_offset);
     case TGT_USER_TYPE:
         return write_user_tfs(file, type, typeformat_offset);
+#ifdef __REACTOS__
+    case TGT_SYSTEM_HANDLE:
+        return write_system_handle_tfs(file, type, typeformat_offset);
+#endif
     case TGT_STRING:
         return write_string_tfs(file, attrs, toplevel_attrs, type, context, name, typeformat_offset);
     case TGT_ARRAY:
@@ -4425,6 +4550,9 @@ void write_parameter_conf_or_var_exprs(FILE *file, int indent, const char *local
             continue;
         case TGT_INVALID:
         case TGT_USER_TYPE:
+#ifdef __REACTOS__
+        case TGT_SYSTEM_HANDLE:
+#endif
         case TGT_CTXT_HANDLE:
         case TGT_CTXT_HANDLE_POINTER:
         case TGT_STRING:
@@ -4523,6 +4651,11 @@ static void write_remoting_arg(FILE *file, int indent, const var_t *func, const 
     case TGT_USER_TYPE:
         print_phase_function(file, indent, "UserMarshal", local_var_prefix, phase, var, start_offset);
         break;
+#ifdef __REACTOS__
+    case TGT_SYSTEM_HANDLE:
+        error("%s: system_handle parameters need interpreted stubs\n", var->name);
+        break;
+#endif
     case TGT_STRING:
         if (phase == PHASE_FREE || pass == PASS_RETURN ||
             pointer_type != FC_RP)
@@ -4770,6 +4903,11 @@ static void write_remoting_arg(FILE *file, int indent, const var_t *func, const 
 
             print_phase_function(file, indent, type_str, local_var_prefix, phase, var, start_offset);
             break;
+#ifdef __REACTOS__
+        case TGT_SYSTEM_HANDLE:
+            error("%s: system_handle parameters need interpreted stubs\n", var->name);
+            break;
+#endif
         case TGT_STRING:
         case TGT_POINTER:
         case TGT_ARRAY:
@@ -4909,7 +5047,7 @@ void declare_stub_args( FILE *file, int indent, const var_t *func )
                 fprintf(file, "(*%s)", var->name);
             } else
                 fprintf(file, "%s", var->name);
-            write_type_right(file, var->declspec.type, FALSE);
+            write_type_right( file, var->declspec.type, false );
             fprintf(file, ";\n");
 
             if (decl_indirect(var->declspec.type))
@@ -4991,6 +5129,9 @@ void assign_stub_out_args( FILE *file, int indent, const var_t *func, const char
                 case TGT_POINTER:
                 case TGT_RANGE:
                 case TGT_IFACE_POINTER:
+#ifdef __REACTOS__
+                case TGT_SYSTEM_HANDLE:
+#endif
                     print_file(file, indent, "%s_W%u = 0;\n", local_var_prefix, i);
                     break;
                 case TGT_USER_TYPE:
@@ -5031,12 +5172,20 @@ void assign_stub_out_args( FILE *file, int indent, const var_t *func, const char
         fprintf(file, "\n");
 }
 
+static void init_param_struct_declspec( decl_spec_t *dst, const decl_spec_t *src )
+{
+    *dst = *src;
+
+    if (!is_ptr( dst->type ) || type_is_alias( dst->type ))
+        dst->qualifier = 0;
+}
 
 void write_func_param_struct( FILE *file, const type_t *iface, const type_t *func,
                               const char *var_decl, int add_retval )
 {
     var_t *retval = type_function_get_retval( func );
     const var_list_t *args = type_function_get_args( func );
+    decl_spec_t declspec;
     const var_t *arg;
     int needs_packing;
     unsigned int align = 0;
@@ -5047,7 +5196,7 @@ void write_func_param_struct( FILE *file, const type_t *iface, const type_t *fun
 
     needs_packing = (align > pointer_size);
 
-    if (needs_packing) print_file( file, 0, "#include <pshpack%u.h>\n", pointer_size );
+    if (needs_packing) print_file( file, 0, "#pragma pack(push,%u)\n", pointer_size );
     print_file(file, 1, "struct _PARAM_STRUCT\n" );
     print_file(file, 1, "{\n" );
     if (is_object( iface )) print_file(file, 2, "%s *This;\n", iface->name );
@@ -5055,7 +5204,8 @@ void write_func_param_struct( FILE *file, const type_t *iface, const type_t *fun
     if (args) LIST_FOR_EACH_ENTRY( arg, args, const var_t, entry )
     {
         print_file(file, 2, "%s", "");
-        write_type_left( file, &arg->declspec, NAME_DEFAULT, false, TRUE );
+        init_param_struct_declspec( &declspec, &arg->declspec );
+        write_type_left( file, &declspec, NAME_DEFAULT );
         if (needs_space_after( arg->declspec.type )) fputc( ' ', file );
         if (is_array( arg->declspec.type ) && !type_array_is_decl_as_ptr( arg->declspec.type )) fputc( '*', file );
 
@@ -5071,7 +5221,8 @@ void write_func_param_struct( FILE *file, const type_t *iface, const type_t *fun
     if (add_retval && !is_void( retval->declspec.type ))
     {
         print_file(file, 2, "%s", "");
-        write_type_left( file, &retval->declspec, NAME_DEFAULT, false, TRUE );
+        init_param_struct_declspec( &declspec, &retval->declspec );
+        write_type_left( file, &declspec, NAME_DEFAULT );
         if (needs_space_after( retval->declspec.type )) fputc( ' ', file );
         if (!is_array( retval->declspec.type ) && !is_ptr( retval->declspec.type ) &&
             type_memsize( retval->declspec.type ) != pointer_size)
@@ -5081,7 +5232,7 @@ void write_func_param_struct( FILE *file, const type_t *iface, const type_t *fun
         fprintf( file, "%s;\n", retval->name );
     }
     print_file(file, 1, "} %s;\n", var_decl );
-    if (needs_packing) print_file( file, 0, "#include <poppack.h>\n" );
+    if (needs_packing) print_file( file, 0, "#pragma pack(pop)\n" );
     print_file( file, 0, "\n" );
 }
 
@@ -5122,9 +5273,9 @@ int write_expr_eval_routines(FILE *file, const char *iface)
         {
             decl_spec_t ds = {.type = (type_t *)eval->cont_type};
             print_file(file, 1, "%s", "");
-            write_type_left(file, &ds, NAME_DEFAULT, false, TRUE);
+            write_type_left( file, &ds, NAME_DEFAULT );
             fprintf(file, " *%s = (", var_name);
-            write_type_left(file, &ds, NAME_DEFAULT, false, TRUE);
+            write_type_left( file, &ds, NAME_DEFAULT );
             fprintf(file, " *)(pStubMsg->StackTop - %u);\n", eval->baseoff);
         }
         print_file(file, 1, "pStubMsg->Offset = 0;\n"); /* FIXME */
@@ -5239,9 +5390,7 @@ void write_client_call_routine( FILE *file, const type_t *iface, const var_t *fu
     }
     else if (has_ret) print_file( file, 1, "%s", "CLIENT_CALL_RETURN _RetVal;\n\n" );
 
-    len = fprintf( file, "    %s%s( ",
-                   has_ret ? "_RetVal = " : "",
-                   interpreted_mode ? "NdrClientCall2" : "NdrClientCall" );
+    len = fprintf( file, "    %sNdrClientCall2( ", has_ret ? "_RetVal = " : "" );
     fprintf( file, "&%s_StubDesc,", prefix );
     fprintf( file, "\n%*s&__MIDL_ProcFormatString.Format[%u]", len, "", proc_offset );
     if (needs_params)

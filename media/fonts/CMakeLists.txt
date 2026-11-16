@@ -26,6 +26,8 @@ list(APPEND FONT_FILES
     lucon.ttf
     Marlett.ttf
     micross.ttf
+    NotoSansJP-Regular.otf
+    NotoSansSC-Regular.otf
     pala.ttf
     palab.ttf
     palabi.ttf
@@ -42,6 +44,12 @@ list(APPEND FONT_FILES
     #sserifeg.fon # to be added (CORE-16165 and CORE-16166)
     #sserifer.fon # to be added (CORE-16165 and CORE-16166)
     #sserifet.fon # to be added (CORE-16165 and CORE-16166)
+    segmdl2.ttf
+    selawk.ttf
+    selawkb.ttf
+    selawkl.ttf
+    selawksb.ttf
+    selawksl.ttf
     symbol.ttf
     tahoma.ttf
     tahomabd.ttf
@@ -64,3 +72,8 @@ list(APPEND FONT_FILES
 foreach(item ${FONT_FILES})
     add_cd_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/${item}" DESTINATION reactos/Fonts FOR all)
 endforeach(item)
+
+add_cd_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/doc/NotoSansJP/LICENSE.txt"
+    DESTINATION reactos NAME_ON_CD NotoSansJP-LICENSE.txt NO_CAB FOR all)
+add_cd_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/doc/NotoSansSC/LICENSE.txt"
+    DESTINATION reactos NAME_ON_CD NotoSansSC-LICENSE.txt NO_CAB FOR all)

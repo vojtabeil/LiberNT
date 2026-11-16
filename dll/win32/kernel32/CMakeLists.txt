@@ -9,6 +9,7 @@ spec2def(kernel32.dll kernel32.spec ADD_IMPORTLIB)
 add_library(kernel32_shared
     client/shared_utils.c
     client/file/fileutils.c
+    client/werreg.c
 )
 target_link_libraries(kernel32_shared PRIVATE pseh)
 add_dependencies(kernel32_shared psdk)
@@ -19,8 +20,8 @@ list(APPEND SOURCE
     client/atom.c
     client/atomansi.c
     client/compname.c
+    client/cputime.c
     client/debugger.c
-    client/dep.c
     client/dosdev.c
     client/dllmain.c
     client/environ.c
@@ -30,10 +31,12 @@ list(APPEND SOURCE
     client/heapmem.c
     client/job.c
     client/loader.c
+    client/mui.c
     client/path.c
     client/pathansi.c
     client/perfcnt.c
     client/power.c
+    client/privatens.c
     client/proc.c
     client/procansi.c
     client/resntfy.c
@@ -47,15 +50,11 @@ list(APPEND SOURCE
     client/toolhelp.c
     client/utils.c
     client/thread.c
+    client/ums.c
     client/vdm.c
     client/version.c
     client/versionansi.c
     client/virtmem.c
-    client/console/alias.c
-    client/console/console.c
-    client/console/history.c
-    client/console/init.c
-    client/console/readwrite.c
     client/file/backup.c
     client/file/cnotify.c
     client/file/copy.c
@@ -83,6 +82,7 @@ list(APPEND SOURCE
     client/file/npipe.c
     client/file/rw.c
     client/file/tape.c
+    client/file/transact.c
     client/file/volume.c
     client/file/volumeansi.c
     wine/actctx.c
@@ -92,11 +92,11 @@ list(APPEND SOURCE
     wine/profile.c
     wine/res.c
     wine/timezone.c
+    winnls/string/caldate.c
     winnls/string/casemap.c
     winnls/string/collation.c
     winnls/string/digitmap.c
     winnls/string/fold.c
-    winnls/string/format_msg.c
     winnls/string/japanese.c
     winnls/string/locale.c
     winnls/string/localeansi.c
@@ -113,22 +113,60 @@ if(MSVC)
 
     # Disable warning C4267: 'initializing': conversion from 'size_t' to 'DWORD', possible loss of data
     set_source_files_properties(winnls/string/locale.c PROPERTIES COMPILE_OPTIONS "/wd4267")
-else()
+elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     # Disable warning: 'variable' defined but not used
     set_source_files_properties(winnls/string/locale.c PROPERTIES COMPILE_OPTIONS "-Wno-unused-variable")
+endif()
+
+if(ARCH STREQUAL "amd64")
+    list(APPEND ASM_SOURCE
+        client/amd64/except.S)
+else()
+    list(APPEND SOURCE
+        client/raise.c)
 endif()
 
 if(ARCH STREQUAL "i386")
     list(APPEND ASM_SOURCE
         client/i386/fiber.S
         client/i386/thread.S)
+    list(APPEND SOURCE
+        client/i386/emuwork.c
+        client/i386/unwind.c)
 elseif(ARCH STREQUAL "amd64")
     list(APPEND ASM_SOURCE
         client/amd64/fiber.S)
+    list(APPEND SOURCE
+        client/amd64/emuwork.c
+        client/amd64/unwind.c)
 elseif(ARCH STREQUAL "arm")
     list(APPEND ASM_SOURCE
         client/arm/fiber.S
         client/arm/thread.S)
+    list(APPEND SOURCE
+        client/arm/emuwork.c
+        client/nounwind.c)
+elseif(ARCH STREQUAL "arm64")
+    list(APPEND SOURCE
+        client/arm64/emuwork.c
+        client/arm64/fiber.c)
+    if(ARM64EC_RUNTIME)
+        list(APPEND SOURCE
+            client/nounwind.c)
+    else()
+        list(APPEND SOURCE
+            client/arm64/unwind.c)
+    endif()
+elseif(ARCH STREQUAL "riscv64")
+    list(APPEND SOURCE
+        client/riscv64/emuwork.c
+        client/riscv64/fiber.c
+        client/riscv64/unwind.c)
+elseif(ARCH STREQUAL "ppc")
+    list(APPEND SOURCE
+        client/ppc/emuwork.c
+        client/ppc/fiber.c
+        client/nounwind.c)
 endif()
 
 add_asm_files(kernel32_asm ${ASM_SOURCE})
@@ -139,14 +177,26 @@ add_library(kernel32 MODULE
     ${CMAKE_CURRENT_BINARY_DIR}/kernel32_stubs.c
     ${CMAKE_CURRENT_BINARY_DIR}/kernel32.def)
 
+if(NOT MSVC)
+    set_source_files_properties(kernel32.rc PROPERTIES COMPILE_OPTIONS "--codepage=65001")
+endif()
+
 set_module_type(kernel32 win32dll ENTRYPOINT DllMain 12)
 #############################################
 ## HACK FOR MSVC COMPILATION WITH win32dll ##
 set_subsystem(kernel32 console)
 ################# END  HACK #################
 
-target_link_libraries(kernel32 psapi_static kernel32_vista_static kernel32_shared wine chkstk ${PSEH_LIB})
-add_importlibs(kernel32 ntdll)
+target_link_libraries(kernel32 psapi_static kernel32_vista_static kernel32_shared wine chkstk symz ${PSEH_LIB})
+add_importlibs(kernel32 kernelbase ntdll)
 add_pch(kernel32 k32.h SOURCE)
+if(CLANG_NATIVE_SEH AND CMAKE_C_COMPILER_ID STREQUAL "Clang" AND NOT USE_DUMMY_PSEH)
+    set_property(SOURCE client/except.c PROPERTY SKIP_PRECOMPILE_HEADERS ON)
+    set_property(SOURCE client/except.c APPEND PROPERTY COMPILE_OPTIONS -Xclang -fasync-exceptions)
+endif()
 add_dependencies(kernel32 psdk errcodes asm)
 add_cd_file(TARGET kernel32 DESTINATION reactos/system32 FOR all)
+
+if(WOW64_I386_RUNTIME AND ARCH STREQUAL "i386")
+    target_compile_definitions(kernel32 PRIVATE WOW64_I386_RUNTIME)
+endif()

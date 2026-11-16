@@ -3,6 +3,12 @@
  ******************************************************************************/
 $if (_WDMDDK_)
 
+#if defined(_M_ARM64)
+$include(arm64/kelayout.h)
+#elif defined(_M_RISCV64)
+$include(riscv64/kelayout.h)
+#endif
+
 typedef UCHAR KIRQL, *PKIRQL;
 typedef CCHAR KPROCESSOR_MODE;
 typedef LONG KPRIORITY;
@@ -20,8 +26,6 @@ typedef enum _MODE {
 #define EVENT_MODIFY_STATE (0x0002)
 #define EVENT_ALL_ACCESS (STANDARD_RIGHTS_REQUIRED | SYNCHRONIZE | 0x3)
 
-#define LTP_PC_SMT 0x1
-
 #if (NTDDI_VERSION < NTDDI_WIN7) || defined(_X86_) || !defined(NT_PROCESSOR_GROUPS)
 #define SINGLE_GROUP_LEGACY_API        1
 #endif
@@ -32,6 +36,8 @@ typedef enum _MODE {
 
 $endif(_WDMDDK_)
 $if(_WDMDDK_ || _WINNT_)
+
+#define LTP_PC_SMT 0x1
 
 typedef struct _PROCESSOR_GROUP_INFO {
   UCHAR MaximumProcessorCount;
@@ -57,8 +63,12 @@ typedef struct _CACHE_DESCRIPTOR {
 
 typedef struct _NUMA_NODE_RELATIONSHIP {
   ULONG NodeNumber;
-  UCHAR Reserved[20];
-  GROUP_AFFINITY GroupMask;
+  UCHAR Reserved[18];
+  USHORT GroupCount;
+  _ANONYMOUS_UNION union {
+    GROUP_AFFINITY GroupMask;
+    GROUP_AFFINITY GroupMasks[ANYSIZE_ARRAY];
+  } DUMMYUNIONNAME;
 } NUMA_NODE_RELATIONSHIP, *PNUMA_NODE_RELATIONSHIP;
 
 typedef struct _CACHE_RELATIONSHIP {
@@ -67,8 +77,12 @@ typedef struct _CACHE_RELATIONSHIP {
   USHORT LineSize;
   ULONG CacheSize;
   PROCESSOR_CACHE_TYPE Type;
-  UCHAR Reserved[20];
-  GROUP_AFFINITY GroupMask;
+  UCHAR Reserved[18];
+  USHORT GroupCount;
+  _ANONYMOUS_UNION union {
+    GROUP_AFFINITY GroupMask;
+    GROUP_AFFINITY GroupMasks[ANYSIZE_ARRAY];
+  } DUMMYUNIONNAME;
 } CACHE_RELATIONSHIP, *PCACHE_RELATIONSHIP;
 
 typedef struct _GROUP_RELATIONSHIP {
@@ -239,18 +253,18 @@ $if(_WDMDDK_)
     NT_ASSERT((Object)->Type == DeviceQueueObject)
 
 #define ASSERT_TIMER(Object) \
-    NT_ASSERT(((Object)->Header.Type == TimerNotificationObject) || \
-              ((Object)->Header.Type == TimerSynchronizationObject))
+    NT_ASSERT((((Object)->Header.Type & KOBJECT_TYPE_MASK) == TimerNotificationObject) || \
+              (((Object)->Header.Type & KOBJECT_TYPE_MASK) == TimerSynchronizationObject))
 
 #define ASSERT_MUTANT(Object) \
-    NT_ASSERT((Object)->Header.Type == MutantObject)
+    NT_ASSERT(((Object)->Header.Type & KOBJECT_TYPE_MASK) == MutantObject)
 
 #define ASSERT_SEMAPHORE(Object) \
-    NT_ASSERT((Object)->Header.Type == SemaphoreObject)
+    NT_ASSERT(((Object)->Header.Type & KOBJECT_TYPE_MASK) == SemaphoreObject)
 
 #define ASSERT_EVENT(Object) \
-    NT_ASSERT(((Object)->Header.Type == NotificationEvent) || \
-              ((Object)->Header.Type == SynchronizationEvent))
+    NT_ASSERT((((Object)->Header.Type & KOBJECT_TYPE_MASK) == NotificationEvent) || \
+              (((Object)->Header.Type & KOBJECT_TYPE_MASK) == SynchronizationEvent))
 
 #define DPC_NORMAL 0
 #define DPC_THREADED 1
@@ -301,6 +315,29 @@ $if(_WDMDDK_)
 #define EXCEPTION_RESERVED_TRAP         0x0F
 #define EXCEPTION_NPX_ERROR             0x010
 #define EXCEPTION_ALIGNMENT_CHECK       0x011
+
+typedef struct _KADDRESS_RANGE {
+  _Field_size_bytes_(Size) PVOID Address;
+  SIZE_T Size;
+} KADDRESS_RANGE, *PKADDRESS_RANGE;
+
+typedef struct _KADDRESS_RANGE_DESCRIPTOR {
+  _Field_size_(AddressRangeCount) CONST KADDRESS_RANGE *AddressRanges;
+  SIZE_T AddressRangeCount;
+} KADDRESS_RANGE_DESCRIPTOR, *PKADDRESS_RANGE_DESCRIPTOR;
+
+#define KE_MAX_TRIAGE_DUMP_DATA_MEMORY_SIZE 0x02000000
+
+typedef struct _KTRIAGE_DUMP_DATA_ARRAY {
+  LIST_ENTRY List;
+  ULONG NumBlocksUsed;
+  ULONG NumBlocksTotal;
+  ULONG DataSize;
+  ULONG MaxDataSize;
+  ULONG ComponentNameBufferLength;
+  PUCHAR ComponentName;
+  KADDRESS_RANGE Blocks[ANYSIZE_ARRAY];
+} KTRIAGE_DUMP_DATA_ARRAY, *PKTRIAGE_DUMP_DATA_ARRAY;
 
 typedef enum _KBUGCHECK_CALLBACK_REASON {
   KbCallbackInvalid,
@@ -432,7 +469,10 @@ typedef PROCESSOR_CALLBACK_FUNCTION *PPROCESSOR_CALLBACK_FUNCTION;
 typedef enum _KINTERRUPT_POLARITY {
   InterruptPolarityUnknown,
   InterruptActiveHigh,
-  InterruptActiveLow
+  InterruptRisingEdge = InterruptActiveHigh,
+  InterruptActiveLow,
+  InterruptFallingEdge = InterruptActiveLow,
+  InterruptActiveBoth
 } KINTERRUPT_POLARITY, *PKINTERRUPT_POLARITY;
 
 typedef enum _KPROFILE_SOURCE {
@@ -501,7 +541,7 @@ typedef enum _KWAIT_REASON {
   WrFastMutex,
   WrGuardedMutex,
   WrRundown,
-#if (NTDDI_VERSION >= NTDDI_WIN8)
+#if (NTDDI_VERSION >= NTDDI_WIN8) || defined(__REACTOS__)
   WrAlertByThreadId,
   WrDeferredPreempt,
 #endif
@@ -522,7 +562,7 @@ typedef enum _KWAIT_REASON {
 
 typedef struct _KWAIT_BLOCK {
   LIST_ENTRY WaitListEntry;
-#if (NTDDI_VERSION >= NTDDI_WIN8)
+#if (NTDDI_VERSION >= NTDDI_WIN8) || defined(KERNEL_LAYOUT_WIN11_ARM64)
   UCHAR WaitType;
   volatile UCHAR BlockState;
   USHORT WaitKey;
@@ -532,6 +572,7 @@ typedef struct _KWAIT_BLOCK {
   union {
     struct _KTHREAD *Thread;
     struct _KQUEUE *NotificationQueue;
+    struct _KDPC *Dpc;
   };
   PVOID Object;
   PVOID SparePtr;
@@ -544,7 +585,10 @@ typedef struct _KWAIT_BLOCK {
 #if (NTDDI_VERSION >= NTDDI_WIN7)
   volatile UCHAR BlockState;
 #else
-  UCHAR SpareByte;
+  union {
+    UCHAR SpareByte;
+    volatile UCHAR BlockState;
+  };
 #endif
 #if defined(_WIN64)
   LONG SpareLong;
@@ -720,6 +764,29 @@ typedef ULONG64 KSPIN_LOCK_QUEUE_NUMBER;
 #define LockQueueTimerTableLock 17
 #define LockQueueMaximumLock (LockQueueTimerTableLock + LOCK_QUEUE_TIMER_TABLE_LOCKS)
 
+#elif defined(_ARM64_) || defined(_RISCV64_)
+
+typedef enum _KSPIN_LOCK_QUEUE_NUMBER {
+  LockQueueDispatcherLock,
+  LockQueueExpansionLock,
+  LockQueuePfnLock,
+  LockQueueSystemSpaceLock,
+  LockQueueVacbLock,
+  LockQueueMasterLock,
+  LockQueueNonPagedPoolLock,
+  LockQueueIoCancelLock,
+  LockQueueWorkQueueLock,
+  LockQueueIoVpbLock,
+  LockQueueIoDatabaseLock,
+  LockQueueIoCompletionLock,
+  LockQueueNtfsStructLock,
+  LockQueueAfdWorkQueueLock,
+  LockQueueBcbLock,
+  LockQueueMmNonPagedPoolLock,
+  LockQueueUnusedSpare16,
+  LockQueueMaximumLock
+} KSPIN_LOCK_QUEUE_NUMBER, *PKSPIN_LOCK_QUEUE_NUMBER;
+
 #else
 
 typedef enum _KSPIN_LOCK_QUEUE_NUMBER {
@@ -765,10 +832,17 @@ typedef enum _KDPC_IMPORTANCE {
 } KDPC_IMPORTANCE;
 
 typedef struct _KDPC {
-  UCHAR Type;
-  UCHAR Importance;
-  volatile USHORT Number;
-  LIST_ENTRY DpcListEntry;
+  /* Shared Win11 26100 layout (sizeof 0x40). */
+  _ANONYMOUS_UNION union {
+    ULONG TargetInfoAsUlong;
+    _ANONYMOUS_STRUCT struct {
+      UCHAR Type;
+      UCHAR Importance;
+      volatile USHORT Number;
+    } DUMMYSTRUCTNAME;
+  } DUMMYUNIONNAME;
+  SINGLE_LIST_ENTRY DpcListEntry;
+  KAFFINITY ProcessorHistory;
   PKDEFERRED_ROUTINE DeferredRoutine;
   PVOID DeferredContext;
   PVOID SystemArgument1;
@@ -802,6 +876,10 @@ typedef struct _KDEVICE_QUEUE {
 # endif
 } KDEVICE_QUEUE, *PKDEVICE_QUEUE, *RESTRICTED_POINTER PRKDEVICE_QUEUE;
 
+#if defined(_X86_)
+#define KENCODED_TIMER_PROCESSOR        1
+#endif
+
 #define TIMER_EXPIRED_INDEX_BITS        6
 #define TIMER_PROCESSOR_INDEX_BITS      5
 
@@ -813,10 +891,10 @@ typedef struct _DISPATCHER_HEADER {
         _ANONYMOUS_UNION union {
           UCHAR TimerControlFlags;
           _ANONYMOUS_STRUCT struct {
+            /* Win11 layout */
             UCHAR Absolute:1;
-            UCHAR Coalescable:1;
-            UCHAR KeepShifting:1;
-            UCHAR EncodedTolerableDelay:5;
+            UCHAR Wake:1;
+            UCHAR EncodedTolerableDelay:6;
           } DUMMYSTRUCTNAME;
         } DUMMYUNIONNAME;
         UCHAR Abandoned;
@@ -839,7 +917,7 @@ typedef struct _DISPATCHER_HEADER {
         UCHAR Hand;
       } DUMMYUNIONNAME2;
       _ANONYMOUS_UNION union {
-#if (NTDDI_VERSION >= NTDDI_WIN7)
+#if (NTDDI_VERSION >= NTDDI_WIN7) || defined(KERNEL_LAYOUT_WIN11_ARM64)
         _ANONYMOUS_UNION union {
           UCHAR TimerMiscFlags;
           _ANONYMOUS_STRUCT struct {
@@ -862,7 +940,8 @@ typedef struct _DISPATCHER_HEADER {
           _ANONYMOUS_STRUCT struct {
             BOOLEAN ActiveDR7:1;
             BOOLEAN Instrumented:1;
-            BOOLEAN Reserved2:4;
+            BOOLEAN Minimal:1;
+            BOOLEAN Reserved4:3;
             BOOLEAN UmsScheduled:1;
             BOOLEAN UmsPrimary:1;
           } DUMMYSTRUCTNAME;
@@ -921,8 +1000,10 @@ typedef struct _KTIMER {
   ULARGE_INTEGER DueTime;
   LIST_ENTRY TimerListEntry;
   struct _KDPC *Dpc;
-#if (NTDDI_VERSION >= NTDDI_WIN7) && !defined(_X86_)
-  ULONG Processor;
+#if ((NTDDI_VERSION >= NTDDI_WIN7) || defined(KERNEL_LAYOUT_WIN11_ARM64)) && !defined(KENCODED_TIMER_PROCESSOR)
+  /* Shared Win11 26100 layout. */
+  USHORT Processor;
+  USHORT TimerType;
 #endif
   ULONG Period;
 } KTIMER, *PKTIMER, *RESTRICTED_POINTER PRKTIMER;
@@ -944,6 +1025,7 @@ typedef KSYNCHRONIZE_ROUTINE *PKSYNCHRONIZE_ROUTINE;
 
 typedef enum _POOL_TYPE {
   NonPagedPool,
+  NonPagedPoolExecute = NonPagedPool,
   PagedPool,
   NonPagedPoolMustSucceed,
   DontUseThisType,
@@ -963,7 +1045,11 @@ typedef enum _POOL_TYPE {
   DontUseThisTypeSession,
   NonPagedPoolCacheAlignedSession,
   PagedPoolCacheAlignedSession,
-  NonPagedPoolCacheAlignedMustSSession
+  NonPagedPoolCacheAlignedMustSSession,
+
+  NonPagedPoolNx = 512,
+  NonPagedPoolNxCacheAligned = NonPagedPoolNx + 4,
+  NonPagedPoolSessionNx = NonPagedPoolNx + 32
 } POOL_TYPE;
 
 typedef enum _ALTERNATIVE_ARCHITECTURE_TYPE {
@@ -1065,9 +1151,9 @@ typedef struct _XSTATE_SAVE {
   struct _KTHREAD* Thread;
   UCHAR Level;
   XSTATE_CONTEXT XStateContext;
-#elif defined(_IA64_) || defined(_ARM_) || defined(_ARM64_)
+#elif !defined(_X86_)
   ULONG Dummy;
-#elif defined(_X86_)
+#else
   _ANONYMOUS_UNION union {
     _ANONYMOUS_STRUCT struct {
       LONG64 Reserved1;
@@ -1208,6 +1294,12 @@ typedef struct _TIMER_SET_COALESCABLE_TIMER_INFO {
 $endif (_NTDDK_)
 $if (_NTDDK_ || _WINNT_)
 
+#if defined(_M_RISCV64)
+$include(riscv64/ketypes.h)
+#elif defined(_M_PPC)
+$include(ppc/ketypes.h)
+#endif
+
 typedef union _ARM64_NT_NEON128
 {
     struct
@@ -1344,7 +1436,7 @@ C_ASSERT((XSTATE_MASK_ALLOWED & XSTATE_MASK_LARGE_FEATURES) == 0);
 #endif
 
 #define XSTATE_COMPACTION_ENABLE            63
-#define XSTATE_COMPACTION_ENABLE_MASK       (1LL << (XSTATE_COMPACTION_ENABLE))
+#define XSTATE_COMPACTION_ENABLE_MASK       (1ULL << (XSTATE_COMPACTION_ENABLE))
 #define XSTATE_ALIGN_BIT                    1
 #define XSTATE_ALIGN_MASK                   (1LL << (XSTATE_ALIGN_BIT))
 
@@ -1557,13 +1649,16 @@ typedef struct _KUSER_SHARED_DATA
 
     ULONG DataFlagsPad[1];                                  // 0x2f4
     ULONGLONG TestRetInstruction;                           // 0x2f8
-#if (NTDDI_VERSION >= NTDDI_WIN8)
+#if defined(_M_IX86)
+    ULONG SystemCall;                                       // 0x300
+    ULONG SystemCallReturn;                                 // 0x304
+#elif (NTDDI_VERSION >= NTDDI_WIN8)
     ULONGLONG QpcFrequency;                                 // 0x300
 #else
     ULONG SystemCall;                                       // 0x300
     ULONG SystemCallReturn;                                 // 0x304
 #endif
-#if (NTDDI_VERSION >= NTDDI_WIN10_TH2)
+#if (NTDDI_VERSION >= NTDDI_WIN10_TH2) && !defined(_M_IX86)
     ULONG SystemCall;                                       // 0x308
     ULONG SystemCallPad0;                                   // 0x30c Renamed to Reserved2 in Vibranium R3
     ULONGLONG SystemCallPad[2];                             // 0x310
@@ -1739,4 +1834,3 @@ typedef struct _KQUEUE {
 } KQUEUE, *PKQUEUE, *RESTRICTED_POINTER PRKQUEUE;
 
 $endif (_NTIFS_)
-

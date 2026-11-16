@@ -31,6 +31,12 @@
 
 /* FIXME */
 GUID MountedDevicesGuid = {0x53F5630D, 0xB6BF, 0x11D0, {0x94, 0xF2, 0x00, 0xA0, 0xC9, 0x1E, 0xFB, 0x8B}};
+static const GUID MountMgrBootRamdiskGuid = {0xD9B257FC, 0x684E, 0x4DCB, {0xAB, 0x79, 0x03, 0xCF, 0xA2, 0xF6, 0xB7, 0x50}};
+static const GUID MountMgrEfiSystemPartitionGuid = {0xC12A7328, 0xF81F, 0x11D2, {0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B}};
+static const GUID MountMgrBasicDataPartitionGuid = {0xEBD0A0A2, 0xB9E5, 0x4433, {0x87, 0xC0, 0x68, 0xB6, 0xB7, 0x26, 0x99, 0xC7}};
+static const GUID MountMgrLinuxDataPartitionGuid = {0x0FC63DAF, 0x8483, 0x4772, {0x8E, 0x79, 0x3D, 0x69, 0xD8, 0x47, 0x7D, 0xE4}};
+/* ntdddisk.h currently truncates this GPT attribute to 32 bits. */
+static const ULONGLONG MountMgrGptNoDriveLetterAttribute = ((ULONGLONG)1 << 63);
 
 PDEVICE_OBJECT gdeviceObject;
 KEVENT UnloadEvent;
@@ -38,6 +44,11 @@ LONG Unloading;
 
 static const WCHAR Cunc[] = L"\\??\\C:";
 #define Cunc_LETTER_POSITION 4
+
+static
+VOID
+MountMgrLoadBootRamdiskInformation(
+    _Inout_ PDEVICE_EXTENSION DeviceExtension);
 
 /**
  * @brief
@@ -123,6 +134,161 @@ MountMgrSendSyncDeviceIoCtl(
     return Status;
 }
 
+static
+VOID
+MountMgrLoadBootRamdiskInformation(
+    _Inout_ PDEVICE_EXTENSION DeviceExtension)
+{
+    NTSTATUS Status;
+    HANDLE DisksKey;
+    ULONG Index;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UNICODE_STRING KeyPath;
+
+    RtlInitUnicodeString(&KeyPath,
+                         L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\Ramdisk\\Parameters\\Disks");
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &KeyPath,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL,
+                               NULL);
+
+    Status = ZwOpenKey(&DisksKey, KEY_READ, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+    {
+        return;
+    }
+
+    for (Index = 0; Index < 256 && DeviceExtension->DriveLetterData == NULL; Index++)
+    {
+        ULONG Length;
+        PKEY_BASIC_INFORMATION BasicInfo;
+
+        Status = ZwEnumerateKey(DisksKey,
+                                 Index,
+                                 KeyBasicInformation,
+                                 NULL,
+                                 0,
+                                 &Length);
+        if (Status == STATUS_NO_MORE_ENTRIES)
+        {
+            break;
+        }
+
+        if (Status != STATUS_BUFFER_OVERFLOW && Status != STATUS_BUFFER_TOO_SMALL)
+        {
+            continue;
+        }
+
+        BasicInfo = AllocatePool(Length);
+        if (!BasicInfo)
+        {
+            break;
+        }
+
+        Status = ZwEnumerateKey(DisksKey,
+                                 Index,
+                                 KeyBasicInformation,
+                                 BasicInfo,
+                                 Length,
+                                 &Length);
+        if (!NT_SUCCESS(Status))
+        {
+            FreePool(BasicInfo);
+            continue;
+        }
+
+        {
+            HANDLE DiskKey;
+            UNICODE_STRING SubName;
+            OBJECT_ATTRIBUTES SubAttributes;
+
+            if (BasicInfo->NameLength > MAXUSHORT - sizeof(WCHAR))
+            {
+                FreePool(BasicInfo);
+                continue;
+            }
+            SubName.MaximumLength = (USHORT)(BasicInfo->NameLength + sizeof(WCHAR));
+            SubName.Buffer = AllocatePool(SubName.MaximumLength);
+            if (!SubName.Buffer)
+            {
+                FreePool(BasicInfo);
+                break;
+            }
+
+            SubName.Length = (USHORT)BasicInfo->NameLength;
+            RtlCopyMemory(SubName.Buffer, BasicInfo->Name, BasicInfo->NameLength);
+            SubName.Buffer[SubName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+
+            InitializeObjectAttributes(&SubAttributes,
+                                       &SubName,
+                                       OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                                       DisksKey,
+                                       NULL);
+
+            Status = ZwOpenKey(&DiskKey, KEY_READ, &SubAttributes);
+
+            FreePool(SubName.Buffer);
+            FreePool(BasicInfo);
+
+            if (!NT_SUCCESS(Status))
+            {
+                continue;
+            }
+
+            {
+                ULONG ValueLength;
+                PKEY_VALUE_PARTIAL_INFORMATION ValueInfo;
+                UNICODE_STRING ValueName;
+
+                RtlInitUnicodeString(&ValueName, L"DiskGuid");
+                Status = ZwQueryValueKey(DiskKey,
+                                          &ValueName,
+                                          KeyValuePartialInformation,
+                                          NULL,
+                                          0,
+                                          &ValueLength);
+                if (Status == STATUS_BUFFER_OVERFLOW || Status == STATUS_BUFFER_TOO_SMALL)
+                {
+                    ValueInfo = AllocatePool(ValueLength);
+                    if (ValueInfo)
+                    {
+                        Status = ZwQueryValueKey(DiskKey,
+                                                  &ValueName,
+                                                  KeyValuePartialInformation,
+                                                  ValueInfo,
+                                                  ValueLength,
+                                                  &ValueLength);
+                        if (NT_SUCCESS(Status) &&
+                            ValueInfo->Type == REG_BINARY &&
+                            ValueInfo->DataLength == sizeof(GUID) &&
+                            RtlCompareMemory(ValueInfo->Data,
+                                             &MountMgrBootRamdiskGuid,
+                                             sizeof(GUID)) == sizeof(GUID))
+                        {
+                            PMOUNTDEV_UNIQUE_ID UniqueId;
+
+                            UniqueId = AllocatePool(sizeof(MOUNTDEV_UNIQUE_ID) + sizeof(GUID));
+                            if (UniqueId)
+                            {
+                                UniqueId->UniqueIdLength = sizeof(GUID);
+                                RtlCopyMemory(UniqueId->UniqueId, ValueInfo->Data, sizeof(GUID));
+                                DeviceExtension->DriveLetterData = UniqueId;
+                            }
+                        }
+
+                        FreePool(ValueInfo);
+                    }
+                }
+
+                ZwClose(DiskKey);
+            }
+        }
+    }
+
+    ZwClose(DisksKey);
+}
+
 /*
  * @implemented
  */
@@ -183,6 +349,65 @@ HasDriveLetter(IN PDEVICE_INFORMATION DeviceInformation)
     }
 
     return FALSE;
+}
+
+static
+NTSTATUS
+NTAPI
+CheckForReservedDriveLetter(IN PWSTR ValueName,
+                            IN ULONG ValueType,
+                            IN PVOID ValueData,
+                            IN ULONG ValueLength,
+                            IN PVOID Context,
+                            IN PVOID EntryContext)
+{
+    PBOOLEAN Reserved = EntryContext;
+    PMOUNTDEV_UNIQUE_ID UniqueId = Context;
+
+    UNREFERENCED_PARAMETER(ValueName);
+
+    if (ValueType != REG_BINARY)
+    {
+        return STATUS_SUCCESS;
+    }
+
+    if (!UniqueId || UniqueId->UniqueIdLength != ValueLength ||
+        RtlCompareMemory(UniqueId->UniqueId, ValueData, ValueLength) != ValueLength)
+    {
+        *Reserved = TRUE;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+BOOLEAN
+IsDriveLetterReserved(IN PUNICODE_STRING DriveLetter,
+                      IN PMOUNTDEV_UNIQUE_ID UniqueId OPTIONAL)
+{
+    BOOLEAN Reserved = FALSE;
+    RTL_QUERY_REGISTRY_TABLE QueryTable[2];
+    WCHAR Name[DRIVE_LETTER_LENGTH / sizeof(WCHAR) + 1];
+
+    if (DriveLetter->Length != DRIVE_LETTER_LENGTH)
+    {
+        return FALSE;
+    }
+
+    RtlCopyMemory(Name, DriveLetter->Buffer, DRIVE_LETTER_LENGTH);
+    Name[DRIVE_LETTER_LENGTH / sizeof(WCHAR)] = UNICODE_NULL;
+
+    RtlZeroMemory(QueryTable, sizeof(QueryTable));
+    QueryTable[0].QueryRoutine = CheckForReservedDriveLetter;
+    QueryTable[0].Name = Name;
+    QueryTable[0].EntryContext = &Reserved;
+
+    RtlQueryRegistryValues(RTL_REGISTRY_ABSOLUTE,
+                           DatabasePath,
+                           QueryTable,
+                           UniqueId,
+                           NULL);
+
+    return Reserved;
 }
 
 /*
@@ -253,6 +478,11 @@ CreateNewDriveLetterName(OUT PUNICODE_STRING DriveLetter,
     for (; Letter <= 'Z'; Letter++)
     {
         DriveLetter->Buffer[DosDevices.Length / sizeof(WCHAR)] = (WCHAR)Letter;
+        if (IsDriveLetterReserved(DriveLetter, UniqueId))
+        {
+            continue;
+        }
+
         Status = GlobalCreateSymbolicLink(DriveLetter, DeviceName);
         if (NT_SUCCESS(Status))
         {
@@ -276,7 +506,7 @@ QueryDeviceInformation(
     _Out_opt_ PUNICODE_STRING DeviceName,
     _Out_opt_ PMOUNTDEV_UNIQUE_ID* UniqueId,
     _Out_opt_ PBOOLEAN Removable,
-    _Out_opt_ PBOOLEAN GptDriveLetter,
+    _Out_opt_ PBOOLEAN DriveLetterAllowed,
     _Out_opt_ PBOOLEAN HasGuid,
     _Inout_opt_ LPGUID StableGuid,
     _Out_opt_ PBOOLEAN IsFT)
@@ -284,13 +514,14 @@ QueryDeviceInformation(
     NTSTATUS Status;
     USHORT Size;
     BOOLEAN IsRemovable;
+    BOOLEAN IsEfiSystemPartition = FALSE;
+    BOOLEAN PartitionInfoValid = FALSE;
     PMOUNTDEV_NAME Name;
     PMOUNTDEV_UNIQUE_ID Id;
     PFILE_OBJECT FileObject;
     PDEVICE_OBJECT DeviceObject;
     PARTITION_INFORMATION_EX PartitionInfo;
     STORAGE_DEVICE_NUMBER StorageDeviceNumber;
-    VOLUME_GET_GPT_ATTRIBUTES_INFORMATION GptAttributes;
 
     /* Get device associated with the symbolic name */
     Status = IoGetDeviceObjectPointer(SymbolicName,
@@ -319,33 +550,42 @@ QueryDeviceInformation(
     /* Get the attached device */
     DeviceObject = IoGetAttachedDeviceReference(FileObject->DeviceObject);
 
-    /* If we've been asked for a GPT drive letter */
-    if (GptDriveLetter)
-    {
-        /* Consider it has one */
-        *GptDriveLetter = TRUE;
+    if (DriveLetterAllowed)
+        *DriveLetterAllowed = TRUE;
 
-        if (!IsRemovable)
+    if (DriveLetterAllowed || (IsFT && !IsRemovable))
+    {
+        Status = MountMgrSendSyncDeviceIoCtl(IOCTL_DISK_GET_PARTITION_INFO_EX, DeviceObject, NULL, 0, &PartitionInfo, sizeof(PartitionInfo), NULL);
+        if (NT_SUCCESS(Status))
         {
-            /* Query the GPT attributes */
-            Status = MountMgrSendSyncDeviceIoCtl(IOCTL_VOLUME_GET_GPT_ATTRIBUTES,
-                                                 DeviceObject,
-                                                 NULL,
-                                                 0,
-                                                 &GptAttributes,
-                                                 sizeof(GptAttributes),
-                                                 NULL);
-            /* Failure isn't major */
-            if (!NT_SUCCESS(Status))
-            {
-                Status = STATUS_SUCCESS;
-            }
-            /* Check if it has a drive letter */
-            else if (GptAttributes.GptAttributes & GPT_BASIC_DATA_ATTRIBUTE_NO_DRIVE_LETTER)
-            {
-                *GptDriveLetter = FALSE;
-            }
+            PartitionInfoValid = TRUE;
         }
+        else
+        {
+            /* Failure isn't major */
+            Status = STATUS_SUCCESS;
+        }
+    }
+
+    if (DriveLetterAllowed && PartitionInfoValid)
+    {
+        if (PartitionInfo.PartitionStyle == PARTITION_STYLE_MBR)
+        {
+            IsEfiSystemPartition = (PartitionInfo.Mbr.PartitionType == PARTITION_SYSTEM);
+            if (!IsRecognizedPartition(PartitionInfo.Mbr.PartitionType))
+                *DriveLetterAllowed = FALSE;
+        }
+        else if (PartitionInfo.PartitionStyle == PARTITION_STYLE_GPT)
+        {
+            IsEfiSystemPartition = IsEqualGUID(&PartitionInfo.Gpt.PartitionType, &MountMgrEfiSystemPartitionGuid);
+            if (!IsEqualGUID(&PartitionInfo.Gpt.PartitionType, &MountMgrBasicDataPartitionGuid) &&
+                !IsEqualGUID(&PartitionInfo.Gpt.PartitionType, &MountMgrLinuxDataPartitionGuid))
+                *DriveLetterAllowed = FALSE;
+        }
+
+        /* Unknown MBR types, EFI system partitions, and fixed GPT volumes marked no-drive-letter stay unassigned. */
+        if (IsEfiSystemPartition || (!IsRemovable && PartitionInfo.PartitionStyle == PARTITION_STYLE_GPT && (PartitionInfo.Gpt.Attributes & MountMgrGptNoDriveLetterAttribute)))
+            *DriveLetterAllowed = FALSE;
     }
 
     /* If caller wants to know if this is a FT volume */
@@ -355,27 +595,9 @@ QueryDeviceInformation(
         *IsFT = FALSE;
 
         /* FT volume can't be removable */
-        if (!IsRemovable)
+        if (!IsRemovable && PartitionInfoValid && PartitionInfo.PartitionStyle == PARTITION_STYLE_MBR && IsFTPartition(PartitionInfo.Mbr.PartitionType))
         {
-            /* Query partition information */
-            Status = MountMgrSendSyncDeviceIoCtl(IOCTL_DISK_GET_PARTITION_INFO_EX,
-                                                 DeviceObject,
-                                                 NULL,
-                                                 0,
-                                                 &PartitionInfo,
-                                                 sizeof(PartitionInfo),
-                                                 NULL);
-            /* Failure isn't major */
-            if (!NT_SUCCESS(Status))
-            {
-                Status = STATUS_SUCCESS;
-            }
-            /* Check if this is a FT volume */
-            else if ((PartitionInfo.PartitionStyle == PARTITION_STYLE_MBR) &&
-                     IsFTPartition(PartitionInfo.Mbr.PartitionType))
-            {
-                *IsFT = TRUE;
-            }
+            *IsFT = TRUE;
 
             /* It looks like a FT volume. Verify it is really one by checking
              * that it does NOT lie on a specific storage device (i.e. it is
@@ -477,6 +699,8 @@ QueryDeviceInformation(
         Id = AllocatePool(sizeof(MOUNTDEV_UNIQUE_ID));
         if (!Id)
         {
+            if (DeviceName && DeviceName->Length)
+                FreePool(DeviceName->Buffer);
             ObDereferenceObject(DeviceObject);
             ObDereferenceObject(FileObject);
             return STATUS_INSUFFICIENT_RESOURCES;
@@ -501,6 +725,8 @@ QueryDeviceInformation(
             Id = AllocatePool(Size);
             if (!Id)
             {
+                if (DeviceName && DeviceName->Length)
+                    FreePool(DeviceName->Buffer);
                 ObDereferenceObject(DeviceObject);
                 ObDereferenceObject(FileObject);
                 return STATUS_INSUFFICIENT_RESOURCES;
@@ -525,7 +751,7 @@ QueryDeviceInformation(
         {
             /* In case of failure, also free the rest */
             FreePool(Id);
-            if (DeviceName->Length)
+            if (DeviceName && DeviceName->Length)
                 FreePool(DeviceName->Buffer);
 
             ObDereferenceObject(DeviceObject);
@@ -681,6 +907,7 @@ MountMgrFreeMountedDeviceInfo(IN PDEVICE_INFORMATION DeviceInformation)
     if (DeviceInformation->TargetDeviceNotificationEntry)
     {
         IoUnregisterPlugPlayNotification(DeviceInformation->TargetDeviceNotificationEntry);
+        DeviceInformation->TargetDeviceNotificationEntry = NULL;
     }
 }
 
@@ -758,8 +985,7 @@ MountMgrUnload(IN PDRIVER_OBJECT DriverObject)
     IoUnregisterPlugPlayNotification(DeviceExtension->NotificationEntry);
 
     /* Acquire the driver exclusively */
-    KeWaitForSingleObject(&(DeviceExtension->DeviceLock), Executive, KernelMode,
-                          FALSE, NULL);
+    MmpAcquireDeviceLock(DeviceExtension);
 
     /* Clear offline devices list */
     while (!IsListEmpty(&(DeviceExtension->OfflineDeviceListHead)))
@@ -786,8 +1012,7 @@ MountMgrUnload(IN PDRIVER_OBJECT DriverObject)
         KeClearEvent(&UnloadEvent);
         WorkItem->Event = &UnloadEvent;
 
-        KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT,
-                           1, FALSE);
+        MmpReleaseDeviceLock(DeviceExtension);
 
         IoCancelIrp(WorkItem->Irp);
         KeWaitForSingleObject(&UnloadEvent, Executive, KernelMode, FALSE, NULL);
@@ -797,8 +1022,7 @@ MountMgrUnload(IN PDRIVER_OBJECT DriverObject)
         FreePool(WorkItem->IrpBuffer);
         FreePool(WorkItem);
 
-        KeWaitForSingleObject(&(DeviceExtension->DeviceLock), Executive, KernelMode,
-                              FALSE, NULL);
+        MmpAcquireDeviceLock(DeviceExtension);
     }
 
     /* If we have drive letter data, release */
@@ -809,7 +1033,7 @@ MountMgrUnload(IN PDRIVER_OBJECT DriverObject)
     }
 
     /* Release driver & quit */
-    KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+    MmpReleaseDeviceLock(DeviceExtension);
 
     GlobalDeleteSymbolicLink(&DosDevicesMount);
     IoDeleteDevice(gdeviceObject);
@@ -862,7 +1086,7 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
     ULONG SymLinkCount, i;
     PLIST_ENTRY NextEntry;
     PUNICODE_STRING SymLinks;
-    NTSTATUS Status, IntStatus;
+    NTSTATUS Status, IntStatus, LinkStatus;
     OBJECT_ATTRIBUTES ObjectAttributes;
     PSYMLINK_INFORMATION SymlinkInformation;
     PMOUNTDEV_UNIQUE_ID UniqueId, NewUniqueId;
@@ -870,7 +1094,7 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
     PDEVICE_INFORMATION DeviceInformation, CurrentDevice;
     WCHAR CSymLinkBuffer[RTL_NUMBER_OF(Cunc)], LinkTargetBuffer[MAX_PATH];
     UNICODE_STRING TargetDeviceName, SuggestedLinkName, DeviceName, VolumeName, DriveLetter, LinkTarget, CSymLink;
-    BOOLEAN HasGuid, HasGptDriveLetter, IsFT, UseOnlyIfThereAreNoOtherLinks;
+    BOOLEAN HasGuid, DriveLetterAllowed, IsFT, UseOnlyIfThereAreNoOtherLinks;
     BOOLEAN IsDrvLetter, IsOff, IsVolumeName, SetOnline;
 
     /* New device = new structure to represent it */
@@ -905,13 +1129,13 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
                                     &TargetDeviceName,
                                     &UniqueId,
                                     &(DeviceInformation->Removable),
-                                    &HasGptDriveLetter,
+                                    &DriveLetterAllowed,
                                     &HasGuid,
                                     &StableGuid,
                                     &IsFT);
     if (!NT_SUCCESS(Status))
     {
-        KeWaitForSingleObject(&(DeviceExtension->DeviceLock), Executive, KernelMode, FALSE, NULL);
+        MmpAcquireDeviceLock(DeviceExtension);
 
         for (NextEntry = DeviceExtension->OfflineDeviceListHead.Flink;
              NextEntry != &(DeviceExtension->OfflineDeviceListHead);
@@ -934,7 +1158,7 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
             InsertTailList(&(DeviceExtension->OfflineDeviceListHead), &(DeviceInformation->DeviceListEntry));
         }
 
-        KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+        MmpReleaseDeviceLock(DeviceExtension);
 
         return Status;
     }
@@ -970,7 +1194,7 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
     }
 
     /* Acquire driver exclusively */
-    KeWaitForSingleObject(&(DeviceExtension->DeviceLock), Executive, KernelMode, FALSE, NULL);
+    MmpAcquireDeviceLock(DeviceExtension);
 
     /* Check if we already have device in to prevent double registration */
     for (NextEntry = DeviceExtension->DeviceListHead.Flink;
@@ -998,7 +1222,7 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
         FreePool(DeviceInformation->SymbolicName.Buffer);
         FreePool(DeviceInformation);
 
-        KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+        MmpReleaseDeviceLock(DeviceExtension);
 
         return STATUS_SUCCESS;
     }
@@ -1035,17 +1259,17 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
                                        NULL);
 
             /* Try to open the associated symlink */
-            Status = ZwOpenSymbolicLinkObject(&LinkHandle, SYMBOLIC_LINK_QUERY, &ObjectAttributes);
-            if (!NT_SUCCESS(Status))
+            LinkStatus = ZwOpenSymbolicLinkObject(&LinkHandle, SYMBOLIC_LINK_QUERY, &ObjectAttributes);
+            if (!NT_SUCCESS(LinkStatus))
             {
                 continue;
             }
 
             /* And query its target */
-            Status = ZwQuerySymbolicLinkObject(LinkHandle, &LinkTarget, NULL);
+            LinkStatus = ZwQuerySymbolicLinkObject(LinkHandle, &LinkTarget, NULL);
             ZwClose(LinkHandle);
 
-            if (!NT_SUCCESS(Status))
+            if (!NT_SUCCESS(LinkStatus))
             {
                 continue;
             }
@@ -1117,6 +1341,13 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
         /* If it has a drive letter */
         else if (IsDriveLetter(&(SymLinks[i])))
         {
+            if (!DriveLetterAllowed)
+            {
+                DeleteFromLocalDatabase(&(SymLinks[i]), UniqueId);
+                FreePool(SymLinks[i].Buffer);
+                continue;
+            }
+
             if (IsDrvLetter)
             {
                 DeleteFromLocalDatabase(&(SymLinks[i]), UniqueId);
@@ -1128,7 +1359,7 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
             }
         }
 
-        /* And recreate the symlink to our device */
+        /* Recreate the symlink to our device */
         Status = GlobalCreateSymbolicLink(&(SymLinks[i]), &TargetDeviceName);
         if (!NT_SUCCESS(Status))
         {
@@ -1238,15 +1469,15 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
         DeviceInformation->SuggestedDriveLetter = 0;
     }
     /* Else, it's time to set up one */
-    else if ((!DeviceExtension->NoAutoMount || DeviceInformation->Removable) &&
+    else if (MountMgrAutoMountAllowed(DeviceExtension, DeviceInformation->Removable) &&
              DeviceExtension->AutomaticDriveLetter &&
-             (HasGptDriveLetter || DeviceInformation->SuggestedDriveLetter) &&
+             (DriveLetterAllowed || DeviceInformation->SuggestedDriveLetter) &&
              !HasNoDriveLetterEntry(UniqueId))
     {
         /* Create a new drive letter */
         Status = CreateNewDriveLetterName(&DriveLetter, &TargetDeviceName,
                                           DeviceInformation->SuggestedDriveLetter,
-                                          NULL);
+                                          UniqueId);
         if (!NT_SUCCESS(Status))
         {
             CreateNoDriveLetterEntry(UniqueId);
@@ -1302,13 +1533,14 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
 
     /* If automount is enabled or the device was already mounted, send now
      * the online notification if needed; otherwise, defer its posting */
-    if (!DeviceExtension->NoAutoMount || IsDrvLetter)
+    if (MountMgrAutoMountAllowed(DeviceExtension, DeviceInformation->Removable) ||
+        IsDrvLetter)
         SetOnline = !DeviceInformation->SkipNotifications;
     else
         SetOnline = FALSE;
 
     /* Finally, release the exclusive lock */
-    KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+    MmpReleaseDeviceLock(DeviceExtension);
 
     /* Set the device online now if necessary */
     if (SetOnline)
@@ -1332,7 +1564,7 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
      */
     if (DeviceExtension->AutomaticDriveLetter)
     {
-        KeWaitForSingleObject(&(DeviceExtension->DeviceLock), Executive, KernelMode, FALSE, NULL);
+        MmpAcquireDeviceLock(DeviceExtension);
 
         ReconcileThisDatabaseWithMaster(DeviceExtension, DeviceInformation);
 
@@ -1349,7 +1581,7 @@ MountMgrMountedDeviceArrival(IN PDEVICE_EXTENSION DeviceExtension,
             CurrentDevice = CONTAINING_RECORD(NextEntry, DEVICE_INFORMATION, DeviceListEntry);
         }
 
-        KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+        MmpReleaseDeviceLock(DeviceExtension);
     }
 
     return STATUS_SUCCESS;
@@ -1370,7 +1602,7 @@ MountMgrMountedDeviceRemoval(IN PDEVICE_EXTENSION DeviceExtension,
     PDEVICE_INFORMATION DeviceInformation, CurrentDevice;
 
     /* Acquire device exclusively */
-    KeWaitForSingleObject(&(DeviceExtension->DeviceLock), Executive, KernelMode, FALSE, NULL);
+    MmpAcquireDeviceLock(DeviceExtension);
 
     /* Look for the leaving device */
     for (NextEntry = DeviceExtension->DeviceListHead.Flink;
@@ -1490,6 +1722,7 @@ MountMgrMountedDeviceRemoval(IN PDEVICE_EXTENSION DeviceExtension,
         if (DeviceInformation->TargetDeviceNotificationEntry)
         {
             IoUnregisterPlugPlayNotification(DeviceInformation->TargetDeviceNotificationEntry);
+            DeviceInformation->TargetDeviceNotificationEntry = NULL;
         }
 
         /*  And leave */
@@ -1515,7 +1748,7 @@ MountMgrMountedDeviceRemoval(IN PDEVICE_EXTENSION DeviceExtension,
     }
 
     /* Release driver */
-    KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+    MmpReleaseDeviceLock(DeviceExtension);
 }
 
 /*
@@ -1737,7 +1970,7 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
     InitializeListHead(&(DeviceExtension->DeviceListHead));
     InitializeListHead(&(DeviceExtension->OfflineDeviceListHead));
 
-    KeInitializeSemaphore(&(DeviceExtension->DeviceLock), 1, 1);
+    KeInitializeMutex(&(DeviceExtension->DeviceLock), 0);
     KeInitializeSemaphore(&(DeviceExtension->RemoteDatabaseLock), 1, 1);
 
     InitializeListHead(&(DeviceExtension->IrpListHead));
@@ -1766,6 +1999,8 @@ DriverEntry(IN PDRIVER_OBJECT DriverObject,
     RtlCopyUnicodeString(&(DeviceExtension->RegistryPath), RegistryPath);
 
     DeviceExtension->NoAutoMount = MountmgrReadNoAutoMount(&(DeviceExtension->RegistryPath));
+
+    MountMgrLoadBootRamdiskInformation(DeviceExtension);
 
     GlobalCreateSymbolicLink(&DosDevicesMount, &DeviceMount);
 

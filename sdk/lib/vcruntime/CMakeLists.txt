@@ -33,6 +33,7 @@ elseif(${ARCH} STREQUAL "amd64")
     )
     list(APPEND VCRT_SETJMP_ASM_SOURCES
         amd64/__longjmp_noframe.s
+        amd64/_intrinsic_setjmp.s
         amd64/_setjmp.s
     )
 elseif(${ARCH} STREQUAL "arm")
@@ -43,12 +44,36 @@ elseif(${ARCH} STREQUAL "arm")
         arm/__longjmp_noframe.s
         arm/_setjmp.s
     )
+elseif(${ARCH} STREQUAL "arm64" AND ARM64EC_RUNTIME)
+    list(APPEND VCRT_SETJMP_SOURCES
+        arm64ec/_setjmp.c
+        arm64ec/longjmp.c
+        arm64ec/setjmp.c
+    )
 elseif(${ARCH} STREQUAL "arm64")
     list(APPEND VCRT_SETJMP_SOURCES
         arm64/longjmp.c
     )
     list(APPEND VCRT_SETJMP_ASM_SOURCES
-        #arm64/_setjmp.s
+        arm64/__longjmp_noframe.s
+        arm64/guardcf.S
+        arm64/_setjmp.s
+    )
+elseif(${ARCH} STREQUAL "riscv64")
+    list(APPEND VCRT_SETJMP_SOURCES
+        riscv64/longjmp.c
+    )
+    list(APPEND VCRT_SETJMP_ASM_SOURCES
+        riscv64/__longjmp_noframe.s
+        riscv64/_setjmp.s
+    )
+elseif(${ARCH} STREQUAL "ppc")
+    list(APPEND VCRT_SETJMP_SOURCES
+        ppc/longjmp.c
+    )
+    list(APPEND VCRT_SETJMP_ASM_SOURCES
+        ppc/__longjmp_noframe.s
+        ppc/_setjmp.s
     )
 endif()
 add_asm_files(vcrt_setjmp_asm ${VCRT_SETJMP_ASM_SOURCES})
@@ -56,6 +81,32 @@ add_asm_files(vcrt_setjmp_asm ${VCRT_SETJMP_ASM_SOURCES})
 # Separate library, so we can link it to ftfd
 add_library(setjmp ${VCRT_SETJMP_SOURCES} ${vcrt_setjmp_asm})
 add_dependencies(setjmp psdk asm)
+
+if(${ARCH} STREQUAL "arm64" AND NOT ARM64EC_RUNTIME AND NOT MSVC)
+    foreach(_lse_op CAS SWP LDADD LDCLR LDEOR LDSET)
+        foreach(_lse_size 1 2 4 8 16)
+            if(_lse_size EQUAL 16 AND NOT _lse_op STREQUAL "CAS")
+                continue()
+            endif()
+            foreach(_lse_model 1 2 3 4 5)
+                set(_lse_source ${CMAKE_CURRENT_BINARY_DIR}/lse/${_lse_op}${_lse_size}_${_lse_model}.S)
+                configure_file(arm64/lse.S ${_lse_source} COPYONLY)
+                set_source_files_properties(${_lse_source} PROPERTIES
+                    COMPILE_DEFINITIONS "LSE_OP_${_lse_op};LSE_SIZE=${_lse_size};LSE_MODEL=${_lse_model}")
+                list(APPEND LSE_ATOMICS_SOURCES ${_lse_source})
+            endforeach()
+        endforeach()
+    endforeach()
+
+    add_library(lse_atomics_um ${LSE_ATOMICS_SOURCES})
+    target_compile_definitions(lse_atomics_um PRIVATE LSE_USER_MODE)
+    add_library(lse_atomics_km ${LSE_ATOMICS_SOURCES})
+    target_compile_definitions(lse_atomics_km PRIVATE LSE_KERNEL_MODE)
+    add_library(lse_atomics_boot ${LSE_ATOMICS_SOURCES})
+    add_dependencies(lse_atomics_um asm)
+    add_dependencies(lse_atomics_km asm)
+    add_dependencies(lse_atomics_boot asm)
+endif()
 
 
 if(${ARCH} STREQUAL "i386")
@@ -86,3 +137,11 @@ endif()
 add_library(vcruntime ${VCRUNTIME_SOURCES} $<TARGET_OBJECTS:setjmp>)
 target_link_libraries(vcruntime ${PSEH_LIB})
 target_include_directories(vcruntime INTERFACE inc)
+
+if(ARM64EC_RUNTIME)
+    add_library(chpe STATIC arm64ec/chpe.S)
+endif()
+
+# Linked to every user-mode module; an image that defines its own _load_config_used never pulls it.
+add_library(loadconfig loadconfig.c)
+add_dependencies(loadconfig psdk)

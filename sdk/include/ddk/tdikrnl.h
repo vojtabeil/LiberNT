@@ -391,13 +391,14 @@ TdiDefaultSendPossibleHandler(
 #define TdiBuildBaseIrp(                                                  \
   bIrp, bDevObj, bFileObj, bCompRoutine, bContxt, bIrpSp, bMinor)         \
 {                                                                         \
+  PIO_COMPLETION_ROUTINE _TdiCompRoutine = (bCompRoutine);                \
   bIrpSp->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;                 \
   bIrpSp->MinorFunction = (bMinor);                                       \
   bIrpSp->DeviceObject  = (bDevObj);                                      \
   bIrpSp->FileObject    = (bFileObj);                                     \
-  if (bCompRoutine)                                                       \
+  if (_TdiCompRoutine != NULL)                                            \
   {                                                                       \
-    IoSetCompletionRoutine(bIrp, bCompRoutine, bContxt, TRUE, TRUE, TRUE);\
+    IoSetCompletionRoutine(bIrp, _TdiCompRoutine, bContxt, TRUE, TRUE, TRUE);\
   }                                                                       \
   else                                                                    \
     IoSetCompletionRoutine(bIrp, NULL, NULL, FALSE, FALSE, FALSE);        \
@@ -1167,6 +1168,38 @@ VOID
 NTAPI
 TdiUnmapBuffer(
   _In_ PMDL MdlChain);
+
+typedef struct _TDI_CMSGHDR_XP {
+  SIZE_T cmsg_len;
+  LONG cmsg_level;
+  LONG cmsg_type;
+} TDI_CMSGHDR_XP, *PTDI_CMSGHDR_XP;
+
+#if (NTDDI_VERSION >= NTDDI_WINXP)
+typedef TDI_CMSGHDR_XP TDI_CMSGHDR;
+typedef TDI_CMSGHDR *PTDI_CMSGHDR;
+#endif
+
+#define TDI_CMSGHDR_ALIGN(length) \
+  (((length) + TYPE_ALIGNMENT(TDI_CMSGHDR) - 1) & (~(TYPE_ALIGNMENT(TDI_CMSGHDR) - 1)))
+
+#define TDI_CMSGDATA_ALIGN(length) \
+  (((length) + MAX_NATURAL_ALIGNMENT - 1) & (~(MAX_NATURAL_ALIGNMENT - 1)))
+
+#define TDI_CMSG_DATA(cmsg) \
+  ((UCHAR *)(cmsg) + TDI_CMSGDATA_ALIGN(sizeof(TDI_CMSGHDR)))
+
+#define TDI_CMSG_SPACE(length) \
+  (TDI_CMSGDATA_ALIGN(sizeof(TDI_CMSGHDR) + TDI_CMSGHDR_ALIGN(length)))
+
+#define TDI_CMSG_LEN(length) \
+  (TDI_CMSGDATA_ALIGN(sizeof(TDI_CMSGHDR)) + length)
+
+#define TDI_INIT_CMSGHDR(cmsg, level, type, length) { \
+  ((TDI_CMSGHDR *)(cmsg))->cmsg_level = level; \
+  ((TDI_CMSGHDR *)(cmsg))->cmsg_type = type; \
+  ((TDI_CMSGHDR *)(cmsg))->cmsg_len = TDI_CMSG_LEN(length); \
+}
 
 #ifdef __cplusplus
 }

@@ -22,9 +22,9 @@
  */
 
 #include <corecrt_io.h>
-#include <mbctype.h>
+#include "include/mbctype.h"
 #include <stdarg.h>
-#include <stdlib.h>
+#include "include/stdlib.h"
 #include <direct.h>
 
 #include "windef.h"
@@ -765,10 +765,14 @@ char* CDECL _getcwd(char * buf, int size)
 
     if (!_wgetcwd(dirW, ARRAY_SIZE(dirW))) return NULL;
 
-    if (!buf) return astrdupw_utf8(dirW);
     len = convert_wcs_to_acp_utf8(dirW, NULL, 0);
     if (!len) return NULL;
-    if (len > size)
+    if (!buf)
+    {
+        if (size < len) size = len;
+        if (!(buf = malloc(size))) return NULL;
+    }
+    else if (len > size)
     {
         *_errno() = ERANGE;
         return NULL;
@@ -847,10 +851,14 @@ char* CDECL _getdcwd(int drive, char * buf, int size)
 
     if (!_wgetdcwd(drive, dirW, ARRAY_SIZE(dirW))) return NULL;
 
-    if (!buf) return astrdupw_utf8(dirW);
     len = convert_wcs_to_acp_utf8(dirW, NULL, 0);
     if (!len) return NULL;
-    if (len > size)
+    if (!buf)
+    {
+        if (size < len) size = len;
+        if (!(buf = malloc(size))) return NULL;
+    }
+    else if (len > size)
     {
         *_errno() = ERANGE;
         return NULL;
@@ -1038,6 +1046,10 @@ errno_t CDECL _splitpath_s(const char* inpath,
             (!ext && sz_ext) ||
             (ext && !sz_ext))
     {
+        if (drive && sz_drive) drive[0] = '\0';
+        if (dir && sz_dir)     dir[0] = '\0';
+        if (fname && sz_fname) fname[0] = '\0';
+        if (ext && sz_ext)     ext[0] = '\0';
         *_errno() = EINVAL;
         return EINVAL;
     }
@@ -1138,6 +1150,10 @@ int CDECL _wsplitpath_s(const wchar_t* inpath,
             (!ext && sz_ext) ||
             (ext && !sz_ext))
     {
+        if (drive && sz_drive) drive[0] = '\0';
+        if (dir && sz_dir)     dir[0] = '\0';
+        if (fname && sz_fname) fname[0] = '\0';
+        if (ext && sz_ext)     ext[0] = '\0';
         *_errno() = EINVAL;
         return EINVAL;
     }

@@ -121,7 +121,7 @@ static const struct  xdr_ops xdrrec_ops = {
  * meet the needs of xdr and rpc based on tcp.
  */
 
-#define LAST_FRAG ((u_int32_t)(1 << 31))
+#define LAST_FRAG ((u_int32_t)1 << 31)
 
 typedef struct rec_strm {
 	char *tcp_handle;
@@ -421,7 +421,7 @@ xdrrec_getoutbase(xdrs)
 	switch (xdrs->x_op) {
 
 	case XDR_ENCODE:
-        buf = rstrm->out_base;
+        buf = (int32_t *)rstrm->out_base;
 		break;
 
 	case XDR_DECODE:

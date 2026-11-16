@@ -17,6 +17,7 @@
 #define MAX_VALUE_NAME 16383
 #define NTPPORT 123
 #define W32TIME_POLL_INTERVAL (4 * 60 * 60) // 4 hours.
+#define W32TIME_RETRY_INTERVAL 60 // Retry shortly while networking is starting.
 
 
 /* ntpclient.c */
@@ -43,6 +44,6 @@ typedef struct _NTPPACKET
   TIMEPACKET TransmitTimestamp;
 }NTPPACKET, *PNTPPACKET;
 
-ULONG GetServerTime(LPWSTR lpAddress);
+DWORD GetServerTime(LPWSTR lpAddress, PULONGLONG pullTime);
 
 #endif /* _W32TIME_H */

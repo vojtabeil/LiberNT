@@ -14,6 +14,7 @@
 @ cdecl DbgPrint(str)
 @ cdecl DbgPrint2(long long str long str)
 @ cdecl DebugDumpBuffer()
+@ cdecl DebugEnable()
 @ cdecl DebugInit()
 @ cdecl FrLdrBugCheckWithMessage()
 @ stdcall KeBugCheckEx(long long long long long)
@@ -47,6 +48,7 @@
 @ cdecl MmAllocateMemoryAtAddress()
 @ cdecl MmAllocateMemoryWithType()
 @ cdecl MmFreeMemory()
+@ cdecl MmFreeMemoryEx()
 @ cdecl MmGetBiosMemoryMap()
 @ cdecl MmGetHighestPhysicalPage()
 @ cdecl MmGetLoaderPagesSpanned()
@@ -66,7 +68,9 @@
 @ cdecl PeLdrScanImportDescriptorTable()
 
 # UI
+@ cdecl UiDiscardFirmwareScreen()
 @ cdecl UiDisplayMenu()
+@ cdecl UiDisplayMenuWithIcons()
 @ cdecl UiDrawBackdrop()
 @ cdecl UiDrawProgressBarCenter()
 @ cdecl UiDrawStatusText()
@@ -76,6 +80,7 @@
 @ cdecl UiGetScreenHeight()
 @ cdecl UiIndicateProgress()
 @ cdecl UiInitialize()
+@ extern UiKeepFirmwareScreen
 @ cdecl UiMessageBox()
 @ cdecl UiMessageBoxCritical()
 @ cdecl UiResetForSOS()
@@ -106,8 +111,10 @@
 @ cdecl MachPrepareForReactOS()
 @ cdecl MachGetExtendedBIOSData()
 @ cdecl MachVideoGetFontsFromFirmware()
+@ extern MachVtbl
 @ cdecl PxeCallApi()
 @ cdecl RamDiskInitialize()
+@ cdecl RamDiskGetFailureText()
 @ cdecl Reboot()
 @ cdecl Relocator16Boot()
 @ stdcall RtlAssert(ptr ptr long ptr)

@@ -4,6 +4,7 @@
  * FILE:            drivers/battery/battc/battc.c
  * PURPOSE:         Battery Class Driver
  * PROGRAMMERS:     Cameron Gutman (cameron.gutman@reactos.org)
+ *                  Ahmed ARIF (arif.ing@outlook.com)
  */
 
 #include <battc.h>
@@ -33,15 +34,29 @@ BatteryClassUnload(PVOID ClassData)
     BattClass = ClassData;
     if (BattClass->InterfaceName.Length != 0)
     {
-        IoSetDeviceInterfaceState(&BattClass->InterfaceName, FALSE);
+        if (!NT_SUCCESS(IoSetDeviceInterfaceState(&BattClass->InterfaceName, FALSE)))
+            DPRINT1("IoSetDeviceInterfaceState(%wZ) failed\n", &BattClass->InterfaceName);
         RtlFreeUnicodeString(&BattClass->InterfaceName);
     }
+
+    if (BattClass->WmiGuidList != NULL)
+        ExFreePoolWithTag(BattClass->WmiGuidList, BATTERY_CLASS_DATA_TAG);
 
     ExFreePoolWithTag(BattClass,
                       BATTERY_CLASS_DATA_TAG);
 
     return STATUS_SUCCESS;
 }
+
+static const GUID *BatteryWmiGuids[] =
+{
+    &BATTERY_STATUS_WMI_GUID,
+    &BATTERY_RUNTIME_WMI_GUID,
+    &BATTERY_TEMPERATURE_WMI_GUID,
+    &BATTERY_FULL_CHARGED_CAPACITY_WMI_GUID,
+    &BATTERY_CYCLE_COUNT_WMI_GUID,
+    &BATTERY_STATIC_DATA_WMI_GUID
+};
 
 BCLASSAPI
 NTSTATUS
@@ -52,9 +67,262 @@ BatteryClassSystemControl(PVOID ClassData,
                           PIRP Irp,
                           PVOID Disposition)
 {
-    UNIMPLEMENTED;
+    PBATTERY_CLASS_DATA BattClass;
+    PWMILIB_CONTEXT WmiLib;
+    PWMIGUIDREGINFO GuidList;
+    ULONG Count, i;
 
-    return STATUS_WMI_GUID_NOT_FOUND;
+    BattClass = ClassData;
+    WmiLib = WmiLibContext;
+
+    ExAcquireFastMutex(&BattClass->Mutex);
+    if (WmiLib->GuidList != BattClass->WmiGuidList)
+    {
+        Count = WmiLib->GuidCount + RTL_NUMBER_OF(BatteryWmiGuids);
+        GuidList = ExAllocatePoolWithTag(PagedPool,
+                                         Count * sizeof(WMIGUIDREGINFO),
+                                         BATTERY_CLASS_DATA_TAG);
+        if (GuidList != NULL)
+        {
+            if (WmiLib->GuidCount != 0)
+                RtlCopyMemory(GuidList, WmiLib->GuidList, WmiLib->GuidCount * sizeof(WMIGUIDREGINFO));
+
+            for (i = 0; i < RTL_NUMBER_OF(BatteryWmiGuids); i++)
+            {
+                GuidList[WmiLib->GuidCount + i].Guid = BatteryWmiGuids[i];
+                GuidList[WmiLib->GuidCount + i].InstanceCount = 1;
+                GuidList[WmiLib->GuidCount + i].Flags = 0;
+            }
+
+            if (BattClass->WmiGuidList != NULL)
+                ExFreePoolWithTag(BattClass->WmiGuidList, BATTERY_CLASS_DATA_TAG);
+
+            BattClass->WmiGuidList = GuidList;
+            BattClass->WmiMiniportGuidCount = WmiLib->GuidCount;
+            WmiLib->GuidList = GuidList;
+            WmiLib->GuidCount = Count;
+        }
+    }
+    ExReleaseFastMutex(&BattClass->Mutex);
+
+    return WmiSystemControl(WmiLib,
+                            DeviceObject,
+                            Irp,
+                            (PSYSCTL_IRP_DISPOSITION)Disposition);
+}
+
+static
+NTSTATUS
+BatteryClassCopyWmiData(PVOID Data,
+                        ULONG DataSize,
+                        PUCHAR Buffer,
+                        ULONG BufferSize,
+                        PULONG Size)
+{
+    *Size = DataSize;
+    if (BufferSize < DataSize)
+        return STATUS_BUFFER_TOO_SMALL;
+
+    RtlCopyMemory(Buffer, Data, DataSize);
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+BatteryClassQueryInfo(PBATTERY_CLASS_DATA BattClass,
+                      ULONG Tag,
+                      BATTERY_QUERY_INFORMATION_LEVEL Level,
+                      PVOID Buffer,
+                      ULONG BufferLength,
+                      PULONG ReturnedLength)
+{
+    ULONG Length = 0;
+    NTSTATUS Status;
+
+    Status = BattClass->MiniportInfo.QueryInformation(BattClass->MiniportInfo.Context,
+                                                      Tag,
+                                                      Level,
+                                                      0,
+                                                      Buffer,
+                                                      BufferLength,
+                                                      &Length);
+    if (ReturnedLength != NULL)
+        *ReturnedLength = Length;
+    return Status;
+}
+
+static
+ULONG
+BatteryClassAppendWmiString(PBATTERY_CLASS_DATA BattClass,
+                            ULONG Tag,
+                            BATTERY_QUERY_INFORMATION_LEVEL Level,
+                            PUCHAR Buffer,
+                            ULONG BufferSize,
+                            ULONG Offset)
+{
+    WCHAR String[MAX_BATTERY_STRING_SIZE];
+    ULONG Returned;
+    USHORT Length = 0;
+
+    if (NT_SUCCESS(BatteryClassQueryInfo(BattClass, Tag, Level, String, sizeof(String), &Returned)))
+    {
+        Returned = min(Returned, sizeof(String)) / sizeof(WCHAR);
+        while (Length / sizeof(WCHAR) < Returned && String[Length / sizeof(WCHAR)] != UNICODE_NULL)
+            Length += sizeof(WCHAR);
+    }
+
+    if (Offset + sizeof(USHORT) + Length <= BufferSize)
+    {
+        RtlCopyMemory(Buffer + Offset, &Length, sizeof(USHORT));
+        RtlCopyMemory(Buffer + Offset + sizeof(USHORT), String, Length);
+    }
+
+    return Offset + sizeof(USHORT) + Length;
+}
+
+static
+NTSTATUS
+BatteryClassQueryWmiData(PBATTERY_CLASS_DATA BattClass,
+                         ULONG Tag,
+                         ULONG Index,
+                         PUCHAR Buffer,
+                         ULONG BufferSize,
+                         PULONG Size)
+{
+    BATTERY_INFORMATION BattInfo;
+    BATTERY_STATUS BattStatus;
+    NTSTATUS Status;
+    ULONG Value;
+
+    switch (Index)
+    {
+        case 0:
+        {
+            BATTERY_WMI_STATUS WmiStatus;
+
+            Status = BattClass->MiniportInfo.QueryStatus(BattClass->MiniportInfo.Context,
+                                                         Tag,
+                                                         &BattStatus);
+            if (!NT_SUCCESS(Status))
+                return Status;
+
+            RtlZeroMemory(&WmiStatus, sizeof(WmiStatus));
+            WmiStatus.Tag = Tag;
+            WmiStatus.RemainingCapacity = BattStatus.Capacity;
+            WmiStatus.Voltage = BattStatus.Voltage;
+            WmiStatus.PowerOnline = (BattStatus.PowerState & BATTERY_POWER_ON_LINE) != 0;
+            WmiStatus.Charging = (BattStatus.PowerState & BATTERY_CHARGING) != 0;
+            WmiStatus.Discharging = (BattStatus.PowerState & BATTERY_DISCHARGING) != 0;
+            WmiStatus.Critical = (BattStatus.PowerState & BATTERY_CRITICAL) != 0;
+            if ((ULONG)BattStatus.Rate != BATTERY_UNKNOWN_RATE)
+            {
+                if (BattStatus.Rate > 0)
+                    WmiStatus.ChargeRate = BattStatus.Rate;
+                else
+                    WmiStatus.DischargeRate = -BattStatus.Rate;
+            }
+            return BatteryClassCopyWmiData(&WmiStatus, sizeof(WmiStatus), Buffer, BufferSize, Size);
+        }
+
+        case 1:
+        {
+            BATTERY_WMI_RUNTIME WmiRuntime;
+
+            Status = BatteryClassQueryInfo(BattClass, Tag, BatteryEstimatedTime, &Value, sizeof(Value), NULL);
+            if (!NT_SUCCESS(Status))
+                return Status;
+
+            WmiRuntime.Tag = Tag;
+            WmiRuntime.EstimatedRuntime = Value;
+            return BatteryClassCopyWmiData(&WmiRuntime, sizeof(WmiRuntime), Buffer, BufferSize, Size);
+        }
+
+        case 2:
+        {
+            BATTERY_WMI_TEMPERATURE WmiTemperature;
+
+            Status = BatteryClassQueryInfo(BattClass, Tag, BatteryTemperature, &Value, sizeof(Value), NULL);
+            if (!NT_SUCCESS(Status))
+                return Status;
+
+            WmiTemperature.Tag = Tag;
+            WmiTemperature.Temperature = Value;
+            return BatteryClassCopyWmiData(&WmiTemperature, sizeof(WmiTemperature), Buffer, BufferSize, Size);
+        }
+
+        case 3:
+        {
+            BATTERY_WMI_FULL_CHARGED_CAPACITY WmiCapacity;
+
+            Status = BatteryClassQueryInfo(BattClass, Tag, BatteryInformation, &BattInfo, sizeof(BattInfo), NULL);
+            if (!NT_SUCCESS(Status))
+                return Status;
+
+            WmiCapacity.Tag = Tag;
+            WmiCapacity.FullChargedCapacity = BattInfo.FullChargedCapacity;
+            return BatteryClassCopyWmiData(&WmiCapacity, sizeof(WmiCapacity), Buffer, BufferSize, Size);
+        }
+
+        case 4:
+        {
+            BATTERY_WMI_CYCLE_COUNT WmiCycleCount;
+
+            Status = BatteryClassQueryInfo(BattClass, Tag, BatteryInformation, &BattInfo, sizeof(BattInfo), NULL);
+            if (!NT_SUCCESS(Status))
+                return Status;
+
+            WmiCycleCount.Tag = Tag;
+            WmiCycleCount.CycleCount = BattInfo.CycleCount;
+            return BatteryClassCopyWmiData(&WmiCycleCount, sizeof(WmiCycleCount), Buffer, BufferSize, Size);
+        }
+
+        case 5:
+        {
+            BATTERY_WMI_STATIC_DATA WmiStatic;
+            BATTERY_MANUFACTURE_DATE Date;
+            WCHAR DateText[RTL_NUMBER_OF(WmiStatic.ManufactureDate) + 1];
+            ULONG Offset;
+
+            Status = BatteryClassQueryInfo(BattClass, Tag, BatteryInformation, &BattInfo, sizeof(BattInfo), NULL);
+            if (!NT_SUCCESS(Status))
+                return Status;
+
+            RtlZeroMemory(&WmiStatic, sizeof(WmiStatic));
+            WmiStatic.Tag = Tag;
+            if (NT_SUCCESS(BatteryClassQueryInfo(BattClass, Tag, BatteryManufactureDate, &Date, sizeof(Date), NULL)) &&
+                NT_SUCCESS(RtlStringCchPrintfW(DateText, RTL_NUMBER_OF(DateText), L"%04u%02u%02u000000.000000+000",
+                                               Date.Year, Date.Month, Date.Day)))
+            {
+                RtlCopyMemory(WmiStatic.ManufactureDate, DateText, sizeof(WmiStatic.ManufactureDate));
+            }
+            if (!NT_SUCCESS(BatteryClassQueryInfo(BattClass, Tag, BatteryGranularityInformation,
+                                                  WmiStatic.Granularity, sizeof(WmiStatic.Granularity), NULL)))
+            {
+                RtlZeroMemory(WmiStatic.Granularity, sizeof(WmiStatic.Granularity));
+            }
+            WmiStatic.Capabilities = BattInfo.Capabilities;
+            WmiStatic.Technology = BattInfo.Technology;
+            RtlCopyMemory(&WmiStatic.Chemistry, BattInfo.Chemistry, sizeof(WmiStatic.Chemistry));
+            WmiStatic.DesignedCapacity = BattInfo.DesignedCapacity;
+            WmiStatic.DefaultAlert1 = BattInfo.DefaultAlert1;
+            WmiStatic.DefaultAlert2 = BattInfo.DefaultAlert2;
+            WmiStatic.CriticalBias = BattInfo.CriticalBias;
+
+            Offset = FIELD_OFFSET(BATTERY_WMI_STATIC_DATA, Strings);
+            if (Offset <= BufferSize)
+                RtlCopyMemory(Buffer, &WmiStatic, Offset);
+            Offset = BatteryClassAppendWmiString(BattClass, Tag, BatteryDeviceName, Buffer, BufferSize, Offset);
+            Offset = BatteryClassAppendWmiString(BattClass, Tag, BatteryManufactureName, Buffer, BufferSize, Offset);
+            Offset = BatteryClassAppendWmiString(BattClass, Tag, BatterySerialNumber, Buffer, BufferSize, Offset);
+            Offset = BatteryClassAppendWmiString(BattClass, Tag, BatteryUniqueID, Buffer, BufferSize, Offset);
+
+            *Size = Offset;
+            return Offset <= BufferSize ? STATUS_SUCCESS : STATUS_BUFFER_TOO_SMALL;
+        }
+
+        default:
+            return STATUS_WMI_GUID_NOT_FOUND;
+    }
 }
 
 BCLASSAPI
@@ -68,9 +336,33 @@ BatteryClassQueryWmiDataBlock(PVOID ClassData,
                               ULONG OutBufferSize,
                               PUCHAR Buffer)
 {
-    UNIMPLEMENTED;
+    PBATTERY_CLASS_DATA BattClass;
+    ULONG Tag, Size = 0;
+    NTSTATUS Status;
 
-    return STATUS_WMI_GUID_NOT_FOUND;
+    BattClass = ClassData;
+
+    if (GuidIndex < BattClass->WmiMiniportGuidCount ||
+        GuidIndex - BattClass->WmiMiniportGuidCount >= RTL_NUMBER_OF(BatteryWmiGuids))
+    {
+        return STATUS_WMI_GUID_NOT_FOUND;
+    }
+
+    Status = BattClass->MiniportInfo.QueryTag(BattClass->MiniportInfo.Context, &Tag);
+    if (NT_SUCCESS(Status))
+    {
+        Status = BatteryClassQueryWmiData(BattClass,
+                                          Tag,
+                                          GuidIndex - BattClass->WmiMiniportGuidCount,
+                                          Buffer,
+                                          InstanceLengthArray != NULL ? OutBufferSize : 0,
+                                          &Size);
+    }
+
+    if (NT_SUCCESS(Status))
+        InstanceLengthArray[0] = Size;
+
+    return WmiCompleteRequest(DeviceObject, Irp, Status, Size, IO_NO_INCREMENT);
 }
 
 BCLASSAPI
@@ -80,7 +372,7 @@ BatteryClassStatusNotify(
     _In_ PVOID ClassData)
 {
     PBATTERY_CLASS_DATA BattClass;
-    PBATTERY_WAIT_STATUS BattWait;
+    BATTERY_WAIT_STATUS BattWait;
     BATTERY_STATUS BattStatus;
     ULONG Tag;
     NTSTATUS Status;
@@ -88,7 +380,6 @@ BatteryClassStatusNotify(
     DPRINT("Received battery status notification from %p\n", ClassData);
 
     BattClass = ClassData;
-    BattWait = BattClass->EventTriggerContext;
 
     ExAcquireFastMutex(&BattClass->Mutex);
     if (!BattClass->Waiting)
@@ -96,6 +387,8 @@ BatteryClassStatusNotify(
         ExReleaseFastMutex(&BattClass->Mutex);
         return STATUS_SUCCESS;
     }
+
+    BattWait = BattClass->EventTriggerContext;
 
     switch (BattClass->EventTrigger)
     {
@@ -114,21 +407,23 @@ BatteryClassStatusNotify(
         case EVENT_BATTERY_STATUS:
             ExReleaseFastMutex(&BattClass->Mutex);
             Status = BattClass->MiniportInfo.QueryStatus(BattClass->MiniportInfo.Context,
-                                                         BattWait->BatteryTag,
+                                                         BattWait.BatteryTag,
                                                          &BattStatus);
-            if (!NT_SUCCESS(Status))
-                return Status;
 
             ExAcquireFastMutex(&BattClass->Mutex);
 
-            if (BattWait->PowerState != BattStatus.PowerState ||
-                BattWait->HighCapacity < BattStatus.Capacity ||
-                BattWait->LowCapacity > BattStatus.Capacity)
+            /* A failed query means the tag died: only the waiter can tell its owner to ask for the new one. */
+            if (!NT_SUCCESS(Status) ||
+                BattWait.PowerState != BattStatus.PowerState ||
+                BattWait.HighCapacity < BattStatus.Capacity ||
+                BattWait.LowCapacity > BattStatus.Capacity)
             {
                 KeSetEvent(&BattClass->WaitEvent, IO_NO_INCREMENT, FALSE);
             }
 
             ExReleaseFastMutex(&BattClass->Mutex);
+            if (!NT_SUCCESS(Status))
+                return Status;
             break;
 
         default:
@@ -185,6 +480,15 @@ BatteryClassInitializeDevice(PBATTERY_MINIPORT_INFO MiniportInfo,
         {
             DPRINT1("IoRegisterDeviceInterface failed (0x%x)\n", Status);
         }
+
+        if (!NT_SUCCESS(Status))
+        {
+            if (BattClass->InterfaceName.Length != 0)
+                RtlFreeUnicodeString(&BattClass->InterfaceName);
+
+            ExFreePoolWithTag(BattClass, BATTERY_CLASS_DATA_TAG);
+            return Status;
+        }
     }
 
     *ClassData = BattClass;
@@ -208,7 +512,8 @@ BatteryClassIoctl(PVOID ClassData,
     LARGE_INTEGER Timeout;
     PBATTERY_STATUS BattStatus;
     BATTERY_NOTIFY BattNotify;
-    ULONG ReturnedLength;
+    BOOLEAN NotifySet;
+    ULONG ReturnedLength = 0;
 
     DPRINT("BatteryClassIoctl(%p %p)\n", ClassData, Irp);
 
@@ -232,7 +537,7 @@ BatteryClassIoctl(PVOID ClassData,
 
             WaitTime = IrpSp->Parameters.DeviceIoControl.InputBufferLength == sizeof(ULONG) ? *(PULONG)Irp->AssociatedIrp.SystemBuffer : 0;
 
-            Timeout.QuadPart = Int32x32To64(WaitTime, -10000);
+            Timeout.QuadPart = -10000LL * (LONGLONG)WaitTime;
 
             Status = BattClass->MiniportInfo.QueryTag(BattClass->MiniportInfo.Context,
                                                       (PULONG)Irp->AssociatedIrp.SystemBuffer);
@@ -290,7 +595,8 @@ BatteryClassIoctl(PVOID ClassData,
                 Status = BattClass->MiniportInfo.SetStatusNotify(BattClass->MiniportInfo.Context,
                                                                  BattWait.BatteryTag,
                                                                  &BattNotify);
-                if (!NT_SUCCESS(Status))
+                NotifySet = NT_SUCCESS(Status);
+                if (!NotifySet)
                 {
                     DPRINT("SetStatusNotify failed (0x%x)\n", Status);
                     // HACK: Continue anyway; the non-zero timeout will limit polling rate.
@@ -303,11 +609,11 @@ BatteryClassIoctl(PVOID ClassData,
 
                 ExAcquireFastMutex(&BattClass->Mutex);
                 BattClass->EventTrigger = EVENT_BATTERY_STATUS;
-                BattClass->EventTriggerContext = &BattWait;
+                BattClass->EventTriggerContext = BattWait;
                 BattClass->Waiting = TRUE;
                 ExReleaseFastMutex(&BattClass->Mutex);
 
-                Timeout.QuadPart = Int32x32To64(BattWait.Timeout, -10000);
+                Timeout.QuadPart = -10000LL * (LONGLONG)BattWait.Timeout;
                 Status = KeWaitForSingleObject(&BattClass->WaitEvent,
                                                Executive,
                                                KernelMode,
@@ -320,7 +626,9 @@ BatteryClassIoctl(PVOID ClassData,
                 BattClass->Waiting = FALSE;
                 ExReleaseFastMutex(&BattClass->Mutex);
 
-                BattClass->MiniportInfo.DisableStatusNotify(BattClass->MiniportInfo.Context);
+                if (NotifySet &&
+                    !NT_SUCCESS(BattClass->MiniportInfo.DisableStatusNotify(BattClass->MiniportInfo.Context)))
+                    DPRINT1("DisableStatusNotify failed\n");
             }
 
             /* Zero the output buffer to prevent leakage of kernel data */
@@ -367,6 +675,12 @@ BatteryClassIoctl(PVOID ClassData,
             }
 
             BattSetInfo = Irp->AssociatedIrp.SystemBuffer;
+
+            if (BattClass->MiniportInfo.SetInformation == NULL)
+            {
+                Status = STATUS_NOT_SUPPORTED;
+                break;
+            }
 
             Status = BattClass->MiniportInfo.SetInformation(BattClass->MiniportInfo.Context,
                                                             BattSetInfo->BatteryTag,

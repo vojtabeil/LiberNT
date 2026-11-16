@@ -34,7 +34,9 @@ extern "C" {
 }
 
 #if (FX_CORE_MODE == FX_CORE_KERNEL_MODE)
+#ifndef UCHAR_MAX
 #define UCHAR_MAX (0xff)
+#endif
 #endif
 
 FxUsbDeviceControlContext::FxUsbDeviceControlContext(
@@ -559,7 +561,7 @@ FxUsbDevice::Start(
             pUsbInterface = m_Interfaces[iInterface];
 
             for (i = 0; i < pUsbInterface->m_NumberOfConfiguredPipes; i++) {
-                pUsbInterface->m_ConfiguredPipes[i]->GotoStartState(&head);
+                (VOID)!pUsbInterface->m_ConfiguredPipes[i]->GotoStartState(&head);
             }
         }
         Unlock(irql);
@@ -1884,7 +1886,7 @@ FxUsbDevice::Deconfig(
     )
 {
     WDF_REQUEST_SEND_OPTIONS options;
-    _URB_SELECT_CONFIGURATION urb;
+    URB urb;
 
     FxSyncRequest request(GetDriverGlobals(), NULL);
     NTSTATUS status;
@@ -1912,7 +1914,7 @@ FxUsbDevice::Deconfig(
     RtlZeroMemory(&urb, sizeof(urb));
 
 #pragma prefast(suppress: __WARNING_BUFFER_OVERFLOW, "this annotation change in usb.h is communicated to usb team");
-    UsbBuildSelectConfigurationRequest((PURB) &urb, sizeof(urb), NULL);
+    UsbBuildSelectConfigurationRequest((PURB) &urb, sizeof(_URB_SELECT_CONFIGURATION), NULL);
 #pragma prefast(suppress: __WARNING_BUFFER_OVERFLOW, "this annotation change in usb.h is communicated to usb team");
     FxFormatUsbRequest(request.m_TrueRequest, (PURB) &urb, FxUrbTypeLegacy, NULL);
 
@@ -2477,4 +2479,3 @@ Return Value:
 
     return FxUrbTypeLegacy;
 }
-

@@ -34,7 +34,6 @@
 #include <string.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winerror.h"
 #include "winbase.h"
@@ -83,6 +82,9 @@ struct context_handle_list
 {
     struct context_handle_list *next;
     NDR_SCONTEXT context_handle;
+#ifdef __REACTOS__
+    BOOL locked;
+#endif
 };
 
 struct threaddata
@@ -329,7 +331,8 @@ RPC_STATUS WINAPI UuidCreateNil(UUID *Uuid)
  */
 RPC_STATUS WINAPI UuidCreate(UUID *Uuid)
 {
-    RtlGenRandom(Uuid, sizeof(*Uuid));
+    if (!RtlGenRandom(Uuid, sizeof(*Uuid)))
+        return RPC_S_INTERNAL_ERROR;
     /* Clear the version bits and set the version (4) */
     Uuid->Data3 &= 0x0fff;
     Uuid->Data3 |= (4 << 12);
@@ -546,7 +549,7 @@ RPC_STATUS WINAPI UuidToStringA(UUID *Uuid, RPC_CSTR* StringUuid)
   if (!Uuid) Uuid = &uuid_nil;
 
 #ifdef __REACTOS__
-  sprintf( (char*)*StringUuid, "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+  sprintf( (char*)*StringUuid, "%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
                  Uuid->Data1, Uuid->Data2, Uuid->Data3,
                  Uuid->Data4[0], Uuid->Data4[1], Uuid->Data4[2],
                  Uuid->Data4[3], Uuid->Data4[4], Uuid->Data4[5],
@@ -577,7 +580,7 @@ RPC_STATUS WINAPI UuidToStringW(UUID *Uuid, RPC_WSTR* StringUuid)
   if (!Uuid) Uuid = &uuid_nil;
 
 #ifdef __REACTOS__
-  sprintf(buf, "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+  sprintf(buf, "%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
                Uuid->Data1, Uuid->Data2, Uuid->Data3,
                Uuid->Data4[0], Uuid->Data4[1], Uuid->Data4[2],
                Uuid->Data4[3], Uuid->Data4[4], Uuid->Data4[5],
@@ -900,6 +903,11 @@ int WINAPI RpcExceptionFilter(ULONG ExceptionCode)
     case STATUS_INSTRUCTION_MISALIGNMENT:
     case STATUS_STACK_OVERFLOW:
     case STATUS_POSSIBLE_DEADLOCK:
+#ifdef __REACTOS__
+    case STATUS_GUARD_PAGE_VIOLATION:
+    case STATUS_IN_PAGE_ERROR:
+    case STATUS_HANDLE_NOT_CLOSABLE:
+#endif
         return EXCEPTION_CONTINUE_SEARCH;
     default:
         return EXCEPTION_EXECUTE_HANDLER;
@@ -1008,7 +1016,11 @@ RpcBinding *RPCRT4_GetThreadCurrentCallHandle(void)
     return tdata->server_binding;
 }
 
+#ifdef __REACTOS__
+void RPCRT4_PushThreadContextHandle(NDR_SCONTEXT SContext, BOOL locked)
+#else
 void RPCRT4_PushThreadContextHandle(NDR_SCONTEXT SContext)
+#endif
 {
     struct threaddata *tdata = get_or_create_threaddata();
     struct context_handle_list *context_handle_list;
@@ -1019,16 +1031,29 @@ void RPCRT4_PushThreadContextHandle(NDR_SCONTEXT SContext)
     if (!context_handle_list) return;
 
     context_handle_list->context_handle = SContext;
+#ifdef __REACTOS__
+    context_handle_list->locked = locked;
+#endif
     context_handle_list->next = tdata->context_handle_list;
     tdata->context_handle_list = context_handle_list;
 }
 
+#ifdef __REACTOS__
+BOOL RPCRT4_RemoveThreadContextHandle(NDR_SCONTEXT SContext)
+#else
 void RPCRT4_RemoveThreadContextHandle(NDR_SCONTEXT SContext)
+#endif
 {
     struct threaddata *tdata = get_or_create_threaddata();
     struct context_handle_list *current, *prev;
+#ifdef __REACTOS__
+    BOOL locked;
+
+    if (!tdata) return TRUE;
+#else
 
     if (!tdata) return;
+#endif
 
     for (current = tdata->context_handle_list, prev = NULL; current; prev = current, current = current->next)
     {
@@ -1038,13 +1063,26 @@ void RPCRT4_RemoveThreadContextHandle(NDR_SCONTEXT SContext)
                 prev->next = current->next;
             else
                 tdata->context_handle_list = current->next;
+#ifdef __REACTOS__
+            locked = current->locked;
+            free(current);
+            return locked;
+#else
             free(current);
             return;
+#endif
         }
     }
+#ifdef __REACTOS__
+    return TRUE;
+#endif
 }
 
+#ifdef __REACTOS__
+NDR_SCONTEXT RPCRT4_PopThreadContextHandle(BOOL *locked)
+#else
 NDR_SCONTEXT RPCRT4_PopThreadContextHandle(void)
+#endif
 {
     struct threaddata *tdata = get_or_create_threaddata();
     struct context_handle_list *context_handle_list;
@@ -1057,6 +1095,9 @@ NDR_SCONTEXT RPCRT4_PopThreadContextHandle(void)
     tdata->context_handle_list = context_handle_list->next;
 
     context_handle = context_handle_list->context_handle;
+#ifdef __REACTOS__
+    *locked = context_handle_list->locked;
+#endif
     free(context_handle_list);
     return context_handle;
 }

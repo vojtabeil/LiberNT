@@ -49,43 +49,63 @@ NTSTATUS InitLogPort(VOID)
     NTSTATUS Status;
     UNICODE_STRING PortName = RTL_CONSTANT_STRING(ELF_PORT_NAME);
     OBJECT_ATTRIBUTES ObjectAttributes;
-    PORT_MESSAGE Request;
+    ALPC_PORT_ATTRIBUTES PortAttributes;
+    union
+    {
+        PORT_MESSAGE Header;
+        UCHAR Buffer[PORT_MAXIMUM_MESSAGE_LENGTH];
+    } Request;
+    SIZE_T BufferLength;
 
     ConnectPortHandle = NULL;
     MessagePortHandle = NULL;
 
     InitializeObjectAttributes(&ObjectAttributes, &PortName, 0, NULL, NULL);
 
-    Status = NtCreatePort(&ConnectPortHandle,
-                          &ObjectAttributes,
-                          0,
-                          PORT_MAXIMUM_MESSAGE_LENGTH, // IO_ERROR_LOG_MESSAGE_LENGTH,
-                          2 * PAGE_SIZE);
+    RtlZeroMemory(&PortAttributes, sizeof(PortAttributes));
+    PortAttributes.MaxMessageLength = PORT_MAXIMUM_MESSAGE_LENGTH;
+    PortAttributes.MaxPoolUsage = 2 * PAGE_SIZE;
+    PortAttributes.SecurityQos.Length = sizeof(PortAttributes.SecurityQos);
+    PortAttributes.SecurityQos.ImpersonationLevel = SecurityIdentification;
+    PortAttributes.SecurityQos.ContextTrackingMode = SECURITY_DYNAMIC_TRACKING;
+    Status = NtAlpcCreatePort(&ConnectPortHandle, &ObjectAttributes, &PortAttributes);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("NtCreatePort() failed (Status %lx)\n", Status);
+        DPRINT1("NtAlpcCreatePort() failed (Status %lx)\n", Status);
         goto ByeBye;
     }
 
-    Status = NtListenPort(ConnectPortHandle, &Request);
+    do
+    {
+        BufferLength = sizeof(Request);
+        Status = NtAlpcSendWaitReceivePort(ConnectPortHandle,
+                                           0,
+                                           NULL,
+                                           NULL,
+                                           &Request.Header,
+                                           &BufferLength,
+                                           NULL,
+                                           NULL);
+    } while (NT_SUCCESS(Status) &&
+             ((Request.Header.u2.s2.Type & ~(LPC_CONTINUATION_REQUIRED | LPC_NO_IMPERSONATE | LPC_KERNELMODE_MESSAGE)) != LPC_CONNECTION_REQUEST));
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("NtListenPort() failed (Status %lx)\n", Status);
+        DPRINT1("NtAlpcSendWaitReceivePort() failed (Status %lx)\n", Status);
         goto ByeBye;
     }
 
-    Status = NtAcceptConnectPort(&MessagePortHandle, ConnectPortHandle,
-                                 &Request, TRUE, NULL, NULL);
+    Status = NtAlpcAcceptConnectPort(&MessagePortHandle,
+                                     ConnectPortHandle,
+                                     0,
+                                     NULL,
+                                     NULL,
+                                     NULL,
+                                     &Request.Header,
+                                     NULL,
+                                     TRUE);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("NtAcceptConnectPort() failed (Status %lx)\n", Status);
-        goto ByeBye;
-    }
-
-    Status = NtCompleteConnectPort(MessagePortHandle);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("NtCompleteConnectPort() failed (Status %lx)\n", Status);
+        DPRINT1("NtAlpcAcceptConnectPort() failed (Status %lx)\n", Status);
         goto ByeBye;
     }
 
@@ -101,6 +121,63 @@ ByeBye:
     return Status;
 }
 
+/* Every offset and length in an I/O error message comes from a driver, so each is checked against what arrived */
+static BOOLEAN
+ParseIoErrorMessage(
+    _In_ PIO_ERROR_LOG_MESSAGE ErrorMessage,
+    _In_ ULONG Length,
+    _Out_ PUNICODE_STRING SourceName,
+    _Out_ PWSTR *Strings,
+    _Out_ PUSHORT NumberOfStrings,
+    _Out_ PULONG DataSize)
+{
+    PIO_ERROR_LOG_PACKET Packet = &ErrorMessage->EntryData;
+    ULONG PacketLength, Offset, End;
+    USHORT Count = 0;
+
+    RtlInitEmptyUnicodeString(SourceName, NULL, 0);
+    *Strings = NULL;
+    *NumberOfStrings = 0;
+    *DataSize = 0;
+
+    if (Length < FIELD_OFFSET(IO_ERROR_LOG_MESSAGE, EntryData) + FIELD_OFFSET(IO_ERROR_LOG_PACKET, DumpData))
+        return FALSE;
+    PacketLength = Length - FIELD_OFFSET(IO_ERROR_LOG_MESSAGE, EntryData);
+
+    *DataSize = FIELD_OFFSET(IO_ERROR_LOG_PACKET, DumpData) +
+                min((ULONG)Packet->DumpDataSize, PacketLength - FIELD_OFFSET(IO_ERROR_LOG_PACKET, DumpData));
+
+    if (ErrorMessage->DriverNameLength >= sizeof(WCHAR) &&
+        ErrorMessage->DriverNameOffset <= Length &&
+        ErrorMessage->DriverNameLength <= Length - ErrorMessage->DriverNameOffset)
+    {
+        SourceName->Buffer = (PWSTR)((PUCHAR)ErrorMessage + ErrorMessage->DriverNameOffset);
+        SourceName->Length = ErrorMessage->DriverNameLength & ~(sizeof(WCHAR) - 1);
+        if (SourceName->Buffer[SourceName->Length / sizeof(WCHAR) - 1] == UNICODE_NULL)
+            SourceName->Length -= sizeof(WCHAR);
+        SourceName->MaximumLength = SourceName->Length;
+    }
+
+    /* IO_ERROR_LOG_PACKET.StringOffset counts from the start of the packet; a string must end inside the message */
+    Offset = Packet->StringOffset;
+    while (Count < Packet->NumberOfStrings && Offset < PacketLength)
+    {
+        for (End = Offset;
+             End + sizeof(WCHAR) <= PacketLength && *(PWSTR)((PUCHAR)Packet + End) != UNICODE_NULL;
+             End += sizeof(WCHAR))
+        {
+        }
+        if (End + sizeof(WCHAR) > PacketLength)
+            break;
+        if (Count == 0)
+            *Strings = (PWSTR)((PUCHAR)Packet + Offset);
+        Count++;
+        Offset = End + sizeof(WCHAR);
+    }
+    *NumberOfStrings = Count;
+    return TRUE;
+}
+
 NTSTATUS ProcessPortMessage(VOID)
 {
     NTSTATUS Status;
@@ -113,8 +190,13 @@ NTSTATUS ProcessPortMessage(VOID)
     ULONG Time;
     USHORT EventType;
     UNICODE_STRING SourceName, ComputerName;
+    PWSTR Strings;
+    USHORT NumberOfStrings;
+    ULONG DataSize;
     DWORD dwComputerNameLength;
     WCHAR szComputerName[MAX_COMPUTERNAME_LENGTH + 1];
+    SIZE_T BufferLength;
+    ULONG MessageType;
 
     DPRINT("ProcessPortMessage() called\n");
 
@@ -122,43 +204,57 @@ NTSTATUS ProcessPortMessage(VOID)
 
     while (TRUE)
     {
-        Status = NtReplyWaitReceivePort(MessagePortHandle,
-                                        NULL,
-                                        NULL,
-                                        &Message->Header);
+        BufferLength = sizeof(Buffer);
+        Status = NtAlpcSendWaitReceivePort(MessagePortHandle,
+                                           0,
+                                           NULL,
+                                           NULL,
+                                           &Message->Header,
+                                           &BufferLength,
+                                           NULL,
+                                           NULL);
 
         if (!NT_SUCCESS(Status))
         {
-            DPRINT1("NtReplyWaitReceivePort() failed (Status %lx)\n", Status);
+            DPRINT1("NtAlpcSendWaitReceivePort() failed (Status %lx)\n", Status);
             break;
         }
 
+        if (Status != STATUS_SUCCESS)
+            continue;
+
         DPRINT("Received message\n");
 
-        if (Message->Header.u2.s2.Type == LPC_PORT_CLOSED)
+        MessageType = Message->Header.u2.s2.Type &
+                      ~(LPC_CONTINUATION_REQUIRED | LPC_NO_IMPERSONATE | LPC_KERNELMODE_MESSAGE);
+
+        if (MessageType == LPC_PORT_CLOSED)
         {
             DPRINT("Port closed\n");
             return STATUS_SUCCESS;
         }
 
-        if (Message->Header.u2.s2.Type == LPC_REQUEST)
+        if (MessageType == LPC_REQUEST)
         {
             DPRINT("Received request\n");
         }
-        else if (Message->Header.u2.s2.Type == LPC_DATAGRAM)
+        else if (MessageType == LPC_DATAGRAM)
         {
-            DPRINT("Received datagram (0x%x, 0x%x)\n",
-                   Message->Unknown[0], Message->Unknown[1]);
+            DPRINT("Received datagram (%u bytes)\n", Message->Header.u1.s1.DataLength);
             ErrorMessage = &Message->IoErrorMessage;
 
             // ASSERT(ErrorMessage->Type == IO_TYPE_ERROR_MESSAGE);
 
-            RtlInitEmptyUnicodeString(&SourceName, NULL, 0);
-            if (ErrorMessage->DriverNameLength > sizeof(UNICODE_NULL)) // DriverNameLength counts NULL-terminator
+            if (!ParseIoErrorMessage(ErrorMessage,
+                                     min((ULONG)Message->Header.u1.s1.DataLength,
+                                         (ULONG)(sizeof(Buffer) - FIELD_OFFSET(ELF_API_MSG, IoErrorMessage))),
+                                     &SourceName,
+                                     &Strings,
+                                     &NumberOfStrings,
+                                     &DataSize))
             {
-                SourceName.Buffer = (PWSTR)((ULONG_PTR)ErrorMessage + ErrorMessage->DriverNameOffset);
-                SourceName.MaximumLength = ErrorMessage->DriverNameLength;
-                SourceName.Length = SourceName.MaximumLength - sizeof(UNICODE_NULL);
+                DPRINT1("Dropping a malformed I/O error message (%u bytes)\n", Message->Header.u1.s1.DataLength);
+                continue;
             }
 
             dwComputerNameLength = ARRAYSIZE(szComputerName);
@@ -207,11 +303,9 @@ NTSTATUS ProcessPortMessage(VOID)
                             &ComputerName,
                             0,
                             NULL,
-                            ErrorMessage->EntryData.NumberOfStrings,
-                            (PWSTR)((ULONG_PTR)ErrorMessage +
-                                ErrorMessage->EntryData.StringOffset),
-                            FIELD_OFFSET(IO_ERROR_LOG_PACKET, DumpData) +
-                                ErrorMessage->EntryData.DumpDataSize,
+                            NumberOfStrings,
+                            Strings,
+                            DataSize,
                             (PVOID)&ErrorMessage->EntryData);
             if (LogBuffer == NULL)
             {

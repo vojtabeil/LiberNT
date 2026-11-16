@@ -34,6 +34,7 @@ RtlpFindGenericTableNodeOrParent(IN PRTL_GENERIC_TABLE Table,
     /* Quick check to see if the table is empty */
     if (RtlIsGenericTableEmpty(Table))
     {
+        *NodeOrParent = NULL;
         return TableEmptyTree;
     }
 
@@ -397,23 +398,6 @@ RtlEnumerateGenericTableWithoutSplaying(IN PRTL_GENERIC_TABLE Table,
 }
 
 /*
- * @unimplemented
- */
-PVOID
-NTAPI
-RtlEnumerateGenericTableLikeADirectory(IN PRTL_AVL_TABLE Table,
-                                       IN PRTL_AVL_MATCH_FUNCTION MatchFunction,
-                                       IN PVOID MatchData,
-                                       IN ULONG NextFlag,
-                                       IN OUT PVOID *RestartKey,
-                                       IN OUT PULONG DeleteCount,
-                                       IN OUT PVOID Buffer)
-{
-    UNIMPLEMENTED;
-    return 0;
-}
-
-/*
  * @implemented
  */
 PVOID
@@ -462,11 +446,12 @@ RtlGetElementGenericTable(IN PRTL_GENERIC_TABLE Table,
         {
             /* Follow the list directly instead */
             OrderedNode = &Table->InsertOrderList;
-            while (NextI)
+            DeltaUp = NextI;
+            while (DeltaUp)
             {
                 /* Get next node */
                 OrderedNode = OrderedNode->Flink;
-                NextI--;
+                DeltaUp--;
             }
         }
     }
@@ -483,7 +468,7 @@ RtlGetElementGenericTable(IN PRTL_GENERIC_TABLE Table,
             while (DeltaUp)
             {
                 /* Get next node */
-                OrderedNode = OrderedNode->Blink;
+                OrderedNode = OrderedNode->Flink;
                 DeltaUp--;
             }
         }

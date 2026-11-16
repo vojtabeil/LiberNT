@@ -119,17 +119,38 @@ typedef struct _ADDRESS_FILE {
     USHORT Protocol;                      /* Protocol number */
     USHORT Port;                          /* Network port (network byte order) */
     LONG Sharers;                         /* Number of file objects with this addr file */
+    BOOLEAN Reuse;
+    BOOLEAN Exclusive;
+    BOOLEAN DualStack;
+    BOOLEAN Raw;
     UCHAR TTL;                            /* Time to live stored in packets sent from this address file */
     UINT DF;                              /* Don't fragment */
     UINT BCast;                           /* Receive broadcast packets */
     UINT HeaderIncl;                      /* Include header in RawIP packets */
+    ULONG MulticastInterface;             /* IPv4 address or network-order interface index */
+    UCHAR MulticastTTL;
+    ULONG UnicastInterface;
+    BOOLEAN NoChecksum;
+    ULONG SendMsgSize;
+    BOOLEAN RecvPktInfo;
+    BOOLEAN RecvTtl;
+    BOOLEAN RecvTos;
+    BOOLEAN RecvEcn;
+    BOOLEAN RecvDstAddr;
     DATAGRAM_COMPLETION_ROUTINE Complete; /* Completion routine for delete request */
     PVOID Context;                        /* Delete request context */
     DATAGRAM_SEND_ROUTINE Send;           /* Routine to send a datagram */
+    PVOID UdpPcb;
     LIST_ENTRY ReceiveQueue;              /* List of outstanding receive requests */
+    LIST_ENTRY DatagramQueue;
+    ULONG QueuedBytes;
     LIST_ENTRY TransmitQueue;             /* List of outstanding transmit requests */
     struct _CONNECTION_ENDPOINT *Connection;
     /* Associated connection or NULL if no associated connection exist */
+    BOOLEAN PendingKeepAliveSet;
+    BOOLEAN PendingKeepAlive;
+    BOOLEAN PendingNoDelaySet;
+    BOOLEAN PendingNoDelay;
     struct _CONNECTION_ENDPOINT *Listener;
     /* Associated listener (see transport/tcp/accept.c) */
     IP_ADDRESS AddrCache;                 /* One entry address cache (destination
@@ -137,6 +158,7 @@ typedef struct _ADDRESS_FILE {
     HANDLE ProcessId;                     /* Creator process ID */
     PVOID SubProcessTag;                  /* Creator process tag */
     LARGE_INTEGER CreationTime;           /* Time of creation */
+    ULONG64 WfpEndpointId;
 
     /* The following members are used to control event notification */
 
@@ -161,6 +183,7 @@ typedef struct _ADDRESS_FILE {
     PTDI_IND_RECEIVE_DATAGRAM ReceiveDatagramHandler;
     PVOID ReceiveDatagramHandlerContext;
     BOOLEAN RegisteredReceiveDatagramHandler;
+    EX_RUNDOWN_REF ReceiveDatagramRundown;
     /* Expedited receive indication handler */
     PTDI_IND_RECEIVE_EXPEDITED ExpeditedReceiveHandler;
     PVOID ExpeditedReceiveHandlerContext;
@@ -249,6 +272,7 @@ typedef struct _CONNECTION_ENDPOINT {
     /* Requests */
     LIST_ENTRY ConnectRequest; /* Queued connect requests */
     LIST_ENTRY ListenRequest;  /* Queued listen requests */
+    LIST_ENTRY PendingAccepts; /* Established connections awaiting a listen request */
     LIST_ENTRY ReceiveRequest; /* Queued receive requests */
     LIST_ENTRY SendRequest;    /* Queued send requests */
     LIST_ENTRY ShutdownRequest;/* Queued shutdown requests */
@@ -266,8 +290,19 @@ typedef struct _CONNECTION_ENDPOINT {
     NTSTATUS ReceiveShutdownStatus;
     BOOLEAN Closing;
 
+    volatile LONG PendingRecvCredit;
+    volatile LONG CreditFlushQueued;
+    ULONG64 WfpEndpointId;
+
     struct _CONNECTION_ENDPOINT *Next; /* Next connection in address file list */
 } CONNECTION_ENDPOINT, *PCONNECTION_ENDPOINT;
+
+typedef struct _TCP_PENDING_ACCEPT {
+    LIST_ENTRY Entry;
+    PCONNECTION_ENDPOINT Listener;
+    PVOID SocketContext;
+    BOOLEAN FinReceived;
+} TCP_PENDING_ACCEPT, *PTCP_PENDING_ACCEPT;
 
 
 
@@ -298,9 +333,19 @@ typedef struct _TRANSPORT_CONTEXT {
 
 typedef struct _TI_QUERY_CONTEXT {
     PIRP Irp;
-    PMDL InputMdl;
-    PMDL OutputMdl;
+    PMDL InputMdl;     /* legacy NDIS_BUFFER expected by InfoTdiQuery* */
+    PMDL OutputMdl;    /* legacy NDIS_BUFFER expected by Info* helpers */
     TCP_REQUEST_QUERY_INFORMATION_EX QueryInfo;
+    /* dev-nt6-1: kernel-pool copies of the user buffers. ReactOS's
+     * MmProbeAndLockPages raises STATUS_ACCESS_VIOLATION on valid user
+     * stack pointers, so we copy in/out via SEH and pass MDLs that map
+     * the kernel-pool copies through to InfoTdi*. */
+    PVOID UserInputBuffer;       /* original user-mode input ptr */
+    PVOID UserOutputBuffer;      /* original user-mode output ptr (or NULL) */
+    ULONG UserOutputLength;      /* original user-mode output length */
+    PVOID KernelInputBuffer;     /* kernel-pool copy of input */
+    PVOID KernelOutputBuffer;    /* kernel-pool buffer for output */
+    ULONG UserContextOffset;
 } TI_QUERY_CONTEXT, *PTI_QUERY_CONTEXT;
 
 /* EOF */

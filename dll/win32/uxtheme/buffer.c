@@ -2,6 +2,7 @@
  * uxtheme Double-buffered Drawing API
  *
  * Copyright (C) 2008 Reece H. Dunn
+ * Copyright 2017 Nikolay Sivov for CodeWeavers
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -18,8 +19,19 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include "uxthemep.h"
-#include <wine/heap.h>
+#include <stdlib.h>
+#include <stdarg.h>
+
+#include "windef.h"
+#include "winbase.h"
+#include "winuser.h"
+#include "wingdi.h"
+#include "vfwmsgs.h"
+#include "uxtheme.h"
+
+#include "wine/debug.h"
+
+WINE_DEFAULT_DEBUG_CHANNEL(uxtheme);
 
 struct paintbuffer
 {
@@ -34,7 +46,7 @@ static void free_paintbuffer(struct paintbuffer *buffer)
 {
     DeleteObject(buffer->bitmap);
     DeleteDC(buffer->memorydc);
-    heap_free(buffer);
+    free(buffer);
 }
 
 static struct paintbuffer *get_buffer_obj(HPAINTBUFFER handle)
@@ -66,11 +78,7 @@ HRESULT WINAPI BufferedPaintUnInit(VOID)
 HPAINTBUFFER WINAPI BeginBufferedPaint(HDC targetdc, const RECT *rect,
         BP_BUFFERFORMAT format, BP_PAINTPARAMS *params, HDC *retdc)
 {
-#if (defined(_MSC_VER))
     char bmibuf[FIELD_OFFSET(BITMAPINFO, bmiColors) + 256 * sizeof(RGBQUAD)];
-#else
-    char bmibuf[FIELD_OFFSET(BITMAPINFO, bmiColors[256])];
-#endif
     BITMAPINFO *bmi = (BITMAPINFO *)bmibuf;
     struct paintbuffer *buffer;
 
@@ -86,7 +94,11 @@ HPAINTBUFFER WINAPI BeginBufferedPaint(HDC targetdc, const RECT *rect,
     if (params)
         FIXME("painting parameters are ignored\n");
 
-    buffer = heap_alloc(sizeof(*buffer));
+    buffer = malloc(sizeof(*buffer));
+#ifdef __REACTOS__
+    if (!buffer)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     buffer->targetdc = targetdc;
     buffer->rect = *rect;
     buffer->memorydc = CreateCompatibleDC(targetdc);
@@ -134,7 +146,6 @@ HPAINTBUFFER WINAPI BeginBufferedPaint(HDC targetdc, const RECT *rect,
     return (HPAINTBUFFER)buffer;
 }
 
-
 /***********************************************************************
  *      EndBufferedPaint                                   (UXTHEME.@)
  */
@@ -166,8 +177,19 @@ HRESULT WINAPI EndBufferedPaint(HPAINTBUFFER bufferhandle, BOOL update)
  */
 HRESULT WINAPI BufferedPaintClear(HPAINTBUFFER hBufferedPaint, const RECT *prc)
 {
-    FIXME("Stub (%p %p)\n", hBufferedPaint, prc);
-    return E_NOTIMPL;
+    struct paintbuffer *buffer = get_buffer_obj(hBufferedPaint);
+    RECT rc;
+
+    TRACE("(%p %s)\n", hBufferedPaint, wine_dbgstr_rect(prc));
+
+    if (!buffer)
+        return E_FAIL;
+
+    if (!prc || !IntersectRect(&rc, prc, &buffer->rect))
+        rc = buffer->rect;
+
+    PatBlt(buffer->memorydc, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, BLACKNESS);
+    return S_OK;
 }
 
 /***********************************************************************
@@ -175,8 +197,32 @@ HRESULT WINAPI BufferedPaintClear(HPAINTBUFFER hBufferedPaint, const RECT *prc)
  */
 HRESULT WINAPI BufferedPaintSetAlpha(HPAINTBUFFER hBufferedPaint, const RECT *prc, BYTE alpha)
 {
-    FIXME("Stub (%p %p %u)\n", hBufferedPaint, prc, alpha);
-    return E_NOTIMPL;
+    struct paintbuffer *buffer = get_buffer_obj(hBufferedPaint);
+    DIBSECTION ds;
+    RECT rc;
+    LONG y, x, row;
+    BYTE *line;
+
+    TRACE("(%p %s %u)\n", hBufferedPaint, wine_dbgstr_rect(prc), alpha);
+
+    if (!buffer)
+        return E_FAIL;
+
+    if (!buffer->bits || GetObjectW(buffer->bitmap, sizeof(ds), &ds) != sizeof(ds) || ds.dsBm.bmBitsPixel != 32)
+        return E_FAIL;
+
+    if (!prc || !IntersectRect(&rc, prc, &buffer->rect))
+        rc = buffer->rect;
+
+    OffsetRect(&rc, -buffer->rect.left, -buffer->rect.top);
+    for (y = rc.top; y < rc.bottom; y++)
+    {
+        row = ds.dsBmih.biHeight < 0 ? y : ds.dsBm.bmHeight - 1 - y;
+        line = (BYTE *)buffer->bits + row * ds.dsBm.bmWidthBytes;
+        for (x = rc.left; x < rc.right; x++)
+            line[x * 4 + 3] = alpha;
+    }
+    return S_OK;
 }
 
 /***********************************************************************

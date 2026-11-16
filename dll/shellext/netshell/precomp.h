@@ -16,10 +16,13 @@
 #include <shlwapi.h>
 #include <shlobj.h>
 #include <shellapi.h>
+#include <reactos/trayicons.h>
 #include <atlbase.h>
 #include <atlcom.h>
 #include <atlcoll.h>
 #include <atlstr.h>
+#include <winsock2.h>
+#include <ws2ipdef.h>
 #include <iphlpapi.h>
 #include <setupapi.h>
 #include <devguid.h>
@@ -38,16 +41,6 @@ WINE_DEFAULT_DEBUG_CHANNEL(shell);
 
 #include "resource.h"
 
-#define NCF_VIRTUAL                     0x1
-#define NCF_SOFTWARE_ENUMERATED         0x2
-#define NCF_PHYSICAL                    0x4
-#define NCF_HIDDEN                      0x8
-#define NCF_NO_SERVICE                  0x10
-#define NCF_NOT_USER_REMOVABLE          0x20
-#define NCF_MULTIPORT_INSTANCED_ADAPTER 0x40
-#define NCF_HAS_UI                      0x80
-#define NCF_FILTER                      0x400
-#define NCF_NDIS_PROTOCOL               0x4000
 
 #define USE_CUSTOM_CONMGR 1
 
@@ -55,7 +48,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(shell);
 extern HINSTANCE netshell_hInstance;
 
 /* enumlist.c */
-#include <pshpack1.h>
+#pragma pack(push, 1)
 #define NETCONIDSTRUCT_SIG 0x4EFF
 typedef struct tagNETCONIDSTRUCT
 {
@@ -69,7 +62,7 @@ typedef struct tagNETCONIDSTRUCT
     ULONG            uNameOffset;
     ULONG            uDeviceNameOffset;
 } NETCONIDSTRUCT, *PNETCONIDSTRUCT;
-#include <poppack.h>
+#pragma pack(pop)
 
 C_ASSERT(2 + FIELD_OFFSET(NETCONIDSTRUCT, clsidThisObject) == 2 + (2 + 8));
 C_ASSERT(2 + FIELD_OFFSET(NETCONIDSTRUCT, guidId) == 2 + (2 + 8 + 16));

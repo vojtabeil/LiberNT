@@ -23,6 +23,7 @@ struct SETTINGS_INFO
     /* Software source settings */
     BOOL bUseSource;
     WCHAR szSourceURL[INTERNET_MAX_URL_LENGTH];
+    WCHAR szPackageArch[16];
 };
 
 typedef SETTINGS_INFO *PSETTINGS_INFO;
@@ -30,5 +31,7 @@ typedef SETTINGS_INFO *PSETTINGS_INFO;
 BOOL LoadSettings(PSETTINGS_INFO pSettingsInfo);
 BOOL SaveSettings(HWND hwnd, PSETTINGS_INFO pSettingsInfo);
 VOID FillDefaultSettings(PSETTINGS_INFO pSettingsInfo);
+LPCWSTR GetPackageArchitecture();
+UINT GetPackageArchitectures(LPCWSTR *Architectures, UINT Count);
 
 extern SETTINGS_INFO SettingsInfo;

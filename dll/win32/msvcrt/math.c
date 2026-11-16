@@ -35,20 +35,27 @@
  * ====================================================
  */
 
-#include <assert.h>
-#include <complex.h>
-#include <stdio.h>
-#include <fenv.h>
-#include <fpieee.h>
-#include <limits.h>
-#include <locale.h>
-#include <math.h>
+#include "include/assert.h"
+#include "include/complex.h"
+#include "include/stdio.h"
+#include "include/fenv.h"
+#include "include/fpieee.h"
+#include "include/inttypes.h"
+#include "include/limits.h"
+#include "include/locale.h"
+#include "include/math.h"
+#if defined(_M_IX86) || defined(_M_X64) || defined(_M_AMD64)
+#include <xmmintrin.h>
+#endif
 
 #include "msvcrt.h"
 #include "winternl.h"
 
 #include "wine/asm.h"
 #include "wine/debug.h"
+#if defined(__REACTOS__) && defined(__aarch64__)
+#include <reactos/arm64/sysreg.h>
+#endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(msvcrt);
 
@@ -85,7 +92,9 @@ static inline double ret_nan( BOOL update_sw )
 {
     double x = 1.0;
     if (!update_sw) return -NAN;
-    return (x - x) / (x - x);
+    x = (x - x) / (x - x);
+    *(UINT64*)&x |= 0x8000000000000000ULL;
+    return x;
 }
 
 #define SET_X87_CW(MASK) \
@@ -152,6 +161,15 @@ double math_error(int type, const char *name, double arg1, double arg2, double r
 
     return exception.retval;
 }
+
+#ifdef __REACTOS__
+double CDECL __acrt_report_math_error(int type, const char *name, double arg1, double arg2, double retval, int error)
+{
+    if (type) return math_error(type, name, arg1, arg2, retval);
+    if (error) *_errno() = error;
+    return retval;
+}
+#endif
 
 /*********************************************************************
  *      __setusermatherr (MSVCRT.@)
@@ -367,7 +385,11 @@ double CDECL MSVCRT_asin( double x )
             return x87_asin(x);
     }
 #else
-    if (isnan(x)) return x;
+    if (isnan(x))
+    {
+        *(UINT64*)&x |= 0x0008000000000000ULL;
+        return x;
+    }
 #endif
 
     return asin( x );
@@ -379,7 +401,11 @@ double CDECL MSVCRT_asin( double x )
 #if _MSVCR_VER == 0  /* other versions call atan() directly */
 double CDECL MSVCRT_atan( double x )
 {
-    if (isnan(x)) return math_error(_DOMAIN, "atan", x, 0, x);
+    if (isnan(x))
+    {
+        *(UINT64*)&x |= 0x0008000000000000ULL;
+        return math_error(_DOMAIN, "atan", x, 0, x);
+    }
     return atan( x );
 }
 #endif
@@ -472,7 +498,7 @@ double CDECL MSVCRT_tanh( double x )
 }
 #endif
 
-#if (defined(__GNUC__) || defined(__clang__)) && defined(__i386__)
+#ifdef __i386__
 
 #define CREATE_FPU_FUNC1(name, call) \
     __ASM_GLOBAL_FUNC(name, \
@@ -586,7 +612,7 @@ __ASM_GLOBAL_FUNC(_ftol,
         __ASM_CFI(".cfi_same_value %ebp\n\t")
         "ret")
 
-#endif /* (defined(__GNUC__) || defined(__clang__)) && defined(__i386__) */
+#endif /* __i386__ */
 
 #ifndef __REACTOS__
 /*********************************************************************
@@ -741,13 +767,12 @@ static void set_mxcsr( unsigned int val )
 }
 #endif
 
-#ifdef __REACTOS__
+#if defined(__REACTOS__) && !defined(__arm64ec__)
 __ATTRIBUTE_SSE__
 #endif
 static void _setfp_sse( unsigned int *cw, unsigned int cw_mask,
         unsigned int *sw, unsigned int sw_mask )
 {
-#if defined(__GNUC__) || defined(__clang__) || defined(_MSC_VER)
     unsigned int old_fpword, fpword = get_mxcsr();
     unsigned int flags;
 
@@ -831,18 +856,13 @@ static void _setfp_sse( unsigned int *cw, unsigned int cw_mask,
     }
 
     if (fpword != old_fpword) set_mxcsr( fpword );
-#else
-    FIXME("not implemented\n");
-    if (cw) *cw = 0;
-    if (sw) *sw = 0;
-#endif
 }
 #endif
 
 static void _setfp( unsigned int *cw, unsigned int cw_mask,
         unsigned int *sw, unsigned int sw_mask )
 {
-#if (defined(__GNUC__) || defined(__clang__) || defined(_MSC_VER)) && defined(__i386__)
+#ifdef __i386__
     unsigned long oldcw = 0, newcw = 0;
     unsigned long oldsw = 0, newsw = 0;
     unsigned int flags;
@@ -852,10 +872,18 @@ static void _setfp( unsigned int *cw, unsigned int cw_mask,
 
     if (sw)
     {
+#ifdef __REACTOS__
+#ifdef _MSC_VER
+        __asm { fnstsw newsw }
+#else
+        __asm__ __volatile__( "fnstsw %0" : "=m" (newsw) );
+#endif
+#else
 #ifdef _MSC_VER
         __asm { fstsw newsw }
 #else
         __asm__ __volatile__( "fstsw %0" : "=m" (newsw) );
+#endif
 #endif
         oldsw = newsw;
 
@@ -929,6 +957,9 @@ static void _setfp( unsigned int *cw, unsigned int cw_mask,
         case _PC_64: newcw |= 0x300; break;
         case _PC_53: newcw |= 0x200; break;
         case _PC_24: newcw |= 0x0; break;
+#ifdef __REACTOS__
+        case _MCW_PC: *cw &= ~_PC_53; break;
+#endif
         }
         if (*cw & _IC_AFFINE) newcw |= 0x1000;
     }
@@ -982,6 +1013,75 @@ static void _setfp( unsigned int *cw, unsigned int cw_mask,
 #endif
 #elif defined(__x86_64__)
     _setfp_sse(cw, cw_mask, sw, sw_mask);
+#elif defined(_M_PPC)
+    union { double d; ULONGLONG bits; } value;
+    unsigned int old_fpscr, fpscr, flags, updated;
+
+    __asm__ __volatile__("mffs %0" : "=f"(value.d));
+    old_fpscr = fpscr = (unsigned int)value.bits;
+
+    if (sw)
+    {
+        flags = 0;
+        if (fpscr & 0x20000000) flags |= _SW_INVALID;
+        if (fpscr & 0x10000000) flags |= _SW_OVERFLOW;
+        if (fpscr & 0x08000000) flags |= _SW_UNDERFLOW;
+        if (fpscr & 0x04000000) flags |= _SW_ZERODIVIDE;
+        if (fpscr & 0x02000000) flags |= _SW_INEXACT;
+        sw_mask &= _MCW_EM;
+        updated = (flags & ~sw_mask) | (*sw & sw_mask);
+        *sw = flags;
+        if (updated != flags)
+        {
+            /* VX is a summary of the invalid-operation causes. Use VXSOFT
+             * to set it, and clear every cause when clearing the status. */
+            fpscr &= ~0xfff80700u;
+            if (updated & _SW_INVALID) fpscr |= 0x00000400;
+            if (updated & _SW_OVERFLOW) fpscr |= 0x10000000;
+            if (updated & _SW_UNDERFLOW) fpscr |= 0x08000000;
+            if (updated & _SW_ZERODIVIDE) fpscr |= 0x04000000;
+            if (updated & _SW_INEXACT) fpscr |= 0x02000000;
+            if (updated) fpscr |= 0x80000000; /* FX */
+        }
+    }
+
+    if (cw)
+    {
+        /* PPC has no separate denormal-operand exception. The IEEE enables
+         * in FPSCR have the opposite polarity to the CRT exception masks. */
+        flags = _EM_DENORMAL;
+        if (!(fpscr & 0x80)) flags |= _EM_INVALID;
+        if (!(fpscr & 0x40)) flags |= _EM_OVERFLOW;
+        if (!(fpscr & 0x20)) flags |= _EM_UNDERFLOW;
+        if (!(fpscr & 0x10)) flags |= _EM_ZERODIVIDE;
+        if (!(fpscr & 0x08)) flags |= _EM_INEXACT;
+        switch (fpscr & 3)
+        {
+        case 1: flags |= _RC_CHOP; break;
+        case 2: flags |= _RC_UP; break;
+        case 3: flags |= _RC_DOWN; break;
+        }
+        cw_mask &= (_MCW_EM & ~_EM_DENORMAL) | _MCW_RC;
+        *cw = (flags & ~cw_mask) | (*cw & cw_mask);
+        fpscr &= ~0xfbu;
+        if (!(*cw & _EM_INVALID)) fpscr |= 0x80;
+        if (!(*cw & _EM_OVERFLOW)) fpscr |= 0x40;
+        if (!(*cw & _EM_UNDERFLOW)) fpscr |= 0x20;
+        if (!(*cw & _EM_ZERODIVIDE)) fpscr |= 0x10;
+        if (!(*cw & _EM_INEXACT)) fpscr |= 0x08;
+        switch (*cw & _MCW_RC)
+        {
+        case _RC_CHOP: fpscr |= 1; break;
+        case _RC_UP: fpscr |= 2; break;
+        case _RC_DOWN: fpscr |= 3; break;
+        }
+    }
+
+    if (fpscr != old_fpscr)
+    {
+        value.bits = fpscr;
+        __asm__ __volatile__("mtfsf 0xff, %0" :: "f"(value.d));
+    }
 #elif defined(__aarch64__)
     ULONG_PTR old_fpsr = 0, fpsr = 0, old_fpcr = 0, fpcr = 0;
     unsigned int flags;
@@ -991,7 +1091,7 @@ static void _setfp( unsigned int *cw, unsigned int cw_mask,
 
     if (sw)
     {
-        __asm__ __volatile__( "mrs %0, fpsr" : "=r" (fpsr) );
+        fpsr = ARM64_READ_SYSREG(FPSR);
         old_fpsr = fpsr;
 
         flags = 0;
@@ -1016,7 +1116,7 @@ static void _setfp( unsigned int *cw, unsigned int cw_mask,
 
     if (cw)
     {
-        __asm__ __volatile__( "mrs %0, fpcr" : "=r" (fpcr) );
+        fpcr = ARM64_READ_SYSREG(FPCR);
         old_fpcr = fpcr;
 
         flags = 0;
@@ -1054,13 +1154,13 @@ static void _setfp( unsigned int *cw, unsigned int cw_mask,
     if (old_fpcr != fpcr && ~(old_fpcr >> 8) & fpsr & 0x9f != fpsr & 0x9f)
     {
         ULONG_PTR mask = fpcr & ~0x9f00;
-        __asm__ __volatile__( "msr fpcr, %0" :: "r" (mask) );
+        ARM64_WRITE_SYSREG(FPCR, mask);
     }
 
     if (old_fpsr != fpsr)
-        __asm__ __volatile__( "msr fpsr, %0" :: "r" (fpsr) );
+        ARM64_WRITE_SYSREG(FPSR, fpsr);
     if (old_fpcr != fpcr)
-        __asm__ __volatile__( "msr fpcr, %0" :: "r" (fpcr) );
+        ARM64_WRITE_SYSREG(FPCR, fpcr);
 #elif defined(__arm__)
     DWORD old_fpscr, fpscr;
     unsigned int flags;
@@ -1129,9 +1229,13 @@ static void _setfp( unsigned int *cw, unsigned int cw_mask,
     if (old_fpscr != fpscr)
         __asm__ __volatile__( "vmsr fpscr, %0" :: "r" (fpscr) );
 #else
+#ifdef __REACTOS__
+    msvcrt_arch_setfp( cw, cw_mask, sw, sw_mask );
+#else
     FIXME("not implemented\n");
     if (cw) *cw = 0;
     if (sw) *sw = 0;
+#endif
 #endif
 }
 
@@ -1456,15 +1560,25 @@ int CDECL fegetenv(fenv_t *env)
 }
 
 /*********************************************************************
+ *      feraiseexcept (MSVCR120.@)
+ */
+int CDECL feraiseexcept(int flags)
+{
+    fenv_t env;
+
+    flags &= FE_ALL_EXCEPT;
+    fegetenv(&env);
+    env._Fe_stat |= fenv_encode(flags, flags);
+    return fesetenv(&env);
+}
+
+/*********************************************************************
  *		feupdateenv (MSVCR120.@)
  */
 int CDECL feupdateenv(const fenv_t *env)
 {
-    fenv_t set;
-    fegetenv(&set);
-    set._Fe_ctl = env->_Fe_ctl;
-    set._Fe_stat |= env->_Fe_stat;
-    return fesetenv(&set);
+    int except = fetestexcept(FE_ALL_EXCEPT);
+    return fesetenv(env) || feraiseexcept(except);
 }
 
 /*********************************************************************
@@ -1489,19 +1603,6 @@ int CDECL fesetexceptflag(const fexcept_t *status, int excepts)
     fegetenv(&env);
     env._Fe_stat &= ~fenv_encode(excepts, excepts);
     env._Fe_stat |= *status & fenv_encode(excepts, excepts);
-    return fesetenv(&env);
-}
-
-/*********************************************************************
- *      feraiseexcept (MSVCR120.@)
- */
-int CDECL feraiseexcept(int flags)
-{
-    fenv_t env;
-
-    flags &= FE_ALL_EXCEPT;
-    fegetenv(&env);
-    env._Fe_stat |= fenv_encode(flags, flags);
     return fesetenv(&env);
 }
 
@@ -1590,9 +1691,14 @@ int CDECL _finite(double num)
  */
 void CDECL _fpreset(void)
 {
-#if (defined(__GNUC__) || defined(__clang__)) && defined(__i386__)
+#ifdef __i386__
     const unsigned int x86_cw = 0x27f;
+#ifdef _MSC_VER
+    __asm { fninit }
+    __asm { fldcw x86_cw }
+#else
     __asm__ __volatile__( "fninit; fldcw %0" : : "m" (x86_cw) );
+#endif
     if (sse2_supported)
     {
         unsigned int cw = _MCW_EM, sw = 0;
@@ -1666,23 +1772,6 @@ int CDECL _isnan(double num)
 #if _MSVCR_VER>=120
 
 /*********************************************************************
- *      rint (MSVCR120.@)
- */
-double CDECL MSVCRT_rint(double x)
-{
-    unsigned cw;
-    double y;
-
-    cw = _controlfp(0, 0);
-    if ((cw & _MCW_PC) != _PC_53)
-        _controlfp(_PC_53, _MCW_PC);
-    y = rint(x);
-    if ((cw & _MCW_PC) != _PC_53)
-        _controlfp(cw, _MCW_PC);
-    return y;
-}
-
-/*********************************************************************
  *		_nearbyint (MSVCR120.@)
  *
  * Based on musl: src/math/nearbyteint.c
@@ -1700,7 +1789,7 @@ double CDECL nearbyint(double x)
         cw |= _EM_INEXACT;
         _setfp(&cw, _EM_INEXACT, NULL, 0);
     }
-    x = MSVCRT_rint(x);
+    x = rint(x);
     if (update_cw || update_sw)
     {
         sw = 0;
@@ -1755,6 +1844,10 @@ char * CDECL _ecvt( double number, int ndigits, int *decpt, int *sign )
                                       * terminating '\0' */
     if (!data->efcvt_buffer)
         data->efcvt_buffer = malloc( 80 ); /* ought to be enough */
+#ifdef __REACTOS__
+    if (!data->efcvt_buffer)
+        return NULL;
+#endif
 
     /* handle cases with zero ndigits or less */
     prec = ndigits;
@@ -1799,14 +1892,39 @@ int CDECL _ecvt_s( char *buffer, size_t length, double number, int ndigits, int 
     if (!MSVCRT_CHECK_PMT(decpt != NULL)) return EINVAL;
     if (!MSVCRT_CHECK_PMT(sign != NULL)) return EINVAL;
     if (!MSVCRT_CHECK_PMT_ERR( length > 2, ERANGE )) return ERANGE;
+#ifdef __REACTOS__
+    if (!MSVCRT_CHECK_PMT_ERR(ndigits < 0 || (size_t)ndigits < length - 1, ERANGE )) return ERANGE;
+#else
     if (!MSVCRT_CHECK_PMT_ERR(ndigits < (int)length - 1, ERANGE )) return ERANGE;
+#endif
 
     /* handle cases with zero ndigits or less */
     prec = ndigits;
     if( prec < 1) prec = 2;
+#ifdef __REACTOS__
+    result = malloc((size_t)prec + 8);
+    if (!result)
+    {
+        buffer[0] = 0;
+        *_errno() = ENOMEM;
+        return ENOMEM;
+    }
+#else
     result = malloc(prec + 8);
+#endif
 
+#ifdef __REACTOS__
+    len = _snprintf(result, (size_t)prec + 8, "%.*le", prec - 1, number);
+    if (len < 0)
+    {
+        free(result);
+        buffer[0] = 0;
+        *_errno() = ERANGE;
+        return ERANGE;
+    }
+#else
     len = _snprintf(result, prec + 8, "%.*le", prec - 1, number);
+#endif
     if (result[0] == '-') {
         memmove( result, result + 1, len-- );
         *sign = 1;
@@ -1847,6 +1965,10 @@ char * CDECL _fcvt( double number, int ndigits, int *decpt, int *sign )
 
     if (!data->efcvt_buffer)
         data->efcvt_buffer = malloc( 80 ); /* ought to be enough */
+#ifdef __REACTOS__
+    if (!data->efcvt_buffer)
+        return NULL;
+#endif
 
     stop = _snprintf(buf, 80, "%.*f", ndigits < 0 ? 0 : ndigits, number);
     ptr1 = buf;
@@ -2052,7 +2174,7 @@ int CDECL _gcvt_s(char *buff, size_t size, double number, int digits)
     return 0;
 }
 
-#include <stdlib.h> /* div_t, ldiv_t */
+#include "include/stdlib.h" /* div_t, ldiv_t */
 
 #ifndef __REACTOS__
 /*********************************************************************
@@ -2060,7 +2182,7 @@ int CDECL _gcvt_s(char *buff, size_t size, double number, int digits)
  * VERSION
  *	[i386] Windows binary compatible - returns the struct in eax/edx.
  */
-#ifdef __i386__
+#if defined(__i386__) && !defined(__WINE_PE_BUILD)
 unsigned __int64 CDECL div(int num, int denom)
 {
     union {
@@ -2075,8 +2197,6 @@ unsigned __int64 CDECL div(int num, int denom)
 #else
 /*********************************************************************
  *		div (MSVCRT.@)
- * VERSION
- *	[!i386] Non-x86 can't run win32 apps so we don't need binary compatibility
  */
 div_t CDECL div(int num, int denom)
 {
@@ -2094,7 +2214,7 @@ div_t CDECL div(int num, int denom)
  * VERSION
  * 	[i386] Windows binary compatible - returns the struct in eax/edx.
  */
-#ifdef __i386__
+#if defined(__i386__) && !defined(__WINE_PE_BUILD)
 unsigned __int64 CDECL ldiv(__msvcrt_long num, __msvcrt_long denom)
 {
     union {
@@ -2109,8 +2229,6 @@ unsigned __int64 CDECL ldiv(__msvcrt_long num, __msvcrt_long denom)
 #else
 /*********************************************************************
  *		ldiv (MSVCRT.@)
- * VERSION
- *	[!i386] Non-x86 can't run win32 apps so we don't need binary compatibility
  */
 ldiv_t CDECL ldiv(__msvcrt_long num, __msvcrt_long denom)
 {
@@ -2134,6 +2252,20 @@ lldiv_t CDECL lldiv(__int64 num, __int64 denom)
   ret.quot = num / denom;
   ret.rem = num % denom;
 
+  return ret;
+}
+#endif
+
+#if _MSVCR_VER>=120
+/*********************************************************************
+ *              imaxdiv (MSVCR100.@)
+ */
+imaxdiv_t CDECL imaxdiv(intmax_t num, intmax_t denom)
+{
+  imaxdiv_t ret;
+
+  ret.quot = num / denom;
+  ret.rem = num % denom;
   return ret;
 }
 #endif
@@ -2637,7 +2769,7 @@ __msvcrt_long CDECL lrint(double x)
 {
     double d;
 
-    d = MSVCRT_rint(x);
+    d = rint(x);
     if ((d < 0 && d != (double)(__msvcrt_long)d)
             || (d >= 0 && d != (double)(__msvcrt_ulong)d)) {
         *_errno() = EDOM;
@@ -2669,7 +2801,7 @@ __int64 CDECL llrint(double x)
 {
     double d;
 
-    d = MSVCRT_rint(x);
+    d = rint(x);
     if ((d < 0 && d != (double)(__int64)d)
             || (d >= 0 && d != (double)(unsigned __int64)d)) {
         *_errno() = EDOM;
@@ -2873,6 +3005,9 @@ float CDECL MSVCRT_atanhf(float x)
  */
 double CDECL _scalb(double num, __msvcrt_long power)
 {
+#if defined(__REACTOS__) && _MSVCR_VER == 0
+  if (isnan(num)) *_errno() = EDOM;
+#endif
   return ldexp(num, power);
 }
 
@@ -3004,16 +3139,58 @@ double CDECL _except1(DWORD fpe, _FP_OPERATION_CODE op, double arg, double res, 
     return res;
 }
 
-_Dcomplex* CDECL _Cbuild(_Dcomplex *ret, double r, double i)
+_Dcomplex CDECL _Cbuild(double r, double i)
 {
-    ret->_Val[0] = r;
-    ret->_Val[1] = i;
+    _Dcomplex ret;
+    ret._Val[0] = r;
+    ret._Val[1] = i;
     return ret;
 }
 
-double CDECL MSVCR120_creal(_Dcomplex z)
+double CDECL creal(_Dcomplex z)
 {
     return z._Val[0];
+}
+
+double CDECL cimag(_Dcomplex z)
+{
+    return z._Val[1];
+}
+
+#if !defined(__i386__) || defined(__MINGW32__) || defined(_MSC_VER)
+_Fcomplex CDECL _FCbuild(float r, float i)
+{
+    _Fcomplex ret;
+    ret._Val[0] = r;
+    ret._Val[1] = i;
+    return ret;
+}
+#else
+#undef _FCbuild
+ULONGLONG CDECL _FCbuild(float r, float i)
+{
+    union
+    {
+        _Fcomplex c;
+        ULONGLONG ull;
+    } ret;
+
+    C_ASSERT(sizeof(_Fcomplex) == sizeof(ULONGLONG));
+
+    ret.c._Val[0] = r;
+    ret.c._Val[1] = i;
+    return ret.ull;
+}
+#endif
+
+float CDECL crealf(_Fcomplex z)
+{
+    return z._Val[0];
+}
+
+float CDECL cimagf(_Fcomplex z)
+{
+    return z._Val[1];
 }
 
 #endif /* _MSVCR_VER>=120 */

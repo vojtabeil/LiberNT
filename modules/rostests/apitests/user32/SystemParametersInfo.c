@@ -106,8 +106,16 @@ static MSG_ENTRY CaptionHeight_chain[]={
 static void Test_NonClientMetrics()
 {
     NONCLIENTMETRICS NonClientMetrics;
+    HRESULT (WINAPI *pDwmIsCompositionEnabled)(BOOL *);
+    BOOL Composition = FALSE;
 
     /* WARNING: this test requires themes and dwm to be disabled */
+    pDwmIsCompositionEnabled = (void *)GetProcAddress(LoadLibraryW(L"dwmapi.dll"), "DwmIsCompositionEnabled");
+    if (pDwmIsCompositionEnabled && SUCCEEDED(pDwmIsCompositionEnabled(&Composition)) && Composition)
+    {
+        skip("Non-client metrics message chains require DWM composition to be disabled\n");
+        return;
+    }
 
     SetCursorPos(0,0);
 
@@ -268,8 +276,72 @@ static void Test_GradientCaptions(void)
     CloseHandle(g_hSemDisplayChange);
 }
 
+static void test_modern_queries(void)
+{
+    DWORD timeout = 0xdeadbeef, original, size = 0;
+    BOOL ret;
+    ret = SystemParametersInfoW(SPI_GETCARETTIMEOUT, 0, &original, 0);
+    ok(ret, "SPI_GETCARETTIMEOUT failed: %lu\n", GetLastError());
+    if (ret)
+    {
+        ret = SystemParametersInfoW(SPI_SETCARETTIMEOUT, 0, (void *)(ULONG_PTR)7500, 0);
+        ok(ret, "SPI_SETCARETTIMEOUT failed: %lu\n", GetLastError());
+        if (ret)
+        {
+            ret = SystemParametersInfoW(SPI_GETCARETTIMEOUT, 0, &timeout, 0);
+            ok(ret && timeout == 7500, "caret timeout: %lu (success %d)\n", timeout, ret);
+            ret = SystemParametersInfoW(SPI_SETCARETTIMEOUT, 0, (void *)(ULONG_PTR)original, 0);
+            ok(ret, "failed to restore caret timeout\n");
+        }
+    }
+    ret = SystemParametersInfoW(0x2028, 0, &size, 0);
+    ok(ret && size > 0 && size <= 1024, "cursor size: %lu (success %d)\n", size, ret);
+    ret = SystemParametersInfoW(SPI_GETCARETTIMEOUT, 0, NULL, 0);
+    ok(!ret, "NULL timeout output accepted\n");
+    ret = SystemParametersInfoW(0x2028, 0, NULL, 0);
+    ok(!ret, "NULL cursor-size output accepted\n");
+}
+
+static void Test_NonClientMetricsSize(void)
+{
+    NONCLIENTMETRICSA Full, Legacy;
+    BOOL ret;
+
+    ZeroMemory(&Full, sizeof(Full));
+    Full.cbSize = sizeof(Full);
+    ret = SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, 0, &Full, 0);
+    ok(ret, "SPI_GETNONCLIENTMETRICS (%u) failed, error %lu\n", Full.cbSize, GetLastError());
+
+    FillMemory(&Legacy, sizeof(Legacy), 0xcc);
+    Legacy.cbSize = FIELD_OFFSET(NONCLIENTMETRICSA, iPaddedBorderWidth);
+    ret = SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, 0, &Legacy, 0);
+    ok(ret, "SPI_GETNONCLIENTMETRICS (%u) failed, error %lu\n", Legacy.cbSize, GetLastError());
+    ok(Legacy.cbSize == FIELD_OFFSET(NONCLIENTMETRICSA, iPaddedBorderWidth), "cbSize %u\n", Legacy.cbSize);
+    ok(Legacy.iPaddedBorderWidth == (int)0xcccccccc, "iPaddedBorderWidth written: %d\n", Legacy.iPaddedBorderWidth);
+    ok(Legacy.iBorderWidth == Full.iBorderWidth, "iBorderWidth %d, expected %d\n", Legacy.iBorderWidth, Full.iBorderWidth);
+    ok(Legacy.iCaptionHeight == Full.iCaptionHeight, "iCaptionHeight %d, expected %d\n", Legacy.iCaptionHeight, Full.iCaptionHeight);
+    ok(Legacy.iMenuHeight == Full.iMenuHeight, "iMenuHeight %d, expected %d\n", Legacy.iMenuHeight, Full.iMenuHeight);
+    ok(Legacy.lfMessageFont.lfHeight == Full.lfMessageFont.lfHeight, "lfMessageFont.lfHeight %ld, expected %ld\n",
+       Legacy.lfMessageFont.lfHeight, Full.lfMessageFont.lfHeight);
+    ok(!lstrcmpA(Legacy.lfMessageFont.lfFaceName, Full.lfMessageFont.lfFaceName), "lfMessageFont face '%s', expected '%s'\n",
+       Legacy.lfMessageFont.lfFaceName, Full.lfMessageFont.lfFaceName);
+    ok(!lstrcmpA(Legacy.lfStatusFont.lfFaceName, Full.lfStatusFont.lfFaceName), "lfStatusFont face '%s', expected '%s'\n",
+       Legacy.lfStatusFont.lfFaceName, Full.lfStatusFont.lfFaceName);
+
+    Legacy.cbSize = FIELD_OFFSET(NONCLIENTMETRICSA, iPaddedBorderWidth) - 1;
+    ret = SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, 0, &Legacy, 0);
+    ok(!ret, "SPI_GETNONCLIENTMETRICS (%u) succeeded\n", Legacy.cbSize);
+
+    Legacy.cbSize = FIELD_OFFSET(NONCLIENTMETRICSA, iPaddedBorderWidth) + 1;
+    ret = SystemParametersInfoA(SPI_GETNONCLIENTMETRICS, 0, &Legacy, 0);
+    ok(!ret, "SPI_GETNONCLIENTMETRICS (%u) succeeded\n", Legacy.cbSize);
+}
+
 START_TEST(SystemParametersInfo)
 {
+    test_modern_queries();
+    Test_NonClientMetricsSize();
+
     RegisterSimpleClass(SysParamsTestProc, L"sysparamstest");
     hWnd1 = CreateWindowW(L"sysparamstest", L"sysparamstest", WS_OVERLAPPEDWINDOW,
                         20, 20, 300, 300, NULL, NULL, 0, NULL);

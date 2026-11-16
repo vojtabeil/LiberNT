@@ -11,16 +11,28 @@
 #include <arc/arc.h>
 #include <stdlib.h>
 #include <ndk/halfuncs.h>
+#include <ndk/inbvfuncs.h>
 
 #include <cportlib/cportlib.h>
 #include <cportlib/uartinfo.h>
+#include <reactos/drivers/bootvid/bootvid.h>
 
 /* GLOBALS ********************************************************************/
 
 CPPORT KdComPort;
+BOOLEAN KdpScreenMode;
 #ifdef KDDEBUG
 CPPORT KdDebugComPort;
 #endif
+
+/* LOCALS *********************************************************************/
+
+#define KDP_SCREEN_LINE_LENGTH_DEFAULT 80
+#define KDP_SCREEN_LINE_LENGTH_MAXIMUM 2048
+static CHAR KdpScreenLineBuffer[KDP_SCREEN_LINE_LENGTH_MAXIMUM + 1];
+static ULONG KdpScreenLineBufferPosition;
+static ULONG KdpScreenLineLength;
+static ULONG KdpScreenLineCapacity = KDP_SCREEN_LINE_LENGTH_DEFAULT;
 
 /* DEBUGGING ******************************************************************/
 
@@ -88,7 +100,9 @@ NTSTATUS
 NTAPI
 KdRestore(IN BOOLEAN SleepTransition)
 {
-    /* Nothing to do on COM ports */
+    if (SleepTransition && KdComPort.Address != NULL)
+        CpInitialize(&KdComPort, KdComPort.Address, KdComPort.BaudRate);
+
     return STATUS_SUCCESS;
 }
 
@@ -106,6 +120,55 @@ KdpPortInitialize(
 
     KdComPortInUse = KdComPort.Address;
     return STATUS_SUCCESS;
+}
+
+VOID
+NTAPI
+KdpScreenPrint(
+    _In_reads_bytes_(Length) PCCH String,
+    _In_ ULONG Length)
+{
+    PCCH Character = String;
+
+    while ((Character < String + Length) && *Character)
+    {
+        if (*Character == '\b')
+        {
+            if (KdpScreenLineLength > 0)
+            {
+                KdpScreenLineBuffer[--KdpScreenLineLength] = ANSI_NULL;
+                KdpScreenLineBufferPosition = KdpScreenLineLength;
+                HalDisplayString("\r");
+                HalDisplayString(KdpScreenLineBuffer);
+            }
+        }
+        else
+        {
+            KdpScreenLineBuffer[KdpScreenLineLength++] = *Character;
+            KdpScreenLineBuffer[KdpScreenLineLength] = ANSI_NULL;
+        }
+
+        if ((*Character == '\n') ||
+            (KdpScreenLineLength >= KdpScreenLineCapacity))
+        {
+            if (KdpScreenLineBufferPosition != KdpScreenLineLength)
+            {
+                HalDisplayString(KdpScreenLineBuffer + KdpScreenLineBufferPosition);
+            }
+
+            KdpScreenLineBuffer[0] = ANSI_NULL;
+            KdpScreenLineLength = 0;
+            KdpScreenLineBufferPosition = 0;
+        }
+
+        ++Character;
+    }
+
+    if (KdpScreenLineBufferPosition != KdpScreenLineLength)
+    {
+        HalDisplayString(KdpScreenLineBuffer + KdpScreenLineBufferPosition);
+        KdpScreenLineBufferPosition = KdpScreenLineLength;
+    }
 }
 
 /******************************************************************************
@@ -149,29 +212,37 @@ KdDebuggerInitialize0(IN PLOADER_PARAMETER_BLOCK LoaderBlock OPTIONAL)
             /* Skip the equals sign */
             if (*PortString) ++PortString;
 
-            /* Do we have a serial port? */
-            if (_strnicmp(PortString, "COM", CONST_STR_LEN("COM")) != 0)
+            if (_strnicmp(PortString, "SCREEN", CONST_STR_LEN("SCREEN")) == 0)
+            {
+                KdpScreenMode = TRUE;
+            }
+            else if (_strnicmp(PortString, "COM", CONST_STR_LEN("COM")) != 0)
+            {
                 return STATUS_INVALID_PARAMETER;
+            }
 
             /* Check for a valid serial port */
-            PortString += CONST_STR_LEN("COM");
-            if (*PortString != ':')
+            if (!KdpScreenMode)
             {
-                Value = (ULONG)atol(PortString);
-                if (Value > MAX_COM_PORTS)
-                    return STATUS_INVALID_PARAMETER;
-                // if (Value > 0 && Value <= MAX_COM_PORTS)
-                /* Set the port to use */
-                ComPortNumber = Value;
-            }
-            else
-            {
-                /* Retrieve and set its address */
-                Value = strtoul(PortString + 1, NULL, 0);
-                if (Value)
+                PortString += CONST_STR_LEN("COM");
+                if (*PortString != ':')
                 {
-                    ComPortNumber = 0;
-                    ComPortAddress = UlongToPtr(Value);
+                    Value = (ULONG)atol(PortString);
+                    if (Value > MAX_COM_PORTS)
+                        return STATUS_INVALID_PARAMETER;
+                    // if (Value > 0 && Value <= MAX_COM_PORTS)
+                    /* Set the port to use */
+                    ComPortNumber = Value;
+                }
+                else
+                {
+                    /* Retrieve and set its address */
+                    Value = strtoul(PortString + 1, NULL, 0);
+                    if (Value)
+                    {
+                        ComPortNumber = 0;
+                        ComPortAddress = UlongToPtr(Value);
+                    }
                 }
             }
         }
@@ -192,6 +263,9 @@ KdDebuggerInitialize0(IN PLOADER_PARAMETER_BLOCK LoaderBlock OPTIONAL)
             }
         }
     }
+
+    if (KdpScreenMode)
+        return STATUS_SUCCESS;
 
     if (!ComPortAddress)
         ComPortAddress = UlongToPtr(BaseArray[ComPortNumber]);
@@ -235,6 +309,30 @@ NTSTATUS
 NTAPI
 KdDebuggerInitialize1(IN PLOADER_PARAMETER_BLOCK LoaderBlock OPTIONAL)
 {
+    VID_DISPLAY_INFO DisplayInfo;
+
+    UNREFERENCED_PARAMETER(LoaderBlock);
+
+    if (KdpScreenMode && InbvIsBootDriverInstalled())
+    {
+        InbvQueryDisplayInfo(&DisplayInfo);
+        if (DisplayInfo.CharacterWidth)
+        {
+            KdpScreenLineCapacity = min(DisplayInfo.Width / DisplayInfo.CharacterWidth, KDP_SCREEN_LINE_LENGTH_MAXIMUM);
+        }
+        if (!KdpScreenLineCapacity)
+            KdpScreenLineCapacity = KDP_SCREEN_LINE_LENGTH_DEFAULT;
+
+        InbvAcquireDisplayOwnership();
+        InbvResetDisplay();
+        InbvSolidColorFill(0, 0, DisplayInfo.Width - 1, DisplayInfo.Height - 1, BV_COLOR_BLACK);
+        InbvSetTextColor(BV_COLOR_WHITE);
+        InbvInstallDisplayStringFilter(NULL);
+        InbvEnableDisplayString(TRUE);
+        InbvSetScrollRegion(0, 0, DisplayInfo.Width - 1, DisplayInfo.Height - 1);
+        HalDisplayString("   Screen debugging enabled\r\n");
+    }
+
     return STATUS_SUCCESS;
 }
 

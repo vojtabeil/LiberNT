@@ -33,6 +33,7 @@ extern void func_crtdata(void);
 extern void func_exp(void);
 extern void func_fabs(void);
 extern void func_floor(void);
+extern void func_fmod(void);
 extern void func_fpcontrol(void);
 extern void func_log(void);
 extern void func_log10(void);
@@ -55,6 +56,7 @@ extern void func_wcstoul(void);
 extern void func_wctomb(void);
 #if defined(_M_IX86)
 extern void func___getmainargs(void);
+extern void func_libm_sse2_precise(void);
 #elif defined(_M_ARM)
 extern void func___rt_div(void);
 extern void func___fto64(void);
@@ -62,6 +64,7 @@ extern void func___64tof(void);
 #endif
 
 extern void func_CommandLine(void);
+extern void func_ExitFlush(void);
 extern void func_ieee(void);
 extern void func_popen(void);
 extern void func_splitpath(void);
@@ -99,6 +102,7 @@ const struct test winetest_testlist[] =
     { "exp", func_exp },
     { "fabs", func_fabs },
     { "floor", func_floor },
+    { "fmod", func_fmod },
     { "log", func_log },
     { "log10", func_log10 },
     { "mbstowcs", func_mbstowcs },
@@ -121,6 +125,7 @@ const struct test winetest_testlist[] =
 
 #if defined(_M_IX86)
     { "__getmainargs", func___getmainargs },
+    { "libm_sse2_precise", func_libm_sse2_precise },
 #elif defined(_M_AMD64)
     { "fpcontrol", func_fpcontrol },  // x86 / arm need fixing
 #elif defined(_M_ARM)
@@ -130,6 +135,7 @@ const struct test winetest_testlist[] =
 #endif
 
     { "CommandLine", func_CommandLine },
+    { "ExitFlush", func_ExitFlush },
     { "ieee", func_ieee },
     { "popen", func_popen },
     { "splitpath", func_splitpath },

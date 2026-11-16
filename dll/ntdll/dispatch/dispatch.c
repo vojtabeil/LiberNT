@@ -15,6 +15,12 @@
 #include <debug.h>
 
 typedef NTSTATUS (NTAPI *USER_CALL)(PVOID Argument, ULONG ArgumentLength);
+typedef VOID (NTAPI *WOW64_PREPARE_FOR_EXCEPTION)(PEXCEPTION_RECORD, PCONTEXT);
+
+/* AMD64 dispatches exceptions in assembly and defines this there. */
+#if defined(_M_ARM64) || defined(_M_RISCV64)
+PVOID LdrpWow64PrepareForException = NULL;
+#endif
 
 /* FUNCTIONS ****************************************************************/
 
@@ -23,13 +29,27 @@ typedef NTSTATUS (NTAPI *USER_CALL)(PVOID Argument, ULONG ArgumentLength);
  */
 VOID
 NTAPI
-KiUserExceptionDispatcher(PEXCEPTION_RECORD ExceptionRecord,
-                          PCONTEXT Context)
+KiUserExceptionDispatcherWorker(PEXCEPTION_RECORD ExceptionRecord,
+                                PCONTEXT Context)
 {
     EXCEPTION_RECORD NestedExceptionRecord;
     NTSTATUS Status;
 
     /* Dispatch the exception and check the result */
+#if defined(_M_ARM64) || defined(_M_RISCV64)
+    if (LdrpWow64PrepareForException != NULL)
+    {
+        ((WOW64_PREPARE_FOR_EXCEPTION)LdrpWow64PrepareForException)(ExceptionRecord, Context);
+    }
+#endif
+
+#if defined(_M_ARM64)
+    if (ChpeIsChpeProcess() && ChpeDispatchException(ExceptionRecord, Context))
+    {
+        Status = NtContinue(Context, FALSE);
+    }
+    else
+#endif
     if (RtlDispatchException(ExceptionRecord, Context))
     {
         /* Continue executing */
@@ -54,20 +74,22 @@ KiUserExceptionDispatcher(PEXCEPTION_RECORD ExceptionRecord,
 /*
  * @implemented
  */
-VOID
+NTSTATUS
 NTAPI
 KiRaiseUserExceptionDispatcher(VOID)
 {
     EXCEPTION_RECORD ExceptionRecord;
+    NTSTATUS ExceptionCode = ((PTEB)NtCurrentTeb())->ExceptionCode;
 
     /* Setup the exception record */
-    ExceptionRecord.ExceptionCode = ((PTEB)NtCurrentTeb())->ExceptionCode;
+    ExceptionRecord.ExceptionCode = ExceptionCode;
     ExceptionRecord.ExceptionFlags = 0;
     ExceptionRecord.ExceptionRecord = NULL;
     ExceptionRecord.NumberParameters = 0;
 
     /* Raise the exception */
     RtlRaiseException(&ExceptionRecord);
+    return ExceptionCode;
 }
 
 /*

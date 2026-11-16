@@ -207,6 +207,8 @@ GetFramebufferVideoData(
     _In_ PVOID ConfigurationData,
     _In_ ULONG ConfigurationDataLength)
 {
+    RtlZeroMemory(VideoConfigData, sizeof(*VideoConfigData));
+
     if (!ConfigurationData ||
         (ConfigurationDataLength < sizeof(CM_PARTIAL_RESOURCE_LIST)))
     {
@@ -246,15 +248,19 @@ GetFramebufferVideoData(
             *VideoRamSize = 0;
         }
 
-        if (Descriptor &&
-            (Descriptor->u.DeviceSpecificData.DataSize >= sizeof(CM_FRAMEBUF_DEVICE_DATA)))
+        if (Descriptor && (Descriptor->u.DeviceSpecificData.DataSize >= CM_FRAMEBUF_DEVICE_DATA_V3_SIZE))
         {
             /* NOTE: This descriptor *MUST* be the last one.
              * The actual device data follows the descriptor. */
             PCM_FRAMEBUF_DEVICE_DATA VideoData = (PCM_FRAMEBUF_DEVICE_DATA)(Descriptor + 1);
+            ULONG DataSize = min(Descriptor->u.DeviceSpecificData.DataSize, sizeof(*VideoConfigData));
 
-            /* Just copy the data */
-            *VideoConfigData = *VideoData;
+            /*
+             * Revision 3 producers do not have the trailing DPI member.
+             * Keep the zero default in that case and copy every field they
+             * did provide.
+             */
+            RtlCopyMemory(VideoConfigData, VideoData, DataSize);
 
             DPRINT_TRACE("**  FbBVid: Framebuffer at: 0x%I64X\n",
                 VideoRamAddress->QuadPart + VideoData->FrameBufferOffset);
@@ -450,6 +456,99 @@ GetArcComponentInterface(
     return Interface;
 }
 
+static BOOLEAN
+FindBootDisplayFromLoaderGop(
+    _Out_ PPHYSICAL_ADDRESS VideoRamAddress,
+    _Out_ PULONG VideoRamSize,
+    _Out_ PCM_FRAMEBUF_DEVICE_DATA VideoConfigData,
+    _Out_opt_ PINTERFACE_TYPE Interface,
+    _Out_opt_ PULONG BusNumber)
+{
+    PLOADER_PARAMETER_EXTENSION Extension;
+    PLOADER_PARAMETER_FRAMEBUFFER Framebuffer;
+    PLOADER_PARAMETER_FRAMEBUFFER_TRANSFORM Transform;
+    BOOLEAN TransformDimensionsValid;
+
+    if (!KeLoaderBlock || !KeLoaderBlock->Extension)
+        return FALSE;
+
+    Extension = KeLoaderBlock->Extension;
+    if (Extension->Size < RTL_SIZEOF_THROUGH_FIELD(LOADER_PARAMETER_EXTENSION, GopFramebuffer))
+    {
+        return FALSE;
+    }
+
+    Framebuffer = &Extension->GopFramebuffer;
+    if ((Framebuffer->FrameBufferBase.QuadPart == 0) ||
+        (Framebuffer->FrameBufferSize == 0) ||
+        (Framebuffer->HorizontalResolution == 0) ||
+        (Framebuffer->VerticalResolution == 0) ||
+        (Framebuffer->PixelsPerScanLine == 0) ||
+        (Framebuffer->PixelFormat == 0))
+    {
+        return FALSE;
+    }
+
+    VideoRamAddress->QuadPart = Framebuffer->FrameBufferBase.QuadPart;
+    *VideoRamSize = Framebuffer->FrameBufferSize;
+
+    RtlZeroMemory(VideoConfigData, sizeof(*VideoConfigData));
+    VideoConfigData->Version = 1;
+    VideoConfigData->Revision = 5;
+    VideoConfigData->FrameBufferOffset = 0;
+    VideoConfigData->ScreenWidth = Framebuffer->HorizontalResolution;
+    VideoConfigData->ScreenHeight = Framebuffer->VerticalResolution;
+    VideoConfigData->PixelsPerScanLine = Framebuffer->PixelsPerScanLine;
+    VideoConfigData->BitsPerPixel = Framebuffer->PixelFormat;
+    VideoConfigData->PixelMasks.RedMask = Framebuffer->RedMask;
+    VideoConfigData->PixelMasks.GreenMask = Framebuffer->GreenMask;
+    VideoConfigData->PixelMasks.BlueMask = Framebuffer->BlueMask;
+    VideoConfigData->PixelMasks.ReservedMask = Framebuffer->Reserved;
+    VideoConfigData->Dpi = Framebuffer->Dpi;
+    VideoConfigData->Rotation = LoaderFramebufferRotationIdentity;
+    VideoConfigData->LogicalWidth = Framebuffer->HorizontalResolution;
+    VideoConfigData->LogicalHeight = Framebuffer->VerticalResolution;
+
+    if (Extension->Size >=
+            RTL_SIZEOF_THROUGH_FIELD(LOADER_PARAMETER_EXTENSION,
+                                     GopFramebufferTransform))
+    {
+        Transform = &Extension->GopFramebufferTransform;
+        if ((Transform->Rotation == LoaderFramebufferRotation90) ||
+            (Transform->Rotation == LoaderFramebufferRotation270))
+        {
+            TransformDimensionsValid =
+                (Transform->LogicalWidth == Framebuffer->VerticalResolution) &&
+                (Transform->LogicalHeight == Framebuffer->HorizontalResolution);
+        }
+        else
+        {
+            TransformDimensionsValid =
+                (Transform->Rotation <= LoaderFramebufferRotation270) &&
+                (Transform->LogicalWidth == Framebuffer->HorizontalResolution) &&
+                (Transform->LogicalHeight == Framebuffer->VerticalResolution);
+        }
+
+        if ((Transform->Size >= sizeof(*Transform)) &&
+            (Transform->Version ==
+                LOADER_PARAMETER_FRAMEBUFFER_TRANSFORM_VERSION) &&
+            TransformDimensionsValid)
+        {
+            VideoConfigData->TransformFlags = Transform->Flags;
+            VideoConfigData->Rotation = Transform->Rotation;
+            VideoConfigData->LogicalWidth = Transform->LogicalWidth;
+            VideoConfigData->LogicalHeight = Transform->LogicalHeight;
+        }
+    }
+
+    if (Interface)
+        *Interface = Internal;
+    if (BusNumber)
+        *BusNumber = 0;
+
+    return TRUE;
+}
+
 static NTSTATUS
 FindBootDisplayFromLoaderARCTree(
     _Out_ PPHYSICAL_ADDRESS VideoRamAddress,
@@ -583,12 +682,44 @@ FindBootDisplay(
      * even if the caller does not require the monitor data itself
      * to be returned.
      */
-    Status = FindBootDisplayFromLoaderARCTree(VideoRamAddress,
-                                              VideoRamSize,
-                                              VideoConfigData,
-                                              &LocalMonitorConfigData,
-                                              &LocalInterface,
-                                              &LocalBusNumber);
+    if (FindBootDisplayFromLoaderGop(VideoRamAddress,
+                                     VideoRamSize,
+                                     VideoConfigData,
+                                     &LocalInterface,
+                                     &LocalBusNumber))
+    {
+        PHYSICAL_ADDRESS ArcVideoRamAddress;
+        ULONG ArcVideoRamSize;
+        CM_FRAMEBUF_DEVICE_DATA ArcVideoConfigData;
+
+        /*
+         * The Windows-compatible GOP loader extension carries framebuffer
+         * geometry, but not monitor timing or physical-size information.
+         * Keep using it as the authoritative scanout handoff, and augment it
+         * with the EDID-derived monitor node in the loader ARC tree.
+         */
+        if (NT_SUCCESS(FindBootDisplayFromLoaderARCTree(
+                           &ArcVideoRamAddress,
+                           &ArcVideoRamSize,
+                           &ArcVideoConfigData,
+                           &LocalMonitorConfigData,
+                           NULL,
+                           NULL)))
+        {
+            VideoConfigData->VideoClock = ArcVideoConfigData.VideoClock;
+        }
+
+        Status = STATUS_SUCCESS;
+    }
+    else
+    {
+        Status = FindBootDisplayFromLoaderARCTree(VideoRamAddress,
+                                                  VideoRamSize,
+                                                  VideoConfigData,
+                                                  &LocalMonitorConfigData,
+                                                  &LocalInterface,
+                                                  &LocalBusNumber);
+    }
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("Boot Display not found\n");
@@ -613,6 +744,7 @@ FindBootDisplay(
     DbgPrint("    ScreenHeight      : %lu\n", VideoConfigData->ScreenHeight);
     DbgPrint("    PixelsPerScanLine : %lu\n", VideoConfigData->PixelsPerScanLine);
     DbgPrint("    BitsPerPixel      : %lu\n", VideoConfigData->BitsPerPixel);
+    DbgPrint("    LogicalDpi        : %lu\n", VideoConfigData->Dpi);
     DbgPrint("    ARGB masks:       : %08x/%08x/%08x/%08x\n",
              VideoConfigData->PixelMasks.ReservedMask,
              VideoConfigData->PixelMasks.RedMask,

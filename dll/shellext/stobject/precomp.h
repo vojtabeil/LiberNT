@@ -13,6 +13,8 @@
 
 #include <windef.h>
 #include <winbase.h>
+#include <wingdi.h>
+#include <wincon.h>
 #include <shlguid_undoc.h>
 #include <shlobj.h>
 #include <strsafe.h>
@@ -21,6 +23,7 @@
 #include <atlwin.h>
 #include <atlstr.h>
 #include <setupapi.h>
+#include <reactos/trayicons.h>
 #include <shellapi.h>
 
 #include <wine/debug.h>
@@ -34,10 +37,12 @@ extern HINSTANCE g_hInstance;
 #define ID_ICON_HOTPLUG (WM_APP + 0x4CC)
 #define ID_ICON_POWER   (WM_APP + 0x4CD)
 #define ID_ICON_MOUSE   (WM_APP + 0x4CE)
+#define ID_ICON_BLUETOOTH (WM_APP + 0x4CF)
 
 #define POWER_SERVICE_FLAG    0x00000001
 #define HOTPLUG_SERVICE_FLAG  0x00000002
 #define VOLUME_SERVICE_FLAG   0x00000004
+#define BLUETOOTH_SERVICE_FLAG 0x10000000
 #define SKEYS_SERVICE_FLAG    0x20000000
 #define FKEYS_SERVICE_FLAG    0x40000000
 #define MOUSE_SERVICE_FLAG    0x80000000
@@ -79,6 +84,11 @@ extern HRESULT STDMETHODCALLTYPE Power_Shutdown(_In_ CSysTray * pSysTray);
 extern HRESULT STDMETHODCALLTYPE Power_Update(_In_ CSysTray * pSysTray);
 extern HRESULT STDMETHODCALLTYPE Power_Message(_In_ CSysTray * pSysTray, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT &lResult);
 
+extern HRESULT STDMETHODCALLTYPE Bluetooth_Init(_In_ CSysTray * pSysTray);
+extern HRESULT STDMETHODCALLTYPE Bluetooth_Shutdown(_In_ CSysTray * pSysTray);
+extern HRESULT STDMETHODCALLTYPE Bluetooth_Update(_In_ CSysTray * pSysTray);
+extern HRESULT STDMETHODCALLTYPE Bluetooth_Message(_In_ CSysTray * pSysTray, UINT uMsg, WPARAM wParam, LPARAM lParam, LRESULT &lResult);
+
 extern HRESULT STDMETHODCALLTYPE MouseKeys_Init(_In_ CSysTray * pSysTray);
 extern HRESULT STDMETHODCALLTYPE MouseKeys_Shutdown(_In_ CSysTray * pSysTray);
 extern HRESULT STDMETHODCALLTYPE MouseKeys_Update(_In_ CSysTray * pSysTray);
@@ -90,8 +100,8 @@ extern HRESULT STDMETHODCALLTYPE MouseKeys_Message(_In_ CSysTray * pSysTray, UIN
 
 #define POLL_TIMER_ID    1 // FIXME: Use callbacks instead of polling with this timer
 #define POWER_TIMER_ID   2
-#define VOLUME_TIMER_ID  3
 #define HOTPLUG_TIMER_ID 4
 #define HOTPLUG_DEVICE_TIMER_ID 5
+#define BLUETOOTH_TIMER_ID 6
 
 #endif /* _STOBJECT_PRECOMP_H_ */

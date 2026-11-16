@@ -59,13 +59,17 @@ list(APPEND UCRT_STRING_SOURCES
 
 # Special handling for GCC and Clang
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    list(APPEND UCRT_STRING_SOURCES
-        string/strnlen-avx2.cpp
-        string/strnlen-sse2.cpp
-    )
-
-    set_source_files_properties(string/strnlen-sse2.cpp PROPERTIES COMPILE_OPTIONS "-msse2")
-    set_source_files_properties(string/strnlen-avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2")
+    if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
+        list(APPEND UCRT_STRING_SOURCES
+            string/strnlen-avx2.cpp
+            string/strnlen-sse2.cpp
+        )
+        # Keep the unbounded SIMD tail loop from calling back into the wcslen dispatcher.
+        set_source_files_properties(string/strnlen-sse2.cpp PROPERTIES
+            COMPILE_OPTIONS "-msse2;-fno-builtin-wcslen")
+        set_source_files_properties(string/strnlen-avx2.cpp PROPERTIES
+            COMPILE_OPTIONS "-mavx2;-fno-builtin-wcslen")
+    endif()
 endif()
 
 if(${ARCH} STREQUAL "i386")
@@ -105,15 +109,36 @@ elseif(${ARCH} STREQUAL "amd64")
         string/strset.c
     )
 else()
-    if(${ARCH} STREQUAL "arm64")
+    if(ARCH STREQUAL "arm64" AND NOT ARM64EC_RUNTIME)
         list(APPEND UCRT_STRING_ASM_SOURCES
-            string/arm64/strlen.s
-            string/arm64/wcslen.s
-    )
+            ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/arm64/strcpy.S
+            ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/arm64/strlen.S
+            ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/arm64/strnlen.S
+            ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/arm64/wcsnlen.S
+            string/arm64/strcmp_simd.S
+            string/arm64/strncmp_simd.S
+            string/arm64/wcscmp_simd.S
+        )
+        list(APPEND UCRT_STRING_SOURCES
+            ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/arm64/strcopy.c
+            string/arm64/strcmp.c
+        )
+        if(MSVC)
+            set_source_files_properties(
+                ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/arm64/strcopy.c
+                string/arm64/strcmp.c
+                PROPERTIES COMPILE_OPTIONS /Oi-)
+        endif()
     else()
         list(APPEND UCRT_STRING_SOURCES
             string/arm/strlen.c
         )
+        if(${ARCH} STREQUAL "arm64")
+            list(APPEND UCRT_STRING_SOURCES
+                string/arm64/strnlen.c
+                string/arm64/wcslen.c
+            )
+        endif()
     endif()
     list(APPEND UCRT_STRING_SOURCES
         string/memccpy.c
@@ -129,6 +154,21 @@ else()
         string/strset.c
         string/strspn.c
     )
+    if(ARCH STREQUAL "arm64" AND NOT ARM64EC_RUNTIME)
+        list(REMOVE_ITEM UCRT_STRING_SOURCES
+            string/strcat.c
+            string/strcmp.c
+            string/strncat.c
+            string/strncmp.c
+            string/strncpy.c
+            string/wcscat.cpp
+            string/wcscmp.cpp
+            string/wcscpy.cpp
+            string/wcsncat.cpp
+            string/wcsncmp.cpp
+            string/wcsncpy.cpp
+        )
+    endif()
 endif()
 
 add_asm_files(UCRT_STRING_ASM ${UCRT_STRING_ASM_SOURCES})

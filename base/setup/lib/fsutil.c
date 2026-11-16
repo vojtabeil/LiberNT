@@ -22,9 +22,8 @@
 #include "fsutil.h"
 
 #include <fslib/vfatlib.h>
-#include <fslib/btrfslib.h>
+#include <fslib/ntfslib.h>
 // #include <fslib/ext2lib.h>
-// #include <fslib/ntfslib.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -32,7 +31,7 @@
 
 /* TYPEDEFS *****************************************************************/
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 typedef struct _FAT_BOOTSECTOR
 {
     UCHAR       JumpBoot[3];                // Jump instruction to boot code
@@ -142,7 +141,7 @@ C_ASSERT(sizeof(NTFS_BOOTSECTOR) == NTFS_BOOTSECTOR_SIZE);
 
 // TODO: Add more bootsector structures!
 
-#include <poppack.h>
+#pragma pack(pop)
 
 
 /* LOCALS *******************************************************************/
@@ -162,11 +161,11 @@ static FILE_SYSTEM RegisteredFileSystems[] =
      * determine whether to use FAT12/16 or FAT32. */
     { L"FAT"  , VfatFormat, VfatChkdsk },
     { L"FAT32", VfatFormat, VfatChkdsk },
+    /* NOTE: NtfsChkdsk is still a stub; only formatting is implemented. */
+    { L"NTFS" , NtfsFormat, NtfsChkdsk },
 #if 0
     { L"FATX" , VfatxFormat, VfatxChkdsk },
-    { L"NTFS" , NtfsFormat, NtfsChkdsk },
 #endif
-    { L"BTRFS", BtrfsFormat, BtrfsChkdsk },
 #if 0
     { L"EXT2" , Ext2Format, Ext2Chkdsk },
     { L"EXT3" , Ext2Format, Ext2Chkdsk },

@@ -406,7 +406,11 @@ CNSCBand::_GetItemEnum(
         if (!pItemData && hItem == TVI_ROOT && !_WantsRootItem())
             hr = psfDesktop->BindToObject(m_pidlRoot, NULL, IID_PPV_ARG(IShellFolder, ppFolder));
         else
+        {
+            if (!pItemData)
+                return E_INVALIDARG;
             hr = psfDesktop->BindToObject(pItemData->absolutePidl, NULL, IID_PPV_ARG(IShellFolder, ppFolder));
+        }
         if (FAILED_UNEXPECTEDLY(hr))
             return hr;
     }
@@ -702,14 +706,14 @@ LRESULT CNSCBand::OnSize(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled
 LRESULT CNSCBand::OnSetFocus(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled)
 {
     m_bFocused = TRUE;
-    IUnknown_OnFocusChangeIS(m_pSite, reinterpret_cast<IUnknown*>(this), TRUE);
+    IUnknown_OnFocusChangeIS(m_pSite, static_cast<IDeskBand*>(this), TRUE);
     bHandled = FALSE;
     return 0;
 }
 
 LRESULT CNSCBand::OnKillFocus(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL &bHandled)
 {
-    IUnknown_OnFocusChangeIS(m_pSite, reinterpret_cast<IUnknown*>(this), FALSE);
+    IUnknown_OnFocusChangeIS(m_pSite, static_cast<IDeskBand*>(this), FALSE);
     m_bFocused = FALSE;
     return 0;
 }
@@ -1400,15 +1404,24 @@ STDMETHODIMP CNSCBand::HasFocusIO()
 STDMETHODIMP CNSCBand::TranslateAcceleratorIO(LPMSG lpMsg)
 {
     BOOL SkipAccelerators = m_isEditing || (!IsChild(lpMsg->hwnd) && lpMsg->hwnd != m_hWnd);
-    if (lpMsg->message == WM_KEYDOWN && lpMsg->wParam == VK_F2 && !SkipAccelerators)
+    if (lpMsg->message == WM_KEYDOWN && !SkipAccelerators)
     {
         if (HTREEITEM hItem = m_hwndTreeView.GetNextItem(NULL, TVGN_CARET))
         {
-            if (_GetAttributesOfItem(_GetItemData(hItem), SFGAO_CANRENAME))
+            CItemData *pItem = _GetItemData(hItem);
+            if (lpMsg->wParam == VK_F2 && _GetAttributesOfItem(pItem, SFGAO_CANRENAME))
             {
                 m_hwndTreeView.SetFocus();
                 m_hwndTreeView.EditLabel(hItem);
                 return S_OK;
+            }
+            if (lpMsg->wParam == VK_DELETE && _GetAttributesOfItem(pItem, SFGAO_CANDELETE))
+            {
+                CComPtr<IShellFolder> pFolder;
+                LPCITEMIDLIST pidlChild;
+                if (FAILED(SHBindToParent(pItem->absolutePidl, IID_PPV_ARG(IShellFolder, &pFolder), &pidlChild)))
+                    return S_FALSE;
+                return SHInvokeCommand(m_hWnd, pFolder, pidlChild, "delete");
             }
         }
     }

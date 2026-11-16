@@ -24,14 +24,11 @@
 #include "objbase.h"
 #include "rpcproxy.h"
 
-static HINSTANCE instance;
-
 BOOL WINAPI DllMain(HINSTANCE hinstance, DWORD reason, LPVOID reserved)
 {
     switch (reason)
     {
     case DLL_PROCESS_ATTACH:
-        instance = hinstance;
         DisableThreadLibraryCalls(hinstance);
         break;
     }
@@ -51,7 +48,7 @@ HRESULT WINAPI DllCanUnloadNow(void)
  */
 HRESULT WINAPI DllRegisterServer(void)
 {
-    return __wine_register_resources( instance );
+    return __wine_register_resources();
 }
 
 /***********************************************************************
@@ -59,5 +56,5 @@ HRESULT WINAPI DllRegisterServer(void)
  */
 HRESULT WINAPI DllUnregisterServer(void)
 {
-    return __wine_unregister_resources( instance );
+    return __wine_unregister_resources();
 }

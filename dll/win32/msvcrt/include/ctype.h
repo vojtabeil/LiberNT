@@ -8,7 +8,7 @@
 #ifndef __WINE_CTYPE_H
 #define __WINE_CTYPE_H
 
-#include <corecrt_wctype.h>
+#include "corecrt_wctype.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -49,6 +49,13 @@ _ACRTIMP int __cdecl isupper(int);
 _ACRTIMP int __cdecl isxdigit(int);
 _ACRTIMP int __cdecl tolower(int);
 _ACRTIMP int __cdecl toupper(int);
+
+#ifndef MB_CUR_MAX
+_ACRTIMP int             __cdecl ___mb_cur_max_func(void);
+_ACRTIMP int             __cdecl ___mb_cur_max_l_func(_locale_t);
+#define __mb_cur_max             ___mb_cur_max_func()
+#define MB_CUR_MAX               ___mb_cur_max_func()
+#endif /* MB_CUR_MAX */
 
 #ifdef __cplusplus
 }

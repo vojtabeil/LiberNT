@@ -120,7 +120,7 @@ HRESULT STDMETHODCALLTYPE  CMenuBand::SetMenu(
     HWND hwnd,
     DWORD dwFlags)
 {
-    HRESULT hr;
+    HRESULT hr = E_FAIL;
 
     TRACE("CMenuBand::SetMenu called, hmenu=%p; hwnd=%p, flags=%x\n", hmenu, hwnd, dwFlags);
 
@@ -148,7 +148,7 @@ HRESULT STDMETHODCALLTYPE  CMenuBand::SetMenu(
             return hr;
     }
 
-    if (m_site)
+    if (m_site && m_staticToolbar)
     {
         HWND hwndParent;
 
@@ -391,6 +391,7 @@ HRESULT STDMETHODCALLTYPE  CMenuBand::GetBandInfo(
 HRESULT STDMETHODCALLTYPE  CMenuBand::ShowDW(BOOL fShow)
 {
     HRESULT hr = S_OK;
+    HRESULT hrInitMenu = S_OK;
 
     if (m_Show == fShow)
         return S_OK;
@@ -416,6 +417,7 @@ HRESULT STDMETHODCALLTYPE  CMenuBand::ShowDW(BOOL fShow)
         hr = _CallCB(SMC_INITMENU, 0, 0);
         if (FAILED_UNEXPECTEDLY(hr))
             return hr;
+        hrInitMenu = hr;
     }
     else if (m_parentBand)
     {
@@ -437,7 +439,7 @@ HRESULT STDMETHODCALLTYPE  CMenuBand::ShowDW(BOOL fShow)
             hr = m_focusManager->PopMenuBar(this);
     }
 
-    return S_OK;
+    return hrInitMenu;
 }
 
 HRESULT STDMETHODCALLTYPE CMenuBand::CloseDW(DWORD dwReserved)
@@ -769,20 +771,21 @@ HRESULT STDMETHODCALLTYPE CMenuBand::IsWindowOwner(HWND hWnd)
 
 HRESULT CMenuBand::_CallCBWithItemId(UINT id, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-    return _CallCB(uMsg, wParam, lParam, id);
+    return _CallCB(uMsg, wParam, lParam, id, NULL, SMDM_HMENU);
 }
 
 HRESULT CMenuBand::_CallCBWithItemPidl(LPITEMIDLIST pidl, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-    return _CallCB(uMsg, wParam, lParam, 0, pidl);
+    return _CallCB(uMsg, wParam, lParam, 0, pidl, SMDM_SHELLFOLDER);
 }
 
-HRESULT CMenuBand::_CallCB(UINT uMsg, WPARAM wParam, LPARAM lParam, UINT id, LPITEMIDLIST pidl)
+HRESULT CMenuBand::_CallCB(UINT uMsg, WPARAM wParam, LPARAM lParam, UINT id, LPITEMIDLIST pidl, DWORD dwMask)
 {
     if (!m_psmc)
         return S_FALSE;
 
     SMDATA smData = { 0 };
+    smData.dwMask = dwMask;
     smData.punk = static_cast<IShellMenu2*>(this);
     smData.uId = id;
     smData.uIdParent = m_uId;
@@ -1226,48 +1229,6 @@ HRESULT STDMETHODCALLTYPE CMenuBand::SetNoBorder(THIS)
 }
 
 HRESULT STDMETHODCALLTYPE CMenuBand::SetTheme(THIS)
-{
-    UNIMPLEMENTED;
-    return S_OK;
-}
-
-HRESULT STDMETHODCALLTYPE CMenuBand::GetTop(THIS)
-{
-    UNIMPLEMENTED;
-    return S_OK;
-}
-
-HRESULT STDMETHODCALLTYPE CMenuBand::GetBottom(THIS)
-{
-    UNIMPLEMENTED;
-    return S_OK;
-}
-
-HRESULT STDMETHODCALLTYPE CMenuBand::GetTracked(THIS)
-{
-    UNIMPLEMENTED;
-    return S_OK;
-}
-
-HRESULT STDMETHODCALLTYPE CMenuBand::GetParentSite(THIS)
-{
-    UNIMPLEMENTED;
-    return S_OK;
-}
-
-HRESULT STDMETHODCALLTYPE CMenuBand::GetState(THIS)
-{
-    UNIMPLEMENTED;
-    return S_OK;
-}
-
-HRESULT STDMETHODCALLTYPE CMenuBand::DoDefaultAction(THIS)
-{
-    UNIMPLEMENTED;
-    return S_OK;
-}
-
-HRESULT STDMETHODCALLTYPE CMenuBand::IsEmpty(THIS)
 {
     UNIMPLEMENTED;
     return S_OK;

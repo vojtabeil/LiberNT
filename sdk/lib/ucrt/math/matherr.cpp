@@ -88,3 +88,52 @@ _invoke_matherr(
     excpt.retval = retval;
     return __acrt_invoke_user_matherr(&excpt);
 }
+
+extern "C"
+double
+__cdecl
+__acrt_report_math_error(
+    int type,
+    char const* name,
+    double arg1,
+    double arg2,
+    double retval,
+    int error)
+{
+    struct _exception excpt;
+    excpt.type = type;
+    excpt.name = const_cast<char*>(name);
+    excpt.arg1 = arg1;
+    excpt.arg2 = arg2;
+    excpt.retval = retval;
+
+    if (type && __acrt_invoke_user_matherr(&excpt))
+        return excpt.retval;
+
+    if (error && type != _UNDERFLOW)
+        errno = error;
+
+    return excpt.retval;
+}
+
+extern "C"
+double
+__cdecl
+__acrt_math_error(
+    int type,
+    char const* name,
+    double arg1,
+    double arg2,
+    double retval)
+{
+    UNREFERENCED_PARAMETER(name);
+    UNREFERENCED_PARAMETER(arg1);
+    UNREFERENCED_PARAMETER(arg2);
+
+    if (type == _DOMAIN)
+        errno = EDOM;
+    else if (type == _SING || type == _OVERFLOW)
+        errno = ERANGE;
+
+    return retval;
+}

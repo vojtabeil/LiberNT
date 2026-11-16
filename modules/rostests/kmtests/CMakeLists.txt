@@ -1,5 +1,7 @@
 
-include_directories(include)
+include_directories(
+    include
+    ${REACTOS_SOURCE_DIR}/sdk/include/reactos/drivers)
 
 #
 # subdirectories containing special-purpose drivers
@@ -8,23 +10,52 @@ add_subdirectory(example)
 add_subdirectory(fltmgr)
 add_subdirectory(hidparse)
 add_subdirectory(kernel32)
+add_subdirectory(ndis)
+add_subdirectory(ntfs)
 add_subdirectory(ntos_cc)
+add_subdirectory(ntos_cm)
 add_subdirectory(ntos_io)
 add_subdirectory(ntos_mm)
 add_subdirectory(ntos_po)
+add_subdirectory(ntos_ps)
 add_subdirectory(tcpip)
+add_subdirectory(netio)
+add_subdirectory(wfp)
 
 list(APPEND COMMON_SOURCE
     example/GuardedMemory.c
     rtl/RtlAvlTree.c
     rtl/RtlException.c
+    rtl/RtlGetVersion.c
     ../apitests/rtl/RtlIntSafe.c
     rtl/RtlMemory.c
     rtl/RtlRegistry.c
+    rtl/RtlSehUnwind.c
     rtl/RtlSplayTree.c
     rtl/RtlStack.c
     rtl/RtlStrSafe.c
     rtl/RtlUnicodeString.c)
+
+# These tests depend on compiler behavior rather than a particular target ISA.
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    # Plain faulting loads and stores must remain covered by native SEH scopes.
+    if(NOT USE_DUMMY_PSEH)
+        set_property(SOURCE
+            ntos_mm/MmMapLockedPagesSpecifyCache_user.c
+            ntos_mm/NtUserPhysicalPages.c
+            rtl/RtlException.c
+            APPEND PROPERTY COMPILE_OPTIONS -Xclang -fasync-exceptions)
+    endif()
+
+    # Preserve every noinline helper in the stack-walk chain.
+    set_property(SOURCE rtl/RtlStack.c APPEND PROPERTY COMPILE_OPTIONS -fno-optimize-sibling-calls)
+
+    # This test snapshots nonvolatile registers around compiler intrinsics.
+    # Optimization may use those registers for the surrounding test itself.
+    if(NOT ARCH STREQUAL "i386")
+        set_property(SOURCE ntos_ex/ExInterlocked.c APPEND PROPERTY COMPILE_OPTIONS -O0)
+    endif()
+endif()
 
 if(ARCH STREQUAL "i386")
 
@@ -46,9 +77,61 @@ list(APPEND KMTEST_DRV_SOURCE
     kmtest_drv/testlist.c
     kmtest_drv/vm_detect.c
 
+    directx/DxgkDeviceWork.c
+    directx/DxgkHotPlugWork.c
+    directx/DxgkChildDescriptor.c
+    directx/DxgkPostDisplayHandoff.c
+    directx/DxgkPresentUserSource.c
+    directx/MonitorBrightnessKey.c
+    directx/DxgkGpuVaAddress.c
+    directx/DxgkGpuVaPageTable.c
+    directx/DxgkGpuVaPte.c
+    directx/DxgkFenceOrdering.c
+    directx/DxgkMonitoredFence.c
+    directx/DxgkPeriodicFence.c
+    directx/DxgkPagingOperation.c
+    directx/DxgkPagingMultipass.c
+    directx/DxgkResidencyBudget.c
+    directx/DxgkResidencyReference.c
+    directx/DxgkOfferReclaim.c
+    directx/DxgkAllocationList.c
+    directx/DxgkPatchLocation.c
+    directx/DxgkDmaRing.c
+    directx/DxgkVidPnTopology.c
+    directx/DxgkVidPnModeSet.c
+    directx/DxgkFlipQueue.c
+    directx/DxgkHandleTable.c
+    directx/DxgkAdapterCaps.c
+    directx/DxgkNodeAffinity.c
+    directx/DxgkNodeStatistics.c
+    directx/DxgkTdrPolicy.c
+    directx/DxgkKeyedMutex.c
+    directx/DxgkFenceConcurrency.c
+    directx/DxgkGpuFaultPolicy.c
+    directx/DxgkCoreConcurrency.c
+    directx/DxgkContextSync.c
+    directx/DxgkPresentQueue.c
+    directx/DxgkVsyncPower.c
+    directx/Rpi5Vc4Pointer.c
+    directx/DxgkSyncWait.c
+    directx/DxgkTrackedWork.c
+    directx/DxgkVidMmWorkerDrain.c
+    directx/DxgkrnlPublicExports.c
+    directx/Dxgmms2ContextStream.c
+    directx/Dxgmms2Scheduler.c
+    directx/Dxgmms2Timeline.c
+    directx/Dxgmms2VidMm.c
     example/Example.c
     example/KernelType.c
+    hal/HalBusData.c
+    hal/HalDmaAlignment.c
+    hal/HalRealTimeClock.c
     hal/HalSystemInfo.c
+    ndis/NdisIfProvider.c
+    ndis/NdisRwLock.c
+    ndis/NdisProcessorGroup.c
+    ndis/NdisLegacyHelpers.c
+    ndis/NdisMiniportCharacteristics.c
     npfs/NpfsConnect.c
     npfs/NpfsCreate.c
     npfs/NpfsFileInfo.c
@@ -56,85 +139,462 @@ list(APPEND KMTEST_DRV_SOURCE
     npfs/NpfsReadWrite.c
     npfs/NpfsVolumeInfo.c
     novp_fsrtl/FsRtlRemoveDotsFromPath.c
+    ntos_cc/CcLazyWriter.c
+    ntos_cm/CmBootFlush.c
+    ntos_cm/CmCallbacks.c
+    ntos_cm/CmKeyKM.c
     ntos_cm/CmSecurity.c
+    ntos_cm/CmTransactions.c
+    ntos_etw/EtwRegisterKM.c
+    ntos_etw/EtwSessionKM.c
+    ntos_wmi/PcwKM.c
+    ntos_wmi/WmiEventKM.c
     ntos_ex/ExCallback.c
+    ntos_ex/ExCallbackExtra.c
     ntos_ex/ExDoubleList.c
     ntos_ex/ExFastMutex.c
+    ntos_ex/ExFastMutexExtra.c
     ntos_ex/ExHardError.c
     ntos_ex/ExInterlocked.c
+    ntos_ex/ExLookaside.c
+    ntos_ex/ExPoolExtra.c
+    ntos_ex/ExPoolBench.c
+    ntos_ex/ExPool2.c
     ntos_ex/ExPools.c
     ntos_ex/ExPushLock.c
     ntos_ex/ExResource.c
+    ntos_ex/ExResourceDeleteHeld.c
+    ntos_ex/ExResourceBoost.c
+    ntos_ex/ExResourceExtra.c
+    ntos_ex/ExRundown.c
     ntos_ex/ExSequencedList.c
+    ntos_ex/ExTimeZone.c
     ntos_ex/ExSingleList.c
+    ntos_ex/ExSystemInformation.c
+    ntos_ex/ExSystemTimeCallback.c
     ntos_ex/ExTimer.c
+    ntos_ex/ExTimerExtra.c
+    ntos_ex/InbvVirtualFrameBuffer.c
     ntos_ex/ExUuid.c
+    ntos_ex/ExWorkItem.c
+    ntos_ex/ExHeadless.c
+    ntos_ex/ExLicenseDif.c
+    ntos_ex/ExWddm.c
     ntos_fsrtl/FsRtlDissect.c
     ntos_fsrtl/FsRtlExpression.c
     ntos_fsrtl/FsRtlLegal.c
     ntos_fsrtl/FsRtlMcb.c
+    ntos_fsrtl/FsRtlPerFileObjectContext.c
+    ntos_fsrtl/FsRtlQueryFileLock.c
     ntos_fsrtl/FsRtlTunnel.c
+    ntos_io/IoDevicePropertyData.c
+    ntos_io/IoBuildIoctlKM.c
+    ntos_io/IoLargeMemoryResource.c
+    ntos_io/IoArbiter.c
+    ntos_io/IoCancelKM.c
+    ntos_io/IoCloseIrqlKM.c
+    ntos_io/IoContainerId.c
+    ntos_io/IoCreateDeviceSecure.c
+    ntos_io/IoDeleteDeviceName.c
+    ntos_io/IoReadPartitionTable.c
+    ntos_io/IoPciMessageEnable.c
+    ntos_io/IoPagingIrpRetire.c
     ntos_io/IoCreateFile.c
+    ntos_io/IoCreateFileAccessCheck.c
+    ntos_io/IoCreateSystemThread.c
+    ntos_io/IoCsqKM.c
+    ntos_io/IoCustomTargetEvent.c
     ntos_io/IoDeviceInterface.c
+    ntos_io/IoDeviceTextProperties.c
+    ntos_io/IoDeviceSecurity.c
+    ntos_io/IoDriverKey.c
+    ntos_io/IoDriverSection.c
+    ntos_io/IoGetRequestorProcess.c
     ntos_io/IoEvent.c
+    ntos_io/IoInterfaceOrder.c
+    ntos_io/IoResourceSearch.c
+    ntos_io/IoMessageInterruptClaim.c
+    ntos_io/IoCreateDriverContext.c
+    ntos_io/PciLineInterrupt.c
+    ntos_io/IoStorageDumpPath.c
     ntos_io/IoFilesystem.c
     ntos_io/IoInterrupt.c
+    ntos_io/IoIommu.c
     ntos_io/IoIrp.c
+    ntos_io/IoWaitCompletionPacket.c
+    ntos_io/IoSafeBootPolicy.c
+    ntos_io/IoStackKM.c
+    ntos_io/IoActivityId.c
+    ntos_io/IoAcpiIoctl.c
+    ntos_io/IoPciPdoPnp.c
+    ntos_io/IoRamdiskPnp.c
+    ntos_io/IoAcpiCmosRegion.c
+    ntos_io/IoI8042Sync.c
+    ntos_io/IoErrorLogEntry.c
+    ntos_io/IoPciD3Cold.c
+    ntos_io/IoPciDeviceReset.c
+    ntos_io/IoPciExpressInterfaces.c
+    ntos_io/IoPciEnumeration.c
+    ntos_io/IoPciRom.c
+    ntos_io/IoStackLimits.c
+    ntos_io/IoVpb.c
     ntos_io/IoMdl.c
+    ntos_io/IoModern.c
+    ntos_io/IoNullDeviceKM.c
     ntos_io/IoVolume.c
+    ntos_io/IoWmiAcpi.c
+    ntos_io/ZwWriteFileAppend.c
+    ntos_kd/KdBootLog.c
+    ntos_kd/KdBreakContinue.c
+    ntos_kd/KdTimeSlipEvent.c
+    ntos_kd/KdbCliCommands.c
+    ntos_kd/KdbContextCommands.c
+    ntos_kd/KdbDeviceCommands.c
+    ntos_kd/KdbLocks.c
+    ntos_kd/KdbMemoryCommands.c
+    ntos_kd/KdbObjectCommands.c
+    ntos_kd/KdbSchedulerCommands.c
+    ntos_kd/KdbSystemBreak.c
+    ntos_kd/KdShutdownCrash.c
+    ntos_kd/KdbThreadApc.c
+    ntos_kd/KdChangeOption.c
+    ntos_kd/KdDebuggerPresent.c
+    ntos_kd/KdPrintComponent.c
+    ntos_kd/KdPrintStatus.c
     ntos_kd/KdSystemDebugControl.c
+    ntos_kd/KdUsbNetRules.c
+    ksecdd/KsecBcrypt.c
+    ntos_ke/KeDpcWatchdog.c
+    ntos_ke/KeWddmExports.c
+    ntos_ke/KeAffinityKM.c
     ntos_ke/KeApc.c
+    ntos_ke/KeApcInject.c
+    ntos_ke/KeApcScheduling.c
+    ntos_ke/KeApcDpcTransitions.c
+    ntos_ke/KeDeferredReady.c
+    ntos_ke/KeIdleSteal.c
+    ntos_ke/KeBadInstructionPointer.c
+    ntos_ke/KeKernelStackOverflow.c
+    ntos_ke/KeBugCheckCbKM.c
+    ntos_ke/KeBugCheckStop.c
+    ntos_ke/KeSystemThreadException.c
+    ntos_ke/KeUnhandledException.c
     ntos_ke/KeDevQueue.c
+    ntos_ke/KeCriticalRegionKM.c
     ntos_ke/KeDpc.c
+    ntos_ke/KeDpcFlush.c
+    ntos_ke/KeDpcReadyThread.c
+    ntos_ke/KeDpcRemove.c
     ntos_ke/KeEvent.c
+    ntos_ke/KeExpandKernelStack.c
     ntos_ke/KeFloatPointState.c
     ntos_ke/KeGuardedMutex.c
+    ntos_ke/KeIpiKM.c
     ntos_ke/KeIrql.c
+    ntos_ke/KeCacheInvalidation.c
+    ntos_ke/KeClockKeepAlive.c
+    ntos_ke/KeClockWatchdog.c
+    ntos_ke/KeModern.c
     ntos_ke/KeMutex.c
+    ntos_ke/KePcr.c
+    ntos_ke/KeQueue.c
+    ntos_ke/KeProcessStackCount.c
+    ntos_ke/KeQueryBasePriority.c
     ntos_ke/KeProcessor.c
+    ntos_ke/KePriorityRaise.c
+    ntos_ke/KeQuantumEnd.c
+    ntos_ke/KeSemaphore.c
     ntos_ke/KeSpinLock.c
+    ntos_ke/KeThreadedDpc.c
+    ntos_ke/KeTime.c
     ntos_ke/KeTimer.c
+    ntos_ke/KeTimer2KM.c
+    ntos_ke/KeWaitMultiple.c
+    ntos_mm/MmAllocateContiguousNode.c
+    ntos_mm/MmContiguousCacheTypes.c
+    ntos_mm/MmDriverMemory.c
+    ntos_mm/MmMemoryNotification.c
     ntos_mm/MmMdl.c
+    ntos_mm/MmMdlDispatch.c
+    ntos_mm/MmLargePages.c
+    ntos_mm/MmLoaderBlock.c
+    ntos_mm/MmMapReserve.c
+    ntos_mm/MmPhysical.c
+    ntos_mm/MmPrefetchPages.c
     ntos_mm/MmReservedMapping.c
+    ntos_mm/MmSelfMap.c
+    ntos_mm/MmUserLayout.c
+    ntos_mm/MmSecureKM.c
     ntos_mm/MmSection.c
+    ntos_mm/MmSystemViewCache.c
+    ntos_mm/MmWddm.c
+    ntos_mm/MmPhysicalAddressRace.c
     ntos_mm/ZwAllocateVirtualMemory.c
+    ntos_zw/ZwDuplicateKM.c
+    ntos_zw/ZwFileKM.c
+    ntos_zw/ZwSystemInfoKM.c
     ntos_mm/ZwCreateSection.c
     ntos_mm/ZwMapViewOfSection.c
+    ntos_ob/ObCallbacks.c
     ntos_ob/ObHandle.c
+    ntos_ob/ObOpenByPointer.c
     ntos_ob/ObQuery.c
     ntos_ob/ObReference.c
+    ntos_ob/ObSdCache.c
     ntos_ob/ObSecurity.c
+    ntos_ob/ObSecurityMethod.c
+    ntos_ob/ObSecurityDescKM.c
     ntos_ob/ObSymbolicLink.c
     ntos_ob/ObType.cpp
     ntos_ob/ObTypes.cpp
     ntos_ob/ObWait.c
+    smclib/SmcLib.c
+    ntos_po/PoDisplayState.c
+    ntos_po/PoSleepInformation.c
+    ntos_po/PoBatteryState.c
+    ntos_po/PoFxState.c
+    ntos_po/PoFxState_pnp.c
+    ntos_po/PoPowerButton.c
+    ntos_po/PoSettingSession.c
+    ntos_po/PoPowerLimit.c
+    ntos_po/PoPowerSettings.c
+    ntos_po/PoProcessorStateHandler.c
+    ntos_po/PoKernelPowerRequest.c
+    ntos_po/PoLockConsoleOnWake.c
     ntos_ps/PsNotify.c
+    ntos_ps/PsNotifyKM.c
+    ntos_ps/PsEnergy.c
+    ntos_ps/PsTls.c
+    ntos_kse/Kse.c
+    ntos_ps/PsProperty.c
+    ntos_ps/PsModern.c
+    ntos_ps/PsWddm.c
+    ntos_ps/PsProcessInfo.c
     ntos_ps/PsQuota.c
+    ntos_ps/PsGetVersion.c
+    ntos_ps/PsSystemThread.c
+    ntos_ps/PsPico.c
+    ntos_ps/PsJobCommit.c
+    ntos_se/SeAccessCheck.c
     ntos_se/SeHelpers.c
     ntos_se/SeInheritance.c
     ntos_se/SeLogonSession.c
+    ntos_se/SeSddl.c
     ntos_se/SeQueryInfoToken.c
     ntos_se/SeTokenFiltering.c
+    ntos_se/SeAccessState.c
+    ntos_se/SePrimaryTokenRelease.c
+    ntos_tm/TmTransactions.c
+    rtl/RtlBitmapKM.c
+    rtl/RtlBitmapEx.c
+    rtl/RtlAtomEx.c
+    rtl/RtlGenericTableKM.c
+    rtl/RtlTableElementKM.c
+    rtl/RtlGuidKM.c
+    rtl/RtlImageKM.c
+    rtl/RtlHashTableKM.c
+    rtl/RtlTimeKM.c
     rtl/RtlIsValidOemCharacter.c
+    rtl/RtlModern.c
+    rtl/RtlRandomKM.c
     rtl/RtlRangeList.c
+    rtl/RtlCmResource.c
+    rtl/RtlNameTablesKM.c
+    rtl/RtlStringSupportKM.c
+    win32ss/CddDisplay.c
     ${COMMON_SOURCE}
 
+    ${REACTOS_SOURCE_DIR}/drivers/bus/acpi/cmos_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/input/i8042prt/sync_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/gpuva_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/adapter_map_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/adapter_start_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/child_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/fence_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/node_stats_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/dma_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/residency_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/paging_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/feature_query_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/display_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/object_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/keyedmutex_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/device_work_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/present_queue_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/submit_reservation_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/context_sync_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/sync_wait_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/tracked_work_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl/vidmm_worker_drain_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgmms2/context_stream_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgmms2/scheduler_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgmms2/timeline_core.c
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgmms2/vidmm_core.c
     kmtest_drv/kmtest_drv.rc)
+
+if(REACTOS_USE_WDDM)
+    list(APPEND KMTEST_DRV_SOURCE
+        directx/DxgkWddmAbi.c
+        directx/SoftGpu2DPolicy.c
+        directx/SoftGpuVidPnPolicy.c
+        directx/SoftGpuSlabHandoff.c
+        directx/SoftGpuVsyncPolicy.c)
+    set(KMTEST_DXGK_WDDM_ABI TRUE)
+    set(KMTEST_SOFTGPU_2D_POLICY TRUE)
+    set(KMTEST_SOFTGPU_VIDPN_POLICY TRUE)
+    set(KMTEST_SOFTGPU_VSYNC_POLICY TRUE)
+endif()
+
+if(REACTOS_USE_WDDM AND (REACTOS_WDDM_TARGET_LEVEL GREATER_EQUAL 2000))
+    list(APPEND KMTEST_DRV_SOURCE directx/SoftGpuGpuVaIsolation.c)
+    set(KMTEST_SOFTGPU_GPUVA_ISOLATION TRUE)
+endif()
+
+if(ENABLE_KERNEL_UBSAN)
+    list(APPEND KMTEST_DRV_SOURCE kubsan/KubsanHandlers.c)
+endif()
+
+if(ARCH STREQUAL "amd64")
+    list(APPEND KMTEST_DRV_SOURCE ntos_ke/amd64/KeSwitchHandoff.c ntos_ke/amd64/KeTrapDebugRegisters.c ntos_ke/amd64/KeTrapFilterX87.c ntos_ke/amd64/KeXState.c)
+endif()
 
 if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
     add_asm_files(KMTEST_DRV_ASM
         kmtest_drv/vm_detect.S)
     list(APPEND KMTEST_DRV_SOURCE
         ${KMTEST_DRV_ASM}
-        hal/HalPortIo.c)
+        hal/HalMessageState.c
+        hal/HalPortIo.c
+        ntos_io/IoTimerKM.c)
+endif()
+
+if(ARCH STREQUAL "arm64")
+    add_asm_files(KMTEST_ARM64_CONTEXT_ASM kmArm64/RtlArm64Context-asm.S)
+    list(APPEND KMTEST_DRV_SOURCE
+        ${KMTEST_ARM64_CONTEXT_ASM}
+        kmArm64/HalArm64Ipi.c
+        kmArm64/HalArm64Layout.c
+        kmArm64/KdArm64Layout.c
+        kmArm64/KeArm64.c
+        kmArm64/KeArm64PmrMigration.c
+        kmArm64/KeArm64Frames.c
+        kmArm64/KeArm64Intrinsics.c
+        kmArm64/KeArm64IpiPreemption.c
+        kmArm64/KeArm64Irql.c
+        kmArm64/KeArm64LoaderCache.c
+        kmArm64/KeArm64PcrPrcb.c
+        kmArm64/KeArm64Profile.c
+        kmArm64/RtlArm64Context.c
+        kmArm64/RtlArm64UnwindLayout.c
+        kmArm64/KeArm64DpcIpi.c)
+endif()
+
+if(ARCH STREQUAL "arm64" OR ARCH STREQUAL "riscv64")
+    list(APPEND KMTEST_DRV_SOURCE
+        kmArm64/KeArm64AffinityEx.c
+        kmArm64/KeArm64Apc.c
+        kmArm64/KeArm64Dispatcher.c
+        kmArm64/KeArm64DpcImportance.c
+        kmArm64/KeArm64Interrupt.c
+        kmArm64/KeArm64IpiBroadcast.c
+        kmArm64/KeArm64Numa.c
+        kmArm64/KeArm64ProcessorChange.c
+        kmArm64/KeArm64Smp.c
+        kmArm64/KeArm64Smt.c
+        kmArm64/KeArm64SpinLock.c
+        kmArm64/KeArm64SubNodeSched.c
+        kmArm64/KeArm64ThreadProcess.c
+        kmArm64/KeArm64WakePlacement.c)
+    set(KMTEST_SMP_TESTS TRUE)
+endif()
+
+# Win11 parity tests for MM and RTL: nothing in them is architecture specific
+list(APPEND KMTEST_DRV_SOURCE
+    rtl/Win11NewKM.c
+    ntos_mm/MmWin11KM.c
+    ntos_mm/MmMdlWin11KM.c
+    ntos_mm/MmPoolWin11KM.c
+    ntos_mm/MmSectionWin11KM.c
+    ntos_mm/MmPteWin11KM.c)
+set(KMTEST_WIN11_TESTS TRUE)
+
+if(ARCH_64BIT)
+    spec2def(ext-ms-win-ntos-ksr-l1-1-5.dll ntos_ex/ksr.spec ADD_IMPORTLIB)
+    set(KMTEST_KSR_APISET TRUE)
 endif()
 
 add_library(kmtest_drv MODULE ${KMTEST_DRV_SOURCE})
+target_include_directories(kmtest_drv PRIVATE
+    ${REACTOS_SOURCE_DIR}/drivers/bus/acpi
+    ${REACTOS_SOURCE_DIR}/drivers/input/i8042prt
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgkrnl
+    ${REACTOS_SOURCE_DIR}/drivers/directx/dxgmms2
+    ${REACTOS_SOURCE_DIR}/sdk/lib/drivers/softgpu
+    ${REACTOS_SOURCE_DIR}/sdk/lib/drivers/arblib)
+if(KMTEST_DXGK_WDDM_ABI)
+    target_compile_definitions(kmtest_drv PRIVATE
+        KMT_DXGK_WDDM_ABI)
+endif()
+if(ENABLE_KERNEL_UBSAN)
+    target_compile_definitions(kmtest_drv PRIVATE KMT_KUBSAN)
+endif()
+if(KMTEST_SOFTGPU_GPUVA_ISOLATION)
+    target_compile_definitions(kmtest_drv PRIVATE
+        KMT_SOFTGPU_GPUVA_ISOLATION)
+endif()
+if(KMTEST_SOFTGPU_2D_POLICY)
+    target_compile_definitions(kmtest_drv PRIVATE
+        KMT_SOFTGPU_2D_POLICY)
+endif()
+if(KMTEST_SOFTGPU_VIDPN_POLICY)
+    target_compile_definitions(kmtest_drv PRIVATE
+        KMT_SOFTGPU_VIDPN_POLICY)
+endif()
+if(KMTEST_SOFTGPU_VSYNC_POLICY)
+    target_compile_definitions(kmtest_drv PRIVATE
+        KMT_SOFTGPU_VSYNC_POLICY)
+endif()
 set_module_type(kmtest_drv kernelmodedriver)
-target_link_libraries(kmtest_drv kmtest_printf chkstk memcmp ntoskrnl_vista ${PSEH_LIB})
-add_importlibs(kmtest_drv ntoskrnl hal)
+# Extended process notifications require an integrity-checked callback image.
+if(MSVC)
+    target_link_options(kmtest_drv PRIVATE /INTEGRITYCHECK)
+elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_link_options(kmtest_drv PRIVATE -Wl,-Xlink=/integritycheck)
+else()
+    target_link_options(kmtest_drv PRIVATE -Wl,--forceinteg)
+endif()
+target_link_libraries(kmtest_drv kmtest_printf chkstk memcmp poguid wdmguid arblib wdmsec ${PSEH_LIB})
+add_importlibs(kmtest_drv battc ksecdd ndis smclib ntoskrnl hal)
+if(REACTOS_USE_WDDM)
+    add_importlibs(kmtest_drv dxgkrnl dxgmms2)
+endif()
+if(KMTEST_KSR_APISET)
+    add_importlibs(kmtest_drv ext-ms-win-ntos-ksr-l1-1-5)
+    target_compile_definitions(kmtest_drv PRIVATE KMT_KSR_APISET)
+endif()
+if(KMTEST_WIN11_TESTS)
+    target_compile_definitions(kmtest_drv PRIVATE KMT_WIN11_TESTS)
+endif()
+if(KMTEST_SMP_TESTS)
+    target_compile_definitions(kmtest_drv PRIVATE KMT_SMP_TESTS)
+endif()
+if(KMT_DESTRUCTIVE_BUGCHECK_TESTS)
+    target_compile_definitions(kmtest_drv PRIVATE
+        KMT_DESTRUCTIVE_BUGCHECK_TESTS)
+endif()
+if(KMT_PERSISTENT_PNP_TESTS)
+    target_compile_definitions(kmtest_drv PRIVATE
+        KMT_PERSISTENT_PNP_TESTS)
+endif()
+if(KMT_PERSISTENT_POWER_TESTS)
+    target_compile_definitions(kmtest_drv PRIVATE
+        KMT_PERSISTENT_POWER_TESTS)
+endif()
 add_dependencies(kmtest_drv bugcodes xdk)
-target_compile_definitions(kmtest_drv PRIVATE KMT_KERNEL_MODE NTDDI_VERSION=NTDDI_WS03SP1)
+if(ARCH STREQUAL "arm64")
+    add_dependencies(kmtest_drv asm)
+endif()
+target_compile_definitions(kmtest_drv PRIVATE KMT_KERNEL_MODE NTDDI_VERSION=${REACTOS_TARGET_NTDDI})
 #add_pch(kmtest_drv include/kmt_test.h)
 add_rostests_file(TARGET kmtest_drv)
 
@@ -160,37 +620,106 @@ list(APPEND KMTEST_SOURCE
 
     example/Example_user.c
 
+    fltmgr/fltmgr_io/fltmgr_io_user.c
+    fltmgr/fltmgr_scan/fltmgr_scan_user.c
+    fltmgr/fltmgr_tx/fltmgr_tx_user.c
     fltmgr/fltmgr_load/fltmgr_user.c
     fltmgr/fltmgr_register/fltmgr_reg_user.c
+
+    ntos_cm/CmFlushReaders_user.c
+
+    ntfs/NtfsTxfRecovery_user.c
 
     hidparse/HidP_user.c
     kernel32/FileAttributes_user.c
     kernel32/FindFile_user.c
+    kernel32/PipeClientComputerName_user.c
+    kernel32/SecureMemoryCache_user.c
+    ntos_se/NtFilterToken.c
+    ntos_se/SeLowBoxToken.c
+    ntos_se/SeAuditAlarm.c
+    ntos_se/SeSecurityDirectory.c
+    ntos_se/SeSaclParts.c
     ntos_cc/CcCopyRead_user.c
     ntos_cc/CcCopyWrite_user.c
     ntos_cc/CcMapData_user.c
     ntos_cc/CcPinMappedData_user.c
     ntos_cc/CcPinRead_user.c
     ntos_cc/CcSetFileSizes_user.c
+    ntos_io/IoAddDeviceUnload_user.c
+    ntos_io/IoFilterRequirements_user.c
+    ntos_io/IoRemoveChild_user.c
     ntos_io/IoCreateFile_user.c
     ntos_io/IoDeviceObject_user.c
+    ntos_io/IoHandleAccess_user.c
+    ntos_io/IoCustomTargetEvent_user.c
+    ntos_io/IoDeviceTree_user.c
+    ntos_io/IoDriverKey_user.c
+    ntos_io/IoErrorLogEntry_user.c
+    ntos_io/IoInterfaceOrder_user.c
+    ntos_io/IoMessageRestart_user.c
+    ntos_io/IoRemovalPolicy_user.c
+    ntos_io/IoRemoveChildren_user.c
     ntos_io/IoReadWrite_user.c
+    ntos_ps/PsThreadCpuSets_user.c
+    ntos_ex/ExCpuSetInformation_user.c
+    ntos_ex/ExHandleInformation_user.c
+    ntos_kd/KdBreakRequest_user.c
+    ntos_kd/KdDebugService_user.c
+    ntos_kd/KdLiveDump_user.c
+    ntos_kd/KdPullRemoteFile_user.c
     ntos_kd/NtSystemDebugControl.c
     ntos_mm/MmMapLockedPagesSpecifyCache_user.c
     ntos_mm/NtCreateSection_user.c
+    ntos_mm/NtUserPhysicalPages.c
+    ntos_mm/NtProcessClone.c
+    ndis/NdisSgDma_user.c
+    ntos_po/BatteryClassNotify_user.c
+    ntos_po/PoDisplayState_user.c
+    ntos_po/PoHibernate_user.c
+    ntos_po/PoSettingSession_user.c
+    ntos_po/PoSleepInformation_user.c
     ntos_po/PoIrp_user.c
+    ntos_po/PoExecutionState_user.c
+    ntos_ps/XpdmVersion_user.c
+    ntos_po/PoFxState_user.c
+    ntos_po/PoShutdownPersist_user.c
+    ntos_po/PoShutdownTime_user.c
+    ntos_po/PoInitiatePowerAction_user.c
     tcpip/TcpIp_user.c
+    netio/wskname/wskname_user.c
+    wfp/wfp_listen/wfp_listen_user.c
+    wfp/wfp_tcp/wfp_tcp_user.c
+    wfp/wfp_udp/wfp_udp_user.c
+    wfp/wfp_user/wfp_user_user.c
     ${COMMON_SOURCE}
 
     kmtest/kmtest.rc)
 
+if(ARCH STREQUAL "amd64")
+    list(APPEND KMTEST_SOURCE
+        ntos_ke/amd64/KeContextSegments_user.c
+        ntos_ke/amd64/KeNonCanonicalReturn_user.c
+        ntos_ke/amd64/KeSystemCallInt2E_user.c)
+endif()
+
 add_executable(kmtest ${KMTEST_SOURCE})
 set_module_type(kmtest win32cui)
 target_link_libraries(kmtest ${PSEH_LIB})
-add_importlibs(kmtest fltlib advapi32 ws2_32 msvcrt kernel32 ntdll)
-target_compile_definitions(kmtest PRIVATE KMT_USER_MODE NTDDI_VERSION=NTDDI_WS03SP1)
+# kmtest/filter.c resolves fltlib.dll at runtime so kmtest still starts on
+# NT 5.x systems without Filter Manager.
+add_importlibs(kmtest advapi32 ws2_32 setupapi newdev fwpuclnt user32 msvcrt kernel32 ntdll)
+target_compile_definitions(kmtest PRIVATE KMT_USER_MODE NTDDI_VERSION=${REACTOS_TARGET_NTDDI})
 #add_pch(kmtest include/kmt_test.h)
 add_rostests_file(TARGET kmtest)
+configure_file(ntos_po/kmtest_pofx.inf kmtest_pofx.inf COPYONLY)
+add_rostests_file(FILE "${CMAKE_CURRENT_BINARY_DIR}/kmtest_pofx.inf")
+configure_file(ntos_io/kmtest_addfail.inf kmtest_addfail.inf COPYONLY)
+add_rostests_file(FILE "${CMAKE_CURRENT_BINARY_DIR}/kmtest_addfail.inf")
+configure_file(ntos_io/kmtest_filterreq.inf kmtest_filterreq.inf COPYONLY)
+add_rostests_file(FILE "${CMAKE_CURRENT_BINARY_DIR}/kmtest_filterreq.inf")
+configure_file(ntos_io/kmtest_remchild.inf kmtest_remchild.inf COPYONLY)
+add_rostests_file(FILE "${CMAKE_CURRENT_BINARY_DIR}/kmtest_remchild.inf")
 
 #
 # Group targets
@@ -199,18 +728,32 @@ add_custom_target(kmtest_drivers)
 add_dependencies(kmtest_drivers
     kmtest_drv
     example_drv
+    ndissg_drv
+    FltMgrLoad_drv
+    fltmgrio_drv
+    fltmgr_create
+    fltmgrreg_drv
+    ntfstxfrecovery_drv
     hidp_drv
+    ioadddeviceunload_drv
+    iofilterrequirements_drv
     iocreatefile_drv
     iodeviceobject_drv
     iohelper_drv
     ioreadwrite_drv
+    ioremovechild_drv
     kernel32_drv
     mmmaplockedpagesspecifycache_drv
     ntcreatesection_drv
+    batteryclassnotify_drv
     poirp_drv
     tcpip_drv
     cccopyread_drv
-    ccmapdata_drv)
+    cccopywrite_drv
+    ccmapdata_drv
+    ccpinmappeddata_drv
+    ccpinread_drv
+    ccsetfilesizes_drv)
 
 add_custom_target(kmtest_all)
 add_dependencies(kmtest_all kmtest_drivers kmtest)

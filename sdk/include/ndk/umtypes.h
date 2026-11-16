@@ -146,6 +146,7 @@ typedef struct _UNICODE_STRING
     USHORT MaximumLength;
     PWSTR Buffer;
 } UNICODE_STRING, *PUNICODE_STRING;
+#define __UNICODE_STRING_DEFINED__
 
 typedef struct _STRING
 {
@@ -207,5 +208,26 @@ typedef PSTRING POEM_STRING;
 typedef CONST STRING* PCOEM_STRING;
 typedef STRING CANSI_STRING;
 typedef PSTRING PCANSI_STRING;
+typedef STRING UTF8_STRING;
+typedef PSTRING PUTF8_STRING;
+
+typedef struct _RTL_BALANCED_NODE
+{
+    _ANONYMOUS_UNION union
+    {
+        struct _RTL_BALANCED_NODE *Children[2];
+        _ANONYMOUS_STRUCT struct
+        {
+            struct _RTL_BALANCED_NODE *Left;
+            struct _RTL_BALANCED_NODE *Right;
+        } DUMMYSTRUCTNAME;
+    } DUMMYUNIONNAME;
+    _ANONYMOUS_UNION union
+    {
+        UCHAR Red : 1;
+        UCHAR Balance : 2;
+        ULONG_PTR ParentValue;
+    } DUMMYUNIONNAME2;
+} RTL_BALANCED_NODE, *PRTL_BALANCED_NODE;
 
 #endif

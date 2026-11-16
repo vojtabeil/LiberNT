@@ -13,6 +13,7 @@
 
 const GUID KSNODETYPE_SUM = {0xDA441A60L, 0xC556, 0x11D0, {0x8A, 0x2B, 0x00, 0xA0, 0xC9, 0x25, 0x5A, 0xC1}};
 const GUID KSNODETYPE_DAC = {0x507AE360L, 0xC554, 0x11D0, {0x8A, 0x2B, 0x00, 0xA0, 0xC9, 0x25, 0x5A, 0xC1}};
+const GUID KSNODETYPE_AUDIO_ENGINE = {0x35CAF6E4L, 0xF3B3, 0x4168, {0xBB, 0x4B, 0x55, 0xE7, 0x7A, 0x46, 0x1C, 0x7E}};
 const GUID KSNODETYPE_ADC = {0x4D837FE0L, 0xC555, 0x11D0, {0x8A, 0x2B, 0x00, 0xA0, 0xC9, 0x25, 0x5A, 0xC1}};
 const GUID KSNODETYPE_AGC = {0xE88C9BA0L, 0xC557, 0x11D0, {0x8A, 0x2B, 0x00, 0xA0, 0xC9, 0x25, 0x5A, 0xC1}};
 const GUID KSNODETYPE_LOUDNESS = {0x41887440L, 0xC558, 0x11D0, {0x8A, 0x2B, 0x00, 0xA0, 0xC9, 0x25, 0x5A, 0xC1}};
@@ -354,6 +355,8 @@ MMixerSetGetMuteControlDetails(
 {
     LPMIXERCONTROLDETAILS_BOOLEAN Input;
     LONG Value;
+    ULONG Channel;
+    ULONG ExpectedChannels;
     MIXER_STATUS Status;
 
     if (MixerControlDetails->cbDetails != sizeof(MIXERCONTROLDETAILS_BOOLEAN))
@@ -361,24 +364,35 @@ MMixerSetGetMuteControlDetails(
 
     /* get input */
     Input = (LPMIXERCONTROLDETAILS_BOOLEAN)MixerControlDetails->paDetails;
+    if (!Input)
+        return MM_STATUS_INVALID_PARAMETER;
 
-    /* FIXME SEH */
-    if (bSet)
-        Value = Input->fValue;
+    ExpectedChannels =
+        (MixerControl->Control.fdwControl & MIXERCONTROL_CONTROLF_UNIFORM) ?
+        1 : max(MixerControl->ChannelCount, 1);
+    if (MixerControlDetails->cChannels != ExpectedChannels)
+        return MM_STATUS_INVALID_PARAMETER;
 
-    /* set control details */
-    Status = MMixerSetGetControlDetails(MixerContext, MixerControl->hDevice, MixerControl->NodeID, bSet, KSPROPERTY_AUDIO_MUTE, 0, &Value);
-
-    if (Status != MM_STATUS_SUCCESS)
-        return Status;
-
-    /* FIXME SEH */
-    if (!bSet)
+    for (Channel = 0; Channel < ExpectedChannels; ++Channel)
     {
-        Input->fValue = Value;
-        return Status;
+        if (bSet)
+            Value = Input[Channel].fValue;
+
+        Status = MMixerSetGetControlDetails(MixerContext,
+                                            MixerControl->hDevice,
+                                            MixerControl->NodeID,
+                                            bSet,
+                                            KSPROPERTY_AUDIO_MUTE,
+                                            Channel,
+                                            &Value);
+        if (Status != MM_STATUS_SUCCESS)
+            return Status;
+
+        if (!bSet)
+            Input[Channel].fValue = Value;
     }
-    else
+
+    if (bSet)
     {
         /* notify wdmaud clients MM_MIXM_LINE_CHANGE dwLineID */
         MMixerNotifyControlChange(MixerContext, MixerInfo, MM_MIXM_LINE_CHANGE, dwLineID);
@@ -655,8 +669,13 @@ MMixerSetGetVolumeControlDetails(
     LPMIXERLINE_EXT MixerLine)
 {
     LPMIXERCONTROLDETAILS_UNSIGNED Input;
-    LONG MaxRange, Value;
+    PKSPROPERTY_STEPPING_LONG Range;
+    LONGLONG RangeSpan;
+    LONGLONG LogicalValue;
+    LONG Value;
     ULONG Channel;
+    ULONG ExpectedChannels;
+    ULONG RangeIndex;
     MIXER_STATUS Status;
     LPMIXERVOLUME_DATA VolumeData;
 
@@ -664,7 +683,7 @@ MMixerSetGetVolumeControlDetails(
         return MM_STATUS_INVALID_PARAMETER;
 
     VolumeData = (LPMIXERVOLUME_DATA)MixerControl->ExtraData;
-    if (!VolumeData)
+    if (!VolumeData || VolumeData->RangeCount == 0)
         return MM_STATUS_UNSUCCESSFUL;
 
     /* Get input */
@@ -672,27 +691,61 @@ MMixerSetGetVolumeControlDetails(
     if (!Input)
         return MM_STATUS_UNSUCCESSFUL; /* To prevent dereferencing NULL */
 
-    /* Get maximum available range */
-    MaxRange = VolumeData->SignedMaximum - VolumeData->SignedMinimum;
+    ExpectedChannels =
+        (MixerControl->Control.fdwControl & MIXERCONTROL_CONTROLF_UNIFORM) ?
+        1 : max(min(MixerControl->ChannelCount, MixerLine->Line.cChannels), 1);
+    if (MixerControlDetails->cChannels != ExpectedChannels)
+        return MM_STATUS_INVALID_PARAMETER;
 
-    /* Loop for each channel */
-    for (Channel = 0; Channel < MixerControlDetails->cChannels; Channel++)
+    for (Channel = 0; Channel < ExpectedChannels; Channel++)
     {
+        RangeIndex = min(Channel, VolumeData->RangeCount - 1);
+        Range = &VolumeData->Ranges[RangeIndex];
+        RangeSpan = (LONGLONG)Range->Bounds.SignedMaximum -
+                    Range->Bounds.SignedMinimum;
+        if (RangeSpan <= 0)
+            return MM_STATUS_UNSUCCESSFUL;
+
         if (bSet)
         {
-            /* FIXME SEH */
-            /* Convert from logical units to hardware range (DB) */
-            Value = (LONG)((INT64)Input[Channel].dwValue * MaxRange / 0x10000 + VolumeData->SignedMinimum);
+            LogicalValue = min(Input[Channel].dwValue, 0xffff);
+            Value = Range->Bounds.SignedMinimum +
+                    (LONG)((LogicalValue * RangeSpan + 0x7fff) / 0xffff);
         }
 
-        /* Get/set control details */
         Status = MMixerSetGetControlDetails(MixerContext, MixerControl->hDevice, NodeId, bSet, KSPROPERTY_AUDIO_VOLUMELEVEL, Channel, &Value);
+        if (Status != MM_STATUS_SUCCESS)
+            return Status;
 
-        if (!bSet)
+        if (bSet)
         {
-            /* FIXME SEH */
-            /* Convert from hardware range (DB) to logical units */
-            Input[Channel].dwValue = (ULONG)(((INT64)Value - VolumeData->SignedMinimum + 1) * 0x10000 / MaxRange);
+            if (Channel < MIXER_VOLUME_CACHED_CHANNELS)
+            {
+                VolumeData->CachedMask &= ~(1UL << Channel);
+                if (MMixerSetGetControlDetails(MixerContext, MixerControl->hDevice, NodeId, FALSE, KSPROPERTY_AUDIO_VOLUMELEVEL, Channel, &Value) == MM_STATUS_SUCCESS)
+                {
+                    VolumeData->CachedValue[Channel] = Value;
+                    VolumeData->CachedLogical[Channel] = (ULONG)LogicalValue;
+                    VolumeData->CachedMask |= 1UL << Channel;
+                }
+            }
+        }
+        else if (Channel < MIXER_VOLUME_CACHED_CHANNELS &&
+                 (VolumeData->CachedMask & (1UL << Channel)) &&
+                 VolumeData->CachedValue[Channel] == Value)
+        {
+            Input[Channel].dwValue = VolumeData->CachedLogical[Channel];
+        }
+        else
+        {
+            if (Value < Range->Bounds.SignedMinimum)
+                Value = Range->Bounds.SignedMinimum;
+            else if (Value > Range->Bounds.SignedMaximum)
+                Value = Range->Bounds.SignedMaximum;
+
+            Input[Channel].dwValue = (ULONG)
+                (((LONGLONG)Value - Range->Bounds.SignedMinimum) * 0xffff /
+                 RangeSpan);
         }
     }
 
@@ -767,6 +820,7 @@ MMixerCreateMixerData(
     MixerData->hDevice = hDevice;
     MixerData->hDeviceInterfaceKey = hKey;
     MixerData->Topology = NULL;
+    MixerData->MixerInfo = NULL;
 
     InsertTailList(&MixerList->MixerData, &MixerData->Entry);
     MixerList->MixerDataCount++;
@@ -801,9 +855,12 @@ MMixerGetDeviceNameWithComponentId(
         Status = MixerContext->OpenKey(NULL, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Control\\MediaCategories", KEY_READ, &hMediaKey);
         if (Status == MM_STATUS_SUCCESS)
         {
-            RtlStringFromGUID(&ComponentId.Name, &GuidString);
-            Status = MixerContext->OpenKey(hMediaKey, GuidString.Buffer, KEY_READ, &hGuidKey);
-            RtlFreeUnicodeString(&GuidString);
+            Status = MM_STATUS_UNSUCCESSFUL;
+            if (NT_SUCCESS(RtlStringFromGUID(&ComponentId.Name, &GuidString)))
+            {
+                Status = MixerContext->OpenKey(hMediaKey, GuidString.Buffer, KEY_READ, &hGuidKey);
+                RtlFreeUnicodeString(&GuidString);
+            }
             if (Status == MM_STATUS_SUCCESS)
             {
                 Status = MixerContext->QueryKeyValue(hGuidKey, L"Name", (PVOID*)&DeviceName, &ResultLength, &KeyType);
@@ -848,6 +905,7 @@ MMixerGetDeviceName(
         /* done */
         return Status;
     }
+    DeviceName[0] = L'\0';
 
     Status = MixerContext->OpenKey(hKey, L"Device Parameters", KEY_READ, &hTemp);
     if (Status != MM_STATUS_SUCCESS)

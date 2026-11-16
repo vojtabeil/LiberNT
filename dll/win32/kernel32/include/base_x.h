@@ -151,8 +151,9 @@
     InitializeObjectAttributes(ObjectAttributes,                                \
                                &ObjectName,                                     \
                                inh ? OBJ_INHERIT : 0,                           \
-                               BaseGetNamedObjectDirectory(),                   \
+                               BasepGetNamedObjectDirectory(),                  \
                                NULL);                                           \
+    BasepAdjustObjectAttributesForPrivateNamespace(ObjectAttributes);           \
     Status = NtOpen##ntobj(&Handle, acc, ObjectAttributes);                     \
     if (!NT_SUCCESS(Status))                                                    \
     {                                                                           \

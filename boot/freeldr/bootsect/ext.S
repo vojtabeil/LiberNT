@@ -79,13 +79,54 @@
 #define BOOTSECTOR_STACK_TEMP_VARIABLES_SIZE    (4 * BOOTSECTOR_STACK_TEMP_VARIABLES)
 #define BOOTSECTOR_STACK_OFFSET                 (8 + BOOTSECTOR_STACK_TEMP_VARIABLES_SIZE)
 #define BOOTSECTOR_STACK_BASE                   (BOOTSECTOR_BASE_ADDRESS - BOOTSECTOR_STACK_OFFSET)
+#ifdef __clang__
+#define BP_REL(x)                               ss:[bp + x##Rel]
+#else
 #define BP_REL(x)                               ss:[bp + (x - BOOTSECTOR_BASE_ADDRESS)]
+#endif
 
 // Temporary variables
 #define ExtFileSizeState                        ((BOOTSECTOR_STACK_BASE + BOOTSECTOR_STACK_TEMP_VARIABLES_SIZE) - 4)
 #define LBASectorsRead                          (ExtFileSizeState - 4)
 
+// Offset constants for ExtReadInode variable access
+#define EXT_READ_INODE_GROUP_OFFSET         48
+#define EXT_READ_INODE_INDEX_OFFSET         52
+#define EXT_READ_INODE_GROUP_BLOCK_OFFSET   56
+#define EXT_READ_INODE_INDEX_BLOCK_OFFSET   60
+#define EXT_READ_INODE_GROUP_OFFSET_OFFSET  64
+#define EXT_READ_INODE_INDEX_OFFSET_OFFSET  66
+
 .code16
+
+#ifdef __clang__
+#define call CALL16
+#define ret RET16
+
+.equ BootDriveRel,                  3
+.equ ExtVolumeStartSectorRel,       4
+.equ ExtBlockSizeRel,               8
+.equ ExtBlockSizeInBytesRel,        12
+.equ ExtPointersPerBlockRel,        16
+.equ ExtGroupDescSizeRel,           20
+.equ ExtFirstDataBlockRel,          24
+.equ ExtInodeSizeRel,               28
+.equ ExtInodesPerGroupRel,          32
+.equ ExtFileSizeRel,                36
+.equ ExtFileAddressRel,             40
+.equ ExtFileAddressOldRel,          44
+.equ ExtReadInodeGroupRel,          48
+.equ ExtReadInodeIndexRel,          52
+.equ ExtReadInodeGroupBlockRel,     56
+.equ ExtReadInodeIndexBlockRel,     60
+.equ ExtReadInodeGroupOffsetRel,    64
+.equ ExtReadInodeIndexOffsetRel,    66
+.equ ExtFileSizeStateRel,           (ExtFileSizeState - BOOTSECTOR_BASE_ADDRESS)
+.equ LBASectorsReadRel,             (LBASectorsRead - BOOTSECTOR_BASE_ADDRESS)
+.equ BootPartitionRel,              509
+.equ ExtFileIndirectPointerRel,     (1024 + 4)
+.equ ExtFileIndirectPointerDoubleRel, (1024 + 8)
+#endif
 
 #ifndef INCLUDED_ASM
 
@@ -324,24 +365,24 @@ ExtReadInode:
     mov dword ptr BP_REL(ExtReadInodeIndex), eax        // Store the Inode index
 
     // Calculate the Inode index block
-    mov si, offset ExtReadInodeIndexBlock - start
+    mov si, EXT_READ_INODE_INDEX_BLOCK_OFFSET
     call ExtCalculateBlock
 
     // Calculate the Inode group block
     mov eax, dword ptr BP_REL(ExtReadInodeGroup)
-    mov si, offset ExtReadInodeGroupBlock - start
+    mov si, EXT_READ_INODE_GROUP_BLOCK_OFFSET
     call ExtCalculateBlock
 
     // Calculate the Inode group offset
-    mov bx, offset ExtReadInodeGroup - start
-    mov si, offset ExtReadInodeGroupBlock - start
-    mov di, offset ExtReadInodeGroupOffset - start
+    mov bx, EXT_READ_INODE_GROUP_OFFSET
+    mov si, EXT_READ_INODE_GROUP_BLOCK_OFFSET
+    mov di, EXT_READ_INODE_GROUP_OFFSET_OFFSET
     call ExtCalculateOffset
 
     // Calculate the Inode index offset
-    mov bx, offset ExtReadInodeIndex - start
-    mov si, offset ExtReadInodeIndexBlock - start
-    mov di, offset ExtReadInodeIndexOffset - start
+    mov bx, EXT_READ_INODE_INDEX_OFFSET
+    mov si, EXT_READ_INODE_INDEX_BLOCK_OFFSET
+    mov di, EXT_READ_INODE_INDEX_OFFSET_OFFSET
     call ExtCalculateOffset
 
     // Read group descriptor
@@ -480,7 +521,7 @@ BasicReadFileExtents:
 
     // Load extent length
     mov bx, word ptr es:[si + EXT_EXTENT_LENGTH_OFFSET]
-    and ebx, HEX(FFFF)
+    movzx ebx, bx
 
     // Check if extent is sparse
     cmp bx, EXT_EXTENT_MAX_LENGTH
@@ -606,7 +647,7 @@ SearchFile:
     jz .Skip                                                            // Skip this entry if yes
 
     mov di, offset ExtLdrFileName                                       // Load target filename address
-    mov cx, offset ExtLdrFileNameEnd - ExtLdrFileName                   // Length of filename to compare
+    mov cx, 10                                                          // Length of "extldr.sys"
     cmp byte ptr ds:[si + EXT_DIRECTORY_ENTRY_NAME_LENGTH_OFFSET], cl   // Compare if both names have the same length
     jnz .Skip                                                           // Skip this entry if not
     add si, EXT_DIRECTORY_ENTRY_NAME_OFFSET                             // Move to filename in entry

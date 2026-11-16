@@ -86,9 +86,11 @@ BaseQuerySystemFirmware(
     _In_ SYSTEM_FIRMWARE_TABLE_ACTION Action)
 {
     SYSTEM_FIRMWARE_TABLE_INFORMATION* SysFirmwareInfo;
-    ULONG Result = 0, ReturnedSize;
-    ULONG TotalSize = BufferSize + sizeof(SYSTEM_FIRMWARE_TABLE_INFORMATION);
-    NTSTATUS Status;
+    _SEH2_VOLATILE ULONG Result = 0;
+    ULONG ReturnedSize;
+    /* The trailing array and structure padding are not caller buffer space. */
+    ULONG TotalSize = BufferSize + FIELD_OFFSET(SYSTEM_FIRMWARE_TABLE_INFORMATION, TableBuffer);
+    _SEH2_VOLATILE NTSTATUS Status = STATUS_UNSUCCESSFUL;
 
     SysFirmwareInfo = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, TotalSize);
     if (!SysFirmwareInfo)
@@ -96,28 +98,31 @@ BaseQuerySystemFirmware(
         SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
-    _SEH2_TRY
+    SysFirmwareInfo->ProviderSignature = FirmwareTableProviderSignature;
+    SysFirmwareInfo->TableID = FirmwareTableID;
+    SysFirmwareInfo->Action = Action;
+    SysFirmwareInfo->TableBufferLength = BufferSize;
+
+    Status = NtQuerySystemInformation(SystemFirmwareTableInformation, SysFirmwareInfo, TotalSize, &ReturnedSize);
+
+    if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_TOO_SMALL)
+        Result = SysFirmwareInfo->TableBufferLength;
+
+    if (NT_SUCCESS(Status) && pFirmwareTableBuffer)
     {
-        SysFirmwareInfo->ProviderSignature = FirmwareTableProviderSignature;
-        SysFirmwareInfo->TableID = FirmwareTableID;
-        SysFirmwareInfo->Action = Action;
-        SysFirmwareInfo->TableBufferLength = BufferSize;
-
-        Status = NtQuerySystemInformation(SystemFirmwareTableInformation, SysFirmwareInfo, TotalSize, &ReturnedSize);
-
-        if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_TOO_SMALL)
-            Result = SysFirmwareInfo->TableBufferLength;
-
-        if (NT_SUCCESS(Status) && pFirmwareTableBuffer)
+        _SEH2_TRY
         {
             RtlCopyMemory(pFirmwareTableBuffer, SysFirmwareInfo->TableBuffer, SysFirmwareInfo->TableBufferLength);
         }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+            Result = 0;
+        }
+        _SEH2_END;
     }
-    _SEH2_FINALLY
-    {
-        RtlFreeHeap(RtlGetProcessHeap(), 0, SysFirmwareInfo);
-    }
-    _SEH2_END;
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, SysFirmwareInfo);
 
     BaseSetLastNTError(Status);
     return Result;
@@ -168,8 +173,12 @@ BOOL
 WINAPI
 IsProcessorFeaturePresent(IN DWORD ProcessorFeature)
 {
+#if defined(_M_ARM64EC) || (defined(_M_IX86) && DLL_EXPORT_VERSION >= 0xA00)
+    return RtlIsProcessorFeaturePresent(ProcessorFeature);
+#else
     if (ProcessorFeature >= PROCESSOR_FEATURE_MAX) return FALSE;
     return ((BOOL)SharedUserData->ProcessorFeatures[ProcessorFeature]);
+#endif
 }
 
 /*
@@ -208,6 +217,10 @@ GetNativeSystemInfo(IN LPSYSTEM_INFO lpSystemInfo)
 {
     SYSTEM_BASIC_INFORMATION BasicInfo;
     SYSTEM_PROCESSOR_INFORMATION ProcInfo;
+    SYSTEM_INFO ProcessInfo;
+    SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION Machines[8];
+    HANDLE Process = NULL;
+    ULONG Index;
     NTSTATUS Status;
 
     Status = RtlGetNativeSystemInformation(SystemBasicInformation,
@@ -223,6 +236,42 @@ GetNativeSystemInfo(IN LPSYSTEM_INFO lpSystemInfo)
     if (!NT_SUCCESS(Status)) return;
 
     GetSystemInfoInternal(&BasicInfo, &ProcInfo, lpSystemInfo);
+
+    if (ProcInfo.ProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL ||
+        ProcInfo.ProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ||
+        ProcInfo.ProcessorArchitecture == PROCESSOR_ARCHITECTURE_IA64)
+    {
+        return;
+    }
+
+    RtlZeroMemory(&ProcessInfo, sizeof(ProcessInfo));
+    ProcessInfo.wProcessorArchitecture = PROCESSOR_ARCHITECTURE_UNKNOWN;
+    GetSystemInfo(&ProcessInfo);
+    if (ProcessInfo.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_INTEL &&
+        ProcessInfo.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_AMD64)
+    {
+        return;
+    }
+
+    *lpSystemInfo = ProcessInfo;
+    if (ProcessInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64)
+        return;
+
+    RtlZeroMemory(Machines, sizeof(Machines));
+    Status = NtQuerySystemInformationEx(SystemSupportedProcessorArchitectures2,
+                                        &Process, sizeof(Process),
+                                        Machines, sizeof(Machines), NULL);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    for (Index = 0; Index < RTL_NUMBER_OF(Machines) && Machines[Index].Machine; ++Index)
+    {
+        if (Machines[Index].Machine == IMAGE_FILE_MACHINE_AMD64 && Machines[Index].UserMode)
+        {
+            lpSystemInfo->wProcessorArchitecture = PROCESSOR_ARCHITECTURE_AMD64;
+            break;
+        }
+    }
 }
 
 /*
@@ -325,6 +374,78 @@ GetNumaNodeProcessorMask(IN UCHAR Node,
     return TRUE;
 }
 
+BOOL
+WINAPI
+GetNumaNodeProcessorMaskEx(IN USHORT Node,
+                           OUT PGROUP_AFFINITY ProcessorMask)
+{
+    NTSTATUS Status;
+    SYSTEM_NUMA_INFORMATION NumaInformation;
+
+    Status = NtQuerySystemInformation(SystemNumaProcessorMap, &NumaInformation, sizeof(NumaInformation), NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    if (Node > NumaInformation.HighestNodeNumber)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    RtlZeroMemory(ProcessorMask, sizeof(*ProcessorMask));
+    ProcessorMask->Mask = (KAFFINITY)NumaInformation.ActiveProcessorsAffinityMask[Node];
+    ProcessorMask->Group = 0;
+    return TRUE;
+}
+
+BOOL
+WINAPI
+GetNumaNodeProcessorMask2(IN USHORT NodeNumber,
+                          OUT PGROUP_AFFINITY ProcessorMasks,
+                          IN USHORT ProcessorMaskCount,
+                          OUT PUSHORT RequiredMaskCount)
+{
+    NTSTATUS Status;
+    SYSTEM_NUMA_INFORMATION NumaInformation;
+    KAFFINITY Mask;
+
+    Status = NtQuerySystemInformation(SystemNumaProcessorMap, &NumaInformation, sizeof(NumaInformation), NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    if (NodeNumber > NumaInformation.HighestNodeNumber || NodeNumber >= MAXIMUM_NUMA_NODES)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    /* TODO: report nodes that span several processor groups; only group 0 exists */
+    Mask = (KAFFINITY)NumaInformation.ActiveProcessorsAffinityMask[NodeNumber];
+    if (Mask == 0)
+    {
+        *RequiredMaskCount = 0;
+        return TRUE;
+    }
+
+    *RequiredMaskCount = 1;
+    if (ProcessorMaskCount < 1)
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    RtlZeroMemory(&ProcessorMasks[0], sizeof(ProcessorMasks[0]));
+    ProcessorMasks[0].Mask = Mask;
+    ProcessorMasks[0].Group = 0;
+    return TRUE;
+}
+
 /*
  * @implemented
  */
@@ -384,6 +505,49 @@ GetNumaProcessorNode(IN UCHAR Processor,
  */
 BOOL
 WINAPI
+GetNumaProcessorNodeEx(IN PPROCESSOR_NUMBER Processor, OUT PUSHORT NodeNumber)
+{
+    SYSTEM_NUMA_INFORMATION Information;
+    NTSTATUS Status;
+    ULONG Node;
+    ULONGLONG Mask;
+
+    /* ReactOS currently exposes one processor group. */
+    if (Processor->Group != 0 || Processor->Reserved != 0 || Processor->Number >= 64)
+    {
+        *NodeNumber = 0xffff;
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    Status = NtQuerySystemInformation(SystemNumaProcessorMap, &Information, sizeof(Information), NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        *NodeNumber = 0xffff;
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    Mask = 1ULL << Processor->Number;
+    for (Node = 0; Node <= Information.HighestNodeNumber && Node < RTL_NUMBER_OF(Information.ActiveProcessorsAffinityMask); ++Node)
+    {
+        if (Information.ActiveProcessorsAffinityMask[Node] & Mask)
+        {
+            *NodeNumber = (USHORT)Node;
+            return TRUE;
+        }
+    }
+
+    *NodeNumber = 0xffff;
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return FALSE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
 GetNumaAvailableMemoryNode(IN UCHAR Node,
                            OUT PULONGLONG AvailableBytes)
 {
@@ -410,6 +574,112 @@ GetNumaAvailableMemoryNode(IN UCHAR Node,
     }
 
     /* Return available memory for that node */
+    *AvailableBytes = NumaInformation.AvailableMemory[Node];
+    return TRUE;
+}
+
+BOOLEAN
+WINAPI
+BasepIsValidNumaNode(IN ULONG Node)
+{
+    ULONG HighestNodeNumber;
+
+    if (!NT_SUCCESS(NtQuerySystemInformation(SystemNumaProcessorMap,
+                                             &HighestNodeNumber,
+                                             sizeof(HighestNodeNumber),
+                                             NULL)))
+    {
+        return FALSE;
+    }
+
+    return Node <= HighestNodeNumber;
+}
+
+BOOL
+WINAPI
+GetNumaProximityNodeEx(IN ULONG ProximityId,
+                       OUT PUSHORT NodeNumber)
+{
+    SYSTEM_NUMA_PROXIMITY_MAP ProximityMap;
+    NTSTATUS Status;
+
+    ProximityMap.NodeProximityId = ProximityId;
+    Status = NtQuerySystemInformation(SystemNumaProximityNodeInformation,
+                                      &ProximityMap,
+                                      sizeof(ProximityMap),
+                                      NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    *NodeNumber = ProximityMap.NodeNumber;
+    return TRUE;
+}
+
+BOOL
+WINAPI
+GetNumaProximityNode(IN ULONG ProximityId,
+                     OUT PUCHAR NodeNumber)
+{
+    USHORT Node;
+
+    if (!GetNumaProximityNodeEx(ProximityId, &Node))
+        return FALSE;
+
+    *NodeNumber = (UCHAR)Node;
+    return TRUE;
+}
+
+BOOL
+WINAPI
+GetNumaNodeNumberFromHandle(IN HANDLE hFile,
+                            OUT PUSHORT NodeNumber)
+{
+    FILE_NUMA_NODE_INFORMATION NumaInformation;
+    IO_STATUS_BLOCK IoStatusBlock;
+    NTSTATUS Status;
+
+    Status = NtQueryInformationFile(hFile,
+                                    &IoStatusBlock,
+                                    &NumaInformation,
+                                    sizeof(NumaInformation),
+                                    FileNumaNodeInformation);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    *NodeNumber = NumaInformation.NodeNumber;
+    return TRUE;
+}
+
+BOOL
+WINAPI
+GetNumaAvailableMemoryNodeEx(IN USHORT Node,
+                             OUT PULONGLONG AvailableBytes)
+{
+    NTSTATUS Status;
+    SYSTEM_NUMA_INFORMATION NumaInformation;
+
+    Status = NtQuerySystemInformation(SystemNumaAvailableMemory,
+                                      &NumaInformation,
+                                      sizeof(NumaInformation),
+                                      NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    if (Node > NumaInformation.HighestNodeNumber || Node >= MAXIMUM_NUMA_NODES)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     *AvailableBytes = NumaInformation.AvailableMemory[Node];
     return TRUE;
 }
@@ -569,8 +839,107 @@ GetSystemFirmwareTable(
                                    SystemFirmwareTable_Get);
 }
 
+BOOL
+WINAPI
+GetPhysicallyInstalledSystemMemory(PULONGLONG TotalMemoryInKilobytes)
+{
+    PUCHAR Buffer, Entry, End, Strings;
+    DWORD BufferSize, ReturnedSize, TableSize, ExtendedSize;
+    DWORD Error = ERROR_INVALID_DATA;
+    USHORT DeviceSize;
+    ULONGLONG TotalMemory = 0, DeviceMemory;
+    MEMORYSTATUSEX MemoryStatus;
+    BOOL Result = FALSE;
+
+    if (!TotalMemoryInKilobytes)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    BufferSize = GetSystemFirmwareTable('RSMB', 0, NULL, 0);
+    if (!BufferSize)
+        return FALSE;
+    Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, BufferSize);
+    if (!Buffer)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    ReturnedSize = GetSystemFirmwareTable('RSMB', 0, Buffer, BufferSize);
+    if (!ReturnedSize)
+    {
+        Error = GetLastError();
+        goto Exit;
+    }
+    if (ReturnedSize > BufferSize || ReturnedSize < 8)
+        goto Exit;
+    RtlCopyMemory(&TableSize, Buffer + 4, sizeof(TableSize));
+    if (TableSize > ReturnedSize - 8)
+        goto Exit;
+    Entry = Buffer + 8;
+    End = Entry + TableSize;
+    while (Entry < End)
+    {
+        if (End - Entry < 4 || Entry[1] < 4 || Entry[1] > End - Entry)
+            goto Exit;
+        Strings = Entry + Entry[1];
+        while (End - Strings >= 2 && (Strings[0] || Strings[1]))
+            ++Strings;
+        if (End - Strings < 2)
+            goto Exit;
+        if (Entry[0] == 127)
+            break;
+        if (Entry[0] == 17)
+        {
+            if (Entry[1] < 0x0e)
+                goto Exit;
+            RtlCopyMemory(&DeviceSize, Entry + 0x0c, sizeof(DeviceSize));
+            if (DeviceSize == 0xffff)
+                goto Exit;
+            if (DeviceSize == 0x7fff)
+            {
+                if (Entry[1] < 0x20)
+                    goto Exit;
+                RtlCopyMemory(&ExtendedSize, Entry + 0x1c, sizeof(ExtendedSize));
+                if (ExtendedSize & 0x80000000)
+                    goto Exit;
+                DeviceMemory = (ULONGLONG)ExtendedSize * 1024;
+            }
+            else if (DeviceSize & 0x8000)
+            {
+                DeviceMemory = DeviceSize & 0x7fff;
+            }
+            else
+            {
+                DeviceMemory = (ULONGLONG)DeviceSize * 1024;
+            }
+            if (DeviceMemory > MAXULONGLONG - TotalMemory)
+                goto Exit;
+            TotalMemory += DeviceMemory;
+        }
+        Entry = Strings + 2;
+    }
+    MemoryStatus.dwLength = sizeof(MemoryStatus);
+    if (!GlobalMemoryStatusEx(&MemoryStatus))
+    {
+        Error = GetLastError();
+        goto Exit;
+    }
+    if (!TotalMemory || TotalMemory < MemoryStatus.ullTotalPhys / 1024)
+        goto Exit;
+    *TotalMemoryInKilobytes = TotalMemory;
+    Result = TRUE;
+
+Exit:
+    RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
+    if (!Result)
+        SetLastError(Error);
+    return Result;
+}
+
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -578,12 +947,27 @@ GetSystemFileCacheSize(OUT PSIZE_T lpMinimumFileCacheSize,
                        OUT PSIZE_T lpMaximumFileCacheSize,
                        OUT PDWORD lpFlags)
 {
-    STUB;
-    return FALSE;
+    SYSTEM_FILECACHE_INFORMATION CacheInfo;
+    NTSTATUS Status;
+
+    Status = NtQuerySystemInformation(SystemFileCacheInformationEx,
+                                      &CacheInfo,
+                                      sizeof(CacheInfo),
+                                      NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    *lpMinimumFileCacheSize = CacheInfo.MinimumWorkingSet;
+    *lpMaximumFileCacheSize = CacheInfo.MaximumWorkingSet;
+    *lpFlags = CacheInfo.Flags;
+    return TRUE;
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -591,18 +975,81 @@ SetSystemFileCacheSize(IN SIZE_T MinimumFileCacheSize,
                        IN SIZE_T MaximumFileCacheSize,
                        IN DWORD Flags)
 {
-    STUB;
-    return FALSE;
+    SYSTEM_FILECACHE_INFORMATION CacheInfo;
+    NTSTATUS Status;
+
+    if ((Flags & ~(FILE_CACHE_MAX_HARD_ENABLE | FILE_CACHE_MAX_HARD_DISABLE |
+                   FILE_CACHE_MIN_HARD_ENABLE | FILE_CACHE_MIN_HARD_DISABLE)) ||
+        ((Flags & FILE_CACHE_MAX_HARD_ENABLE) && (Flags & FILE_CACHE_MAX_HARD_DISABLE)) ||
+        ((Flags & FILE_CACHE_MIN_HARD_ENABLE) && (Flags & FILE_CACHE_MIN_HARD_DISABLE)))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    RtlZeroMemory(&CacheInfo, sizeof(CacheInfo));
+    CacheInfo.MinimumWorkingSet = MinimumFileCacheSize;
+    CacheInfo.MaximumWorkingSet = MaximumFileCacheSize;
+    CacheInfo.Flags = Flags;
+
+    Status = NtSetSystemInformation(SystemFileCacheInformationEx,
+                                    &CacheInfo,
+                                    sizeof(CacheInfo));
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+GetOsSafeBootMode(OUT PDWORD Flags)
+{
+    if (!Flags)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    *Flags = SharedUserData->SafeBootMode;
+    return TRUE;
 }
 
 /*
  * @unimplemented
  */
-LONG
+HRESULT
 WINAPI
-GetCurrentPackageId(UINT32 *BufferLength,
-                    BYTE *Buffer)
+OpenStateExplicit(IN PVOID Arg1, OUT PVOID Arg2)
 {
     STUB;
-    return APPMODEL_ERROR_NO_PACKAGE;
+    return E_NOTIMPL;
+}
+
+/*
+ * @unimplemented
+ */
+HRESULT
+WINAPI
+CloseState(IN PVOID StateHandle)
+{
+    STUB;
+    return E_NOTIMPL;
+}
+
+/*
+ * @unimplemented
+ */
+HRESULT
+WINAPI
+GetStateSettingsFolder(IN PVOID Arg1, IN PVOID Arg2, OUT PVOID Arg3)
+{
+    STUB;
+    return E_NOTIMPL;
 }

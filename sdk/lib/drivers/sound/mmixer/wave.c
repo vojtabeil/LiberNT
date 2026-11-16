@@ -17,56 +17,7 @@ const GUID KSDATAFORMAT_SUBTYPE_PCM             = {0x00000001L, 0x0000, 0x0010, 
 const GUID KSDATAFORMAT_TYPE_AUDIO              = {0x73647561L, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
 const GUID KSINTERFACESETID_Standard            = {0x1A8766A0L, 0x62CE, 0x11CF, {0xA5, 0xD6, 0x28, 0xDB, 0x04, 0xC1, 0x00, 0x00}};
 const GUID KSMEDIUMSETID_Standard               = {0x4747B320L, 0x62CE, 0x11CF, {0xA5, 0xD6, 0x28, 0xDB, 0x04, 0xC1, 0x00, 0x00}};
-
-typedef struct
-{
-    ULONG SampleRate;
-    ULONG Bit8Mono;
-    ULONG Bit8Stereo;
-    ULONG Bit16Mono;
-    ULONG Bit16Stereo;
-}AUDIO_RANGE;
-
-#define AUDIO_TEST_RANGE (5)
-
-static AUDIO_RANGE TestRange[AUDIO_TEST_RANGE] =
-{
-    {
-        11025,
-        WAVE_FORMAT_1M08,
-        WAVE_FORMAT_1S08,
-        WAVE_FORMAT_1M16,
-        WAVE_FORMAT_1S16
-    },
-    {
-        22050,
-        WAVE_FORMAT_2M08,
-        WAVE_FORMAT_2S08,
-        WAVE_FORMAT_2M16,
-        WAVE_FORMAT_2S16
-    },
-    {
-        44100,
-        WAVE_FORMAT_4M08,
-        WAVE_FORMAT_4S08,
-        WAVE_FORMAT_4M16,
-        WAVE_FORMAT_4S16
-    },
-    {
-        48000,
-        WAVE_FORMAT_48M08,
-        WAVE_FORMAT_48S08,
-        WAVE_FORMAT_48M16,
-        WAVE_FORMAT_48S16
-    },
-    {
-        96000,
-        WAVE_FORMAT_96M08,
-        WAVE_FORMAT_96S08,
-        WAVE_FORMAT_96M16,
-        WAVE_FORMAT_96S16
-    }
-};
+const GUID KSPROPSETID_Jack                     = {0x4509F757L, 0x2D46, 0x4637, {0x8E, 0x62, 0xCE, 0x7D, 0xB9, 0x44, 0xF5, 0x7B}};
 
 PKSPIN_CONNECT
 MMixerAllocatePinConnect(
@@ -111,46 +62,82 @@ MMixerGetWaveInfoByIndexAndType(
     return MM_STATUS_INVALID_PARAMETER;
 }
 
+static
+DWORD
+MMixerChannelMaskFromCount(
+    IN ULONG Channels)
+{
+    switch (Channels)
+    {
+        case 1:
+            return KSAUDIO_SPEAKER_MONO;
+        case 2:
+            return KSAUDIO_SPEAKER_STEREO;
+        case 4:
+            return KSAUDIO_SPEAKER_QUAD;
+        case 6:
+            return KSAUDIO_SPEAKER_5POINT1;
+        case 8:
+            return KSAUDIO_SPEAKER_7POINT1;
+        default:
+            return KSAUDIO_SPEAKER_DIRECTOUT;
+    }
+}
+
+static
+MIXER_STATUS
+MMixerValidateWaveFormat(
+    IN LPWAVEFORMATEX WaveFormat)
+{
+    if (!WaveFormat)
+        return MM_STATUS_INVALID_PARAMETER;
+
+    if (WaveFormat->wFormatTag == WAVE_FORMAT_PCM)
+    {
+        if (WaveFormat->cbSize)
+            return MM_STATUS_INVALID_PARAMETER;
+    }
+    else if (WaveFormat->wFormatTag == WAVE_FORMAT_EXTENSIBLE)
+    {
+        if (WaveFormat->cbSize !=
+            sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX))
+        {
+            return MM_STATUS_INVALID_PARAMETER;
+        }
+    }
+    else
+    {
+        return MM_STATUS_INVALID_PARAMETER;
+    }
+
+    return MM_STATUS_SUCCESS;
+}
+
 VOID
 MMixerInitializeDataFormat(
     _Inout_ PKSDATAFORMAT_WAVEFORMATEX DataFormat,
     _In_ LPWAVEFORMATEX WaveFormatEx,
     _In_ DWORD cbSize)
 {
-    DataFormat->WaveFormatEx.wFormatTag = WaveFormatEx->wFormatTag;
-    DataFormat->WaveFormatEx.nChannels = WaveFormatEx->nChannels;
-    DataFormat->WaveFormatEx.nSamplesPerSec = WaveFormatEx->nSamplesPerSec;
-    DataFormat->WaveFormatEx.nBlockAlign = WaveFormatEx->nBlockAlign;
-    DataFormat->WaveFormatEx.nAvgBytesPerSec = WaveFormatEx->nAvgBytesPerSec;
-    DataFormat->WaveFormatEx.wBitsPerSample = WaveFormatEx->wBitsPerSample;
-    DataFormat->WaveFormatEx.cbSize = cbSize;
+    RtlCopyMemory(&DataFormat->WaveFormatEx, WaveFormatEx,
+                  sizeof(*WaveFormatEx) + cbSize);
+    DataFormat->WaveFormatEx.cbSize = (WORD)cbSize;
     DataFormat->DataFormat.FormatSize = sizeof(KSDATAFORMAT) + sizeof(WAVEFORMATEX) + cbSize;
     DataFormat->DataFormat.Flags = 0;
     DataFormat->DataFormat.Reserved = 0;
     DataFormat->DataFormat.MajorFormat = KSDATAFORMAT_TYPE_AUDIO;
-    DataFormat->DataFormat.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
-    DataFormat->DataFormat.Specifier = KSDATAFORMAT_SPECIFIER_WAVEFORMATEX;
-    DataFormat->DataFormat.SampleSize = 4;
-
-    /* Write additional fields for Extensible audio format */
-    if (WaveFormatEx->wFormatTag == WAVE_FORMAT_EXTENSIBLE)
+    if (WaveFormatEx->wFormatTag == WAVE_FORMAT_EXTENSIBLE &&
+        cbSize >= sizeof(WAVEFORMATEXTENSIBLE) - sizeof(WAVEFORMATEX))
     {
-        PWAVEFORMATEXTENSIBLE WaveFormatExt = (PWAVEFORMATEXTENSIBLE)&DataFormat->WaveFormatEx;
-        WaveFormatExt->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
-        WaveFormatExt->Samples.wValidBitsPerSample = WaveFormatEx->wBitsPerSample;
-        if (WaveFormatEx->nChannels == 0)
-            WaveFormatExt->dwChannelMask = KSAUDIO_SPEAKER_DIRECTOUT;
-        else if (WaveFormatEx->nChannels == 1)
-            WaveFormatExt->dwChannelMask = KSAUDIO_SPEAKER_MONO;
-        else if (WaveFormatEx->nChannels == 2)
-            WaveFormatExt->dwChannelMask = KSAUDIO_SPEAKER_STEREO;
-        else if (WaveFormatEx->nChannels == 4)
-            WaveFormatExt->dwChannelMask = KSAUDIO_SPEAKER_QUAD;
-        else if (WaveFormatEx->nChannels == 5)
-            WaveFormatExt->dwChannelMask = KSAUDIO_SPEAKER_5POINT1;
-        else if (WaveFormatEx->nChannels == 7)
-            WaveFormatExt->dwChannelMask = KSAUDIO_SPEAKER_7POINT1;
+        DataFormat->DataFormat.SubFormat =
+            ((PWAVEFORMATEXTENSIBLE)WaveFormatEx)->SubFormat;
     }
+    else
+    {
+        DataFormat->DataFormat.SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+    }
+    DataFormat->DataFormat.Specifier = KSDATAFORMAT_SPECIFIER_WAVEFORMATEX;
+    DataFormat->DataFormat.SampleSize = WaveFormatEx->nBlockAlign;
 }
 
 MIXER_STATUS
@@ -175,7 +162,7 @@ MMixerGetAudioPinDataRanges(
     Status = MixerContext->Control(hDevice, IOCTL_KS_PROPERTY, (PVOID)&PinProperty, sizeof(KSP_PIN), (PVOID)NULL, 0, &BytesReturned);
     if (Status != MM_STATUS_MORE_ENTRIES)
     {
-        return Status;
+        return (Status == MM_STATUS_SUCCESS) ? MM_STATUS_UNSUCCESSFUL : Status;
     }
 
     MultipleItem = MixerContext->Alloc(BytesReturned);
@@ -203,27 +190,81 @@ MMixerFindAudioDataRange(
     PKSMULTIPLE_ITEM MultipleItem,
     PKSDATARANGE_AUDIO * OutDataRangeAudio)
 {
-    ULONG Index;
+    ULONG Index, RangeSize, AttributeSize, RangeFlags, Remaining;
     PKSDATARANGE_AUDIO DataRangeAudio;
     PKSDATARANGE DataRange;
+    PKSMULTIPLE_ITEM AttributeItem;
 
+    if (!MultipleItem || !OutDataRangeAudio ||
+        MultipleItem->Size < sizeof(KSMULTIPLE_ITEM))
+    {
+        return MM_STATUS_INVALID_PARAMETER;
+    }
+
+    *OutDataRangeAudio = NULL;
+    Remaining = MultipleItem->Size - sizeof(KSMULTIPLE_ITEM);
     DataRange = (PKSDATARANGE) (MultipleItem + 1);
     for(Index = 0; Index < MultipleItem->Count; Index++)
     {
-        if (DataRange->FormatSize == sizeof(KSDATARANGE_AUDIO))
+        if (Remaining < sizeof(KSDATARANGE) ||
+            DataRange->FormatSize < sizeof(KSDATARANGE) ||
+            DataRange->FormatSize > MAXULONG - 7)
+        {
+            return MM_STATUS_INVALID_PARAMETER;
+        }
+
+        RangeSize = (DataRange->FormatSize + 7) & ~7UL;
+        if (RangeSize > Remaining)
+            return MM_STATUS_INVALID_PARAMETER;
+
+        if (DataRange->FormatSize >= sizeof(KSDATARANGE_AUDIO))
         {
             DataRangeAudio = (PKSDATARANGE_AUDIO)DataRange;
-            if (IsEqualGUIDAligned(&DataRangeAudio->DataRange.MajorFormat, &KSDATAFORMAT_TYPE_AUDIO) &&
-                IsEqualGUIDAligned(&DataRangeAudio->DataRange.SubFormat, &KSDATAFORMAT_SUBTYPE_PCM) &&
-                IsEqualGUIDAligned(&DataRangeAudio->DataRange.Specifier, &KSDATAFORMAT_SPECIFIER_WAVEFORMATEX))
+            if (IsEqualGUIDAligned(&DataRange->MajorFormat, &KSDATAFORMAT_TYPE_AUDIO) &&
+                IsEqualGUIDAligned(&DataRange->SubFormat, &KSDATAFORMAT_SUBTYPE_PCM) &&
+                IsEqualGUIDAligned(&DataRange->Specifier, &KSDATAFORMAT_SPECIFIER_WAVEFORMATEX))
             {
                 DPRINT("Min Sample %u Max Sample %u Min Bits %u Max Bits %u Max Channel %u\n", DataRangeAudio->MinimumSampleFrequency, DataRangeAudio->MaximumSampleFrequency,
                                                          DataRangeAudio->MinimumBitsPerSample, DataRangeAudio->MaximumBitsPerSample, DataRangeAudio->MaximumChannels);
-                *OutDataRangeAudio = DataRangeAudio;
+                *OutDataRangeAudio = (PKSDATARANGE_AUDIO)DataRange;
                 return MM_STATUS_SUCCESS;
             }
         }
-        DataRange = (PKSDATARANGE)((ULONG_PTR)DataRange + DataRange->FormatSize);
+
+        RangeFlags = DataRange->Flags;
+        Remaining -= RangeSize;
+        DataRange = (PKSDATARANGE)((PUCHAR)DataRange + RangeSize);
+
+        if (RangeFlags & KSDATARANGE_ATTRIBUTES)
+        {
+            if (Index + 1 >= MultipleItem->Count ||
+                Remaining < sizeof(KSMULTIPLE_ITEM))
+            {
+                return MM_STATUS_INVALID_PARAMETER;
+            }
+
+            AttributeItem = (PKSMULTIPLE_ITEM)DataRange;
+            if (AttributeItem->Size < sizeof(KSMULTIPLE_ITEM) ||
+                AttributeItem->Size > Remaining)
+            {
+                return MM_STATUS_INVALID_PARAMETER;
+            }
+
+            AttributeSize = AttributeItem->Size;
+            if (Index + 2 < MultipleItem->Count)
+            {
+                if (AttributeSize > MAXULONG - 7)
+                    return MM_STATUS_INVALID_PARAMETER;
+
+                AttributeSize = (AttributeSize + 7) & ~7UL;
+                if (AttributeSize > Remaining)
+                    return MM_STATUS_INVALID_PARAMETER;
+            }
+
+            Remaining -= AttributeSize;
+            DataRange = (PKSDATARANGE)((PUCHAR)DataRange + AttributeSize);
+            Index++;
+        }
     }
     return MM_STATUS_UNSUCCESSFUL;
 }
@@ -251,8 +292,10 @@ MMixerOpenWavePin(
     if (!MixerData)
         return MM_STATUS_INVALID_PARAMETER;
 
-    /* Enforce 0 for WAVE_FORMAT_PCM, which ignores extra information size */
-    cbSize = WaveFormatEx->wFormatTag == WAVE_FORMAT_PCM ? 0 : WaveFormatEx->cbSize;
+    if (MMixerValidateWaveFormat(WaveFormatEx) != MM_STATUS_SUCCESS)
+        return MM_STATUS_INVALID_PARAMETER;
+
+    cbSize = WaveFormatEx->cbSize;
 
     /* allocate pin connect */
     PinConnect = MMixerAllocatePinConnect(MixerContext, sizeof(KSDATAFORMAT_WAVEFORMATEX) + cbSize);
@@ -300,40 +343,13 @@ MMixerCheckFormat(
     IN LPWAVE_INFO WaveInfo,
     IN ULONG bInput)
 {
-    ULONG Index, SampleFrequency;
-    ULONG Result = 0;
+    ULONG Result;
 
-    for(Index = 0; Index < AUDIO_TEST_RANGE; Index++)
-    {
-        SampleFrequency = TestRange[Index].SampleRate;
-
-        if (DataRangeAudio->MinimumSampleFrequency <= SampleFrequency && DataRangeAudio->MaximumSampleFrequency >= SampleFrequency)
-        {
-            /* the audio adapter supports the sample frequency */
-            if (DataRangeAudio->MinimumBitsPerSample <= 8 && DataRangeAudio->MaximumBitsPerSample >= 8)
-            {
-                Result |= TestRange[Index].Bit8Mono;
-
-                if (DataRangeAudio->MaximumChannels > 1)
-                {
-                    /* check if pin supports the sample rate in 8-Bit Stereo */
-                    Result |= TestRange[Index].Bit8Stereo;
-                }
-            }
-
-            if (DataRangeAudio->MinimumBitsPerSample <= 16 && DataRangeAudio->MaximumBitsPerSample >= 16)
-            {
-                /* check if pin supports the sample rate in 16-Bit Mono */
-                Result |= TestRange[Index].Bit16Mono;
-
-                if (DataRangeAudio->MaximumChannels > 1)
-                {
-                    /* check if pin supports the sample rate in 16-Bit Stereo */
-                    Result |= TestRange[Index].Bit16Stereo;
-                }
-            }
-        }
-    }
+    Result = RosSoundAudioRangeToLegacyFlags(DataRangeAudio->MinimumSampleFrequency,
+                                             DataRangeAudio->MaximumSampleFrequency,
+                                             DataRangeAudio->MinimumBitsPerSample,
+                                             DataRangeAudio->MaximumBitsPerSample,
+                                             DataRangeAudio->MaximumChannels);
 
     if (bInput)
         WaveInfo->u.InCaps.dwFormats = Result;
@@ -341,6 +357,65 @@ MMixerCheckFormat(
         WaveInfo->u.OutCaps.dwFormats = Result;
 
     DPRINT("Format %lx bInput %u\n", Result, bInput);
+}
+
+static
+MIXER_STATUS
+MMixerAudioRangeToWaveFormat(
+    IN PKSDATARANGE_AUDIO DataRangeAudio,
+    OUT PWAVEFORMATEXTENSIBLE Format)
+{
+    ULONG Channels, ValidBits, ContainerBits, BlockAlign, SampleRate;
+
+    Channels = DataRangeAudio->MaximumChannels;
+    ValidBits = DataRangeAudio->MaximumBitsPerSample;
+    if (!Channels || Channels > MAXUSHORT || !ValidBits || ValidBits > MAXUSHORT)
+        return MM_STATUS_UNSUCCESSFUL;
+
+    BlockAlign = DataRangeAudio->DataRange.SampleSize;
+    if (BlockAlign)
+    {
+        if (BlockAlign > MAXUSHORT || BlockAlign % Channels)
+            return MM_STATUS_UNSUCCESSFUL;
+
+        ContainerBits = (BlockAlign / Channels) * 8;
+    }
+    else
+    {
+        ContainerBits = (ValidBits + 7) & ~7;
+        BlockAlign = Channels * (ContainerBits / 8);
+        if (!BlockAlign || BlockAlign > MAXUSHORT)
+            return MM_STATUS_UNSUCCESSFUL;
+    }
+
+    if (ContainerBits < ValidBits || ContainerBits > MAXUSHORT)
+        return MM_STATUS_UNSUCCESSFUL;
+
+    if (DataRangeAudio->MinimumSampleFrequency <= 48000 &&
+        DataRangeAudio->MaximumSampleFrequency >= 48000)
+    {
+        SampleRate = 48000;
+    }
+    else
+    {
+        SampleRate = DataRangeAudio->MaximumSampleFrequency;
+    }
+
+    if (!SampleRate || SampleRate > MAXULONG / BlockAlign)
+        return MM_STATUS_UNSUCCESSFUL;
+
+    RtlZeroMemory(Format, sizeof(*Format));
+    Format->Format.wFormatTag = WAVE_FORMAT_EXTENSIBLE;
+    Format->Format.nChannels = (WORD)Channels;
+    Format->Format.nSamplesPerSec = SampleRate;
+    Format->Format.nAvgBytesPerSec = SampleRate * BlockAlign;
+    Format->Format.nBlockAlign = (WORD)BlockAlign;
+    Format->Format.wBitsPerSample = (WORD)ContainerBits;
+    Format->Format.cbSize = sizeof(*Format) - sizeof(Format->Format);
+    Format->Samples.wValidBitsPerSample = (WORD)ValidBits;
+    Format->dwChannelMask = MMixerChannelMaskFromCount(Channels);
+    Format->SubFormat = KSDATAFORMAT_SUBTYPE_PCM;
+    return MM_STATUS_SUCCESS;
 }
 
 MIXER_STATUS
@@ -362,6 +437,8 @@ MMixerInitializeWaveInfo(
     if (!WaveInfo)
         return MM_STATUS_NO_MEMORY;
 
+    RtlZeroMemory(WaveInfo, sizeof(*WaveInfo));
+
     if (PinCount > 1)
     {
         /* FIXME support multiple pins for wave device */
@@ -372,6 +449,8 @@ MMixerInitializeWaveInfo(
     /* initialize wave info */
     WaveInfo->DeviceId = MixerData->DeviceId;
     WaveInfo->PinId = Pins[0];
+    WaveInfo->ConnectorDeviceId = MAXULONG;
+    WaveInfo->ConnectorPinId = MAXULONG;
 
     /* sanity check */
     ASSERT(wcslen(DeviceName) < MAXPNAMELEN);
@@ -405,6 +484,7 @@ MMixerInitializeWaveInfo(
     if (Status != MM_STATUS_SUCCESS)
     {
         /* failed to get audio pin data ranges */
+        DPRINT1("MMIXER: pin %lu data ranges failed %x\n", Pins[0], Status);
         MixerContext->Free(WaveInfo);
         return MM_STATUS_UNSUCCESSFUL;
     }
@@ -414,6 +494,9 @@ MMixerInitializeWaveInfo(
     if (Status != MM_STATUS_SUCCESS)
     {
         /* failed to find audio pin data range */
+        DPRINT1("MMIXER: pin %lu has no audio data range status %x\n",
+                Pins[0],
+                Status);
         MixerContext->Free(MultipleItem);
         MixerContext->Free(WaveInfo);
         return MM_STATUS_UNSUCCESSFUL;
@@ -432,6 +515,10 @@ MMixerInitializeWaveInfo(
     /* get all supported formats */
     MMixerCheckFormat(DataRangeAudio, WaveInfo, bWaveIn);
 
+    /* Keep the native pin format for clients which are not representable by
+       the legacy WAVE_FORMAT_* capability flags. */
+    MMixerAudioRangeToWaveFormat(DataRangeAudio, &WaveInfo->PreferredFormat);
+
     /* free dataranges buffer */
     MixerContext->Free(MultipleItem);
 
@@ -447,6 +534,413 @@ MMixerInitializeWaveInfo(
     }
 
     return MM_STATUS_SUCCESS;
+}
+
+VOID
+MMixerSetWaveConnector(
+    IN PMIXER_LIST MixerList,
+    IN ULONG WaveDeviceId,
+    IN ULONG WavePinId,
+    IN ULONG bWaveIn,
+    IN ULONG ConnectorDeviceId,
+    IN ULONG ConnectorPinId)
+{
+    PLIST_ENTRY Entry;
+    PLIST_ENTRY ListHead;
+
+    ListHead = bWaveIn ? &MixerList->WaveInList : &MixerList->WaveOutList;
+    Entry = ListHead->Flink;
+    while (Entry != ListHead)
+    {
+        LPWAVE_INFO WaveInfo = CONTAINING_RECORD(Entry, WAVE_INFO, Entry);
+
+        if (WaveInfo->DeviceId == WaveDeviceId &&
+            WaveInfo->PinId == WavePinId)
+        {
+            WaveInfo->ConnectorDeviceId = ConnectorDeviceId;
+            WaveInfo->ConnectorPinId = ConnectorPinId;
+        }
+        Entry = Entry->Flink;
+    }
+}
+
+static MIXER_STATUS
+MMixerGetJackProperty(
+    IN PMIXER_CONTEXT MixerContext,
+    IN HANDLE FilterHandle,
+    IN ULONG PinId,
+    IN ULONG PropertyId,
+    IN ULONG ItemSize,
+    OUT PKSMULTIPLE_ITEM *Result)
+{
+    KSP_PIN Pin;
+    PKSMULTIPLE_ITEM MultipleItem;
+    MIXER_STATUS Status;
+    ULONG BytesReturned = 0;
+    ULONG MaximumCount;
+
+    RtlZeroMemory(&Pin, sizeof(Pin));
+    Pin.Property.Set = KSPROPSETID_Jack;
+    Pin.Property.Id = PropertyId;
+    Pin.Property.Flags = KSPROPERTY_TYPE_GET;
+    Pin.PinId = PinId;
+
+    Status = MixerContext->Control(FilterHandle,
+                                   IOCTL_KS_PROPERTY,
+                                   &Pin,
+                                   sizeof(Pin),
+                                   NULL,
+                                   0,
+                                   &BytesReturned);
+    if (Status != MM_STATUS_MORE_ENTRIES ||
+        BytesReturned < sizeof(KSMULTIPLE_ITEM))
+    {
+        return (Status == MM_STATUS_MORE_ENTRIES || Status == MM_STATUS_SUCCESS)
+            ? MM_STATUS_UNSUCCESSFUL
+            : Status;
+    }
+
+    MultipleItem = MixerContext->Alloc(BytesReturned);
+    if (!MultipleItem)
+        return MM_STATUS_NO_MEMORY;
+
+    Status = MixerContext->Control(FilterHandle,
+                                   IOCTL_KS_PROPERTY,
+                                   &Pin,
+                                   sizeof(Pin),
+                                   MultipleItem,
+                                   BytesReturned,
+                                   &BytesReturned);
+    if (Status != MM_STATUS_SUCCESS ||
+        BytesReturned < sizeof(KSMULTIPLE_ITEM) ||
+        MultipleItem->Size < sizeof(KSMULTIPLE_ITEM) ||
+        MultipleItem->Size > BytesReturned)
+    {
+        MixerContext->Free(MultipleItem);
+        return Status == MM_STATUS_SUCCESS ? MM_STATUS_UNSUCCESSFUL : Status;
+    }
+
+    MaximumCount = (MultipleItem->Size - sizeof(KSMULTIPLE_ITEM)) / ItemSize;
+    if (MultipleItem->Count > MaximumCount)
+    {
+        MixerContext->Free(MultipleItem);
+        return MM_STATUS_UNSUCCESSFUL;
+    }
+
+    *Result = MultipleItem;
+    return MM_STATUS_SUCCESS;
+}
+
+MIXER_STATUS
+MMixerGetWaveConnectionState(
+    IN PMIXER_CONTEXT MixerContext,
+    IN ULONG DeviceIndex,
+    IN ULONG bWaveIn,
+    OUT PULONG PresenceDetection,
+    OUT PULONG IsConnected)
+{
+    PMIXER_LIST MixerList;
+    LPMIXER_DATA ConnectorData;
+    LPWAVE_INFO WaveInfo;
+    PKSMULTIPLE_ITEM Descriptions;
+    PKSMULTIPLE_ITEM Descriptions2;
+    MIXER_STATUS Status;
+    ULONG Index;
+
+    if (!PresenceDetection || !IsConnected)
+        return MM_STATUS_INVALID_PARAMETER;
+
+    *PresenceDetection = FALSE;
+    *IsConnected = TRUE;
+
+    Status = MMixerVerifyContext(MixerContext);
+    if (Status != MM_STATUS_SUCCESS)
+        return Status;
+
+    MixerList = (PMIXER_LIST)MixerContext->MixerContext;
+    Status = MMixerGetWaveInfoByIndexAndType(MixerList,
+                                             DeviceIndex,
+                                             bWaveIn,
+                                             &WaveInfo);
+    if (Status != MM_STATUS_SUCCESS)
+        return Status;
+
+    if (WaveInfo->ConnectorDeviceId == MAXULONG ||
+        WaveInfo->ConnectorPinId == MAXULONG)
+    {
+        return MM_STATUS_SUCCESS;
+    }
+
+    ConnectorData = MMixerGetDataByDeviceId(MixerList,
+                                             WaveInfo->ConnectorDeviceId);
+    if (!ConnectorData)
+        return MM_STATUS_UNSUCCESSFUL;
+
+    Descriptions2 = NULL;
+    Status = MMixerGetJackProperty(MixerContext,
+                                    ConnectorData->hDevice,
+                                    WaveInfo->ConnectorPinId,
+                                    KSPROPERTY_JACK_DESCRIPTION2,
+                                    sizeof(KSJACK_DESCRIPTION2),
+                                    &Descriptions2);
+    if (Status == MM_STATUS_SUCCESS)
+    {
+        PKSJACK_DESCRIPTION2 Description =
+            (PKSJACK_DESCRIPTION2)(Descriptions2 + 1);
+
+        for (Index = 0; Index < Descriptions2->Count; ++Index)
+        {
+            if (Description[Index].JackCapabilities &
+                JACKDESC2_PRESENCE_DETECT_CAPABILITY)
+            {
+                *PresenceDetection = TRUE;
+                break;
+            }
+        }
+        MixerContext->Free(Descriptions2);
+    }
+
+    Descriptions = NULL;
+    Status = MMixerGetJackProperty(MixerContext,
+                                    ConnectorData->hDevice,
+                                    WaveInfo->ConnectorPinId,
+                                    KSPROPERTY_JACK_DESCRIPTION,
+                                    sizeof(KSJACK_DESCRIPTION),
+                                    &Descriptions);
+    if (Status != MM_STATUS_SUCCESS)
+    {
+        /* No jack property means a fixed endpoint with no presence detection. */
+        return MM_STATUS_SUCCESS;
+    }
+
+    if (Descriptions->Count)
+    {
+        PKSJACK_DESCRIPTION Description =
+            (PKSJACK_DESCRIPTION)(Descriptions + 1);
+
+        for (Index = 0; Index < Descriptions->Count; ++Index)
+        {
+            if (!Description[Index].IsConnected)
+            {
+                *PresenceDetection = TRUE;
+                *IsConnected = FALSE;
+                break;
+            }
+        }
+    }
+
+    MixerContext->Free(Descriptions);
+    return MM_STATUS_SUCCESS;
+}
+
+MIXER_STATUS
+MMixerGetWaveConnector(
+    IN PMIXER_CONTEXT MixerContext,
+    IN ULONG DeviceIndex,
+    IN ULONG bWaveIn,
+    OUT LPWSTR *DevicePath,
+    OUT PULONG PinId)
+{
+    PMIXER_LIST MixerList;
+    LPMIXER_DATA ConnectorData;
+    LPWAVE_INFO WaveInfo;
+    MIXER_STATUS Status;
+    SIZE_T Length;
+
+    if (!DevicePath || !PinId)
+        return MM_STATUS_INVALID_PARAMETER;
+
+    Status = MMixerVerifyContext(MixerContext);
+    if (Status != MM_STATUS_SUCCESS)
+        return Status;
+
+    MixerList = (PMIXER_LIST)MixerContext->MixerContext;
+    Status = MMixerGetWaveInfoByIndexAndType(MixerList, DeviceIndex, bWaveIn, &WaveInfo);
+    if (Status != MM_STATUS_SUCCESS)
+        return MM_STATUS_INVALID_PARAMETER;
+
+    if (WaveInfo->ConnectorDeviceId == MAXULONG ||
+        WaveInfo->ConnectorPinId == MAXULONG)
+    {
+        return MM_STATUS_UNSUCCESSFUL;
+    }
+
+    ConnectorData = MMixerGetDataByDeviceId(MixerList, WaveInfo->ConnectorDeviceId);
+    if (!ConnectorData || !ConnectorData->DeviceName)
+        return MM_STATUS_UNSUCCESSFUL;
+
+    Length = wcslen(ConnectorData->DeviceName) + 1;
+    *DevicePath = MixerContext->Alloc(Length * sizeof(WCHAR));
+    if (!*DevicePath)
+        return MM_STATUS_NO_MEMORY;
+
+    MixerContext->Copy(*DevicePath, ConnectorData->DeviceName, Length * sizeof(WCHAR));
+    *PinId = WaveInfo->ConnectorPinId;
+    return MM_STATUS_SUCCESS;
+}
+
+MIXER_STATUS
+MMixerGetWaveFormat(
+    IN PMIXER_CONTEXT MixerContext,
+    IN ULONG DeviceIndex,
+    IN ULONG bWaveIn,
+    OUT PWAVEFORMATEXTENSIBLE Format)
+{
+    PMIXER_LIST MixerList;
+    MIXER_STATUS Status;
+    LPWAVE_INFO WaveInfo;
+
+    if (!Format)
+        return MM_STATUS_INVALID_PARAMETER;
+
+    Status = MMixerVerifyContext(MixerContext);
+    if (Status != MM_STATUS_SUCCESS)
+        return Status;
+
+    MixerList = (PMIXER_LIST)MixerContext->MixerContext;
+    Status = MMixerGetWaveInfoByIndexAndType(MixerList, DeviceIndex, bWaveIn, &WaveInfo);
+    if (Status != MM_STATUS_SUCCESS || !WaveInfo->PreferredFormat.Format.nChannels)
+        return MM_STATUS_UNSUCCESSFUL;
+
+    MixerContext->Copy(Format, &WaveInfo->PreferredFormat, sizeof(*Format));
+    return MM_STATUS_SUCCESS;
+}
+
+MIXER_STATUS
+MMixerGetWaveMixerId(
+    IN PMIXER_CONTEXT MixerContext,
+    IN ULONG DeviceIndex,
+    IN ULONG bWaveIn,
+    OUT PULONG MixerId)
+{
+    PMIXER_LIST MixerList;
+    LPMIXER_DATA MixerData;
+    LPMIXER_INFO MixerInfo;
+    LPWAVE_INFO WaveInfo;
+    PLIST_ENTRY Entry;
+    MIXER_STATUS Status;
+    ULONG Index;
+
+    if (!MixerId)
+        return MM_STATUS_INVALID_PARAMETER;
+
+    Status = MMixerVerifyContext(MixerContext);
+    if (Status != MM_STATUS_SUCCESS)
+        return Status;
+
+    MixerList = (PMIXER_LIST)MixerContext->MixerContext;
+    Status = MMixerGetWaveInfoByIndexAndType(MixerList,
+                                             DeviceIndex,
+                                             bWaveIn,
+                                             &WaveInfo);
+    if (Status != MM_STATUS_SUCCESS)
+        return Status;
+
+    MixerData = MMixerGetDataByDeviceId(MixerList, WaveInfo->DeviceId);
+    if (!MixerData || !MixerData->MixerInfo)
+        return MM_STATUS_UNSUCCESSFUL;
+
+    Index = 0;
+    Entry = MixerList->MixerList.Flink;
+    while (Entry != &MixerList->MixerList)
+    {
+        MixerInfo = CONTAINING_RECORD(Entry, MIXER_INFO, Entry);
+        if (MixerInfo == MixerData->MixerInfo)
+        {
+            *MixerId = Index;
+            return MM_STATUS_SUCCESS;
+        }
+
+        ++Index;
+        Entry = Entry->Flink;
+    }
+
+    return MM_STATUS_UNSUCCESSFUL;
+}
+
+MIXER_STATUS
+MMixerQueryWaveFormatSupport(
+    IN PMIXER_CONTEXT MixerContext,
+    IN ULONG DeviceIndex,
+    IN ULONG bWaveIn,
+    IN LPWAVEFORMATEX WaveFormat,
+    IN ULONG WaveFormatSize)
+{
+    PMIXER_LIST MixerList;
+    LPWAVE_INFO WaveInfo;
+    LPMIXER_DATA MixerData;
+    PKSP_PIN Pin;
+    PKSMULTIPLE_ITEM MultipleItem;
+    PKSDATAFORMAT_WAVEFORMATEX DataFormat;
+    PVOID ResultFormat;
+    MIXER_STATUS Status;
+    ULONG DataFormatSize;
+    ULONG RequestSize;
+    ULONG BytesReturned;
+
+    Status = MMixerVerifyContext(MixerContext);
+    if (Status != MM_STATUS_SUCCESS)
+        return Status;
+
+    if (WaveFormatSize < sizeof(WAVEFORMATEX) ||
+        MMixerValidateWaveFormat(WaveFormat) != MM_STATUS_SUCCESS ||
+        WaveFormat->cbSize > WaveFormatSize - sizeof(WAVEFORMATEX))
+    {
+        return MM_STATUS_INVALID_PARAMETER;
+    }
+
+    MixerList = (PMIXER_LIST)MixerContext->MixerContext;
+    Status = MMixerGetWaveInfoByIndexAndType(MixerList,
+                                             DeviceIndex,
+                                             bWaveIn,
+                                             &WaveInfo);
+    if (Status != MM_STATUS_SUCCESS)
+        return Status;
+
+    MixerData = MMixerGetDataByDeviceId(MixerList, WaveInfo->DeviceId);
+    if (!MixerData)
+        return MM_STATUS_INVALID_PARAMETER;
+
+    DataFormatSize = sizeof(KSDATAFORMAT_WAVEFORMATEX) + WaveFormat->cbSize;
+    RequestSize = sizeof(KSP_PIN) + sizeof(KSMULTIPLE_ITEM) + DataFormatSize;
+
+    Pin = MixerContext->Alloc(RequestSize);
+    if (!Pin)
+        return MM_STATUS_NO_MEMORY;
+
+    ResultFormat = MixerContext->Alloc(DataFormatSize);
+    if (!ResultFormat)
+    {
+        MixerContext->Free(Pin);
+        return MM_STATUS_NO_MEMORY;
+    }
+
+    RtlZeroMemory(Pin, RequestSize);
+    RtlZeroMemory(ResultFormat, DataFormatSize);
+
+    Pin->PinId = WaveInfo->PinId;
+    Pin->Property.Set = KSPROPSETID_Pin;
+    Pin->Property.Id = KSPROPERTY_PIN_DATAINTERSECTION;
+    Pin->Property.Flags = KSPROPERTY_TYPE_GET;
+
+    MultipleItem = (PKSMULTIPLE_ITEM)(Pin + 1);
+    MultipleItem->Count = 1;
+    MultipleItem->Size = DataFormatSize;
+
+    DataFormat = (PKSDATAFORMAT_WAVEFORMATEX)(MultipleItem + 1);
+    MMixerInitializeDataFormat(DataFormat, WaveFormat, WaveFormat->cbSize);
+
+    Status = MixerContext->Control(MixerData->hDevice,
+                                   IOCTL_KS_PROPERTY,
+                                   Pin,
+                                   RequestSize,
+                                   ResultFormat,
+                                   DataFormatSize,
+                                   &BytesReturned);
+
+    MixerContext->Free(ResultFormat);
+    MixerContext->Free(Pin);
+    return Status;
 }
 
 MIXER_STATUS

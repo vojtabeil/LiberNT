@@ -80,6 +80,7 @@ BEGIN
     IDS_DECOMPRESSERROR "Kompressionsverfahren %d wird nicht unterstützt. Dennoch fortfahren?"
     IDS_UNKNOWNERROR "Unbekannter Fehler 0x%08x."
     IDS_CANTDELETEFILE "Failed to delete the file(s)."
+    IDS_DRAGEXTRACT "&Extract..."
 
     IDS_WIZ_TITLE "Extrahier-Assistent"
     IDS_WIZ_DEST_TITLE "Ziel auswählen"
@@ -95,5 +96,7 @@ BEGIN
 
     IDS_MENUITEM "&Alle Extrahieren..."
     IDS_HELPTEXT "Ordnerinhalt extrahieren"
+    IDS_MENUITEM_HERE "&Hier extrahieren"
+    IDS_HELPTEXT_HERE "Extrahiert den Inhalt in diesen Ordner"
     IDS_FRIENDLYNAME "ZIP-komprimierter Ordner"
 END

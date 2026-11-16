@@ -25,6 +25,9 @@ Test_PageFileSection(void)
     PVOID BaseAddress, BaseAddress2;
     SIZE_T ViewSize;
     ULONG OldProtect;
+    BOOL IsWow64 = FALSE;
+
+    IsWow64Process(GetCurrentProcess(), &IsWow64);
 
     /* Create a page file backed section with SEC_COMMIT */
     MaximumSize.QuadPart = 0x20000;
@@ -174,11 +177,15 @@ Test_PageFileSection(void)
                                 ViewShare,
                                 0,
                                 PAGE_READWRITE);
-    if (GetNTVersion() >= _WIN32_WINNT_VISTA)
+    if (GetNTVersion() >= _WIN32_WINNT_VISTA && (sizeof(void *) == 8 || IsWow64))
     {
         ok_ntstatus(Status, STATUS_SUCCESS);
         ok(((ULONG_PTR)BaseAddress & 0x0000FFFF) == 0, "BaseAddress not 64k aligned: %p\n", BaseAddress);
         ok(((ULONG_PTR)BaseAddress & (ULONG_PTR)0xFFFFFFFFF0000000ULL) == 0, "Upper bits are not all zero: %p\n", BaseAddress);
+    }
+    else if (GetNTVersion() >= _WIN32_WINNT_VISTA)
+    {
+        ok_ntstatus(Status, STATUS_INVALID_PARAMETER_4);
     }
     else
     {
@@ -186,6 +193,29 @@ Test_PageFileSection(void)
         if (!NT_SUCCESS(Status))
             return;
     }
+
+#ifdef _WIN64
+    BaseAddress = NULL;
+    SectionOffset.QuadPart = 0;
+    ViewSize = 0x1000;
+    Status = NtMapViewOfSection(SectionHandle,
+                                NtCurrentProcess(),
+                                &BaseAddress,
+                                MAXULONG,
+                                0,
+                                &SectionOffset,
+                                &ViewSize,
+                                ViewShare,
+                                0,
+                                PAGE_READWRITE);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    ok((ULONG_PTR)BaseAddress + ViewSize - 1 <= MAXULONG, "View is not below 4 GB: %p\n", BaseAddress);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
+        ok_ntstatus(Status, STATUS_SUCCESS);
+    }
+#endif
 
     /* Map 2 pages, without MEM_COMMIT */
     BaseAddress = (PVOID)0x30000000;
@@ -620,7 +650,7 @@ Test_PageFileSection(void)
     /* WoW64 returns STATUS_NO_MEMORY */
     ok((Status == STATUS_NO_MEMORY) || (Status == STATUS_INVALID_VIEW_SIZE),
        "got wrong Status: 0x%lx\n", Status);
-    ok(ViewSize == 0, "wrong ViewSize: 0x%Ix\n", ViewSize);
+    ok(ViewSize == 0, "wrong ViewSize: 0x%Ix\n", (size_t)ViewSize);
 #endif
 
     /* Map with PAGE_NOACCESS */
@@ -792,6 +822,11 @@ Test_ImageSection(void)
                         &IoStatusBlock,
                         FILE_SHARE_READ,
                         FILE_SYNCHRONOUS_IO_NONALERT);
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_OBJECT_PATH_NOT_FOUND)
+    {
+        skip("File %s is not present\n", wine_dbgstr_wn(FileName.Buffer, FileName.Length / sizeof(WCHAR)));
+        return;
+    }
     ok_ntstatus(Status, STATUS_SUCCESS);
     if (!NT_SUCCESS(Status))
     {
@@ -1110,7 +1145,6 @@ Test_ImageSection2(void)
 
 }
 
-// doesn't work with WoW64!
 void
 Test_BasedSection(void)
 {
@@ -1119,6 +1153,9 @@ Test_BasedSection(void)
     LARGE_INTEGER MaximumSize, SectionOffset;
     PVOID BaseAddress1, BaseAddress2;
     SIZE_T ViewSize;
+    BOOL IsWow64 = FALSE;
+
+    IsWow64Process(GetCurrentProcess(), &IsWow64);
 
     /* Create a based section with SEC_COMMIT */
     MaximumSize.QuadPart = 0x1000;
@@ -1145,11 +1182,7 @@ Test_BasedSection(void)
                                 ViewShare,
                                 0,
                                 PAGE_READWRITE);
-#if 0 // WOW64?
-    ok_ntstatus(Status, STATUS_CONFLICTING_ADDRESSES);
-#else
-    ok_ntstatus(Status, STATUS_SUCCESS);
-#endif
+    ok_ntstatus(Status, IsWow64 ? STATUS_CONFLICTING_ADDRESSES : STATUS_SUCCESS);
 
     /* Create a 2nd based section with SEC_COMMIT */
     MaximumSize.QuadPart = 0x1000;
@@ -1176,15 +1209,14 @@ Test_BasedSection(void)
                                 ViewShare,
                                 0,
                                 PAGE_READWRITE);
-#if 0 // WOW64?
-    ok_ntstatus(Status, STATUS_CONFLICTING_ADDRESSES);
-#else
-    ok_ntstatus(Status, STATUS_SUCCESS);
-    ok((ULONG_PTR)BaseAddress2 < (ULONG_PTR)BaseAddress1,
-       "Invalid addresses: BaseAddress1=%p, BaseAddress2=%p\n", BaseAddress1, BaseAddress2);
-    ok(((ULONG_PTR)BaseAddress1 - (ULONG_PTR)BaseAddress2) == 0x10000,
-       "Invalid addresses: BaseAddress1=%p, BaseAddress2=%p\n", BaseAddress1, BaseAddress2);
-#endif
+    ok_ntstatus(Status, IsWow64 ? STATUS_CONFLICTING_ADDRESSES : STATUS_SUCCESS);
+    if (!IsWow64)
+    {
+        ok((ULONG_PTR)BaseAddress2 < (ULONG_PTR)BaseAddress1,
+           "Invalid addresses: BaseAddress1=%p, BaseAddress2=%p\n", BaseAddress1, BaseAddress2);
+        ok(((ULONG_PTR)BaseAddress1 - (ULONG_PTR)BaseAddress2) == 0x10000,
+           "Invalid addresses: BaseAddress1=%p, BaseAddress2=%p\n", BaseAddress1, BaseAddress2);
+    }
 }
 
 #define BYTES4(x) x, x, x, x
@@ -1488,7 +1520,7 @@ Test_SectionContents(BOOL Relocate)
                                     ViewShare,
                                     0,
                                     PAGE_READWRITE);
-        if (Relocate)
+        if (Relocate && GetNTVersion() < _WIN32_WINNT_WIN10)
             ok_ntstatus(Status, STATUS_IMAGE_NOT_AT_BASE);
         else
             ok_ntstatus(Status, STATUS_SUCCESS);
@@ -2010,7 +2042,7 @@ Test_Truncate(VOID)
     {
         // First we test data that was truncated even before the file mapping was opened
         Length = strlen((char*)BaseAddress);
-        ok(Length == 6, "Old data was not properly erased! (Length=%lu)\n", Length);
+        ok(Length == 6, "Old data was not properly erased! (Length=%Iu)\n", (size_t)Length);
     }
 
     // Now we truncate the file on disk some more
@@ -2024,7 +2056,7 @@ Test_Truncate(VOID)
     if (BaseAddress)
     {
         Length = strlen((char*)BaseAddress);
-        ok(Length == 6, "Length should not have changed! (Length=%lu)\n", Length);
+        ok(Length == 6, "Length should not have changed! (Length=%Iu)\n", (size_t)Length);
     }
 
     // Unmap and set the end shorter.

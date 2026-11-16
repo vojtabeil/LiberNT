@@ -48,16 +48,86 @@ extern "C" {
  * Taskbar interface WM_COPYDATA structures
  * See http://www.geoffchappell.com/studies/windows/shell/shell32/api/shlnot/copydata.htm
  */
+#if defined(BUILD_WOW6432)
+typedef struct _NOTIFYICONDATA64W
+{
+    DWORD cbSize;
+    UINT64 hWnd;
+    UINT uID;
+    UINT uFlags;
+    UINT uCallbackMessage;
+    UINT64 hIcon;
+    WCHAR szTip[128];
+    DWORD dwState;
+    DWORD dwStateMask;
+    WCHAR szInfo[256];
+    union
+    {
+        UINT uTimeout;
+        UINT uVersion;
+    } DUMMYUNIONNAME;
+    WCHAR szInfoTitle[64];
+    DWORD dwInfoFlags;
+    GUID guidItem;
+    UINT64 hBalloonIcon;
+} NOTIFYICONDATA64W;
+
+C_ASSERT(sizeof(NOTIFYICONDATA64W) == 0x3D0);
+C_ASSERT(FIELD_OFFSET(NOTIFYICONDATA64W, hIcon) == 0x20);
+C_ASSERT(FIELD_OFFSET(NOTIFYICONDATA64W, hBalloonIcon) == 0x3C8);
+
+typedef struct _NOTIFYICONIDENTIFIER64
+{
+    DWORD cbSize;
+    UINT64 hWnd;
+    UINT uID;
+    GUID guidItem;
+} NOTIFYICONIDENTIFIER64;
+
+C_ASSERT(sizeof(NOTIFYICONIDENTIFIER64) == 0x28);
+#endif
+
+#if defined(_WIN64)
+C_ASSERT(sizeof(NOTIFYICONDATAW) == 0x3D0);
+C_ASSERT(FIELD_OFFSET(NOTIFYICONDATAW, hIcon) == 0x20);
+C_ASSERT(FIELD_OFFSET(NOTIFYICONDATAW, hBalloonIcon) == 0x3C8);
+C_ASSERT(sizeof(NOTIFYICONIDENTIFIER) == 0x28);
+#endif
+
 /* Data structure for Shell_NotifyIcon messages */
 typedef struct _TRAYNOTIFYDATAW
 {
     DWORD dwSignature;
     DWORD dwMessage;
+#if defined(BUILD_WOW6432)
+    NOTIFYICONDATA64W nid;
+#else
     NOTIFYICONDATAW nid; // Always use the latest NOTIFYICONDATAW structure version.
+#endif
 } TRAYNOTIFYDATAW, *PTRAYNOTIFYDATAW;
 // Note: One could also introduce TRAYNOTIFYDATAA
 
 #define NI_NOTIFY_SIG 0x34753423 /* TRAYNOTIFYDATA */
+
+#define NI_GETRECT_SIG 0x3472434E /* TRAYNOTIFYICONGETRECTDATA */
+#define NI_GETRECT_MAPPING_LENGTH 64
+
+typedef struct _TRAYNOTIFYICONGETRECTDATA
+{
+    DWORD dwSignature;
+#if defined(BUILD_WOW6432)
+    NOTIFYICONIDENTIFIER64 Identifier;
+#else
+    NOTIFYICONIDENTIFIER Identifier;
+#endif
+    WCHAR MappingName[NI_GETRECT_MAPPING_LENGTH];
+} TRAYNOTIFYICONGETRECTDATA, *PTRAYNOTIFYICONGETRECTDATA;
+
+typedef struct _TRAYNOTIFYICONGETRECTRESULT
+{
+    HRESULT Result;
+    RECT IconRect;
+} TRAYNOTIFYICONGETRECTRESULT, *PTRAYNOTIFYICONGETRECTRESULT;
 
 #endif /* defined (_SHELLAPI_H) || defined (_INC_SHELLAPI) */
 
@@ -176,7 +246,7 @@ typedef struct _SHCNF_PRINTJOB_INFO
 HRESULT WINAPI SHUpdateRecycleBinIcon(void);
 
 // Used in SHChangeNotify(SHCNE_UPDATEIMAGE)
-#include <pshpack1.h>
+#pragma pack(push, 1)
 typedef struct tagSHCNF_UPDATEIMAGE_DATA_1
 {
     WORD   cbSize;
@@ -196,7 +266,7 @@ typedef struct tagSHCNF_UPDATEIMAGE_DATA_2
     WCHAR szHashItem[MAX_PATH];
     USHORT terminator;
 } SHCNF_UPDATEIMAGE_DATA_2, *PSHCNF_UPDATEIMAGE_DATA_2;
-#include <poppack.h>
+#pragma pack(pop)
 
 /****************************************************************************
  * Shell Common Dialogs
@@ -490,13 +560,13 @@ HRESULT WINAPI SHRegisterDragDrop(
 
 HRESULT WINAPI SHRevokeDragDrop(HWND hWnd);
 
-BOOL WINAPI DAD_DragEnter(HWND hWnd);
+BOOL WINAPI DAD_DragEnter(_In_ HWND hWnd);
 
 BOOL WINAPI DAD_SetDragImageFromListView(
     HWND hWnd,
     POINT pt);
 
-BOOL WINAPI DAD_ShowDragImage(BOOL bShow);
+BOOL WINAPI DAD_ShowDragImage(_In_ BOOL bShow);
 
 /****************************************************************************
  * Path Manipulation Routines
@@ -1024,6 +1094,7 @@ BOOL WINAPI LinkWindow_UnregisterClass(_In_ DWORD dwUnused);
 #define TABDMC_APPBAR     0
 #define TABDMC_NOTIFY     1
 #define TABDMC_LOADINPROC 2
+#define TABDMC_NOTIFY_GETRECT 3
 
 void WINAPI ShellDDEInit(BOOL bInit);
 
@@ -1092,7 +1163,7 @@ SHGetComputerDisplayNameW(
 /*****************************************************************************
  * Shell Link
  */
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 typedef struct tagSHELL_LINK_HEADER
 {
@@ -1311,7 +1382,7 @@ typedef struct SFVM_CUSTOMVIEWINFO_DATA
     COLORREF clrTextBack;
 } SFVM_CUSTOMVIEWINFO_DATA, *LPSFVM_CUSTOMVIEWINFO_DATA;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 #if defined(_WIN64) || defined(BUILD_WOW6432)
     typedef UINT64 APPBAR_OUTPUT;
@@ -1327,7 +1398,7 @@ typedef struct SFVM_CUSTOMVIEWINFO_DATA
  * See also: https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle
  * > DuplicateHandle can be used to duplicate a handle between a 32-bit process and a 64-bit process.
  */
-#include <pshpack8.h>
+#pragma pack(push, 8)
 typedef struct tagAPPBARDATAINTEROP
 {
     DWORD cbSize; /* == sizeof(APPBARDATAINTEROP) */
@@ -1344,7 +1415,7 @@ typedef struct tagAPPBAR_COMMAND
     APPBAR_OUTPUT hOutput; /* For shlwapi!SHAllocShared */
     DWORD dwProcessId;
 } APPBAR_COMMAND, *PAPPBAR_COMMAND;
-#include <poppack.h>
+#pragma pack(pop)
 
 #if defined(_WIN64) || defined(BUILD_WOW6432)
 C_ASSERT(sizeof(APPBAR_COMMAND) == 0x40);

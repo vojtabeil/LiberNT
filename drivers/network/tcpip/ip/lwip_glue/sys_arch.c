@@ -1,5 +1,6 @@
 #include <debug.h>
 #include <lwip/sys.h>
+#include <lwip/tcpip.h>
 
 #include "lwip_glue.h"
 
@@ -9,10 +10,10 @@ static ERESOURCE GlobalLock;
 static ULONG GlobalLockLevel = 0;
 
 KEVENT TerminationEvent;
-NPAGED_LOOKASIDE_LIST MessageLookasideList;
 NPAGED_LOOKASIDE_LIST QueueEntryLookasideList;
 
-static LARGE_INTEGER StartTime;
+static LARGE_INTEGER StartSystemTime;
+static ULONGLONG StartTick;
 
 typedef struct _thread_t
 {
@@ -24,11 +25,16 @@ typedef struct _thread_t
 
 u32_t sys_now(void)
 {
-    LARGE_INTEGER CurrentTime;
+    return (u32_t)(KeQueryInterruptTime() / 10000);
+}
 
-    KeQuerySystemTime(&CurrentTime);
+LONGLONG
+LibSysNowToSystemTime(u32_t Tick)
+{
+    ULONGLONG Now = KeQueryInterruptTime() / 10000;
+    ULONGLONG Then = Now - (u32_t)((u32_t)Now - Tick);
 
-    return (CurrentTime.QuadPart - StartTime.QuadPart) / 10000;
+    return StartSystemTime.QuadPart + (LONGLONG)(Then - StartTick) * 10000;
 }
 
 void
@@ -98,7 +104,7 @@ sys_arch_sem_wait(sys_sem_t* sem, u32_t timeout)
 
     LargeTimeout.QuadPart = Int32x32To64(timeout, -10000);
 
-    KeQuerySystemTime(&PreWaitTime);
+    PreWaitTime.QuadPart = KeQueryInterruptTime();
 
     Status = KeWaitForMultipleObjects(2,
                                       WaitObjects,
@@ -110,7 +116,7 @@ sys_arch_sem_wait(sys_sem_t* sem, u32_t timeout)
                                       NULL);
     if (Status == STATUS_WAIT_0)
     {
-        KeQuerySystemTime(&PostWaitTime);
+        PostWaitTime.QuadPart = KeQueryInterruptTime();
         TimeDiff = PostWaitTime.QuadPart - PreWaitTime.QuadPart;
         TimeDiff /= 10000;
 
@@ -193,7 +199,7 @@ sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
 
     LargeTimeout.QuadPart = Int32x32To64(timeout, -10000);
 
-    KeQuerySystemTime(&PreWaitTime);
+    PreWaitTime.QuadPart = KeQueryInterruptTime();
 
     Status = KeWaitForMultipleObjects(2,
                                       WaitObjects,
@@ -218,7 +224,7 @@ sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
         if (msg)
             *msg = Message;
 
-        KeQuerySystemTime(&PostWaitTime);
+        PostWaitTime.QuadPart = KeQueryInterruptTime();
         TimeDiff = PostWaitTime.QuadPart - PreWaitTime.QuadPart;
         TimeDiff /= 10000;
 
@@ -263,6 +269,7 @@ LwipThreadMain(PVOID Context)
     KIRQL OldIrql;
 
     ExInterlockedInsertHeadList(&ThreadListHead, &Container->ListEntry, &ThreadListLock);
+    KeSetPriorityThread(KeGetCurrentThread(), LOW_REALTIME_PRIORITY);
 
     Container->ThreadFunction(Container->ThreadContext);
 
@@ -311,17 +318,10 @@ sys_init(void)
     KeInitializeSpinLock(&ThreadListLock);
     InitializeListHead(&ThreadListHead);
 
-    KeQuerySystemTime(&StartTime);
+    KeQuerySystemTime(&StartSystemTime);
+    StartTick = KeQueryInterruptTime() / 10000;
 
     KeInitializeEvent(&TerminationEvent, NotificationEvent, FALSE);
-
-    ExInitializeNPagedLookasideList(&MessageLookasideList,
-                                    NULL,
-                                    NULL,
-                                    0,
-                                    sizeof(struct lwip_callback_msg),
-                                    LWIP_MESSAGE_TAG,
-                                    0);
 
     ExInitializeNPagedLookasideList(&QueueEntryLookasideList,
                                     NULL,
@@ -348,16 +348,40 @@ sys_shutdown(void)
 
         if (Container->ThreadFunction)
         {
-            KeWaitForSingleObject(Container->Handle,
-                                  Executive,
-                                  KernelMode,
-                                  FALSE,
-                                  NULL);
+            PVOID Thread;
+
+            if (NT_SUCCESS(ObReferenceObjectByHandle(Container->Handle, SYNCHRONIZE, *PsThreadType,
+                                                     KernelMode, &Thread, NULL)))
+            {
+                KeWaitForSingleObject(Thread, Executive, KernelMode, FALSE, NULL);
+                ObDereferenceObject(Thread);
+            }
 
             ZwClose(Container->Handle);
         }
     }
 
-    ExDeleteNPagedLookasideList(&MessageLookasideList);
     ExDeleteNPagedLookasideList(&QueueEntryLookasideList);
+}
+
+static PKTHREAD LibTCPCoreOwner;
+
+void
+LibTCPLockCore(void)
+{
+    sys_mutex_lock(&lock_tcpip_core);
+    LibTCPCoreOwner = KeGetCurrentThread();
+}
+
+void
+LibTCPUnlockCore(void)
+{
+    LibTCPCoreOwner = NULL;
+    sys_mutex_unlock(&lock_tcpip_core);
+}
+
+BOOLEAN
+LibTCPCoreHeld(void)
+{
+    return LibTCPCoreOwner == KeGetCurrentThread();
 }

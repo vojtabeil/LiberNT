@@ -3,9 +3,12 @@
 # Global compile options
 ###############################################################################
 
-# This requires NT6
-remove_definitions(-D_WIN32_WINNT=0x502 -DWINVER=0x502)
-add_definitions(-D_WIN32_WINNT=0x601 -DWINVER=0x601)
+# Use conforming swprintfs
+remove_definitions(-D_CRT_NON_CONFORMING_SWPRINTFS)
+
+if(MSVC AND LTCG)
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/GL->)
+endif()
 
 # Replace the global CRT include directory with the msvcrt include directory
 get_property(INCLUDE_DIRS DIRECTORY . PROPERTY INCLUDE_DIRECTORIES)
@@ -52,6 +55,14 @@ if(MSVC)
     endif()
 endif()
 
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    set_source_files_properties(math.c PROPERTIES COMPILE_OPTIONS "-Wno-incompatible-library-redeclaration")
+    set_property(SOURCE except.c APPEND PROPERTY COMPILE_OPTIONS -Wno-unused-variable -Wno-unused-function)
+    set_property(SOURCE string.c APPEND PROPERTY COMPILE_OPTIONS -Wno-unused-function)
+elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(math.c PROPERTIES COMPILE_OPTIONS "-Wno-builtin-declaration-mismatch")
+endif()
+
 ###############################################################################
 # A static library shared with ucrtbase
 ###############################################################################
@@ -80,13 +91,23 @@ elseif(ARCH STREQUAL "arm")
     list(APPEND SHARED_SOURCE
         except_arm.c
     )
+elseif(ARM64EC_RUNTIME)
+    list(APPEND SHARED_SOURCE
+        except_arm64ec.c
+    )
 elseif(ARCH STREQUAL "arm64")
     list(APPEND SHARED_SOURCE
         except_arm64.c
     )
-elseif(ARCH STREQUAL "arm64ec")
+elseif(ARCH STREQUAL "riscv64")
     list(APPEND SHARED_SOURCE
-        except_arm64ec.c
+        except_riscv64.c
+        fpu_riscv64.c
+    )
+elseif(ARCH STREQUAL "ppc")
+    list(APPEND SHARED_SOURCE
+        except_ppc.c
+        fpu_ppc.c
     )
 endif()
 
@@ -104,6 +125,11 @@ if(MSVC)
             amd64/cpp_vtables.s
             amd64/except_x86_64.s
         )
+    elseif(ARCH STREQUAL "arm64" AND NOT ARM64EC_RUNTIME)
+        list(APPEND SHARED_ASM_SOURCE
+            arm64/cpp_vtables.s
+            arm64/except_arm64.s
+        )
     endif()
 endif()
 
@@ -117,6 +143,10 @@ add_library(msvcrt_shared
 
 target_compile_definitions(msvcrt_shared PRIVATE _MSVCR_VER=0 __UCRTSUPPORT__)
 add_dependencies(msvcrt_shared psdk asm)
+
+add_library(msvcrt_undname_ucrt undname.c)
+target_compile_definitions(msvcrt_undname_ucrt PRIVATE _MSVCR_VER=0 __UCRTSUPPORT__ _UCRT)
+add_dependencies(msvcrt_undname_ucrt psdk)
 
 ###############################################################################
 # A static library shared between msvcrt.dll msvcrt20.dll and msvcrt40.dll
@@ -152,6 +182,36 @@ list(APPEND MSVCRT_SOURCE
     wcs.c
 )
 
+if(ARCH STREQUAL "arm64" AND NOT ARM64EC_RUNTIME)
+    list(APPEND MSVCRT_ASM_SOURCE
+        ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/arm64/strlen.S
+        ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/arm64/strcpy.S
+        ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/arm64/strchr.S
+        ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/arm64/strrchr.S
+    )
+    set(MSVCRT_ARCH_ROUTINES MSVCRT_ARCH_STRLEN MSVCRT_ARCH_STRCPY MSVCRT_ARCH_STRCHR MSVCRT_ARCH_STRRCHR)
+elseif(ARCH STREQUAL "riscv64")
+    list(APPEND MSVCRT_SOURCE
+        ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/riscv64/rvdispatch.c
+    )
+    list(APPEND MSVCRT_ASM_SOURCE
+        ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/riscv64/rvscalar.S
+        ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/riscv64/rvvector.S
+    )
+    set_source_files_properties(${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/riscv64/rvdispatch.c
+        PROPERTIES COMPILE_OPTIONS "-fno-builtin")
+    set(MSVCRT_ARCH_ROUTINES MSVCRT_ARCH_STRLEN MSVCRT_ARCH_STRCPY MSVCRT_ARCH_STRCMP MSVCRT_ARCH_MEMCPY MSVCRT_ARCH_MEMSET MSVCRT_ARCH_MEMCMP)
+elseif(ARCH STREQUAL "amd64")
+    list(APPEND MSVCRT_ASM_SOURCE
+        ${REACTOS_SOURCE_DIR}/sdk/lib/crt/mem/amd64/memset_asm.s
+    )
+    list(APPEND MSVCRT_SOURCE
+        ${REACTOS_SOURCE_DIR}/sdk/lib/crt/mem/amd64/memset_nt.c
+        ${REACTOS_SOURCE_DIR}/sdk/lib/crt/mem/amd64/memmove_nt.c
+    )
+    set(MSVCRT_ARCH_ROUTINES MSVCRT_ARCH_MEMSET)
+endif()
+
 add_asm_files(msvcrt_asm ${MSVCRT_ASM_SOURCE})
 list(APPEND MSVCRT_SOURCE ${msvcrt_asm})
 
@@ -159,8 +219,19 @@ add_library(msvcrt_static
     ${MSVCRT_SOURCE}
 )
 
-target_compile_definitions(msvcrt_static PRIVATE _MSVCR_VER=0)
+target_compile_definitions(msvcrt_static PRIVATE _MSVCR_VER=0 ${MSVCRT_ARCH_ROUTINES})
 add_dependencies(msvcrt_static psdk asm)
+if(ARCH STREQUAL "riscv64")
+    if(RISCV64_FAST_MISALIGNED_ACCESS)
+        target_compile_options(msvcrt_static PRIVATE -mno-scalar-strict-align)
+    endif()
+    if(RISCV64_VECTOR)
+        target_compile_definitions(msvcrt_static PRIVATE RV_CRT_RVA23)
+        if(RISCV64_FAST_MISALIGNED_ACCESS)
+            target_compile_definitions(msvcrt_static PRIVATE RV_CRT_FAST_UNALIGNED)
+        endif()
+    endif()
+endif()
 
 ###############################################################################
 # MSVCRT.DLL
@@ -173,6 +244,11 @@ add_library(msvcrt MODULE
     ${CMAKE_CURRENT_BINARY_DIR}/msvcrt.def
     msvcrt.rc
 )
+
+if(ARCH STREQUAL "arm64" AND ARM64EC_RUNTIME)
+    target_sources(msvcrt PRIVATE arm64ec_memory.c)
+    set_source_files_properties(arm64ec_memory.c PROPERTIES COMPILE_OPTIONS "-fno-builtin")
+endif()
 
 target_compile_definitions(msvcrt PRIVATE _MSVCR_VER=0)
 set_module_type(msvcrt win32dll ENTRYPOINT DllMain 12)

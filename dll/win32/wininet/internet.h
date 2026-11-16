@@ -23,23 +23,30 @@
 #ifndef _WINE_INTERNET_H_
 #define _WINE_INTERNET_H_
 
-#include "wine/heap.h"
 #include "wine/list.h"
 
+#ifdef __REACTOS__
+#include <limits.h>
+#endif
 #include <time.h>
 
 #include "winineti.h"
 
-extern HMODULE WININET_hModule DECLSPEC_HIDDEN;
+extern HMODULE WININET_hModule;
+
+typedef struct server_addr
+{
+    struct sockaddr_storage addr;
+    int addr_len;
+    char addr_str[INET6_ADDRSTRLEN];
+    struct server_addr *next;
+} server_addr_t;
 
 typedef struct {
     WCHAR *name;
     INTERNET_PORT port;
     BOOL is_https;
-    struct sockaddr_storage addr;
-    int addr_len;
-    char addr_str[INET6_ADDRSTRLEN];
-
+    server_addr_t *addr;
     WCHAR *scheme_host_port;
     const WCHAR *host_port;
     const WCHAR *canon_host_port;
@@ -53,15 +60,15 @@ typedef struct {
     struct list conn_pool;
 } server_t;
 
-void server_addref(server_t*) DECLSPEC_HIDDEN;
-void server_release(server_t*) DECLSPEC_HIDDEN;
+void server_addref(server_t*);
+void server_release(server_t*);
 
 typedef enum {
     COLLECT_TIMEOUT,
     COLLECT_CONNECTIONS,
     COLLECT_CLEANUP
 } collect_type_t;
-BOOL collect_connections(collect_type_t) DECLSPEC_HIDDEN;
+BOOL collect_connections(collect_type_t);
 
 /* used for netconnection.c stuff */
 typedef struct
@@ -86,49 +93,21 @@ typedef struct
     struct list pool_entry;
 } netconn_t;
 
-BOOL is_valid_netconn(netconn_t *) DECLSPEC_HIDDEN;
-void close_netconn(netconn_t *) DECLSPEC_HIDDEN;
+BOOL is_valid_netconn(netconn_t *);
+void close_netconn(netconn_t *);
 
-static inline void * __WINE_ALLOC_SIZE(2) heap_realloc_zero(void *mem, size_t len)
-{
-    return HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, mem, len);
-}
-
-static inline LPWSTR heap_strdupW(LPCWSTR str)
-{
-    LPWSTR ret = NULL;
-
-    if(str) {
-        DWORD size;
-
-        size = (lstrlenW(str)+1)*sizeof(WCHAR);
-        ret = heap_alloc(size);
-        if(ret)
-            memcpy(ret, str, size);
-    }
-
-    return ret;
-}
-
-static inline char *heap_strdupA(const char *str)
-{
-    char *ret = NULL;
-
-    if(str) {
-        DWORD size = strlen(str)+1;
-
-        ret = heap_alloc(size);
-        if(ret)
-            memcpy(ret, str, size);
-    }
-
-    return ret;
-}
-
-static inline LPWSTR heap_strndupW(LPCWSTR str, UINT max_len)
+#ifdef __REACTOS__
+static inline WCHAR *strndupW(const WCHAR *str, size_t max_len)
+#else
+static inline WCHAR *strndupW(const WCHAR *str, UINT max_len)
+#endif
 {
     LPWSTR ret;
+#ifdef __REACTOS__
+    size_t len;
+#else
     UINT len;
+#endif
 
     if(!str)
         return NULL;
@@ -137,35 +116,84 @@ static inline LPWSTR heap_strndupW(LPCWSTR str, UINT max_len)
         if(str[len] == '\0')
             break;
 
-    ret = heap_alloc(sizeof(WCHAR)*(len+1));
+#ifdef __REACTOS__
+    if (len >= (size_t)-1 / sizeof(WCHAR))
+    {
+        SetLastError(ERROR_OUTOFMEMORY);
+        return NULL;
+    }
+#endif
+    ret = malloc(sizeof(WCHAR) * (len + 1));
     if(ret) {
         memcpy(ret, str, sizeof(WCHAR)*len);
         ret[len] = '\0';
     }
+#ifdef __REACTOS__
+    else SetLastError(ERROR_OUTOFMEMORY);
+#endif
 
     return ret;
 }
 
-static inline WCHAR *heap_strndupAtoW(const char *str, int len_a, DWORD *len_w)
+#ifdef __REACTOS__
+static inline WCHAR *strndupAtoW(const char *str, DWORD len_a, DWORD *len_w)
+#else
+static inline WCHAR *strndupAtoW(const char *str, int len_a, DWORD *len_w)
+#endif
 {
     WCHAR *ret = NULL;
 
     if(str) {
+#ifdef __REACTOS__
+        size_t bytes = len_a == ~0u ? strlen(str) : strnlen(str, len_a);
+        int len;
+
+        if (bytes > INT_MAX)
+        {
+            SetLastError(ERROR_OUTOFMEMORY);
+            return NULL;
+        }
+        len = bytes ? MultiByteToWideChar(CP_ACP, 0, str, bytes, NULL, 0) : 0;
+        if (bytes && !len) return NULL;
+        if ((size_t)len >= (size_t)-1 / sizeof(WCHAR))
+        {
+            SetLastError(ERROR_OUTOFMEMORY);
+            return NULL;
+        }
+        ret = malloc(((size_t)len + 1) * sizeof(WCHAR));
+#else
         size_t len;
-        if(len_a < 0) len_a = strlen(str);
+        if(len_a < 0)
+            len_a = strlen(str);
+        else if(len_a > 0)
+            len_a = strnlen(str, len_a);
         len = MultiByteToWideChar(CP_ACP, 0, str, len_a, NULL, 0);
-        ret = heap_alloc((len+1)*sizeof(WCHAR));
+        ret = malloc((len + 1) * sizeof(WCHAR));
+#endif
         if(ret) {
+#ifdef __REACTOS__
+            if (bytes && !MultiByteToWideChar(CP_ACP, 0, str, bytes, ret, len))
+            {
+                DWORD error = GetLastError();
+                free(ret);
+                SetLastError(error);
+                return NULL;
+            }
+#else
             MultiByteToWideChar(CP_ACP, 0, str, len_a, ret, len);
+#endif
             ret[len] = 0;
             *len_w = len;
         }
+#ifdef __REACTOS__
+        else SetLastError(ERROR_OUTOFMEMORY);
+#endif
     }
 
     return ret;
 }
 
-static inline WCHAR *heap_strdupAtoW(const char *str)
+static inline WCHAR *strdupAtoW(const char *str)
 {
     LPWSTR ret = NULL;
 
@@ -173,23 +201,62 @@ static inline WCHAR *heap_strdupAtoW(const char *str)
         DWORD len;
 
         len = MultiByteToWideChar(CP_ACP, 0, str, -1, NULL, 0);
-        ret = heap_alloc(len*sizeof(WCHAR));
+#ifdef __REACTOS__
+        if (!len) return NULL;
+        if ((size_t)len > (size_t)-1 / sizeof(WCHAR))
+        {
+            SetLastError(ERROR_OUTOFMEMORY);
+            return NULL;
+        }
+        ret = malloc((size_t)len * sizeof(WCHAR));
+#else
+        ret = malloc(len * sizeof(WCHAR));
+#endif
         if(ret)
+#ifdef __REACTOS__
+        {
+            if (!MultiByteToWideChar(CP_ACP, 0, str, -1, ret, len))
+            {
+                DWORD error = GetLastError();
+                free(ret);
+                SetLastError(error);
+                return NULL;
+            }
+        }
+        else SetLastError(ERROR_OUTOFMEMORY);
+#else
             MultiByteToWideChar(CP_ACP, 0, str, -1, ret, len);
+#endif
     }
 
     return ret;
 }
 
-static inline char *heap_strdupWtoA(LPCWSTR str)
+static inline char *strdupWtoA(const WCHAR *str)
 {
     char *ret = NULL;
 
     if(str) {
         DWORD size = WideCharToMultiByte(CP_ACP, 0, str, -1, NULL, 0, NULL, NULL);
-        ret = heap_alloc(size);
+#ifdef __REACTOS__
+        if (!size) return NULL;
+#endif
+        ret = malloc(size);
         if(ret)
+#ifdef __REACTOS__
+        {
+            if (!WideCharToMultiByte(CP_ACP, 0, str, -1, ret, size, NULL, NULL))
+            {
+                DWORD error = GetLastError();
+                free(ret);
+                SetLastError(error);
+                return NULL;
+            }
+        }
+        else SetLastError(ERROR_OUTOFMEMORY);
+#else
             WideCharToMultiByte(CP_ACP, 0, str, -1, ret, size, NULL, NULL);
+#endif
     }
 
     return ret;
@@ -259,10 +326,15 @@ typedef struct {
     void (*CloseConnection)(object_header_t*);
     DWORD (*QueryOption)(object_header_t*,DWORD,void*,DWORD*,BOOL);
     DWORD (*SetOption)(object_header_t*,DWORD,void*,DWORD);
+    DWORD (*SetFilePointer)(object_header_t*,LONG,DWORD);
     DWORD (*ReadFile)(object_header_t*,void*,DWORD,DWORD*,DWORD,DWORD_PTR);
     DWORD (*WriteFile)(object_header_t*,const void*,DWORD,DWORD*);
     DWORD (*QueryDataAvailable)(object_header_t*,DWORD*,DWORD,DWORD_PTR);
+#ifdef __REACTOS__
+    DWORD (*FindNextFileW)(object_header_t*,void*,BOOL);
+#else
     DWORD (*FindNextFileW)(object_header_t*,void*);
+#endif
     DWORD (*LockRequestFile)(object_header_t*,req_file_t**);
 } object_vtbl_t;
 
@@ -273,10 +345,14 @@ struct _object_header_t
     WH_TYPE htype;
     const object_vtbl_t *vtbl;
     HINTERNET hInternet;
+    ULONG  connect_timeout;
+    ULONG  send_timeout;
+    ULONG  receive_timeout;
+    ULONG  data_send_timeout;
+    ULONG  data_receive_timeout;
     BOOL valid_handle;
     DWORD  dwFlags;
     DWORD_PTR dwContext;
-    DWORD  dwError;
     ULONG  ErrorMask;
     DWORD  dwInternalFlags;
     LONG   refs;
@@ -295,7 +371,11 @@ typedef struct
     LPWSTR  proxyUsername;
     LPWSTR  proxyPassword;
     DWORD   accessType;
-    DWORD   connect_timeout;
+#ifdef __REACTOS__
+    SRWLOCK synced_lock;
+    struct list synced_urls;
+    BOOL preconfig;
+#endif
 } appinfo_t;
 
 typedef struct
@@ -306,9 +386,9 @@ typedef struct
     LPWSTR  userName;
     LPWSTR  password;
     INTERNET_PORT hostPort; /* the final destination port of the request */
-    DWORD connect_timeout;
-    DWORD send_timeout;
-    DWORD receive_timeout;
+#ifdef __REACTOS__
+    LPWSTR  agent;
+#endif
 } http_session_t;
 
 #define HDR_ISREQUEST		0x0001
@@ -336,6 +416,9 @@ typedef struct {
     data_stream_t data_stream;
     ULONGLONG content_length;
     ULONGLONG content_read;
+#ifdef __REACTOS__
+    BOOL premature_eof;
+#endif
 } netconn_stream_t;
 
 #define READ_BUFFER_SIZE 8192
@@ -343,6 +426,7 @@ typedef struct {
 typedef struct
 {
     object_header_t hdr;
+    DWORD state;
     http_session_t *session;
     server_t *server;
     server_t *proxy;
@@ -350,14 +434,18 @@ typedef struct
     LPWSTR verb;
     netconn_t *netconn;
     DWORD security_flags;
-    DWORD connect_timeout;
-    DWORD send_timeout;
-    DWORD receive_timeout;
     LPWSTR version;
     DWORD status_code;
     LPWSTR statusText;
     DWORD bytesToWrite;
     DWORD bytesWritten;
+    BOOL clear_auth; /* Flag to clear the password field on the authorization dialog */
+#ifdef __REACTOS__
+    BOOL awaiting_response;
+    BOOL no_headers;
+    DWORD net_received;
+    BOOL request_sent;
+#endif
 
     CRITICAL_SECTION headers_section;  /* section to protect the headers array */
     HTTPHEADERW *custHeaders;
@@ -365,6 +453,7 @@ typedef struct
 
     FILETIME last_modified;
     HANDLE hCacheFile;
+    ULONGLONG cache_size;  /* size of cached data */
     req_file_t *req_file;
     FILETIME expires;
     struct HttpAuthInfo *authInfo;
@@ -372,6 +461,7 @@ typedef struct
 
     CRITICAL_SECTION read_section;  /* section to protect the following fields */
     ULONGLONG contentLength;  /* total number of bytes to be read */
+    ULONGLONG content_pos;    /* content read position */
     BOOL  read_gzip;      /* are we reading in gzip mode? */
     DWORD read_pos;       /* current read position in read_buf */
     DWORD read_size;      /* valid data size in read_buf */
@@ -387,64 +477,76 @@ typedef void (*async_task_proc_t)(task_header_t*);
 struct task_header_t
 {
     async_task_proc_t proc;
+#ifdef __REACTOS__
+    async_task_proc_t destroy;
+#endif
     object_header_t *hdr;
 };
 
-void *alloc_async_task(object_header_t*,async_task_proc_t,size_t) DECLSPEC_HIDDEN;
+void *alloc_async_task(object_header_t*,async_task_proc_t,size_t);
+#ifdef __REACTOS__
+void free_async_task(task_header_t*);
+#endif
 
-void *alloc_object(object_header_t*,const object_vtbl_t*,size_t) DECLSPEC_HIDDEN;
-object_header_t *get_handle_object( HINTERNET hinternet ) DECLSPEC_HIDDEN;
-object_header_t *WININET_AddRef( object_header_t *info ) DECLSPEC_HIDDEN;
-BOOL WININET_Release( object_header_t *info ) DECLSPEC_HIDDEN;
+void *alloc_object(object_header_t*,const object_vtbl_t*,size_t);
+object_header_t *get_handle_object( HINTERNET hinternet );
+object_header_t *WININET_AddRef( object_header_t *info );
+BOOL WININET_Release( object_header_t *info );
 
-DWORD INET_QueryOption(object_header_t*,DWORD,void*,DWORD*,BOOL) DECLSPEC_HIDDEN;
-DWORD INET_SetOption(object_header_t*,DWORD,void*,DWORD) DECLSPEC_HIDDEN;
+DWORD INET_QueryOption(object_header_t*,DWORD,void*,DWORD*,BOOL);
+DWORD INET_SetOption(object_header_t*,DWORD,void*,DWORD);
 
-time_t ConvertTimeString(LPCWSTR asctime) DECLSPEC_HIDDEN;
+time_t ConvertTimeString(LPCWSTR asctime);
 
 HINTERNET FTP_Connect(appinfo_t *hIC, LPCWSTR lpszServerName,
 	INTERNET_PORT nServerPort, LPCWSTR lpszUserName,
 	LPCWSTR lpszPassword, DWORD dwFlags, DWORD_PTR dwContext,
-	DWORD dwInternalFlags) DECLSPEC_HIDDEN;
+	DWORD dwInternalFlags);
 
 DWORD HTTP_Connect(appinfo_t*,LPCWSTR,
         INTERNET_PORT nServerPort, LPCWSTR lpszUserName,
         LPCWSTR lpszPassword, DWORD dwFlags, DWORD_PTR dwContext,
-        DWORD dwInternalFlags, HINTERNET*) DECLSPEC_HIDDEN;
+        DWORD dwInternalFlags, HINTERNET*);
 
-BOOL GetAddress(const WCHAR*,INTERNET_PORT,SOCKADDR*,int*,char*) DECLSPEC_HIDDEN;
+server_addr_t *GetAddress(const WCHAR*,INTERNET_PORT);
+int create_connect_socket(server_addr_t*,int,DWORD,object_header_t*,DWORD_PTR);
 
-DWORD get_cookie_header(const WCHAR*,const WCHAR*,WCHAR**) DECLSPEC_HIDDEN;
-DWORD set_cookie(substr_t,substr_t,substr_t,substr_t,DWORD) DECLSPEC_HIDDEN;
+DWORD get_cookie_header(const WCHAR*,const WCHAR*,WCHAR**);
+DWORD set_cookie(substr_t,substr_t,substr_t,substr_t,DWORD);
 
-void INTERNET_SetLastError(DWORD dwError) DECLSPEC_HIDDEN;
-DWORD INTERNET_GetLastError(void) DECLSPEC_HIDDEN;
-DWORD INTERNET_AsyncCall(task_header_t*) DECLSPEC_HIDDEN;
-LPSTR INTERNET_GetResponseBuffer(void) DECLSPEC_HIDDEN;
+void INTERNET_SetLastError(DWORD dwError);
+DWORD INTERNET_GetLastError(void);
+DWORD INTERNET_AsyncCall(task_header_t*);
+LPSTR INTERNET_GetResponseBuffer(void);
 
 VOID INTERNET_SendCallback(object_header_t *hdr, DWORD_PTR dwContext,
                            DWORD dwInternetStatus, LPVOID lpvStatusInfo,
-                           DWORD dwStatusInfoLength) DECLSPEC_HIDDEN;
-WCHAR *INTERNET_FindProxyForProtocol(LPCWSTR szProxy, LPCWSTR proto) DECLSPEC_HIDDEN;
+                           DWORD dwStatusInfoLength);
+WCHAR *INTERNET_FindProxyForProtocol(LPCWSTR szProxy, LPCWSTR proto);
 
-DWORD create_netconn(server_t*,DWORD,BOOL,DWORD,netconn_t**) DECLSPEC_HIDDEN;
-void free_netconn(netconn_t*) DECLSPEC_HIDDEN;
-void NETCON_unload(void) DECLSPEC_HIDDEN;
-DWORD NETCON_secure_connect(netconn_t*,server_t*) DECLSPEC_HIDDEN;
+DWORD create_netconn(server_t*,object_header_t*,DWORD,BOOL,DWORD,netconn_t**);
+void free_netconn(netconn_t*);
+void NETCON_unload(void);
+DWORD NETCON_secure_connect(netconn_t*,server_t*);
 DWORD NETCON_send(netconn_t *connection, const void *msg, size_t len, int flags,
-		int *sent /* out */) DECLSPEC_HIDDEN;
-DWORD NETCON_recv(netconn_t*,void*,size_t,BOOL,int*) DECLSPEC_HIDDEN;
-BOOL NETCON_is_alive(netconn_t*) DECLSPEC_HIDDEN;
-LPCVOID NETCON_GetCert(netconn_t *connection) DECLSPEC_HIDDEN;
-int NETCON_GetCipherStrength(netconn_t*) DECLSPEC_HIDDEN;
-DWORD NETCON_set_timeout(netconn_t *connection, BOOL send, DWORD value) DECLSPEC_HIDDEN;
-int sock_send(int fd, const void *msg, size_t len, int flags) DECLSPEC_HIDDEN;
-int sock_recv(int fd, void *msg, size_t len, int flags) DECLSPEC_HIDDEN;
+		int *sent /* out */);
+DWORD NETCON_recv(netconn_t*,void*,size_t,BOOL,int*);
+BOOL NETCON_is_alive(netconn_t*);
+LPCVOID NETCON_GetCert(netconn_t *connection);
+int NETCON_GetCipherStrength(netconn_t*);
+DWORD NETCON_set_timeout(netconn_t *connection, BOOL send, DWORD value);
+int sock_send(int fd, const void *msg, size_t len, int flags);
+int sock_recv(int fd, void *msg, size_t len, int flags);
 
-server_t *get_server(substr_t,INTERNET_PORT,BOOL,BOOL) DECLSPEC_HIDDEN;
+server_t *get_server(substr_t,INTERNET_PORT,BOOL,BOOL);
 
-DWORD create_req_file(const WCHAR*,req_file_t**) DECLSPEC_HIDDEN;
-void req_file_release(req_file_t*) DECLSPEC_HIDDEN;
+DWORD create_req_file(const WCHAR*,req_file_t**);
+void req_file_release(req_file_t*);
+#ifdef __REACTOS__
+WCHAR *INTERNET_GetAutoConfigProxy(const WCHAR*,const WCHAR*);
+void INTERNET_AddSessionSyncedUrl(appinfo_t*,const WCHAR*);
+BOOL INTERNET_IsSessionSyncedUrl(appinfo_t*,const WCHAR*);
+#endif
 
 static inline req_file_t *req_file_addref(req_file_t *req_file)
 {
@@ -452,14 +554,14 @@ static inline req_file_t *req_file_addref(req_file_t *req_file)
     return req_file;
 }
 
-BOOL init_urlcache(void) DECLSPEC_HIDDEN;
-void free_urlcache(void) DECLSPEC_HIDDEN;
-void free_cookie(void) DECLSPEC_HIDDEN;
-void free_authorization_cache(void) DECLSPEC_HIDDEN;
+BOOL init_urlcache(void);
+void free_urlcache(void);
+void free_cookie(void);
+void free_authorization_cache(void);
 
-void init_winsock(void) DECLSPEC_HIDDEN;
+void init_winsock(void);
 
-#define MAX_REPLY_LEN	 	0x5B4
+#define MAX_REPLY_LEN   0x1000
 
 /* Used for debugging - maybe need to be shared in the Wine debugging code ? */
 typedef struct

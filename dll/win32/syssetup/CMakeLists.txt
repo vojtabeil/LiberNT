@@ -1,10 +1,9 @@
 
 include_directories(${REACTOS_SOURCE_DIR}/sdk/lib/tzlib)
 
-spec2def(syssetup.dll syssetup.spec)
+spec2def(syssetup.dll syssetup.spec ADD_IMPORTLIB)
 
 list(APPEND SOURCE
-    addons.c
     classinst.c
     dllmain.c
     install.c
@@ -12,6 +11,7 @@ list(APPEND SOURCE
     netinstall.c
     proppage.c
     security.c
+    target.c
     wizard.c
     precomp.h
     ${CMAKE_CURRENT_BINARY_DIR}/syssetup_stubs.c)

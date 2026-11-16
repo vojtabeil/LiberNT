@@ -451,6 +451,10 @@ OFFSET(MfRsp, MACHINE_FRAME, Rsp),
 OFFSET(MfSegSs, MACHINE_FRAME, SegSs),
 SIZE(MachineFrameLength, MACHINE_FRAME),
 
+HEADER("KUSER_EXCEPTION_STACK offsets"),
+OFFSET(UesExceptionRecord, KUSER_EXCEPTION_STACK, ExceptionRecord),
+OFFSET(UesMachineFrame, KUSER_EXCEPTION_STACK, MachineFrame),
+
 // MCE Recovery Context Offset Definitions
 //OFFSET(MrcFlags, ????, Flags),
 //OFFSET(MrcPhysicalAddress, ????, PhysicalAddress),
@@ -469,7 +473,7 @@ OFFSET(PbRspBase, KPRCB, RspBase),
 OFFSET(PbPrcbLock, KPRCB, PrcbLock),
 #if (NTDDI_VERSION >= NTDDI_VISTA)
 OFFSET(PbPriorityState, KPRCB, PriorityState),
-#endif /* (NTDDI_VERSION >= NTDDI_VISTA) */
+#endif
 OFFSET(PbSetMember, KPRCB, SetMember), // not Win 10
 OFFSET(PbProcessorState, KPRCB, ProcessorState),
 OFFSET(PbCpuType, KPRCB, CpuType),
@@ -547,7 +551,7 @@ OFFSET(PbPollSlot, KPRCB, PollSlot), // not Win 10
 OFFSET(PbParentNode, KPRCB, ParentNode),
 OFFSET(PbMultiThreadProcessorSet, KPRCB, MultiThreadProcessorSet),
 OFFSET(PbMultiThreadSetMaster, KPRCB, MultiThreadSetMaster), // not Win 10
-OFFSET(PbStartCycles, KPRCB, StartCycles),
+//OFFSET(PbStartCycles, KPRCB, StartCycles),
 OFFSET(PbPageColor, KPRCB, PageColor),
 OFFSET(PbNodeColor, KPRCB, NodeColor),
 OFFSET(PbNodeShiftedColor, KPRCB,NodeShiftedColor),
@@ -637,6 +641,7 @@ OFFSET(PcSkipTick, KIPCR, Prcb.SkipTick), // not Win 10
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
 OFFSET(PcVirtualApicAssist, KIPCR, Prcb.VirtualApicAssist),
 OFFSET(PcStartCycles, KIPCR, Prcb.StartCycles),
+OFFSET(PcCycleTime, KIPCR, Prcb.CycleTime),
 #endif
 //OFFSET(PcFeatureBits, KIPCR, Prcb.FeatureBits),
 //OFFSET(PcNmiActive, KIPCR, Prcb.NmiActive),
@@ -705,6 +710,9 @@ OFFSET(SfReturn, KSTART_FRAME, Return),
 SIZE(KSTART_FRAME_LENGTH, KSTART_FRAME),
 
 HEADER("KSPECIAL_REGISTERS"),
+OFFSET(SrCr0, KSPECIAL_REGISTERS, Cr0),
+OFFSET(SrCr3, KSPECIAL_REGISTERS, Cr3),
+OFFSET(SrCr4, KSPECIAL_REGISTERS, Cr4),
 OFFSET(SrKernelDr0, KSPECIAL_REGISTERS, KernelDr0),
 OFFSET(SrKernelDr1, KSPECIAL_REGISTERS, KernelDr1),
 OFFSET(SrKernelDr2, KSPECIAL_REGISTERS, KernelDr2),
@@ -842,8 +850,8 @@ OFFSET(UcbUmsTeb, UMS_CONTROL_BLOCK, UmsTeb),
 HEADER("XSTATE_CONFIGURATION offsets"),
 OFFSET(XcfgEnabledFeatures, XSTATE_CONFIGURATION, EnabledFeatures),
 #if (NTDDI_VERSION >= NTDDI_WIN10)
-OFFSET(XcfgEnabledVolatileFeatures, XSTATE_CONFIGURATION, EnabledFeatures),
-OFFSET(XcfgEnabledSupervisorFeatures, XSTATE_CONFIGURATION, EnabledSupervisorFeaturestures),
+OFFSET(XcfgEnabledVolatileFeatures, XSTATE_CONFIGURATION, EnabledVolatileFeatures),
+OFFSET(XcfgEnabledSupervisorFeatures, XSTATE_CONFIGURATION, EnabledSupervisorFeatures),
 #endif
 
 HEADER("XSTATE_CONTEXT offsets"),
@@ -858,18 +866,20 @@ SIZE(XsaHeaderLength, XSAVE_AREA_HEADER),
 
 //CONSTANT(CFlushSize),
 
-HEADER("KTHREAD offsets"),
 #if (NTDDI_VERSION >= NTDDI_VISTA)
-OFFSET(ThTebMappedLowVa, KTHREAD, TebMappedLowVa), // not Win 10
+HEADER("KTHREAD offsets"),
+#if (NTDDI_VERSION < NTDDI_WIN8)
+// TebMappedLowVa/Ucb are UMS-era fields removed from the Win10/11 amd64 KTHREAD.
+OFFSET(ThTebMappedLowVa, KTHREAD, TebMappedLowVa),
 OFFSET(ThUcb, KTHREAD, Ucb),
-//OFFSET(ThBase, KTHREAD, Base?),
-//OFFSET(ThLimit, KTHREAD, Limit?),
 #endif
 
-#if (NTDDI_VERSION >= NTDDI_VISTA)
 HEADER("KPROCESS offsets"),
-OFFSET(PrLdtSystemDescriptor, KPROCESS, LdtSystemDescriptor), // not Win 10
-OFFSET(PrLdtBaseAddress, KPROCESS, LdtBaseAddress), // not Win 10
+OFFSET(PrLdtSystemDescriptor, KPROCESS, LdtSystemDescriptor),
+OFFSET(PrLdtBaseAddress, KPROCESS, LdtBaseAddress),
+#if (NTDDI_VERSION >= NTDDI_WIN11_GE)
+OFFSET(PrInstrumentationCallback, KPROCESS, InstrumentationCallback),
+#endif
 #endif
 
 
@@ -1047,7 +1057,14 @@ OFFSET(KTHREAD_TrapFrame, KTHREAD, TrapFrame),
 OFFSET(KTHREAD_PreviousMode, KTHREAD, PreviousMode),
 OFFSET(KTHREAD_KernelStack, KTHREAD, KernelStack),
 OFFSET(KTHREAD_UserApcPending, KTHREAD, ApcState.UserApcPending),
+// LargeStack: Win11 spare (Spare6) at >= WIN10, legacy KTHREAD at < WIN8; gone in the upstream WIN8..WIN10 variant.
+#if (NTDDI_VERSION < NTDDI_WIN8) || (NTDDI_VERSION >= NTDDI_WIN10)
 OFFSET(KTHREAD_LargeStack, KTHREAD, LargeStack),
+#endif
+
+HEADER("ETHREAD"),
+OFFSET(ETHREAD_UserFsBase, ETHREAD, UserFsBase),
+OFFSET(ETHREAD_UserGsBase, ETHREAD, UserGsBase),
 
 HEADER("KINTERRUPT"),
 OFFSET(KINTERRUPT_Type, KINTERRUPT, Type),

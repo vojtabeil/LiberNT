@@ -83,7 +83,11 @@ static SecurityFunctionTableA securityFunctionTableA = {
     QuerySecurityContextToken,
     EncryptMessage,
     DecryptMessage,
-    NULL
+    SetContextAttributesA,
+    SetCredentialsAttributesA,
+    NULL, /* ChangeAccountPassword */
+    QueryContextAttributesExA,
+    NULL /* QueryCredentialsAttributesEx */
 };
 
 static SecurityFunctionTableW securityFunctionTableW = {
@@ -114,7 +118,11 @@ static SecurityFunctionTableW securityFunctionTableW = {
     QuerySecurityContextToken,
     EncryptMessage,
     DecryptMessage,
-    NULL
+    SetContextAttributesW,
+    SetCredentialsAttributesW,
+    NULL, /* ChangeAccountPassword */
+    QueryContextAttributesExW,
+    NULL /* QueryCredentialsAttributesEx */
 };
 
 /***********************************************************************
@@ -211,7 +219,9 @@ static void _makeFnTableA(PSecurityFunctionTableA fnTableA,
              */
             size_t tableSize = inFnTableA->dwVersion == 1 ?
              (const BYTE *)&inFnTableA->SetContextAttributesA -
-             (const BYTE *)inFnTableA : sizeof(SecurityFunctionTableA);
+             (const BYTE *)inFnTableA : inFnTableA->dwVersion == 2 ?
+             FIELD_OFFSET(SecurityFunctionTableA, SetCredentialsAttributesA) : inFnTableA->dwVersion == 3 ?
+             FIELD_OFFSET(SecurityFunctionTableA, QueryContextAttributesExA) : sizeof(SecurityFunctionTableA);
 
             memcpy(fnTableA, inFnTableA, tableSize);
             /* override this, since we can do it internally anyway */
@@ -282,7 +292,9 @@ static void _makeFnTableW(PSecurityFunctionTableW fnTableW,
              */
             size_t tableSize = inFnTableW->dwVersion == 1 ?
              (const BYTE *)&inFnTableW->SetContextAttributesW -
-             (const BYTE *)inFnTableW : sizeof(SecurityFunctionTableW);
+             (const BYTE *)inFnTableW : inFnTableW->dwVersion == 2 ?
+             FIELD_OFFSET(SecurityFunctionTableW, SetCredentialsAttributesW) : inFnTableW->dwVersion == 3 ?
+             FIELD_OFFSET(SecurityFunctionTableW, QueryContextAttributesExW) : sizeof(SecurityFunctionTableW);
 
             memcpy(fnTableW, inFnTableW, tableSize);
             /* override this, since we can do it internally anyway */
@@ -380,7 +392,7 @@ SecureProvider *SECUR32_addProvider(const SecurityFunctionTableA *fnTableA,
         list_init(&providerTable->table);
     }
 
-    ret = HeapAlloc(GetProcessHeap(), 0, sizeof(SecureProvider));
+    ret = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(SecureProvider));
     if (!ret)
     {
         LeaveCriticalSection(&cs);
@@ -563,6 +575,7 @@ static void SECUR32_initializeProviders(void)
     /* Now load the built-in providers (in Wine, this is done before the registry loading) */
 #ifdef __REACTOS__
 /// FIXME: Interim Wine code until we get Samuel's rewrite!
+    SECUR32_initSchannelSP();
     /* First load built-in providers */
     SECUR32_initNTLMSP();
     SECUR32_initKerberosSP();
@@ -650,9 +663,7 @@ SecurePackage *SECUR32_findPackageA(PCSTR packageName)
     TRACE("\n");
     EnterCriticalSection(&cs);
 
-#ifndef __REACTOS__
     SECUR32_deinitSchannelSP();
-#endif
 
     if (packageTable)
     {

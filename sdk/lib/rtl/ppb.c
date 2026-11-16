@@ -35,9 +35,10 @@ RtlpCopyParameterString(PWCHAR *Ptr,
       Destination->Buffer = (PWCHAR)(*Ptr);
       if (Source->Length)
          memmove (Destination->Buffer, Source->Buffer, Source->Length);
-      Destination->Buffer[Destination->Length / sizeof(WCHAR)] = 0;
+      if (Destination->MaximumLength >= Destination->Length + sizeof(WCHAR))
+         Destination->Buffer[Destination->Length / sizeof(WCHAR)] = 0;
    }
-   *Ptr += Destination->MaximumLength/sizeof(WCHAR);
+   *Ptr = (PWCHAR)((PUCHAR)*Ptr + Destination->MaximumLength);
    *Ptr = ALIGN_UP_POINTER_BY(*Ptr, sizeof(PVOID));
 }
 
@@ -81,8 +82,8 @@ RtlCreateProcessParameters(PRTL_USER_PROCESS_PARAMETERS *ProcessParameters,
 	if (CurrentDirectory == NULL)
 	  CurrentDirectory = &NtCurrentPeb()->ProcessParameters->CurrentDirectory.DosPath;
 	CurrentDirectoryHandle = NtCurrentPeb()->ProcessParameters->CurrentDirectory.Handle;
-	ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
-	ConsoleFlags = NtCurrentPeb()->ProcessParameters->ConsoleFlags;
+	ConsoleHandle = NULL;
+	ConsoleFlags = 0;
      }
    else
      {
@@ -132,7 +133,7 @@ RtlCreateProcessParameters(PRTL_USER_PROCESS_PARAMETERS *ProcessParameters,
        EnvironmentSize = (EnvEnd - Environment + 1) * sizeof(WCHAR);
    }
 
-   AllocationSize = Length + EnvironmentSize;
+   AllocationSize = ALIGN(Length + EnvironmentSize, sizeof(PVOID));
 
    /* Calculate the required block size */
    Param = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, AllocationSize);
@@ -223,7 +224,7 @@ RtlCreateProcessParameters(PRTL_USER_PROCESS_PARAMETERS *ProcessParameters,
    {
       RtlCopyMemory(Dest, Environment, EnvironmentSize);
       Param->Environment = Dest;
-      Param->EnvironmentSize = EnvironmentSize;
+      Param->EnvironmentSize = AllocationSize - ((PUCHAR)Dest - (PUCHAR)Param);
 
       /* Make sure we didn't go past the end of the buffer */
       ASSERT((PUCHAR)Dest + EnvironmentSize - (PUCHAR)Param <= AllocationSize);
@@ -252,6 +253,36 @@ RtlDestroyProcessParameters(IN PRTL_USER_PROCESS_PARAMETERS ProcessParameters)
  *
  * @implemented
  */
+NTSTATUS NTAPI
+RtlCreateProcessParametersEx(PRTL_USER_PROCESS_PARAMETERS *ProcessParameters,
+                             PUNICODE_STRING ImagePathName,
+                             PUNICODE_STRING DllPath,
+                             PUNICODE_STRING CurrentDirectory,
+                             PUNICODE_STRING CommandLine,
+                             PWSTR Environment,
+                             PUNICODE_STRING WindowTitle,
+                             PUNICODE_STRING DesktopInfo,
+                             PUNICODE_STRING ShellInfo,
+                             PUNICODE_STRING RuntimeData,
+                             ULONG Flags)
+{
+    NTSTATUS Status;
+
+    Status = RtlCreateProcessParameters(ProcessParameters,
+                                        ImagePathName,
+                                        DllPath,
+                                        CurrentDirectory,
+                                        CommandLine,
+                                        Environment,
+                                        WindowTitle,
+                                        DesktopInfo,
+                                        ShellInfo,
+                                        RuntimeData);
+    if (NT_SUCCESS(Status) && (Flags & RTL_USER_PROCESS_PARAMETERS_NORMALIZED))
+        RtlNormalizeProcessParams(*ProcessParameters);
+    return Status;
+}
+
 PRTL_USER_PROCESS_PARAMETERS NTAPI
 RtlDeNormalizeProcessParams(PRTL_USER_PROCESS_PARAMETERS Params)
 {

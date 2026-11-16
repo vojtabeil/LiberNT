@@ -30,7 +30,7 @@ extern "C" {
 
 #include "usbiodef.h"
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 #define USBUSER_VERSION                   0x0004
 
@@ -103,6 +103,7 @@ typedef enum _USB_USER_ERROR_CODE {
 #define USB_HC_FEATURE_FLAG_PORT_POWER_SWITCHING  0x00000001
 #define USB_HC_FEATURE_FLAG_SEL_SUSPEND           0x00000002
 #define USB_HC_FEATURE_LEGACY_BIOS                0x00000004
+#define USB_HC_FEATURE_TIME_SYNC_API              0x00000008
 
 typedef struct _USBUSER_REQUEST_HEADER {
   ULONG UsbUserRequest;
@@ -340,7 +341,7 @@ typedef struct _USBUSER_REFRESH_HCT_REG {
   ULONG Flags;
 } USBUSER_REFRESH_HCT_REG, *PUSBUSER_REFRESH_HCT_REG;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 #endif /* _WIN32_WINNT >= 0x0501 */
 

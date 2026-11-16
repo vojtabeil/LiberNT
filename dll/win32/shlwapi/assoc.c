@@ -31,8 +31,8 @@
 #ifdef __REACTOS__
 #include "shlwapi_undoc.h"
 #include "evalcmd.h"
-#endif
 #include "wine/unicode.h"
+#endif
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(shell);
@@ -49,112 +49,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(shell);
 
 #ifdef __REACTOS__
 EXTERN_C ULONG WINAPI GetProcessOsVersion(void); // FIXME: Move or delete
-
-static HRESULT SHELL_SetRegString(HKEY hKey, LPCWSTR pszSubKey, LPCWSTR pszName, UINT Type, LPCWSTR pszData)
-{
-    ULONG err = SHSetValueW(hKey, pszSubKey, pszName, Type, pszData, (lstrlenW(pszData) + 1) * sizeof(*pszData));
-    return HRESULT_FROM_WIN32(err);
-}
-
-/* _AssocOpenRegKey is borrowed from shell32:elements.cpp since that code is only available for NT5 targets here */
-static HRESULT
-_AssocOpenRegKey(HKEY hKey, PCWSTR lpSubKey, PHKEY phkResult, BOOL bCreate)
-{
-    *phkResult = NULL;
-    if (!hKey)
-        return HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION);
-
-    LSTATUS error;
-    if ( bCreate )
-        error = RegCreateKeyExW(hKey, lpSubKey, 0, NULL, 0, MAXIMUM_ALLOWED, NULL,
-                                phkResult, NULL);
-    else
-        error = RegOpenKeyExW(hKey, lpSubKey, 0, MAXIMUM_ALLOWED, phkResult);
-
-    if (error == ERROR_SUCCESS)
-        return S_OK;
-
-    return HRESULT_FROM_WIN32(error);
-}
-
-static void AssocDeleteSubkey(HKEY hBase, LPCWSTR pszSubKey)
-{
-    HKEY hKey;
-    if (*pszSubKey && SUCCEEDED(_AssocOpenRegKey(hBase, pszSubKey, &hKey, FALSE)))
-    {
-        RegCloseKey(hKey);
-        SHDeleteKeyW(hBase, pszSubKey);
-    }
-}
-
-static HRESULT AssocMakeVerbCommand(HKEY hVerb, LPCWSTR pszExeFallback, const ASSOCMAKEVERB *pVerb)
-{
-    UINT Type = REG_SZ;
-    WCHAR szCmd[MAX_PATH * 4];
-    LPCWSTR pszExe = pVerb->pszExe ? pVerb->pszExe : pszExeFallback;
-    LPCWSTR pszOrgArgs = pVerb->pszArgs ? pVerb->pszArgs : L"";
-    LPCWSTR pszArgs = *pszOrgArgs ? pszOrgArgs : L"\"%1\"";
-
-    if (pVerb->pszFriendlyName && *pVerb->pszFriendlyName)
-        SHELL_SetRegString(hVerb, NULL, NULL, REG_SZ, pVerb->pszFriendlyName);
-
-    lstrcpyW(szCmd, pszExe);
-    PathQuoteSpacesW(szCmd);
-    lstrcatW(szCmd, L" ");
-    lstrcatW(szCmd, pszArgs);
-    if (StrStrIW(pszExe, L"%") || StrStrIW(pszOrgArgs, L"%"))
-        Type = REG_EXPAND_SZ;
-    return SHELL_SetRegString(hVerb, L"command", NULL, Type, szCmd);
-}
-
-HRESULT WINAPI AssocMakeShell(SIZE_T Unknown, HKEY hClass, LPCWSTR pszExe, const ASSOCMAKESHELL *pShell)
-{
-    HRESULT hr = E_INVALIDARG;
-    if (!hClass || !pszExe || !pShell)
-        return E_INVALIDARG;
-    for (SIZE_T i = 0; i < pShell->Count; ++i)
-    {
-        HKEY hVerb;
-        WCHAR szVerbKey[sizeof("shell") + MAX_PATH];
-        const ASSOCMAKEVERB *pVerb = &pShell->pVerbs[i];
-        if (!pVerb->pszVerb)
-            continue;
-
-        PathCombineW(szVerbKey, L"shell", pVerb->pszVerb);
-        AssocDeleteSubkey(hClass, szVerbKey); // Delete possibly existing old DDE/Delegate info
-        if (FAILED(_AssocOpenRegKey(hClass, szVerbKey, &hVerb, TRUE)))
-            continue;
-        hr = AssocMakeVerbCommand(hVerb, pszExe, pVerb);
-        RegCloseKey(hVerb);
-        if (i == pShell->DefaultIndex)
-            SHELL_SetRegString(hClass, L"shell", NULL, REG_SZ, pVerb->pszVerb);
-    }
-    return hr;
-}
-
-HRESULT WINAPI AssocMakeProgid(SIZE_T Unknown1, SIZE_T Unknown2, SIZE_T Unknown3, SIZE_T Unknown4)
-{
-    FIXME("stub\n");
-    return E_NOTIMPL;
-}
-
-HRESULT WINAPI AssocMakeApplicationByKeyW(SIZE_T Unknown1, SIZE_T Unknown2, SIZE_T Unknown3)
-{
-    FIXME("stub\n");
-    return E_NOTIMPL;
-}
-
-HRESULT WINAPI AssocMakeApplicationByKeyA(SIZE_T Unknown1, SIZE_T Unknown2, SIZE_T Unknown3)
-{
-    return AssocMakeApplicationByKeyW(Unknown1, Unknown2, Unknown3);
-}
-
-HRESULT WINAPI AssocCopyVerbs(HKEY hSrc, HKEY hDst)
-{
-    FIXME("stub\n");
-    return E_NOTIMPL;
-}
-#endif // __REACTOS__
+#endif
 
 /*************************************************************************
  * SHLWAPI_ParamAToW
@@ -164,10 +59,6 @@ HRESULT WINAPI AssocCopyVerbs(HKEY hSrc, HKEY hDst)
 static BOOL SHLWAPI_ParamAToW(LPCSTR lpszParam, LPWSTR lpszBuff, DWORD dwLen,
                               LPWSTR* lpszOut)
 {
-#ifdef __REACTOS__
-  if (!lpszParam && LOBYTE(GetVersion()) < 6)
-    lpszParam = ""; // NT5 incorrectly converts NULL to L""
-#endif
   if (lpszParam)
   {
     DWORD dwStrLen = MultiByteToWideChar(CP_ACP, 0, lpszParam, -1, NULL, 0);
@@ -204,11 +95,9 @@ static BOOL SHLWAPI_ParamAToW(LPCSTR lpszParam, LPWSTR lpszBuff, DWORD dwLen,
  *  Success: S_OK. lpInterface contains the new object.
  *  Failure: An HRESULT error code indicating the error.
  *
-#ifndef __REACTOS__ // WRONG NOTES!
  * NOTES
  *  clsid  must be equal to CLSID_QueryAssociations and
  *  refiid must be equal to IID_IQueryAssociations, IID_IUnknown or this function will fail
-#endif
  */
 HRESULT WINAPI AssocCreate(CLSID clsid, REFIID refiid, void **lpInterface)
 {
@@ -241,6 +130,7 @@ HRESULT WINAPI AssocCreate(CLSID clsid, REFIID refiid, void **lpInterface)
 }
 
 
+#ifdef __REACTOS__
 struct AssocPerceivedInfo
 {
     PCWSTR Type;
@@ -406,6 +296,7 @@ static const struct AssocPerceivedInfo* AssocFindByType(LPCWSTR pszType)
     }
     return NULL;
 }
+#endif
 
 
 /*************************************************************************
@@ -429,7 +320,11 @@ static const struct AssocPerceivedInfo* AssocFindByType(LPCWSTR pszType)
  *  lppszType is optional and it can be NULL.
  *  if lpType or lpFlag are NULL, the function will crash.
  *  if lpszExt is NULL, an error is returned.
+ *
+ * BUGS
+ *   Unimplemented.
  */
+#ifdef __REACTOS__
 HRESULT WINAPI AssocGetPerceivedType(LPCWSTR lpszExt, PERCEIVED *lpType,
                                      INT *lpFlag, LPWSTR *lppszType)
 {
@@ -488,6 +383,18 @@ HRESULT WINAPI AssocGetPerceivedType(LPCWSTR lpszExt, PERCEIVED *lpType,
     }
     return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
 }
+#else
+HRESULT WINAPI AssocGetPerceivedType(LPCWSTR lpszExt, PERCEIVED *lpType,
+                                     INT *lpFlag, LPWSTR *lppszType)
+{
+  FIXME("(%s, %p, %p, %p) not supported\n", debugstr_w(lpszExt), lpType, lpFlag, lppszType);
+
+  if (lpszExt == NULL)
+    return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+
+  return E_NOTIMPL;
+}
+#endif
 
 /*************************************************************************
  * AssocQueryKeyW  [SHLWAPI.@]
@@ -625,11 +532,7 @@ HRESULT WINAPI AssocQueryStringA(ASSOCF cfFlags, ASSOCSTR str, LPCSTR pszAssoc,
            SHLWAPI_ParamAToW(pszExtra, szExtraW, MAX_PATH, &lpszExtraW))
   {
     WCHAR szReturnW[MAX_PATH], *lpszReturnW = szReturnW;
-#ifdef __REACTOS__
-    DWORD dwLenOut = IS_INTRESOURCE(pcchOut) && LOBYTE(GetVersion()) < 6 ? PtrToUlong(pcchOut) : *pcchOut; 
-#else
     DWORD dwLenOut = *pcchOut;
-#endif
 
     if (dwLenOut >= MAX_PATH)
       lpszReturnW = malloc((dwLenOut + 1) * sizeof(WCHAR));
@@ -647,10 +550,6 @@ HRESULT WINAPI AssocQueryStringA(ASSOCF cfFlags, ASSOCSTR str, LPCSTR pszAssoc,
         dwLenOut = WideCharToMultiByte(CP_ACP, 0, lpszReturnW, -1,
                                        pszOut, *pcchOut, NULL, NULL);
 
-#ifdef __REACTOS__
-      if (IS_INTRESOURCE(pcchOut))
-        pcchOut = &dwLenOut;
-#endif
       *pcchOut = dwLenOut;
       if (lpszReturnW != szReturnW)
         free(lpszReturnW);
@@ -729,11 +628,7 @@ HRESULT WINAPI AssocQueryStringByKeyA(ASSOCF cfFlags, ASSOCSTR str, HKEY hkAssoc
     hRet = E_INVALIDARG;
   else if (SHLWAPI_ParamAToW(pszExtra, szExtraW, MAX_PATH, &lpszExtraW))
   {
-#ifdef __REACTOS__
-    DWORD dwLenOut = IS_INTRESOURCE(pcchOut) && LOBYTE(GetVersion()) < 6 ? PtrToUlong(pcchOut) : *pcchOut; 
-#else
     DWORD dwLenOut = *pcchOut;
-#endif
     if (dwLenOut >= MAX_PATH)
       lpszReturnW = malloc((dwLenOut + 1) * sizeof(WCHAR));
 
@@ -744,10 +639,6 @@ HRESULT WINAPI AssocQueryStringByKeyA(ASSOCF cfFlags, ASSOCSTR str, HKEY hkAssoc
 
       if (SUCCEEDED(hRet))
         WideCharToMultiByte(CP_ACP,0,szReturnW,-1,pszOut,dwLenOut,0,0);
-#ifdef __REACTOS__
-      if (IS_INTRESOURCE(pcchOut))
-        pcchOut = &dwLenOut;
-#endif
       *pcchOut = dwLenOut;
 
       if (lpszReturnW != szReturnW)
@@ -775,6 +666,69 @@ HRESULT WINAPI AssocQueryStringByKeyA(ASSOCF cfFlags, ASSOCSTR str, HKEY hkAssoc
  */
 BOOL WINAPI AssocIsDangerous(LPCWSTR lpszAssoc)
 {
+#ifdef __REACTOS__
+    static const WCHAR *const dangerous_exts[] =
+    {
+        L".ade", L".adp", L".app", L".appref-ms", L".asp", L".bas", L".bat", L".cer", L".chm",
+        L".cmd", L".cnt", L".com", L".cpl", L".crt", L".csh", L".der", L".exe", L".fxp", L".gadget",
+        L".grp", L".hlp", L".hpj", L".hta", L".inf", L".ins", L".iso", L".isp", L".its", L".js",
+        L".jse", L".ksh", L".lnk", L".mad", L".maf", L".mag", L".mam", L".maq", L".mar", L".mas",
+        L".mat", L".mau", L".mav", L".maw", L".mcf", L".mda", L".mdb", L".mde", L".mdt", L".mdw",
+        L".mdz", L".msc", L".msh", L".msh1", L".msh1xml", L".msh2", L".msh2xml", L".mshxml",
+        L".msi", L".msp", L".mst", L".msu", L".ocx", L".ops", L".pcd", L".pif", L".pl", L".plg",
+        L".prf", L".prg", L".printerexport", L".ps1", L".ps1xml", L".ps2", L".ps2xml", L".psc1",
+        L".psc2", L".psd1", L".pst", L".reg", L".scf", L".scr", L".sct", L".shb", L".shs",
+        L".theme", L".tmp", L".url", L".vb", L".vbe", L".vbp", L".vbs", L".vhd", L".vhdx",
+        L".vsmacros", L".vsw", L".webpnp", L".website", L".ws", L".wsc", L".wsf", L".wsh", L".xnk",
+    };
+    static const WCHAR *const dangerous_progids[] =
+    {
+        L"batfile", L"exefile", L"inffile", L"JSFile",
+    };
+    WCHAR progid[MAX_PATH];
+    LPCWSTR type = lpszAssoc;
+    DWORD flags, size, i;
+    HKEY key;
+
+    TRACE("%s\n", debugstr_w(lpszAssoc));
+
+    if (!lpszAssoc)
+        return FALSE;
+    if (!*lpszAssoc)
+        return TRUE;
+
+    if (*lpszAssoc == '.')
+    {
+        LPCWSTR ext = PathFindExtensionW(lpszAssoc);
+        for (i = 0; i < ARRAY_SIZE(dangerous_exts); i++)
+        {
+            if (!wcsicmp(ext, dangerous_exts[i]))
+                return TRUE;
+        }
+        size = sizeof(progid);
+        if (RegGetValueW(HKEY_CLASSES_ROOT, ext, NULL, RRF_RT_REG_SZ, NULL, progid, &size) != ERROR_SUCCESS)
+            return FALSE;
+        type = progid;
+    }
+    else
+    {
+        for (i = 0; i < ARRAY_SIZE(dangerous_progids); i++)
+        {
+            if (!wcsicmp(lpszAssoc, dangerous_progids[i]))
+                return TRUE;
+        }
+    }
+
+    if (RegOpenKeyExW(HKEY_CLASSES_ROOT, type, 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return FALSE;
+    flags = 0;
+    size = sizeof(flags);
+    if (RegQueryValueExW(key, L"EditFlags", NULL, NULL, (BYTE *)&flags, &size) != ERROR_SUCCESS || size != sizeof(flags))
+        flags = 0;
+    RegCloseKey(key);
+    return (flags & FTA_AlwaysUnsafe) != 0;
+#else
     FIXME("%s\n", debugstr_w(lpszAssoc));
     return FALSE;
+#endif
 }

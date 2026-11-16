@@ -44,6 +44,8 @@ const UNICODE_STRING RtlpDosPRNDevice = RTL_CONSTANT_STRING(L"PRN");
 const UNICODE_STRING RtlpDosAUXDevice = RTL_CONSTANT_STRING(L"AUX");
 const UNICODE_STRING RtlpDosCONDevice = RTL_CONSTANT_STRING(L"CON");
 const UNICODE_STRING RtlpDosNULDevice = RTL_CONSTANT_STRING(L"NUL");
+const UNICODE_STRING RtlpDosCONINDevice = RTL_CONSTANT_STRING(L"CONIN$");
+const UNICODE_STRING RtlpDosCONOUTDevice = RTL_CONSTANT_STRING(L"CONOUT$");
 
 const UNICODE_STRING RtlpDoubleSlashPrefix   = RTL_CONSTANT_STRING(L"\\\\");
 
@@ -245,6 +247,11 @@ RtlIsDosDeviceName_Ustr(IN PCUNICODE_STRING PathString)
         ReturnLength = sizeof(L"AUX") - sizeof(WCHAR);
         return MAKELONG(ReturnLength, ReturnOffset);
     }
+    else if (((PathChars == 6) && RtlEqualUnicodeString(&PathCopy, &RtlpDosCONINDevice, TRUE)) ||
+             ((PathChars == 7) && RtlEqualUnicodeString(&PathCopy, &RtlpDosCONOUTDevice, TRUE)))
+    {
+        return MAKELONG(PathCopy.Length, ReturnOffset);
+    }
 
     /* Otherwise, this is not a valid DOS device */
     return 0;
@@ -312,6 +319,12 @@ RtlpCollapsePath(PWSTR Path, /* ULONG PathBufferSize, ULONG PathLength, */ ULONG
     SIZE_T PathLength = wcslen(Path);
     PWSTR EndBuffer = Path + PathLength; // Path + PathBufferSize / sizeof(WCHAR);
     PWSTR EndPath;
+
+    if (mark > PathLength)
+    {
+        DPRINT("RtlpCollapsePath: mark %lu beyond path '%S' len %Iu\n", mark, Path, PathLength);
+        mark = (ULONG)PathLength;
+    }
 
     /* Convert slashes into backslashes */
     for (p = Path; *p; p++)
@@ -410,7 +423,11 @@ RtlpCollapsePath(PWSTR Path, /* ULONG PathBufferSize, ULONG PathLength, */ ULONG
      * the path string and going up to the end of the buffer.
      * It also NULL-terminate the path string.
      */
-    ASSERT(EndBuffer >= p);
+    if (p > EndBuffer)
+    {
+        DPRINT("RtlpCollapsePath: overrun path '%S' mark %lu len %Iu\n", Path, mark, PathLength);
+        p = EndBuffer;
+    }
     RtlZeroMemory(p, (EndBuffer - p + 1) * sizeof(WCHAR));
 
     /* Return the real path length */
@@ -943,7 +960,7 @@ RtlGetFullPathName_Ustr(
                         goto Quit;
 
                     default:
-                        DPRINT1("RtlQueryEnvironmentVariable_U(\"%wZ\") returned 0x%08lx\n", &EnvVarName, Status);
+                        DPRINT("RtlQueryEnvironmentVariable_U(\"%wZ\") returned 0x%08lx\n", &EnvVarName, Status);
 
                         EnvVarNameBuffer[0] = NewDrive;
                         EnvVarNameBuffer[1] = L':';
@@ -1183,7 +1200,8 @@ RtlpDosPathNameToRelativeNtPathName_Ustr(IN BOOLEAN HaveRelative,
     // if (!RtlPrefixUnicodeString(&RtlpWin32NtRootSlash, &CapturedDosName, FALSE))
     if ((CapturedDosName.Length <= RtlpWin32NtRootSlash.Length) ||
         (CapturedDosName.Buffer[0] != RtlpWin32NtRootSlash.Buffer[0]) ||
-        (CapturedDosName.Buffer[1] != RtlpWin32NtRootSlash.Buffer[1]) ||
+        ((CapturedDosName.Buffer[1] != RtlpWin32NtRootSlash.Buffer[1]) &&
+         (CapturedDosName.Buffer[1] != RtlpWin32NtRootSlash.Buffer[2])) ||
         (CapturedDosName.Buffer[2] != RtlpWin32NtRootSlash.Buffer[2]) ||
         (CapturedDosName.Buffer[3] != RtlpWin32NtRootSlash.Buffer[3]))
     {
@@ -1936,7 +1954,40 @@ Leave:
 
 /*
  * @implemented
+ * Note: Win7+ changed this function's return type from ULONG to NTSTATUS.
  */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+NTSTATUS
+NTAPI
+RtlGetFullPathName_UEx(
+    _In_ PWSTR FileName,
+    _In_ ULONG BufferLength,
+    _Out_writes_bytes_(BufferLength) PWSTR Buffer,
+    _Out_opt_ PWSTR *FilePart,
+    _Out_opt_ RTL_PATH_TYPE *InputPathType)
+{
+    UNICODE_STRING FileNameString;
+    NTSTATUS Status;
+
+    if (InputPathType)
+        *InputPathType = 0;
+
+    /* Build the string */
+    Status = RtlInitUnicodeStringEx(&FileNameString, FileName);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    /* Call the extended function */
+    RtlGetFullPathName_Ustr(
+        &FileNameString,
+        BufferLength,
+        Buffer,
+        (PCWSTR*)FilePart,
+        NULL,
+        InputPathType);
+
+    return STATUS_SUCCESS;
+}
+#else
 ULONG
 NTAPI
 RtlGetFullPathName_UEx(
@@ -1965,6 +2016,7 @@ RtlGetFullPathName_UEx(
         NULL,
         InputPathType);
 }
+#endif /* NTDDI_VERSION >= NTDDI_WIN7 */
 
 /******************************************************************
  *    RtlGetFullPathName_U  (NTDLL.@)
@@ -1991,13 +2043,37 @@ RtlGetFullPathName_U(
     _Out_opt_ PWSTR *ShortName)
 {
     RTL_PATH_TYPE PathType;
+    UNICODE_STRING FileNameString;
+    PWSTR FileNameCopy = NULL;
+    ULONG Length;
+    NTSTATUS Status;
 
-    /* Call the extended function */
-    return RtlGetFullPathName_UEx((PWSTR)FileName,
-                                   Size,
-                                   Buffer,
-                                   ShortName,
-                                   &PathType);
+    Status = RtlInitUnicodeStringEx(&FileNameString, FileName);
+    if (!NT_SUCCESS(Status)) return 0;
+
+    if (Buffer && Size &&
+        (ULONG_PTR)FileName < (ULONG_PTR)Buffer + Size &&
+        (ULONG_PTR)Buffer < (ULONG_PTR)FileName + FileNameString.MaximumLength)
+    {
+        FileNameCopy = RtlpAllocateStringMemory(FileNameString.MaximumLength, TAG_USTR);
+        if (!FileNameCopy) return 0;
+        RtlCopyMemory(FileNameCopy, FileName, FileNameString.MaximumLength);
+        FileNameString.Buffer = FileNameCopy;
+    }
+
+    /* Call the internal function directly to get the ULONG result */
+    Length = RtlGetFullPathName_Ustr(
+        &FileNameString,
+        Size,
+        Buffer,
+        (PCWSTR*)ShortName,
+        NULL,
+        &PathType);
+
+    if (FileNameCopy)
+        RtlpFreeStringMemory(FileNameCopy, TAG_USTR);
+
+    return Length;
 }
 
 /*
@@ -2328,6 +2404,7 @@ RtlGetFullPathName_UstrEx(IN PUNICODE_STRING FileName,
     ULONG Length;
     USHORT StaticLength;
     UNICODE_STRING TempDynamicString;
+    RTL_PATH_TYPE LocalPathType;
 
     /* Initialize all our locals */
     ShortName = NULL;
@@ -2338,6 +2415,7 @@ RtlGetFullPathName_UstrEx(IN PUNICODE_STRING FileName,
     if (StringUsed) *StringUsed = NULL;
     if (LengthNeeded) *LengthNeeded = 0;
     if (FilePartSize) *FilePartSize = 0;
+    LocalPathType = *(volatile RTL_PATH_TYPE *)PathType;
 
     /* Check for invalid parameters */
     if ((DynamicString) && !(StringUsed) && (StaticString))
@@ -2366,7 +2444,7 @@ RtlGetFullPathName_UstrEx(IN PUNICODE_STRING FileName,
                                      StaticBuffer,
                                      &ShortName,
                                      NameInvalid,
-                                     PathType);
+                                     &LocalPathType);
     DPRINT("Length: %u StaticBuffer: %S\n", Length, StaticBuffer);
     if (!Length)
     {
@@ -2436,7 +2514,7 @@ RtlGetFullPathName_UstrEx(IN PUNICODE_STRING FileName,
                                      StaticBuffer,
                                      &ShortName,
                                      NameInvalid,
-                                     PathType);
+                                     &LocalPathType);
     if (!Length)
     {
         /* It failed */
@@ -2488,7 +2566,7 @@ RtlGetFullPathName_UstrEx(IN PUNICODE_STRING FileName,
                                      TempDynamicString.Buffer,
                                      &ShortName,
                                      NameInvalid,
-                                     PathType);
+                                     &LocalPathType);
     if (!Length)
     {
         /* Some path error, so fail out */
@@ -2528,9 +2606,11 @@ Release:
     RtlReleasePebLock();
 
 Quickie:
+    *PathType = LocalPathType;
+
     /* Free any buffers we should be freeing */
     DPRINT("Status: %lx %S %S\n", Status, StaticBuffer, TempDynamicString.Buffer);
-    if ((StaticString) && (StaticBuffer) && (StaticBuffer != StaticString->Buffer))
+    if ((StaticBuffer) && (!(StaticString) || (StaticBuffer != StaticString->Buffer)))
     {
         RtlpFreeStringMemory(StaticBuffer, TAG_USTR);
     }
@@ -2625,7 +2705,7 @@ RtlDosSearchPath_Ustr(IN ULONG Flags,
     if (PathType == RtlPathTypeRelative)
     {
         /* Does the caller want SxS? */
-        if (Flags & 1)
+        if ((Flags & 1) && (FileNameString->Length))
         {
             /* Apply the SxS magic */
             FullIsolatedPath = NULL;

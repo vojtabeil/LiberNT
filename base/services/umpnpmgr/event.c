@@ -33,7 +33,304 @@
 #define NDEBUG
 #include <debug.h>
 
+#define DEVICE_EVENT_TIMEOUT 2000
+
+typedef struct _TARGET_DEVICE_CUSTOM_NOTIFICATION
+{
+    USHORT Version;
+    USHORT Size;
+    GUID Event;
+    PVOID FileObject;
+    LONG NameBufferOffset;
+    UCHAR CustomDataBuffer[1];
+} TARGET_DEVICE_CUSTOM_NOTIFICATION, *PTARGET_DEVICE_CUSTOM_NOTIFICATION;
+
+typedef enum _DEVICE_EVENT_RECIPIENT_TYPE
+{
+    DeviceEventRecipientWindow,
+    DeviceEventRecipientService
+} DEVICE_EVENT_RECIPIENT_TYPE;
+
+typedef struct _DEVICE_EVENT_CONTEXT
+{
+    LIST_ENTRY ListEntry;
+    DEVICE_EVENT_RECIPIENT_TYPE RecipientType;
+    HWND Window;
+    PWSTR ServiceName;
+    DWORD EventType;
+    PDEV_BROADCAST_DEVICEINTERFACE_W EventData;
+} DEVICE_EVENT_CONTEXT, *PDEVICE_EVENT_CONTEXT;
+
+typedef struct _PDO_NAME_ENTRY
+{
+    LIST_ENTRY ListEntry;
+    PWSTR PdoName;
+    WCHAR DeviceInstance[ANYSIZE_ARRAY];
+} PDO_NAME_ENTRY, *PPDO_NAME_ENTRY;
+
+static CRITICAL_SECTION DeviceEventQueueLock;
+static LIST_ENTRY DeviceEventQueueHead;
+static HANDLE DeviceEventQueueEvent;
+static LIST_ENTRY PdoNameListHead = { &PdoNameListHead, &PdoNameListHead };
+
 /* FUNCTIONS *****************************************************************/
+
+static
+DWORD
+WINAPI
+DeviceEventWorker(
+    _In_ LPVOID Parameter)
+{
+    PDEVICE_EVENT_CONTEXT Context;
+    SERVICE_STATUS_HANDLE ServiceStatus;
+
+    UNREFERENCED_PARAMETER(Parameter);
+
+    for (;;)
+    {
+        WaitForSingleObject(DeviceEventQueueEvent, INFINITE);
+
+        for (;;)
+        {
+            EnterCriticalSection(&DeviceEventQueueLock);
+            if (IsListEmpty(&DeviceEventQueueHead))
+            {
+                LeaveCriticalSection(&DeviceEventQueueLock);
+                break;
+            }
+
+            Context = CONTAINING_RECORD(RemoveHeadList(&DeviceEventQueueHead),
+                                        DEVICE_EVENT_CONTEXT,
+                                        ListEntry);
+            LeaveCriticalSection(&DeviceEventQueueLock);
+
+            if (Context->RecipientType == DeviceEventRecipientWindow)
+            {
+                SendMessageTimeoutW(Context->Window,
+                                    WM_DEVICECHANGE,
+                                    (WPARAM)Context->EventType,
+                                    (LPARAM)Context->EventData,
+                                    SMTO_ABORTIFHUNG,
+                                    DEVICE_EVENT_TIMEOUT,
+                                    NULL);
+            }
+            else if (I_ScValidatePnpService(NULL,
+                                            Context->ServiceName,
+                                            &ServiceStatus) == ERROR_SUCCESS)
+            {
+                I_ScSendPnPMessage(ServiceStatus,
+                                   SERVICE_CONTROL_DEVICEEVENT,
+                                   Context->EventType,
+                                   Context->EventData);
+            }
+
+            HeapFree(GetProcessHeap(), 0, Context->EventData);
+            HeapFree(GetProcessHeap(), 0, Context->ServiceName);
+            HeapFree(GetProcessHeap(), 0, Context);
+        }
+    }
+
+    return ERROR_SUCCESS;
+}
+
+
+static
+DWORD
+InitializeDeviceEventQueue(VOID)
+{
+    HANDLE Thread;
+    DWORD Error;
+
+    InitializeCriticalSection(&DeviceEventQueueLock);
+    InitializeListHead(&DeviceEventQueueHead);
+
+    DeviceEventQueueEvent = CreateEventW(NULL, FALSE, FALSE, NULL);
+    if (DeviceEventQueueEvent == NULL)
+    {
+        Error = GetLastError();
+        DeleteCriticalSection(&DeviceEventQueueLock);
+        return Error;
+    }
+
+    Thread = CreateThread(NULL, 0, DeviceEventWorker, NULL, 0, NULL);
+    if (Thread == NULL)
+    {
+        Error = GetLastError();
+        CloseHandle(DeviceEventQueueEvent);
+        DeviceEventQueueEvent = NULL;
+        DeleteCriticalSection(&DeviceEventQueueLock);
+        return Error;
+    }
+
+    CloseHandle(Thread);
+    return ERROR_SUCCESS;
+}
+
+
+static
+BOOL
+QueueDeviceEvent(
+    _In_ DEVICE_EVENT_RECIPIENT_TYPE RecipientType,
+    _In_opt_ HWND Window,
+    _In_opt_ PCWSTR ServiceName,
+    _In_ DWORD EventType,
+    _In_ PDEV_BROADCAST_DEVICEINTERFACE_W EventData)
+{
+    PDEVICE_EVENT_CONTEXT Context;
+    SIZE_T ServiceNameSize;
+
+    if (RecipientType == DeviceEventRecipientService && ServiceName == NULL)
+        return FALSE;
+
+    Context = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*Context));
+    if (Context == NULL)
+        return FALSE;
+
+    if (ServiceName != NULL)
+    {
+        ServiceNameSize = (wcslen(ServiceName) + 1) * sizeof(WCHAR);
+        Context->ServiceName = HeapAlloc(GetProcessHeap(), 0, ServiceNameSize);
+        if (Context->ServiceName == NULL)
+        {
+            HeapFree(GetProcessHeap(), 0, Context);
+            return FALSE;
+        }
+
+        CopyMemory(Context->ServiceName, ServiceName, ServiceNameSize);
+    }
+
+    Context->RecipientType = RecipientType;
+    Context->Window = Window;
+    Context->EventType = EventType;
+    Context->EventData = EventData;
+
+    EnterCriticalSection(&DeviceEventQueueLock);
+    InsertTailList(&DeviceEventQueueHead, &Context->ListEntry);
+    LeaveCriticalSection(&DeviceEventQueueLock);
+    SetEvent(DeviceEventQueueEvent);
+    return TRUE;
+}
+
+static
+VOID
+BroadcastDeviceNodesChanged(VOID)
+{
+    DWORD Recipients = BSM_ALLDESKTOPS | BSM_APPLICATIONS;
+
+    BroadcastSystemMessageExW(BSF_SENDNOTIFYMESSAGE |
+                              BSF_FORCEIFHUNG |
+                              BSF_NOHANG,
+                              &Recipients,
+                              WM_DEVICECHANGE,
+                              DBT_DEVNODES_CHANGED,
+                              0,
+                              NULL);
+}
+
+
+BOOL
+GetPhysicalDeviceObjectName(
+    _In_ PCWSTR DeviceInstance,
+    _Out_writes_bytes_(BufferSize) PWSTR Buffer,
+    _In_ ULONG BufferSize)
+{
+    PLUGPLAY_CONTROL_PROPERTY_DATA PlugPlayData;
+
+    RtlInitUnicodeString(&PlugPlayData.DeviceInstance, DeviceInstance);
+    PlugPlayData.Property = PNP_PROPERTY_PHYSICAL_DEVICE_OBJECT_NAME;
+    PlugPlayData.Buffer = Buffer;
+    PlugPlayData.BufferSize = BufferSize - sizeof(WCHAR);
+    return NT_SUCCESS(NtPlugPlayControl(PlugPlayControlProperty, &PlugPlayData, sizeof(PlugPlayData)));
+}
+
+
+static
+PPDO_NAME_ENTRY
+FindPdoName(
+    _In_ PCWSTR DeviceInstance)
+{
+    PLIST_ENTRY Current;
+
+    for (Current = PdoNameListHead.Flink; Current != &PdoNameListHead; Current = Current->Flink)
+    {
+        PPDO_NAME_ENTRY Entry = CONTAINING_RECORD(Current, PDO_NAME_ENTRY, ListEntry);
+
+        if (!_wcsicmp(Entry->DeviceInstance, DeviceInstance))
+            return Entry;
+    }
+    return NULL;
+}
+
+
+static
+VOID
+ForgetPdoName(
+    _In_ PPDO_NAME_ENTRY Entry)
+{
+    RemoveEntryList(&Entry->ListEntry);
+    HeapFree(GetProcessHeap(), 0, Entry);
+}
+
+
+static
+VOID
+RememberPdoName(
+    _In_ PCWSTR DeviceInstance)
+{
+    WCHAR PdoName[MAX_PATH] = {0};
+    PPDO_NAME_ENTRY Entry;
+    SIZE_T InstanceSize, NameSize;
+
+    Entry = FindPdoName(DeviceInstance);
+    if (Entry != NULL)
+        ForgetPdoName(Entry);
+
+    if (!GetPhysicalDeviceObjectName(DeviceInstance, PdoName, sizeof(PdoName)) ||
+        PdoName[0] == UNICODE_NULL)
+    {
+        return;
+    }
+
+    InstanceSize = (wcslen(DeviceInstance) + 1) * sizeof(WCHAR);
+    NameSize = (wcslen(PdoName) + 1) * sizeof(WCHAR);
+    Entry = HeapAlloc(GetProcessHeap(), 0, FIELD_OFFSET(PDO_NAME_ENTRY, DeviceInstance) + InstanceSize + NameSize);
+    if (Entry == NULL)
+        return;
+    CopyMemory(Entry->DeviceInstance, DeviceInstance, InstanceSize);
+    Entry->PdoName = (PWSTR)((PUCHAR)Entry->DeviceInstance + InstanceSize);
+    CopyMemory(Entry->PdoName, PdoName, NameSize);
+    InsertTailList(&PdoNameListHead, &Entry->ListEntry);
+}
+
+
+static
+VOID
+BroadcastTargetRemoveComplete(
+    _In_ PCWSTR DeviceInstance)
+{
+    WCHAR PdoName[MAX_PATH] = {0};
+    PPDO_NAME_ENTRY Entry;
+    PDEV_BROADCAST_HANDLE pEventData;
+    DWORD dwSize;
+
+    Entry = FindPdoName(DeviceInstance);
+    if (Entry == NULL && !GetPhysicalDeviceObjectName(DeviceInstance, PdoName, sizeof(PdoName)))
+        return;
+
+    dwSize = FIELD_OFFSET(DEV_BROADCAST_HANDLE, dbch_data) + 2 * sizeof(WCHAR);
+    pEventData = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize);
+    if (pEventData != NULL)
+    {
+        pEventData->dbch_size = dwSize;
+        pEventData->dbch_devicetype = DBT_DEVTYP_HANDLE;
+        pEventData->dbch_nameoffset = -1;
+        BroadcastListenerEvent(DBT_DEVICEREMOVECOMPLETE, Entry ? Entry->PdoName : PdoName, (PBYTE)pEventData, dwSize);
+        HeapFree(GetProcessHeap(), 0, pEventData);
+    }
+    if (Entry != NULL)
+        ForgetPdoName(Entry);
+}
+
 
 static
 VOID
@@ -46,17 +343,9 @@ ProcessTargetDeviceEvent(
 
     if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_ARRIVAL, &RpcStatus))
     {
-//        DWORD dwRecipient;
-
         DPRINT("Device arrival: %S\n", PnpEvent->TargetDevice.DeviceIds);
-
-//       dwRecipient = BSM_ALLDESKTOPS | BSM_APPLICATIONS;
-//       BroadcastSystemMessageW(BSF_POSTMESSAGE,
-//                               &dwRecipient,
-//                               WM_DEVICECHANGE,
-//                               DBT_DEVNODES_CHANGED,
-//                               0);
-        SendMessageW(HWND_BROADCAST, WM_DEVICECHANGE, DBT_DEVNODES_CHANGED, 0);
+        RememberPdoName(PnpEvent->TargetDevice.DeviceIds);
+        BroadcastDeviceNodesChanged();
     }
     else if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_EJECT_VETOED, &RpcStatus))
     {
@@ -68,31 +357,15 @@ ProcessTargetDeviceEvent(
     }
     else if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_SAFE_REMOVAL, &RpcStatus))
     {
-//        DWORD dwRecipient;
-
         DPRINT1("Safe removal: %S\n", PnpEvent->TargetDevice.DeviceIds);
-
-//        dwRecipient = BSM_ALLDESKTOPS | BSM_APPLICATIONS;
-//        BroadcastSystemMessageW(BSF_POSTMESSAGE,
-//                                &dwRecipient,
-//                                WM_DEVICECHANGE,
-//                                DBT_DEVNODES_CHANGED,
-//                                0);
-        SendMessageW(HWND_BROADCAST, WM_DEVICECHANGE, DBT_DEVNODES_CHANGED, 0);
+        BroadcastTargetRemoveComplete(PnpEvent->TargetDevice.DeviceIds);
+        BroadcastDeviceNodesChanged();
     }
     else if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_SURPRISE_REMOVAL, &RpcStatus))
     {
-//        DWORD dwRecipient;
-
         DPRINT1("Surprise removal: %S\n", PnpEvent->TargetDevice.DeviceIds);
-
-//        dwRecipient = BSM_ALLDESKTOPS | BSM_APPLICATIONS;
-//        BroadcastSystemMessageW(BSF_POSTMESSAGE,
-//                                &dwRecipient,
-//                                WM_DEVICECHANGE,
-//                                DBT_DEVNODES_CHANGED,
-//                                0);
-        SendMessageW(HWND_BROADCAST, WM_DEVICECHANGE, DBT_DEVNODES_CHANGED, 0);
+        BroadcastTargetRemoveComplete(PnpEvent->TargetDevice.DeviceIds);
+        BroadcastDeviceNodesChanged();
     }
     else if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_REMOVAL_VETOED, &RpcStatus))
     {
@@ -100,7 +373,7 @@ ProcessTargetDeviceEvent(
     }
     else if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_REMOVE_PENDING, &RpcStatus))
     {
-        DPRINT1("Removal pending: %S\n", PnpEvent->TargetDevice.DeviceIds);
+        DPRINT("Removal pending: %S\n", PnpEvent->TargetDevice.DeviceIds);
     }
     else
     {
@@ -110,6 +383,18 @@ ProcessTargetDeviceEvent(
                 PnpEvent->EventGuid.Data4[3], PnpEvent->EventGuid.Data4[4], PnpEvent->EventGuid.Data4[5],
                 PnpEvent->EventGuid.Data4[6], PnpEvent->EventGuid.Data4[7]);
     }
+}
+
+
+static
+VOID
+CopyInterfaceName(
+    _Out_ PWSTR Destination,
+    _In_ PCWSTR SymbolicLinkName)
+{
+    wcscpy(Destination, SymbolicLinkName);
+    if (!wcsncmp(Destination, L"\\??\\", 4))
+        Destination[1] = L'\\';
 }
 
 
@@ -165,22 +450,39 @@ ProcessDeviceClassChangeEvent(
                 pEventData->dbcc_size = dwSize;
                 pEventData->dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
                 CopyMemory(&pEventData->dbcc_classguid, &PnpEvent->DeviceClass.ClassGuid, sizeof(GUID));
-                wcscpy(pEventData->dbcc_name, PnpEvent->DeviceClass.SymbolicLinkName);
+                CopyInterfaceName(pEventData->dbcc_name, PnpEvent->DeviceClass.SymbolicLinkName);
+            }
+
+            if (pEventData == NULL)
+            {
+                Current = Current->Flink;
+                continue;
             }
 
             if ((pNotifyData->ulFlags & DEVICE_NOTIFY_SERVICE_HANDLE) == DEVICE_NOTIFY_WINDOW_HANDLE)
             {
-                SendMessageW((HANDLE)pNotifyData->hRecipient, WM_DEVICECHANGE, (WPARAM)dwEventType, (LPARAM)pEventData);
+                if (QueueDeviceEvent(DeviceEventRecipientWindow,
+                                     (HWND)pNotifyData->hRecipient,
+                                     NULL,
+                                     dwEventType,
+                                     pEventData))
+                {
+                    pEventData = NULL;
+                }
             }
             else if ((pNotifyData->ulFlags & DEVICE_NOTIFY_SERVICE_HANDLE) == DEVICE_NOTIFY_SERVICE_HANDLE)
             {
-                I_ScSendPnPMessage((SERVICE_STATUS_HANDLE)pNotifyData->hRecipient,
-                                   SERVICE_CONTROL_DEVICEEVENT,
-                                   dwEventType,
-                                   pEventData);
+                if (QueueDeviceEvent(DeviceEventRecipientService,
+                                     NULL,
+                                     pNotifyData->pszName,
+                                     dwEventType,
+                                     pEventData))
+                {
+                    pEventData = NULL;
+                }
             }
 
-            if (pEventData)
+            if (pEventData != NULL)
                 HeapFree(GetProcessHeap(), 0, pEventData);
         }
 
@@ -188,6 +490,66 @@ ProcessDeviceClassChangeEvent(
     }
 
     RtlReleaseResource(&NotificationListLock);
+
+    if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_INTERFACE_ARRIVAL, &RpcStatus))
+        dwEventType = DBT_DEVICEARRIVAL;
+    else if (UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_INTERFACE_REMOVAL, &RpcStatus))
+        dwEventType = DBT_DEVICEREMOVECOMPLETE;
+    else
+        return;
+
+    dwSize = sizeof(DEV_BROADCAST_DEVICEINTERFACE_W) + wcslen(PnpEvent->DeviceClass.SymbolicLinkName) * sizeof(WCHAR);
+    pEventData = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize);
+    if (pEventData == NULL)
+        return;
+    pEventData->dbcc_size = dwSize;
+    pEventData->dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+    CopyMemory(&pEventData->dbcc_classguid, &PnpEvent->DeviceClass.ClassGuid, sizeof(GUID));
+    CopyInterfaceName(pEventData->dbcc_name, PnpEvent->DeviceClass.SymbolicLinkName);
+    BroadcastListenerEvent(dwEventType, PnpEvent->DeviceClass.SymbolicLinkName, (PBYTE)pEventData, dwSize);
+    HeapFree(GetProcessHeap(), 0, pEventData);
+}
+
+
+static
+VOID
+ProcessCustomDeviceEvent(
+    _In_ PPLUGPLAY_EVENT_BLOCK PnpEvent)
+{
+    PTARGET_DEVICE_CUSTOM_NOTIFICATION Notification = PnpEvent->CustomNotification.NotificationStructure;
+    PUCHAR EventEnd = (PUCHAR)PnpEvent + PnpEvent->TotalSize;
+    WCHAR PdoName[MAX_PATH] = {0};
+    PDEV_BROADCAST_HANDLE pEventData;
+    ULONG DataSize, dwSize;
+    LONG NameOffset;
+
+    if ((PUCHAR)Notification < (PUCHAR)PnpEvent->CustomNotification.DeviceIds ||
+        (PUCHAR)Notification + FIELD_OFFSET(TARGET_DEVICE_CUSTOM_NOTIFICATION, CustomDataBuffer) > EventEnd ||
+        Notification->Size < FIELD_OFFSET(TARGET_DEVICE_CUSTOM_NOTIFICATION, CustomDataBuffer) ||
+        Notification->Size > (ULONG)(EventEnd - (PUCHAR)Notification))
+    {
+        DPRINT1("Malformed custom device event\n");
+        return;
+    }
+    DataSize = Notification->Size - FIELD_OFFSET(TARGET_DEVICE_CUSTOM_NOTIFICATION, CustomDataBuffer);
+    NameOffset = Notification->NameBufferOffset;
+    if (NameOffset < 0 || (ULONG)NameOffset >= DataSize)
+        NameOffset = -1;
+
+    if (!GetPhysicalDeviceObjectName(PnpEvent->CustomNotification.DeviceIds, PdoName, sizeof(PdoName)))
+        return;
+
+    dwSize = FIELD_OFFSET(DEV_BROADCAST_HANDLE, dbch_data) + DataSize + 2 * sizeof(WCHAR);
+    pEventData = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, dwSize);
+    if (pEventData == NULL)
+        return;
+    pEventData->dbch_size = dwSize;
+    pEventData->dbch_devicetype = DBT_DEVTYP_HANDLE;
+    pEventData->dbch_eventguid = Notification->Event;
+    pEventData->dbch_nameoffset = NameOffset;
+    CopyMemory(pEventData->dbch_data, Notification->CustomDataBuffer, DataSize);
+    BroadcastListenerEvent(DBT_CUSTOMEVENT, PdoName, (PBYTE)pEventData, dwSize);
+    HeapFree(GetProcessHeap(), 0, pEventData);
 }
 
 
@@ -197,14 +559,19 @@ ProcessDeviceInstallEvent(
     _In_ PPLUGPLAY_EVENT_BLOCK PnpEvent)
 {
     DeviceInstallParams* Params;
+    RPC_STATUS RpcStatus;
     DWORD len;
     DWORD DeviceIdLength;
-//    DWORD dwRecipient;
-
     DPRINT("ProcessDeviceInstallEvent(%p)\n", PnpEvent);
     DPRINT("Device enumerated: %S\n", PnpEvent->InstallDevice.DeviceId);
 
     DeviceIdLength = lstrlenW(PnpEvent->InstallDevice.DeviceId);
+    if (DeviceIdLength && IsDeviceDoNotInstall(PnpEvent->InstallDevice.DeviceId))
+    {
+        BroadcastDeviceNodesChanged();
+        return;
+    }
+
     if (DeviceIdLength)
     {
         /* Allocate a new device-install event */
@@ -212,24 +579,102 @@ ProcessDeviceInstallEvent(
         Params = HeapAlloc(GetProcessHeap(), 0, len);
         if (Params)
         {
+            Params->Arrival = UuidEqual(&PnpEvent->EventGuid, (UUID*)&GUID_DEVICE_ARRIVAL, &RpcStatus);
             wcscpy(Params->DeviceIds, PnpEvent->InstallDevice.DeviceId);
 
             /* Queue the event (will be dequeued by DeviceInstallThread) */
             WaitForSingleObject(hDeviceInstallListMutex, INFINITE);
+            ResetEvent(hNoPendingInstalls);
             InsertTailList(&DeviceInstallListHead, &Params->ListEntry);
             ReleaseMutex(hDeviceInstallListMutex);
 
             SetEvent(hDeviceInstallListNotEmpty);
 
-//            dwRecipient = BSM_ALLDESKTOPS | BSM_APPLICATIONS;
-//            BroadcastSystemMessageW(BSF_POSTMESSAGE,
-//                                    &dwRecipient,
-//                                    WM_DEVICECHANGE,
-//                                    DBT_DEVNODES_CHANGED,
-//                                    0);
-            SendMessageW(HWND_BROADCAST, WM_DEVICECHANGE, DBT_DEVNODES_CHANGED, 0);
+            BroadcastDeviceNodesChanged();
         }
     }
+}
+
+
+static
+VOID
+ProcessPowerEvent(
+    _In_ PPLUGPLAY_EVENT_BLOCK PnpEvent)
+{
+    LPENUM_SERVICE_STATUS_PROCESSW Services = NULL;
+    SERVICE_STATUS_HANDLE ServiceStatus;
+    SC_HANDLE Manager;
+    DWORD Needed = 0;
+    DWORD Count = 0;
+    DWORD Resume = 0;
+    DWORD Index;
+
+    DPRINT("ProcessPowerEvent(0x%lx)\n", PnpEvent->PowerNotification.NotificationCode);
+
+    if (PnpEvent->PowerNotification.NotificationCode == PBT_POWERSETTINGCHANGE)
+    {
+        PPOWERBROADCAST_SETTING Setting = (PPOWERBROADCAST_SETTING)(&PnpEvent->PowerNotification + 1);
+        ULONG Offset = FIELD_OFFSET(PLUGPLAY_EVENT_BLOCK, PowerNotification) + sizeof(PnpEvent->PowerNotification);
+
+        if (PnpEvent->TotalSize < Offset + FIELD_OFFSET(POWERBROADCAST_SETTING, Data) ||
+            PnpEvent->TotalSize - Offset - FIELD_OFFSET(POWERBROADCAST_SETTING, Data) < Setting->DataLength)
+        {
+            return;
+        }
+
+        if (!I_ScSendPnPMessage((SERVICE_STATUS_HANDLE)(ULONG_PTR)PnpEvent->PowerNotification.NotificationData,
+                                SERVICE_CONTROL_POWEREVENT,
+                                PBT_POWERSETTINGCHANGE,
+                                Setting))
+        {
+            DPRINT1("Power setting notification to service %lu failed (Error %lu)\n",
+                    PnpEvent->PowerNotification.NotificationData, GetLastError());
+        }
+        return;
+    }
+
+    Manager = OpenSCManagerW(NULL, SERVICES_ACTIVE_DATABASEW, SC_MANAGER_ENUMERATE_SERVICE);
+    if (Manager == NULL)
+        return;
+
+    if (!EnumServicesStatusExW(Manager, SC_ENUM_PROCESS_INFO, SERVICE_WIN32, SERVICE_ACTIVE,
+                               NULL, 0, &Needed, &Count, &Resume, NULL) &&
+        GetLastError() == ERROR_MORE_DATA)
+    {
+        Services = HeapAlloc(GetProcessHeap(), 0, Needed);
+        Resume = 0;
+        if (Services != NULL &&
+            EnumServicesStatusExW(Manager, SC_ENUM_PROCESS_INFO, SERVICE_WIN32, SERVICE_ACTIVE,
+                                  (LPBYTE)Services, Needed, &Needed, &Count, &Resume, NULL))
+        {
+            for (Index = 0; Index < Count; Index++)
+            {
+                if (Services[Index].ServiceStatusProcess.dwCurrentState != SERVICE_RUNNING ||
+                    !(Services[Index].ServiceStatusProcess.dwControlsAccepted & SERVICE_ACCEPT_POWEREVENT))
+                {
+                    continue;
+                }
+
+                if (I_ScValidatePnpService(NULL, Services[Index].lpServiceName, &ServiceStatus) != ERROR_SUCCESS)
+                    continue;
+
+                if (!I_ScSendPnPMessage(ServiceStatus,
+                                        SERVICE_CONTROL_POWEREVENT,
+                                        PnpEvent->PowerNotification.NotificationCode,
+                                        NULL))
+                {
+                    DPRINT1("Power event 0x%lx to %S failed (Error %lu)\n",
+                            PnpEvent->PowerNotification.NotificationCode,
+                            Services[Index].lpServiceName,
+                            GetLastError());
+                }
+            }
+        }
+    }
+
+    if (Services != NULL)
+        HeapFree(GetProcessHeap(), 0, Services);
+    CloseServiceHandle(Manager);
 }
 
 
@@ -245,6 +690,10 @@ PnpEventThread(
     ULONG PnpEventSize;
 
     UNREFERENCED_PARAMETER(lpParameter);
+
+    dwRet = InitializeDeviceEventQueue();
+    if (dwRet != ERROR_SUCCESS)
+        return dwRet;
 
     PnpEventSize = 0x1000;
     PnpEvent = HeapAlloc(GetProcessHeap(), 0, PnpEventSize);
@@ -292,14 +741,19 @@ PnpEventThread(
                 ProcessDeviceClassChangeEvent(PnpEvent);
                 break;
 
-//            case CustomDeviceEvent:
+            case CustomDeviceEvent:
+                ProcessCustomDeviceEvent(PnpEvent);
+                break;
 
             case DeviceInstallEvent:
                 ProcessDeviceInstallEvent(PnpEvent);
                 break;
 
+            case PowerEvent:
+                ProcessPowerEvent(PnpEvent);
+                break;
+
 //            case DeviceArrivalEvent:
-//            case PowerEvent:
 //            case VetoEvent:
 //            case BlockedDriverEvent:
 

@@ -95,6 +95,7 @@ DWORD getInterfaceIndexByName(const char *name, PDWORD index);
  */
 DWORD getInterfaceIPAddrByName(const char *name);
 DWORD getInterfaceIPAddrByIndex(DWORD index);
+DWORD getInterfaceIPAddrsByIndex(DWORD index, DWORD *addrs, DWORD *masks, DWORD count);
 DWORD getInterfaceMaskByName(const char *name);
 DWORD getInterfaceMaskByIndex(DWORD index);
 DWORD getInterfaceBCastAddrByName(const char *name);
@@ -133,11 +134,6 @@ DWORD getInterfaceMtuByIndex(DWORD index, PDWORD mtu);
  */
 DWORD getInterfaceEntryByName(const char *name, PMIB_IFROW entry);
 DWORD getInterfaceEntryByIndex(DWORD index, PMIB_IFROW entry);
-
-/* Converts the network-order bytes in addr to a printable string.  Returns
- * string.
- */
-char *toIPAddressString(unsigned int addr, char string[16]);
 
 /* add and delete IP addresses */
 NTSTATUS addIPAddress( IPAddr Address, IPMask Mask, DWORD IfIndex,

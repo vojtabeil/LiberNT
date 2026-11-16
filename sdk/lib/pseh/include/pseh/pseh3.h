@@ -8,6 +8,7 @@
 /* For additional information see pseh3.c in the related library. */
 
 #pragma once
+#ifndef _PSEH3_H_
 #define _PSEH3_H_
 
 #include <excpt.h>
@@ -17,8 +18,8 @@
 extern "C" {
 #endif
 
-/* CLANG must safe non-volatiles, because it uses a return-twice algorithm */
-#if defined(__clang__) && !defined(_SEH3$_FRAME_ALL_NONVOLATILES)
+/* Handlers resume at the registration, which needs the non-volatiles and its return address */
+#ifndef _SEH3$_FRAME_ALL_NONVOLATILES
 #define _SEH3$_FRAME_ALL_NONVOLATILES 1
 #endif
 
@@ -66,9 +67,7 @@ typedef struct _SEH3$_REGISTRATION_FRAME
     unsigned long Esi;
     unsigned long Edi;
 #endif
-#ifdef __clang__
     void *ReturnAddress;
-#endif
 } SEH3$_REGISTRATION_FRAME ,*PSEH3$_REGISTRATION_FRAME;
 
 #if defined(__cplusplus)
@@ -180,30 +179,24 @@ _SEH3$_RegisterTryLevelWithNonVolatiles(
 #else /* !__clang__ */
 
 /* This will make GCC use ebp, even if it was disabled by -fomit-frame-pointer */
-#define _SEH3$_EnforceFramePointer() asm volatile ("#\n" : : "m"(*(char*)__builtin_alloca(0)) : "%esp", "memory")
+#define _SEH3$_EnforceFramePointer() asm volatile ("#\n" : : "m"(*(char*)__builtin_alloca(4)) : "%esp", "memory")
 
 #define _SEH3$_ASM_GOTO(...) asm goto ("#\n" : : : "memory" : __VA_ARGS__)
 
-#ifdef __cplusplus
+/* Filters and handlers resume after this call with their code in eax and take the edges of
+   this asm goto, because a jump straight to a label misses the moves GCC places on the edges */
 #define _SEH3$_CALL_WRAPPER(_Function, _TrylevelFrame, _DataTable) \
     asm goto ("leal %0, %%eax\n\t" \
               "leal %1, %%edx\n\t" \
-              "call " #_Function "WithStackLayout" \
+              "call " #_Function "WithNonVolatiles\n\t" \
+              "cmpl $1, %%eax\n\t" \
+              "je %l8\n\t" \
+              "cmpl $2, %%eax\n\t" \
+              "je %l5\n\t" \
               : \
               : "m" (*(_TrylevelFrame)), "m" (*(_DataTable)), "c" (__builtin_alloca(0)), "p" (_SEH3$_RegisterFrameWithNonVolatiles) \
-              : "eax", "edx", "memory" \
+              : "eax", "edx", "ebx", "esi", "edi", "memory" \
               : _SEH3$_l_BeforeTry, _SEH3$_l_HandlerTarget, _SEH3$_l_OnException, _SEH3$_l_BeforeFilterOrFinally, _SEH3$_l_FilterOrFinally)
-
-#else
-#define _SEH3$_CALL_WRAPPER(_Function, _TrylevelFrame, _DataTable) \
-    asm goto ("leal %0, %%eax\n\t" \
-              "leal %1, %%edx\n\t" \
-              "call " #_Function \
-              : \
-              : "m" (*(_TrylevelFrame)), "m" (*(_DataTable)), "p" (_SEH3$_RegisterFrameWithNonVolatiles) \
-              : "eax", "edx", "ecx", "memory" \
-              : _SEH3$_l_BeforeTry, _SEH3$_l_HandlerTarget, _SEH3$_l_OnException, _SEH3$_l_BeforeFilterOrFinally, _SEH3$_l_FilterOrFinally)
-#endif
 
 /* This is an asm wrapper around _SEH3$_RegisterFrame */
 #define _SEH3$_RegisterFrame_(_TrylevelFrame, _DataTable) \
@@ -240,6 +233,19 @@ __attribute__((regparm(1)))
 _SEH3$_AutoCleanup(
     volatile SEH3$_REGISTRATION_FRAME *Frame);
 
+void
+__attribute__((regparm(1)))
+_SEH3$_Unregister(
+    volatile SEH3$_REGISTRATION_FRAME *Frame);
+
+/* Entered only through the registration, the finally body would see the registration-time values */
+#define _SEH3$_FINALLY_ON_NORMAL_EXIT() \
+    do { \
+        _SEH3$_Unregister(&_SEH3$_TrylevelFrame); \
+        _SEH3$_TrylevelFrame.ScopeTable = 0; \
+        goto _SEH3$_l_FilterOrFinally; \
+    } while (0)
+
 /* These are only dummies here */
 #define _SEH3$_DECLARE_CLEANUP_FUNC(_Name)
 #define _SEH3$_DEFINE_CLEANUP_FUNC(_Name)
@@ -265,7 +271,7 @@ _SEH3$_AutoCleanup(
         asm volatile ("#\n" : : : "eax", "ebx", "ecx", "edx", "esi", "edi", "flags", "memory"); \
         /* This construct makes sure that the finally function returns */ \
         /* a proper value at the end */ \
-        for (; ; (void)({_SEH3$_NESTED_FUNC_RETURN(0); 0;}))
+        for (; ; (void)({ if (_SEH3$_TrylevelFrame.ExceptionPointers == 0) goto _SEH3$_l_EndTry; _SEH3$_NESTED_FUNC_RETURN(0); 0;}))
 
 #define _SEH3$_FILTER(_Filter, _FilterExpression) (&&_SEH3$_l_FilterOrFinally)
 #define _SEH3$_FINALLY(_Finally) (&&_SEH3$_l_FilterOrFinally)
@@ -352,6 +358,8 @@ _Pragma("GCC diagnostic pop") \
         /* Invoke the finally function (an inline dummy in the __except case) */ \
         _SEH3$_FinallyFunction(1); \
     }
+
+#define _SEH3$_FINALLY_ON_NORMAL_EXIT() goto _SEH3$_l_EndTry
 
 #endif /* __cplusplus || __clang__ */
 
@@ -454,7 +462,7 @@ _Pragma("GCC diagnostic pop") \
         /* Set ExceptionPointers to 0, this is used by _abnormal_termination() */ \
          _SEH3$_TrylevelFrame.ExceptionPointers = 0; \
 \
-        goto _SEH3$_l_EndTry; \
+        _SEH3$_FINALLY_ON_NORMAL_EXIT(); \
 \
     _SEH3$_l_BeforeTry: (void)0; \
         _SEH3$_ASM_GOTO(_SEH3$_l_OnException); \
@@ -513,4 +521,6 @@ void __stdcall _SEH3$_longjmp_unwind(_JUMP_BUFFER* _Buf);
 
 #ifdef __cplusplus
 }; // extern "C"
+#endif
+
 #endif

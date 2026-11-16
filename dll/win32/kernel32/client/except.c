@@ -13,6 +13,8 @@
 
 #include <k32.h>
 #include <strsafe.h>
+#include <errorrep.h>
+#include <symz.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -56,6 +58,84 @@ _module_name_from_addr(const void* addr, void **module_start_addr,
 
 
 static VOID
+_print_address(const void *addr)
+{
+    PVOID StartAddr;
+    CHAR szMod[128] = "", *szModFile;
+    CHAR szName[256];
+    CHAR szSymbol[512] = "";
+    PIMAGE_NT_HEADERS NtHeaders;
+    PIMAGE_SECTION_HEADER Section;
+    const UCHAR *Table = NULL;
+    ULONG TableSize = 0, Rva, SymbolRva, Line, Index;
+    const char *Name, *FileName;
+    PUCHAR Buffer;
+
+    _module_name_from_addr(addr, &StartAddr, szMod, sizeof(szMod), &szModFile);
+
+    _SEH2_TRY
+    {
+        NtHeaders = StartAddr ? RtlImageNtHeader(StartAddr) : NULL;
+        if (NtHeaders != NULL)
+        {
+            Section = IMAGE_FIRST_SECTION(NtHeaders);
+            for (Index = 0; Index < NtHeaders->FileHeader.NumberOfSections; Index++, Section++)
+            {
+                if (RtlCompareMemory(Section->Name, SYMZ_SECTION_NAME, sizeof(SYMZ_SECTION_NAME)) == sizeof(SYMZ_SECTION_NAME) &&
+                    Section->VirtualAddress < NtHeaders->OptionalHeader.SizeOfImage &&
+                    Section->Misc.VirtualSize <= NtHeaders->OptionalHeader.SizeOfImage - Section->VirtualAddress)
+                {
+                    Table = (const UCHAR *)StartAddr + Section->VirtualAddress;
+                    TableSize = Section->Misc.VirtualSize;
+                    break;
+                }
+            }
+        }
+
+        Buffer = Table ? VirtualAlloc(NULL,
+                                      SYMZ_MAX_BLOCK_SIZE + SYMZ_DECODER_WORK_SIZE,
+                                      MEM_COMMIT | MEM_RESERVE,
+                                      PAGE_READWRITE) : NULL;
+        if (Buffer != NULL)
+        {
+            Rva = (ULONG)((ULONG_PTR)addr - (ULONG_PTR)StartAddr);
+            if (SymzLookup(Table, TableSize, Rva,
+                           Buffer, SYMZ_MAX_BLOCK_SIZE,
+                           Buffer + SYMZ_MAX_BLOCK_SIZE, SYMZ_DECODER_WORK_SIZE,
+                           &Name, &SymbolRva))
+            {
+                StringCbCopyA(szName, sizeof(szName), Name);
+                if (SymzLookupLine(Table, TableSize, Rva,
+                                   Buffer, SYMZ_MAX_BLOCK_SIZE,
+                                   Buffer + SYMZ_MAX_BLOCK_SIZE, SYMZ_DECODER_WORK_SIZE,
+                                   &FileName, &Line))
+                {
+                    StringCbPrintfA(szSymbol, sizeof(szSymbol), " (%s:%lu (%s+0x%lx))", FileName, Line, szName, Rva - SymbolRva);
+                }
+                else
+                {
+                    StringCbPrintfA(szSymbol, sizeof(szSymbol), " (%s+0x%lx)", szName, Rva - SymbolRva);
+                }
+            }
+
+            VirtualFree(Buffer, 0, MEM_RELEASE);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        szSymbol[0] = ANSI_NULL;
+    }
+    _SEH2_END;
+
+    DbgPrint("<%s:%Ix> (%s@%p)%s\n",
+             szModFile,
+             (ULONG_PTR)addr - (ULONG_PTR)StartAddr,
+             szMod,
+             StartAddr,
+             szSymbol);
+}
+
+static VOID
 _dump_context(PCONTEXT pc)
 {
 #ifdef _M_IX86
@@ -84,16 +164,121 @@ _dump_context(PCONTEXT pc)
     DbgPrint("R4:  %08lx   R5:  %08lx   R6:  %08lx   R7:  %08lx\n", pc->R4, pc->R5, pc->R6, pc->R7);
     DbgPrint("R8:  %08lx   R9:  %08lx   R10: %08lx   R11: %08lx\n", pc->R8, pc->R9, pc->R10, pc->R11);
     DbgPrint("R12: %08lx   CPSR: %08lx  FPSCR: %08lx\n", pc->R12, pc->Cpsr, pc->Fpscr);
+#elif defined(_M_ARM64)
+    DbgPrint("PC:  %I64x   LR:  %I64x   SP:  %I64x   FP:  %I64x\n", pc->Pc, pc->Lr, pc->Sp, pc->Fp);
+    DbgPrint("X0:  %I64x   X1:  %I64x   X2:  %I64x   X3:  %I64x\n", pc->X0, pc->X1, pc->X2, pc->X3);
+    DbgPrint("X4:  %I64x   X5:  %I64x   X6:  %I64x   X7:  %I64x\n", pc->X4, pc->X5, pc->X6, pc->X7);
+    DbgPrint("X8:  %I64x   X9:  %I64x   X10: %I64x   X11: %I64x\n", pc->X8, pc->X9, pc->X10, pc->X11);
+    DbgPrint("X12: %I64x   X13: %I64x   X14: %I64x   X15: %I64x\n", pc->X12, pc->X13, pc->X14, pc->X15);
+    DbgPrint("X16: %I64x   X17: %I64x   X18: %I64x   X19: %I64x\n", pc->X16, pc->X17, pc->X18, pc->X19);
+    DbgPrint("X20: %I64x   X21: %I64x   X22: %I64x   X23: %I64x\n", pc->X20, pc->X21, pc->X22, pc->X23);
+    DbgPrint("X24: %I64x   X25: %I64x   X26: %I64x   X27: %I64x\n", pc->X24, pc->X25, pc->X26, pc->X27);
+    DbgPrint("X28: %I64x   CPSR: %08lx  FPCR: %08lx  FPSR: %08lx\n", pc->X28, pc->Cpsr, pc->Fpcr, pc->Fpsr);
+#elif defined(_M_RISCV64)
+    DbgPrint("PC:  %I64x   RA:  %I64x   SP:  %I64x   GP:  %I64x\n", pc->Pc, pc->Ra, pc->Sp, pc->Gp);
+    DbgPrint("TP:  %I64x   T0:  %I64x   T1:  %I64x   T2:  %I64x\n", pc->Tp, pc->T0, pc->T1, pc->T2);
+    DbgPrint("S0:  %I64x   S1:  %I64x   A0:  %I64x   A1:  %I64x\n", pc->S0, pc->S1, pc->A0, pc->A1);
+    DbgPrint("A2:  %I64x   A3:  %I64x   A4:  %I64x   A5:  %I64x\n", pc->A2, pc->A3, pc->A4, pc->A5);
+    DbgPrint("A6:  %I64x   A7:  %I64x   S2:  %I64x   S3:  %I64x\n", pc->A6, pc->A7, pc->S2, pc->S3);
+    DbgPrint("S4:  %I64x   S5:  %I64x   S6:  %I64x   S7:  %I64x\n", pc->S4, pc->S5, pc->S6, pc->S7);
+    DbgPrint("S8:  %I64x   S9:  %I64x   S10: %I64x   S11: %I64x\n", pc->S8, pc->S9, pc->S10, pc->S11);
+    DbgPrint("T3:  %I64x   T4:  %I64x   T5:  %I64x   T6:  %I64x   FCSR: %08lx\n", pc->T3, pc->T4, pc->T5, pc->T6, pc->Fcsr);
+#elif defined(_M_PPC)
+    DbgPrint("IAR: %08lx   LR:  %08lx   CTR: %08lx   MSR: %08lx\n", pc->Iar, pc->Lr, pc->Ctr, pc->Msr);
+    DbgPrint("CR:  %08lx   XER: %08lx\n", pc->Cr, pc->Xer);
+    DbgPrint("R0:  %08lx   R1:  %08lx   R2:  %08lx   R3:  %08lx\n", pc->Gpr0, pc->Gpr1, pc->Gpr2, pc->Gpr3);
+    DbgPrint("R4:  %08lx   R5:  %08lx   R6:  %08lx   R7:  %08lx\n", pc->Gpr4, pc->Gpr5, pc->Gpr6, pc->Gpr7);
+    DbgPrint("R8:  %08lx   R9:  %08lx   R10: %08lx   R11: %08lx\n", pc->Gpr8, pc->Gpr9, pc->Gpr10, pc->Gpr11);
+    DbgPrint("R12: %08lx   R13: %08lx   R14: %08lx   R15: %08lx\n", pc->Gpr12, pc->Gpr13, pc->Gpr14, pc->Gpr15);
+    DbgPrint("R16: %08lx   R17: %08lx   R18: %08lx   R19: %08lx\n", pc->Gpr16, pc->Gpr17, pc->Gpr18, pc->Gpr19);
+    DbgPrint("R20: %08lx   R21: %08lx   R22: %08lx   R23: %08lx\n", pc->Gpr20, pc->Gpr21, pc->Gpr22, pc->Gpr23);
+    DbgPrint("R24: %08lx   R25: %08lx   R26: %08lx   R27: %08lx\n", pc->Gpr24, pc->Gpr25, pc->Gpr26, pc->Gpr27);
+    DbgPrint("R28: %08lx   R29: %08lx   R30: %08lx   R31: %08lx\n", pc->Gpr28, pc->Gpr29, pc->Gpr30, pc->Gpr31);
 #else
     #error "Unknown architecture"
 #endif
 }
 
+static EFaultRepRetVal
+BasepReportFault(IN PEXCEPTION_POINTERS ExceptionInfo)
+{
+    EFaultRepRetVal Result = frrvErrNoDW;
+    pfn_REPORTFAULT ReportFault;
+    HMODULE FaultRep;
+
+    if (BaseRunningInServerProcess)
+        return Result;
+
+    FaultRep = LoadLibraryW(L"faultrep.dll");
+    if (FaultRep == NULL)
+        return Result;
+
+    ReportFault = (pfn_REPORTFAULT)GetProcAddress(FaultRep, "ReportFault");
+    if (ReportFault != NULL)
+        Result = ReportFault(ExceptionInfo, 0);
+    FreeLibrary(FaultRep);
+    return Result;
+}
+
+
+static VOID
+_print_cxx_exception(PEXCEPTION_RECORD ExceptionRecord)
+{
+    ULONG_PTR Base = 0;
+    const ULONG *Type, *Table, *Info;
+    BOOLEAN StdException = FALSE;
+    ULONG Count, Index;
+    PCSTR Name, What;
+
+    if (ExceptionRecord->ExceptionCode != 0xE06D7363 ||
+        ExceptionRecord->NumberParameters < 3 ||
+        ExceptionRecord->ExceptionInformation[0] < 0x19930520 ||
+        ExceptionRecord->ExceptionInformation[0] > 0x19930522)
+    {
+        return;
+    }
+
+    if (sizeof(PVOID) == sizeof(ULONG64))
+    {
+        if (ExceptionRecord->NumberParameters < 4)
+            return;
+        Base = ExceptionRecord->ExceptionInformation[3];
+    }
+
+    _SEH2_TRY
+    {
+        Type = (const ULONG *)ExceptionRecord->ExceptionInformation[2];
+        Table = (const ULONG *)(Base + Type[3]);
+        Count = min(Table[0], 8);
+        for (Index = 0; Index < Count; Index++)
+        {
+            Info = (const ULONG *)(Base + Table[1 + Index]);
+            Name = (PCSTR)(Base + Info[1] + 2 * sizeof(PVOID));
+            DbgPrint("C++ exception type: %s\n", Name);
+            if (!strcmp(Name, ".?AVexception@std@@"))
+                StdException = TRUE;
+        }
+
+        if (StdException)
+        {
+            const ULONG_PTR *Object = (const ULONG_PTR *)ExceptionRecord->ExceptionInformation[1];
+
+            What = (PCSTR)Object[1];
+            if (What)
+                DbgPrint("C++ exception what: %s\n", What);
+            DbgPrint("C++ exception data: %p %p\n", (PVOID)Object[3], (PVOID)Object[4]);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        DbgPrint("<error reading C++ exception: 0x%x>\n", _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+}
+
 static VOID
 PrintStackTrace(IN PEXCEPTION_POINTERS ExceptionInfo)
 {
-    PVOID StartAddr;
-    CHAR szMod[128] = "", *szModFile;
     PEXCEPTION_RECORD ExceptionRecord = ExceptionInfo->ExceptionRecord;
     PCONTEXT ContextRecord = ExceptionInfo->ContextRecord;
 
@@ -114,50 +299,27 @@ PrintStackTrace(IN PEXCEPTION_POINTERS ExceptionInfo)
         DbgPrint("Missing function: %s!%s\n", (PSZ)ExceptionRecord->ExceptionInformation[0], (PSZ)ExceptionRecord->ExceptionInformation[1]);
     }
 
+    _print_cxx_exception(ExceptionRecord);
+
     _dump_context(ContextRecord);
-    _module_name_from_addr(ExceptionRecord->ExceptionAddress, &StartAddr, szMod, sizeof(szMod), &szModFile);
-    DbgPrint("Address:\n<%s:%x> (%s@%x)\n",
-             szModFile,
-             (ULONG_PTR)ExceptionRecord->ExceptionAddress - (ULONG_PTR)StartAddr,
-             szMod,
-             StartAddr);
-#ifdef _M_IX86
+    DbgPrint("Address:\n");
+    _print_address(ExceptionRecord->ExceptionAddress);
     DbgPrint("Frames:\n");
 
     _SEH2_TRY
     {
+        CONTEXT UnwindContext = *ContextRecord;
+        ULONG_PTR ReturnAddress;
         UINT i;
-        PULONG Frame = (PULONG)ContextRecord->Ebp;
 
-        for (i = 0; Frame[1] != 0 && Frame[1] != 0xdeadbeef && i < 128; i++)
-        {
-            if (IsBadReadPtr((PVOID)Frame[1], 4))
-            {
-                DbgPrint("<%s:%x>\n", "[invalid address]", Frame[1]);
-            }
-            else
-            {
-                _module_name_from_addr((const void*)Frame[1], &StartAddr,
-                                       szMod, sizeof(szMod), &szModFile);
-                DbgPrint("<%s:%x> (%s@%x)\n",
-                         szModFile,
-                         (ULONG_PTR)Frame[1] - (ULONG_PTR)StartAddr,
-                         szMod,
-                         StartAddr);
-            }
-
-            if (IsBadReadPtr((PVOID)Frame[0], sizeof(*Frame) * 2))
-                break;
-
-            Frame = (PULONG)Frame[0];
-        }
+        for (i = 0; i < 128 && BasepArchUnwindFrame(&UnwindContext, &ReturnAddress); i++)
+            _print_address((const void *)ReturnAddress);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
         DbgPrint("<error dumping stack trace: 0x%x>\n", _SEH2_GetExceptionCode());
     }
     _SEH2_END;
-#endif
 }
 
 /* GLOBALS ********************************************************************/
@@ -349,6 +511,9 @@ UnhandledExceptionFilter(IN PEXCEPTION_POINTERS ExceptionInfo)
 
     /* No debugger present, let's continue... */
 
+    /* ReactOS-specific: DPRINT a stack trace */
+    PrintStackTrace(ExceptionInfo);
+
     RealFilter = RtlDecodePointer(GlobalTopLevelExceptionFilter);
     if (RealFilter)
     {
@@ -357,8 +522,8 @@ UnhandledExceptionFilter(IN PEXCEPTION_POINTERS ExceptionInfo)
             return RetValue;
     }
 
-    /* ReactOS-specific: DPRINT a stack trace */
-    PrintStackTrace(ExceptionInfo);
+    if (BasepReportFault(ExceptionInfo) == frrvLaunchDebugger)
+        return EXCEPTION_CONTINUE_SEARCH;
 
     /*
      * Now pop up an error if needed. Check both the process-wide (Win32)
@@ -368,6 +533,7 @@ UnhandledExceptionFilter(IN PEXCEPTION_POINTERS ExceptionInfo)
         (RtlGetThreadErrorMode() & RTL_SEM_NOGPFAULTERRORBOX))
     {
         /* Do not display the pop-up error box, just transfer control to the exception handler */
+        BasepRunApplicationRecovery(ExceptionRecord->ExceptionCode);
         return EXCEPTION_EXECUTE_HANDLER;
     }
 
@@ -497,7 +663,12 @@ UnhandledExceptionFilter(IN PEXCEPTION_POINTERS ExceptionInfo)
     // Also see Vostokov's book "Memory Dump Analysis Anthology Collector's Edition, Volume 1"
     // at: https://books.google.fr/books?id=9w2x6NHljg4C&pg=PA115&lpg=PA115
 
-    if (!(AeDebugPath && AeDebugAuto))
+    if (!AeDebugPath)
+    {
+        Status = STATUS_SUCCESS;
+        ErrorResponse = ResponseOk;
+    }
+    else if (!AeDebugAuto)
     {
         /*
          * Either there is no debugger specified, or the debugger should
@@ -677,6 +848,8 @@ UnhandledExceptionFilter(IN PEXCEPTION_POINTERS ExceptionInfo)
 
 
 Quit:
+    BasepRunApplicationRecovery(ExceptionRecord->ExceptionCode);
+
     /* If this is a second chance exception, kill the process */
     if (IsSecondChance)
         NtTerminateProcess(NtCurrentProcess(), ExceptionRecord->ExceptionCode);
@@ -690,57 +863,6 @@ Quit:
      */
 
     return EXCEPTION_EXECUTE_HANDLER;
-}
-
-/*
- * @implemented
- */
-VOID
-WINAPI
-RaiseException(
-    _In_ DWORD dwExceptionCode,
-    _In_ DWORD dwExceptionFlags,
-    _In_ DWORD nNumberOfArguments,
-    _In_opt_ const ULONG_PTR *lpArguments)
-{
-    EXCEPTION_RECORD ExceptionRecord;
-
-    /* Setup the exception record */
-    RtlZeroMemory(&ExceptionRecord, sizeof(ExceptionRecord));
-    ExceptionRecord.ExceptionCode = dwExceptionCode;
-    ExceptionRecord.ExceptionRecord = NULL;
-    ExceptionRecord.ExceptionAddress = (PVOID)RaiseException;
-    ExceptionRecord.ExceptionFlags = dwExceptionFlags & EXCEPTION_NONCONTINUABLE;
-
-    /* Check if we have arguments */
-    if (!lpArguments)
-    {
-        /* We don't */
-        ExceptionRecord.NumberParameters = 0;
-    }
-    else
-    {
-        /* We do, normalize the count */
-        if (nNumberOfArguments > EXCEPTION_MAXIMUM_PARAMETERS)
-            nNumberOfArguments = EXCEPTION_MAXIMUM_PARAMETERS;
-
-        /* Set the count of parameters and copy them */
-        ExceptionRecord.NumberParameters = nNumberOfArguments;
-        RtlCopyMemory(ExceptionRecord.ExceptionInformation,
-                      lpArguments,
-                      nNumberOfArguments * sizeof(ULONG_PTR));
-    }
-
-    /* Better handling of Delphi Exceptions... a ReactOS Hack */
-    if (dwExceptionCode == 0xeedface || dwExceptionCode == 0xeedfade)
-    {
-        DPRINT1("Delphi Exception at address: %p\n", ExceptionRecord.ExceptionInformation[0]);
-        DPRINT1("Exception-Object: %p\n", ExceptionRecord.ExceptionInformation[1]);
-        DPRINT1("Exception text: %lx\n", ExceptionRecord.ExceptionInformation[2]);
-    }
-
-    /* Raise the exception */
-    RtlRaiseException(&ExceptionRecord);
 }
 
 /*

@@ -34,6 +34,10 @@
 #include "wine/debug.h"
 #include "wine/list.h"
 
+#ifdef __REACTOS__
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
+#endif
+
 WINE_DEFAULT_DEBUG_CHANNEL(compstui);
 
 static HMODULE compstui_hmod;

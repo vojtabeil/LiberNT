@@ -52,7 +52,16 @@ DriverEntry(
     DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = KsecDdDispatch;
 
     /* Initialize */
+    KsecInitializeRandomSupport();
     KsecInitializeEncryptionSupport();
+    Status = KsecInitializeBCrypt();
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("KSECDD: kernel BCrypt self-test failed: 0x%08lx\n", Status);
+        IoDeleteDevice(KsecDeviceObject);
+        KsecDeviceObject = NULL;
+        return Status;
+    }
 
     return STATUS_SUCCESS;
 }

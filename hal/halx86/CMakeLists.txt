@@ -1,11 +1,13 @@
 
 add_definitions(
     -D_NTHALDLL_
-    -D_NTHAL_)
+    -D_NTHAL_
+    -DNTDDI_VERSION=${REACTOS_TARGET_NTDDI})
 
 include_directories(
     include
-    ${REACTOS_SOURCE_DIR}/ntoskrnl/include
+    ${REACTOS_SOURCE_DIR}/hal/arch/common/include
+    ${REACTOS_SOURCE_DIR}/ntos/include
     ${REACTOS_SOURCE_DIR}/sdk/include/reactos/libs/fast486)
 
 function(add_hal _halname)
@@ -20,12 +22,13 @@ function(add_hal _halname)
     endforeach()
     add_library(${_halname} MODULE
         ${_haldata_SOURCES}
+        ${CMAKE_CURRENT_BINARY_DIR}/${_halname}_stubs.c
         ${CMAKE_CURRENT_BINARY_DIR}/hal.def)
 
     if(${_halname} STREQUAL "hal")
-        target_link_libraries(${_halname} libcntpr setjmp arbiter fast486 ${PSEH_LIB})
+        target_link_libraries(${_halname} halcommon libcntpr setjmp arblib fast486 ${PSEH_LIB})
     else()
-        target_link_libraries(${_halname} libcntpr setjmp fast486 ${PSEH_LIB})
+        target_link_libraries(${_halname} halcommon libcntpr setjmp fast486 ${PSEH_LIB})
     endif()
 
     add_importlibs(${_halname} ntoskrnl)
@@ -35,8 +38,6 @@ function(add_hal _halname)
     add_cd_file(TARGET ${_halname} DESTINATION reactos/system32 NO_CAB FOR all)
     if(MSVC)
         target_link_options(${_halname} PRIVATE /ignore:4216 /SECTION:INIT,ERWD)
-    else()
-        target_link_libraries(${_halname} -lgcc)
     endif()
 endfunction()
 
@@ -44,34 +45,24 @@ endfunction()
 include(generic.cmake)
 include(acpi.cmake)
 include(apic.cmake)
-include(up.cmake)
 include(smp.cmake)
 
 if(ARCH STREQUAL "i386")
-    include(pcidata.cmake)
-    include(legacy.cmake)
-    include(pic.cmake)
-    include(xbox.cmake)
-    include(pc98.cmake)
+    # The i386 HAL is the SMP one: every component has to reach the PCR through
+    # FS rather than at the boot processor's address, and take real spinlocks.
+    target_compile_definitions(lib_hal_generic PRIVATE CONFIG_SMP)
+    target_compile_definitions(lib_hal_acpi PRIVATE CONFIG_SMP)
+    target_compile_definitions(lib_hal_apic PRIVATE CONFIG_SMP)
+endif()
+
+if(ARCH STREQUAL "i386" AND (SARCH STREQUAL "pc98" OR SARCH STREQUAL "xbox"))
+    message(FATAL_ERROR "The SMP HAL does not support ${SARCH}")
+endif()
+
+if(ARCH STREQUAL "i386")
     add_subdirectory(minihal)
+endif()
 
-    remove_definitions(-DSARCH_XBOX)
-    remove_definitions(-DSARCH_PC98)
-
-    # hal
-    add_hal(hal SOURCES pic/halpic.rc COMPONENTS generic legacy up pic)
-    add_hal(halacpi SOURCES acpi/halacpi.rc COMPONENTS generic acpi up pic)
-    add_hal(halaacpi SOURCES apic/halaacpi.rc COMPONENTS generic acpi up apic)
-    add_hal(halapic SOURCES apic/halapic.rc COMPONENTS generic legacy up apic)
-    add_hal(halxbox SOURCES xbox/halxbox.rc COMPONENTS xbox up)
-    add_hal(halpc98 SOURCES pc98/halpc98.rc COMPONENTS pc98 up)
-
-    add_hal(halmacpi SOURCES smp/halmacpi.rc COMPONENTS generic acpi smp apic)
-    #add_hal(halmp SOURCES mp/halmp.rc COMPONENTS generic legacy smp apic)
-
-elseif(ARCH STREQUAL "amd64")
-
-    add_hal(hal SOURCES ${HAL_SOURCE} COMPONENTS generic acpi up apic)
-    add_hal(halmp SOURCES ${HAL_SOURCE} COMPONENTS generic acpi smp apic)
-
+if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
+    add_hal(hal SOURCES smp/halmacpi.rc COMPONENTS generic acpi smp apic)
 endif()

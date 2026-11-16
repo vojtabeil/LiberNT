@@ -43,7 +43,6 @@ static SERVICE_STATUS ServiceStatus;
 
 HKEY hEnumKey = NULL;
 HKEY hClassKey = NULL;
-BOOL g_IsUISuppressed = FALSE;
 BOOL g_ShuttingDown = FALSE;
 BOOL g_IsMiniNT = FALSE;
 
@@ -87,12 +86,12 @@ ServiceControlHandler(DWORD dwControl,
                       LPVOID lpEventData,
                       LPVOID lpContext)
 {
-    DPRINT1("ServiceControlHandler() called\n");
+    DPRINT("ServiceControlHandler() called\n");
 
     switch (dwControl)
     {
         case SERVICE_CONTROL_STOP:
-            DPRINT1("  SERVICE_CONTROL_STOP received\n");
+            DPRINT("  SERVICE_CONTROL_STOP received\n");
             UpdateServiceStatus(SERVICE_STOP_PENDING, 1);
             /* Stop listening to RPC Messages */
             RpcMgmtStopServerListening(NULL);
@@ -100,23 +99,23 @@ ServiceControlHandler(DWORD dwControl,
             return ERROR_SUCCESS;
 
         case SERVICE_CONTROL_PAUSE:
-            DPRINT1("  SERVICE_CONTROL_PAUSE received\n");
+            DPRINT("  SERVICE_CONTROL_PAUSE received\n");
             UpdateServiceStatus(SERVICE_PAUSED, 0);
             return ERROR_SUCCESS;
 
         case SERVICE_CONTROL_CONTINUE:
-            DPRINT1("  SERVICE_CONTROL_CONTINUE received\n");
+            DPRINT("  SERVICE_CONTROL_CONTINUE received\n");
             UpdateServiceStatus(SERVICE_RUNNING, 0);
             return ERROR_SUCCESS;
 
         case SERVICE_CONTROL_INTERROGATE:
-            DPRINT1("  SERVICE_CONTROL_INTERROGATE received\n");
+            DPRINT("  SERVICE_CONTROL_INTERROGATE received\n");
             SetServiceStatus(ServiceStatusHandle,
                              &ServiceStatus);
             return ERROR_SUCCESS;
 
         case SERVICE_CONTROL_SHUTDOWN:
-            DPRINT1("  SERVICE_CONTROL_SHUTDOWN received\n");
+            DPRINT("  SERVICE_CONTROL_SHUTDOWN received\n");
             UpdateServiceStatus(SERVICE_STOP_PENDING, 1);
             /* Stop listening to RPC Messages */
             RpcMgmtStopServerListening(NULL);
@@ -127,78 +126,6 @@ ServiceControlHandler(DWORD dwControl,
             DPRINT1("  Control %lu received\n", dwControl);
             return ERROR_CALL_NOT_IMPLEMENTED;
     }
-}
-
-static DWORD
-GetBooleanRegValue(
-    IN HKEY hKey,
-    IN PCWSTR lpSubKey,
-    IN PCWSTR lpValue,
-    OUT PBOOL pValue)
-{
-    DWORD dwError, dwType, dwData;
-    DWORD cbData = sizeof(dwData);
-    HKEY hSubKey = NULL;
-
-    /* Default value */
-    *pValue = FALSE;
-
-    dwError = RegOpenKeyExW(hKey,
-                            lpSubKey,
-                            0,
-                            KEY_READ,
-                            &hSubKey);
-    if (dwError != ERROR_SUCCESS)
-    {
-        DPRINT("GetBooleanRegValue(): RegOpenKeyExW() has failed to open '%S' key! (Error: %lu)\n",
-               lpSubKey, dwError);
-        return dwError;
-    }
-
-    dwError = RegQueryValueExW(hSubKey,
-                               lpValue,
-                               0,
-                               &dwType,
-                               (PBYTE)&dwData,
-                               &cbData);
-    if (dwError != ERROR_SUCCESS)
-    {
-        DPRINT("GetBooleanRegValue(): RegQueryValueExW() has failed to query '%S' value! (Error: %lu)\n",
-               lpValue, dwError);
-        goto Cleanup;
-    }
-    if (dwType != REG_DWORD)
-    {
-        DPRINT("GetBooleanRegValue(): The value is not of REG_DWORD type!\n");
-        goto Cleanup;
-    }
-
-    /* Return the value */
-    *pValue = (dwData == 1);
-
-Cleanup:
-    RegCloseKey(hSubKey);
-
-    return dwError;
-}
-
-BOOL
-GetSuppressNewUIValue(VOID)
-{
-    BOOL bSuppressNewHWUI = FALSE;
-
-    /*
-     * Query the SuppressNewHWUI policy registry value. Don't cache it
-     * as we want to update our behaviour in consequence.
-     */
-    GetBooleanRegValue(HKEY_LOCAL_MACHINE,
-                       L"Software\\Policies\\Microsoft\\Windows\\DeviceInstall\\Settings",
-                       L"SuppressNewHWUI",
-                       &bSuppressNewHWUI);
-    if (bSuppressNewHWUI)
-        DPRINT("GetSuppressNewUIValue(): newdev.dll's wizard UI won't be shown!\n");
-
-    return bSuppressNewHWUI;
 }
 
 /**
@@ -225,7 +152,7 @@ IsMiniNT(VOID)
 VOID WINAPI
 ServiceMain(DWORD argc, LPTSTR *argv)
 {
-    HANDLE hThread;
+    HANDLE hThread, hRpcReady;
     DWORD dwThreadId;
 
     UNREFERENCED_PARAMETER(argc);
@@ -257,14 +184,17 @@ ServiceMain(DWORD argc, LPTSTR *argv)
 
     UpdateServiceStatus(SERVICE_START_PENDING, 2);
 
+    hRpcReady = CreateEventW(NULL, TRUE, FALSE, NULL);
     hThread = CreateThread(NULL,
                            0,
                            RpcServerThread,
-                           NULL,
+                           hRpcReady,
                            0,
                            &dwThreadId);
     if (hThread != NULL)
         CloseHandle(hThread);
+    else if (hRpcReady != NULL)
+        SetEvent(hRpcReady);
 
     UpdateServiceStatus(SERVICE_START_PENDING, 3);
 
@@ -276,6 +206,14 @@ ServiceMain(DWORD argc, LPTSTR *argv)
                            &dwThreadId);
     if (hThread != NULL)
         CloseHandle(hThread);
+    else
+        SetEvent(hBootInstallComplete);
+
+    if (hRpcReady != NULL)
+    {
+        WaitForSingleObject(hRpcReady, INFINITE);
+        CloseHandle(hRpcReady);
+    }
 
     UpdateServiceStatus(SERVICE_RUNNING, 0);
 
@@ -312,6 +250,17 @@ InitializePnPManager(VOID)
         return dwError;
     }
 
+    hBootInstallComplete = CreateEventW(NULL,
+                                        TRUE,
+                                        FALSE,
+                                        L"Global\\PnP_Boot_Install_Complete");
+    if (hBootInstallComplete == NULL)
+    {
+        dwError = GetLastError();
+        DPRINT1("Could not create the Boot-Install Event! (Error %lu)\n", dwError);
+        return dwError;
+    }
+
     /*
      * Initialize the device-install event list
      */
@@ -332,14 +281,12 @@ InitializePnPManager(VOID)
         return dwError;
     }
     InitializeListHead(&DeviceInstallListHead);
+    InitializeListHead(&DoNotInstallListHead);
 
-    /* Query the SuppressUI registry value and cache it for our whole lifetime */
-    GetBooleanRegValue(HKEY_LOCAL_MACHINE,
-                       L"System\\CurrentControlSet\\Services\\PlugPlay\\Parameters",
-                       L"SuppressUI",
-                       &g_IsUISuppressed);
-    if (g_IsUISuppressed)
-        DPRINT("UMPNPMGR: newdev.dll's wizard UI won't be shown!\n");
+    /* PnpEventThread can consume notifications before RpcServerThread runs. */
+    InitializeListHead(&NotificationListHead);
+    RtlInitializeResource(&NotificationListLock);
+    InitializeListeners();
 
     dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                             L"System\\CurrentControlSet\\Enum",

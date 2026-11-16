@@ -9,6 +9,9 @@
 //
 
 #include <internal_shared.h>
+#if _VCRT_X86_INTRINSICS
+#include <immintrin.h>
+#endif
 
 #ifdef _WIN64
 #define DEFAULT_SECURITY_COOKIE 0x00002B992DDFA232ull
@@ -21,16 +24,31 @@
 uintptr_t __security_cookie = DEFAULT_SECURITY_COOKIE;
 uintptr_t __security_cookie_complement = ~DEFAULT_SECURITY_COOKIE;
 
+#if defined(__clang__) && _VCRT_X86_INTRINSICS
+__attribute__((target("rdrnd")))
+static int __security_rdrand(uintptr_t *randomValue)
+{
+#if _VCRT_AMD64_INTRINSICS
+    return _rdrand64_step((unsigned long long *)randomValue);
+#else
+    return _rdrand32_step((unsigned int *)randomValue);
+#endif
+}
+#endif
+
 void __security_init_cookie(void)
 {
     LARGE_INTEGER performanceCounter;
     FILETIME fileTime;
     uintptr_t randomValue = (uintptr_t)0x27E30B2C16B07297ull;
 
-#if defined(_M_IX86) || defined(_M_X64)
+#if _VCRT_X86_INTRINSICS
     if (IsProcessorFeaturePresent(PF_RDRAND_INSTRUCTION_AVAILABLE))
     {
-#ifdef _M_X64
+#ifdef __clang__
+        while (!__security_rdrand(&randomValue))
+            _mm_pause();
+#elif _VCRT_AMD64_INTRINSICS
         while (!_rdrand64_step(&randomValue))
             _mm_pause();
 #else

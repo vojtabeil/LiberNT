@@ -412,14 +412,54 @@ gethostname(OUT char FAR * name,
     getxyDataEnt(&Results, RNR_BUFFER_SIZE, NULL, &HostnameGuid, &Name);
     if (Name)
     {
+        if (strlen(Name) >= (SIZE_T)namelen)
+        {
+            if (Results != ResultsBuffer) HeapFree(WsSockHeap, 0, Results);
+            SetLastError(WSAEFAULT);
+            return SOCKET_ERROR;
+        }
+
         /* Copy it */
-        strncpy(name, Name, namelen-1);
+        strcpy(name, Name);
     }
 
     /* Check if we received a newly allocated buffer; free it. */
     if (Results != ResultsBuffer) HeapFree(WsSockHeap, 0, Results);
 
     /* Return success */
+    return ERROR_SUCCESS;
+}
+
+/*
+ * @implemented
+ */
+INT
+WSAAPI
+GetHostNameW(OUT PWSTR name,
+             IN INT namelen)
+{
+    CHAR HostName[256];
+    INT Length;
+
+    if (!name || namelen < 1)
+    {
+        SetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    HostName[0] = ANSI_NULL;
+    if (gethostname(HostName, sizeof(HostName)) != ERROR_SUCCESS)
+        return SOCKET_ERROR;
+
+    HostName[sizeof(HostName) - 1] = ANSI_NULL;
+    Length = MultiByteToWideChar(CP_ACP, 0, HostName, -1, NULL, 0);
+    if (Length == 0 || Length > namelen)
+    {
+        SetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    MultiByteToWideChar(CP_ACP, 0, HostName, -1, name, namelen);
     return ERROR_SUCCESS;
 }
 

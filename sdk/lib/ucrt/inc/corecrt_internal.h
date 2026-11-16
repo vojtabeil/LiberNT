@@ -29,6 +29,8 @@
     #include <roapi.h>
 #endif
 
+#include <pseh/pseh_cpp_aliases.h>
+
 _CRT_BEGIN_C_HEADER
 
 #define _DEFINE_SET_FUNCTION(function_name, type, variable_name) \
@@ -44,10 +46,8 @@ _CRT_BEGIN_C_HEADER
 
 #if defined _M_IX86
     #define _CRT_LINKER_SYMBOL_PREFIX "_"
-#elif defined _M_X64 || defined _M_ARM || defined _M_ARM64
-    #define _CRT_LINKER_SYMBOL_PREFIX ""
 #else
-    #error Unsupported architecture
+    #define _CRT_LINKER_SYMBOL_PREFIX ""
 #endif
 
 #define _CRT_LINKER_FORCE_INCLUDE(name) \

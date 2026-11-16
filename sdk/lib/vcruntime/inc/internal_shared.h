@@ -12,6 +12,7 @@
 
 #include <corecrt_startup.h>
 #include <crtdbg.h>
+#include <malloc.h>
 #include <windef.h>
 #include <winbase.h>
 
@@ -181,6 +182,9 @@ extern const IMAGE_TLS_DIRECTORY _tls_used;
 #ifdef __cplusplus
 } // extern "C"
 
+#include <pseh/pseh2.h>
+#include <pseh/pseh_cpp_push.h>
+
 template<typename T>
 __forceinline
 T __crt_fast_encode_pointer(T ptr)
@@ -239,7 +243,7 @@ struct __crt_seh_guarded_call
     template<typename Init, typename Action, typename Cleanup>
     T operator()(Init init, Action action, Cleanup cleanup)
     {
-        T result;
+        T result{};
         init();
         __try
         {
@@ -345,4 +349,5 @@ using __crt_scoped_stack_ptr = __crt_unique_heap_ptr<T, __crt_malloca_free_polic
 #define _recalloc_crt_t(t, p, n) (__crt_unique_heap_ptr<t>(static_cast<t*>(_recalloc_crt(p, (n), sizeof(t)))))
 #define _malloca_crt_t(t, n) (__crt_scoped_stack_ptr<t>(static_cast<t*>(_malloca_crt((n) * sizeof(t)))))
 
+#include <pseh/pseh_cpp_pop.h>
 #endif // __cplusplus

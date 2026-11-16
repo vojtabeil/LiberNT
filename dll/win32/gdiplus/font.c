@@ -34,7 +34,7 @@ WINE_DEFAULT_DEBUG_CHANNEL (gdiplus);
 #include "gdiplus_private.h"
 
 /* PANOSE is 10 bytes in size, need to pack the structure properly */
-#include "pshpack2.h"
+#pragma pack(push,2)
 typedef struct
 {
     USHORT version;
@@ -99,7 +99,7 @@ typedef struct
     SHORT metricDataFormat;
     USHORT numberOfHMetrics;
 } TT_HHEA;
-#include "poppack.h"
+#pragma pack(pop)
 
 #ifdef WORDS_BIGENDIAN
 #define GET_BE_WORD(x) (x)
@@ -456,7 +456,11 @@ GpStatus WINGDIPAPI GdipGetLogFontA(GpFont *font, GpGraphics *graphics,
  */
 GpStatus WINGDIPAPI GdipGetLogFontW(GpFont *font, GpGraphics *graphics, LOGFONTW *lf)
 {
+#ifdef __REACTOS__
+    REAL angle, rel_width, rel_height, height;
+#else
     REAL angle, rel_height, height;
+#endif
     GpMatrix matrix;
 
     TRACE("(%p, %p, %p)\n", font, graphics, lf);
@@ -481,7 +485,14 @@ GpStatus WINGDIPAPI GdipGetLogFontW(GpFont *font, GpGraphics *graphics, LOGFONTW
     }
 
     GdipMultiplyMatrix(&matrix, &graphics->gdi_transform, MatrixOrderAppend);
+#ifdef __REACTOS__
+    transform_properties(graphics, &matrix, FALSE, NULL, NULL, &angle);
+    rel_width = sqrtf(matrix.matrix[0] * matrix.matrix[0] + matrix.matrix[1] * matrix.matrix[1]);
+    rel_height = rel_width ? matrix.matrix[3] * (matrix.matrix[0] / rel_width) -
+                            matrix.matrix[2] * (matrix.matrix[1] / rel_width) : 0.0f;
+#else
     transform_properties(graphics, &matrix, FALSE, NULL, &rel_height, &angle);
+#endif
     get_log_fontW(font, graphics, lf);
 
     lf->lfHeight = -gdip_round(height * rel_height);
@@ -1140,7 +1151,7 @@ GpStatus WINGDIPAPI GdipPrivateAddFontFile(GpFontCollection *collection, GDIPCON
 
 #define TT_MAC_ID_SIMPLIFIED_CHINESE    25
 
-#define NAME_ID_FULL_FONT_NAME  4
+#define NAME_ID_FONT_FAMILY     1
 
 typedef struct {
     ULONG version;
@@ -1366,6 +1377,10 @@ static WCHAR *copy_name_table_string( const tt_name_record *name, const BYTE *da
     case TT_PLATFORM_APPLE_UNICODE:
     case TT_PLATFORM_MICROSOFT:
         ret = malloc((name_len / 2 + 1) * sizeof(WCHAR));
+#ifdef __REACTOS__
+        if (!ret)
+            RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
         for (len = 0; len < name_len / 2; len++)
             ret[len] = (data[len * 2] << 8) | data[len * 2 + 1];
         ret[len] = 0;
@@ -1376,6 +1391,10 @@ static WCHAR *copy_name_table_string( const tt_name_record *name, const BYTE *da
         if (!len)
             return NULL;
         ret = malloc(len * sizeof(WCHAR));
+#ifdef __REACTOS__
+        if (!ret)
+            RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
         len = MultiByteToWideChar( codepage, 0, (char *)data, name_len, ret, len - 1 );
         ret[len] = 0;
         return ret;
@@ -1488,7 +1507,7 @@ GpStatus WINGDIPAPI GdipPrivateAddMemoryFont(GpFontCollection* fontCollection,
     if (!fontCollection || !memory || !length)
         return InvalidParameter;
 
-    name = load_ttf_name_id(memory, length, NAME_ID_FULL_FONT_NAME);
+    name = load_ttf_name_id(memory, length, NAME_ID_FONT_FAMILY);
     if (!name)
         return OutOfMemory;
 
@@ -1507,13 +1526,13 @@ GpStatus WINGDIPAPI GdipPrivateAddMemoryFont(GpFontCollection* fontCollection,
         if(lstrlenW(name) > LF_FACESIZE - 1)
             name[LF_FACESIZE - 1] = 0;
 
+        memset(&lfw, 0, sizeof(lfw));
         lfw.lfCharSet = DEFAULT_CHARSET;
         lstrcpyW(lfw.lfFaceName, name);
-        lfw.lfPitchAndFamily = 0;
 
         param.collection = fontCollection;
         param.is_system = FALSE;
-        if (!EnumFontFamiliesExW(param.hdc, &lfw, add_font_proc, (LPARAM)&param, 0))
+        if (!add_font_proc(&lfw, NULL, TRUETYPE_FONTTYPE, (LPARAM)&param))
             ret = param.stat;
 
         DeleteDC(param.hdc);

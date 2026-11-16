@@ -1,7 +1,7 @@
 
 start_module_group(rostests)
 
-if(NOT MSVC)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     add_link_options("-Wl,-T,${CMAKE_CURRENT_SOURCE_DIR}/test-section.lds")
 endif()
 
@@ -19,9 +19,7 @@ add_subdirectory(apitests)
 #add_subdirectory(dibtests)
 add_subdirectory(drivers)
 #add_subdirectory(dxtest)
-if(MSVC OR NOT ARCH STREQUAL "amd64") # FIXME build is broken with new x64 PSEH
 add_subdirectory(kmtests)
-endif()
 #add_subdirectory(regtests)
 add_subdirectory(rosautotest)
 add_subdirectory(tests)

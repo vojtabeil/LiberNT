@@ -26,6 +26,11 @@ HRESULT CDECL decoder_get_frame_info(struct decoder *decoder, UINT frame, struct
     return decoder->vtable->get_frame_info(decoder, frame, info);
 }
 
+HRESULT CDECL decoder_get_decoder_palette(struct decoder *decoder, UINT frame, WICColor *colors, UINT *num_colors)
+{
+    return decoder->vtable->get_decoder_palette(decoder, frame, colors, num_colors);
+}
+
 HRESULT CDECL decoder_copy_pixels(struct decoder *decoder, UINT frame,
     const WICRect *prc, UINT stride, UINT buffersize, BYTE *buffer)
 {
@@ -68,9 +73,9 @@ HRESULT CDECL encoder_write_lines(struct encoder* encoder, BYTE *data, DWORD lin
     return encoder->vtable->write_lines(encoder, data, line_count, stride);
 }
 
-HRESULT CDECL encoder_commit_frame(struct encoder* encoder)
+HRESULT CDECL encoder_commit_frame(struct encoder* encoder, const struct encoder_metadata *metadata, UINT metadata_count)
 {
-    return encoder->vtable->commit_frame(encoder);
+    return encoder->vtable->commit_frame(encoder, metadata, metadata_count);
 }
 
 HRESULT CDECL encoder_commit_file(struct encoder* encoder)

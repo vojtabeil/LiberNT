@@ -11,11 +11,6 @@
 #include <shlobj_undoc.h>
 #include <shlguid_undoc.h>
 #include <new>
-#include "evalcmd.h" // SHELL32_CAssocElement_Version
-
-WINE_DEFAULT_DEBUG_CHANNEL(shell);
-
-EXTERN_C BOOL WINAPI GUIDFromStringW(LPCWSTR idstr, CLSID *id);
 
 static HRESULT SHAllocBlob(ULONG cbData, const BYTE *pbData, FLAGGED_BYTE_BLOB** ppBlob)
 {
@@ -92,31 +87,11 @@ public:
  * CRegistrySource
  */
 class CRegistrySource
-    : public IQuerySourceOld, public IQuerySource
-    , public IObjectWithRegistryKeyOld, public IObjectWithRegistryKey
+    : public IQuerySource
+    , public IObjectWithRegistryKeyOld
 {
     LONG m_cRefs = 1;
     HKEY m_hKey = NULL;
-
-    template<WORD Ver> static bool ExposeFeature()
-    {
-        if (Ver >= _WIN32_WINNT_VISTA && SHELL32_CAssocElement_Version >= _WIN32_WINNT_VISTA)
-            return true;
-        if (Ver < _WIN32_WINNT_VISTA && SHELL32_CAssocElement_Version < _WIN32_WINNT_VISTA)
-            return true;
-
-        DWORD packed = GetVersion();
-        WORD W32Nt = MAKEWORD(HIBYTE(packed), LOBYTE(packed));
-        if (Ver >= _WIN32_WINNT_VISTA)
-            return W32Nt >= _WIN32_WINNT_VISTA;
-#if 0
-        if (Ver < _WIN32_WINNT_VISTA)
-            return W32Nt < _WIN32_WINNT_VISTA;
-        return false;
-#else
-        return Ver < _WIN32_WINNT_VISTA; // FIXME: The apitest currently only uses the NT5 interface
-#endif
-    }
 
 public:
     virtual ~CRegistrySource();
@@ -129,21 +104,17 @@ public:
     STDMETHODIMP_(ULONG) Release() override;
     // IQuerySource methods
     STDMETHODIMP EnumValues(IEnumString **ppEnum) override;
-    STDMETHODIMP EnumSources(IEnumString **ppEnum) override;
     STDMETHODIMP QueryValueString(PCWSTR keyName, PCWSTR valueName, PWSTR *ppszValue) override;
     STDMETHODIMP QueryValueDword(PCWSTR keyName, PCWSTR valueName, DWORD *pdwValue) override;
+    STDMETHODIMP QueryValueGuid(PCWSTR keyName, PCWSTR valueName, GUID *pGuid) override;
     STDMETHODIMP QueryValueExists(PCWSTR keyName, PCWSTR valueName) override;
     STDMETHODIMP QueryValueDirect(PCWSTR keyName, PCWSTR valueName,
                                   FLAGGED_BYTE_BLOB **ppBlob) override;
-    STDMETHODIMP OpenSource(PCWSTR keyName, BOOL bCreate, IQuerySourceOld **ppSource) override;
-    STDMETHODIMP SetValueDirect(PCWSTR keyName, PCWSTR valueName, DWORD dwType, DWORD cbData,
-                                LPCVOID pvData) override;
-    STDMETHOD(QueryValueGuid)(PCWSTR keyName, PCWSTR valueName, GUID *guid) override;
-    STDMETHOD(OpenSource)(PCWSTR keyName, IQuerySource **ppSource) override;
-    // IObjectWithRegistryKey methods
+    STDMETHODIMP EnumSources(IEnumString **ppEnum) override;
+    STDMETHODIMP OpenSource(PCWSTR keyName, IQuerySource **ppSource) override;
+    // IObjectWithRegistryKeyOld methods
     STDMETHODIMP SetKey(HKEY hKey) override;
     STDMETHODIMP GetKey(HKEY *phKey) override;
-    STDMETHODIMP GetKey(REGSAM samDesired, HKEY *phKey) override;
 };
 
 /******************************************************************************/
@@ -299,45 +270,18 @@ STDMETHODIMP CRegistrySource::QueryInterface(REFIID riid, void **ppvObject)
     if (!ppvObject)
         return E_POINTER;
 
-    if (riid == IID_IUnknown)
+    if (riid == IID_IQuerySource)
     {
-        *ppvObject = static_cast<IQuerySourceOld*>(this);
+        *ppvObject = static_cast<IQuerySource*>(this);
         AddRef();
         return S_OK;
     }
 
-    if (ExposeFeature<_WIN32_WINNT_WINXP>())
+    if (riid == IID_IObjectWithRegistryKeyOld)
     {
-        if (riid == IID_IQuerySourceOld)
-        {
-            *ppvObject = static_cast<IQuerySourceOld*>(this);
-            AddRef();
-            return S_OK;
-        }
-
-        if (riid == IID_IObjectWithRegistryKeyOld)
-        {
-            *ppvObject = static_cast<IObjectWithRegistryKeyOld*>(this);
-            AddRef();
-            return S_OK;
-        }
-    }
-
-    if (ExposeFeature<_WIN32_WINNT_VISTA>())
-    {
-        if (riid == IID_IQuerySource)
-        {
-            *ppvObject = static_cast<IQuerySource*>(this);
-            AddRef();
-            return S_OK;
-        }
-
-        if (riid == IID_IObjectWithRegistryKey)
-        {
-            *ppvObject = static_cast<IObjectWithRegistryKey*>(this);
-            AddRef();
-            return S_OK;
-        }
+        *ppvObject = static_cast<IObjectWithRegistryKeyOld*>(this);
+        AddRef();
+        return S_OK;
     }
 
     *ppvObject = NULL;
@@ -443,17 +387,6 @@ STDMETHODIMP CRegistrySource::QueryValueDword(PCWSTR keyName, PCWSTR valueName, 
     return S_OK;
 }
 
-STDMETHODIMP CRegistrySource::QueryValueGuid(PCWSTR keyName, PCWSTR valueName, GUID *guid)
-{
-    PWSTR str;
-    HRESULT hr = QueryValueString(keyName, valueName, &str);
-    if (FAILED(hr))
-        return hr;
-    hr = guid ? (GUIDFromStringW(str, guid) ? S_OK : E_DATATYPE_MISMATCH) : E_INVALIDARG;
-    CoTaskMemFree(str);
-    return hr;
-}
-
 STDMETHODIMP CRegistrySource::QueryValueExists(PCWSTR keyName, PCWSTR valueName)
 {
     LSTATUS error = SHGetValueW(m_hKey, keyName, valueName, NULL, NULL, NULL);
@@ -514,27 +447,23 @@ STDMETHODIMP CRegistrySource::QueryValueDirect(
     return hr;
 }
 
-STDMETHODIMP CRegistrySource::OpenSource(PCWSTR keyName, BOOL bCreate, IQuerySourceOld **ppSource)
+STDMETHODIMP CRegistrySource::QueryValueGuid(PCWSTR keyName, PCWSTR valueName, GUID *pGuid)
 {
-    return QuerySourceCreateFromKey(m_hKey, keyName, bCreate, IID_IQuerySourceOld, (PVOID*)ppSource);
+    PWSTR pszValue;
+    HRESULT hr = QueryValueString(keyName, valueName, &pszValue);
+    if (hr == E_DATATYPE_MISMATCH)
+        return HRESULT_FROM_WIN32(ERROR_UNSUPPORTED_TYPE);
+    if (FAILED(hr))
+        return hr;
+
+    hr = CLSIDFromString(pszValue, pGuid);
+    CoTaskMemFree(pszValue);
+    return hr;
 }
 
 STDMETHODIMP CRegistrySource::OpenSource(PCWSTR keyName, IQuerySource **ppSource)
 {
-    return QuerySourceCreateFromKey(m_hKey, keyName, TRUE, IID_IQuerySource, (PVOID*)ppSource);
-}
-
-STDMETHODIMP CRegistrySource::SetValueDirect(
-    PCWSTR keyName,
-    PCWSTR valueName,
-    DWORD dwType,
-    DWORD cbData,
-    LPCVOID pvData)
-{
-    LSTATUS error = SHSetValueW(m_hKey, keyName, valueName, dwType, pvData, cbData);
-    if (error)
-        return HRESULT_FROM_WIN32(error);
-    return S_OK;
+    return QuerySourceCreateFromKey(m_hKey, keyName, FALSE, IID_IQuerySource, (PVOID*)ppSource);
 }
 
 STDMETHODIMP CRegistrySource::SetKey(HKEY hKey)
@@ -556,15 +485,6 @@ STDMETHODIMP CRegistrySource::GetKey(HKEY *phKey)
         return E_UNEXPECTED;
 
     return S_OK;
-}
-
-STDMETHODIMP CRegistrySource::GetKey(REGSAM samDesired, HKEY *phKey)
-{
-    if (!m_hKey || !*phKey)
-        return E_UNEXPECTED;
-
-    LONG err = RegOpenKeyExW(m_hKey, NULL, 0, samDesired, phKey);
-    return HRESULT_FROM_WIN32(err);
 }
 
 /**************************************************************************

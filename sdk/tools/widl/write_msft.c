@@ -80,7 +80,12 @@ typedef struct _msft_typelib_t
     unsigned char *typelib_segment_data[MSFT_SEG_MAX];
     int typelib_segment_block_length[MSFT_SEG_MAX];
 
+#ifdef __REACTOS__
+    int *typelib_typeinfo_offsets;
+    int typelib_typeinfo_offsets_size;
+#else
     int typelib_typeinfo_offsets[0x200]; /* Hope that's enough. */
+#endif
 
     int *typelib_namehash_segment;
     int *typelib_guidhash_segment;
@@ -424,6 +429,14 @@ static int ctl2_alloc_typeinfo(
 
     offset = ctl2_alloc_segment(typelib, MSFT_SEG_TYPEINFO, sizeof(MSFT_TypeInfoBase), 0);
 
+#ifdef __REACTOS__
+    if (typelib->typelib_header.nrtypeinfos >= typelib->typelib_typeinfo_offsets_size)
+    {
+        typelib->typelib_typeinfo_offsets_size = typelib->typelib_typeinfo_offsets_size ? typelib->typelib_typeinfo_offsets_size * 2 : 0x200;
+        typelib->typelib_typeinfo_offsets = xrealloc(typelib->typelib_typeinfo_offsets,
+                                                     typelib->typelib_typeinfo_offsets_size * sizeof(*typelib->typelib_typeinfo_offsets));
+    }
+#endif
     typelib->typelib_typeinfo_offsets[typelib->typelib_header.nrtypeinfos++] = offset;
 
     typeinfo = (void *)(typelib->typelib_segment_data[MSFT_SEG_TYPEINFO] + offset);
@@ -2006,9 +2019,13 @@ static msft_typeinfo_t *create_msft_typeinfo(msft_typelib_t *typelib, enum type_
             break;
 
         case ATTR_VERSION:
-            typeinfo->version = attr->u.ival;
-            break;
+        {
+            const version_t *version = attr->u.pval;
+            unsigned short major = version ? version->major : 0, minor = version ? version->minor : 0;
 
+            typeinfo->version = (minor << 16) | major;
+            break;
+        }
         default:
             break;
         }
@@ -2507,7 +2524,10 @@ static void set_name(msft_typelib_t *typelib)
 
 static void set_version(msft_typelib_t *typelib)
 {
-    typelib->typelib_header.version = get_attrv( typelib->typelib->attrs, ATTR_VERSION );
+    unsigned short major, minor;
+
+    get_version( typelib->typelib->attrs, &major, &minor );
+    typelib->typelib_header.version = (minor << 16) | major;
 }
 
 static void set_guid(msft_typelib_t *typelib)
@@ -2745,9 +2765,6 @@ static void save_all_changes(msft_typelib_t *typelib)
         add_output_to_resources( "TYPELIB", typelib_id );
         if (strendswith( typelib_name, "_t.res" ))  /* add typelib registration */
             output_typelib_regscript( typelib->typelib );
-#ifdef __REACTOS__
-        flush_output_resources( typelib_name );
-#endif
     }
     else flush_output_buffer( typelib_name );
 }
@@ -2830,6 +2847,9 @@ int create_msft_typelib(typelib_t *typelib)
             add_entry(msft, stmt);
 
     save_all_changes(msft);
+#ifdef __REACTOS__
+    free(msft->typelib_typeinfo_offsets);
+#endif
     free(msft);
     return 1;
 }

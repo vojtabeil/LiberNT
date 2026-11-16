@@ -156,7 +156,7 @@ i8042DetectKeyboard(
      * Pavilion notebooks the response to that command was incorrect.
      * So now we just assume that a keyboard is attached.
      */
-    DeviceExtension->Flags |= KEYBOARD_PRESENT;
+    InterlockedOr((PLONG)&DeviceExtension->Flags, KEYBOARD_PRESENT);
 
     INFO_(I8042PRT, "Keyboard detected\n");
 }
@@ -246,7 +246,7 @@ i8042DetectMouse(
         goto failure;
     }
 
-    DeviceExtension->Flags |= MOUSE_PRESENT;
+    InterlockedOr((PLONG)&DeviceExtension->Flags, MOUSE_PRESENT);
     INFO_(I8042PRT, "Mouse detected\n");
     return;
 
@@ -307,9 +307,10 @@ i8042ConnectKeyboardInterrupt(
         return Status;
     }
 
-    if (DirqlMax == PortDeviceExtension->KeyboardInterrupt.Dirql)
-        PortDeviceExtension->HighestDIRQLInterrupt = PortDeviceExtension->KeyboardInterrupt.Object;
-    PortDeviceExtension->Flags |= KEYBOARD_INITIALIZED;
+    PortDeviceExtension->HighestDIRQLInterrupt = I8042CoreSyncInterrupt(
+        PortDeviceExtension->HighestDIRQLInterrupt, PortDeviceExtension->KeyboardInterrupt.Object,
+        PortDeviceExtension->KeyboardInterrupt.Dirql, DirqlMax);
+    InterlockedOr((PLONG)&PortDeviceExtension->Flags, KEYBOARD_INITIALIZED);
     return STATUS_SUCCESS;
 }
 
@@ -357,19 +358,21 @@ i8042ConnectMouseInterrupt(
         goto cleanup;
     }
 
-    if (DirqlMax == PortDeviceExtension->MouseInterrupt.Dirql)
-        PortDeviceExtension->HighestDIRQLInterrupt = PortDeviceExtension->MouseInterrupt.Object;
+    PortDeviceExtension->HighestDIRQLInterrupt = I8042CoreSyncInterrupt(
+        PortDeviceExtension->HighestDIRQLInterrupt, PortDeviceExtension->MouseInterrupt.Object,
+        PortDeviceExtension->MouseInterrupt.Dirql, DirqlMax);
 
-    PortDeviceExtension->Flags |= MOUSE_INITIALIZED;
+    InterlockedOr((PLONG)&PortDeviceExtension->Flags, MOUSE_INITIALIZED);
     Status = STATUS_SUCCESS;
 
 cleanup:
     if (!NT_SUCCESS(Status))
     {
-        PortDeviceExtension->Flags &= ~MOUSE_INITIALIZED;
+        InterlockedAnd((PLONG)&PortDeviceExtension->Flags, ~MOUSE_INITIALIZED);
         if (PortDeviceExtension->MouseInterrupt.Object)
         {
             IoDisconnectInterrupt(PortDeviceExtension->MouseInterrupt.Object);
+            PortDeviceExtension->MouseInterrupt.Object = NULL;
             PortDeviceExtension->HighestDIRQLInterrupt = PortDeviceExtension->KeyboardInterrupt.Object;
         }
     }
@@ -434,15 +437,14 @@ StartProcedure(
         }
         if (DeviceExtension->Flags & MOUSE_PRESENT)
         {
-            FlagsToDisable |= CCB_MOUSE_DISAB;
-            FlagsToEnable |= CCB_MOUSE_INT_ENAB;
+            FlagsToEnable |= CCB_MOUSE_DISAB | CCB_MOUSE_INT_ENAB;
         }
 
         Status = EnableInterrupts(DeviceExtension, FlagsToDisable, FlagsToEnable);
         if (!NT_SUCCESS(Status))
         {
             WARN_(I8042PRT, "EnableInterrupts failed: %lx\n", Status);
-            DeviceExtension->Flags &= ~(KEYBOARD_PRESENT | MOUSE_PRESENT);
+            InterlockedAnd((PLONG)&DeviceExtension->Flags, ~(KEYBOARD_PRESENT | MOUSE_PRESENT));
             return Status;
         }
     }
@@ -457,7 +459,7 @@ StartProcedure(
         Status = i8042ConnectKeyboardInterrupt(DeviceExtension->KeyboardExtension);
         if (NT_SUCCESS(Status))
         {
-            DeviceExtension->Flags |= KEYBOARD_INITIALIZED;
+            InterlockedOr((PLONG)&DeviceExtension->Flags, KEYBOARD_INITIALIZED);
         }
         else
         {
@@ -474,11 +476,14 @@ StartProcedure(
         Status = i8042ConnectMouseInterrupt(DeviceExtension->MouseExtension);
         if (NT_SUCCESS(Status))
         {
-            DeviceExtension->Flags |= MOUSE_INITIALIZED;
+            InterlockedOr((PLONG)&DeviceExtension->Flags, MOUSE_INITIALIZED);
         }
         else
         {
             WARN_(I8042PRT, "i8042ConnectMouseInterrupt failed: %lx\n", Status);
+            if (!i8042QuiesceMouse(DeviceExtension))
+                WARN_(I8042PRT, "Unable to quiesce mouse port\n");
+            return Status;
         }
 
         /* Start the mouse */
@@ -509,6 +514,8 @@ i8042PnpStartDevice(
     BOOLEAN FoundDataPort = FALSE;
     BOOLEAN FoundControlPort = FALSE;
     BOOLEAN FoundIrq = FALSE;
+    PUCHAR DataPort = NULL;
+    PUCHAR ControlPort = NULL;
     ULONG i;
     NTSTATUS Status;
 
@@ -558,14 +565,14 @@ i8042PnpStartDevice(
                      */
                     if (!FoundDataPort)
                     {
-                        PortDeviceExtension->DataPort = ULongToPtr(ResourceDescriptor->u.Port.Start.u.LowPart);
-                        INFO_(I8042PRT, "Found data port: %p\n", PortDeviceExtension->DataPort);
+                        DataPort = ULongToPtr(ResourceDescriptor->u.Port.Start.u.LowPart);
+                        INFO_(I8042PRT, "Found data port: %p\n", DataPort);
                         FoundDataPort = TRUE;
                     }
                     else if (!FoundControlPort)
                     {
-                        PortDeviceExtension->ControlPort = ULongToPtr(ResourceDescriptor->u.Port.Start.u.LowPart);
-                        INFO_(I8042PRT, "Found control port: %p\n", PortDeviceExtension->ControlPort);
+                        ControlPort = ULongToPtr(ResourceDescriptor->u.Port.Start.u.LowPart);
+                        INFO_(I8042PRT, "Found control port: %p\n", ControlPort);
                         FoundControlPort = TRUE;
                     }
                     else
@@ -609,31 +616,40 @@ i8042PnpStartDevice(
         WARN_(I8042PRT, "Some required resources were not found in allocated resources list\n");
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    else if (DeviceExtension->Type == Mouse && (FoundDataPort || FoundControlPort))
+    else if (DeviceExtension->Type == Mouse && FoundDataPort != FoundControlPort)
     {
-        WARN_(I8042PRT, "Too much resources were provided in allocated resources list\n");
+        WARN_(I8042PRT, "Mouse was given only one of the controller ports\n");
         return STATUS_INVALID_PARAMETER;
     }
+
+    KeWaitForSingleObject(&PortDeviceExtension->PnpMutex, Executive, KernelMode, FALSE, NULL);
 
     switch (DeviceExtension->Type)
     {
         case Keyboard:
         {
+            PortDeviceExtension->DataPort = DataPort;
+            PortDeviceExtension->ControlPort = ControlPort;
             RtlCopyMemory(
                 &PortDeviceExtension->KeyboardInterrupt,
                 &InterruptData,
                 sizeof(INTERRUPT_DATA));
-            PortDeviceExtension->Flags |= KEYBOARD_STARTED;
+            InterlockedOr((PLONG)&PortDeviceExtension->Flags, KEYBOARD_STARTED);
             Status = StartProcedure(PortDeviceExtension);
             break;
         }
         case Mouse:
         {
+            if (FoundDataPort && FoundControlPort && PortDeviceExtension->DataPort == NULL)
+            {
+                PortDeviceExtension->DataPort = DataPort;
+                PortDeviceExtension->ControlPort = ControlPort;
+            }
             RtlCopyMemory(
                 &PortDeviceExtension->MouseInterrupt,
                 &InterruptData,
                 sizeof(INTERRUPT_DATA));
-            PortDeviceExtension->Flags |= MOUSE_STARTED;
+            InterlockedOr((PLONG)&PortDeviceExtension->Flags, MOUSE_STARTED);
             Status = StartProcedure(PortDeviceExtension);
             break;
         }
@@ -644,6 +660,8 @@ i8042PnpStartDevice(
             Status = STATUS_INVALID_DEVICE_REQUEST;
         }
     }
+
+    KeReleaseMutex(&PortDeviceExtension->PnpMutex, FALSE);
 
     if (NT_SUCCESS(Status))
         DeviceExtension->PnpState = dsStarted;
@@ -658,9 +676,48 @@ i8042RemoveDevice(
     PI8042_DRIVER_EXTENSION DriverExtension;
     KIRQL OldIrql;
     PFDO_DEVICE_EXTENSION DeviceExtension;
+    PPORT_DEVICE_EXTENSION PortDeviceExtension;
 
     DriverExtension = (PI8042_DRIVER_EXTENSION)IoGetDriverObjectExtension(DeviceObject->DriverObject, DeviceObject->DriverObject);
     DeviceExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+    PortDeviceExtension = DeviceExtension->PortDeviceExtension;
+
+    KeWaitForSingleObject(&PortDeviceExtension->PnpMutex, Executive, KernelMode, FALSE, NULL);
+
+    if (DeviceExtension->Type == Mouse)
+    {
+        if (PortDeviceExtension->DataPort != NULL &&
+            !i8042QuiesceMouse(PortDeviceExtension))
+            WARN_(I8042PRT, "Unable to quiesce mouse port\n");
+
+        if (PortDeviceExtension->Flags & MOUSE_INITIALIZED)
+        {
+            if (PortDeviceExtension->HighestDIRQLInterrupt == PortDeviceExtension->MouseInterrupt.Object)
+                PortDeviceExtension->HighestDIRQLInterrupt = PortDeviceExtension->KeyboardInterrupt.Object;
+            IoDisconnectInterrupt(PortDeviceExtension->MouseInterrupt.Object);
+            PortDeviceExtension->MouseInterrupt.Object = NULL;
+        }
+        if (PortDeviceExtension->Flags & MOUSE_CONNECTED)
+            KeCancelTimer(&PortDeviceExtension->MouseExtension->TimerMouseTimeout);
+        InterlockedAnd((PLONG)&PortDeviceExtension->Flags, ~(MOUSE_CONNECTED | MOUSE_STARTED | MOUSE_INITIALIZED));
+        PortDeviceExtension->MouseExtension = NULL;
+    }
+    else if (DeviceExtension->Type == Keyboard)
+    {
+        if (PortDeviceExtension->Flags & KEYBOARD_INITIALIZED)
+        {
+            if (PortDeviceExtension->HighestDIRQLInterrupt == PortDeviceExtension->KeyboardInterrupt.Object)
+                PortDeviceExtension->HighestDIRQLInterrupt = PortDeviceExtension->MouseInterrupt.Object;
+            IoDisconnectInterrupt(PortDeviceExtension->KeyboardInterrupt.Object);
+            PortDeviceExtension->KeyboardInterrupt.Object = NULL;
+        }
+        InterlockedAnd((PLONG)&PortDeviceExtension->Flags, ~(KEYBOARD_CONNECTED | KEYBOARD_STARTED | KEYBOARD_INITIALIZED));
+        PortDeviceExtension->KeyboardExtension = NULL;
+    }
+
+    KeReleaseMutex(&PortDeviceExtension->PnpMutex, FALSE);
+
+    KeFlushQueuedDpcs();
 
     KeAcquireSpinLock(&DriverExtension->DeviceListLock, &OldIrql);
     RemoveEntryList(&DeviceExtension->ListEntry);

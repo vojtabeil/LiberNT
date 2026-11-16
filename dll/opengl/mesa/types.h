@@ -185,6 +185,10 @@
 #include "GL/gl.h"
 #include "config.h"
 
+#ifndef GL_MIRRORED_REPEAT
+#define GL_MIRRORED_REPEAT 0x8370
+#endif
+
 
 struct HashTable;
 
@@ -270,6 +274,7 @@ typedef void (*TextureSampleFunc)( const struct gl_texture_object *tObj,
 struct gl_image {
 	GLint Width;
 	GLint Height;
+	GLint Depth;		/* for 3-D texturing */
 	GLint Components;	/* 1, 2, 3 or 4 */
         GLenum Format;		/* GL_COLOR_INDEX, GL_RED, GL_RGB, etc */
 	GLenum Type;		/* GL_UNSIGNED_BYTE or GL_FLOAT or GL_BITMAP */
@@ -293,13 +298,16 @@ struct gl_texture_image {
 				 */
 	GLenum IntFormat;	/* Internal format as given by the user */
 	GLuint Border;		/* 0 or 1 */
-	GLuint Width;		/* = 2^WidthLog2 + 2*Border */
-	GLuint Height;		/* = 2^HeightLog2 + 2*Border */
+	GLuint Width;		/* Image width including border */
+	GLuint Height;		/* Image height including border */
+	GLuint Depth;		/* Image depth including border */
 	GLuint Width2;		/* = Width - 2*Border */
 	GLuint Height2;		/* = Height - 2*Border */
-	GLuint WidthLog2;	/* = log2(Width2) */
-	GLuint HeightLog2;	/* = log2(Height2) */
-	GLuint MaxLog2;		/* = MAX(WidthLog2, HeightLog2) */
+	GLuint Depth2;		/* = Depth - 2*Border */
+	GLuint WidthLog2;	/* = floor(log2(max(Width2, 1))) */
+	GLuint HeightLog2;	/* = floor(log2(max(Height2, 1))) */
+	GLuint DepthLog2;	/* = floor(log2(max(Depth2, 1))) */
+	GLuint MaxLog2;		/* = MAX(WidthLog2, HeightLog2, DepthLog2) */
 	GLubyte *Data;		/* Image data as unsigned bytes */
 
 	/* For device driver: */
@@ -351,6 +359,8 @@ struct gl_api_table {
    void (*CopyTexSubImage1D)( GLcontext *, GLenum, GLint, GLint,
                               GLint, GLint, GLsizei );
    void (*CopyTexSubImage2D)( GLcontext *, GLenum, GLint, GLint, GLint,
+                              GLint, GLint, GLsizei, GLsizei );
+   void (*CopyTexSubImage3D)( GLcontext *, GLenum, GLint, GLint, GLint, GLint,
                               GLint, GLint, GLsizei, GLsizei );
    void (*CullFace)( GLcontext *, GLenum );
    void (*DeleteLists)( GLcontext *, GLuint, GLsizei );
@@ -507,6 +517,13 @@ struct gl_api_table {
    void (*TexSubImage2D)( GLcontext *, GLenum, GLint, GLint, GLint,
                           GLsizei, GLsizei, GLenum, GLenum,
                           struct gl_image * );
+   void (*TexImage3D)( GLcontext *, GLenum, GLint, GLint,
+                       GLsizei, GLsizei, GLsizei, GLint,
+                       GLenum, GLenum, struct gl_image * );
+   void (*TexSubImage3D)( GLcontext *, GLenum, GLint,
+                          GLint, GLint, GLint,
+                          GLsizei, GLsizei, GLsizei,
+                          GLenum, GLenum, struct gl_image * );
    void (*TexParameterfv)( GLcontext *, GLenum, GLenum, const GLfloat * );
    /* Translated implemented by Translatef */
    void (*Translatef)( GLcontext *, GLfloat, GLfloat, GLfloat );
@@ -883,6 +900,14 @@ struct gl_stencil_attrib {
 	GLstencil	ValueMask;	/* Value mask */
 	GLstencil	Clear;		/* Clear value */
 	GLstencil	WriteMask;	/* Write mask */
+	GLenum		BackFunction;	/* Back-face stencil function */
+	GLenum		BackFailFunc;	/* Back-face stencil fail function */
+	GLenum		BackZPassFunc;	/* Back-face depth pass function */
+	GLenum		BackZFailFunc;	/* Back-face depth fail function */
+	GLstencil	BackRef;	/* Back-face reference value */
+	GLstencil	BackValueMask;	/* Back-face value mask */
+	GLstencil	BackWriteMask;	/* Back-face write mask */
+	GLboolean	Facing;		/* 0 for front-facing, 1 for back-facing */
 };
 
 
@@ -893,6 +918,7 @@ struct gl_stencil_attrib {
 
 #define TEXTURE_1D 1
 #define TEXTURE_2D 2
+#define TEXTURE_3D 4
 
 
 struct gl_texture_attrib {
@@ -914,10 +940,12 @@ struct gl_texture_attrib {
 	GLfloat EyePlaneQ[4];
 	struct gl_texture_object *Current1D;
 	struct gl_texture_object *Current2D;
-	struct gl_texture_object *Current;  /* = Current1D, 2D or NULL */
+	struct gl_texture_object *Current3D;
+	struct gl_texture_object *Current;  /* = Current1D, 2D, 3D or NULL */
 #ifdef GL_VERSION_1_1
 	struct gl_texture_object *Proxy1D;
 	struct gl_texture_object *Proxy2D;
+	struct gl_texture_object *Proxy3D;
 #endif
 	GLboolean AnyDirty;
 };
@@ -958,6 +986,8 @@ struct gl_pixelstore_attrib {
 	GLint RowLength;
 	GLint SkipPixels;
 	GLint SkipRows;
+	GLint ImageHeight;
+	GLint SkipImages;
 	GLboolean SwapBytes;
 	GLboolean LsbFirst;
 };
@@ -1091,9 +1121,9 @@ struct gl_texture_object {
 	GLuint Dimensions;		/* 1 or 2 or 3 */
 	GLfloat Priority;		/* in [0,1] */
 	GLint BorderColor[4];		/* as integers in [0,255] */
-	GLenum WrapS;			/* GL_CLAMP or GL_REPEAT */
-	GLenum WrapT;			/* GL_CLAMP or GL_REPEAT */
-	GLenum WrapR;			/* GL_CLAMP or GL_REPEAT */
+	GLenum WrapS;			/* Texture coordinate wrap mode */
+	GLenum WrapT;			/* Texture coordinate wrap mode */
+	GLenum WrapR;			/* Texture coordinate wrap mode */
 	GLenum MinFilter;		/* minification filter */
 	GLenum MagFilter;		/* magnification filter */
 	GLfloat MinMagThresh;		/* min/mag threshold */
@@ -1126,6 +1156,7 @@ struct gl_shared_state {
    struct gl_texture_object *TexObjectList;/* Linked list of texture objects */
    struct gl_texture_object *Default1D;	/* Default texture objects */
    struct gl_texture_object *Default2D;
+   struct gl_texture_object *Default3D;
 };
 
 
@@ -1350,6 +1381,7 @@ struct gl_context {
 	GLenum ErrorValue;		/* Last error code */
 
 	GLboolean DirectContext;	/* Important for real GLX */
+	GLboolean AllowNpotTextures; /* Driver accepts non-power-of-two images */
 
 	/* Miscellaneous */
         GLuint NewState;        /* bitwise OR of NEW_* flags */

@@ -34,8 +34,12 @@ list(APPEND SOURCE
 
 add_library(cdfs MODULE ${SOURCE} cdfs.rc)
 set_module_type(cdfs kernelmodedriver)
-target_link_libraries(cdfs ${PSEH_LIB} memcmp)
+target_link_libraries(cdfs ${PSEH_LIB} memcmp libcntpr)
 add_importlibs(cdfs ntoskrnl hal)
 
 add_cd_file(TARGET cdfs DESTINATION reactos/system32/drivers NO_CAB FOR all)
 add_registry_inf(cdfs_reg.inf)
+
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(cdfs PRIVATE -Wno-unused-value)
+endif()

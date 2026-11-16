@@ -8,14 +8,69 @@
 
 #include "ndissys.h"
 
+#define NDIS_IO_WORKITEM_TAG 'wINn'
+#define NDIS_IO_WORKITEM_MAGIC 0xB16C1001
+
+typedef struct _NDIS_IO_WORKITEM_WRAPPER
+{
+   ULONG Magic;
+   PIO_WORKITEM IoWorkItem;
+   NDIS_IO_WORKITEM_ROUTINE Routine;
+   PVOID WorkItemContext;
+} NDIS_IO_WORKITEM_WRAPPER, *PNDIS_IO_WORKITEM_WRAPPER;
+
+static VOID NTAPI
+NdisIoWorkItemThunk(
+   IN PDEVICE_OBJECT DeviceObject,
+   IN PVOID Context)
+{
+   PNDIS_IO_WORKITEM_WRAPPER Wrapper = Context;
+
+   UNREFERENCED_PARAMETER(DeviceObject);
+
+   if (Wrapper == NULL || Wrapper->Magic != NDIS_IO_WORKITEM_MAGIC ||
+       Wrapper->Routine == NULL)
+   {
+      return;
+   }
+
+   Wrapper->Routine(Wrapper->WorkItemContext, Wrapper);
+}
+
 NDIS_HANDLE
 EXPORT
 NdisAllocateIoWorkItem(
     IN NDIS_HANDLE NdisObjectHandle)
 {
-   PLOGICAL_ADAPTER Adapter = NdisObjectHandle;
+   PDEVICE_OBJECT DeviceObject;
+   PNDIS_IO_WORKITEM_WRAPPER Wrapper;
+   PIO_WORKITEM IoWorkItem;
+   extern PDEVICE_OBJECT Ndis6GetIoWorkItemDeviceObject(NDIS_HANDLE);
 
-   return IoAllocateWorkItem(Adapter->NdisMiniportBlock.PhysicalDeviceObject);
+   DeviceObject = Ndis6GetIoWorkItemDeviceObject(NdisObjectHandle);
+   if (DeviceObject == NULL)
+   {
+      DbgPrint("NDIS6: NdisAllocateIoWorkItem has no device object for handle %p\n", NdisObjectHandle);
+      return NULL;
+   }
+
+   IoWorkItem = IoAllocateWorkItem(DeviceObject);
+   if (IoWorkItem == NULL)
+      return NULL;
+
+   Wrapper = ExAllocatePoolWithTag(NonPagedPool,
+                                   sizeof(*Wrapper),
+                                   NDIS_IO_WORKITEM_TAG);
+   if (Wrapper == NULL)
+   {
+      IoFreeWorkItem(IoWorkItem);
+      return NULL;
+   }
+
+   RtlZeroMemory(Wrapper, sizeof(*Wrapper));
+   Wrapper->Magic = NDIS_IO_WORKITEM_MAGIC;
+   Wrapper->IoWorkItem = IoWorkItem;
+   return Wrapper;
 }
 
 VOID
@@ -25,12 +80,21 @@ NdisQueueIoWorkItem(
     IN NDIS_IO_WORKITEM_ROUTINE Routine,
     IN PVOID WorkItemContext)
 {
-   PNDIS_IO_WORKITEM WorkItem = NdisIoWorkItemHandle;
+   PNDIS_IO_WORKITEM_WRAPPER Wrapper = NdisIoWorkItemHandle;
 
-   IoQueueWorkItem(WorkItem,
-                   Routine,
+   if (Wrapper == NULL || Wrapper->Magic != NDIS_IO_WORKITEM_MAGIC ||
+       Wrapper->IoWorkItem == NULL || Routine == NULL)
+   {
+      return;
+   }
+
+   Wrapper->Routine = Routine;
+   Wrapper->WorkItemContext = WorkItemContext;
+
+   IoQueueWorkItem(Wrapper->IoWorkItem,
+                   NdisIoWorkItemThunk,
                    DelayedWorkQueue,
-                   WorkItemContext);
+                   Wrapper);
 }
 
 VOID
@@ -38,6 +102,14 @@ EXPORT
 NdisFreeIoWorkItem(
     IN NDIS_HANDLE NdisIoWorkItemHandle)
 {
-   PNDIS_IO_WORKITEM WorkItem = NdisIoWorkItemHandle;
-   IoFreeWorkItem(WorkItem);
+   PNDIS_IO_WORKITEM_WRAPPER Wrapper = NdisIoWorkItemHandle;
+
+   if (Wrapper == NULL || Wrapper->Magic != NDIS_IO_WORKITEM_MAGIC)
+      return;
+
+   Wrapper->Magic = 0;
+   if (Wrapper->IoWorkItem != NULL)
+      IoFreeWorkItem(Wrapper->IoWorkItem);
+
+   ExFreePoolWithTag(Wrapper, NDIS_IO_WORKITEM_TAG);
 }

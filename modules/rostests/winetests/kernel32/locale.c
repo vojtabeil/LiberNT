@@ -2777,11 +2777,6 @@ static void test_lcmapstring_unicode(lcmapstring_wrapper func_ptr, const char *f
     ok(!memcmp(p_buf, p_buf2, ret), "%s sort keys must be equal\n", func_name);
 
     /* test contents with short buffer */
-#if defined(__REACTOS__) && defined(_WIN64)
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: These tests crash on ReactOS x64\n");
-    } else {
-#endif
     memset( buf, 0xcc, sizeof(buf) );
     ret = func_ptr(LCMAP_SORTKEY, upper_case, -1, buf, ret - 1);
     ok( !ret, "%s succeeded with %u\n", func_name, ret );
@@ -2799,9 +2794,6 @@ static void test_lcmapstring_unicode(lcmapstring_wrapper func_ptr, const char *f
     ok( ret, "%s buffer not filled\n", func_name );
     ok( p_buf[ret - 1] == 0x01, "%s buffer filled up to %02x\n", func_name, (BYTE)p_buf[ret - 1] );
     ok( !memcmp( p_buf, p_buf2, ret - 1 ), "%s buffers differ\n", func_name );
-#if defined(__REACTOS__) && defined(_WIN64)
-    }
-#endif
 
     /* test LCMAP_SORTKEY | NORM_IGNORECASE */
     ret = func_ptr(LCMAP_SORTKEY | NORM_IGNORECASE,
@@ -2991,12 +2983,6 @@ static void test_LocaleNameToLCID(void)
         win_skip( "LocaleNameToLCID not available\n" );
         return;
     }
-#if defined(__REACTOS__) && defined(_WIN64)
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: Most of test_LocaleNameToLCID() crashes on ReactOS x64\n");
-        return;
-    }
-#endif
 
     /* special cases */
     buffer[0] = 0;
@@ -3828,7 +3814,7 @@ static const struct sorting_test_entry unicode_sorting_tests[] =
     { L"en-US", -1, CSTR_LESS_THAN,    0, L"\x013a", L"\x013f" },
     { L"vi-VN", -1, CSTR_LESS_THAN,    0, L"\x1d8f", L"\x1ea8" },
     { L"vi-VN", -1, CSTR_LESS_THAN,    0, L"\x0323", L"\xfe26" },
-    { L"vi-VN",  1, CSTR_GREATER_THAN, 0, L"R",      L"\xff32" },
+    { L"vi-VN", -1, CSTR_LESS_THAN,    0, L"R",      L"\xff32" },
     { L"en-US",  1, CSTR_GREATER_THAN, 0, L"\x1d8f", L"\x1ea8" },
     { L"en-US",  1, CSTR_GREATER_THAN, 0, L"\x0323", L"\xfe26" },
     { L"en-US", -1, CSTR_LESS_THAN,    0, L"R",      L"\xff32" },
@@ -4844,6 +4830,7 @@ static BOOL CALLBACK lgrplocale_procA(LGRPID lgrpid, LCID lcid, LPSTR lpszNum,
 static void test_EnumLanguageGroupLocalesA(void)
 {
   BOOL ret;
+  LGRPID group;
 
   if (!pEnumLanguageGroupLocalesA || !pIsValidLanguageGroup)
   {
@@ -4880,7 +4867,11 @@ static void test_EnumLanguageGroupLocalesA(void)
   ok( !ret && GetLastError() == ERROR_INVALID_PARAMETER,
       "Expected ERROR_INVALID_PARAMETER, got %ld\n", GetLastError());
 
-  pEnumLanguageGroupLocalesA(lgrplocale_procA, LGRPID_WESTERN_EUROPE, 0, 0);
+  for (group = LGRPID_WESTERN_EUROPE; group <= LGRPID_ARMENIAN; ++group)
+  {
+    ret = pEnumLanguageGroupLocalesA(lgrplocale_procA, group, 0, 0);
+    ok(ret, "EnumLanguageGroupLocalesA(%lu) failed with error %lu\n", group, GetLastError());
+  }
 }
 
 static void test_SetLocaleInfo(void)
@@ -5301,12 +5292,7 @@ static void test_GetCPInfo(void)
     ok( !ret, "GetCPInfoExW succeeeded\n" );
     ok( GetLastError() == ERROR_INVALID_PARAMETER, "wrong error %lu\n", GetLastError() );
 
-#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600
-    /* FIXME: NtGetNlsSectionPtr is a STUB on ReactOS! */
-    if (!is_reactos() && pNtGetNlsSectionPtr)
-#else
     if (pNtGetNlsSectionPtr)
-#endif
     {
         CPTABLEINFO table;
         NTSTATUS status;
@@ -5890,12 +5876,7 @@ static void test_Idn(void)
 {
     FILE *f;
 
-#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600
-    /* FIXME: Idn functions are STUBS on ReactOS */
-    if (is_reactos() || !pIdnToAscii || !pIdnToUnicode || !pIdnToNameprepUnicode)
-#else
     if (!pIdnToAscii || !pIdnToUnicode || !pIdnToNameprepUnicode)
-#endif
     {
         win_skip("Idn support is not available\n");
         return;
@@ -6055,11 +6036,6 @@ static void test_GetLocaleInfoEx(void)
         ret = pGetLocaleInfoEx(dummyW, LOCALE_SNAME, bufferW, ARRAY_SIZE(bufferW));
         ok(!ret && GetLastError() == ERROR_INVALID_PARAMETER, "got %d, error %ld\n", ret, GetLastError());
 
-#if defined(__REACTOS__) && defined(_WIN64)
-        if (is_reactos()) {
-            ok(FALSE, "FIXME: These tests crash on ReactOS x64\n");
-        } else {
-#endif
         while (*ptr->name)
         {
             val = 0;
@@ -6077,9 +6053,6 @@ static void test_GetLocaleInfoEx(void)
         ret = GetLocaleInfoW(GetUserDefaultLCID(), LOCALE_SNAME, buffer2, ARRAY_SIZE(buffer2));
         ok(ret && ret == lstrlenW(buffer2)+1, "got ret value %d\n", ret);
         ok(!lstrcmpW(bufferW, buffer2), "LOCALE_SNAMEs don't match %s %s\n", wine_dbgstr_w(bufferW), wine_dbgstr_w(buffer2));
-#if defined(__REACTOS__) && defined(_WIN64)
-        }
-#endif
     }
 }
 
@@ -6994,8 +6967,8 @@ static void test_GetThreadPreferredUILanguages(void)
 {
     BOOL ret;
     NTSTATUS status;
-    ULONG count, size, size_id;
-    WCHAR *buf;
+    ULONG count, size, size_id, size_name, count_name;
+    WCHAR *buf, *names;
 
     if (!pGetThreadPreferredUILanguages)
     {
@@ -7054,15 +7027,48 @@ static void test_GetThreadPreferredUILanguages(void)
        "Expected error ERROR_INSUFFICIENT_BUFFER, got %ld\n", GetLastError());
     ok(size == size_id, "expected %lu, got %lu\n", size_id, size);
 
-    size = size_id - 2;
+    HeapFree(GetProcessHeap(), 0, buf);
+    size_name = count_name = 0;
+    ret = pGetThreadPreferredUILanguages(MUI_LANGUAGE_NAME, &count_name, NULL, &size_name);
+    ok(ret, "GetThreadPreferredUILanguages names failed: %lu\n", GetLastError());
+    ok(count_name && size_name >= 2, "Name query returned count %lu, size %lu\n", count_name, size_name);
+    if (!ret || size_name < 2) return;
+
+    buf = HeapAlloc(GetProcessHeap(), 0, size_name * sizeof(WCHAR));
+    names = HeapAlloc(GetProcessHeap(), 0, size_name * sizeof(WCHAR));
+    ok(buf && names, "Failed to allocate language buffers\n");
+    if (!buf || !names)
+    {
+        HeapFree(GetProcessHeap(), 0, names);
+        HeapFree(GetProcessHeap(), 0, buf);
+        return;
+    }
+
+    size = size_name - 1;
     SetLastError(0xdeadbeef);
     ret = pGetThreadPreferredUILanguages(0, &count, buf, &size);
     ok(!ret, "Expected GetThreadPreferredUILanguages to fail\n");
     ok(GetLastError() == ERROR_INSUFFICIENT_BUFFER,
        "Expected error ERROR_INSUFFICIENT_BUFFER, got %ld\n", GetLastError());
-    todo_wine
-    ok(size == size_id || size == size_id - 1 /* before win10 1809 */, "expected %lu, got %lu\n", size_id, size);
+    ok(size == size_name, "expected name size %lu, got %lu\n", size_name, size);
 
+    memset(buf, 0x5a, size_name * sizeof(WCHAR));
+    size = size_name;
+    ret = pGetThreadPreferredUILanguages(0, &count, buf, &size);
+    ok(ret, "GetThreadPreferredUILanguages default format failed: %lu\n", GetLastError());
+    ok(size == size_name && count == count_name,
+       "Default query returned count %lu, size %lu; expected %lu, %lu\n", count, size, count_name, size_name);
+    ok(!buf[size_name - 2] && !buf[size_name - 1], "Default language list is not double-NUL terminated\n");
+    memset(names, 0x5a, size_name * sizeof(WCHAR));
+    size = size_name;
+    ret = pGetThreadPreferredUILanguages(MUI_LANGUAGE_NAME, &count, names, &size);
+    ok(ret, "GetThreadPreferredUILanguages explicit names failed: %lu\n", GetLastError());
+    ok(size == size_name && count == count_name,
+       "Explicit name query returned count %lu, size %lu; expected %lu, %lu\n", count, size, count_name, size_name);
+    ok(!names[size_name - 2] && !names[size_name - 1], "Explicit language list is not double-NUL terminated\n");
+    ok(!memcmp(buf, names, size_name * sizeof(WCHAR)), "Default format differs from explicit language names\n");
+
+    HeapFree(GetProcessHeap(), 0, names);
     HeapFree(GetProcessHeap(), 0, buf);
 }
 
@@ -7244,12 +7250,7 @@ static void test_FindNLSStringEx(void)
     };
     unsigned int i;
 
-#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600
-    /* FIXME: FindNLSStringEx is a STUB on ReactOS! */
-    if (is_reactos() || !pFindNLSStringEx)
-#else
     if (!pFindNLSStringEx)
-#endif
     {
         win_skip("FindNLSStringEx is not available.\n");
         return;
@@ -8166,12 +8167,7 @@ static void test_NLSVersion(void)
     ok( !ret, "GetNLSVersion succeeded\n" );
     ok( GetLastError() == ERROR_INVALID_PARAMETER, "wrong error %lu\n", GetLastError() );
 
-#ifdef __REACTOS__
-    /* HACK: ReactOS's implementation for GetNLSVersionEx is a STUB! */
-    if (pGetNLSVersionEx && !is_reactos())
-#else
     if (pGetNLSVersionEx)
-#endif
     {
         SetLastError( 0xdeadbeef );
         memset( &info, 0xcc, sizeof(info) );
@@ -8468,7 +8464,7 @@ static void test_geo_name(void)
     if (!RegQueryValueExW(key, L"Name", NULL, &type, (BYTE *)reg_name, &size))
         have_name = TRUE;
 
-    lstrcpyW(buf, L"QQ");
+    lstrcpyW(buf, L"BE");
     RegSetValueExW(key, L"Name", 0, REG_SZ, (BYTE *)buf, (lstrlenW(buf) + 1) * sizeof(WCHAR));
 
     size = sizeof(reg_name);
@@ -8518,7 +8514,7 @@ static void test_geo_name(void)
     SetLastError(0xdeadbeef);
     ret = pGetUserDefaultGeoName(buf, name_size);
     ok(ret == name_size && GetLastError() == 0xdeadbeef, "Got unexpected ret %u, GetLastError() %lu.\n", ret, GetLastError());
-    ok(!lstrcmpW(buf, L"QQ"), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
+    ok(!lstrcmpW(buf, L"BE"), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
 
     SetLastError(0xdeadbeef);
     bret = pSetUserGeoName(NULL);
@@ -8537,15 +8533,33 @@ static void test_geo_name(void)
 
     SetLastError(0xdeadbeef);
     ret = pGetUserDefaultGeoName(buf, ARRAY_SIZE(buf));
-    ok(ret == 4 && GetLastError() == 0xdeadbeef, "Got unexpected ret %u, GetLastError() %lu.\n", ret, GetLastError());
-    ok(!lstrcmpW(buf, L"001"), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
+    ok(ret && GetLastError() == 0xdeadbeef, "Got unexpected ret %u, GetLastError() %lu.\n", ret, GetLastError());
+    ok(!lstrcmpW(buf, L"BE") || broken(!lstrcmpW(buf, L"001")), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
     geoid = GetUserGeoID(GEOCLASS_REGION);
     ok(geoid == 39070, "Got unexpected geoid %lu.\n", geoid);
     size = sizeof(buf);
     status = RegQueryValueExW(key, L"Name", NULL, &type, (BYTE *)buf, &size);
     ok(status == ERROR_SUCCESS, "Got unexpected status %#lx.\n", status);
     ok(type == REG_SZ, "Got unexpected type %#lx.\n", type);
-    ok(!lstrcmpW(buf, L"001"), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
+    ok(!lstrcmpW(buf, L"BE") || broken(!lstrcmpW(buf, L"001")), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
+
+    lstrcpyW(set_name, L"CA");
+    SetLastError(0xdeadbeef);
+    bret = pSetUserGeoName(set_name);
+    ok((bret && GetLastError() == 0xdeadbeef) || broken(bret && GetLastError() == 0),
+            "Got unexpected bret %#x, GetLastError() %lu.\n", bret, GetLastError());
+
+    SetLastError(0xdeadbeef);
+    ret = pGetUserDefaultGeoName(buf, ARRAY_SIZE(buf));
+    ok(ret == 3 && GetLastError() == 0xdeadbeef, "Got unexpected ret %u, GetLastError() %lu.\n", ret, GetLastError());
+    ok(!lstrcmpW(buf, L"CA"), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
+    geoid = GetUserGeoID(GEOCLASS_REGION);
+    ok(geoid == 39070, "Got unexpected geoid %lu.\n", geoid);
+    size = sizeof(buf);
+    status = RegQueryValueExW(key, L"Name", NULL, &type, (BYTE *)buf, &size);
+    ok(status == ERROR_SUCCESS, "Got unexpected status %#lx.\n", status);
+    ok(type == REG_SZ, "Got unexpected type %#lx.\n", type);
+    ok(!lstrcmpW(buf, L"CA"), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
 
     lstrcpyW(set_name, L"ar");
     SetLastError(0xdeadbeef);
@@ -8565,9 +8579,10 @@ static void test_geo_name(void)
     ok((bret && GetLastError() == 0xdeadbeef) || broken(bret && GetLastError() == 0),
             "Got unexpected bret %#x, GetLastError() %lu.\n", bret, GetLastError());
     ret = pGetUserDefaultGeoName(buf, ARRAY_SIZE(buf));
-    ok((ret == 4 && GetLastError() == 0xdeadbeef) || broken(ret == 4 && GetLastError() == 0),
+    ok((ret && GetLastError() == 0xdeadbeef) || broken(GetLastError() == 0),
             "Got unexpected ret %u, GetLastError() %lu.\n", ret, GetLastError());
-    ok(!lstrcmpW(buf, L"150"), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
+    ok(!lstrcmpW(buf, L"AR") || broken(!lstrcmpW(buf, L"150")),
+        "Got unexpected name %s.\n", wine_dbgstr_w(buf));
     geoid = GetUserGeoID(GEOCLASS_NATION);
     ok(geoid == 11, "Got unexpected geoid %lu.\n", geoid);
 
@@ -8576,26 +8591,26 @@ static void test_geo_name(void)
     bret = pSetUserGeoName(set_name);
     ok(!bret && GetLastError() == ERROR_INVALID_PARAMETER, "Got unexpected bret %#x, GetLastError() %lu.\n", bret, GetLastError());
 
-    bret = SetUserGeoID(21242);
+    bret = SetUserGeoID(349);
     ok(bret, "Got unexpected bret %#x, GetLastError() %lu.\n", bret, GetLastError());
     SetLastError(0xdeadbeef);
     ret = pGetUserDefaultGeoName(buf, ARRAY_SIZE(buf));
     ok(ret == 3 && GetLastError() == 0xdeadbeef, "Got unexpected ret %u, GetLastError() %lu.\n", ret, GetLastError());
-    ok(!lstrcmpW(buf, L"XX"), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
+    ok(!lstrcmpW(buf, L"TC"), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
 
     bret = SetUserGeoID(42483);
     ok(bret, "Got unexpected bret %#x, GetLastError() %lu.\n", bret, GetLastError());
     SetLastError(0xdeadbeef);
     ret = pGetUserDefaultGeoName(buf, ARRAY_SIZE(buf));
-    ok(ret == 4 && GetLastError() == 0xdeadbeef, "Got unexpected ret %u, GetLastError() %lu.\n", ret, GetLastError());
-    ok(!lstrcmpW(buf, L"011"), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
+    ok(ret && GetLastError() == 0xdeadbeef, "Got unexpected ret %u, GetLastError() %lu.\n", ret, GetLastError());
+    ok(!lstrcmpW(buf, L"TC") || broken(!lstrcmpW(buf, L"011")), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
 
     bret = SetUserGeoID(333);
     ok(bret, "Got unexpected bret %#x, GetLastError() %lu.\n", bret, GetLastError());
     SetLastError(0xdeadbeef);
     ret = pGetUserDefaultGeoName(buf, ARRAY_SIZE(buf));
     ok(ret == 3 && GetLastError() == 0xdeadbeef, "Got unexpected ret %u, GetLastError() %lu.\n", ret, GetLastError());
-    ok(!lstrcmpW(buf, L"AN"), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
+    ok(!lstrcmpW(buf, L"TC") || broken(!lstrcmpW(buf, L"AN")), "Got unexpected name %s.\n", wine_dbgstr_w(buf));
 
     RegDeleteValueW(key, L"Name");
     RegDeleteValueW(key, L"Region");

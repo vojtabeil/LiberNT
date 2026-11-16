@@ -2,6 +2,13 @@
 
 DEFINE_GUID(IID_PRIV_CRANGE, 0xB68832F0, 0x34B9, 0x11D3, 0xA7, 0x45, 0x00, 0x50, 0x04, 0x0A, 0xB4, 0x07);
 
+class CRange;
+struct ContextRange
+{
+    struct list entry;
+    CRange *range;
+};
+
 class CRange
     : public ITfRangeACP
     , public ITfRangeAnchor
@@ -10,11 +17,25 @@ class CRange
 public:
     CRange(
         _In_ ITfContext *context,
-        _In_ TfAnchor anchorStart,
-        _In_ TfAnchor anchorEnd);
+        _In_ LONG anchorStart,
+        _In_ LONG anchorEnd);
+    CRange(
+        _In_ ITfContext *context,
+        _In_ LONG anchorStart,
+        _In_ LONG anchorEnd,
+        _In_ TfGravity gravityStart,
+        _In_ TfGravity gravityEnd,
+        _In_ BOOL fWeakContext);
     virtual ~CRange();
 
     static HRESULT TF_SELECTION_to_TS_SELECTION_ACP(const TF_SELECTION *tf, TS_SELECTION_ACP *tsAcp);
+    static CRange *FromRange(ITfRange *range);
+    ContextRange m_link;
+    void OnTextChange(const TS_TEXTCHANGE *change);
+    LONG Start() const { return m_anchorStart; }
+    LONG End() const { return m_anchorEnd; }
+    ITfContext *Context() const { return m_context; }
+    void SetAnchors(LONG start, LONG end);
 
     // ** IUnknown methods **
     STDMETHODIMP QueryInterface(REFIID riid, void **ppvObj) override;
@@ -121,9 +142,15 @@ protected:
     LONG m_cRefs;
     ITfContext *m_context;
     DWORD m_dwLockType;
-    TfAnchor m_anchorStart;
-    TfAnchor m_anchorEnd;
+    LONG m_anchorStart;
+    LONG m_anchorEnd;
     DWORD m_dwCookie;
+    TfGravity m_gravityStart;
+    TfGravity m_gravityEnd;
+    BOOL m_fWeakContext;
+
+    HRESULT _GetAnchor(TfEditCookie ec, ITfRange *pWith, TfAnchor aPos, LONG *pPos);
+    HRESULT _Shift(TfEditCookie ec, BOOL bEnd, LONG cchReq, LONG *pcch, const TF_HALTCOND *pHalt);
 
     CRange *_Clone();
 
@@ -136,3 +163,12 @@ protected:
         TfAnchor aPos,
         LONG *plResult);
 };
+
+HRESULT Range_CreateInternal(
+    ITfContext *context,
+    LONG anchorStart,
+    LONG anchorEnd,
+    TfGravity gravityStart,
+    TfGravity gravityEnd,
+    BOOL fWeakContext,
+    CRange **ppOut);

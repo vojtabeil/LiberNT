@@ -1,4 +1,6 @@
 #include <rosdhcp.h>
+#include <ws2tcpip.h>
+#include <netioapi.h>
 
 #define NDEBUG
 #include <reactos/debug.h>
@@ -245,13 +247,20 @@ done:
     return dwError;
 }
 
+static const WCHAR *AdapterGuidName( PDHCP_ADAPTER Adapter ) {
+    const WCHAR *Name = wcschr(Adapter->IfMib.wszName, L'{');
+
+    return Name ? Name : Adapter->IfMib.wszName;
+}
+
 BOOL PrepareAdapterForService( PDHCP_ADAPTER Adapter ) {
     HKEY AdapterKey;
     DWORD Error = ERROR_SUCCESS, DhcpEnabled, Length = sizeof(DWORD);
 
     Adapter->DhclientState.config = &Adapter->DhclientConfig;
-    strncpy(Adapter->DhclientInfo.name, (char*)Adapter->IfMib.bDescr,
-            sizeof(Adapter->DhclientInfo.name));
+    WideCharToMultiByte(CP_ACP, 0, AdapterGuidName(Adapter), -1, Adapter->DhclientInfo.name,
+                        sizeof(Adapter->DhclientInfo.name), NULL, NULL);
+    Adapter->DhclientInfo.name[sizeof(Adapter->DhclientInfo.name) - 1] = 0;
 
     AdapterKey = FindAdapterKey( Adapter );
     if( AdapterKey )
@@ -393,6 +402,39 @@ FreeAdapter(
     free(Adapter);
 }
 
+static
+VOID
+AdapterRemove(
+    PDHCP_ADAPTER Adapter)
+{
+    struct protocol *proto = find_protocol_by_adapter(&Adapter->DhclientInfo);
+
+    if (proto)
+        remove_protocol(proto);
+    cancel_timeout(send_discover, &Adapter->DhclientInfo);
+    cancel_timeout(discover_panic, &Adapter->DhclientInfo);
+    cancel_timeout(send_request, &Adapter->DhclientInfo);
+    cancel_timeout(state_selecting, &Adapter->DhclientInfo);
+    cancel_timeout(state_bound, &Adapter->DhclientInfo);
+    RemoveEntryList(&Adapter->ListEntry);
+    FreeAdapter(Adapter);
+    ApiSignalLeaseChange();
+}
+
+static VOID NETIOAPI_API_ AdapterInterfaceChanged(PVOID Context, PMIB_IPINTERFACE_ROW Row, MIB_NOTIFICATION_TYPE NotificationType) {
+    SetEvent((HANDLE)Context);
+}
+
+static VOID NETIOAPI_API_ AdapterAddressChanged(PVOID Context, PMIB_UNICASTIPADDRESS_ROW Row, MIB_NOTIFICATION_TYPE NotificationType) {
+    if (!Row)
+        return;
+    ApiLock();
+    apipa_address_changed(Row->InterfaceIndex);
+    ApiSignalLeaseChange();
+    ApiUnlock();
+    SetEvent(hAdapterStateChangedEvent);
+}
+
 /*
  * XXX Figure out the way to bind a specific adapter to a socket.
  */
@@ -401,9 +443,24 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
     DWORD Error, Size = sizeof(MIB_IFTABLE);
     PDHCP_ADAPTER Adapter = NULL;
     HANDLE hStopEvent = (HANDLE)Context;
+    HANDLE hInterfaceChanged = CreateEventW(NULL, FALSE, FALSE, NULL);
+    HANDLE hNotification = NULL, hAddressNotification = NULL;
+    HANDLE Waits[2];
     struct interface_info *ifi = NULL;
     struct protocol *proto;
-    int i, AdapterCount = 0, Broadcast;
+    PLIST_ENTRY ListEntry, NextEntry;
+    DWORD Entry;
+    int i, Broadcast;
+
+    Waits[0] = hStopEvent;
+    Waits[1] = hInterfaceChanged;
+    if (hInterfaceChanged &&
+        NotifyIpInterfaceChange(AF_INET, AdapterInterfaceChanged, hInterfaceChanged, FALSE, &hNotification) != NO_ERROR)
+    {
+        hNotification = NULL;
+    }
+    if (NotifyUnicastIpAddressChange(AF_INET, AdapterAddressChanged, NULL, FALSE, &hAddressNotification) != NO_ERROR)
+        hAddressNotification = NULL;
 
     while (TRUE)
     {
@@ -425,13 +482,29 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
 
        DH_DbgPrint(MID_TRACE,("Got Adapter List (%d entries)\n", Table->dwNumEntries));
 
+       ApiLock();
+       for (ListEntry = AdapterList.Flink; ListEntry != &AdapterList; ListEntry = NextEntry)
+       {
+           NextEntry = ListEntry->Flink;
+           Adapter = CONTAINING_RECORD(ListEntry, DHCP_ADAPTER, ListEntry);
+           for (Entry = 0; Entry < Table->dwNumEntries; Entry++)
+           {
+               if (Table->table[Entry].dwIndex == Adapter->IfMib.dwIndex &&
+                   !wcsicmp(Table->table[Entry].wszName, Adapter->IfMib.wszName))
+                   break;
+           }
+           if (Entry == Table->dwNumEntries)
+               AdapterRemove(Adapter);
+       }
+       ApiUnlock();
+
        for( i = Table->dwNumEntries - 1; i >= 0; i-- ) {
             DH_DbgPrint(MID_TRACE,("Getting adapter %d attributes\n",
                                    Table->table[i].dwIndex));
 
             ApiLock();
 
-            if ((Adapter = AdapterFindByHardwareAddress(Table->table[i].bPhysAddr, Table->table[i].dwPhysAddrLen)))
+            if ((Adapter = AdapterFindIndex(Table->table[i].dwIndex)))
             {
                 proto = find_protocol_by_adapter(&Adapter->DhclientInfo);
 
@@ -451,23 +524,19 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
 
                         /* These are already invalid since the media state change */
                         Adapter->RouterMib.dwForwardNextHop = 0;
-                        Adapter->NteContext = 0;
 
                         add_protocol(Adapter->DhclientInfo.name,
                                      Adapter->DhclientInfo.rfdesc,
                                      got_one, &Adapter->DhclientInfo);
+                        Adapter->DhclientInfo.client->discover_cycle = 0;
                         state_init(&Adapter->DhclientInfo);
 
                         SetEvent(hAdapterStateChangedEvent);
                     }
 
                 } else {
-                    if (proto)
-                        remove_protocol(proto);
-
                     /* We've lost our link so out we go */
-                    RemoveEntryList(&Adapter->ListEntry);
-                    free(Adapter);
+                    AdapterRemove(Adapter);
                 }
 
                 ApiUnlock();
@@ -525,6 +594,9 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
                              0 : WSAGetLastError();
                     } else {
                         error("socket() failed: %d\n", WSAGetLastError());
+                        FreeAdapter(Adapter);
+                        Adapter = NULL;
+                        continue;
                     }
                 } else {
                     Adapter->DhclientInfo.rfdesc =
@@ -534,7 +606,7 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
                 Adapter->DhclientConfig.timeout = DHCP_PANIC_TIMEOUT;
                 Adapter->DhclientConfig.initial_interval = DHCP_DISCOVER_INTERVAL;
                 Adapter->DhclientConfig.retry_interval = DHCP_DISCOVER_INTERVAL;
-                Adapter->DhclientConfig.select_interval = 1;
+                Adapter->DhclientConfig.select_interval = 0;
                 Adapter->DhclientConfig.reboot_timeout = DHCP_REBOOT_TIMEOUT;
                 Adapter->DhclientConfig.backoff_cutoff = DHCP_BACKOFF_MAX;
                 Adapter->DhclientState.interval =
@@ -552,12 +624,12 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
                                      Adapter->DhclientInfo.rfdesc,
                                      got_one, &Adapter->DhclientInfo);
 
+                        Adapter->DhclientInfo.client->discover_cycle = 0;
                         state_init(&Adapter->DhclientInfo);
                     }
 
                     ApiLock();
                     InsertTailList( &AdapterList, &Adapter->ListEntry );
-                    AdapterCount++;
                     SetEvent(hAdapterStateChangedEvent);
                     ApiUnlock();
                 } else { FreeAdapter( Adapter ); Adapter = 0; }
@@ -572,13 +644,20 @@ DWORD WINAPI AdapterDiscoveryThread(LPVOID Context) {
         if (Error != NO_ERROR)
             break;
 #else
-        if (WaitForSingleObject(hStopEvent, 3000) == WAIT_OBJECT_0)
+        if (WaitForMultipleObjects(hInterfaceChanged ? 2 : 1, Waits, FALSE, 3000) == WAIT_OBJECT_0)
         {
             DPRINT("Stopping the discovery thread!\n");
             break;
         }
 #endif
     }
+
+    if (hNotification)
+        CancelMibChangeNotify2(hNotification);
+    if (hAddressNotification)
+        CancelMibChangeNotify2(hAddressNotification);
+    if (hInterfaceChanged)
+        CloseHandle(hInterfaceChanged);
 
     if (Table)
         free(Table);
@@ -622,14 +701,12 @@ PDHCP_ADAPTER AdapterFindIndex( unsigned int indx ) {
 PDHCP_ADAPTER AdapterFindName( const WCHAR *name ) {
     PDHCP_ADAPTER Adapter;
     PLIST_ENTRY ListEntry;
-    WCHAR UnicodeName[45];
 
     for( ListEntry = AdapterList.Flink;
          ListEntry != &AdapterList;
          ListEntry = ListEntry->Flink ) {
         Adapter = CONTAINING_RECORD( ListEntry, DHCP_ADAPTER, ListEntry );
-        mbstowcs(UnicodeName, (const CHAR *)Adapter->IfMib.bDescr, strlen((const CHAR *)Adapter->IfMib.bDescr) + 1);
-        if( !wcsicmp(UnicodeName, name ) ) return Adapter;
+        if( !wcsicmp(AdapterGuidName(Adapter), name ) ) return Adapter;
     }
 
     return NULL;

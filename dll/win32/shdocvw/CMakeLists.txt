@@ -10,8 +10,13 @@ list(APPEND SOURCE
     precomp.h
     ${CMAKE_CURRENT_BINARY_DIR}/shdocvw_stubs.c)
 
-add_typelib(res/shdocvw_v1.idl)
-set_source_files_properties(shdocvw.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/shdocvw_v1.tlb)
+list(APPEND shdocvw_rc_deps
+    ${CMAKE_CURRENT_SOURCE_DIR}/res/favband.rgs
+    ${CMAKE_CURRENT_SOURCE_DIR}/res/explorerband.rgs
+    ${CMAKE_CURRENT_SOURCE_DIR}/res/shelldocobjview.rgs
+    ${CMAKE_CURRENT_SOURCE_DIR}/res/adminfoldershortcut.rgs
+    ${CMAKE_CURRENT_SOURCE_DIR}/res/attachmentservices.rgs)
+set_source_files_properties(shdocvw.rc PROPERTIES OBJECT_DEPENDS "${shdocvw_rc_deps}")
 
 add_library(shdocvw MODULE
     ${SOURCE}
@@ -25,17 +30,19 @@ target_include_directories(shdocvw BEFORE PRIVATE
 
 set_module_type(shdocvw win32dll UNICODE)
 target_link_libraries(shdocvw cpprt uuid wine)
-add_delay_importlibs(shdocvw shell32 user32 gdi32 ole32 oleaut32 ieframe)
+add_delay_importlibs(shdocvw version shell32 user32 gdi32 ole32 oleaut32 ieframe urlmon)
 add_importlibs(shdocvw shlwapi advapi32 msvcrt comctl32 kernel32 ntdll)
 add_dependencies(shdocvw stdole2)
 add_pch(shdocvw precomp.h SOURCE)
 add_cd_file(TARGET shdocvw DESTINATION reactos/system32 FOR all)
 
 add_library(shdocvw_sublib OBJECT
+    CAdminToolsFolder.cpp
+    CAttachmentServices.cpp
     CExplorerBand.cpp
     CFavBand.cpp
     CNSCBand.cpp
-    mrulist.cpp
+    CShellDocObjView.cpp
     objects.cpp
     utility.cpp
     winlist.cpp)

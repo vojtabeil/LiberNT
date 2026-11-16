@@ -1,6 +1,5 @@
 
-remove_definitions(-D_WIN32_WINNT=0x502)
-add_definitions(-D_WIN32_WINNT=0x600)
+remove_definitions(-D_CRT_NON_CONFORMING_SWPRINTFS)
 
 add_definitions(-D__WINESRC__ -DMSIRUNMODE=MSIRUNMODE_T)
 spec2def(msi.dll msi.spec ADD_IMPORTLIB)
@@ -47,7 +46,7 @@ list(APPEND SOURCE
     where.c)
 
 BISON_TARGET(cond cond.y ${CMAKE_CURRENT_BINARY_DIR}/cond.tab.c)
-BISON_TARGET(sql sql.y ${CMAKE_CURRENT_BINARY_DIR}/sql.tab.c)
+BISON_TARGET(sql sql.y ${CMAKE_CURRENT_BINARY_DIR}/sql.tab.c COMPILE_FLAGS "-Wno-conflicts-rr")
 
 set(OLD_IDL_FLAGS ${IDL_FLAGS})
 set(IDL_FLAGS ${IDL_FLAGS} --prefix-server=s_)
@@ -65,6 +64,11 @@ list(APPEND PCH_SKIP_SOURCE
     ${CMAKE_CURRENT_BINARY_DIR}/winemsi_s.c
     ${CMAKE_CURRENT_BINARY_DIR}/msi_stubs.c)
 
+if(MSVC AND (ARCH STREQUAL "i386"))
+    add_asm_files(msi_asm i386/custom.s)
+    list(APPEND SOURCE ${msi_asm})
+endif()
+
 add_library(msi MODULE
     ${SOURCE}
     ${PCH_SKIP_SOURCE}
@@ -80,12 +84,12 @@ if(MSVC)
 endif()
 
 add_idl_headers(msi_idlheader msiserver.idl winemsi.idl)
-add_typelib(msiserver.idl winemsi.idl)
-set_source_files_properties(msi.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/msiserver.tlb;${CMAKE_CURRENT_BINARY_DIR}/winemsi.tlb")
+add_typelib(msiserver.idl)
+set_source_files_properties(msi.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_BINARY_DIR}/msiserver.tlb")
 set_module_type(msi win32dll)
 target_link_libraries(msi uuid ${PSEH_LIB} wine_dll_register oldnames)
 add_dependencies(msi msi_idlheader)
-add_delay_importlibs(msi odbccp32 crypt32 wintrust apphelp)
+add_delay_importlibs(msi odbccp32 crypt32 wintrust)
 add_importlibs(msi advapi32 advapi32_vista cabinet comctl32 gdi32 ole32 oleaut32 shell32 shlwapi rpcrt4 urlmon user32 version wininet sxs
     #FIXME : imagehlp, mspatcha should be in delayed imports
     imagehlp

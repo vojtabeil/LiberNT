@@ -23,7 +23,7 @@ AtaFdoCreateSymLinks(
     _In_ PATAPORT_CHANNEL_EXTENSION ChanExt)
 {
     UNICODE_STRING ChannelName;
-    ULONG ScsiAdapter, ScsiPortCount;
+    ULONG ScsiAdapter;
     WCHAR ChannelNameBuffer[sizeof("\\Device\\Ide\\IdePort99999")];
     NTSTATUS Status;
     DECLARE_PAGED_WSTRING(FdoFormat, L"\\Device\\Ide\\IdePort%lu");
@@ -40,10 +40,8 @@ AtaFdoCreateSymLinks(
     ASSERT(NT_SUCCESS(Status));
     RtlInitUnicodeString(&ChannelName, ChannelNameBuffer);
 
-    ScsiPortCount = IoGetConfigurationInformation()->ScsiPortCount;
-
     /* Search for a free SCSI port adapter in the system */
-    for (ScsiAdapter = 0; ScsiAdapter <= ScsiPortCount; ++ScsiAdapter)
+    for (ScsiAdapter = 0; ScsiAdapter <= IoGetConfigurationInformation()->ScsiPortCount; ++ScsiAdapter)
     {
         WCHAR SymLinkNameBuffer[sizeof("\\DosDevices\\Scsi99999:")];
         UNICODE_STRING SymLinkName;
@@ -77,7 +75,7 @@ AtaFdoCreateSymLinks(
         }
 
         /* Register ourselves (ATA channel) as a SCSI port adapter */
-        IoGetConfigurationInformation()->ScsiPortCount++;
+        InterlockedIncrement((PLONG)&IoGetConfigurationInformation()->ScsiPortCount);
 
         ChanExt->ScsiPortNumber = ScsiAdapter;
         ChanExt->PortData.PortFlags |= PORT_FLAG_SYMLINK_CREATED;
@@ -116,9 +114,9 @@ AtaFdoAllocateLocalBuffer(
 
     PhysicalAddress = MmGetPhysicalAddress(PortData->LocalBuffer);
 
-    PortData->LocalSgList.NumberOfElements = 1;
-    PortData->LocalSgList.Elements[0].Length = ATA_LOCAL_BUFFER_SIZE;
-    PortData->LocalSgList.Elements[0].Address.QuadPart = PhysicalAddress.QuadPart;
+    ((PSCATTER_GATHER_LIST)PortData->LocalSgListBuffer)->NumberOfElements = 1;
+    ((PSCATTER_GATHER_LIST)PortData->LocalSgListBuffer)->Elements[0].Length = ATA_LOCAL_BUFFER_SIZE;
+    ((PSCATTER_GATHER_LIST)PortData->LocalSgListBuffer)->Elements[0].Address.QuadPart = PhysicalAddress.QuadPart;
 
     return STATUS_SUCCESS;
 }
@@ -221,7 +219,7 @@ AtaFdoRemoveSymLinks(
     (VOID)IoDeleteSymbolicLink(&SymLinkName);
 
     /* Unregister the SCSI port adapter */
-    IoGetConfigurationInformation()->ScsiPortCount--;
+    InterlockedDecrement((PLONG)&IoGetConfigurationInformation()->ScsiPortCount);
 }
 
 CODE_SEG("PAGE")
@@ -413,7 +411,8 @@ AtaFdoStopDevice(
     AtaFdoDetachChannel(ChanExt);
 
     if (ChanExt->StorageInterfaceName.Buffer)
-        IoSetDeviceInterfaceState(&ChanExt->StorageInterfaceName, FALSE);
+        if (!NT_SUCCESS(IoSetDeviceInterfaceState(&ChanExt->StorageInterfaceName, FALSE)))
+            ERR("IoSetDeviceInterfaceState(%wZ) failed\n", &ChanExt->StorageInterfaceName);
 
     return STATUS_SUCCESS;
 }
@@ -432,7 +431,8 @@ AtaFdoRemoveDevice(
 
     if (ChanExt->StorageInterfaceName.Buffer)
     {
-        IoSetDeviceInterfaceState(&ChanExt->StorageInterfaceName, FALSE);
+        if (!NT_SUCCESS(IoSetDeviceInterfaceState(&ChanExt->StorageInterfaceName, FALSE)))
+            ERR("IoSetDeviceInterfaceState(%wZ) failed\n", &ChanExt->StorageInterfaceName);
 
         RtlFreeUnicodeString(&ChanExt->StorageInterfaceName);
         ChanExt->StorageInterfaceName.Buffer = NULL;

@@ -28,6 +28,7 @@
 
 #define INTERVAL 250
 #define LONG_INTERVAL 2500
+#define AUTOHIDE_SETTLE 100
 
 static const TCHAR s_szName[] = TEXT("AppBarSample");
 static RECT s_rcPrimaryMonitor;
@@ -81,8 +82,8 @@ SHAppBarMessageWrap(DWORD dwMessage, PAPPBARDATA pData)
 
 void SlideWindow(HWND hwnd, LPRECT prc)
 {
-#define SLIDE_HIDE 400
-#define SLIDE_SHOW 150
+#define SLIDE_HIDE 0
+#define SLIDE_SHOW 0
     RECT rcOld, rcNew = *prc;
     GetWindowRect(hwnd, &rcOld);
 
@@ -526,7 +527,7 @@ protected:
     {
         if (m_fAutoHide)
         {
-            SetTimer(hwnd, IDT_AUTOHIDE, 500, NULL);
+            SetTimer(hwnd, IDT_AUTOHIDE, 50, NULL);
         }
     }
 
@@ -952,6 +953,14 @@ protected:
         m_fMoving = FALSE;
     }
 
+    template <typename T>
+    static void WaitFor(T fnCondition, DWORD dwTimeout)
+    {
+        DWORD dwStart = GetTickCount();
+        while (!fnCondition() && GetTickCount() - dwStart < dwTimeout)
+            Sleep(10);
+    }
+
     void GetWorkArea(LPRECT prc) const
     {
         SystemParametersInfoW(SPI_GETWORKAREA, 0, prc, 0);
@@ -979,7 +988,7 @@ public:
     void TEST_Main()
     {
         trace("TEST_Main\n");
-        Sleep(INTERVAL);
+        WaitFor([] { RECT rc; GetWindowRect(s_hwnd2, &rc); return rc.bottom == s_rcWorkArea.top + 110; }, INTERVAL);
 
         POINT pt;
         RECT rc1, rc2, rcWork;
@@ -1004,7 +1013,7 @@ public:
         ok_long(rcWork.right, s_rcWorkArea.right);
         ok_long(rcWork.bottom, s_rcWorkArea.bottom);
         PostMessageW(s_hwnd1, WM_CLOSE, 0, 0);
-        Sleep(LONG_INTERVAL);
+        WaitFor([] { RECT rc; GetWindowRect(s_hwnd2, &rc); return rc.top == s_rcWorkArea.top; }, LONG_INTERVAL);
 
         GetWindowRect(s_hwnd2, &rc2);
         GetWorkArea(&rcWork);
@@ -1017,7 +1026,7 @@ public:
         ok_long(rcWork.right, s_rcWorkArea.right);
         ok_long(rcWork.bottom, s_rcWorkArea.bottom);
         AppBar_SetSide(s_hwnd2, ABE_LEFT);
-        Sleep(INTERVAL);
+        WaitFor([] { RECT rc; GetWindowRect(s_hwnd2, &rc); return rc.right == s_rcWorkArea.left + 30; }, INTERVAL);
 
         GetWindowRect(s_hwnd2, &rc2);
         GetWorkArea(&rcWork);
@@ -1029,7 +1038,7 @@ public:
         ok_long(rcWork.right, s_rcWorkArea.right);
         ok_long(rcWork.bottom, s_rcWorkArea.bottom);
         AppBar_SetSide(s_hwnd2, ABE_TOP);
-        Sleep(INTERVAL);
+        WaitFor([] { RECT rc; GetWindowRect(s_hwnd2, &rc); return rc.bottom == s_rcWorkArea.top + 30; }, INTERVAL);
 
         GetWindowRect(s_hwnd2, &rc2);
         GetWorkArea(&rcWork);
@@ -1042,7 +1051,7 @@ public:
         ok_long(rcWork.right, s_rcWorkArea.right);
         ok_long(rcWork.bottom, s_rcWorkArea.bottom);
         AppBar_SetSide(s_hwnd2, ABE_RIGHT);
-        Sleep(INTERVAL);
+        WaitFor([] { RECT rc; GetWindowRect(s_hwnd2, &rc); return rc.left == s_rcWorkArea.right - 30; }, INTERVAL);
 
         GetWindowRect(s_hwnd2, &rc2);
         GetWorkArea(&rcWork);
@@ -1053,7 +1062,6 @@ public:
         ok_long(rcWork.top, s_rcWorkArea.top);
         ok_long(rcWork.right, s_rcWorkArea.right - 30);
         ok_long(rcWork.bottom, s_rcWorkArea.bottom);
-        Sleep(INTERVAL);
 
         GetWindowRect(s_hwnd2, &rc2);
         pt.x = (rc2.left + rc2.right) / 2;
@@ -1061,13 +1069,13 @@ public:
         MOVE(pt.x, pt.y);
         LEFT_DOWN();
         MOVE(pt.x + 64, pt.y + 64);
-        Sleep(INTERVAL);
+        WaitFor([this] { return m_fMoving; }, LONG_INTERVAL);
 
         pt.x = s_rcWorkArea.left + 80;
         pt.y = (s_rcWorkArea.top + s_rcWorkArea.bottom) / 2;
         MOVE(pt.x, pt.y);
         LEFT_UP();
-        Sleep(INTERVAL);
+        WaitFor([] { RECT rc; GetWindowRect(s_hwnd2, &rc); return rc.right == s_rcWorkArea.left + 30; }, INTERVAL);
 
         GetWindowRect(s_hwnd2, &rc2);
         GetWorkArea(&rcWork);
@@ -1078,7 +1086,6 @@ public:
         ok_long(rcWork.top, s_rcWorkArea.top);
         ok_long(rcWork.right, s_rcWorkArea.right);
         ok_long(rcWork.bottom, s_rcWorkArea.bottom);
-        Sleep(INTERVAL);
     }
 
     void TEST_Dragging()
@@ -1093,18 +1100,18 @@ public:
         pt.y = (rc.top + rc.bottom) / 2;
         MOVE(pt.x, pt.y);
         LEFT_DOWN();
-        Sleep(INTERVAL);
+        WaitFor([this] { return m_fMoving; }, LONG_INTERVAL);
 
         pt.x = (s_rcWorkArea.left + s_rcWorkArea.right) / 2;
         pt.y = s_rcWorkArea.top;
         MOVE(pt.x, pt.y);
-        Sleep(INTERVAL);
+        WaitFor([this] { return m_bDragged && m_uSide == ABE_TOP; }, LONG_INTERVAL);
 
         pt.x = s_rcWorkArea.right - 1;
         pt.y = (s_rcWorkArea.top + s_rcWorkArea.bottom) / 2;
         MOVE(pt.x, pt.y);
         LEFT_UP();
-        Sleep(LONG_INTERVAL);
+        WaitFor([] { RECT rc; GetWindowRect(s_hwnd2, &rc); return rc.left == s_rcWorkArea.right - 30; }, LONG_INTERVAL);
 
         GetWindowRect(s_hwnd2, &rc);
         GetWorkArea(&rcWork);
@@ -1129,7 +1136,7 @@ public:
         AppBar_AutoHide(s_hwnd2);
         HWND hwndRet = AppBar_GetAutoHideBar(s_hwnd2, ABE_TOP);
         ok_ptr(hwndRet, s_hwnd2);
-        Sleep(LONG_INTERVAL);
+        WaitFor([] { RECT rc; GetWindowRect(s_hwnd2, &rc); return rc.bottom == s_rcWorkArea.top + 2; }, LONG_INTERVAL);
 
         GetWindowRect(s_hwnd2, &rc);
         ok_long(rc.left, s_rcWorkArea.left);
@@ -1140,7 +1147,7 @@ public:
         MOVE((s_rcWorkArea.left + s_rcWorkArea.right) / 2, s_rcWorkArea.top);
         LEFT_DOWN();
         LEFT_UP();
-        Sleep(LONG_INTERVAL);
+        WaitFor([] { RECT rc; GetWindowRect(s_hwnd2, &rc); return rc.bottom == s_rcWorkArea.top + 40; }, LONG_INTERVAL);
 
         GetWindowRect(s_hwnd2, &rc);
         ok_long(rc.left, s_rcWorkArea.left);
@@ -1151,7 +1158,7 @@ public:
         MOVE((s_rcWorkArea.left + s_rcWorkArea.right) / 2, s_rcWorkArea.bottom - 1);
         LEFT_DOWN();
         LEFT_UP();
-        Sleep(LONG_INTERVAL);
+        WaitFor([] { RECT rc; GetWindowRect(s_hwnd2, &rc); return rc.bottom == s_rcWorkArea.top + 2; }, LONG_INTERVAL);
 
         GetWindowRect(s_hwnd2, &rc);
         ok_long(rc.left, s_rcWorkArea.left);
@@ -1160,7 +1167,7 @@ public:
         ok_long(rc.bottom, s_rcWorkArea.top + 2);
 
         SetForegroundWindow(s_hwnd2);
-        Sleep(LONG_INTERVAL);
+        WaitFor([] { RECT rc; GetWindowRect(s_hwnd2, &rc); return rc.bottom == s_rcWorkArea.top + 40; }, LONG_INTERVAL);
 
         GetWindowRect(s_hwnd2, &rc);
         ok_long(rc.left, s_rcWorkArea.left);
@@ -1181,7 +1188,7 @@ public:
         ok_long(rc.bottom, s_rcWorkArea.bottom);
 
         MOVE(s_rcWorkArea.left, (s_rcWorkArea.top + s_rcWorkArea.bottom) / 2);
-        Sleep(LONG_INTERVAL);
+        Sleep(AUTOHIDE_SETTLE);
 
         GetWindowRect(s_hwnd2, &rc);
         ok_long(rc.left, s_rcWorkArea.right - 2);
@@ -1196,7 +1203,7 @@ public:
         RECT rc = s_rcPrimaryMonitor;
         m_bGotFullScreen = FALSE;
         MoveWindow(s_hwnd2, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, TRUE);
-        Sleep(LONG_INTERVAL);
+        WaitFor([this] { return m_bGotFullScreen != FALSE; }, LONG_INTERVAL);
         ok_int(m_bGotFullScreen, TRUE);
         MoveWindow(s_hwnd2, rc.left, rc.top, 100, 100, TRUE);
     }

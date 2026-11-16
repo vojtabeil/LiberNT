@@ -106,7 +106,7 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(tooltips);
 
-static HICON hTooltipIcons[TTI_ERROR+1];
+static HICON hTooltipIcons[TTI_ERROR_LARGE+1];
 
 typedef struct
 {
@@ -125,6 +125,9 @@ typedef struct
 typedef struct
 {
     HWND     hwndSelf;
+#ifdef __REACTOS__
+    HTHEME   hTheme;
+#endif
     WCHAR      szTipText[INFOTIPSIZE];
     BOOL     bActive;
     BOOL     bTrackActive;
@@ -132,6 +135,7 @@ typedef struct
     COLORREF   clrBk;
     COLORREF   clrText;
     HFONT    hFont;
+    HFONT    hStatusFont;
     HFONT    hTitleFont;
     INT      xTrackPos;
     INT      yTrackPos;
@@ -146,6 +150,8 @@ typedef struct
     BOOL     bToolBelow;
     LPWSTR   pszTitle;
     HICON    hTitleIcon;
+    int      iconWidth;
+    int      iconHeight;
 
     TTTOOL_INFO *tools;
 } TOOLTIPS_INFO;
@@ -176,8 +182,6 @@ typedef struct
 
 #define BALLOON_ICON_TITLE_SPACING 8 /* horizontal spacing between icon and title */
 #define BALLOON_TITLE_TEXT_SPACING 8 /* vertical spacing between icon/title and main text */
-#define ICON_HEIGHT 16
-#define ICON_WIDTH  16
 
 #define MAX_TEXT_SIZE_A 80 /* maximum retrieving text size by ANSI message */
 
@@ -202,15 +206,36 @@ TOOLTIPS_InitSystemSettings (TOOLTIPS_INFO *infoPtr)
     infoPtr->clrBk   = comctl32_color.clrInfoBk;
     infoPtr->clrText = comctl32_color.clrInfoText;
 
-    DeleteObject (infoPtr->hFont);
+    DeleteObject (infoPtr->hStatusFont);
     nclm.cbSize = sizeof(nclm);
     SystemParametersInfoW (SPI_GETNONCLIENTMETRICS, sizeof(nclm), &nclm, 0);
-    infoPtr->hFont = CreateFontIndirectW (&nclm.lfStatusFont);
+    infoPtr->hStatusFont = CreateFontIndirectW (&nclm.lfStatusFont);
 
     DeleteObject (infoPtr->hTitleFont);
     nclm.lfStatusFont.lfWeight = FW_BOLD;
     infoPtr->hTitleFont = CreateFontIndirectW (&nclm.lfStatusFont);
+
+    infoPtr->hFont = infoPtr->hStatusFont;
 }
+
+#ifdef __REACTOS__
+static HTHEME
+TOOLTIPS_GetTheme (const TOOLTIPS_INFO *infoPtr, DWORD dwStyle, int *pPart)
+{
+    int part;
+
+    if (!infoPtr->hTheme)
+        return NULL;
+    if (infoPtr->clrBk != comctl32_color.clrInfoBk ||
+        infoPtr->clrText != comctl32_color.clrInfoText)
+        return NULL;
+    part = (dwStyle & TTS_BALLOON) ? TTP_BALLOON : TTP_STANDARD;
+    if (!IsThemePartDefined(infoPtr->hTheme, part, 0))
+        return NULL;
+    *pPart = part;
+    return infoPtr->hTheme;
+}
+#endif
 
 /* Custom draw routines */
 static void
@@ -236,7 +261,7 @@ TOOLTIPS_notify_customdraw (DWORD dwDrawStage, NMTTCUSTOMDRAW *lpnmttcd)
     LRESULT result;
     lpnmttcd->nmcd.dwDrawStage = dwDrawStage;
 
-    TRACE("Notifying stage %d, flags %x, id %x\n", lpnmttcd->nmcd.dwDrawStage,
+    TRACE("Notifying stage %ld, flags %x, id %x\n", lpnmttcd->nmcd.dwDrawStage,
           lpnmttcd->uDrawFlags, lpnmttcd->nmcd.hdr.code);
 
     result = SendMessageW(GetParent(lpnmttcd->nmcd.hdr.hwndFrom), WM_NOTIFY,
@@ -259,6 +284,10 @@ TOOLTIPS_Refresh (const TOOLTIPS_INFO *infoPtr, HDC hdc)
     DWORD dwStyle = GetWindowLongW(infoPtr->hwndSelf, GWL_STYLE);
     NMTTCUSTOMDRAW nmttcd;
     DWORD cdmode;
+#ifdef __REACTOS__
+    int themePart = 0;
+    HTHEME hTheme = TOOLTIPS_GetTheme(infoPtr, dwStyle, &themePart);
+#endif
 
     if (infoPtr->nMaxTipWidth > -1)
 	uFlags |= DT_WORDBREAK;
@@ -285,17 +314,93 @@ TOOLTIPS_Refresh (const TOOLTIPS_INFO *infoPtr, HDC hdc)
 
         GetWindowRgn(infoPtr->hwndSelf, hRgn);
 
+#ifdef __REACTOS__
+        if (hTheme)
+        {
+            RECT rcBody = rc;
+
+            if (IsThemeBackgroundPartiallyTransparent(hTheme, themePart, TTBS_NORMAL))
+            {
+                FillRgn(hdc, hRgn, hBrush);
+                DrawThemeParentBackground(infoPtr->hwndSelf, hdc, &rc);
+            }
+            if (infoPtr->bToolBelow)
+                rcBody.top += BALLOON_STEMHEIGHT;
+            else
+                rcBody.bottom -= BALLOON_STEMHEIGHT;
+            DrawThemeBackground(hTheme, hdc, themePart, TTBS_NORMAL, &rcBody, NULL);
+            if (IsThemePartDefined(hTheme, TTP_BALLOONSTEM, 0))
+            {
+                HRGN hrgnStem;
+                RECT rcStem;
+                int stemState;
+
+                if (infoPtr->bToolBelow)
+                    hrgnStem = CreateRectRgn(rc.left, rc.top, rc.right,
+                                             rc.top + BALLOON_STEMHEIGHT);
+                else
+                    hrgnStem = CreateRectRgn(rc.left,
+                                             rc.bottom - BALLOON_STEMHEIGHT + 1,
+                                             rc.right, rc.bottom);
+                if (CombineRgn(hrgnStem, hrgnStem, hRgn, RGN_AND) > NULLREGION &&
+                    GetRgnBox(hrgnStem, &rcStem) > NULLREGION)
+                {
+                    if (infoPtr->bToolBelow)
+                        rcStem.bottom = rc.top + BALLOON_STEMHEIGHT;
+                    else
+                        rcStem.top = rc.bottom - BALLOON_STEMHEIGHT;
+                    if (rcStem.left <= rc.left + BALLOON_STEMINDENT)
+                        stemState = infoPtr->bToolBelow ? TTBSS_POINTINGUPLEFTWALL
+                                                        : TTBSS_POINTINGDOWNLEFTWALL;
+                    else if (rcStem.right >= rc.right - BALLOON_STEMINDENT)
+                        stemState = infoPtr->bToolBelow ? TTBSS_POINTINGUPRIGHTWALL
+                                                        : TTBSS_POINTINGDOWNRIGHTWALL;
+                    else
+                        stemState = infoPtr->bToolBelow ? TTBSS_POINTINGUPCENTERED
+                                                        : TTBSS_POINTINGDOWNCENTERED;
+                    DrawThemeBackground(hTheme, hdc, TTP_BALLOONSTEM, stemState,
+                                        &rcStem, NULL);
+                }
+                DeleteObject(hrgnStem);
+            }
+            DeleteObject(hBrush);
+            hBrush = NULL;
+        }
+        else
+        {
+#endif
         /* fill the background */
         FillRgn(hdc, hRgn, hBrush);
         DeleteObject(hBrush);
         hBrush = NULL;
+#ifdef __REACTOS__
+        }
+#endif
     }
     else
     {
+#ifdef __REACTOS__
+        if (hTheme)
+        {
+            if (IsThemeBackgroundPartiallyTransparent(hTheme, themePart, TTSS_NORMAL))
+            {
+                FillRect(hdc, &rc, hBrush);
+                DrawThemeParentBackground(infoPtr->hwndSelf, hdc, &rc);
+            }
+            DrawThemeBackground(hTheme, hdc, themePart, TTSS_NORMAL, &rc, NULL);
+            DeleteObject(hBrush);
+            hBrush = NULL;
+        }
+        else
+        {
+#endif
         /* fill the background */
         FillRect(hdc, &rc, hBrush);
         DeleteObject(hBrush);
         hBrush = NULL;
+#ifdef __REACTOS__
+        }
+#endif
     }
 
     if ((dwStyle & TTS_BALLOON) || infoPtr->pszTitle)
@@ -317,14 +422,34 @@ TOOLTIPS_Refresh (const TOOLTIPS_INFO *infoPtr, HDC hdc)
             /* draw icon */
             icon_present = infoPtr->hTitleIcon && 
                 DrawIconEx(hdc, rc.left, rc.top, infoPtr->hTitleIcon,
-                           ICON_WIDTH, ICON_HEIGHT, 0, NULL, DI_NORMAL);
+                           infoPtr->iconWidth, infoPtr->iconHeight, 0, NULL, DI_NORMAL);
             if (icon_present)
-                rcTitle.left += ICON_WIDTH + BALLOON_ICON_TITLE_SPACING;
+                rcTitle.left += infoPtr->iconWidth + BALLOON_ICON_TITLE_SPACING;
 
-            rcTitle.bottom = rc.top + ICON_HEIGHT;
+            rcTitle.bottom = rc.top + infoPtr->iconHeight;
 
             /* draw title text */
             prevFont = SelectObject (hdc, infoPtr->hTitleFont);
+#ifdef __REACTOS__
+            height = 0;
+            if (hTheme)
+            {
+                RECT rcExtent;
+                int titlePart = (themePart == TTP_BALLOON) ? TTP_BALLOONTITLE
+                                                           : TTP_STANDARDTITLE;
+
+                if (SUCCEEDED(GetThemeTextExtent(hTheme, hdc, titlePart, TTSS_NORMAL,
+                                                 infoPtr->pszTitle, -1,
+                                                 DT_SINGLELINE | DT_NOPREFIX,
+                                                 NULL, &rcExtent)) &&
+                    SUCCEEDED(DrawThemeText(hTheme, hdc, titlePart, TTSS_NORMAL,
+                                            infoPtr->pszTitle, -1,
+                                            DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX,
+                                            0, &rcTitle)))
+                    height = rcExtent.bottom - rcExtent.top;
+            }
+            if (!height)
+#endif
             height = DrawTextW(hdc, infoPtr->pszTitle, -1, &rcTitle, DT_BOTTOM | DT_SINGLELINE | DT_NOPREFIX);
             SelectObject (hdc, prevFont);
             rc.top += height + BALLOON_TITLE_TEXT_SPACING;
@@ -342,6 +467,9 @@ TOOLTIPS_Refresh (const TOOLTIPS_INFO *infoPtr, HDC hdc)
     /* draw text */
 #ifdef __REACTOS__
     uFlags |= DT_EXPANDTABS;
+    if (!hTheme ||
+        FAILED(DrawThemeText(hTheme, hdc, themePart, TTSS_NORMAL,
+                             infoPtr->szTipText, -1, uFlags, 0, &rc)))
 #endif
     DrawTextW (hdc, infoPtr->szTipText, -1, &rc, uFlags);
 
@@ -354,7 +482,11 @@ TOOLTIPS_Refresh (const TOOLTIPS_INFO *infoPtr, HDC hdc)
     SelectObject (hdc, hOldFont);
     SetBkMode (hdc, oldBkMode);
 
+#ifdef __REACTOS__
+    if ((dwStyle & TTS_BALLOON) && !hTheme)
+#else
     if (dwStyle & TTS_BALLOON)
+#endif
     {
         /* frame region because default window proc doesn't do it */
         INT width = GetSystemMetrics(SM_CXDLGFRAME) - GetSystemMetrics(SM_CXEDGE);
@@ -381,7 +513,7 @@ static void TOOLTIPS_GetDispInfoA(const TOOLTIPS_INFO *infoPtr, TTTOOL_INFO *too
     ttnmdi.uFlags = toolPtr->uFlags;
     ttnmdi.lParam = toolPtr->lParam;
 
-    TRACE("hdr.idFrom = %lx\n", ttnmdi.hdr.idFrom);
+    TRACE("hdr.idFrom = %Ix\n", ttnmdi.hdr.idFrom);
     SendMessageW(toolPtr->hwnd, WM_NOTIFY, toolPtr->uId, (LPARAM)&ttnmdi);
 
     if (IS_INTRESOURCE(ttnmdi.lpszText)) {
@@ -408,7 +540,7 @@ static void TOOLTIPS_GetDispInfoA(const TOOLTIPS_INFO *infoPtr, TTTOOL_INFO *too
         buffer[0] = '\0';
     }
 
-#ifndef __REACTOS_
+#ifndef __REACTOS__
     /* no text available - try calling parent instead as per native */
     /* FIXME: Unsure if SETITEM should save the value or not        */
     if (buffer[0] == 0x00) {
@@ -439,7 +571,7 @@ static void TOOLTIPS_GetDispInfoW(const TOOLTIPS_INFO *infoPtr, TTTOOL_INFO *too
     ttnmdi.uFlags = toolPtr->uFlags;
     ttnmdi.lParam = toolPtr->lParam;
 
-    TRACE("hdr.idFrom = %lx\n", ttnmdi.hdr.idFrom);
+    TRACE("hdr.idFrom = %Ix\n", ttnmdi.hdr.idFrom);
     SendMessageW(toolPtr->hwnd, WM_NOTIFY, toolPtr->uId, (LPARAM)&ttnmdi);
 
     if (IS_INTRESOURCE(ttnmdi.lpszText)) {
@@ -533,6 +665,10 @@ TOOLTIPS_CalcTipSize (const TOOLTIPS_INFO *infoPtr, LPSIZE lpSize)
     UINT uFlags = DT_EXTERNALLEADING | DT_CALCRECT;
     RECT rc = {0, 0, 0, 0};
     SIZE title = {0, 0};
+#ifdef __REACTOS__
+    int themePart = 0;
+    HTHEME hTheme = TOOLTIPS_GetTheme(infoPtr, style, &themePart);
+#endif
 
     if (infoPtr->nMaxTipWidth > -1) {
 	rc.right = infoPtr->nMaxTipWidth;
@@ -549,11 +685,19 @@ TOOLTIPS_CalcTipSize (const TOOLTIPS_INFO *infoPtr, LPSIZE lpSize)
         TRACE("title %s\n", debugstr_w(infoPtr->pszTitle));
         if (infoPtr->hTitleIcon)
         {
-            title.cx = ICON_WIDTH;
-            title.cy = ICON_HEIGHT;
+            title.cx = infoPtr->iconWidth;
+            title.cy = infoPtr->iconHeight;
         }
         if (title.cx != 0) title.cx += BALLOON_ICON_TITLE_SPACING;
         hOldFont = SelectObject (hdc, infoPtr->hTitleFont);
+#ifdef __REACTOS__
+        if (!hTheme ||
+            FAILED(GetThemeTextExtent(hTheme, hdc,
+                                      (themePart == TTP_BALLOON) ? TTP_BALLOONTITLE
+                                                                 : TTP_STANDARDTITLE,
+                                      TTSS_NORMAL, infoPtr->pszTitle, -1,
+                                      DT_SINGLELINE | DT_NOPREFIX, NULL, &rcTitle)))
+#endif
         DrawTextW(hdc, infoPtr->pszTitle, -1, &rcTitle, DT_SINGLELINE | DT_NOPREFIX | DT_CALCRECT);
         SelectObject (hdc, hOldFont);
         title.cy = max(title.cy, rcTitle.bottom - rcTitle.top) + BALLOON_TITLE_TEXT_SPACING;
@@ -562,6 +706,10 @@ TOOLTIPS_CalcTipSize (const TOOLTIPS_INFO *infoPtr, LPSIZE lpSize)
     hOldFont = SelectObject (hdc, infoPtr->hFont);
 #ifdef __REACTOS__
     uFlags |= DT_EXPANDTABS;
+    if (!hTheme ||
+        FAILED(GetThemeTextExtent(hTheme, hdc, themePart, TTSS_NORMAL,
+                                  infoPtr->szTipText, -1, uFlags,
+                                  (infoPtr->nMaxTipWidth > -1) ? &rc : NULL, &rc)))
 #endif
     DrawTextW (hdc, infoPtr->szTipText, -1, &rc, uFlags);
     SelectObject (hdc, hOldFont);
@@ -634,7 +782,7 @@ TOOLTIPS_Show (TOOLTIPS_INFO *infoPtr, BOOL track_activate)
     toolPtr = &infoPtr->tools[nTool];
     TOOLTIPS_CalcTipSize (infoPtr, &size);
 
-    TRACE("Show tooltip %d, %s, size %d x %d\n", nTool, debugstr_w(infoPtr->szTipText),
+    TRACE("Show tooltip %d, %s, size %ld x %ld\n", nTool, debugstr_w(infoPtr->szTipText),
         size.cx, size.cy);
 
     if (track_activate && (toolPtr->uFlags & TTF_TRACK))
@@ -738,7 +886,7 @@ TOOLTIPS_Show (TOOLTIPS_INFO *infoPtr, BOOL track_activate)
         }
     }
 
-    TRACE("pos %d - %d\n", rect.left, rect.top);
+    TRACE("pos %ld - %ld\n", rect.left, rect.top);
 
     rect.right = rect.left + size.cx;
     rect.bottom = rect.top + size.cy;
@@ -1034,7 +1182,11 @@ TOOLTIPS_CopyInfoT (const TOOLTIPS_INFO *infoPtr, INT index, TTTOOLINFOW *ti, BO
                                 (LPSTR)ti->lpszText, MAX_TEXT_SIZE_A, NULL, NULL);
     }
 
+#if defined(__REACTOS__) && __WINE_COMCTL32_VERSION != 6
+    if (ti->cbSize > TTTOOLINFOW_V1_SIZE)
+#else
     if (ti->cbSize >= TTTOOLINFOW_V2_SIZE)
+#endif
         ti->lParam = toolPtr->lParam;
 
     /* lpReserved is intentionally not set. */
@@ -1110,11 +1262,16 @@ TOOLTIPS_AddToolT (TOOLTIPS_INFO *infoPtr, const TTTOOLINFOW *ti, BOOL isW)
 
     if (!ti) return FALSE;
 
-    TRACE("add tool (%p) %p %ld%s\n", infoPtr->hwndSelf, ti->hwnd, ti->uId,
+    TRACE("add tool (%p) %p %Id%s\n", infoPtr->hwndSelf, ti->hwnd, ti->uId,
         (ti->uFlags & TTF_IDISHWND) ? " TTF_IDISHWND" : "");
 
+#if defined(__REACTOS__) && __WINE_COMCTL32_VERSION != 6
+    if (ti->cbSize > TTTOOLINFOW_V2_SIZE && isW)
+        return FALSE;
+#else
     if (ti->cbSize > TTTOOLINFOW_V3_SIZE && isW)
         return FALSE;
+#endif
 
     if (infoPtr->uNumTools == 0) {
 	infoPtr->tools = Alloc (sizeof(TTTOOL_INFO));
@@ -1250,9 +1407,14 @@ TOOLTIPS_DelToolT (TOOLTIPS_INFO *infoPtr, const TTTOOLINFOW *ti, BOOL isW)
     INT nTool;
 
     if (!ti) return 0;
+#if defined(__REACTOS__) && __WINE_COMCTL32_VERSION != 6
+    if (isW && ti->cbSize > TTTOOLINFOW_V2_SIZE)
+	return 0;
+#else
     if (isW && ti->cbSize > TTTOOLINFOW_V2_SIZE &&
                ti->cbSize != TTTOOLINFOW_V3_SIZE)
 	return 0;
+#endif
     if (infoPtr->uNumTools == 0)
 	return 0;
 
@@ -1295,8 +1457,16 @@ TOOLTIPS_DelToolT (TOOLTIPS_INFO *infoPtr, const TTTOOLINFOW *ti, BOOL isW)
 
     /* destroying tool that mouse was on on last relayed mouse move */
     if (infoPtr->nTool == nTool)
+#ifdef __REACTOS__
+    {
+        KillTimer(infoPtr->hwndSelf, ID_TIMERSHOW);
+        KillTimer(infoPtr->hwndSelf, ID_TIMERLEAVE);
+#endif
         /* -1 means no current tool (0 means first tool) */
         infoPtr->nTool = -1;
+#ifdef __REACTOS__
+    }
+#endif
     else if (infoPtr->nTool > nTool)
         infoPtr->nTool--;
 
@@ -1350,7 +1520,7 @@ TOOLTIPS_GetBubbleSize (const TOOLTIPS_INFO *infoPtr, const TTTOOLINFOW *lpToolI
     TRACE("tool %d\n", nTool);
 
     TOOLTIPS_CalcTipSize (infoPtr, &size);
-    TRACE("size %d x %d\n", size.cx, size.cy);
+    TRACE("size %ld x %ld\n", size.cx, size.cy);
 
     return MAKELRESULT(size.cx, size.cy);
 }
@@ -1385,7 +1555,7 @@ TOOLTIPS_GetDelayTime (const TOOLTIPS_INFO *infoPtr, DWORD duration)
         return infoPtr->nInitialTime;
 
     default:
-        WARN("Invalid duration flag %x\n", duration);
+        WARN("Invalid duration flag %lx\n", duration);
 	break;
     }
 
@@ -1477,6 +1647,10 @@ TOOLTIPS_GetToolInfoT (const TOOLTIPS_INFO *infoPtr, TTTOOLINFOW *ti, BOOL isW)
     if (!ti) return FALSE;
     if (ti->cbSize < TTTOOLINFOW_V1_SIZE)
 	return FALSE;
+#if defined(__REACTOS__) && __WINE_COMCTL32_VERSION != 6
+    if (isW && ti->cbSize > TTTOOLINFOW_V2_SIZE)
+	return FALSE;
+#endif
     if (infoPtr->uNumTools == 0)
 	return FALSE;
 
@@ -1490,7 +1664,11 @@ TOOLTIPS_GetToolInfoT (const TOOLTIPS_INFO *infoPtr, TTTOOLINFOW *ti, BOOL isW)
     TOOLTIPS_CopyInfoT (infoPtr, nTool, ti, isW);
     ti->hwnd = hwnd;
 
+#if defined(__REACTOS__) && __WINE_COMCTL32_VERSION != 6
+    return ti->cbSize <= TTTOOLINFOW_V2_SIZE;
+#else
     return TRUE;
+#endif
 }
 
 
@@ -1642,7 +1820,7 @@ TOOLTIPS_SetDelayTime (TOOLTIPS_INFO *infoPtr, DWORD duration, INT nTime)
 	    break;
 
     default:
-        WARN("Invalid duration flag %x\n", duration);
+        WARN("Invalid duration flag %lx\n", duration);
 	break;
     }
 
@@ -1722,7 +1900,18 @@ TOOLTIPS_SetTitleT (TOOLTIPS_INFO *infoPtr, UINT_PTR uTitleIcon, LPCWSTR pszTitl
     else
         infoPtr->pszTitle = NULL;
 
-    if (uTitleIcon <= TTI_ERROR)
+    if (uTitleIcon >= TTI_INFO_LARGE && uTitleIcon <= TTI_ERROR_LARGE)
+    {
+        infoPtr->iconWidth = GetSystemMetrics(SM_CXICON);
+        infoPtr->iconHeight = GetSystemMetrics(SM_CYICON);
+    }
+    else
+    {
+        infoPtr->iconWidth = GetSystemMetrics(SM_CXSMICON);
+        infoPtr->iconHeight = GetSystemMetrics(SM_CYSMICON);
+    }
+
+    if (uTitleIcon <= TTI_ERROR_LARGE)
         infoPtr->hTitleIcon = hTooltipIcons[uTitleIcon];
     else
         infoPtr->hTitleIcon = CopyIcon((HICON)uTitleIcon);
@@ -1884,6 +2073,9 @@ TOOLTIPS_Create (HWND hwnd)
     infoPtr->nCurrentTool = -1;
     infoPtr->nTrackTool = -1;
     infoPtr->hwndSelf = hwnd;
+#ifdef __REACTOS__
+    infoPtr->hTheme = OpenThemeData (hwnd, L"Tooltip");
+#endif
 
     /* initialize colours and fonts */
     TOOLTIPS_InitSystemSettings(infoPtr);
@@ -1919,8 +2111,12 @@ TOOLTIPS_Destroy (TOOLTIPS_INFO *infoPtr)
         DeleteObject(infoPtr->hTitleIcon);
 
     /* delete fonts */
-    DeleteObject (infoPtr->hFont);
+    DeleteObject (infoPtr->hStatusFont);
     DeleteObject (infoPtr->hTitleFont);
+
+#ifdef __REACTOS__
+    CloseThemeData (infoPtr->hTheme);
+#endif
 
     /* free tool tips info data */
     SetWindowLongPtrW(infoPtr->hwndSelf, 0, 0);
@@ -1989,36 +2185,7 @@ TOOLTIPS_NCHitTest (const TOOLTIPS_INFO *infoPtr, WPARAM wParam, LPARAM lParam)
 static LRESULT
 TOOLTIPS_NotifyFormat (TOOLTIPS_INFO *infoPtr, WPARAM wParam, LPARAM lParam)
 {
-#ifdef __REACTOS__
-    TTTOOL_INFO *toolPtr = infoPtr->tools;
-    LRESULT nResult;
-
-    TRACE("infoPtr=%p wParam=%lx lParam=%p\n", infoPtr, wParam, (PVOID)lParam);
-
-    if (lParam == NF_QUERY) {
-        if (toolPtr->bNotifyUnicode) {
-            return NFR_UNICODE;
-        } else {
-            return NFR_ANSI;
-        }
-    }
-    else if (lParam == NF_REQUERY) {
-        nResult = SendMessageW (toolPtr->hwnd, WM_NOTIFYFORMAT,
-                    (WPARAM)infoPtr->hwndSelf, (LPARAM)NF_QUERY);
-        if (nResult == NFR_ANSI) {
-            toolPtr->bNotifyUnicode = FALSE;
-            TRACE(" -- WM_NOTIFYFORMAT returns: NFR_ANSI\n");
-        } else if (nResult == NFR_UNICODE) {
-            toolPtr->bNotifyUnicode = TRUE;
-            TRACE(" -- WM_NOTIFYFORMAT returns: NFR_UNICODE\n");
-        } else {
-            TRACE (" -- WM_NOTIFYFORMAT returns: error!\n");
-        }
-        return nResult;
-    }
-#else
-    FIXME ("hwnd=%p wParam=%lx lParam=%lx\n", infoPtr->hwndSelf, wParam, lParam);
-#endif
+    FIXME("hwnd %p, wParam %Ix, lParam %Ix\n", infoPtr->hwndSelf, wParam, lParam);
 
     return 0;
 }
@@ -2046,8 +2213,7 @@ TOOLTIPS_SetFont (TOOLTIPS_INFO *infoPtr, HFONT hFont, BOOL redraw)
     if(!GetObjectW(hFont, sizeof(lf), &lf))
         return 0;
 
-    DeleteObject (infoPtr->hFont);
-    infoPtr->hFont = CreateFontIndirectW(&lf);
+    infoPtr->hFont = hFont;
 
     DeleteObject (infoPtr->hTitleFont);
     lf.lfWeight = FW_BOLD;
@@ -2101,7 +2267,11 @@ TOOLTIPS_OnWMGetText (const TOOLTIPS_INFO *infoPtr, WPARAM size, LPWSTR pszText)
 static LRESULT
 TOOLTIPS_Timer (TOOLTIPS_INFO *infoPtr, INT iTimer)
 {
+#ifdef __REACTOS__
+    INT nOldTool, nTool;
+#else
     INT nOldTool;
+#endif
 
     TRACE("timer %d (%p) expired\n", iTimer, infoPtr->hwndSelf);
 
@@ -2109,7 +2279,14 @@ TOOLTIPS_Timer (TOOLTIPS_INFO *infoPtr, INT iTimer)
     case ID_TIMERSHOW:
         KillTimer (infoPtr->hwndSelf, ID_TIMERSHOW);
 	nOldTool = infoPtr->nTool;
+#ifdef __REACTOS__
+        if (nOldTool == -1) break;
+        nTool = TOOLTIPS_CheckTool(infoPtr, TRUE);
+        if (infoPtr->nTool != nOldTool) break;
+	if ((infoPtr->nTool = nTool) == nOldTool)
+#else
 	if ((infoPtr->nTool = TOOLTIPS_CheckTool (infoPtr, TRUE)) == nOldTool)
+#endif
 	    TOOLTIPS_Show (infoPtr, FALSE);
 	break;
 
@@ -2119,7 +2296,18 @@ TOOLTIPS_Timer (TOOLTIPS_INFO *infoPtr, INT iTimer)
 
     case ID_TIMERLEAVE:
         nOldTool = infoPtr->nTool;
+#ifdef __REACTOS__
+        if (nOldTool == -1)
+        {
+            KillTimer(infoPtr->hwndSelf, ID_TIMERLEAVE);
+            break;
+        }
+        nTool = TOOLTIPS_CheckTool(infoPtr, FALSE);
+        if (infoPtr->nTool != nOldTool) break;
+	infoPtr->nTool = nTool;
+#else
 	infoPtr->nTool = TOOLTIPS_CheckTool (infoPtr, FALSE);
+#endif
 	TRACE("tool (%p) %d %d %d\n", infoPtr->hwndSelf, nOldTool,
 	      infoPtr->nTool, infoPtr->nCurrentTool);
 	if (infoPtr->nTool != nOldTool) {
@@ -2196,7 +2384,8 @@ TOOLTIPS_WindowProc (HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     TOOLTIPS_INFO *infoPtr = TOOLTIPS_GetInfoPtr (hwnd);
 
-    TRACE("hwnd=%p msg=%x wparam=%lx lParam=%lx\n", hwnd, uMsg, wParam, lParam);
+    TRACE("hwnd %p, msg %x, wparam %Ix, lParam %Ix\n", hwnd, uMsg, wParam, lParam);
+
     if (!infoPtr && (uMsg != WM_CREATE) && (uMsg != WM_NCCREATE))
         return DefWindowProcW (hwnd, uMsg, wParam, lParam);
     switch (uMsg)
@@ -2321,6 +2510,11 @@ TOOLTIPS_WindowProc (HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 	case WM_GETFONT:
 	    return TOOLTIPS_GetFont (infoPtr);
 
+        case WM_GETOBJECT:
+            if ((LONG)lParam == OBJID_QUERYCLASSNAMEIDX)
+                return 0x10018;
+	    return DefWindowProcW (hwnd, uMsg, wParam, lParam);
+
 	case WM_GETTEXT:
 	    return TOOLTIPS_OnWMGetText (infoPtr, wParam, (LPWSTR)lParam);
 
@@ -2356,6 +2550,14 @@ TOOLTIPS_WindowProc (HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 	    COMCTL32_RefreshSysColors();
 	    return 0;
 
+#ifdef __REACTOS__
+	case WM_THEMECHANGED:
+	    CloseThemeData (infoPtr->hTheme);
+	    infoPtr->hTheme = OpenThemeData (hwnd, L"Tooltip");
+	    InvalidateRect (hwnd, NULL, TRUE);
+	    return 0;
+#endif
+
 	case WM_TIMER:
 	    return TOOLTIPS_Timer (infoPtr, (INT)wParam);
 
@@ -2364,8 +2566,7 @@ TOOLTIPS_WindowProc (HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 
 	default:
 	    if ((uMsg >= WM_USER) && (uMsg < WM_APP) && !COMCTL32_IsReflectedMessage(uMsg))
-		ERR("unknown msg %04x wp=%08lx lp=%08lx\n",
-		     uMsg, wParam, lParam);
+		ERR("unknown msg %04x, wp %Ix, lp %Ix\n", uMsg, wParam, lParam);
 	    return DefWindowProcW (hwnd, uMsg, wParam, lParam);
     }
 }
@@ -2389,19 +2590,15 @@ TOOLTIPS_Register (void)
 
     hTooltipIcons[TTI_NONE] = NULL;
     hTooltipIcons[TTI_INFO] = LoadImageW(COMCTL32_hModule,
-        (LPCWSTR)MAKEINTRESOURCE(IDI_TT_INFO_SM), IMAGE_ICON, 0, 0, 0);
+        (LPCWSTR)MAKEINTRESOURCE(IDI_TT_INFO_SM), IMAGE_ICON, 0, 0, LR_SHARED);
     hTooltipIcons[TTI_WARNING] = LoadImageW(COMCTL32_hModule,
-        (LPCWSTR)MAKEINTRESOURCE(IDI_TT_WARN_SM), IMAGE_ICON, 0, 0, 0);
+        (LPCWSTR)MAKEINTRESOURCE(IDI_TT_WARN_SM), IMAGE_ICON, 0, 0, LR_SHARED);
     hTooltipIcons[TTI_ERROR] = LoadImageW(COMCTL32_hModule,
-        (LPCWSTR)MAKEINTRESOURCE(IDI_TT_ERROR_SM), IMAGE_ICON, 0, 0, 0);
-}
-
-
-VOID
-TOOLTIPS_Unregister (void)
-{
-    int i;
-    for (i = TTI_INFO; i <= TTI_ERROR; i++)
-        DestroyIcon(hTooltipIcons[i]);
-    UnregisterClassW (TOOLTIPS_CLASSW, NULL);
+        (LPCWSTR)MAKEINTRESOURCE(IDI_TT_ERROR_SM), IMAGE_ICON, 0, 0, LR_SHARED);
+    hTooltipIcons[TTI_INFO_LARGE] = LoadImageW(COMCTL32_hModule,
+        (LPCWSTR)MAKEINTRESOURCE(IDI_TT_INFO_MD), IMAGE_ICON, 0, 0, LR_SHARED);
+    hTooltipIcons[TTI_WARNING_LARGE] = LoadImageW(COMCTL32_hModule,
+        (LPCWSTR)MAKEINTRESOURCE(IDI_TT_WARN_MD), IMAGE_ICON, 0, 0, LR_SHARED);
+    hTooltipIcons[TTI_ERROR_LARGE] = LoadImageW(COMCTL32_hModule,
+        (LPCWSTR)MAKEINTRESOURCE(IDI_TT_ERROR_MD), IMAGE_ICON, 0, 0, LR_SHARED);
 }

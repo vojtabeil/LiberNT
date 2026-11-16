@@ -35,7 +35,7 @@
 @ stdcall AVIStreamAddRef(ptr)
 @ stdcall AVIStreamBeginStreaming(ptr long long long)
 @ stdcall AVIStreamCreate(ptr long long ptr)
-@ stdcall AVIStreamEndStreaming(ptr) 
+@ stdcall AVIStreamEndStreaming(ptr)
 @ stdcall AVIStreamFindSample(ptr long long)
 @ stdcall AVIStreamGetFrame(ptr long)
 @ stdcall AVIStreamGetFrameClose(ptr)

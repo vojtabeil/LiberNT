@@ -11,6 +11,40 @@
 #define NDEBUG
 #include <debug.h>
 
+#if defined(_M_ARM64)
+NTSYSAPI BOOLEAN NTAPI RtlIsEcCode(ULONG_PTR CodeAddress);
+
+static LPCWSTR BasepChpeModuleName(LPCWSTR ModuleName, PVOID CallerAddress)
+{
+    static const UNICODE_STRING NtdllName = RTL_CONSTANT_STRING(L"ntdll.dll");
+    static const UNICODE_STRING NtdllBaseName = RTL_CONSTANT_STRING(L"ntdll");
+    PIMAGE_NT_HEADERS NtHeaders;
+    UNICODE_STRING RequestedName;
+
+    if (!ModuleName)
+        return ModuleName;
+
+    RtlInitUnicodeString(&RequestedName, ModuleName);
+    if (!RtlEqualUnicodeString(&RequestedName, &NtdllName, TRUE) &&
+        !RtlEqualUnicodeString(&RequestedName, &NtdllBaseName, TRUE))
+        return ModuleName;
+
+    NtHeaders = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
+    if (!NtHeaders ||
+        (NtHeaders->FileHeader.Machine != IMAGE_FILE_MACHINE_AMD64 &&
+         NtHeaders->FileHeader.Machine != IMAGE_FILE_MACHINE_ARM64EC))
+    {
+        return ModuleName;
+    }
+
+    if (!NtCurrentPeb()->ChpeV2ProcessInfo ||
+        RtlIsEcCode((ULONG_PTR)CallerAddress))
+        return ModuleName;
+
+    return L"ntdll_chpe.dll";
+}
+#endif
+
 /* FUNCTIONS ****************************************************************/
 
 NTSTATUS
@@ -183,9 +217,46 @@ LoadLibraryW(LPCWSTR lpLibFileName)
 }
 
 
+typedef struct _BASEP_EXCLUSIVE_DATAFILE
+{
+    LIST_ENTRY Entry;
+    HMODULE Module;
+    HANDLE File;
+} BASEP_EXCLUSIVE_DATAFILE, *PBASEP_EXCLUSIVE_DATAFILE;
+
+static LIST_ENTRY BasepExclusiveDatafileList = { &BasepExclusiveDatafileList, &BasepExclusiveDatafileList };
+
+static
+VOID
+BasepCloseExclusiveDatafile(HMODULE Module)
+{
+    PLIST_ENTRY Entry;
+    PBASEP_EXCLUSIVE_DATAFILE Datafile = NULL;
+
+    RtlAcquirePebLock();
+    for (Entry = BasepExclusiveDatafileList.Flink; Entry != &BasepExclusiveDatafileList; Entry = Entry->Flink)
+    {
+        PBASEP_EXCLUSIVE_DATAFILE Current = CONTAINING_RECORD(Entry, BASEP_EXCLUSIVE_DATAFILE, Entry);
+
+        if (Current->Module == Module)
+        {
+            RemoveEntryList(&Current->Entry);
+            Datafile = Current;
+            break;
+        }
+    }
+    RtlReleasePebLock();
+
+    if (Datafile)
+    {
+        NtClose(Datafile->File);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Datafile);
+    }
+}
+
 static
 NTSTATUS
-BasepLoadLibraryAsDatafile(PWSTR Path, LPCWSTR Name, HMODULE *hModule)
+BasepLoadLibraryAsDatafile(PWSTR Path, LPCWSTR Name, DWORD Flags, HMODULE *hModule)
 {
     WCHAR FilenameW[MAX_PATH];
     HANDLE hFile = INVALID_HANDLE_VALUE;
@@ -193,6 +264,8 @@ BasepLoadLibraryAsDatafile(PWSTR Path, LPCWSTR Name, HMODULE *hModule)
     NTSTATUS Status;
     PVOID lpBaseAddress = NULL;
     SIZE_T ViewSize = 0;
+    DWORD Protect = PAGE_READONLY;
+    PVOID ArbitraryUserPointer;
     //PUNICODE_STRING OriginalName;
     //UNICODE_STRING dotDLL = RTL_CONSTANT_STRING(L".DLL");
 
@@ -235,16 +308,28 @@ BasepLoadLibraryAsDatafile(PWSTR Path, LPCWSTR Name, HMODULE *hModule)
     /* If opening failed - return last status value */
     if (hFile == INVALID_HANDLE_VALUE) return NtCurrentTeb()->LastStatusValue;
 
-    /* Create file mapping */
-    hMapping = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (Flags & LOAD_LIBRARY_AS_IMAGE_RESOURCE)
+        Protect |= SEC_IMAGE;
 
-    /* Close the file handle */
-    CloseHandle(hFile);
+    /* Create file mapping */
+    hMapping = CreateFileMappingW(hFile, NULL, Protect, 0, 0, NULL);
+
+    if (!(Flags & LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE) || (Flags & LOAD_LIBRARY_AS_IMAGE_RESOURCE))
+    {
+        CloseHandle(hFile);
+        hFile = INVALID_HANDLE_VALUE;
+    }
 
     /* If creating file mapping failed - return last status value */
-    if (!hMapping) return NtCurrentTeb()->LastStatusValue;
+    if (!hMapping)
+    {
+        if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
+        return NtCurrentTeb()->LastStatusValue;
+    }
 
     /* Map view of section */
+    ArbitraryUserPointer = NtCurrentTeb()->NtTib.ArbitraryUserPointer;
+    NtCurrentTeb()->NtTib.ArbitraryUserPointer = FilenameW;
     Status = NtMapViewOfSection(hMapping,
                                 NtCurrentProcess(),
                                 &lpBaseAddress,
@@ -255,28 +340,154 @@ BasepLoadLibraryAsDatafile(PWSTR Path, LPCWSTR Name, HMODULE *hModule)
                                 ViewShare,
                                 0,
                                 PAGE_READONLY);
+    NtCurrentTeb()->NtTib.ArbitraryUserPointer = ArbitraryUserPointer;
 
     /* Close handle to the section */
     CloseHandle(hMapping);
 
     /* If mapping view of section failed - return last status value */
-    if (!NT_SUCCESS(Status)) return NtCurrentTeb()->LastStatusValue;
+    if (!NT_SUCCESS(Status))
+    {
+        if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
+        return Status;
+    }
 
     /* Make sure it's a valid PE file */
     if (!RtlImageNtHeader(lpBaseAddress))
     {
         /* Unmap the view and return failure status */
         UnmapViewOfFile(lpBaseAddress);
+        if (hFile != INVALID_HANDLE_VALUE) CloseHandle(hFile);
         return STATUS_INVALID_IMAGE_FORMAT;
     }
 
-    /* Set low bit of handle to indicate datafile module */
-    *hModule = (HMODULE)((ULONG_PTR)lpBaseAddress | 1);
+    /* Tag the handle according to the resource mapping type. */
+    if (Flags & LOAD_LIBRARY_AS_IMAGE_RESOURCE)
+        *hModule = (HMODULE)((ULONG_PTR)lpBaseAddress | 2);
+    else
+        *hModule = (HMODULE)((ULONG_PTR)lpBaseAddress | 1);
+
+    if (hFile != INVALID_HANDLE_VALUE)
+    {
+        PBASEP_EXCLUSIVE_DATAFILE Datafile = RtlAllocateHeap(RtlGetProcessHeap(), 0, sizeof(*Datafile));
+
+        if (!Datafile)
+        {
+            UnmapViewOfFile(lpBaseAddress);
+            CloseHandle(hFile);
+            *hModule = 0;
+            return STATUS_NO_MEMORY;
+        }
+
+        Datafile->Module = *hModule;
+        Datafile->File = hFile;
+        RtlAcquirePebLock();
+        InsertHeadList(&BasepExclusiveDatafileList, &Datafile->Entry);
+        RtlReleasePebLock();
+    }
 
     /* Load alternate resource module */
     //LdrLoadAlternateResourceModule(*hModule, FilenameW);
 
     return STATUS_SUCCESS;
+}
+
+static
+BOOLEAN
+BasepIsMissingPrivateDll(IN LPCWSTR lpLibFileName,
+                         IN NTSTATUS Status)
+{
+    static const PCWSTR SystemDirectories[] = { L"\\System32\\", L"\\SysWOW64\\" };
+    UNICODE_STRING FileName, Prefix;
+    WCHAR Buffer[MAX_PATH];
+    RTL_PATH_TYPE PathType;
+    ULONG Index;
+
+    if (Status != STATUS_DLL_NOT_FOUND || !lpLibFileName)
+        return FALSE;
+
+    PathType = RtlDetermineDosPathNameType_U(lpLibFileName);
+    if (PathType != RtlPathTypeDriveAbsolute && PathType != RtlPathTypeUncAbsolute)
+        return FALSE;
+
+    if (RtlDoesFileExists_U(lpLibFileName))
+        return FALSE;
+
+    RtlInitUnicodeString(&FileName, lpLibFileName);
+    for (Index = 0; Index < RTL_NUMBER_OF(SystemDirectories); Index++)
+    {
+        RtlInitEmptyUnicodeString(&Prefix, Buffer, sizeof(Buffer));
+        if (!NT_SUCCESS(RtlAppendUnicodeToString(&Prefix, SharedUserData->NtSystemRoot)) ||
+            !NT_SUCCESS(RtlAppendUnicodeToString(&Prefix, SystemDirectories[Index])) ||
+            RtlPrefixUnicodeString(&Prefix, &FileName, TRUE))
+        {
+            return FALSE;
+        }
+    }
+
+    return TRUE;
+}
+
+static
+BOOLEAN
+BasepIsKnownDll(IN PUNICODE_STRING DllName)
+{
+    UNICODE_STRING SectionName;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    WCHAR Buffer[MAX_PATH + 32];
+    HANDLE Section;
+    NTSTATUS Status;
+    USHORT Index;
+    BOOLEAN GotExtension = FALSE;
+
+    ASSERT(DllName->Length >= sizeof(WCHAR));
+
+    for (Index = 0; Index < DllName->Length / sizeof(WCHAR); Index++)
+    {
+        ASSERT(DllName->Buffer[Index] != L'\\' && DllName->Buffer[Index] != L'/');
+        if (DllName->Buffer[Index] == L'.')
+            GotExtension = TRUE;
+    }
+
+    RtlInitEmptyUnicodeString(&SectionName, Buffer, sizeof(Buffer));
+    Status = RtlAppendUnicodeToString(&SectionName, NtCurrentTeb()->WowTebOffset ? L"\\KnownDlls32\\" : L"\\KnownDlls\\");
+    if (NT_SUCCESS(Status))
+        Status = RtlAppendUnicodeStringToString(&SectionName, DllName);
+    if (NT_SUCCESS(Status) && !GotExtension)
+        Status = RtlAppendUnicodeToString(&SectionName, L".dll");
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    InitializeObjectAttributes(&ObjectAttributes, &SectionName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenSection(&Section, SECTION_QUERY, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    NtClose(Section);
+    return TRUE;
+}
+
+static
+NTSTATUS
+BasepLoadDllWithoutSearch(IN PULONG DllCharacteristics,
+                          IN PUNICODE_STRING DllName,
+                          OUT PVOID *BaseAddress)
+{
+    NTSTATUS Status;
+
+    *BaseAddress = NULL;
+
+    Status = LdrGetDllHandleEx(0, NULL, NULL, DllName, BaseAddress);
+    if (NT_SUCCESS(Status))
+    {
+        ASSERT(*BaseAddress != NULL);
+        return Status;
+    }
+
+    if (!BasepIsKnownDll(DllName))
+        return STATUS_INVALID_PARAMETER;
+
+    return LdrLoadDll(NULL, DllCharacteristics, DllName, BaseAddress);
 }
 
 /*
@@ -291,9 +502,11 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
 {
     UNICODE_STRING DllName;
     HINSTANCE hInst;
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
     PWSTR SearchPath;
     ULONG DllCharacteristics = 0;
+    DWORD SearchFlags;
+    RTL_PATH_TYPE PathType;
     BOOL FreeString = FALSE;
 
     /* Check for any flags LdrLoadDll might be interested in */
@@ -304,6 +517,12 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
     }
 
     /* Build up a unicode dll name from null-terminated string */
+    if (!lpLibFileName || !*lpLibFileName)
+    {
+        SetLastError(lpLibFileName ? ERROR_MOD_NOT_FOUND : ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
     RtlInitUnicodeString(&DllName, (LPWSTR)lpLibFileName);
 
     /* Lazy-initialize BasepExeLdrEntry */
@@ -311,7 +530,7 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
         LdrEnumerateLoadedModules(0, BasepLocateExeLdrEntry, NtCurrentPeb()->ImageBaseAddress);
 
     /* Check if that module is our exe*/
-    if (BasepExeLdrEntry && !(dwFlags & LOAD_LIBRARY_AS_DATAFILE) &&
+    if (BasepExeLdrEntry && !(dwFlags & (LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE)) &&
         DllName.Length == BasepExeLdrEntry->FullDllName.Length)
     {
         /* Lengths match and it's not a datafile, so perform name comparison */
@@ -335,10 +554,48 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
         FreeString = TRUE;
     }
 
-    /* Compute the load path */
-    SearchPath = BaseComputeProcessDllPath((dwFlags & LOAD_WITH_ALTERED_SEARCH_PATH) ?
-                                           DllName.Buffer : NULL,
-                                           NULL);
+    SearchFlags = dwFlags & (LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR |
+                             LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+                             LOAD_LIBRARY_SEARCH_USER_DIRS |
+                             LOAD_LIBRARY_SEARCH_SYSTEM32 |
+                             LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+
+    if (!SearchFlags)
+        SearchFlags = BaseDefaultDllDirectoriesFlags;
+    if ((dwFlags & LOAD_WITH_ALTERED_SEARCH_PATH) && SearchFlags)
+        SearchFlags |= LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR;
+
+    if (SearchFlags & LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR)
+    {
+        PathType = RtlDetermineDosPathNameType_U(DllName.Buffer);
+        if (PathType != RtlPathTypeRooted && PathType != RtlPathTypeDriveAbsolute && PathType != RtlPathTypeUncAbsolute && PathType != RtlPathTypeLocalDevice)
+        {
+            /* Windows still returns a loaded module or a KnownDLL for a bare name */
+            if (PathType == RtlPathTypeRelative &&
+                !wcschr(DllName.Buffer, L'\\') && !wcschr(DllName.Buffer, L'/') &&
+                !(dwFlags & (LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE)))
+            {
+                Status = BasepLoadDllWithoutSearch(&DllCharacteristics, &DllName, (PVOID*)&hInst);
+            }
+            else
+            {
+                Status = STATUS_INVALID_PARAMETER;
+            }
+
+            if (FreeString) RtlFreeUnicodeString(&DllName);
+            if (!NT_SUCCESS(Status))
+            {
+                BaseSetLastNTError(Status);
+                return NULL;
+            }
+            return hInst;
+        }
+    }
+
+    if (SearchFlags)
+        SearchPath = BaseComputeSecureDllPath(DllName.Buffer, SearchFlags);
+    else
+        SearchPath = BaseComputeProcessDllPath((dwFlags & LOAD_WITH_ALTERED_SEARCH_PATH) ? DllName.Buffer : NULL, NULL);
     if (!SearchPath)
     {
         /* Getting DLL path failed, so set last error, free mem and return */
@@ -347,30 +604,30 @@ LoadLibraryExW(LPCWSTR lpLibFileName,
         return NULL;
     }
 
-    _SEH2_TRY
+    if (dwFlags & (LOAD_LIBRARY_AS_DATAFILE | LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE))
     {
-        if (dwFlags & LOAD_LIBRARY_AS_DATAFILE)
+        _SEH2_TRY
         {
             /* If the image is loaded as a datafile, try to get its handle */
             Status = LdrGetDllHandleEx(0, SearchPath, NULL, &DllName, (PVOID*)&hInst);
             if (!NT_SUCCESS(Status))
             {
                 /* It's not loaded yet - so load it up */
-                Status = BasepLoadLibraryAsDatafile(SearchPath, DllName.Buffer, &hInst);
+                Status = BasepLoadLibraryAsDatafile(SearchPath, DllName.Buffer, dwFlags, &hInst);
             }
-            _SEH2_YIELD(goto done;)
         }
-
-        /* Call the API Properly */
-        Status = LdrLoadDll(SearchPath,
-                            &DllCharacteristics,
-                            &DllName,
-                            (PVOID*)&hInst);
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        } _SEH2_END;
+        goto done;
     }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-    {
-        Status = _SEH2_GetExceptionCode();
-    } _SEH2_END;
+
+    /* Call the API Properly */
+    Status = LdrLoadDll(SearchPath,
+                        &DllCharacteristics,
+                        &DllName,
+                        (PVOID*)&hInst);
 
 
 done:
@@ -383,7 +640,33 @@ done:
     /* Set last error in failure case */
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("LoadLibraryExW(%ls) failing with status %lx\n", lpLibFileName, Status);
+        PVOID Callers[4] = { NULL };
+        ULONG CallerCount, Frame;
+
+        if (BasepIsMissingPrivateDll(lpLibFileName, Status))
+            DPRINT("LoadLibraryExW(%ls, dwFlags 0x%lx) failing with status %lx\n",
+                   lpLibFileName, dwFlags, Status);
+        else
+            DPRINT1("LoadLibraryExW(%ls, dwFlags 0x%lx) failing with status %lx\n",
+                    lpLibFileName, dwFlags, Status);
+
+        /* Log the caller chain, so the log identifies who issued the load */
+        CallerCount = RtlWalkFrameChain(Callers, RTL_NUMBER_OF(Callers), 0);
+        for (Frame = 0; Frame < CallerCount; Frame++)
+        {
+            PLDR_DATA_TABLE_ENTRY LdrEntry;
+            UNICODE_STRING ModuleName = RTL_CONSTANT_STRING(L"<unknown>");
+            ULONG_PTR Offset = 0;
+
+            if (NT_SUCCESS(LdrFindEntryForAddress(Callers[Frame], &LdrEntry)))
+            {
+                ModuleName = LdrEntry->BaseDllName;
+                Offset = (ULONG_PTR)Callers[Frame] - (ULONG_PTR)LdrEntry->DllBase;
+            }
+            DPRINT("    frame %lu: %p ('%wZ' + 0x%Ix)\n",
+                   Frame, Callers[Frame], &ModuleName, Offset);
+        }
+
         BaseSetLastNTError(Status);
         return NULL;
     }
@@ -462,15 +745,16 @@ FreeLibrary(HINSTANCE hLibModule)
     NTSTATUS Status;
     PIMAGE_NT_HEADERS NtHeaders;
 
-    if (LDR_IS_DATAFILE(hLibModule))
+    if (LDR_IS_RESOURCE(hLibModule))
     {
-        /* This is a LOAD_LIBRARY_AS_DATAFILE module, check if it's a valid one */
-        NtHeaders = RtlImageNtHeader((PVOID)((ULONG_PTR)hLibModule & ~1));
+        /* This is a datafile or image-resource module, check if it's valid. */
+        NtHeaders = RtlImageNtHeader((PVOID)((ULONG_PTR)hLibModule & ~(ULONG_PTR)3));
 
         if (NtHeaders)
         {
             /* Unmap view */
-            Status = NtUnmapViewOfSection(NtCurrentProcess(), (PVOID)((ULONG_PTR)hLibModule & ~1));
+            Status = NtUnmapViewOfSection(NtCurrentProcess(), (PVOID)((ULONG_PTR)hLibModule & ~(ULONG_PTR)3));
+            BasepCloseExclusiveDatafile(hLibModule);
 
             /* Unload alternate resource module */
             LdrUnloadAlternateResourceModule(hLibModule);
@@ -508,13 +792,13 @@ FreeLibraryAndExitThread(HMODULE hLibModule,
                          DWORD dwExitCode)
 {
 
-    if (LDR_IS_DATAFILE(hLibModule))
+    if (LDR_IS_RESOURCE(hLibModule))
     {
-        /* This is a LOAD_LIBRARY_AS_DATAFILE module */
-        if (RtlImageNtHeader((PVOID)((ULONG_PTR)hLibModule & ~1)))
+        /* This is a datafile or image-resource module. */
+        if (RtlImageNtHeader((PVOID)((ULONG_PTR)hLibModule & ~(ULONG_PTR)3)))
         {
             /* Unmap view */
-            NtUnmapViewOfSection(NtCurrentProcess(), (PVOID)((ULONG_PTR)hLibModule & ~1));
+            NtUnmapViewOfSection(NtCurrentProcess(), (PVOID)((ULONG_PTR)hLibModule & ~(ULONG_PTR)3));
 
             /* Unload alternate resource module */
             LdrUnloadAlternateResourceModule(hLibModule);
@@ -601,65 +885,33 @@ GetModuleFileNameW(HINSTANCE hModule,
                    LPWSTR lpFilename,
                    DWORD nSize)
 {
-    PLIST_ENTRY ModuleListHead, Entry;
-    PLDR_DATA_TABLE_ENTRY Module;
-    ULONG Length = 0;
-    ULONG_PTR Cookie;
-    PPEB Peb;
+    UNICODE_STRING Name;
+    NTSTATUS Status;
 
     hModule = BasepMapModuleHandle(hModule, FALSE);
-
-    /* Upscale nSize from chars to bytes */
-    nSize *= sizeof(WCHAR);
-
-    _SEH2_TRY
+    if (!hModule)
     {
-        /* We don't use per-thread cur dir now */
-        //PRTL_PERTHREAD_CURDIR PerThreadCurdir = (PRTL_PERTHREAD_CURDIR)teb->NtTib.SubSystemTib;
-
-        Peb = NtCurrentPeb ();
-
-        /* Acquire a loader lock */
-        LdrLockLoaderLock(LDR_LOCK_LOADER_LOCK_FLAG_RAISE_ON_ERRORS, NULL, &Cookie);
-
-        /* Traverse the module list */
-        ModuleListHead = &Peb->Ldr->InLoadOrderModuleList;
-        Entry = ModuleListHead->Flink;
-        while (Entry != ModuleListHead)
-        {
-            Module = CONTAINING_RECORD(Entry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
-
-            /* Check if this is the requested module */
-            if (Module->DllBase == (PVOID)hModule)
-            {
-                /* Calculate size to copy */
-                Length = min(nSize, Module->FullDllName.MaximumLength);
-
-                /* Copy contents */
-                RtlMoveMemory(lpFilename, Module->FullDllName.Buffer, Length);
-
-                /* Subtract a terminating zero */
-                if (Length == Module->FullDllName.MaximumLength)
-                    Length -= sizeof(WCHAR);
-
-                /* Break out of the loop */
-                break;
-            }
-
-            /* Advance to the next entry */
-            Entry = Entry->Flink;
-        }
+        BaseSetLastNTError(STATUS_DLL_NOT_FOUND);
+        return 0;
     }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+
+    Name.Buffer = lpFilename;
+    Name.Length = 0;
+    Name.MaximumLength = (USHORT)(min(nSize, UNICODE_STRING_MAX_CHARS) * sizeof(WCHAR));
+    Status = LdrGetDllFullName(hModule, &Name);
+    if (Status == STATUS_SUCCESS)
     {
-        BaseSetLastNTError(_SEH2_GetExceptionCode());
-        Length = 0;
-    } _SEH2_END
+        SetLastError(ERROR_SUCCESS);
+        return Name.Length / sizeof(WCHAR);
+    }
 
-    /* Release the loader lock */
-    LdrUnlockLoaderLock(LDR_UNLOCK_LOADER_LOCK_FLAG_RAISE_ON_ERRORS, Cookie);
+    BaseSetLastNTError(Status);
+    if (Status != STATUS_BUFFER_TOO_SMALL)
+        return 0;
 
-    return Length / sizeof(WCHAR);
+    if (Name.MaximumLength)
+        lpFilename[Name.MaximumLength / sizeof(WCHAR) - 1] = UNICODE_NULL;
+    return Name.MaximumLength / sizeof(WCHAR);
 }
 
 HMODULE
@@ -725,6 +977,9 @@ BasepGetModuleHandleExW(BOOLEAN NoLock, DWORD dwPublicFlags, LPCWSTR lpwModuleNa
     /* Validate parameters */
     dwValid = BasepGetModuleHandleExParameterValidation(dwPublicFlags, lpwModuleName, phModule);
     ASSERT(dwValid == BASEP_GET_MODULE_HANDLE_EX_PARAMETER_VALIDATION_CONTINUE);
+
+    if (dwPublicFlags & GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT)
+        NoLock = TRUE;
 
     /* Acquire lock if necessary */
     if (!NoLock)
@@ -813,6 +1068,9 @@ GetModuleHandleA(LPCSTR lpModuleName)
 {
     PUNICODE_STRING ModuleNameW;
     PTEB pTeb = NtCurrentTeb();
+#if defined(_M_ARM64)
+    PVOID CallerAddress = _ReturnAddress();
+#endif
 
     /* Check if we have no name to convert */
     if (!lpModuleName)
@@ -823,7 +1081,11 @@ GetModuleHandleA(LPCSTR lpModuleName)
 
     /* Call W version if conversion was successful */
     if (ModuleNameW)
+#if defined(_M_ARM64)
+        return GetModuleHandleW(BasepChpeModuleName(ModuleNameW->Buffer, CallerAddress));
+#else
         return GetModuleHandleW(ModuleNameW->Buffer);
+#endif
 
     /* Return failure */
     return 0;
@@ -843,6 +1105,10 @@ GetModuleHandleW(LPCWSTR lpModuleName)
     /* If current module is requested - return it right away */
     if (!lpModuleName)
         return ((HMODULE)NtCurrentPeb()->ImageBaseAddress);
+
+#if defined(_M_ARM64)
+    lpModuleName = BasepChpeModuleName(lpModuleName, _ReturnAddress());
+#endif
 
     /* Use common helper routine */
     Success = BasepGetModuleHandleExW(TRUE,
@@ -879,6 +1145,11 @@ GetModuleHandleExW(IN DWORD dwFlags,
     /* If result is 2, there is no need to do anything - return success. */
     if (dwValid == BASEP_GET_MODULE_HANDLE_EX_PARAMETER_VALIDATION_SUCCESS) return TRUE;
 
+#if defined(_M_ARM64)
+    if (!(dwFlags & GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS))
+        lpwModuleName = BasepChpeModuleName(lpwModuleName, _ReturnAddress());
+#endif
+
     /* Use common helper routine */
     Ret = BasepGetModuleHandleExW(FALSE,
                                   dwFlags,
@@ -900,6 +1171,9 @@ GetModuleHandleExA(IN DWORD dwFlags,
     PUNICODE_STRING lpModuleNameW;
     DWORD dwValid;
     BOOL Ret;
+#if defined(_M_ARM64)
+    PVOID CallerAddress = _ReturnAddress();
+#endif
 
     /* Validate parameters */
     dwValid = BasepGetModuleHandleExParameterValidation(dwFlags, (LPCWSTR)lpModuleName, phModule);
@@ -930,7 +1204,11 @@ GetModuleHandleExA(IN DWORD dwFlags,
         /* Call the extended version of the API */
         Ret = BasepGetModuleHandleExW(FALSE,
                                       dwFlags,
+#if defined(_M_ARM64)
+                                      BasepChpeModuleName(lpModuleNameW->Buffer, CallerAddress),
+#else
                                       lpModuleNameW->Buffer,
+#endif
                                       phModule);
     }
 
@@ -1136,7 +1414,7 @@ BaseProcessInitPostImport(VOID)
     DPRINT("Post-init called\n");
 
     /* Check if this is a terminal server */
-    if (SharedUserData->SuiteMask & VER_SUITE_TERMINAL)
+    if ((SharedUserData->SuiteMask & (VER_SUITE_TERMINAL | VER_SUITE_SINGLEUSERTS)) == VER_SUITE_TERMINAL)
     {
         /* Initialize TS pointers */
         return BasepInitializeTermsrvFpns();

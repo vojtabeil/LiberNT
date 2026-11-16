@@ -917,7 +917,9 @@ SRomReadMacAddress(
 
     /* Sanity check */
     if (*(PULONG)SRom == 0xFFFFFFFF || *(PULONG)SRom == 0)
+    {
         return FALSE;
+    }
 
     WARN("Legacy/unknown board found\n");
     MacOffset = 0;
@@ -1498,7 +1500,9 @@ DcReadEeprom(
     }
 
     if (Status != NDIS_STATUS_SUCCESS)
+    {
         return Status;
+    }
 
     INFO("MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
          Adapter->PermanentMacAddress[0],

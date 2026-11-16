@@ -9,67 +9,58 @@
 
 #include <pseh/pseh2.h>
 
+PVOID Buffers[0x100];
+
 START_TEST(RtlAllocateHeap)
 {
-    PVOID Buffers[0x100];
     USHORT i;
     HANDLE hHeap;
-    BOOLEAN Not8BytesAligned = FALSE;
-    BOOLEAN Not16BytesAligned = FALSE;
+    BOOLEAN Aligned = TRUE;
     RTL_HEAP_PARAMETERS Parameters = {0};
 
-    for (i = 0; i < ARRAYSIZE(Buffers); ++i)
+    for (i = 0; i < 0x100; ++i)
     {
-        /* RtlAllocateHeap() totally ignores HEAP_CREATE_ALIGN_16 (it's only for RtlCreateHeap() */
         Buffers[i] = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_CREATE_ALIGN_16, (i % 16 ) + 1);
         ASSERT(Buffers[i] != NULL);
-
-        if (Buffers[i] != ALIGN_DOWN_POINTER_BY(Buffers[i], 8))
-            Not8BytesAligned = TRUE;
-
-        if (Buffers[i] != ALIGN_DOWN_POINTER_BY(Buffers[i], 16))
-            Not16BytesAligned = TRUE;
+        if (!((ULONG_PTR)Buffers[i] & 0xF))
+        {
+            Aligned = FALSE;
+        }
     }
 
-    for (i = 0; i < ARRAYSIZE(Buffers); ++i)
+    for (i = 0; i < 0x100; ++i)
     {
         RtlFreeHeap(RtlGetProcessHeap(), 0, Buffers[i]);
     }
 
-    ok(Not8BytesAligned == FALSE, "Found address that was not 8 byte aligned\n");
-#ifdef _WIN64
-    ok(Not16BytesAligned == FALSE, "Found address that was not 16 byte aligned\n");
-#endif
+    ok(Aligned == FALSE, "No unaligned address returned\n");
 
-    Not16BytesAligned = FALSE;
+    Aligned = TRUE;
     Parameters.Length = sizeof(Parameters);
     hHeap = RtlCreateHeap(HEAP_CREATE_ALIGN_16, NULL, 0, 0, NULL, &Parameters);
-    ok(hHeap != NULL, "Failed to create heap!\n");
     if (hHeap == NULL)
     {
-        skip("Failed to create heap!\n");
         return;
     }
 
-    for (i = 0; i < ARRAYSIZE(Buffers); ++i)
+    for (i = 0; i < 0x100; ++i)
     {
         Buffers[i] = RtlAllocateHeap(hHeap, 0, (i % 16 ) + 1);
         ASSERT(Buffers[i] != NULL);
-
-        if (Buffers[i] != ALIGN_DOWN_POINTER_BY(Buffers[i], 16))
-            Not16BytesAligned = TRUE;
+        if ((ULONG_PTR)Buffers[i] & 0xF)
+        {
+            Aligned = FALSE;
+        }
     }
 
-    for (i = 0; i < ARRAYSIZE(Buffers); ++i)
+    for (i = 0; i < 0x100; ++i)
     {
         RtlFreeHeap(hHeap, 0, Buffers[i]);
     }
 
     RtlDestroyHeap(hHeap);
 
-    /* Windows 2003 always returns unaligned addresses */
-    ok(Not16BytesAligned == FALSE || broken(GetNTVersion() < _WIN32_WINNT_VISTA),
-       "Found address that was not 16 byte aligned\n");
+    ok(Aligned == TRUE, "Unaligned address returned\n");
 
     _SEH2_TRY
     {

@@ -17,6 +17,70 @@
 
 /* INTERNAL FUNCTIONS *******************************************************/
 
+static
+NTSTATUS
+NTAPI
+RtlpQueryEnvironmentSize(
+    _In_ PCWSTR Environment,
+    _Out_ PSIZE_T EnvironmentSize)
+{
+    MEMORY_BASIC_INFORMATION MemoryInfo;
+    ULONG_PTR BaseAddress, EnvironmentAddress;
+    SIZE_T MaximumSize, MaximumLength, Offset, Index;
+    NTSTATUS Status;
+    BOOLEAN Found = FALSE;
+
+    if (!Environment || !EnvironmentSize)
+        return STATUS_INVALID_PARAMETER;
+
+    Status = NtQueryVirtualMemory(NtCurrentProcess(),
+                                  (PVOID)Environment,
+                                  MemoryBasicInformation,
+                                  &MemoryInfo,
+                                  sizeof(MemoryInfo),
+                                  NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    BaseAddress = (ULONG_PTR)MemoryInfo.BaseAddress;
+    EnvironmentAddress = (ULONG_PTR)Environment;
+    if (EnvironmentAddress < BaseAddress)
+        return STATUS_INVALID_PARAMETER;
+
+    Offset = EnvironmentAddress - BaseAddress;
+    if (Offset >= MemoryInfo.RegionSize)
+        return STATUS_INVALID_PARAMETER;
+
+    MaximumSize = MemoryInfo.RegionSize - Offset;
+    MaximumLength = MaximumSize / sizeof(WCHAR);
+    if (MaximumLength < 2)
+        return STATUS_INVALID_PARAMETER;
+
+    _SEH2_TRY
+    {
+        for (Index = 0; Index + 1 < MaximumLength; ++Index)
+        {
+            if (Environment[Index] == UNICODE_NULL &&
+                Environment[Index + 1] == UNICODE_NULL)
+            {
+                *EnvironmentSize = (Index + 2) * sizeof(WCHAR);
+                Found = TRUE;
+                break;
+            }
+        }
+    }
+    _SEH2_EXCEPT(_SEH2_GetExceptionCode() == STATUS_ACCESS_VIOLATION)
+    {
+        Status = STATUS_ACCESS_VIOLATION;
+    }
+    _SEH2_END;
+
+    if (Found)
+        return STATUS_SUCCESS;
+
+    return NT_SUCCESS(Status) ? STATUS_INVALID_PARAMETER : Status;
+}
+
 NTSTATUS
 NTAPI
 RtlpMapFile(PUNICODE_STRING ImageFileName,
@@ -101,11 +165,9 @@ RtlpInitEnvironment(HANDLE ProcessHandle,
     /* Find the end of the Enviroment Block */
     if ((Environment = (PWCHAR)ProcessParameters->Environment))
     {
-        while (*Environment++) while (*Environment++);
-
-        /* Calculate the size of the block */
-        EnviroSize = (ULONG)((ULONG_PTR)Environment -
-                             (ULONG_PTR)ProcessParameters->Environment);
+        Status = RtlpQueryEnvironmentSize(Environment, &EnviroSize);
+        if (!NT_SUCCESS(Status))
+            return Status;
 
         /* Allocate and Initialize new Environment Block */
         Size = EnviroSize;
@@ -203,188 +265,311 @@ RtlCreateUserProcess(IN PUNICODE_STRING ImageFileName,
                      OUT PRTL_USER_PROCESS_INFORMATION ProcessInfo)
 {
     NTSTATUS Status;
-    HANDLE hSection;
-    PROCESS_BASIC_INFORMATION ProcessBasicInfo;
     OBJECT_ATTRIBUTES ObjectAttributes;
-    UNICODE_STRING DebugString = RTL_CONSTANT_STRING(L"\\WindowsSS");
     DPRINT("RtlCreateUserProcess: %wZ\n", ImageFileName);
 
-    /* Map and Load the File */
-    Status = RtlpMapFile(ImageFileName,
-                         Attributes,
-                         &hSection);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("Could not map process image\n");
-        return Status;
-    }
-
-    /* Clean out the current directory handle if we won't use it */
-    if (!InheritHandles) ProcessParameters->CurrentDirectory.Handle = NULL;
-
-    /* Use us as parent if none other specified */
-    if (!ParentProcess) ParentProcess = NtCurrentProcess();
-
-    /* Initialize the Object Attributes */
-    InitializeObjectAttributes(&ObjectAttributes,
-                               NULL,
-                               0,
-                               NULL,
-                               ProcessSecurityDescriptor);
-
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
     /*
-     * If FLG_ENABLE_CSRDEBUG is used, then CSRSS is created under the
-     * watch of WindowsSS
+     * Vista+ path: use NtCreateUserProcess which combines process and
+     * thread creation into a single kernel call.
      */
-    if ((RtlGetNtGlobalFlags() & FLG_ENABLE_CSRDEBUG) &&
-        (wcsstr(ImageFileName->Buffer, L"csrss")))
     {
-        ObjectAttributes.ObjectName = &DebugString;
-    }
+        PS_CREATE_INFO CreateInfo;
+        ULONG ProcessCreateFlags = 0;
+        ULONG AttrCount = 0;
 
-    /* Create Kernel Process Object */
-    Status = ZwCreateProcess(&ProcessInfo->ProcessHandle,
-                             PROCESS_ALL_ACCESS,
-                             &ObjectAttributes,
-                             ParentProcess,
-                             InheritHandles,
-                             hSection,
-                             DebugPort,
-                             ExceptionPort);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("Could not create Kernel Process Object\n");
-        ZwClose(hSection);
-        return Status;
-    }
+        /*
+         * We need up to 4 attributes:
+         * [0] PS_ATTRIBUTE_IMAGE_NAME (required)
+         * [1] PS_ATTRIBUTE_CLIENT_ID (output)
+         * [2] PS_ATTRIBUTE_IMAGE_INFO (output)
+         * [3] PS_ATTRIBUTE_PARENT_PROCESS (optional, if non-default)
+         */
+        ULONG_PTR AttrBuffer[sizeof(PS_ATTRIBUTE_LIST) / sizeof(ULONG_PTR) +
+                             3 * (sizeof(PS_ATTRIBUTE) / sizeof(ULONG_PTR)) + 1];
+        PPS_ATTRIBUTE_LIST AttrList = (PPS_ATTRIBUTE_LIST)AttrBuffer;
 
-    /* Get some information on the image */
-    Status = ZwQuerySection(hSection,
-                            SectionImageInformation,
-                            &ProcessInfo->ImageInformation,
-                            sizeof(SECTION_IMAGE_INFORMATION),
-                            NULL);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("Could not query Section Info\n");
-        ZwClose(ProcessInfo->ProcessHandle);
-        ZwClose(hSection);
-        return Status;
-    }
+        /*
+         * The ImageFileName passed to RtlCreateUserProcess is already an
+         * NT path (e.g. \??\C:\Windows\system32\smss.exe or
+         * \SystemRoot\system32\smss.exe), so use it directly.
+         */
 
-    /* Get some information about the process */
-    Status = ZwQueryInformationProcess(ProcessInfo->ProcessHandle,
-                                       ProcessBasicInformation,
-                                       &ProcessBasicInfo,
-                                       sizeof(ProcessBasicInfo),
-                                       NULL);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("Could not query Process Info\n");
-        ZwClose(ProcessInfo->ProcessHandle);
-        ZwClose(hSection);
-        return Status;
-    }
+        /* Clean out the current directory handle if we won't use it */
+        if (!InheritHandles) ProcessParameters->CurrentDirectory.Handle = NULL;
 
-    /* Duplicate the standard handles */
-    Status = STATUS_SUCCESS;
-    _SEH2_TRY
-    {
-        if (ProcessParameters->StandardInput)
+        /* Use us as parent if none other specified */
+        if (!ParentProcess) ParentProcess = NtCurrentProcess();
+
+        /* Set process creation flags */
+        if (InheritHandles)
+            ProcessCreateFlags |= PROCESS_CREATE_FLAGS_INHERIT_HANDLES;
+
+        /* Build attribute list */
+        AttrCount = 0;
+
+        /* Image name attribute (required) */
+        AttrList->Attributes[AttrCount].Attribute = PS_ATTRIBUTE_IMAGE_NAME;
+        AttrList->Attributes[AttrCount].Size = ImageFileName->Length;
+        AttrList->Attributes[AttrCount].ValuePtr = ImageFileName->Buffer;
+        AttrList->Attributes[AttrCount].ReturnLength = NULL;
+        AttrCount++;
+
+        /* Client ID output attribute */
+        AttrList->Attributes[AttrCount].Attribute = PS_ATTRIBUTE_CLIENT_ID;
+        AttrList->Attributes[AttrCount].Size = sizeof(ProcessInfo->ClientId);
+        AttrList->Attributes[AttrCount].ValuePtr = &ProcessInfo->ClientId;
+        AttrList->Attributes[AttrCount].ReturnLength = NULL;
+        AttrCount++;
+
+        /* Image information output attribute */
+        AttrList->Attributes[AttrCount].Attribute = PS_ATTRIBUTE_IMAGE_INFO;
+        AttrList->Attributes[AttrCount].Size = sizeof(ProcessInfo->ImageInformation);
+        AttrList->Attributes[AttrCount].ValuePtr = &ProcessInfo->ImageInformation;
+        AttrList->Attributes[AttrCount].ReturnLength = NULL;
+        AttrCount++;
+
+        /* Parent process attribute if non-default */
+        if (ParentProcess != NtCurrentProcess())
         {
-            Status = ZwDuplicateObject(ParentProcess,
-                                       ProcessParameters->StandardInput,
-                                       ProcessInfo->ProcessHandle,
-                                       &ProcessParameters->StandardInput,
-                                       0,
-                                       0,
-                                       DUPLICATE_SAME_ACCESS |
-                                       DUPLICATE_SAME_ATTRIBUTES);
-            if (!NT_SUCCESS(Status))
-            {
-                _SEH2_LEAVE;
-            }
+            AttrList->Attributes[AttrCount].Attribute = PS_ATTRIBUTE_PARENT_PROCESS;
+            AttrList->Attributes[AttrCount].Size = sizeof(HANDLE);
+            AttrList->Attributes[AttrCount].ValuePtr = ParentProcess;
+            AttrList->Attributes[AttrCount].ReturnLength = NULL;
+            AttrCount++;
         }
 
-        if (ProcessParameters->StandardOutput)
-        {
-            Status = ZwDuplicateObject(ParentProcess,
-                                       ProcessParameters->StandardOutput,
-                                       ProcessInfo->ProcessHandle,
-                                       &ProcessParameters->StandardOutput,
-                                       0,
-                                       0,
-                                       DUPLICATE_SAME_ACCESS |
-                                       DUPLICATE_SAME_ATTRIBUTES);
-            if (!NT_SUCCESS(Status))
-            {
-                _SEH2_LEAVE;
-            }
-        }
+        /* Set total length */
+        AttrList->TotalLength = FIELD_OFFSET(PS_ATTRIBUTE_LIST, Attributes) +
+                                AttrCount * sizeof(PS_ATTRIBUTE);
 
-        if (ProcessParameters->StandardError)
-        {
-            Status = ZwDuplicateObject(ParentProcess,
-                                       ProcessParameters->StandardError,
-                                       ProcessInfo->ProcessHandle,
-                                       &ProcessParameters->StandardError,
-                                       0,
-                                       0,
-                                       DUPLICATE_SAME_ACCESS |
-                                       DUPLICATE_SAME_ATTRIBUTES);
-            if (!NT_SUCCESS(Status))
-            {
-                _SEH2_LEAVE;
-            }
-        }
-    }
-    _SEH2_FINALLY
-    {
+        /* Initialize the Object Attributes */
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   NULL,
+                                   0,
+                                   NULL,
+                                   ProcessSecurityDescriptor);
+
+        /* Set up CreateInfo */
+        RtlZeroMemory(&CreateInfo, sizeof(CreateInfo));
+        CreateInfo.Size = sizeof(CreateInfo);
+        CreateInfo.State = PsCreateInitialState;
+
+        /* Normalize process parameters */
+        RtlNormalizeProcessParams(ProcessParameters);
+
+        /* Call NtCreateUserProcess */
+        Status = NtCreateUserProcess(&ProcessInfo->ProcessHandle,
+                                     &ProcessInfo->ThreadHandle,
+                                     PROCESS_ALL_ACCESS,
+                                     THREAD_ALL_ACCESS,
+                                     &ObjectAttributes,
+                                     NULL,
+                                     ProcessCreateFlags,
+                                     THREAD_CREATE_FLAGS_CREATE_SUSPENDED,
+                                     ProcessParameters,
+                                     &CreateInfo,
+                                     AttrList);
+
         if (!NT_SUCCESS(Status))
         {
+            DPRINT1("NtCreateUserProcess failed, Status=0x%lx\n", Status);
+            return Status;
+        }
+
+        /* The image's file and section come back as our handles; nothing here keeps them */
+        if (CreateInfo.SuccessState.FileHandle) NtClose(CreateInfo.SuccessState.FileHandle);
+        if (CreateInfo.SuccessState.SectionHandle) NtClose(CreateInfo.SuccessState.SectionHandle);
+
+        return STATUS_SUCCESS;
+    }
+#else
+    /*
+     * Pre-Vista path: separate NtCreateProcess + NtCreateThread calls.
+     */
+    {
+        HANDLE hSection;
+        PROCESS_BASIC_INFORMATION ProcessBasicInfo;
+        UNICODE_STRING DebugString = RTL_CONSTANT_STRING(L"\\WindowsSS");
+
+        /* Map and Load the File */
+        Status = RtlpMapFile(ImageFileName,
+                             Attributes,
+                             &hSection);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Could not map process image\n");
+            return Status;
+        }
+
+        /* Clean out the current directory handle if we won't use it */
+        if (!InheritHandles) ProcessParameters->CurrentDirectory.Handle = NULL;
+
+        /* Use us as parent if none other specified */
+        if (!ParentProcess) ParentProcess = NtCurrentProcess();
+
+        /* Initialize the Object Attributes */
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   NULL,
+                                   0,
+                                   NULL,
+                                   ProcessSecurityDescriptor);
+
+        /*
+         * If FLG_ENABLE_CSRDEBUG is used, then CSRSS is created under the
+         * watch of WindowsSS
+         */
+        if ((RtlGetNtGlobalFlags() & FLG_ENABLE_CSRDEBUG) &&
+            (wcsstr(ImageFileName->Buffer, L"csrss")))
+        {
+            ObjectAttributes.ObjectName = &DebugString;
+        }
+
+        /* Create Kernel Process Object */
+        Status = ZwCreateProcess(&ProcessInfo->ProcessHandle,
+                                 PROCESS_ALL_ACCESS,
+                                 &ObjectAttributes,
+                                 ParentProcess,
+                                 InheritHandles,
+                                 hSection,
+                                 DebugPort,
+                                 ExceptionPort);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Could not create Kernel Process Object\n");
+            ZwClose(hSection);
+            return Status;
+        }
+
+        /* Get some information on the image */
+        Status = ZwQuerySection(hSection,
+                                SectionImageInformation,
+                                &ProcessInfo->ImageInformation,
+                                sizeof(SECTION_IMAGE_INFORMATION),
+                                NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Could not query Section Info\n");
             ZwClose(ProcessInfo->ProcessHandle);
             ZwClose(hSection);
+            return Status;
         }
-    }
-    _SEH2_END;
 
-    if (!NT_SUCCESS(Status))
-        return Status;
+        /* Get some information about the process */
+        Status = ZwQueryInformationProcess(ProcessInfo->ProcessHandle,
+                                           ProcessBasicInformation,
+                                           &ProcessBasicInfo,
+                                           sizeof(ProcessBasicInfo),
+                                           NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Could not query Process Info\n");
+            ZwClose(ProcessInfo->ProcessHandle);
+            ZwClose(hSection);
+            return Status;
+        }
 
-    /* Create Process Environment */
-    Status = RtlpInitEnvironment(ProcessInfo->ProcessHandle,
-                                 ProcessBasicInfo.PebBaseAddress,
-                                 ProcessParameters);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("Could not Create Process Environment\n");
-        ZwClose(ProcessInfo->ProcessHandle);
+        /* Duplicate the standard handles */
+        Status = STATUS_SUCCESS;
+        _SEH2_TRY
+        {
+            if (ProcessParameters->StandardInput)
+            {
+                Status = ZwDuplicateObject(ParentProcess,
+                                           ProcessParameters->StandardInput,
+                                           ProcessInfo->ProcessHandle,
+                                           &ProcessParameters->StandardInput,
+                                           0,
+                                           0,
+                                           DUPLICATE_SAME_ACCESS |
+                                           DUPLICATE_SAME_ATTRIBUTES);
+                if (!NT_SUCCESS(Status))
+                {
+                    _SEH2_LEAVE;
+                }
+            }
+
+            if (ProcessParameters->StandardOutput)
+            {
+                Status = ZwDuplicateObject(ParentProcess,
+                                           ProcessParameters->StandardOutput,
+                                           ProcessInfo->ProcessHandle,
+                                           &ProcessParameters->StandardOutput,
+                                           0,
+                                           0,
+                                           DUPLICATE_SAME_ACCESS |
+                                           DUPLICATE_SAME_ATTRIBUTES);
+                if (!NT_SUCCESS(Status))
+                {
+                    _SEH2_LEAVE;
+                }
+            }
+
+            if (ProcessParameters->StandardError)
+            {
+                Status = ZwDuplicateObject(ParentProcess,
+                                           ProcessParameters->StandardError,
+                                           ProcessInfo->ProcessHandle,
+                                           &ProcessParameters->StandardError,
+                                           0,
+                                           0,
+                                           DUPLICATE_SAME_ACCESS |
+                                           DUPLICATE_SAME_ATTRIBUTES);
+                if (!NT_SUCCESS(Status))
+                {
+                    _SEH2_LEAVE;
+                }
+            }
+        }
+        _SEH2_FINALLY
+        {
+            if (!NT_SUCCESS(Status))
+            {
+                ZwClose(ProcessInfo->ProcessHandle);
+                ZwClose(hSection);
+            }
+        }
+        _SEH2_END;
+
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        /* Create Process Environment */
+        Status = RtlpInitEnvironment(ProcessInfo->ProcessHandle,
+                                     ProcessBasicInfo.PebBaseAddress,
+                                     ProcessParameters);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Could not Create Process Environment\n");
+            ZwClose(ProcessInfo->ProcessHandle);
+            ZwClose(hSection);
+            return Status;
+        }
+
+        /* Create the first Thread */
+        Status = RtlCreateUserThread(ProcessInfo->ProcessHandle,
+                                     ThreadSecurityDescriptor,
+                                     TRUE,
+                                     ProcessInfo->ImageInformation.ZeroBits,
+                                     ProcessInfo->ImageInformation.MaximumStackSize,
+                                     ProcessInfo->ImageInformation.CommittedStackSize,
+                                     ProcessInfo->ImageInformation.TransferAddress,
+                                     ProcessBasicInfo.PebBaseAddress,
+                                     &ProcessInfo->ThreadHandle,
+                                     &ProcessInfo->ClientId);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Could not Create Thread\n");
+            ZwClose(ProcessInfo->ProcessHandle);
+            ZwClose(hSection); /* Don't try to optimize this on top! */
+            return Status;
+        }
+
+        /* Close the Section Handle and return */
         ZwClose(hSection);
-        return Status;
+        return STATUS_SUCCESS;
     }
-
-    /* Create the first Thread */
-    Status = RtlCreateUserThread(ProcessInfo->ProcessHandle,
-                                 ThreadSecurityDescriptor,
-                                 TRUE,
-                                 ProcessInfo->ImageInformation.ZeroBits,
-                                 ProcessInfo->ImageInformation.MaximumStackSize,
-                                 ProcessInfo->ImageInformation.CommittedStackSize,
-                                 ProcessInfo->ImageInformation.TransferAddress,
-                                 ProcessBasicInfo.PebBaseAddress,
-                                 &ProcessInfo->ThreadHandle,
-                                 &ProcessInfo->ClientId);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("Could not Create Thread\n");
-        ZwClose(ProcessInfo->ProcessHandle);
-        ZwClose(hSection); /* Don't try to optimize this on top! */
-        return Status;
-    }
-
-    /* Close the Section Handle and return */
-    ZwClose(hSection);
-    return STATUS_SUCCESS;
+#endif /* NTDDI_VERSION >= NTDDI_LONGHORN */
 }
 
 /*
@@ -405,10 +590,14 @@ RtlEncodePointer(IN PVOID Pointer)
     if(!NT_SUCCESS(Status))
     {
         DPRINT1("Failed to receive the process cookie! Status: 0x%lx\n", Status);
-        return Pointer;
+        RtlRaiseStatus(Status);
     }
 
-    return (PVOID)((ULONG_PTR)Pointer ^ Cookie);
+#ifdef _WIN64
+    return (PVOID)(ULONG_PTR)RotateRight64((ULONG_PTR)Pointer ^ Cookie, Cookie);
+#else
+    return (PVOID)(ULONG_PTR)RotateRight32((ULONG_PTR)Pointer ^ Cookie, Cookie);
+#endif
 }
 
 /*
@@ -418,7 +607,21 @@ PVOID
 NTAPI
 RtlDecodePointer(IN PVOID Pointer)
 {
-    return RtlEncodePointer(Pointer);
+    ULONG Cookie;
+    NTSTATUS Status;
+
+    Status = ZwQueryInformationProcess(NtCurrentProcess(), ProcessCookie, &Cookie, sizeof(Cookie), NULL);
+    if(!NT_SUCCESS(Status))
+    {
+        DPRINT1("Failed to receive the process cookie! Status: 0x%lx\n", Status);
+        RtlRaiseStatus(Status);
+    }
+
+#ifdef _WIN64
+    return (PVOID)(ULONG_PTR)(RotateLeft64((ULONG_PTR)Pointer, Cookie) ^ Cookie);
+#else
+    return (PVOID)(ULONG_PTR)(RotateLeft32((ULONG_PTR)Pointer, Cookie) ^ Cookie);
+#endif
 }
 
 /*
@@ -428,7 +631,11 @@ PVOID
 NTAPI
 RtlEncodeSystemPointer(IN PVOID Pointer)
 {
-    return (PVOID)((ULONG_PTR)Pointer ^ SharedUserData->Cookie);
+#ifdef _WIN64
+    return (PVOID)(ULONG_PTR)RotateRight64((ULONG_PTR)Pointer ^ SharedUserData->Cookie, SharedUserData->Cookie);
+#else
+    return (PVOID)(ULONG_PTR)RotateRight32((ULONG_PTR)Pointer ^ SharedUserData->Cookie, SharedUserData->Cookie);
+#endif
 }
 
 /*
@@ -438,7 +645,11 @@ PVOID
 NTAPI
 RtlDecodeSystemPointer(IN PVOID Pointer)
 {
-    return RtlEncodeSystemPointer(Pointer);
+#ifdef _WIN64
+    return (PVOID)(ULONG_PTR)(RotateLeft64((ULONG_PTR)Pointer, SharedUserData->Cookie) ^ SharedUserData->Cookie);
+#else
+    return (PVOID)(ULONG_PTR)(RotateLeft32((ULONG_PTR)Pointer, SharedUserData->Cookie) ^ SharedUserData->Cookie);
+#endif
 }
 
 /*

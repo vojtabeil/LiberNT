@@ -1,10 +1,6 @@
 
 cmake_minimum_required(VERSION 3.17.0)
 
-if(NOT CMAKE_VERSION MATCHES "ReactOS")
-    message(WARNING "Building with \"${CMAKE_COMMAND}\", which is not the custom CMake included in RosBE, might cause build issues...")
-endif()
-
 include(CMakeDependentOption)
 
 # CMAKE_CROSSCOMPILING and MSVC_IDE are not set until project() is called, so let's test this instead
@@ -12,6 +8,10 @@ if ((DEFINED CMAKE_TOOLCHAIN_FILE) AND (CMAKE_GENERATOR MATCHES "Visual Studio.*
 # Do not use MSVC_RUNTIME_LIBRARY target property. We use our own flags instead
 message(WARNING "Setting policy CMP0091 to OLD behaviour")
 cmake_policy(SET CMP0091 OLD)
+endif()
+
+if(POLICY CMP0116)
+    cmake_policy(SET CMP0116 OLD)
 endif()
 
 project(REACTOS)
@@ -30,7 +30,7 @@ set(CMAKE_CXX_STANDARD 11)
 
 # check that the ARCH (target architecture) variable is defined
 if(NOT ARCH)
-    message(FATAL_ERROR "Target architecture (ARCH) is not defined. Please, choose one of: i386, amd64, arm, arm64")
+    message(FATAL_ERROR "Target architecture (ARCH) is not defined. Please, choose one of: i386, amd64, arm, arm64, riscv64, ppc")
 endif()
 # Now the ARCH variable will be in lowercase.
 # It is needed because STREQUAL comparison
@@ -40,7 +40,7 @@ endif()
 string(TOLOWER ${ARCH} ARCH)
 
 # set possible values for cmake GUI
-set_property(CACHE ARCH PROPERTY STRINGS "i386" "amd64" "arm" "arm64")
+set_property(CACHE ARCH PROPERTY STRINGS "i386" "amd64" "arm" "arm64" "riscv64" "ppc")
 
 # Alternative WinNT-compatible architecture string
 if(ARCH STREQUAL "i386")
@@ -62,8 +62,42 @@ endif()
 # Versioning
 include(sdk/include/reactos/version.cmake)
 
+# Build stamp: the branch, commit and time the build was made from. It is
+# written once here so the first compile has it, and again at every build so a
+# tree that moved is stamped with where it moved to.
+set(LIBERNT_BUILDSTAMP_HEADER "${REACTOS_BINARY_DIR}/sdk/include/reactos/buildstamp.h")
+execute_process(COMMAND ${CMAKE_COMMAND}
+    -DSOURCE_DIR=${REACTOS_SOURCE_DIR}
+    -DOUTPUT=${LIBERNT_BUILDSTAMP_HEADER}
+    -DBUILD_ARCH=${WINARCH}
+    -DCOMPILER_ID=${CMAKE_C_COMPILER_ID}
+    -P ${REACTOS_SOURCE_DIR}/sdk/cmake/buildstamp.cmake)
+add_custom_target(buildstamp ALL
+    COMMAND ${CMAKE_COMMAND}
+        -DSOURCE_DIR=${REACTOS_SOURCE_DIR}
+        -DOUTPUT=${LIBERNT_BUILDSTAMP_HEADER}
+        -DBUILD_ARCH=${WINARCH}
+        -DCOMPILER_ID=${CMAKE_C_COMPILER_ID}
+        -P ${REACTOS_SOURCE_DIR}/sdk/cmake/buildstamp.cmake
+    BYPRODUCTS ${LIBERNT_BUILDSTAMP_HEADER}
+    COMMENT "Stamping the build with its branch, commit and time"
+    VERBATIM)
+
 # Compile options
 include(sdk/cmake/config.cmake)
+
+# Derive the target NTDDI level from REACTOS_TARGET_NT for *both* the
+# cross-compile (target) build and the host-tools build below — host tools like
+# mkhive need the same NTDDI level the kernel will use so cmlib's hive-format
+# feature gates stay in sync. Mirror sdkddkver.h's WS03 default too: when the
+# selected target is 5.2, default NTDDI should be WS03SP1 rather than raw WS03.
+if(REACTOS_TARGET_NT STREQUAL "0x502")
+    set(REACTOS_TARGET_NTDDI "0x05020100")
+elseif(REACTOS_TARGET_NT STREQUAL "0xA00")
+    set(REACTOS_TARGET_NTDDI "0x0A000010")
+else()
+    math(EXPR REACTOS_TARGET_NTDDI "${REACTOS_TARGET_NT} * 65536" OUTPUT_FORMAT HEXADECIMAL)
+endif()
 
 # Compiler flags handling
 include(sdk/cmake/compilerflags.cmake)
@@ -156,12 +190,12 @@ if(NOT CMAKE_CROSSCOMPILING)
     add_subdirectory(sdk/tools)
     add_subdirectory(sdk/lib)
 
-    set(NATIVE_TARGETS asmpp bin2c widl gendib cabman fatten hpp isohybrid mkhive mkisofs obj2bin spec2def geninc mkshelllink utf16le xml2sdb)
+    set(NATIVE_TARGETS asmpp bin2c gas2armasm widl gendib cabman fatten hpp isohybrid mkhive mkisofs obj2bin spec2def geninc mkshelllink utf16le windmc xml2sdb)
+    if(NOT CMAKE_HOST_WIN32)
+        list(APPEND NATIVE_TARGETS ntfsimg)
+    endif()
     if(NOT MSVC)
-        list(APPEND NATIVE_TARGETS pefixup)
-        if (ARCH STREQUAL "i386")
-            list(APPEND NATIVE_TARGETS rsym)
-        endif()
+        list(APPEND NATIVE_TARGETS pefixup symz)
     endif()
 
     install(TARGETS ${NATIVE_TARGETS})
@@ -180,6 +214,9 @@ else()
     else()
         # Single-configuration generators, like Ninja.
         message("-- Build type: ${CMAKE_BUILD_TYPE}")
+        if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+            message(WARNING "${CMAKE_BUILD_TYPE} builds are not built by CI and are not maintained. Use a Debug build.")
+        endif()
     endif()
 
     # Always add /MT in VS CMAKE_GENERATOR and define _SBCS otherwise VS thinks it's a multi-byte or whatever project
@@ -223,27 +260,44 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
         add_definitions(-DDBG=0)
     endif()
 
+    option(PCH "Whether to use precompiled headers" OFF)
     if(ENABLE_CCACHE)
-        message(WARNING "-- Disabling precompiled headers support (ccache).")
-        option(PCH "Whether to use precompiled headers" OFF)
         set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE ccache)
-    elseif(CMAKE_C_COMPILER_ID STREQUAL "GNU")
-        message(WARNING "-- Disabling precompiled headers on GCC by default CORE-17108.")
-        option(PCH "Whether to use precompiled headers" OFF)
-    else()
-        option(PCH "Whether to use precompiled headers" ON)
     endif()
 
-    # Version Options
-    add_definitions(-DWINVER=0x502
+    # Version Options (REACTOS_TARGET_NTDDI is computed unconditionally above
+    # so host-tools see the same value).
+    math(EXPR _NT_MAJOR "${REACTOS_TARGET_NT} / 256")
+    math(EXPR _NT_MINOR "${REACTOS_TARGET_NT} % 256")
+    math(EXPR _NT_VALUE "${REACTOS_TARGET_NT} + 0")
+
+    add_definitions(-DWINVER=${REACTOS_TARGET_NT}
                     -D_WIN32_IE=0x603
-                    -D_WIN32_WINNT=0x502
-                    -D_WIN32_WINDOWS=0x502
-                    -D_SETUPAPI_VER=0x502
+                    -D_WIN32_WINNT=${REACTOS_TARGET_NT}
+                    -D_WIN32_WINDOWS=${REACTOS_TARGET_NT}
+                    -D_SETUPAPI_VER=${REACTOS_TARGET_NT}
                     -DMINGW_HAS_SECURE_API=1
-                    -DD3D_UMD_INTERFACE_VERSION=0x000C # Vista
                     -DDXGKDDI_INTERFACE_VERSION=0x1052 # Vista
-                    -DDLL_EXPORT_VERSION=${DLL_EXPORT_VERSION})
+                    -DDLL_EXPORT_VERSION=${DLL_EXPORT_VERSION}
+                    -DVER_PRODUCTMAJORVERSION=${_NT_MAJOR}
+                    -DVER_PRODUCTMINORVERSION=${_NT_MINOR})
+
+    if(REACTOS_USE_WDDM)
+        add_definitions(
+            -DD3D_UMD_INTERFACE_VERSION=${REACTOS_WDDM_EFFECTIVE_UMD_INTERFACE_VERSION})
+        add_compile_definitions(REACTOS_GRAPHICS_DRIVER_MODEL_WDDM=1)
+        message(STATUS
+            "Display driver model: WDDM ${REACTOS_WDDM_LEVEL} compatibility ceiling "
+            "(UMD ABI ${REACTOS_WDDM_EFFECTIVE_UMD_INTERFACE_VERSION})")
+    else()
+        add_definitions(-DD3D_UMD_INTERFACE_VERSION=0x000C) # Vista
+        add_compile_definitions(REACTOS_GRAPHICS_DRIVER_MODEL_XPDM=1)
+        message(STATUS "Display driver model: XPDM")
+    endif()
+
+    if(_NT_VALUE GREATER_EQUAL 2560)
+        add_definitions(-DVER_PRODUCTBUILD=26100 -DVER_PRODUCTBUILD_QFE=1)
+    endif()
 
     # Arch Options
     if(ARCH STREQUAL "i386")
@@ -263,26 +317,40 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
             add_compile_definitions(_M_AMD64 _M_X64)
         endif()
         add_definitions(-D_AMD64_ -D__x86_64__ -D_WIN64)
+        set(ARCH_64BIT TRUE)
     elseif(ARCH STREQUAL "arm")
         # _M_ARM is already defined by toolchain
         add_definitions(-D_ARM_ -D__arm__ -DWIN32)
         if(SARCH STREQUAL "omap3-zoom2")
             add_definitions(-D_ZOOM2_)
         endif()
+    elseif(ARCH STREQUAL "riscv64")
+        # Clang defines _M_RISCV64 with the Microsoft-compatible value (100).
+        add_compile_definitions(_RISCV64_ _WIN64)
+        set(ARCH_64BIT TRUE)
+    elseif(ARCH STREQUAL "ppc")
+        # Clang defines _M_PPC with the Microsoft-compatible CPU value.
+        add_compile_definitions(_PPC_ WIN32)
     elseif(ARCH STREQUAL "arm64")
-        # GNU tools refer to arm64 as aarch64
-        add_definitions(-D_ARM64_ -D__arm64__ -D__aarch64__ -D_WIN64)
+        set(ARCH_64BIT TRUE)
+        if(ARM64EC_RUNTIME)
+            # ARM64EC has the x64 ABI/type model while emitting ARM64 code.
+            # llvm-mingw defines __arm64ec__ and __x86_64__; define the MS
+            # architecture macros expected by the ReactOS/SDK headers too.
+            add_definitions(-D_AMD64_ -D_M_AMD64 -D_M_X64
+                            -D_ARM64EC_ -D_M_ARM64EC
+                            -D__arm64ec__ -D__x86_64__ -D_WIN64)
+        else()
+            # GNU tools refer to arm64 as aarch64
+            add_definitions(-D_ARM64_ -D_M_ARM64 -D__arm64__ -D__aarch64__ -D_WIN64)
+        endif()
     endif()
 
     # Other
     add_definitions(-D_NEW_DELETE_OPERATORS_)
     if(ARCH STREQUAL "i386")
         add_definitions(-DUSE_COMPILER_EXCEPTIONS -D_USE_32BIT_TIME_T)
-    elseif(ARCH STREQUAL "amd64")
-        add_compile_definitions(USE_COMPILER_EXCEPTIONS)
-    elseif(ARCH STREQUAL "arm")
-        add_compile_definitions(USE_COMPILER_EXCEPTIONS)
-    elseif(ARCH STREQUAL "arm64")
+    else()
         add_compile_definitions(USE_COMPILER_EXCEPTIONS)
     endif()
 
@@ -305,6 +373,9 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
     # Compiler specific definitions and macros
     if(MSVC)
         include(sdk/cmake/msvc.cmake)
+    elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        set(_REACTOS_CLANG_BUILD_CONFIG TRUE)
+        include(sdk/cmake/clang.cmake)
     else()
         include(sdk/cmake/gcc.cmake)
     endif()
@@ -315,6 +386,8 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
     # IDL macros for widl/midl
     # We're using widl now for both MSVC and GCC builds
     include(sdk/cmake/widl-support.cmake)
+
+    include(sdk/cmake/rv64x.cmake)
 
     include_directories(
         sdk/include
@@ -344,16 +417,6 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
 
     add_subdirectory(sdk/include)
 
-    if(ARCH MATCHES "64$")
-        include(sdk/cmake/baseaddress64.cmake)
-    elseif(NO_ROSSYM)
-        include(sdk/cmake/baseaddress_dwarf.cmake)
-    elseif(MSVC)
-        include(sdk/cmake/baseaddress_msvc.cmake)
-    else()
-        include(sdk/cmake/baseaddress.cmake)
-    endif()
-
     # For MSVC builds, this puts all debug symbols file in the same directory.
     if(MSVC)
         set(CMAKE_PDB_OUTPUT_DIRECTORY "${REACTOS_BINARY_DIR}/msvc_pdb")
@@ -361,24 +424,48 @@ Enable this if the module uses typeid or dynamic_cast. You will probably need to
         set(CMAKE_PDB_OUTPUT_DIRECTORY "${REACTOS_BINARY_DIR}/symbols")
     endif()
 
+    add_custom_target(submodules)
+
     #begin with boot so reactos_cab target is defined before all other modules
     add_subdirectory(boot)
+    add_subdirectory(bootloader)
     add_subdirectory(base)
     add_subdirectory(dll)
+    set(FEX_ARM64EC_AVAILABLE OFF)
+    add_subdirectory(submodules)
     add_subdirectory(drivers)
     add_subdirectory(hal)
     add_subdirectory(sdk/lib)
     add_subdirectory(media)
     add_subdirectory(modules)
-    add_subdirectory(ntoskrnl)
+    add_subdirectory(ntos)
     add_subdirectory(subsystems)
     add_subdirectory(sdk/tools/wpp)
-    add_subdirectory(win32ss)
+
+    if(ARCH STREQUAL "arm64" AND ENABLE_FEX_ARM64EC AND FEX_ARM64EC_AVAILABLE AND NOT ARM64EC_RUNTIME)
+        include(sdk/cmake/arm64ec.cmake)
+        include(sdk/cmake/fex_amd64.cmake)
+    endif()
+
+    # PreLoad.cmake runs apply.cmake only as an initial-cache script, so the
+    # profile package list and validation helper must be (re)loaded here.
+    include(sdk/cmake/rosconfig/profiles/apply.cmake)
+    rosconfig_validate_profile_packages()
+
+    if(ENABLE_WOW64)
+        include(sdk/cmake/wow64.cmake)
+    endif()
+
+    if(TARGET amd64emu)
+        include(sdk/cmake/emu_amd64.cmake)
+    endif()
+
+    include(sdk/cmake/ci.cmake)
 
     # Create the registry hives
     create_registry_hives()
 
-    # Create {bootcd, bootcdregtest, livecd}.lst
+    # Create {bootcd, livecd, preinstall}.lst
     create_iso_lists()
 
     file(MAKE_DIRECTORY ${REACTOS_BINARY_DIR}/sdk/include/reactos)

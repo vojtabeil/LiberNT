@@ -15,6 +15,7 @@ add_importlibs(msi_selfreg advapi32 msvcrt kernel32)
 list(APPEND SOURCE
     action.c
     automation.c
+    customserver.c
     db.c
     format.c
     install.c
@@ -46,8 +47,7 @@ add_typelib(typelib.idl)
 target_compile_definitions(msi_winetest PRIVATE __WINESRC__ USE_WINE_TODOS strcasecmp=_stricmp)
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(msi_winetest PRIVATE -Wno-format-overflow -Wno-format)
-    target_compile_options(msi_custom PRIVATE -Wno-format)
+    target_compile_options(msi_winetest PRIVATE -Wno-format-overflow)
 endif()
 
 if (MSVC)

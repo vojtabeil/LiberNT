@@ -34,7 +34,7 @@
 @ stub DeviceRenameEvent
 @ stdcall DisassociateColorProfileFromDeviceA(str str str)
 @ stdcall DisassociateColorProfileFromDeviceW(wstr wstr wstr)
-#@ stub DllCanUnloadNow
+@ stdcall -private DllCanUnloadNow()
 #@ stub DllGetClassObject
 @ stdcall EnumColorProfilesA(str ptr ptr ptr ptr)
 @ stdcall EnumColorProfilesW(wstr ptr ptr ptr ptr)
@@ -84,22 +84,22 @@
 @ stdcall UninstallColorProfileW(wstr wstr long)
 @ stdcall UnregisterCMMA(str long)
 @ stdcall UnregisterCMMW(wstr long)
-@ stub WcsAssociateColorProfileWithDevice
+@ stdcall WcsAssociateColorProfileWithDevice(long wstr wstr)
 @ stub WcsCheckColors
-@ stub WcsCreateIccProfile
-@ stub WcsDisassociateColorProfileFromDevice
+@ stdcall WcsCreateIccProfile(ptr long)
+@ stdcall WcsDisassociateColorProfileFromDevice(long wstr wstr)
 @ stub WcsEnumColorProfiles
 @ stdcall WcsEnumColorProfilesSize(long ptr ptr)
-@ stub WcsGetCalibrationManagementState
-@ stub WcsGetDefaultColorProfile
-@ stub WcsGetDefaultColorProfileSize
-@ stub WcsGetDefaultRenderingIntent
+@ stdcall WcsGetCalibrationManagementState(ptr)
+@ stdcall WcsGetDefaultColorProfile(long wstr long long long long wstr)
+@ stdcall WcsGetDefaultColorProfileSize(long wstr long long long ptr)
+@ stdcall WcsGetDefaultRenderingIntent(long ptr)
 @ stdcall WcsGetUsePerUserProfiles(wstr long ptr)
 @ stub WcsGpCanInstallOrUninstallProfiles
 @ stdcall WcsOpenColorProfileA(ptr ptr ptr long long long long)
 @ stdcall WcsOpenColorProfileW(ptr ptr ptr long long long long)
 @ stub WcsSetCalibrationManagementState
-@ stub WcsSetDefaultColorProfile
+@ stdcall WcsSetDefaultColorProfile(long wstr long long long wstr)
 @ stub WcsSetDefaultRenderingIntent
 @ stub WcsSetUsePerUserProfiles
 @ stub WcsTranslateColors

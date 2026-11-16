@@ -42,7 +42,7 @@
 DWORD NFS41D_VERSION = 0;
 
 #ifndef __REACTOS__
-static const char FILE_NETCONFIG[] = "C:\\ReactOS\\System32\\drivers\\etc\\netconfig";
+static const char FILE_NETCONFIG[] = "C:\\Windows\\System32\\drivers\\etc\\netconfig";
 #endif
 
 /* Globals */
@@ -441,7 +441,7 @@ VOID ServiceStart(DWORD argc, LPTSTR *argv)
 
 #ifdef _DEBUG
     /* dump memory leaks to stderr on exit; this requires the debug heap,
-    /* available only when built in debug mode under visual studio -cbodley */
+     * available only when built in debug mode under visual studio -cbodley */
     _CrtSetDbgFlag(_CRTDBG_ALLOC_MEM_DF | _CRTDBG_LEAK_CHECK_DF);
     _CrtSetReportMode(_CRT_WARN, _CRTDBG_MODE_FILE);
 #pragma warning (push)

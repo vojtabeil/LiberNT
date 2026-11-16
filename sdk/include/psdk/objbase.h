@@ -486,6 +486,19 @@ CoGetStandardMarshal(
   _In_ DWORD mshlflags,
   _Outptr_ LPMARSHAL *ppMarshal);
 
+typedef enum tagSTDMSHLFLAGS
+{
+  SMEXF_SERVER = 0x01,
+  SMEXF_HANDLER = 0x02
+} STDMSHLFLAGS;
+
+HRESULT
+WINAPI
+CoGetStdMarshalEx(
+  _In_ LPUNKNOWN pUnkOuter,
+  _In_ DWORD smexflags,
+  _Outptr_ LPUNKNOWN *ppUnkInner);
+
 HRESULT WINAPI CoMarshalHresult(_In_ LPSTREAM pstm, _In_ HRESULT hresult);
 
 _Check_return_
@@ -535,6 +548,14 @@ CoLockObjectExternal(
   _In_ BOOL fLastUnlockReleases);
 
 BOOL WINAPI CoIsHandlerConnected(_In_ LPUNKNOWN pUnk);
+
+_Check_return_
+HRESULT
+WINAPI
+CoCancelCall(
+  _In_ DWORD dwThreadId,
+  _In_ ULONG ulTimeout
+);
 
 _Check_return_
 HRESULT

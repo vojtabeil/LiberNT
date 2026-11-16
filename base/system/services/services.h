@@ -55,6 +55,9 @@ typedef struct _SERVICE_IMAGE
     DWORD dwProcessId;
     HANDLE hToken;
     HANDLE hProfile;
+    ULONG ImageSerial;
+    BOOL bProcessWatched;
+    BOOL bStopping;
 } SERVICE_IMAGE, *PSERVICE_IMAGE;
 
 
@@ -76,6 +79,8 @@ typedef struct _SERVICE
 
     DWORD dwServiceBits;
     DWORD dwServiceTag;
+    DWORD dwFailureCount;
+    ULONGLONG ullLastFailureTime;
 
     ULONG Flags;
 
@@ -83,17 +88,28 @@ typedef struct _SERVICE
 
     BOOLEAN ServiceVisited;
 
+    LIST_ENTRY HandleListHead;
+
     WCHAR szServiceName[1];
 } SERVICE, *PSERVICE;
 
 
 #define LOCK_TAG 0x4C697041 /* 'ApiL' */
 
+typedef struct _SERVICE_FAILURE_ACTIONS_VALUE
+{
+    DWORD dwResetPeriod;
+    DWORD lpRebootMsg;
+    DWORD lpCommand;
+    DWORD cActions;
+    DWORD lpsaActions;
+} SERVICE_FAILURE_ACTIONS_VALUE, *PSERVICE_FAILURE_ACTIONS_VALUE;
+
 typedef struct _START_LOCK
 {
     DWORD Tag;             /* Must be LOCK_TAG */
     DWORD TimeWhenLocked;  /* Number of seconds since 1970 */
-    PSID LockOwnerSid;     /* It is NULL if the SCM acquired the lock */
+    WCHAR LockOwner[ANYSIZE_ARRAY];
 } START_LOCK, *PSTART_LOCK;
 
 
@@ -183,6 +199,7 @@ DWORD ScmCreateServiceDatabase(VOID);
 VOID ScmShutdownServiceDatabase(VOID);
 VOID ScmGetBootAndSystemDriverState(VOID);
 VOID ScmAutoStartServices(VOID);
+VOID ScmLoadSystemProfile(VOID);
 VOID ScmAutoShutdownServices(VOID);
 DWORD ScmStartService(PSERVICE Service,
                       DWORD argc,
@@ -192,9 +209,12 @@ DWORD ScmReferenceService(PSERVICE lpService);
 DWORD ScmDereferenceService(PSERVICE lpService);
 
 VOID ScmRemoveServiceImage(PSERVICE_IMAGE pServiceImage);
+DWORD ScmRunServiceCommand(PSERVICE pService, LPWSTR lpCommandLine);
+BOOL ScmImageHasServices(PSERVICE_IMAGE pServiceImage);
 PSERVICE ScmGetServiceEntryByName(LPCWSTR lpServiceName);
 PSERVICE ScmGetServiceEntryByDisplayName(LPCWSTR lpDisplayName);
 PSERVICE ScmGetServiceEntryByResumeCount(DWORD dwResumeCount);
+PSERVICE ScmGetServiceEntryByStatusHandle(DWORD hServiceStatus);
 DWORD ScmCreateNewServiceRecord(LPCWSTR lpServiceName,
                                 PSERVICE *lpServiceRecord,
                                 DWORD dwServiceType,
@@ -215,7 +235,7 @@ ScmControlServiceEx(
     _In_ HANDLE hControlPipe,
     _In_ PCWSTR pServiceName,
     _In_ DWORD dwControl,
-    _In_ SERVICE_STATUS_HANDLE hServiceStatus,
+    _In_ DWORD hServiceStatus,
     _In_opt_ DWORD dwServiceTag,
     _In_opt_ DWORD argc,
     _In_reads_opt_(argc) const PCWSTR* argv);
@@ -225,7 +245,7 @@ ScmControlService(
     _In_ HANDLE hControlPipe,
     _In_ PCWSTR pServiceName,
     _In_ DWORD dwControl,
-    _In_ SERVICE_STATUS_HANDLE hServiceStatus);
+    _In_ DWORD hServiceStatus);
 
 BOOL ScmLockDatabaseExclusive(VOID);
 BOOL ScmLockDatabaseShared(VOID);
@@ -247,6 +267,19 @@ DWORD ScmControlDriver(PSERVICE lpService,
                        LPSERVICE_STATUS lpServiceStatus);
 
 
+/* failure.c */
+
+VOID ScmServiceFailure(PSERVICE lpService, BOOL bCrashed);
+
+
+/* trigger.c */
+
+DWORD ScmSetServiceTriggers(HKEY hServiceKey, const SERVICE_TRIGGER_INFO *lpInfo);
+DWORD ScmQueryServiceTriggers(HKEY hServiceKey, LPBYTE lpBuffer, DWORD cbBufSize, LPDWORD pcbBytesNeeded);
+VOID ScmStartTriggers(VOID);
+VOID ScmTriggersChanged(VOID);
+
+
 /* groupdb.c */
 
 PSERVICE_GROUP
@@ -263,13 +296,24 @@ DWORD ScmSetServiceGroup(PSERVICE lpService,
 DWORD ScmAcquireServiceStartLock(IN BOOL IsServiceController,
                                  OUT LPSC_RPC_LOCK lpLock);
 DWORD ScmReleaseServiceStartLock(IN OUT LPSC_RPC_LOCK lpLock);
-VOID ScmQueryServiceLockStatusW(OUT LPQUERY_SERVICE_LOCK_STATUSW lpLockStatus);
-VOID ScmQueryServiceLockStatusA(OUT LPQUERY_SERVICE_LOCK_STATUSA lpLockStatus);
+DWORD ScmQueryServiceLockStatusW(OUT LPQUERY_SERVICE_LOCK_STATUSW lpLockStatus,
+                                 IN DWORD cbBufSize,
+                                 OUT LPDWORD pcbBytesNeeded);
+DWORD ScmQueryServiceLockStatusA(OUT LPQUERY_SERVICE_LOCK_STATUSA lpLockStatus,
+                                 IN DWORD cbBufSize,
+                                 OUT LPDWORD pcbBytesNeeded);
 
 
 /* rpcserver.c */
 
 VOID ScmStartRpcServer(VOID);
+VOID ScmInitServiceNotify(VOID);
+VOID ScmNotifyServiceStatus(PSERVICE lpService);
+extern CRITICAL_SECTION ScmStatusChangeLock;
+extern CONDITION_VARIABLE ScmStatusChanged;
+DWORD ScmReadFailureActions(HKEY hServiceKey,
+                            PSERVICE_FAILURE_ACTIONS_VALUE *lpValue,
+                            LPDWORD lpActionCount);
 
 
 /* security.c */

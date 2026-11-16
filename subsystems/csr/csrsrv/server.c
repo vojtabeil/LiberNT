@@ -18,9 +18,16 @@
 /* DATA ***********************************************************************/
 
 PCSR_SERVER_DLL CsrLoadedServerDll[CSR_SERVER_DLL_MAX];
+#ifdef _WIN64
+#define CSR_WOW64_ADDRESS_LIMIT    0x80000000ULL
+#define CSR_WOW64_RESERVED_TAIL    0x00100000ULL
+#define MM_ALLOCATION_GRANULARITY  0x10000
+#endif
+
 PVOID CsrSrvSharedSectionHeap = NULL;
 PVOID CsrSrvSharedSectionBase = NULL;
 PVOID *CsrSrvSharedStaticServerData = NULL;
+PULONG CsrSrvSharedStaticServerData32 = NULL;
 ULONG CsrSrvSharedSectionSize = 0;
 HANDLE CsrSrvSharedSection = NULL;
 
@@ -189,6 +196,7 @@ CsrLoadServerDll(IN PCHAR DllString,
     ServerDll->Length = Size;
     ServerDll->SizeOfProcessData = 0;
     ServerDll->SharedSection = CsrSrvSharedSectionHeap; // Send to the server dll our shared heap pointer.
+    ServerDll->SharedSection32 = CsrSrvSharedSectionHeap;
     ServerDll->Name.Length = DllName.Length;
     ServerDll->Name.MaximumLength = DllName.MaximumLength;
     ServerDll->Name.Buffer = (PCHAR)(ServerDll + 1);
@@ -257,6 +265,7 @@ CsrLoadServerDll(IN PCHAR DllString,
                 /* No, save the pointer to its shared section in our list */
                 CsrSrvSharedStaticServerData[ServerDll->ServerId] = ServerDll->SharedSection;
             }
+            if (ServerDll->SharedSection32 != CsrSrvSharedSectionHeap) CsrSrvSharedStaticServerData32[ServerDll->ServerId] = PtrToUlong(ServerDll->SharedSection32);
         }
     }
 
@@ -366,6 +375,13 @@ CsrSrvCreateSharedSection(IN PCHAR ParameterValue)
     LARGE_INTEGER SectionSize;
     SIZE_T ViewSize = 0;
     PPEB Peb = NtCurrentPeb();
+#ifdef _WIN64
+    ULONG AllocationAttributes = SEC_RESERVE;
+    ULONG_PTR ZeroBits = 0x7fffffff;
+#else
+    ULONG AllocationAttributes = SEC_BASED | SEC_RESERVE;
+    ULONG_PTR ZeroBits = 0;
+#endif
 
     /* If there's no parameter, fail */
     if (!ParameterValue) return STATUS_INVALID_PARAMETER;
@@ -397,32 +413,36 @@ CsrSrvCreateSharedSection(IN PCHAR ParameterValue)
     /* Create the Secion */
     SectionSize.LowPart = CsrSrvSharedSectionSize;
     SectionSize.HighPart = 0;
-    Status = NtCreateSection(&CsrSrvSharedSection,
-                             SECTION_ALL_ACCESS,
-                             NULL,
-                             &SectionSize,
-                             PAGE_EXECUTE_READWRITE,
-                             SEC_BASED | SEC_RESERVE,
-                             NULL);
+    Status = NtCreateSection(&CsrSrvSharedSection, SECTION_ALL_ACCESS, NULL, &SectionSize, PAGE_EXECUTE_READWRITE, AllocationAttributes, NULL);
     if (!NT_SUCCESS(Status)) return Status;
 
     /* Map the section */
-    Status = NtMapViewOfSection(CsrSrvSharedSection,
-                                NtCurrentProcess(),
-                                &CsrSrvSharedSectionBase,
-                                0,
-                                0,
-                                NULL,
-                                &ViewSize,
-                                ViewUnmap,
-                                MEM_TOP_DOWN,
-                                PAGE_EXECUTE_READWRITE);
+    Status = NtMapViewOfSection(CsrSrvSharedSection, NtCurrentProcess(), &CsrSrvSharedSectionBase, ZeroBits, 0, NULL, &ViewSize, ViewUnmap, MEM_TOP_DOWN, PAGE_EXECUTE_READWRITE);
     if (!NT_SUCCESS(Status))
     {
         /* Fail */
         NtClose(CsrSrvSharedSection);
         return Status;
     }
+
+#ifdef _WIN64
+    if ((ULONG_PTR)CsrSrvSharedSectionBase + CsrSrvSharedSectionSize >
+        CSR_WOW64_ADDRESS_LIMIT - CSR_WOW64_RESERVED_TAIL)
+    {
+        NtUnmapViewOfSection(NtCurrentProcess(), CsrSrvSharedSectionBase);
+
+        CsrSrvSharedSectionBase =
+            (PVOID)ALIGN_DOWN_BY(CSR_WOW64_ADDRESS_LIMIT - CSR_WOW64_RESERVED_TAIL - CsrSrvSharedSectionSize,
+                                 MM_ALLOCATION_GRANULARITY);
+        ViewSize = 0;
+        Status = NtMapViewOfSection(CsrSrvSharedSection, NtCurrentProcess(), &CsrSrvSharedSectionBase, 0, 0, NULL, &ViewSize, ViewUnmap, 0, PAGE_EXECUTE_READWRITE);
+        if (!NT_SUCCESS(Status))
+        {
+            NtClose(CsrSrvSharedSection);
+            return Status;
+        }
+    }
+#endif
 
     /* FIXME: Write the value to registry */
 
@@ -449,9 +469,17 @@ CsrSrvCreateSharedSection(IN PCHAR ParameterValue)
                                                    CSR_SERVER_DLL_MAX * sizeof(PVOID));
     if (!CsrSrvSharedStaticServerData) return STATUS_NO_MEMORY;
 
+    CsrSrvSharedStaticServerData32 = RtlAllocateHeap(CsrSrvSharedSectionHeap, HEAP_ZERO_MEMORY, CSR_SERVER_DLL_MAX * sizeof(ULONG));
+    if (!CsrSrvSharedStaticServerData32) return STATUS_NO_MEMORY;
+
     /* Write the values to the PEB */
     Peb->ReadOnlySharedMemoryBase = CsrSrvSharedSectionBase;
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    /* ReadOnlySharedMemoryHeap was replaced by HotpatchInformation at Vista */
+    Peb->HotpatchInformation = CsrSrvSharedSectionHeap;
+#else
     Peb->ReadOnlySharedMemoryHeap = CsrSrvSharedSectionHeap;
+#endif
     Peb->ReadOnlyStaticServerData = CsrSrvSharedStaticServerData;
 
     /* Return */
@@ -486,7 +514,7 @@ CsrSrvAttachSharedSection(IN PCSR_PROCESS CsrProcess OPTIONAL,
     SIZE_T ViewSize = 0;
 
     /* Check if we have a process */
-    if (CsrProcess)
+    if (CsrProcess && !(CsrProcess->Flags & CsrProcessSharedSectionMapped))
     {
         /* Map the section into this process */
         Status = NtMapViewOfSection(CsrSrvSharedSection,
@@ -498,14 +526,15 @@ CsrSrvAttachSharedSection(IN PCSR_PROCESS CsrProcess OPTIONAL,
                                     &ViewSize,
                                     ViewUnmap,
                                     SEC_NO_CHANGE,
-                                    PAGE_EXECUTE_READ);
+                                    PAGE_READONLY);
         if (!NT_SUCCESS(Status)) return Status;
+        CsrProcess->Flags |= CsrProcessSharedSectionMapped;
     }
 
     /* Write the values in the Connection Info structure */
     ConnectInfo->SharedSectionBase = CsrSrvSharedSectionBase;
     ConnectInfo->SharedSectionHeap = CsrSrvSharedSectionHeap;
-    ConnectInfo->SharedStaticServerData = CsrSrvSharedStaticServerData;
+    ConnectInfo->SharedStaticServerData = (CsrProcess && (CsrProcess->Flags & CsrProcessIsWow64)) ? (PVOID)CsrSrvSharedStaticServerData32 : (PVOID)CsrSrvSharedStaticServerData;
 
     /* Return success */
     return STATUS_SUCCESS;

@@ -12,6 +12,9 @@
 
 #include "MmMapLockedPagesSpecifyCache.h"
 
+C_ASSERT(MdlMappingNoWrite == TEST_MDL_MAPPING_NO_WRITE);
+C_ASSERT(MdlMappingNoExecute == TEST_MDL_MAPPING_NO_EXECUTE);
+
 static KMT_IRP_HANDLER TestIrpHandler;
 static KMT_MESSAGE_HANDLER TestMessageHandler;
 
@@ -19,6 +22,112 @@ static PVOID CurrentBuffer;
 static PMDL CurrentMdl;
 static PVOID CurrentUser;
 static SIZE_T NonCachedLength;
+static PMDL ExitMdl;
+static PVOID ExitKernelAddress;
+static PEPROCESS ExitProcess;
+
+static VOID
+TestFreeExitBuffer(VOID)
+{
+    if (ExitKernelAddress != NULL)
+    {
+        MmUnmapLockedPages(ExitKernelAddress, ExitMdl);
+        ExitKernelAddress = NULL;
+    }
+    if (ExitMdl != NULL)
+    {
+        MmFreePagesFromMdl(ExitMdl);
+        ExFreePool(ExitMdl);
+        ExitMdl = NULL;
+    }
+    if (ExitProcess != NULL)
+    {
+        ObDereferenceObject(ExitProcess);
+        ExitProcess = NULL;
+    }
+}
+
+static NTSTATUS
+TestMapExitBuffer(PEXIT_BUFFER Request)
+{
+    PHYSICAL_ADDRESS Low = {{0}};
+    PHYSICAL_ADDRESS High;
+    PHYSICAL_ADDRESS Skip = {{0}};
+    KAPC_STATE ApcState;
+    NTSTATUS Status;
+    ULONG Index;
+
+    if (ExitMdl != NULL || ExitProcess != NULL || Request->Length == 0 ||
+        Request->Length > 16 * 1024 * 1024 || (Request->Length % PAGE_SIZE) != 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    Request->Address = NULL;
+    Status = ObReferenceObjectByHandle(Request->Process, PROCESS_VM_OPERATION,
+                                      *PsProcessType, UserMode,
+                                      (PVOID *)&ExitProcess, NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    High.QuadPart = MAXLONGLONG;
+    ExitMdl = MmAllocatePagesForMdl(Low, High, Skip, Request->Length);
+    if (ExitMdl == NULL || MmGetMdlByteCount(ExitMdl) != Request->Length)
+    {
+        TestFreeExitBuffer();
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    ExitKernelAddress = MmMapLockedPagesSpecifyCache(ExitMdl, KernelMode,
+        MmCached, NULL, FALSE, NormalPagePriority);
+    if (ExitKernelAddress == NULL)
+    {
+        TestFreeExitBuffer();
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    for (Index = 0; Index < Request->Length / sizeof(ULONG); ++Index)
+        ((PULONG)ExitKernelAddress)[Index] = Request->Pattern;
+
+    KeStackAttachProcess((PRKPROCESS)ExitProcess, &ApcState);
+    _SEH2_TRY
+    {
+        Request->Address = MmMapLockedPagesSpecifyCache(ExitMdl, UserMode,
+            MmCached, NULL, FALSE, NormalPagePriority);
+        Status = Request->Address != NULL ? STATUS_SUCCESS : STATUS_INSUFFICIENT_RESOURCES;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+    KeUnstackDetachProcess(&ApcState);
+    if (!NT_SUCCESS(Status))
+        TestFreeExitBuffer();
+    return Status;
+}
+
+static NTSTATUS
+TestCheckExitBuffer(PEXIT_BUFFER Request)
+{
+    LARGE_INTEGER Timeout = {{0}};
+    NTSTATUS Status;
+    ULONG Index;
+    ULONG Mismatches = 0;
+
+    if (ExitMdl == NULL || ExitProcess == NULL || ExitKernelAddress == NULL)
+        return STATUS_INVALID_PARAMETER;
+    /* A signaled process has finished tearing down its address space. The
+     * MDL and backing remain held by this driver throughout that teardown. */
+    Status = KeWaitForSingleObject(ExitProcess, Executive, KernelMode, FALSE, &Timeout);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (Status != STATUS_SUCCESS)
+        return STATUS_DEVICE_BUSY;
+    for (Index = 0; Index < MmGetMdlByteCount(ExitMdl) / sizeof(ULONG); ++Index)
+        Mismatches += ((PULONG)ExitKernelAddress)[Index] != Request->Pattern;
+    ok_eq_ulong(Mismatches, 0);
+    trace("MDL process exit: retained %lu bytes, %lu mismatches\n",
+          MmGetMdlByteCount(ExitMdl), Mismatches);
+    TestFreeExitBuffer();
+    return STATUS_SUCCESS;
+}
 
 NTSTATUS
 TestEntry(
@@ -75,17 +184,9 @@ TestCleanEverything(VOID)
         CurrentUser = NULL;
     }
 
-    SehStatus = STATUS_SUCCESS;
-    _SEH2_TRY
-    {
-        MmUnlockPages(CurrentMdl);
-    }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-    {
-        SehStatus = _SEH2_GetExceptionCode();
-    }
-    _SEH2_END;
-    ok_eq_hex(SehStatus, STATUS_SUCCESS);
+    /* The kernel buffer stays resident until its owning allocation is freed. */
+    ok((CurrentMdl->MdlFlags & MDL_SOURCE_IS_NONPAGED_POOL) != 0,
+       "Expected an MDL describing owned nonpaged memory\n");
     IoFreeMdl(CurrentMdl);
     if (NonCachedLength)
     {
@@ -160,17 +261,10 @@ TestMessageHandler(
                         {
                             KIRQL Irql;
 
-                            SehStatus = STATUS_SUCCESS;
-                            _SEH2_TRY
-                            {
-                                MmProbeAndLockPages(CurrentMdl, KernelMode, IoWriteAccess);
-                            }
-                            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-                            {
-                                SehStatus = _SEH2_GetExceptionCode();
-                            }
-                            _SEH2_END;
-                            ok_eq_hex(SehStatus, STATUS_SUCCESS);
+                            /* Both allocation paths return nonpaged kernel memory. */
+                            MmBuildMdlForNonPagedPool(CurrentMdl);
+                            ok((CurrentMdl->MdlFlags & MDL_SOURCE_IS_NONPAGED_POOL) != 0,
+                               "Nonpaged MDL flag was not set\n");
 
                             Irql = KeGetCurrentIrql();
                             ok(Irql <= APC_LEVEL, "IRQL > APC_LEVEL: %d\n", Irql);
@@ -178,7 +272,7 @@ TestMessageHandler(
                             SehStatus = STATUS_SUCCESS;
                             _SEH2_TRY
                             {
-                                CurrentUser = MmMapLockedPagesSpecifyCache(CurrentMdl, UserMode, CacheType, QueryBuffer->Buffer, FALSE, NormalPagePriority);
+                                CurrentUser = MmMapLockedPagesSpecifyCache(CurrentMdl, UserMode, CacheType, QueryBuffer->Buffer, FALSE, NormalPagePriority | QueryBuffer->MappingFlags);
                             }
                             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
                             {
@@ -251,6 +345,20 @@ TestMessageHandler(
         case IOCTL_CLEAN:
         {
             TestCleanEverything();
+            break;
+        }
+        case IOCTL_MAP_EXIT_BUFFER:
+        case IOCTL_CHECK_EXIT_BUFFER:
+        {
+            if (Buffer == NULL || InLength != sizeof(EXIT_BUFFER) ||
+                *OutLength < sizeof(EXIT_BUFFER))
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+            Status = ControlCode == IOCTL_MAP_EXIT_BUFFER ?
+                TestMapExitBuffer(Buffer) : TestCheckExitBuffer(Buffer);
+            *OutLength = sizeof(EXIT_BUFFER);
             break;
         }
         default:

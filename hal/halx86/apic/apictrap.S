@@ -15,9 +15,10 @@
 #include <trapamd64.inc>
 .code
 
-TRAP_ENTRY HalpClockInterrupt, TF_SEND_EOI
-TRAP_ENTRY HalpClockIpi, TF_SEND_EOI
-TRAP_ENTRY HalpProfileInterrupt, TF_SEND_EOI
+/* The clock and profile handlers send their own EOI. */
+TRAP_ENTRY HalpClockInterrupt, 0
+TRAP_ENTRY HalpClockIpi, 0
+TRAP_ENTRY HalpProfileInterrupt, 0
 
 PUBLIC ApicSpuriousService
 ApicSpuriousService:
@@ -34,6 +35,7 @@ TRAP_ENTRY HalpProfileInterrupt, KI_PUSH_FAKE_ERROR_CODE
 TRAP_ENTRY HalpTrap0D, 0
 TRAP_ENTRY HalpApcInterrupt, KI_PUSH_FAKE_ERROR_CODE
 TRAP_ENTRY HalpDispatchInterrupt, KI_PUSH_FAKE_ERROR_CODE
+TRAP_ENTRY HalpIpiInterrupt, KI_PUSH_FAKE_ERROR_CODE
 
 PUBLIC _ApicSpuriousService
 _ApicSpuriousService:

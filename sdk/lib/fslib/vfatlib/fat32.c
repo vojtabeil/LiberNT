@@ -340,6 +340,7 @@ Fat32WriteRootDirectory(IN HANDLE FileHandle,
 
     /* Zero the buffer */
     RtlZeroMemory(Buffer, BootSector->SectorsPerCluster * BootSector->BytesPerSector);
+    FatSetVolumeLabelEntry(Buffer, BootSector->VolumeLabel);
 
     DPRINT("BootSector->ReservedSectors = %lu\n", BootSector->ReservedSectors);
     DPRINT("BootSector->FATSectors32 = %lu\n", BootSector->FATSectors32);
@@ -403,7 +404,19 @@ Fat32Format(IN HANDLE FileHandle,
     /* Calculate cluster size */
     if (ClusterSize == 0)
     {
-        if (PartitionInfo->PartitionLength.QuadPart < 8LL * 1024LL * 1024LL * 1024LL)
+        if (PartitionInfo->PartitionLength.QuadPart <= 64LL * 1024LL * 1024LL)
+        {
+            ClusterSize = 512;
+        }
+        else if (PartitionInfo->PartitionLength.QuadPart <= 128LL * 1024LL * 1024LL)
+        {
+            ClusterSize = 1024;
+        }
+        else if (PartitionInfo->PartitionLength.QuadPart <= 256LL * 1024LL * 1024LL)
+        {
+            ClusterSize = 2048;
+        }
+        else if (PartitionInfo->PartitionLength.QuadPart < 8LL * 1024LL * 1024LL * 1024LL)
         {
             /* Partition < 8GB ==> 4KB Cluster */
             ClusterSize = 4096;
@@ -423,6 +436,8 @@ Fat32Format(IN HANDLE FileHandle,
             /* Partition >= 32GB ==> 32KB Cluster */
             ClusterSize = 32768;
         }
+        if (ClusterSize < DiskGeometry->BytesPerSector)
+            ClusterSize = DiskGeometry->BytesPerSector;
     }
 
     RtlZeroMemory(&BootSector, sizeof(FAT32_BOOT_SECTOR));
@@ -453,13 +468,13 @@ Fat32Format(IN HANDLE FileHandle,
     BootSector.Drive = (DiskGeometry->MediaType == FixedMedia) ? 0x80 : 0x00;
     BootSector.ExtBootSignature = 0x29;
     BootSector.VolumeID = CalcVolumeSerialNumber();
-    if ((Label == NULL) || (Label->Buffer == NULL))
+    if ((Label == NULL) || (Label->Buffer == NULL) || (Label->Length == 0))
     {
         memcpy(&BootSector.VolumeLabel[0], "NO NAME    ", 11);
     }
     else
     {
-        RtlUnicodeStringToOemString(&VolumeLabel, Label, TRUE);
+        RtlUpcaseUnicodeStringToOemString(&VolumeLabel, Label, TRUE);
         RtlFillMemory(&BootSector.VolumeLabel[0], 11, ' ');
         memcpy(&BootSector.VolumeLabel[0], VolumeLabel.Buffer,
                VolumeLabel.Length < 11 ? VolumeLabel.Length : 11);

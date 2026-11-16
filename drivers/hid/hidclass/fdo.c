@@ -416,9 +416,10 @@ HidClassFDO_StartDevice(
     }
 
     //
-    // let's start the lower device too
+    // let's start the lower device too; the request comes back here, so it
+    // gets a location of its own rather than this driver's
     //
-    IoSkipCurrentIrpStackLocation(Irp);
+    IoCopyCurrentIrpStackLocationToNext(Irp);
     Status = HidClassFDO_DispatchRequestSynchronous(DeviceObject, Irp);
     if (!NT_SUCCESS(Status))
     {
@@ -452,6 +453,8 @@ HidClassFDO_StartDevice(
         return Status;
     }
 
+    Status = HidClassFDO_StartRead(DeviceObject);
+
     //
     // complete request
     //
@@ -467,6 +470,7 @@ HidClassFDO_RemoveDevice(
 {
     NTSTATUS Status;
     PHIDCLASS_FDO_EXTENSION FDODeviceExtension;
+    ULONG Index;
 
     //
     // get device extension
@@ -476,17 +480,31 @@ HidClassFDO_RemoveDevice(
 
     /* FIXME cleanup */
 
+    HidClassFDO_DisarmWake(FDODeviceExtension);
+    HidClassFDO_StopRead(DeviceObject, FALSE);
+
     //
-    // dispatch to minidriver
+    // dispatch to minidriver; the request comes back here to be completed
     //
-    IoSkipCurrentIrpStackLocation(Irp);
+    IoCopyCurrentIrpStackLocationToNext(Irp);
     Status = HidClassFDO_DispatchRequestSynchronous(DeviceObject, Irp);
+
+    HidClassFDO_StopRead(DeviceObject, TRUE);
 
     //
     // complete request
     //
     Irp->IoStatus.Status = Status;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+    if (FDODeviceExtension->DeviceRelations != NULL)
+    {
+        for (Index = 0; Index < FDODeviceExtension->DeviceRelations->Count; Index++)
+            IoDeleteDevice(FDODeviceExtension->DeviceRelations->Objects[Index]);
+
+        ExFreePoolWithTag(FDODeviceExtension->DeviceRelations, HIDCLASS_TAG);
+        FDODeviceExtension->DeviceRelations = NULL;
+    }
 
     //
     // detach and delete device

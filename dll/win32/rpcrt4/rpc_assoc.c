@@ -395,6 +395,7 @@ RPC_STATUS RpcAssoc_GetClientConnection(RpcAssoc *assoc,
 {
     RpcConnection *NewConnection;
     RPC_STATUS status;
+    BOOL first_connection;
 
     *Connection = RpcAssoc_GetIdleConnection(assoc, InterfaceId, TransferSyntax, AuthInfo, QOS);
     if (*Connection) {
@@ -403,35 +404,46 @@ RPC_STATUS RpcAssoc_GetClientConnection(RpcAssoc *assoc,
         return RPC_S_OK;
     }
 
+    EnterCriticalSection(&assoc->cs);
+    first_connection = !assoc->assoc_group_id;
+    if (!first_connection)
+        LeaveCriticalSection(&assoc->cs);
+
     /* create a new connection */
     status = RPCRT4_CreateConnection(&NewConnection, FALSE /* is this a server connection? */,
         assoc->Protseq, assoc->NetworkAddr,
         assoc->Endpoint, assoc->NetworkOptions,
         AuthInfo, QOS, CookieAuth);
     if (status != RPC_S_OK)
-        return status;
+        goto done;
 
     NewConnection->assoc = assoc;
     status = RPCRT4_OpenClientConnection(NewConnection);
     if (status != RPC_S_OK)
     {
         RPCRT4_ReleaseConnection(NewConnection);
-        return status;
+        goto done;
     }
 
     status = RpcAssoc_BindConnection(assoc, NewConnection, InterfaceId, TransferSyntax);
     if (status != RPC_S_OK)
     {
         RPCRT4_ReleaseConnection(NewConnection);
-        return status;
+        goto done;
     }
 
+    if (first_connection)
+        assoc->assoc_group_id = NewConnection->assoc_group_id;
     InterlockedIncrement(&assoc->connection_cnt);
 
     TRACE("return new connection %p for association %p\n", *Connection, assoc);
     *Connection = NewConnection;
     if (from_cache) *from_cache = FALSE;
-    return RPC_S_OK;
+
+done:
+    if (first_connection)
+        LeaveCriticalSection(&assoc->cs);
+    return status;
 }
 
 void RpcAssoc_ReleaseIdleConnection(RpcAssoc *assoc, RpcConnection *Connection)
@@ -501,6 +513,9 @@ RPC_STATUS RpcServerAssoc_FindContextHandle(RpcAssoc *assoc, const UUID *uuid,
             {
                 LeaveCriticalSection(&assoc->cs);
                 TRACE("found %p\n", context_handle);
+#ifdef __REACTOS__
+                if (!(Flags & RPC_CONTEXT_HANDLE_DONT_SERIALIZE))
+#endif
                 EnterCriticalSection(&context_handle->lock);
                 return RPC_S_OK;
             }
@@ -527,9 +542,14 @@ RPC_STATUS RpcServerAssoc_UpdateContextHandle(RpcAssoc *assoc,
     EnterCriticalSection(&assoc->cs);
     if (UuidIsNil(&context_handle->uuid, &status))
     {
+        status = UuidCreate(&context_handle->uuid);
+        if (status != RPC_S_OK)
+        {
+            LeaveCriticalSection(&assoc->cs);
+            return status;
+        }
         /* add a ref for the data being valid */
         context_handle->refs++;
-        UuidCreate(&context_handle->uuid);
         context_handle->rundown_routine = rundown_routine;
         TRACE("allocated uuid %s for context handle %p\n",
               debugstr_guid(&context_handle->uuid), context_handle);

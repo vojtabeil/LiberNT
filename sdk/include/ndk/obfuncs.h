@@ -69,12 +69,30 @@ ObCreateObject(
 );
 
 NTKERNELAPI
+VOID
+NTAPI
+ObDeleteCapturedInsertInfo(
+    _In_ PVOID Object
+);
+
+NTKERNELAPI
 NTSTATUS
 NTAPI
 ObCreateObjectType(
     _In_ PUNICODE_STRING TypeName,
     _In_ POBJECT_TYPE_INITIALIZER ObjectTypeInitializer,
-    _Reserved_ PVOID Reserved,
+    _In_opt_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _Out_ POBJECT_TYPE *ObjectType
+);
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+ObCreateObjectTypeEx(
+    _In_ PUNICODE_STRING TypeName,
+    _In_ POBJECT_TYPE_INITIALIZER ObjectTypeInitializer,
+    _In_opt_ PSECURITY_DESCRIPTOR SecurityDescriptor,
+    _In_opt_ LONG_PTR WaitObjectInfo,
     _Out_ POBJECT_TYPE *ObjectType
 );
 
@@ -108,6 +126,20 @@ NTKERNELAPI
 ULONG
 NTAPI
 ObGetObjectPointerCount(
+    _In_ PVOID Object
+);
+
+NTKERNELAPI
+POBJECT_TYPE
+NTAPI
+ObGetObjectType(
+    _In_ PVOID Object
+);
+
+NTKERNELAPI
+POBJECT_HEADER_NAME_INFO
+NTAPI
+ObQueryNameInfo(
     _In_ PVOID Object
 );
 
@@ -160,7 +192,7 @@ NTSTATUS
 NTAPI
 ObSetHandleAttributes(
     _In_ HANDLE Handle,
-    _In_ POBJECT_HANDLE_FLAG_INFORMATION HandleFlags,
+    _In_ POBJECT_HANDLE_ATTRIBUTE_INFORMATION HandleFlags,
     _In_ KPROCESSOR_MODE PreviousMode
 );
 
@@ -185,6 +217,14 @@ NtClose(
     _In_ HANDLE Handle
 );
 
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCompareObjects(
+    _In_ HANDLE FirstObjectHandle,
+    _In_ HANDLE SecondObjectHandle
+);
+
 __kernel_entry
 NTSYSCALLAPI
 NTSTATUS
@@ -202,6 +242,33 @@ NtCreateDirectoryObject(
     _Out_ PHANDLE DirectoryHandle,
     _In_ ACCESS_MASK DesiredAccess,
     _In_ POBJECT_ATTRIBUTES ObjectAttributes
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCreatePrivateNamespace(
+    _Out_ PHANDLE NamespaceHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ PVOID BoundaryDescriptor
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtOpenPrivateNamespace(
+    _Out_ PHANDLE NamespaceHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ PVOID BoundaryDescriptor
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtDeletePrivateNamespace(
+    _In_ HANDLE NamespaceHandle
 );
 
 NTSYSCALLAPI

@@ -16,7 +16,7 @@ UINT    ColumnDataHints[COLUMN_NMAX];
 const PresetColumnEntry ColumnPresets[COLUMN_NMAX] = {
     DECLARE_COLUMN_PRESET(IMAGENAME,        105,  TRUE, LVCFMT_LEFT)
     DECLARE_COLUMN_PRESET(PID,               50,  TRUE, LVCFMT_LEFT)
-    DECLARE_COLUMN_PRESET(USERNAME,         107, FALSE, LVCFMT_LEFT)
+    DECLARE_COLUMN_PRESET(USERNAME,         107,  TRUE, LVCFMT_LEFT)
     DECLARE_COLUMN_PRESET(SESSIONID,         70, FALSE, LVCFMT_LEFT)
     DECLARE_COLUMN_PRESET(CPUUSAGE,          35,  TRUE, LVCFMT_RIGHT)
     DECLARE_COLUMN_PRESET(CPUTIME,           70,  TRUE, LVCFMT_RIGHT)
@@ -75,7 +75,7 @@ static int InsertColumn(int nCol, LPCWSTR lpszColumnHeading, int nFormat, int nW
     if (nWidth != -1)
     {
         column.mask |= LVCF_WIDTH;
-        column.cx = nWidth;
+        column.cx = MulDiv(nWidth, TaskManager_GetDpi(), 96);
     }
 
     if (nSubItem != -1)
@@ -121,7 +121,7 @@ void SaveColumnSettings(void)
             if (_wcsicmp(text, szTemp) == 0)
             {
                 TaskManagerSettings.Columns[n] = TRUE;
-                TaskManagerSettings.ColumnSizeArray[n] = hditem.cxy;
+                TaskManagerSettings.ColumnSizeArray[n] = MulDiv(hditem.cxy, 96, TaskManager_GetDpi());
             }
         }
     }

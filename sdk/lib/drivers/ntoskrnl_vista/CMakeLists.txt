@@ -1,4 +1,4 @@
-remove_definitions(-D_WIN32_WINNT=0x502)
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT})
 add_definitions(-D_WIN32_WINNT=0x602)
 
 add_definitions(-DUNICODE -D_UNICODE -D_NTOSKRNL_ -D_NTSYSTEM_)
@@ -10,12 +10,11 @@ list(APPEND SOURCE
     fsrtl.c
     io.c
     po.c
-    pofx.c
     ke.c
     ${REACTOS_SOURCE_DIR}/sdk/lib/rtl/utf8.c)
 
 add_library(ntoskrnl_vista ${SOURCE})
 target_link_libraries(ntoskrnl_vista PRIVATE pseh) # rtl_vista)
-add_dependencies(ntoskrnl_vista bugcodes xdk)
+add_dependencies(ntoskrnl_vista bugcodes psdk xdk)
 
 target_compile_definitions(ntoskrnl_vista PUBLIC NTKRNLVISTA)

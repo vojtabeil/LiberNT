@@ -201,7 +201,7 @@ MapInAnotherThread(IN PVOID Context)
     Ret = CcMapData(TestFileObject, &Offset, TestContext->Length, MAP_WAIT, &Bcb, (PVOID *)&Buffer);
     KmtEndSeh(STATUS_SUCCESS);
 
-    if (!skip(Ret == TRUE, "CcMapData failed\n"))
+    if (ok(Ret == TRUE, "CcMapData failed\n"))
     {
         ok_eq_pointer(Bcb, TestContext->Bcb);
         ok_eq_pointer(Buffer, TestContext->Buffer);
@@ -213,7 +213,7 @@ MapInAnotherThread(IN PVOID Context)
     Ret = CcPinRead(TestFileObject, &Offset, TestContext->Length, 0, &Bcb, (PVOID *)&Buffer);
     KmtEndSeh(STATUS_SUCCESS);
 
-    if (!skip(Ret == TRUE, "CcPinRead failed\n"))
+    if (ok(Ret == TRUE, "CcPinRead failed\n"))
     {
         ok(Bcb != TestContext->Bcb, "Returned same BCB!\n");
         ok_eq_pointer(Buffer, TestContext->Buffer);
@@ -235,7 +235,7 @@ MapInAnotherThread(IN PVOID Context)
     Ret = CcPinRead(TestFileObject, &Offset, TestContext->Length, PIN_EXCLUSIVE, &Bcb, (PVOID *)&Buffer);
     KmtEndSeh(STATUS_SUCCESS);
 
-    if (!skip(Ret == TRUE, "CcPinRead failed\n"))
+    if (ok(Ret == TRUE, "CcPinRead failed\n"))
     {
         ok(Bcb != TestContext->Bcb, "Returned same BCB!\n");
         ok_eq_pointer(Buffer, TestContext->Buffer);
@@ -250,7 +250,7 @@ MapInAnotherThread(IN PVOID Context)
     Ret = CcMapData(TestFileObject, &Offset, TestContext->Length, MAP_WAIT, &Bcb, (PVOID *)&Buffer);
     KmtEndSeh(STATUS_SUCCESS);
 
-    if (!skip(Ret == TRUE, "CcMapData failed\n"))
+    if (ok(Ret == TRUE, "CcMapData failed\n"))
     {
         ok_eq_pointer(Bcb, TestContext->Bcb);
         ok_eq_pointer(Buffer, (PVOID)((ULONG_PTR)TestContext->Buffer + 0x500));
@@ -306,7 +306,7 @@ PerformTest(
                     Ret = CcMapData(TestFileObject, &Offset, FileSizes.FileSize.QuadPart - Offset.QuadPart, MAP_WAIT, &Bcb, (PVOID *)&Buffer);
                     KmtEndSeh(STATUS_SUCCESS);
 
-                    if (!skip(Ret == TRUE, "CcMapData failed\n"))
+                    if (ok(Ret == TRUE, "CcMapData failed\n"))
                     {
                         ok_eq_ulong(Buffer[(0x3000 - TestId * 0x1000) / sizeof(ULONG)], 0xDEADBABE);
 
@@ -326,34 +326,13 @@ PerformTest(
                         Ret = CcMapData(TestFileObject, &Offset, FileSizes.FileSize.QuadPart - Offset.QuadPart, MAP_WAIT, &TestContext->Bcb, &TestContext->Buffer);
                         KmtEndSeh(STATUS_SUCCESS);
 
-                        if (!skip(Ret == TRUE, "CcMapData failed\n"))
+                        if (ok(Ret == TRUE, "CcMapData failed\n"))
                         {
                             PKTHREAD ThreadHandle;
 
                             /* That's a bit rough but should do the job */
-#ifdef _X86_
-                            if (Memory >= 2 * 1024)
-                            {
-                                ok((TestContext->Buffer >= (PVOID)0xC1000000 && TestContext->Buffer < (PVOID)0xE0FFFFFF) ||
-                                   (TestContext->Buffer >= (PVOID)0xA4000000 && TestContext->Buffer < (PVOID)0xBFFFFFFF),
-                                   "Buffer %p not mapped in system space\n", TestContext->Buffer);
-                            }
-                            else if (TS)
-                            {
-                                ok(TestContext->Buffer >= (PVOID)0xC1000000 && TestContext->Buffer < (PVOID)0xDCFFFFFF,
-                                   "Buffer %p not mapped in system space\n", TestContext->Buffer);
-                            }
-                            else
-                            {
-                                ok(TestContext->Buffer >= (PVOID)0xC1000000 && TestContext->Buffer < (PVOID)0xDBFFFFFF,
-                                   "Buffer %p not mapped in system space\n", TestContext->Buffer);
-                            }
-#elif defined(_M_AMD64)
-                            ok(TestContext->Buffer >= (PVOID)0xFFFFF98000000000 && TestContext->Buffer < (PVOID)0xFFFFFA8000000000,
+                            ok((ULONG_PTR)TestContext->Buffer >= (ULONG_PTR)MmSystemRangeStart,
                                "Buffer %p not mapped in system space\n", TestContext->Buffer);
-#else
-                            skip(FALSE, "System space mapping not defined\n");
-#endif
 
                             TestContext->Length = FileSizes.FileSize.QuadPart - Offset.QuadPart;
                             ThreadHandle = KmtStartThread(MapInAnotherThread, TestContext);
@@ -440,6 +419,18 @@ PerformTest(
 
                     if (Ret)
                     {
+                        volatile UCHAR *MappedBuffer = (volatile UCHAR *)Buffer;
+
+                        /* Verify the full requested range is accessible across the VACB boundary. */
+                        KmtStartSeh();
+                        MappedBuffer[0] = 0x5a;
+                        MappedBuffer[VACB_MAPPING_GRANULARITY] = 0xa5;
+                        MappedBuffer[VACB_MAPPING_GRANULARITY + 0xfff] = 0x3c;
+                        ok_eq_uint(MappedBuffer[0], 0x5a);
+                        ok_eq_uint(MappedBuffer[VACB_MAPPING_GRANULARITY], 0xa5);
+                        ok_eq_uint(MappedBuffer[VACB_MAPPING_GRANULARITY + 0xfff], 0x3c);
+                        KmtEndSeh(STATUS_SUCCESS);
+
                         CcUnpinData(Bcb);
                     }
                 }

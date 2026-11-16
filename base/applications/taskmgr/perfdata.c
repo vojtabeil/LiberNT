@@ -32,6 +32,17 @@ SYSTEM_FILECACHE_INFORMATION               SystemCacheInfo;
 ULONG                                      SystemNumberOfHandles;
 PSYSTEM_PROCESSOR_PERFORMANCE_INFORMATION  SystemProcessorTimeInfo = NULL;
 PSID                                       SystemUserSid = NULL;
+static PSID                                CurrentUserSid = NULL;
+
+#define PERF_MAX_CPUS 64
+static LARGE_INTEGER                       liOldPerCpuIdle[PERF_MAX_CPUS];
+static LARGE_INTEGER                       liOldPerCpuKernel[PERF_MAX_CPUS];
+static LARGE_INTEGER                       liOldPerCpuUser[PERF_MAX_CPUS];
+static BYTE                                PerCpuUsage[PERF_MAX_CPUS];
+static BYTE                                PerCpuKernelUsage[PERF_MAX_CPUS];
+
+typedef BOOL (WINAPI *PFN_GetProcessInformation)(HANDLE, PROCESS_INFORMATION_CLASS, PVOID, DWORD);
+static PFN_GetProcessInformation pGetProcessInformation;
 
 PCMD_LINE_CACHE global_cache = NULL;
 
@@ -50,8 +61,12 @@ BOOL PerfDataInitialize(void)
 {
     SID_IDENTIFIER_AUTHORITY NtSidAuthority = {SECURITY_NT_AUTHORITY};
     NTSTATUS    status;
+    HANDLE      hToken;
+    ULONG       TokenUserBuffer[64];
+    DWORD       dwLength;
 
     InitializeCriticalSection(&PerfDataCriticalSection);
+    pGetProcessInformation = (PFN_GetProcessInformation)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcessInformation");
 
     /*
      * Get number of processors in the system
@@ -64,6 +79,20 @@ BOOL PerfDataInitialize(void)
      * Create the SYSTEM Sid
      */
     AllocateAndInitializeSid(&NtSidAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &SystemUserSid);
+
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &hToken))
+    {
+        if (GetTokenInformation(hToken, TokenUser, TokenUserBuffer, sizeof(TokenUserBuffer), &dwLength))
+        {
+            PSID Sid = ((PTOKEN_USER)TokenUserBuffer)->User.Sid;
+
+            dwLength = GetLengthSid(Sid);
+            CurrentUserSid = HeapAlloc(GetProcessHeap(), 0, dwLength);
+            if (CurrentUserSid != NULL)
+                CopySid(dwLength, CurrentUserSid, Sid);
+        }
+        CloseHandle(hToken);
+    }
 
     /*
      * Set up global info storage
@@ -88,6 +117,12 @@ void PerfDataUninitialize(void)
     {
         FreeSid(SystemUserSid);
         SystemUserSid = NULL;
+    }
+
+    if (CurrentUserSid != NULL)
+    {
+        HeapFree(GetProcessHeap(), 0, CurrentUserSid);
+        CurrentUserSid = NULL;
     }
 
     /* Free user names cache list */
@@ -272,6 +307,40 @@ void PerfDataRefresh(void)
         CurrentKernelTime += Li2Double(SystemProcessorTimeInfo[Idx].InterruptTime);
     }
 
+    for (Idx = 0; Idx < (ULONG)SystemBasicInfo.NumberOfProcessors && Idx < PERF_MAX_CPUS; Idx++) {
+        LONGLONG KernelDelta = SystemProcessorTimeInfo[Idx].KernelTime.QuadPart - liOldPerCpuKernel[Idx].QuadPart;
+        LONGLONG UserDelta = SystemProcessorTimeInfo[Idx].UserTime.QuadPart - liOldPerCpuUser[Idx].QuadPart;
+        LONGLONG IdleDelta = SystemProcessorTimeInfo[Idx].IdleTime.QuadPart - liOldPerCpuIdle[Idx].QuadPart;
+        LONGLONG TotalDelta = KernelDelta + UserDelta;
+
+        if (liOldPerCpuKernel[Idx].QuadPart != 0 && TotalDelta > 0) {
+            /* The kernel time of a processor includes its idle time */
+            LONGLONG BusyDelta = TotalDelta - IdleDelta;
+            LONGLONG KernelBusyDelta = KernelDelta - IdleDelta;
+            LONGLONG Usage, KernelUsage;
+
+            if (BusyDelta < 0)
+                BusyDelta = 0;
+            if (KernelBusyDelta < 0)
+                KernelBusyDelta = 0;
+            Usage = (BusyDelta * 100) / TotalDelta;
+            KernelUsage = (KernelBusyDelta * 100) / TotalDelta;
+            if (Usage > 100)
+                Usage = 100;
+            if (KernelUsage > Usage)
+                KernelUsage = Usage;
+            PerCpuUsage[Idx] = (BYTE)Usage;
+            PerCpuKernelUsage[Idx] = (BYTE)KernelUsage;
+        } else {
+            PerCpuUsage[Idx] = 0;
+            PerCpuKernelUsage[Idx] = 0;
+        }
+
+        liOldPerCpuKernel[Idx] = SystemProcessorTimeInfo[Idx].KernelTime;
+        liOldPerCpuUser[Idx] = SystemProcessorTimeInfo[Idx].UserTime;
+        liOldPerCpuIdle[Idx] = SystemProcessorTimeInfo[Idx].IdleTime;
+    }
+
     /* If it's a first call - skip idle time calcs */
     if (liOldIdleTime.QuadPart != 0) {
         /*  CurrentValue = NewValue - OldValue */
@@ -399,9 +468,23 @@ ReadProcOwner:
                     pPerfData[Idx].GDIObjectCount = GetGuiResources(hProcess, GR_GDIOBJECTS);
                 }
 
-                if (IsWow64Process(hProcess, &bIsWow64) && bIsWow64)
+                PROCESS_MACHINE_INFORMATION MachineInformation;
+
+                if (pGetProcessInformation &&
+                    pGetProcessInformation(hProcess, ProcessMachineTypeInfo, &MachineInformation, sizeof(MachineInformation)))
                 {
-                    wcscat(pPerfData[Idx].ImageName, L" *32");
+                    pPerfData[Idx].ImageMachine = MachineInformation.ProcessMachine;
+                    if (MachineInformation.ProcessMachine == IMAGE_FILE_MACHINE_I386)
+                        StringCchCatW(pPerfData[Idx].ImageName, _countof(pPerfData[Idx].ImageName), L" *32");
+#if defined(_M_ARM64)
+                    else if (MachineInformation.ProcessMachine == IMAGE_FILE_MACHINE_AMD64)
+                        StringCchCatW(pPerfData[Idx].ImageName, _countof(pPerfData[Idx].ImageName), L" *x64");
+#endif
+                }
+                else if (IsWow64Process(hProcess, &bIsWow64) && bIsWow64)
+                {
+                    pPerfData[Idx].ImageMachine = IMAGE_FILE_MACHINE_I386;
+                    StringCchCatW(pPerfData[Idx].ImageName, _countof(pPerfData[Idx].ImageName), L" *32");
                 }
 
                 GetProcessIoCounters(hProcess, &pPerfData[Idx].IOCounters);
@@ -417,6 +500,8 @@ ClearInfo:
 
         cwcUserName = _countof(pPerfData[0].UserName);
         CachedGetUserFromSid(ProcessUser, pPerfData[Idx].UserName, &cwcUserName);
+        pPerfData[Idx].IsCurrentUser = (CurrentUserSid != NULL && ProcessUser != NULL && IsValidSid(ProcessUser) &&
+                                        EqualSid(ProcessUser, CurrentUserSid));
 
         if (ProcessSD != NULL)
         {
@@ -485,6 +570,39 @@ ULONG PerfDataGetProcessorSystemUsage(void)
     return Result;
 }
 
+ULONG PerfDataGetProcessorCount(void)
+{
+    ULONG Count = SystemBasicInfo.NumberOfProcessors;
+
+    if (Count == 0)
+        Count = 1;
+    if (Count > PERF_MAX_CPUS)
+        Count = PERF_MAX_CPUS;
+    return Count;
+}
+
+ULONG PerfDataGetProcessorUsagePerCpu(ULONG Cpu)
+{
+    ULONG Result = 0;
+
+    EnterCriticalSection(&PerfDataCriticalSection);
+    if (Cpu < PERF_MAX_CPUS)
+        Result = PerCpuUsage[Cpu];
+    LeaveCriticalSection(&PerfDataCriticalSection);
+    return Result;
+}
+
+ULONG PerfDataGetProcessorKernelUsagePerCpu(ULONG Cpu)
+{
+    ULONG Result = 0;
+
+    EnterCriticalSection(&PerfDataCriticalSection);
+    if (Cpu < PERF_MAX_CPUS)
+        Result = PerCpuKernelUsage[Cpu];
+    LeaveCriticalSection(&PerfDataCriticalSection);
+    return Result;
+}
+
 BOOL PerfDataGetImageName(ULONG Index, LPWSTR lpImageName, ULONG nMaxCount)
 {
     BOOL  bSuccessful;
@@ -533,6 +651,22 @@ BOOL PerfDataGetUserName(ULONG Index, LPWSTR lpUserName, ULONG nMaxCount)
     LeaveCriticalSection(&PerfDataCriticalSection);
 
     return bSuccessful;
+}
+
+BOOL PerfDataIsCurrentUserProcess(ULONG Index)
+{
+    BOOL  bCurrentUser;
+
+    EnterCriticalSection(&PerfDataCriticalSection);
+
+    if (Index < ProcessCount)
+        bCurrentUser = pPerfData[Index].IsCurrentUser;
+    else
+        bCurrentUser = FALSE;
+
+    LeaveCriticalSection(&PerfDataCriticalSection);
+
+    return bCurrentUser;
 }
 
 BOOL PerfDataGetCommandLine(ULONG Index, LPWSTR lpCommandLine, ULONG nMaxCount)
@@ -1131,4 +1265,3 @@ BOOL PerfDataGet(ULONG Index, PPERFDATA *lppData)
     LeaveCriticalSection(&PerfDataCriticalSection);
     return bSuccessful;
 }
-

@@ -14,6 +14,9 @@ HKCR
                 val Attributes = d '0x20000000'
             }
             val LocalizedString = s '@%MODULE%,-10000'
+            val 'System.ApplicationName' = s 'Microsoft.NetworkConnections'
+            val 'System.ControlPanel.Category' = s '3'
+            val '{305CA226-D286-468e-B848-2B2E8E697B74} 2' = d '3'
         }
         ForceRemove {7007ACC5-3202-11D1-AAD2-00805FC1270E} = s 'LAN Connection UI'
         {
@@ -33,7 +36,7 @@ HKCR
         {
             InprocServer32 = s '%MODULE%'
             {
-                val ThreadingModel = s 'Both'
+                val ThreadingModel = s 'Free'
             }
             DefaultIcon = s '%MODULE%'
         }
@@ -128,4 +131,23 @@ HKLM
       }
     }
   }
+}
+HKLM
+{
+    NoRemove Software
+    {
+        NoRemove Microsoft
+        {
+            NoRemove Windows
+            {
+                NoRemove CurrentVersion
+                {
+                    NoRemove ShellServiceObjectDelayLoad
+                    {
+                        val 'Network.ConnectionTray' = s '{7007ACCF-3202-11D1-AAD2-00805FC1270E}'
+                    }
+                }
+            }
+        }
+    }
 }

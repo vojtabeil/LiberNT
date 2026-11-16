@@ -32,6 +32,7 @@ typedef struct TF_LMLATTELEMENT
 } TF_LMLATTELEMENT;
 
 cpp_quote("EXTERN_C const CLSID CLSID_SapiLayr;")
+cpp_quote("EXTERN_C const GUID GUID_LBI_INPUTMODE;")
 
 interface IEnumTfCandidates;
 interface IEnumTfLatticeElements;
@@ -369,7 +370,7 @@ interface ITfFnPropertyUIStatus : IUnknown
   uuid(4cea93c0-0a58-11d3-8df0-00105a2799b5),
   pointer_default(unique)
 ]
-interface ITfFnReconversion : IUnknown
+interface ITfFnReconversion : ITfFunction
 {
     HRESULT QueryRange(
         [in]  ITfRange *pRange,

@@ -7,4 +7,3 @@
 @ stdcall -private DllRegisterServer()
 @ stdcall -private DllUnregisterServer()
 @ stdcall GetProxyDllInfo(ptr ptr)
-

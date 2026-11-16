@@ -77,6 +77,13 @@ BOOL WINAPI DllMain(HINSTANCE hinst, DWORD reason, LPVOID reserved)
     return TRUE;
 }
 
+static LONG volatile gdiplus_startup_count;
+
+BOOL gdiplus_is_started(void)
+{
+    return gdiplus_startup_count > 0;
+}
+
 /*****************************************************
  *      GdiplusStartup [GDIPLUS.@]
  */
@@ -103,6 +110,7 @@ Status WINAPI GdiplusStartup(ULONG_PTR *token, const struct GdiplusStartupInput 
     }
 
     *token = 0xdeadbeef;
+    InterlockedIncrement(&gdiplus_startup_count);
 
     /* FIXME: DebugEventCallback ignored */
 
@@ -132,6 +140,9 @@ ULONG WINAPI GdiplusShutdown_wrapper(ULONG_PTR token)
 
     /* FIXME: no object tracking */
 
+    if (InterlockedDecrement(&gdiplus_startup_count) < 0)
+        InterlockedIncrement(&gdiplus_startup_count);
+
     /* "bricksntiles" expects a return value of 0, which native
      * coincidentally gives.
      */
@@ -143,7 +154,7 @@ ULONG WINAPI GdiplusShutdown_wrapper(ULONG_PTR token)
  */
 void* WINGDIPAPI GdipAlloc(SIZE_T size)
 {
-    return calloc(1, size);
+    return malloc(size);
 }
 
 /*****************************************************
@@ -453,6 +464,16 @@ void convert_32bppARGB_to_32bppPARGB(UINT width, UINT height,
         for (x=0; x<width; x++)
         {
             BYTE alpha=src[3];
+            if (alpha == 255 || alpha == 0)
+            {
+                if (alpha)
+                    memcpy(dst, src, 4);
+                else
+                    memset(dst, 0, 4);
+                dst += 4;
+                src += 4;
+                continue;
+            }
             *dst++ = (*src++ * alpha + 127) / 255;
             *dst++ = (*src++ * alpha + 127) / 255;
             *dst++ = (*src++ * alpha + 127) / 255;

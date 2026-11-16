@@ -38,10 +38,6 @@
 #define IDB_SHELL_EDIT_SM           227
 #define IDB_SHELL_EDIT_SM_HOT       228
 
-/* Bitmaps for fancy log off dialog box */
-#define IDB_DLG_BG                  500
-#define IDB_REACTOS_FLAG            501
-#define IDB_IMAGE_STRIP             502
 
 /* Strings */
 
@@ -62,6 +58,9 @@
 #define IDS_SHV_COLUMN_CATEGORY         313
 #define IDS_SHV_COLUMN_WORKGROUP 314
 #define IDS_SHV_COLUMN_NETLOCATION  315
+#define IDS_SHV_COLUMN_FILESYSTEM  342
+#define IDS_SHV_COLUMN_PERCENTFULL 353
+#define IDS_SHV_COLUMN_FREESPACE  354
 #define IDS_SHV_COLUMN_DOCUMENTS 319
 #define IDS_SHV_COLUMN_STATUS    320
 #define IDS_SHV_COLUMN_COMMENTS  321
@@ -261,6 +260,7 @@
 #define IDS_SHORTCUT_RUN_NORMAL  4167
 #define IDS_SHORTCUT_RUN_MIN     4168
 #define IDS_SHORTCUT_RUN_MAX     4169
+#define IDS_SHORTCUT_INFOTIP_LOCATION 4170
 
 /* FS property sheet */
 #define IDS_MULTIPLETYPES       8705
@@ -383,11 +383,18 @@
 
 #define IDS_SYSTEMFOLDER                            30540 // FIXME: "Show translucent selection rectangle"
 #define IDS_FOLDERTYPEBACKGROUNDIMAGE               30543
+#define IDS_FILETYPE_JPG                            30596
+#define IDS_FILETYPE_PNG                            30598
 
-#define IDS_LOG_OFF_DESC                            35000
-#define IDS_SWITCH_USER_DESC                        35001
-#define IDS_LOG_OFF_TITLE                           35010
-#define IDS_SWITCH_USER_TITLE                       35011
+/* Modern Computer folder view */
+#define IDS_COMPUTER_DEVICES_AND_DRIVES             60020
+#define IDS_COMPUTER_SYSTEM_LOCATIONS               60021
+#define IDS_COMPUTER_FREE_SPACE                     60022
+#define IDS_COMPUTER_FOLDERS                        60023
+#define IDS_FILE_EXPLORER                           60030
+#define IDS_SEARCHBAND_COMMAND                      12708
+#define IDS_FOLDERSHORTCUT_TYPE                     10540
+
 
 /* Dialogs */
 
@@ -548,12 +555,6 @@
 #define IDC_VIEW_TREEVIEW                   14003
 #define IDC_VIEW_RESTORE_DEFAULTS           14004
 
-/* Control IDs for IDD_LOG_OFF_FANCY dialog */
-#define IDC_LOG_OFF_BUTTON                  15001
-#define IDC_SWITCH_USER_BUTTON              15002
-#define IDC_LOG_OFF_STATIC                  15003
-#define IDC_SWITCH_USER_STATIC              15004
-#define IDC_LOG_OFF_TEXT_STATIC             15005
 
 /* Other dialogs */
 #define IDD_OPEN_WITH    24
@@ -581,14 +582,10 @@
 #define IDC_LINK_PROBLEM_LABEL2             14010
 
 /* Not used dialogs */
-#define IDD_SHUTDOWN             29
-#define IDD_LOG_OFF              30
-#define IDD_DISCONNECT           31
 #define IDD_CONFIRM_FILE_REPLACE 32
 #define IDD_AUTOPLAY1            33
 #define IDD_MIXED_CONTENT1       34
 #define IDD_MIXED_CONTENT2       35
-#define IDD_LOG_OFF_FANCY        600
 
 /* Icons */
 #define IDI_SHELL_DOCUMENT           1
@@ -834,6 +831,7 @@
 #define IDI_SHELL_DELETE3 16717
 #define IDI_SHELL_DELETE4 16718
 #define IDI_SHELL_DELETE5 16721
+#define IDI_SHELL_DOWNLOADS 16722
 
 /*
  * AVI resources
@@ -921,11 +919,17 @@
 #define IDM_LINKHERE 0xB
 #define IDM_DVSELECT 0x104
 
+#define IDM_POPUPMENU        2001
+#define IDM_LARGE_ICONS      2002
+#define IDM_SMALL_ICONS      2003
+#define IDM_SHOW_TEXT        2004
+#define IDM_VIEW_MENU        2005
+#define IDM_OPEN_FOLDER      2006
+
 #define IDM_MYDOCUMENTS 516
 #define IDM_MYPICTURES 518
 
 /* Registrar scripts (RGS) */
-#define IDR_ADMINFOLDERSHORTCUT 128
 #define IDR_CONTROLPANEL        130
 #define IDR_DRAGDROPHELPER      131
 #define IDR_FOLDEROPTIONS       132
@@ -936,7 +940,6 @@
 #define IDR_MYDOCUMENTS         137
 #define IDR_NETWORKPLACES       138
 #define IDR_NEWMENU             139
-#define IDR_PRINTERS            140
 #define IDR_RECYCLEBIN          141
 #define IDR_SHELLDESKTOP        142
 #define IDR_SHELLFSFOLDER       143
@@ -961,5 +964,38 @@
 #define IDR_RECYCLEBINCLEANER   162
 #define IDR_EXPLORER            163
 #define IDR_SYSTEMFILEASSOC     164
-#define IDR_SHELLLIBRARY        165
-#define IDR_USEREVENTTIMER      166
+#define IDR_WINECLASSES         165
+#define IDR_STARTMENUPIN        166
+#define IDR_FILEOPERATION       167
+#define IDR_ACLMULTI            168
+#define IDR_ACLHISTORY          169
+#define IDR_BANDPROXY           170
+#define IDR_REGTREEOPTIONS      171
+#define IDR_AUTOCOMPLETE        172
+#define IDR_ACLISTISF           173
+#define IDR_ACLCUSTOMMRU        174
+#define IDR_USERASSIST          175
+#define IDR_ACLMRU              176
+#define IDR_PROGRESSDIALOG      177
+#define IDR_ISFBAND             178
+#define IDR_FOLDERITEM          179
+#define IDR_TRACKSHELLMENU      180
+#define IDR_QUICKLINKS          181
+#define IDR_FOLDERITEMSFDF      182
+#define IDR_RECYCLEBINEMPTYCMD  183
+#define IDR_RECYCLEBINEMPTYSTATE 184
+#define IDR_SHELLFOLDERVIEW     185
+#define IDR_SHELLWINDOWS        186
+#define IDR_SHELLSEARCHEXT      187
+#define IDR_AUTOMATIONCM        188
+#define IDR_SEARCHBAND          189
+#define IDR_FADETASK            190
+#define IDR_THUMBNAIL           191
+#define IDR_SHELLFOLDERVIEWOC   192
+#define IDR_CDBURN              193
+#define IDR_SHELL32TYPELIB      194
+#define IDR_ENUMERABLEOBJECTCOLLECTION 195
+#define IDR_DESTINATIONLIST     196
+#define IDR_TXTPREVIEWHANDLER   197
+#define IDR_APPLICATIONDOCUMENTLISTS 198
+#define IDR_APPLICATIONDESTINATIONS 199

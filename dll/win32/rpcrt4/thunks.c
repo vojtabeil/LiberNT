@@ -177,10 +177,10 @@ __ASM_GLOBAL_FUNC( call_stubless_func,
 
 __ASM_GLOBAL_FUNC( call_stubless_func,
                    "stp x29, x30, [sp, #-0x90]!\n\t"
-                   ".seh_save_fplr_x 0x90\n\t"
+                   __ASM_SEH(".seh_save_fplr_x 0x90\n\t")
                    "mov x29, sp\n\t"
-                   ".seh_set_fp\n\t"
-                   ".seh_endprologue\n\t"
+                   __ASM_SEH(".seh_set_fp\n\t")
+                   __ASM_SEH(".seh_endprologue\n\t")
                    "stp d0, d1, [sp, #0x10]\n\t"
                    "stp d2, d3, [sp, #0x20]\n\t"
                    "stp d4, d5, [sp, #0x30]\n\t"
@@ -229,9 +229,89 @@ __ASM_GLOBAL_FUNC( call_stubless_func,
     "b.w call_stubless_func\n" \
     "1:\t.long "#num"\n\t"
 
+#elif defined(__riscv) && (__riscv_xlen == 64)
+
+/* t0 is an ordinary caller-clobbered register and carries the method index.
+ * Each table entry is exactly eight uncompressed bytes. */
+__ASM_GLOBAL_FUNC( call_stubless_func,
+                   "addi sp,sp,-80\n\t"
+                   __ASM_SEH(".seh_set_cfa x2, 80\n\t")
+                   "sd ra,8(sp)\n\t"
+                   __ASM_SEH(".seh_save_gpr x1, -72\n\t")
+                   "sd a0,16(sp)\n\t"
+                   "sd a1,24(sp)\n\t"
+                   "sd a2,32(sp)\n\t"
+                   "sd a3,40(sp)\n\t"
+                   "sd a4,48(sp)\n\t"
+                   "sd a5,56(sp)\n\t"
+                   "sd a6,64(sp)\n\t"
+                   "sd a7,72(sp)\n\t"
+                   __ASM_SEH(".seh_endprologue\n\t")
+                   "mv a0,t0\n\t"
+                   "addi a1,sp,16\n\t"
+                   "li a2,0\n\t"
+                   "call ndr_stubless_client_call\n\t"
+                   __ASM_SEH(".seh_startepilogue\n\t")
+                   "ld ra,8(sp)\n\t"
+                   __ASM_SEH(".seh_same_gpr x1\n\t")
+                   "addi sp,sp,80\n\t"
+                   __ASM_SEH(".seh_set_cfa x2, 0\n\t")
+                   "ret\n\t"
+                   __ASM_SEH(".seh_endepilogue") )
+
+#define T(num) \
+    ".balign 4\n\t" \
+    ".globl ObjectStublessClient" #num "\n" \
+    "ObjectStublessClient" #num ":\n\t" \
+    ".option push\n\t.option norvc\n\t" \
+    "li t0,"#num"\n\t" \
+    "j call_stubless_func\n\t" \
+    ".option pop\n\t"
+
+#elif defined(__powerpc__) && !defined(__powerpc64__)
+
+/* Windows NT PowerPC: r0 carries the method index. The caller's frame has an
+ * eight-word home area at 24(r1) for r3-r10, directly below the stack
+ * arguments at 56(r1), so homing the registers gives NDR one contiguous
+ * argument image, as on i386. Each entry has a code entry "..Name" and the
+ * {code, TOC} descriptor "Name" that the vtable stores. */
+__asm__( ".text\n\t"
+         ".p2align 2\n"
+         "call_stubless_func:\n\t"
+         "stw 3,24(1)\n\tstw 4,28(1)\n\tstw 5,32(1)\n\tstw 6,36(1)\n\t"
+         "stw 7,40(1)\n\tstw 8,44(1)\n\tstw 9,48(1)\n\tstw 10,52(1)\n\t"
+         "mflr 11\n\t"
+         "stw 11,8(1)\n\t"
+         "stwu 1,-64(1)\n\t"
+         "stw 2,4(1)\n\t"
+         "mr 3,0\n\t"
+         "addi 4,1,64+24\n\t"
+         "li 5,0\n\t"
+         "bl ..ndr_stubless_client_call\n\t"
+         "lwz 2,4(1)\n\t"
+         "addi 1,1,64\n\t"
+         "lwz 0,8(1)\n\t"
+         "mtlr 0\n\t"
+         "blr" );
+
+#define T(num) \
+    ".p2align 2\n\t" \
+    ".globl ..ObjectStublessClient" #num "\n" \
+    "..ObjectStublessClient" #num ":\n\t" \
+    "li 0,"#num"\n\t" \
+    "b call_stubless_func\n\t" \
+    ".globl ObjectStublessClient" #num "\n" \
+    "ObjectStublessClient" #num ":\n\t" \
+    ".long ..ObjectStublessClient" #num "\n\t" \
+    ".long .toc\n\t"
+
 #endif  /* __i386__ */
 
+#if defined(__powerpc__) && !defined(__powerpc64__)
+__asm__( ".text\n\t" ALL_THUNK_ENTRIES );
+#else
 __ASM_GLOBAL_FUNC( stubless_thunks, ALL_THUNK_ENTRIES )
+#endif
 
 #undef T
 
@@ -286,9 +366,47 @@ __ASM_GLOBAL_FUNC( stubless_thunks, ALL_THUNK_ENTRIES )
     "ldr ip, [r0]\n\t" \
     "ldr pc, [ip, #(4*"#num")]\n\t"
 
+#elif defined(__riscv) && (__riscv_xlen == 64)
+
+#define T(num) \
+    ".balign 4\n\t" \
+    ".globl NdrProxyForwardingFunction" #num "\n" \
+    "NdrProxyForwardingFunction" #num ":\n\t" \
+    "ld a0,32(a0)\n\t" \
+    "ld t0,0(a0)\n\t" \
+    "li t1,"#num"\n\t" \
+    "slli t1,t1,3\n\t" \
+    "add t0,t0,t1\n\t" \
+    "ld t0,0(t0)\n\t" \
+    "jr t0\n\t"
+
+#elif defined(__powerpc__) && !defined(__powerpc64__)
+
+/* Replace This with the delegated object and tail-call its method through
+ * the vtable's function descriptor. */
+#define T(num) \
+    ".p2align 2\n\t" \
+    ".globl ..NdrProxyForwardingFunction" #num "\n" \
+    "..NdrProxyForwardingFunction" #num ":\n\t" \
+    "lwz 3,16(3)\n\t" \
+    "lwz 11,0(3)\n\t" \
+    "lwz 11,4*"#num"(11)\n\t" \
+    "lwz 0,0(11)\n\t" \
+    "lwz 2,4(11)\n\t" \
+    "mtctr 0\n\t" \
+    "bctr\n\t" \
+    ".globl NdrProxyForwardingFunction" #num "\n" \
+    "NdrProxyForwardingFunction" #num ":\n\t" \
+    ".long ..NdrProxyForwardingFunction" #num "\n\t" \
+    ".long .toc\n\t"
+
 #endif  /* __i386__ */
 
+#if defined(__powerpc__) && !defined(__powerpc64__)
+__asm__( ".text\n\t" ALL_THUNK_ENTRIES );
+#else
 __ASM_GLOBAL_FUNC( vtbl_thunks, ALL_THUNK_ENTRIES )
+#endif
 
 #undef T
 
@@ -324,8 +442,13 @@ const struct delegating_vtbl delegating_vtbl =
 
 
 #if defined(__aarch64__) || defined(__arm__)
+#ifdef _MSC_VER
+void args_stack_to_regs( void **args, void **regs, void **stack,
+                         const NDR_PROC_PARTIAL_OIF_HEADER *header )
+#else
 static void __attribute__((used)) args_stack_to_regs( void **args, void **regs, void **stack,
                                                       const NDR_PROC_PARTIAL_OIF_HEADER *header )
+#endif
 {
     const NDR_PROC_HEADER_EXTS *ext = (const NDR_PROC_HEADER_EXTS *)(header + 1);
     unsigned int i, size, count, pos;
@@ -513,12 +636,12 @@ __ASM_GLOBAL_FUNC( call_server_func,
 #elif defined __aarch64__
 __ASM_GLOBAL_FUNC( call_server_func,
                    "stp x29, x30, [sp, #-0x20]!\n\t"
-                   ".seh_save_fplr_x 0x20\n\t"
+                   __ASM_SEH(".seh_save_fplr_x 0x20\n\t")
                    "stp x19, x20, [sp, #0x10]\n\t"
-                   ".seh_save_regp x19, 0x10\n\t"
+                   __ASM_SEH(".seh_save_regp x19, 0x10\n\t")
                    "mov x29, sp\n\t"
-                   ".seh_set_fp\n\t"
-                   ".seh_endprologue\n\t"
+                   __ASM_SEH(".seh_set_fp\n\t")
+                   __ASM_SEH(".seh_endprologue\n\t")
                    "add x9, x2, #16*8+15\n\t"
                    "lsr x9, x9, #4\n\t"
                    "sub sp, sp, x9, lsl #4\n\t"
@@ -540,4 +663,149 @@ __ASM_GLOBAL_FUNC( call_server_func,
                    "ldp x19, x20, [sp, #0x10]\n\t"
                    "ldp x29, x30, [sp], #0x20\n\t"
                    "ret" )
+#elif defined(__riscv) && (__riscv_xlen == 64)
+/* The server's logical argument image is eight-byte slots. a0-a7 consume its
+ * first eight slots; later slots start at outgoing SP. s0 anchors RVUW's CFA
+ * while the outgoing argument area is allocated below this frame. */
+__ASM_GLOBAL_FUNC( call_server_func,
+                   "addi sp,sp,-48\n\t"
+                   __ASM_SEH(".seh_set_cfa x2, 48\n\t")
+                   "sd ra,40(sp)\n\t"
+                   __ASM_SEH(".seh_save_gpr x1, -8\n\t")
+                   "sd s0,32(sp)\n\t"
+                   __ASM_SEH(".seh_save_gpr x8, -16\n\t")
+                   "sd s1,24(sp)\n\t"
+                   __ASM_SEH(".seh_save_gpr x9, -24\n\t")
+                   "sd s2,16(sp)\n\t"
+                   __ASM_SEH(".seh_save_gpr x18, -32\n\t")
+                   "addi s0,sp,48\n\t"
+                   __ASM_SEH(".seh_set_cfa x8, 0\n\t")
+                   __ASM_SEH(".seh_endprologue\n\t")
+                   "mv s1,a0\n\t"
+                   "mv s2,a1\n\t"
+                   "mv t3,a2\n\t"
+                   "li t0,64\n\t"
+                   "bgeu t0,t3,1f\n\t"
+                   "addi t0,t3,-64\n\t"
+                   "addi t0,t0,15\n\t"
+                   "andi t0,t0,-16\n\t"
+                   "sub sp,sp,t0\n\t"
+                   "li t1,64\n"
+                   "2:\n\t"
+                   "bgeu t1,t3,1f\n\t"
+                   "add t0,s2,t1\n\t"
+                   "ld t2,0(t0)\n\t"
+                   "addi t0,t1,-64\n\t"
+                   "add t0,sp,t0\n\t"
+                   "sd t2,0(t0)\n\t"
+                   "addi t1,t1,8\n\t"
+                   "j 2b\n"
+                   "1:\n\t"
+                   "li a0,0\n\tli a1,0\n\tli a2,0\n\tli a3,0\n\t"
+                   "li a4,0\n\tli a5,0\n\tli a6,0\n\tli a7,0\n\t"
+                   "li t0,8\n\t"
+                   "bltu t3,t0,3f\n\tld a0,0(s2)\n"
+                   "3:\n\tli t0,16\n\t"
+                   "bltu t3,t0,3f\n\tld a1,8(s2)\n"
+                   "3:\n\tli t0,24\n\t"
+                   "bltu t3,t0,3f\n\tld a2,16(s2)\n"
+                   "3:\n\tli t0,32\n\t"
+                   "bltu t3,t0,3f\n\tld a3,24(s2)\n"
+                   "3:\n\tli t0,40\n\t"
+                   "bltu t3,t0,3f\n\tld a4,32(s2)\n"
+                   "3:\n\tli t0,48\n\t"
+                   "bltu t3,t0,3f\n\tld a5,40(s2)\n"
+                   "3:\n\tli t0,56\n\t"
+                   "bltu t3,t0,3f\n\tld a6,48(s2)\n"
+                   "3:\n\tli t0,64\n\t"
+                   "bltu t3,t0,3f\n\tld a7,56(s2)\n"
+                   "3:\n\tjalr ra,s1,0\n\t"
+                   __ASM_SEH(".seh_startepilogue\n\t")
+                   "addi sp,s0,-48\n\t"
+                   __ASM_SEH(".seh_set_cfa x2, 48\n\t")
+                   "ld s2,16(sp)\n\t"
+                   __ASM_SEH(".seh_same_gpr x18\n\t")
+                   "ld s1,24(sp)\n\t"
+                   __ASM_SEH(".seh_same_gpr x9\n\t")
+                   "ld s0,32(sp)\n\t"
+                   __ASM_SEH(".seh_same_gpr x8\n\t")
+                   "ld ra,40(sp)\n\t"
+                   __ASM_SEH(".seh_same_gpr x1\n\t")
+                   "addi sp,sp,48\n\t"
+                   __ASM_SEH(".seh_set_cfa x2, 0\n\t")
+                   "ret\n\t"
+                   __ASM_SEH(".seh_endepilogue") )
+#elif defined(__powerpc__) && !defined(__powerpc64__)
+/* NT PowerPC's parameter image has eight register words followed by stack
+ * arguments. Preserve a fixed frame pointer across the variable-sized outgoing
+ * area, and describe the prologue so exceptions can cross an RPC server call. */
+__asm__( ".text\n\t"
+         ".p2align 2\n\t"
+         ".globl ..call_server_func\n"
+         ".seh_proc ..call_server_func\n"
+         "..call_server_func:\n\t"
+         "mflr 0\n\t"
+         "stw 0,8(1)\n\t"
+         "stwu 1,-64(1)\n\t"
+         "stw 2,4(1)\n\t"
+         "stw 29,52(1)\n\t"
+         "stw 30,56(1)\n\t"
+         "stw 31,60(1)\n\t"
+         "mr 31,1\n\t"
+         ".seh_endprologue\n\t"
+         "mr 29,3\n\t"
+         "mr 30,4\n\t"
+         "subic. 6,5,32\n\t"
+         "bge 1f\n\t"
+         "li 6,0\n"
+         "1:\n\t"
+         "addi 7,6,56+15\n\t"
+         "rlwinm 7,7,0,0,27\n\t"
+         "neg 7,7\n\t"
+         /* Dynamic allocations retain the entry back chain. */
+         "lwz 11,0(1)\n\t"
+         "stwux 11,1,7\n\t"
+         "srwi. 6,6,2\n\t"
+         "beq 3f\n\t"
+         "mtctr 6\n\t"
+         "addi 8,30,32-4\n\t"
+         "addi 9,1,56-4\n"
+         "2:\n\t"
+         "lwzu 0,4(8)\n\t"
+         "stwu 0,4(9)\n\t"
+         "bdnz 2b\n"
+         "3:\n\t"
+         "lwz 0,0(29)\n\t"
+         "lwz 2,4(29)\n\t"
+         "mtctr 0\n\t"
+         "mr 11,5\n\t"
+         "li 3,0\n\tli 4,0\n\tli 5,0\n\tli 6,0\n\t"
+         "li 7,0\n\tli 8,0\n\tli 9,0\n\tli 10,0\n\t"
+         "cmplwi 11,4\n\tblt 4f\n\tlwz 3,0(30)\n\t"
+         "cmplwi 11,8\n\tblt 4f\n\tlwz 4,4(30)\n\t"
+         "cmplwi 11,12\n\tblt 4f\n\tlwz 5,8(30)\n\t"
+         "cmplwi 11,16\n\tblt 4f\n\tlwz 6,12(30)\n\t"
+         "cmplwi 11,20\n\tblt 4f\n\tlwz 7,16(30)\n\t"
+         "cmplwi 11,24\n\tblt 4f\n\tlwz 8,20(30)\n\t"
+         "cmplwi 11,28\n\tblt 4f\n\tlwz 9,24(30)\n\t"
+         "cmplwi 11,32\n\tblt 4f\n\tlwz 10,28(30)\n"
+         "4:\n\t"
+         "bctrl\n\t"
+         "mr 1,31\n\t"
+         "lwz 2,4(1)\n\t"
+         "lwz 29,52(1)\n\t"
+         "lwz 30,56(1)\n\t"
+         "lwz 31,60(1)\n\t"
+         "addi 1,1,64\n\t"
+         "lwz 0,8(1)\n\t"
+         "mtlr 0\n\t"
+         "blr\n\t"
+         ".seh_endproc\n\t"
+         ".section .rdata,\"dr\"\n\t"
+         ".p2align 2\n\t"
+         ".globl call_server_func\n"
+         "call_server_func:\n\t"
+         ".long ..call_server_func\n\t"
+         ".long .toc\n\t"
+         ".text" );
 #endif

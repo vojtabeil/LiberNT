@@ -73,7 +73,7 @@ TestBind(IN_ADDR Address)
             AddrSize = sizeof(Addr);
             Error = getsockname(Socket, (struct sockaddr *) &Addr, &AddrSize);
             ok(Error == 0, "Unexpected error %d %d on getsockname for test %d\n", Error, WSAGetLastError(), i);
-            ok(AddrSize == sizeof(Addr), "Returned size %d differs from expected %d for test %d\n", AddrSize, sizeof(Addr), i);
+            ok(AddrSize == sizeof(Addr), "Returned size %d differs from expected %Iu for test %d\n", AddrSize, sizeof(Addr), i);
             ok(Addr.sin_addr.s_addr == Tests[i].ExpectedAddr.sin_addr.s_addr, "Expected address %lx differs from returned address %lx for test %d\n", Tests[i].ExpectedAddr.sin_addr.s_addr, Addr.sin_addr.s_addr, i);
             if (Tests[i].ExpectedAddr.sin_port)
             {
@@ -101,7 +101,7 @@ TestBind(IN_ADDR Address)
         AddrSize = sizeof(Addr);
         Error = getsockname(Socket, (struct sockaddr *) &Addr, &AddrSize);
         ok(Error == 0, "Unexpected error %d %d on getsockname for double bind test\n", Error, WSAGetLastError());
-        ok(AddrSize == sizeof(Addr), "Returned size %d differs from expected %d for double bind test\n", AddrSize, sizeof(Addr));
+        ok(AddrSize == sizeof(Addr), "Returned size %d differs from expected %Iu for double bind test\n", AddrSize, sizeof(Addr));
         ok(Addr.sin_addr.s_addr == Tests[0].ExpectedAddr.sin_addr.s_addr, "Expected address %lx differs from returned address %lx for double bind test\n", Tests[0].ExpectedAddr.sin_addr.s_addr, Addr.sin_addr.s_addr);
         if (Tests[0].ExpectedAddr.sin_port)
         {
@@ -125,6 +125,55 @@ TestBind(IN_ADDR Address)
     ok(Error == 0, "Unexpected error %d %d on bind for broadcast test\n", Error, WSAGetLastError());
     Error = closesocket(Socket);
     ok(Error == 0, "Unexpected error %d %d on closesocket for broadcast test\n", Error, WSAGetLastError());
+}
+
+static void TestRandomizePort(void)
+{
+    struct sockaddr_in Addr;
+    SOCKET Socket;
+    BOOL Value;
+    int Length;
+    int Error;
+
+    Socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    ok(Socket != INVALID_SOCKET, "socket failed with %d\n", WSAGetLastError());
+    if (Socket == INVALID_SOCKET)
+        return;
+
+    Value = TRUE;
+    Error = setsockopt(Socket, SOL_SOCKET, SO_RANDOMIZE_PORT, (const char *)&Value, sizeof(Value));
+    ok_dec(Error, 0);
+
+    Value = FALSE;
+    Length = sizeof(Value);
+    Error = getsockopt(Socket, SOL_SOCKET, SO_RANDOMIZE_PORT, (char *)&Value, &Length);
+    ok_dec(Error, 0);
+    ok_dec(Value, TRUE);
+    ok_dec(Length, sizeof(BOOLEAN));
+
+    Length = 0;
+    Error = getsockopt(Socket, SOL_SOCKET, SO_RANDOMIZE_PORT, (char *)&Value, &Length);
+    ok_dec(Error, SOCKET_ERROR);
+    ok_dec(WSAGetLastError(), WSAEFAULT);
+
+    Error = setsockopt(Socket, SOL_SOCKET, SO_RANDOMIZE_PORT, (const char *)&Value, sizeof(BOOLEAN));
+    ok_dec(Error, 0);
+    Error = setsockopt(Socket, SOL_SOCKET, SO_RANDOMIZE_PORT, (const char *)&Value, 0);
+    ok_dec(Error, SOCKET_ERROR);
+    ok_dec(WSAGetLastError(), WSAEFAULT);
+
+    ZeroMemory(&Addr, sizeof(Addr));
+    Addr.sin_family = AF_INET;
+    Addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    Error = bind(Socket, (const struct sockaddr *)&Addr, sizeof(Addr));
+    ok_dec(Error, 0);
+
+    Length = sizeof(Addr);
+    Error = getsockname(Socket, (struct sockaddr *)&Addr, &Length);
+    ok_dec(Error, 0);
+    ok(ntohs(Addr.sin_port) >= 49152, "Port %u is outside the dynamic range\n", ntohs(Addr.sin_port));
+
+    closesocket(Socket);
 }
 
 START_TEST(bind)
@@ -198,13 +247,11 @@ START_TEST(bind)
         ok_dec(WSAGetLastError(), WSAEFAULT);
         closesocket(Socket);
     EndSeh(STATUS_SUCCESS);
+    Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     StartSeh()
-        Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        Error = bind(Socket, InvalidPointer, sizeof(Addr));
-        ok_dec(Error, SOCKET_ERROR);
-        ok_dec(WSAGetLastError(), WSAEFAULT);
-        closesocket(Socket);
-    EndSeh(STATUS_SUCCESS);
+        bind(Socket, InvalidPointer, sizeof(Addr));
+    EndSeh(STATUS_ACCESS_VIOLATION);
+    closesocket(Socket);
     StartSeh()
         Socket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
         Error = bind(Socket, (const struct sockaddr *) &Addr, 0);
@@ -221,6 +268,7 @@ START_TEST(bind)
     EndSeh(STATUS_SUCCESS);
 
     TestBind(Address);
+    TestRandomizePort();
     /* TODO: test IPv6 */
 
     Error = WSACleanup();

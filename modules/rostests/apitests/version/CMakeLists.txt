@@ -1,11 +1,9 @@
 
 list(APPEND SOURCE
-    GetFileVersionInfoSize.c
     VerQueryValue.c
     precomp.h)
 
 list(APPEND PCH_SKIP_SOURCE
-    resource.rc
     testlist.c)
 
 add_executable(version_apitest

@@ -30,7 +30,7 @@ BEGIN
     STRING_NO_SUPPORT "処理がサポートされていません。"
     STRING_FMIFS_FAIL "FMIFS エントリ ポイント を設定できませんでした。\n\n"
     STRING_UNKNOW_ARG "不明な引数: %s\n"
-    STRING_DRIVE_PARM "必要なドライブを指定するパラメータが不足しています。\n\n"
+    STRING_DRIVE_PARM "必要なドライブを指定するパラメーターが不足しています。\n\n"
     STRING_ERROR_DRIVE_TYPE "ドライブの種類がわかりませんでした。\n"
     STRING_INSERT_DISK "%C: ドライブに新しいフロッピーを挿入してください。\n準備ができたら、[Enter] キーを押してください..."
     STRING_NO_VOLUME "ボリュームの問い合わせができませんでした"
@@ -50,4 +50,7 @@ BEGIN
     STRING_NO_LABEL "ボリュームにラベルをつけられませんでした。"
     STRING_FREE_SPACE "\nディスク領域は合計で %I64d バイトです。\nそのうち %I64d バイトが使用可能です。\n"
     STRING_SERIAL_NUMBER "\nボリューム シリアル番号は  %04X-%04X です\n"
+    STRING_FORCE_DISMOUNT "\nThe volume is in use by another process. It can be formatted once it is\n\
+dismounted, which makes every open handle to it invalid.\n\
+Force a dismount of this volume (Y/N)? "
 END

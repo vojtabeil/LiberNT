@@ -28,6 +28,15 @@
 
 #define ACPI_MAX_STRING			80
 
+/* Temporary toggle while ReactOS brings up ACPI PCI support */
+#ifndef CONFIG_ACPI_PCI
+#define CONFIG_ACPI_PCI 1
+#endif
+
+#ifndef CONFIG_ACPI_EC
+#define CONFIG_ACPI_EC 1
+#endif
+
 
 /* --------------------------------------------------------------------------
                                     ACPI Bus
@@ -110,6 +119,9 @@
 int acpi_button_init (void);
 void acpi_button_exit (void);
 
+int acpi_ged_init(void);
+int acpi_cmos_init(void);
+
 /* --------------------------------------------------------------------------
                                 Embedded Controller
    -------------------------------------------------------------------------- */
@@ -124,6 +136,7 @@ void acpi_button_exit (void);
 #ifdef CONFIG_ACPI_EC
 
 int acpi_ec_ecdt_probe (void);
+int acpi_ec_dsdt_probe (void);
 int acpi_ec_init (void);
 void acpi_ec_exit (void);
 
@@ -141,6 +154,16 @@ void acpi_ec_exit (void);
 #define ACPI_FAN_DEVICE_NAME		"Fan"
 #define ACPI_FAN_FILE_STATE		"state"
 #define ACPI_FAN_NOTIFY_STATUS		0x80
+
+int acpi_fan_init(void);
+void acpi_fan_exit(void);
+int acpi_fan_force_maximum(ACPI_HANDLE handle);
+void acpi_fan_force_all_maximum(void);
+int acpi_fan_set_thermal_level(ACPI_HANDLE handle, PVOID source, LONG level);
+void acpi_fan_set_all_thermal_levels(PVOID source, LONG level);
+
+#define ACPI_FAN_THERMAL_LEVEL_OFF      (-1)
+#define ACPI_FAN_THERMAL_LEVEL_MAXIMUM  10
 
 
 /* --------------------------------------------------------------------------
@@ -160,6 +183,46 @@ void acpi_ec_exit (void);
 
 int acpi_pci_root_init (void);
 void acpi_pci_root_exit (void);
+BOOLEAN
+NTAPI
+AcpiPciRootQueryInfo(
+    _In_ ACPI_HANDLE Handle,
+    _Out_opt_ PULONG Segment,
+    _Out_opt_ PULONG BusStart,
+    _Out_opt_ PULONG BusEnd);
+
+/*
+ * AcpiFindPciDeviceInNamespace - Find ACPI device for a PCI device
+ *
+ * Used internally by the ACPI driver to locate ACPI namespace nodes
+ * for PCI devices. The PCI driver uses the device interface and
+ * IOCTL_ACPI_EVAL_METHOD_FOR_PCI instead of calling this directly.
+ */
+/* interface.c: IOCTL_ACPI_QUERY_PCI_NOTIFY_INTERFACE (internal device control). */
+NTSTATUS
+AcpiQueryPciNotifyInterfaceIoctl(
+    _Inout_ PIRP Irp,
+    _In_ PIO_STACK_LOCATION IrpSp);
+
+NTSTATUS
+AcpiQueryPciChildNotifyInterfaceIoctl(
+    _Inout_ PIRP Irp,
+    _In_ PIO_STACK_LOCATION IrpSp);
+
+NTSTATUS
+EvalFindDisplayChildByAcpiUid(
+    _In_ ACPI_HANDLE AdapterHandle,
+    _In_ ULONG ChildAcpiUid,
+    _Out_ ACPI_HANDLE *ChildHandle);
+
+BOOLEAN
+NTAPI
+AcpiFindPciDeviceInNamespace(
+    _In_ ULONG Segment,
+    _In_ ULONG Bus,
+    _In_ ULONG Device,
+    _In_ ULONG Function,
+    _Out_ ACPI_HANDLE *OutHandle);
 
 /* ACPI PCI Interrupt Link (pci_link.c) */
 
@@ -208,6 +271,8 @@ int acpi_pci_bind_root (struct acpi_device *device, struct acpi_pci_id *id, stru
 
 int acpi_power_get_inferred_state (struct acpi_device *device);
 int acpi_power_transition (struct acpi_device *device, int state);
+int acpi_enable_wakeup_device_power (struct acpi_device *dev, int sleep_state);
+int acpi_disable_wakeup_device_power (struct acpi_device *dev);
 int acpi_power_init (void);
 void acpi_power_exit (void);
 
@@ -229,10 +294,7 @@ void acpi_power_exit (void);
 #define ACPI_PROCESSOR_NOTIFY_PERFORMANCE 0x80
 #define ACPI_PROCESSOR_NOTIFY_POWER	0x81
 #define ACPI_PROCESSOR_LIMIT_NONE	0x00
-#define ACPI_PROCESSOR_LIMIT_INCREMENT	0x01
 #define ACPI_PROCESSOR_LIMIT_DECREMENT	0x02
-
-int acpi_processor_set_thermal_limit(ACPI_HANDLE handle, int type);
 
 
 /* --------------------------------------------------------------------------
@@ -279,6 +341,9 @@ void acpi_system_exit (void);
 #define ACPI_THERMAL_MODE_ACTIVE	0x00
 #define ACPI_THERMAL_MODE_PASSIVE	0x01
 #define ACPI_THERMAL_PATH_POWEROFF	"/sbin/poweroff"
+
+int acpi_thermal_init(void);
+void acpi_thermal_exit(void);
 
 /* Motherboard devices */
 int acpi_motherboard_init(void);

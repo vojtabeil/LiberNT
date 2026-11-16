@@ -2,9 +2,6 @@
 include_directories(BEFORE ${REACTOS_SOURCE_DIR}/sdk/include/wine)
 add_definitions(-D__WINESRC__ -DWINETEST_USE_DBGSTR_LONGLONG)
 
-remove_definitions(-D_WIN32_WINNT=0x502 -DWINVER=0x502)
-add_definitions(-D_WIN32_WINNT=0x601)
-
 if(_WINKD_)
     add_definitions(-D_WINKD_)
 endif()
@@ -60,12 +57,28 @@ if(MSVC)
 endif()
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    target_compile_options(ntdll_winetest PRIVATE "-Wno-format")
     target_compile_options(ntdll_winetest PRIVATE "-Wno-int-conversion")
     target_compile_options(ntdll_winetest PRIVATE "-Wno-unused-variable")
 endif()
 
 set_module_type(ntdll_winetest win32cui)
-add_importlibs(ntdll_winetest user32 psapi ole32 advapi32 msvcrt kernel32 ntdll)
+add_importlibs(ntdll_winetest user32 ole32 advapi32 psapi msvcrt kernel32 ntdll)
 add_rostests_file(TARGET ntdll_winetest)
 target_compile_definitions(ntdll_winetest PRIVATE wcsnicmp=_wcsnicmp)
+
+add_executable(emulation_winetest EXCLUDE_FROM_ALL wow64.c emulation_testlist.c)
+target_link_libraries(emulation_winetest pseh)
+set_module_type(emulation_winetest win32cui)
+add_importlibs(emulation_winetest user32 ole32 advapi32 psapi msvcrt kernel32 ntdll)
+target_compile_definitions(emulation_winetest PRIVATE wcsnicmp=_wcsnicmp)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(emulation_winetest PRIVATE -Wno-int-conversion -Wno-unused-variable)
+endif()
+
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(ntdll_winetest PRIVATE -Wno-unused-but-set-global -Wno-unused-function)
+endif()
+
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(ntdll_winetest PRIVATE -Wno-maybe-uninitialized)
+endif()

@@ -1,12 +1,13 @@
 
-add_subdirectory(packages)
 
 # Setup settings file
-add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/txtsetup.sif DESTINATION reactos NO_CAB FOR bootcd regtest)
+add_cd_file(FILE ${REACTOS_BINARY_DIR}/boot/bootdata/txtsetup.$<CONFIG>.sif DESTINATION reactos NO_CAB NAME_ON_CD txtsetup.sif FOR bootcd)
+add_cd_file(FILE ${REACTOS_BINARY_DIR}/boot/bootdata/txtsetup.$<CONFIG>.sif DESTINATION ${ARCH} NAME_ON_CD txtsetup.sif FOR preinstall)
 
 add_custom_target(converted_caroots_inf DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/caroots.inf)
 utf16le_convert(${CMAKE_CURRENT_SOURCE_DIR}/caroots.inf ${CMAKE_CURRENT_BINARY_DIR}/caroots.inf)
-add_cd_file(TARGET converted_caroots_inf FILE ${CMAKE_CURRENT_BINARY_DIR}/caroots.inf DESTINATION reactos NO_CAB FOR bootcd regtest)
+add_cd_file(TARGET converted_caroots_inf FILE ${CMAKE_CURRENT_BINARY_DIR}/caroots.inf DESTINATION reactos NO_CAB FOR bootcd)
+add_cd_file(TARGET converted_caroots_inf FILE ${CMAKE_CURRENT_BINARY_DIR}/caroots.inf DESTINATION ${ARCH} FOR preinstall)
 
 # Common hives
 add_registry_inf(
@@ -16,54 +17,86 @@ add_registry_inf(
     hivesys.inf
     hivebcd.inf)
 
+if(REACTOS_USE_XPDM)
+    add_registry_inf(hivesys_xpdm.inf)
+endif()
+
+if(ARCH STREQUAL "arm64")
+    add_registry_inf(hivesys_arm64.inf)
+    if(RPI3_SUPPORT OR RPI5_SUPPORT OR APPLE_SILICON_SUPPORT)
+        add_registry_inf(hivesys_cyw43455.inf)
+    endif()
+    if(APPLE_SILICON_SUPPORT)
+        add_registry_inf(hivesys_apple.inf)
+    endif()
+    if(RPI3_SUPPORT)
+        add_registry_inf(hivesys_rpi3.inf)
+    endif()
+    if(RPI5_SUPPORT AND
+       (REACTOS_USE_XPDM OR
+        (REACTOS_USE_WDDM AND (REACTOS_WDDM_TARGET_LEVEL GREATER_EQUAL 2000))))
+        add_registry_inf(hivesys_rpi5.inf)
+    endif()
+elseif(ARCH STREQUAL "amd64")
+    add_registry_inf(hivesys_x86.inf hivesys_amd64.inf)
+elseif(ARCH STREQUAL "i386")
+    add_registry_inf(hivesys_x86.inf hivesys_i386.inf)
+elseif(ARCH STREQUAL "riscv64")
+    add_registry_inf(hivesys_riscv64.inf)
+    if(SPACEMIT_K1_SUPPORT)
+        add_registry_inf(hivesys_spacemit_k1.inf)
+    endif()
+elseif(ARCH STREQUAL "ppc")
+    add_registry_inf(hivesys_ppc.inf)
+endif()
+
+if(LATTEPANDAMU_SUPPORT)
+    add_registry_inf(hivesys_lattepandamu.inf)
+endif()
+
+if(_NT_VALUE GREATER_EQUAL 2560)
+    add_registry_inf(hivent10.inf)
+endif()
+
+if(ENABLE_WOW64)
+    add_registry_inf(hivewow64.inf)
+endif()
+
 # Regtest
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcdregtest/regtest.cmd DESTINATION reactos/bin FOR all)
 
 # autorun.inf
-add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/autorun.inf DESTINATION root NO_CAB FOR bootcd)
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/autorun.inf DESTINATION root NO_CAB FOR bootcd livecd)
 
 # icon.ico
-add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/icon.ico DESTINATION root NO_CAB FOR bootcd)
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/icon.ico DESTINATION root NO_CAB FOR bootcd livecd)
 
 # readme.txt
-add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/readme.txt DESTINATION root NO_CAB FOR bootcd)
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/readme.txt DESTINATION root NO_CAB FOR bootcd livecd)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/readme.txt DESTINATION reactos FOR all)
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/system.ini DESTINATION reactos FOR all)
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/win.ini DESTINATION reactos FOR all)
 
-## NOTE: The root setup.exe file is a renamed welcome.exe for BootCD purposes.
-# welcome.exe optional custom configuration (only for LiveImage)
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/welcome_config/)
-    # Copy the main configuration file
-    add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/welcome_config/welcome.ini DESTINATION reactos NO_CAB FOR livecd)
-
-    # Convert the translation files (name format: xx-YY.ini) into UTF-16
-    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/welcome_config)
-    file(GLOB I18N_FILES RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}/welcome_config/ ${CMAKE_CURRENT_SOURCE_DIR}/welcome_config/*-*.ini)
-    foreach(_file ${I18N_FILES})
-        set(_converted_file ${CMAKE_CURRENT_BINARY_DIR}/welcome_config/${_file})
-        set(_source_file ${CMAKE_CURRENT_SOURCE_DIR}/welcome_config/${_file})
-        utf16le_convert(${_source_file} ${_converted_file})
-        add_cd_file(TARGET converted_welcome_i18n_files FILE ${_converted_file} DESTINATION reactos/welcome NO_CAB NAME_ON_CD ${_file} FOR livecd)
-        list(APPEND _converted_welcome_i18n_files ${_converted_file})
-    endforeach(_file)
-    add_custom_target(converted_welcome_i18n_files DEPENDS ${_converted_welcome_i18n_files})
-endif()
-
-# freeldr.ini
-add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcd.ini DESTINATION root NO_CAB NAME_ON_CD freeldr.ini FOR bootcd)
-add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcd_regtest.ini DESTINATION root NO_CAB NAME_ON_CD freeldr.ini FOR regtest)
+# freeldr.ini (FREELDR_BOOTCD_INI is prepared by sdk/cmake/boot_images.cmake)
+set(_boot_media_freeldr_ini "${FREELDR_BOOTCD_INI}")
+add_cd_file(FILE ${_boot_media_freeldr_ini} DESTINATION root NO_CAB NAME_ON_CD freeldr.ini FOR bootcd livecd)
 
 # Unattend
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcd/unattend.inf DESTINATION reactos NO_CAB FOR bootcd)
-add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcdregtest/unattend.inf DESTINATION reactos NO_CAB FOR regtest)
 add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/livecd/unattend.inf DESTINATION reactos NO_CAB FOR livecd)
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/livecd/unattend.inf DESTINATION reactos NO_CAB FOR livecd)
+add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/preinstall/unattend.inf DESTINATION reactos FOR preinstall)
 
 # LiveImage shortcuts
 add_custom_target(livecd_links)
 function(add_livecd_shortcut name path)
-    # Only handle DESTINATION; transfer all the other parameters verbatim to add_link()
-    cmake_parse_arguments(_shortcut "" "" "DESTINATION" ${ARGN})
+    # Only handle DESTINATION and FOR; transfer all the other parameters verbatim to add_link()
+    cmake_parse_arguments(_shortcut "" "" "DESTINATION;FOR" ${ARGN})
     if(NOT _shortcut_DESTINATION)
         message(FATAL_ERROR "You must provide at least one destination")
+    endif()
+    if(NOT _shortcut_FOR)
+        set(_shortcut_FOR livecd preinstall)
     endif()
 
     add_link(${name} ${path} ${_shortcut_UNPARSED_ARGUMENTS})
@@ -74,7 +107,7 @@ function(add_livecd_shortcut name path)
         add_cd_file(FILE "${CMAKE_CURRENT_BINARY_DIR}/${name}.lnk"
                     TARGET livecd_links
                     DESTINATION ${dest}
-                    FOR livecd)
+                    FOR ${_shortcut_FOR})
     endforeach()
 endfunction()
 
@@ -99,9 +132,8 @@ cmdenvvar(envvar_homepath   "HOMEPATH"   FALSE)
 
 ## NOTE: What would be nice is to create this list using /media/inf/shortcuts.inf
 ## and taking their default english translation!
-
-set(dir_allusers_desktop        "Profiles/All Users/Desktop")
-set(dir_startmenu_programs      "Profiles/All Users/Start Menu/Programs")
+set(dir_allusers_desktop        "Users/Public/Desktop")
+set(dir_startmenu_programs      "ProgramData/Microsoft/Windows/Start Menu/Programs")
 set(dir_startmenu_admintools    "${dir_startmenu_programs}/Administrative Tools")
 set(dir_startmenu_accessories   "${dir_startmenu_programs}/Accessories")
 set(dir_startmenu_games         "${dir_startmenu_programs}/Games")
@@ -109,31 +141,49 @@ set(dir_startmenu_accessibility "${dir_startmenu_accessories}/Accessibility")
 set(dir_startmenu_comms         "${dir_startmenu_accessories}/Communications")
 set(dir_startmenu_entertainment "${dir_startmenu_accessories}/Entertainment")
 set(dir_startmenu_systemtools   "${dir_startmenu_accessories}/System Tools")
-set(dir_quicklaunch             "Profiles/Default User/Application Data/Microsoft/Internet Explorer/Quick Launch")
+set(dir_quicklaunch             "reactos/system32/config/systemprofile/AppData/Roaming/Microsoft/Internet Explorer/Quick Launch")
 
 cmdenvvar(envvar_systemdrive "SystemDrive" TRUE)
 cmdenvvar(envvar_archdir     "PROCESSOR_ARCHITECTURE:x86=I386" TRUE)
-add_livecd_shortcut("Install ReactOS"
+add_livecd_shortcut("Install LiberNT"
     "shell:system\\cmd.exe"
-    CMDLINE_ARGS "/D /E:ON /C \"start ${envvar_systemdrive}\\${envvar_archdir}\\reactos.exe\""
-    ICON "${envvar_systemroot}\\system32\\msiexec.exe"
+    CMDLINE_ARGS "/D /E:ON /C \"start ${envvar_systemdrive}\\${envvar_archdir}\\libernt.exe\""
+    ICON "${envvar_systemdrive}\\${ARCH}\\libernt.exe"
     MINIMIZE
     DESTINATION "${dir_allusers_desktop}")
+add_cd_file(FILE "${CMAKE_CURRENT_BINARY_DIR}/Install LiberNT.lnk"
+            TARGET livecd_links
+            DESTINATION "${dir_startmenu_programs}"
+            FOR preinstall)
+add_livecd_shortcut("Finish Setup"
+    "shell:system\\oobe\\oobe.exe" ICON_INDEX 0
+    DESTINATION "${dir_startmenu_programs}"
+    FOR preinstall)
 
 add_livecd_shortcut("Read Me"
     "shell:windows\\readme.txt"
     ICON "${envvar_systemroot}\\system32\\shell32.dll" ICON_INDEX -152
     DESTINATION "${dir_allusers_desktop}")
-add_livecd_shortcut("ReactOS Explorer"
+add_livecd_shortcut("LiberNT Explorer"
     "shell:windows\\explorer.exe" ICON_INDEX 1
     WORKDIR "${envvar_homedrive}${envvar_homepath}"
     DESTINATION "${dir_startmenu_programs}" "${dir_quicklaunch}")
+add_livecd_shortcut("Terminal"
+    "shell:system\\terminal.exe" ICON_INDEX 0
+    WORKDIR "${envvar_homedrive}${envvar_homepath}"
+    DESTINATION "${dir_startmenu_accessories}" "${dir_quicklaunch}")
 add_livecd_shortcut("Command Prompt"
     "shell:system\\cmd.exe" ICON_INDEX 0
     WORKDIR "${envvar_homedrive}${envvar_homepath}"
-    DESTINATION "${dir_allusers_desktop}" "${dir_startmenu_accessories}" "${dir_quicklaunch}")
+    DESTINATION "${dir_startmenu_accessories}")
+add_livecd_shortcut("Applications Manager"
+    "shell:system\\rapps.exe" ICON_INDEX 0
+    DESTINATION "${dir_startmenu_programs}")
 add_livecd_shortcut("Device Manager"
     "shell:system\\devmgmt.exe" ICON_INDEX 0
+    DESTINATION "${dir_startmenu_admintools}")
+add_livecd_shortcut("Disk Management"
+    "shell:system\\diskmgmt.exe" ICON_INDEX 0
     DESTINATION "${dir_startmenu_admintools}")
 add_livecd_shortcut("Event Viewer"
     "shell:system\\eventvwr.exe" ICON_INDEX 0
@@ -144,9 +194,6 @@ add_livecd_shortcut("Service Manager"
 add_livecd_shortcut("System Configuration"
     "shell:system\\msconfig.exe" ICON_INDEX 0
     DESTINATION "${dir_startmenu_admintools}")
-add_livecd_shortcut("Accessibility Utility Manager"
-    "shell:system\\utilman.exe" ICON_INDEX 0
-    DESTINATION "${dir_startmenu_accessibility}")
 add_livecd_shortcut("Magnify"
     "shell:system\\magnify.exe" ICON_INDEX 0
     DESTINATION "${dir_startmenu_accessibility}")
@@ -165,9 +212,6 @@ add_livecd_shortcut("Sound Recorder"
     "shell:system\\sndrec32.exe" ICON_INDEX 0
     WORKDIR "${envvar_homedrive}${envvar_homepath}"
     DESTINATION "${dir_startmenu_entertainment}")
-add_livecd_shortcut("Volume Control"
-    "shell:system\\sndvol32.exe" ICON_INDEX 0
-    DESTINATION "${dir_startmenu_entertainment}")
 add_livecd_shortcut("Character Map"
     "shell:system\\charmap.exe" ICON_INDEX 0
     DESTINATION "${dir_startmenu_systemtools}")
@@ -185,6 +229,18 @@ add_livecd_shortcut("Registry Editor"
     DESTINATION "${dir_startmenu_systemtools}")
 add_livecd_shortcut("Task Manager"
     "shell:system\\taskmgr.exe" ICON_INDEX 0
+    DESTINATION "${dir_startmenu_systemtools}")
+add_livecd_shortcut("Task Manager 11"
+    "shell:system\\taskmgr11.exe" ICON_INDEX 0
+    DESTINATION "${dir_startmenu_systemtools}")
+add_livecd_shortcut("LntGet"
+    "shell:system\\lntget.exe" ICON_INDEX 0 CMDLINE_ARGS "gui"
+    DESTINATION "${dir_startmenu_systemtools}")
+add_livecd_shortcut("LiberNT Driver Installer"
+    "shell:system\\lntdrv.exe" ICON_INDEX 0
+    DESTINATION "${dir_startmenu_systemtools}")
+add_livecd_shortcut("Optional Components"
+    "shell:system\\oobe\\oobe.exe" ICON_INDEX 0 CMDLINE_ARGS "/components"
     DESTINATION "${dir_startmenu_systemtools}")
 add_livecd_shortcut("Calculator"
     "shell:system\\calc.exe" ICON_INDEX 0
@@ -211,3 +267,4 @@ add_livecd_shortcut("Spider Solitaire"
 add_livecd_shortcut("WineMine"
     "shell:system\\winmine.exe" ICON_INDEX 0
     DESTINATION "${dir_startmenu_games}")
+

@@ -2255,6 +2255,8 @@ static void test_IsWow64Process2(void)
     USHORT expect_native = IMAGE_FILE_MACHINE_ARMNT;
 #elif defined __aarch64__
     USHORT expect_native = IMAGE_FILE_MACHINE_ARM64;
+#elif defined(__REACTOS__) && defined(__riscv) && (__riscv_xlen == 64)
+    USHORT expect_native = IMAGE_FILE_MACHINE_RISCV64;
 #else
     USHORT expect_native = 0;
 #endif
@@ -2484,12 +2486,6 @@ static void test_DuplicateHandle(void)
     DWORD info;
     BOOL r;
 
-#if defined(__REACTOS__) && defined(_WIN64)
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: test_DuplicateHandle() deadlocks on ReactOS x64!\n");
-        return;
-    }
-#endif
     r = DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(),
             GetCurrentProcess(), &out, 0, FALSE,
             DUPLICATE_SAME_ACCESS | DUPLICATE_CLOSE_SOURCE);
@@ -2759,7 +2755,7 @@ static void test_IsProcessInJob(void)
     ok(ret, "IsProcessInJob error %lu\n", GetLastError());
     ok(out, "IsProcessInJob returned out=%u\n", out);
 #ifdef __REACTOS__
-    if (GetNTVersion() >= _WIN32_WINNT_WIN8) {
+    if (GetNTVersion() >= _WIN32_WINNT_WIN8 && GetNTVersion() < _WIN32_WINNT_WIN10) {
         test_assigned_proc(job, 1);
         test_accounting(job, 1, 1, 0);
     } else {
@@ -2942,7 +2938,7 @@ static void test_QueryInformationJobObject(void)
     ok(ret_len == sizeof(basic_accounting_info), "QueryInformationJobObject returned ret_len=%lu\n", ret_len);
     expect_eq_d(3, basic_accounting_info.TotalProcesses);
 #if defined(__REACTOS__)
-    ok(basic_accounting_info.ActiveProcesses == 2 || broken(basic_accounting_info.ActiveProcesses == 3) /* Win8+ */, "Expected %d == %d\n", basic_accounting_info.ActiveProcesses, 2);
+    ok(basic_accounting_info.ActiveProcesses == 2 || broken(basic_accounting_info.ActiveProcesses == 3) /* Win8+ */, "Expected %lu == %d\n", basic_accounting_info.ActiveProcesses, 2);
 #else
     expect_eq_d(2, basic_accounting_info.ActiveProcesses);
 #endif
@@ -3536,12 +3532,6 @@ static void test_StdHandleInheritance(void)
 #undef X
     };
 
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: These std handle tests on ReactOS confuses rosautotest\n");
-        return;
-    }
-#endif
     hsavestd[0] = GetStdHandle(STD_INPUT_HANDLE);
     hsavestd[1] = GetStdHandle(STD_OUTPUT_HANDLE);
     hsavestd[2] = GetStdHandle(STD_ERROR_HANDLE);
@@ -5765,12 +5755,6 @@ START_TEST(process)
      *  console:        check if console creation parameters work
      */
 
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: ReactOS's job support is too basic for these tests.\n");
-        return;
-    }
-#endif
     if (!pCreateJobObjectW)
     {
         win_skip("No job object support\n");

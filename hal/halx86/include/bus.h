@@ -116,6 +116,29 @@ typedef struct _PCIPBUSDATA
     UCHAR SwizzleIn[4];
     RTL_BITMAP DeviceConfigured;
     ULONG ConfiguredBits[PCI_MAX_DEVICES * PCI_MAX_FUNCTION / 32];
+
+    /* PCI bus resource apertures (IO/Memory/Prefetch windows) */
+    ULONGLONG IoBase;
+    ULONGLONG IoLimit;
+    ULONGLONG IoNext;
+    ULONGLONG MemoryBase;
+    ULONGLONG MemoryLimit;
+    ULONGLONG MemoryNext;
+    ULONGLONG IoWindowBase;
+    ULONGLONG IoWindowLimit;
+    ULONGLONG MemoryWindowBase;
+    ULONGLONG MemoryWindowLimit;
+    ULONGLONG PrefetchWindowBase;
+    ULONGLONG PrefetchWindowLimit;
+
+    /* PCI bus number range */
+    BOOLEAN BusNumbersConfigured;
+    UCHAR BusNumberStart;
+    UCHAR BusNumberEnd;
+
+    /* Extended fields (appended to preserve ABI with original layout above) */
+    BOOLEAN ResourcesInitialized;
+    USHORT PciSegment;
 } PCIPBUSDATA, *PPCIPBUSDATA;
 
 typedef ULONG
@@ -276,9 +299,8 @@ typedef struct _HAL_BUS_HANDLER
 /* SHARED (Fake PCI-BUS HANDLER) */
 
 extern PCI_CONFIG_HANDLER PCIConfigHandler;
-extern const PCI_CONFIG_HANDLER PCIConfigHandlerType1;
-extern const PCI_CONFIG_HANDLER PCIConfigHandlerType2;
-extern const BUS_HANDLER HalpFakePciBusHandler;
+extern PCI_CONFIG_HANDLER PCIConfigHandlerType1;
+extern PCI_CONFIG_HANDLER PCIConfigHandlerType2;
 
 CODE_SEG("INIT")
 PPCI_REGISTRY_INFO_INTERNAL
@@ -358,26 +380,6 @@ HalpWritePCIConfig(
     IN ULONG Offset,
     IN ULONG Length
 );
-
-ULONG
-NTAPI
-HaliPciInterfaceReadConfig(
-    _In_ PBUS_HANDLER RootBusHandler,
-    _In_ ULONG BusNumber,
-    _In_ PCI_SLOT_NUMBER SlotNumber,
-    _Out_writes_bytes_(Length) PVOID Buffer,
-    _In_ ULONG Offset,
-    _In_ ULONG Length);
-
-ULONG
-NTAPI
-HaliPciInterfaceWriteConfig(
-    _In_ PBUS_HANDLER RootBusHandler,
-    _In_ ULONG BusNumber,
-    _In_ PCI_SLOT_NUMBER SlotNumber,
-    _In_reads_bytes_(Length) PVOID Buffer,
-    _In_ ULONG Offset,
-    _In_ ULONG Length);
 
 ULONG
 NTAPI
@@ -650,8 +652,17 @@ HalpGetSystemInterruptVector(
     OUT PKAFFINITY Affinity
 );
 
+VOID
+NTAPI
+HalpPciSetExtendedConfigWindow(
+    _In_ ULONGLONG BaseAddress,
+    _In_ ULONG StartBus,
+    _In_ ULONG EndBus
+);
+
 extern ULONG HalpBusType;
 extern BOOLEAN HalpPCIConfigInitialized;
+extern BUS_HANDLER HalpFakePciBusHandler;
 extern ULONG HalpMinPciBus, HalpMaxPciBus;
 extern LIST_ENTRY HalpAllBusHandlers;
 

@@ -6,6 +6,8 @@
  */
 
 #include "precomp.h"
+#include <propkey.h>
+#include <propvarutil.h>
 #include <lmcons.h>
 #include <lmapibuf.h>
 #include <lmaccess.h>
@@ -178,101 +180,6 @@ StrRStrW(
     return const_cast<PWSTR>(pchEnd);
 }
 
-HWND
-CStubWindow32::FindStubWindow(UINT Type, LPCWSTR Path)
-{
-    for (HWND hWnd, hWndAfter = NULL;;)
-    {
-        hWnd = hWndAfter = FindWindowExW(NULL, hWndAfter, CSTUBWINDOW32_CLASSNAME, Path);
-        if (!hWnd || !Path)
-            return NULL;
-        if (GetPropW(hWnd, GetTypePropName()) == ULongToHandle(Type))
-            return hWnd;
-    }
-}
-
-HRESULT
-CStubWindow32::CreateStub(UINT Type, LPCWSTR Path, const POINT *pPt)
-{
-    if (HWND hWnd = FindStubWindow(Type, Path))
-    {
-        ::SwitchToThisWindow(::GetLastActivePopup(hWnd), TRUE);
-        return HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS);
-    }
-    RECT rcPosition = { pPt ? pPt->x : CW_USEDEFAULT, pPt ? pPt->y : CW_USEDEFAULT, 0, 0 };
-    DWORD Style = WS_DISABLED | WS_CLIPSIBLINGS | WS_CAPTION;
-    DWORD ExStyle = WS_EX_WINDOWEDGE | WS_EX_APPWINDOW;
-    if (!Create(NULL, rcPosition, Path, Style, ExStyle))
-    {
-        ERR("StubWindow32 creation failed\n");
-        return E_FAIL;
-    }
-    ::SetPropW(*this, GetTypePropName(), ULongToHandle(Type));
-    return S_OK;
-}
-
-BOOL PathIsDotOrDotDotW(_In_ LPCWSTR pszPath)
-{
-    if (pszPath[0] != L'.')
-        return FALSE;
-    return !pszPath[1] || (pszPath[1] == L'.' && !pszPath[2]);
-}
-
-#define PATH_VALID_ELEMENT ( \
-    PATH_CHAR_CLASS_DOT | PATH_CHAR_CLASS_SEMICOLON | PATH_CHAR_CLASS_COMMA | \
-    PATH_CHAR_CLASS_SPACE | PATH_CHAR_CLASS_OTHER_VALID \
-)
-
-BOOL PathIsValidElement(_In_ LPCWSTR pszPath)
-{
-    if (!*pszPath || PathIsDotOrDotDotW(pszPath))
-        return FALSE;
-
-    for (LPCWSTR pch = pszPath; *pch; ++pch)
-    {
-        if (!PathIsValidCharW(*pch, PATH_VALID_ELEMENT))
-            return FALSE;
-    }
-
-    return TRUE;
-}
-
-BOOL PathIsDosDevice(_In_ LPCWSTR pszName)
-{
-    WCHAR szPath[MAX_PATH];
-    StringCchCopyW(szPath, _countof(szPath), pszName);
-    PathRemoveExtensionW(szPath);
-
-    if (lstrcmpiW(szPath, L"NUL") == 0 || lstrcmpiW(szPath, L"PRN") == 0 ||
-        lstrcmpiW(szPath, L"CON") == 0 || lstrcmpiW(szPath, L"AUX") == 0)
-    {
-        return TRUE;
-    }
-
-    if (_wcsnicmp(szPath, L"LPT", 3) == 0 || _wcsnicmp(szPath, L"COM", 3) == 0)
-    {
-        if ((L'0' <= szPath[3] && szPath[3] <= L'9') && szPath[4] == UNICODE_NULL)
-            return TRUE;
-    }
-
-    return FALSE;
-}
-
-HRESULT SHILAppend(_Inout_ LPITEMIDLIST pidl, _Inout_ LPITEMIDLIST *ppidl)
-{
-    LPITEMIDLIST pidlOld = *ppidl;
-    if (!pidlOld)
-    {
-        *ppidl = pidl;
-        return S_OK;
-    }
-
-    HRESULT hr = SHILCombine(*ppidl, pidl, ppidl);
-    ILFree(pidlOld);
-    ILFree(pidl);
-    return hr;
-}
-
 /*************************************************************************
  *  SHShouldShowWizards [SHELL32.237]
  *
@@ -290,17 +197,8 @@ SHShouldShowWizards(_In_ IUnknown *pUnknown)
     if (FAILED(hr))
         return hr;
 
-    SHELLSTATE state;
-    SHGetSetSettings(&state, SSF_WEBVIEW, FALSE);
-    if (state.fWebView &&
-        !SHRegGetBoolUSValueW(L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Advanced",
-                              L"ShowWizardsTEST", FALSE, FALSE))
-    {
-        hr = S_FALSE;
-    }
-
     pBrowser->Release();
-    return hr;
+    return S_FALSE;
 }
 
 static BOOL
@@ -325,362 +223,6 @@ OpenEffectiveToken(
     return ret;
 }
 
-BOOL BindCtx_ContainsObject(_In_ IBindCtx *pBindCtx, _In_ LPCWSTR pszName)
-{
-    CComPtr<IUnknown> punk;
-    if (!pBindCtx || FAILED(pBindCtx->GetObjectParam(const_cast<LPWSTR>(pszName), &punk)))
-        return FALSE;
-    return TRUE;
-}
-
-DWORD BindCtx_GetMode(_In_ IBindCtx *pbc, _In_ DWORD dwDefault)
-{
-    if (!pbc)
-        return dwDefault;
-
-    BIND_OPTS BindOpts = { sizeof(BindOpts) };
-    HRESULT hr = pbc->GetBindOptions(&BindOpts);
-    if (FAILED(hr))
-        return dwDefault;
-
-    return BindOpts.grfMode;
-}
-
-BOOL SHSkipJunctionBinding(_In_ IBindCtx *pbc, _In_ CLSID *pclsid)
-{
-    if (!pbc)
-        return FALSE;
-
-    BIND_OPTS BindOps = { sizeof(BindOps) };
-    if (SUCCEEDED(pbc->GetBindOptions(&BindOps)) && BindOps.grfFlags == OLECONTF_LINKS)
-        return TRUE;
-
-    return pclsid && SHSkipJunction(pbc, pclsid);
-}
-
-HRESULT SHIsFileSysBindCtx(_In_ IBindCtx *pBindCtx, _Out_opt_ WIN32_FIND_DATAW *pFindData)
-{
-    CComPtr<IUnknown> punk;
-    CComPtr<IFileSystemBindData> pBindData;
-
-    if (!pBindCtx || FAILED(pBindCtx->GetObjectParam((LPWSTR)STR_FILE_SYS_BIND_DATA, &punk)))
-        return S_FALSE;
-
-    if (FAILED(punk->QueryInterface(IID_PPV_ARG(IFileSystemBindData, &pBindData))))
-        return S_FALSE;
-
-    if (pFindData)
-        pBindData->GetFindData(pFindData);
-
-    return S_OK;
-}
-
-BOOL Shell_FailForceReturn(_In_ HRESULT hr)
-{
-    DWORD code = HRESULT_CODE(hr);
-
-    switch (code)
-    {
-        case ERROR_BAD_NETPATH:
-        case ERROR_BAD_NET_NAME:
-        case ERROR_CANCELLED:
-            return TRUE;
-
-        default:
-            return (ERROR_FILE_NOT_FOUND <= code && code <= ERROR_PATH_NOT_FOUND);
-    }
-}
-
-SHSTDAPI
-SHBindToObject(
-    _In_opt_ IShellFolder *pShellFolder,
-    _In_ PCUIDLIST_RELATIVE pidl,
-    _In_opt_ IBindCtx *pBindCtx,
-    _In_ REFIID riid,
-    _Out_ void **ppvObj)
-{
-    CComPtr<IShellFolder> psfDesktop;
-
-    *ppvObj = NULL;
-
-    if (!pShellFolder)
-    {
-        SHGetDesktopFolder(&psfDesktop);
-        if (!psfDesktop)
-            return E_FAIL;
-
-        pShellFolder = psfDesktop;
-    }
-
-    HRESULT hr;
-    if (_ILIsDesktop(pidl))
-        hr = pShellFolder->QueryInterface(riid, ppvObj);
-    else
-        hr = pShellFolder->BindToObject(pidl, pBindCtx, riid, ppvObj);
-
-    if (SUCCEEDED(hr) && !*ppvObj)
-        hr = E_FAIL;
-
-    return hr;
-}
-
-EXTERN_C HRESULT
-SHELL_GetUIObjectOfAbsoluteItem(
-    _In_opt_ HWND hWnd,
-    _In_ PCIDLIST_ABSOLUTE pidl,
-    _In_ REFIID riid, _Out_ void **ppvObj)
-{
-    if (!ppvObj)
-        return E_INVALIDARG;
-    *ppvObj = NULL;
-    IShellFolder *psf;
-    PCUITEMID_CHILD pidlChild;
-    HRESULT hr = SHBindToParent(pidl, IID_PPV_ARG(IShellFolder, &psf), &pidlChild);
-    if (SUCCEEDED(hr))
-    {
-        hr = psf->GetUIObjectOf(hWnd, 1, &pidlChild, riid, NULL, ppvObj);
-        psf->Release();
-        if (SUCCEEDED(hr))
-        {
-            if (*ppvObj)
-                return hr;
-            hr = E_FAIL;
-        }
-    }
-    return hr;
-}
-
-HRESULT
-SHELL_DisplayNameOf(
-    _In_opt_ IShellFolder *psf,
-    _In_ LPCITEMIDLIST pidl,
-    _In_opt_ UINT Flags,
-    _Out_ PWSTR *ppStr)
-{
-    HRESULT hr;
-    CComPtr<IShellFolder> psfRoot;
-    if (!psf)
-    {
-        PCUITEMID_CHILD pidlChild;
-        hr = SHBindToParent(pidl, IID_PPV_ARG(IShellFolder, &psfRoot), &pidlChild);
-        if (FAILED(hr))
-            return hr;
-        psf = psfRoot;
-        pidl = pidlChild;
-    }
-    STRRET sr;
-    hr = psf->GetDisplayNameOf((PCUITEMID_CHILD)pidl, Flags, &sr);
-    return SUCCEEDED(hr) ? StrRetToStrW(&sr, pidl, ppStr) : hr;
-}
-
-/***********************************************************************
- *    DisplayNameOfW [SHELL32.757] (Vista+)
- */
-EXTERN_C HRESULT WINAPI
-DisplayNameOfW(
-    _In_ IShellFolder *psf,
-    _In_ LPCITEMIDLIST pidl,
-    _In_ DWORD dwFlags,
-    _Out_ LPWSTR pszBuf,
-    _In_ UINT cchBuf)
-{
-    *pszBuf = UNICODE_NULL;
-    STRRET sr;
-    HRESULT hr = psf->GetDisplayNameOf(pidl, dwFlags, &sr);
-    if (FAILED(hr))
-        return hr;
-    return StrRetToBufW(&sr, pidl, pszBuf, cchBuf);
-}
-
-DWORD
-SHGetAttributes(_In_ IShellFolder *psf, _In_ LPCITEMIDLIST pidl, _In_ DWORD dwAttributes)
-{
-    LPCITEMIDLIST pidlLast = pidl;
-    IShellFolder *release = NULL;
-
-    if (!psf)
-    {
-        SHBindToParent(pidl, IID_PPV_ARG(IShellFolder, &psf), &pidlLast);
-        if (!psf)
-            return 0;
-        release = psf;
-    }
-
-    DWORD oldAttrs = dwAttributes;
-    if (FAILED(psf->GetAttributesOf(1, &pidlLast, &dwAttributes)))
-        dwAttributes = 0;
-    else
-        dwAttributes &= oldAttrs;
-
-    if ((dwAttributes & SFGAO_FOLDER) &&
-        (dwAttributes & SFGAO_STREAM) &&
-        !(dwAttributes & SFGAO_STORAGEANCESTOR) &&
-        (oldAttrs & SFGAO_STORAGEANCESTOR) &&
-        (SHGetObjectCompatFlags(psf, NULL) & 0x200))
-    {
-        dwAttributes &= ~(SFGAO_STREAM | SFGAO_STORAGEANCESTOR);
-        dwAttributes |= SFGAO_STORAGEANCESTOR;
-    }
-
-    if (release)
-        release->Release();
-    return dwAttributes;
-}
-
-HRESULT SHELL_GetIDListTarget(_In_ LPCITEMIDLIST pidl, _Out_ PIDLIST_ABSOLUTE *ppidl)
-{
-    IShellLink *pSL;
-    HRESULT hr = SHBindToObject(NULL, pidl, NULL, IID_PPV_ARG(IShellLink, &pSL));
-    if (SUCCEEDED(hr))
-    {
-        hr = pSL->GetIDList(ppidl); // Note: Returns S_FALSE if no target pidl
-        pSL->Release();
-    }
-    return hr;
-}
-
-HRESULT SHCoInitializeAnyApartment(VOID)
-{
-    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    if (FAILED(hr))
-        hr = CoInitializeEx(NULL, COINIT_DISABLE_OLE1DDE);
-    return hr;
-}
-
-HRESULT
-SHGetNameAndFlagsW(
-    _In_ LPCITEMIDLIST pidl,
-    _In_ DWORD dwFlags,
-    _Out_opt_ LPWSTR pszText,
-    _In_ UINT cchBuf,
-    _Inout_opt_ DWORD *pdwAttributes)
-{
-    if (pszText)
-        *pszText = UNICODE_NULL;
-
-    HRESULT hrCoInit = SHCoInitializeAnyApartment();
-
-    CComPtr<IShellFolder> psfFolder;
-    LPCITEMIDLIST ppidlLast;
-    HRESULT hr = SHBindToParent(pidl, IID_PPV_ARG(IShellFolder, &psfFolder), &ppidlLast);
-    if (SUCCEEDED(hr))
-    {
-        if (pszText)
-            hr = DisplayNameOfW(psfFolder, ppidlLast, dwFlags, pszText, cchBuf);
-
-        if (SUCCEEDED(hr))
-        {
-            if (pdwAttributes)
-                *pdwAttributes = SHGetAttributes(psfFolder, ppidlLast, *pdwAttributes);
-        }
-    }
-
-    if (SUCCEEDED(hrCoInit))
-        CoUninitialize();
-
-    return hr;
-}
-
-EXTERN_C HWND
-BindCtx_GetUIWindow(_In_ IBindCtx *pBindCtx)
-{
-    HWND hWnd = NULL;
-
-    CComPtr<IUnknown> punk;
-    if (pBindCtx && SUCCEEDED(pBindCtx->GetObjectParam((LPWSTR)L"UI During Binding", &punk)))
-        IUnknown_GetWindow(punk, &hWnd);
-
-    return hWnd;
-}
-
-class CDummyOleWindow : public IOleWindow
-{
-protected:
-    LONG m_cRefs;
-    HWND m_hWnd;
-
-public:
-    CDummyOleWindow() : m_cRefs(1), m_hWnd(NULL) { }
-    virtual ~CDummyOleWindow() { }
-
-    // IUnknown methods
-    STDMETHODIMP QueryInterface(REFIID riid, LPVOID *ppvObj) override
-    {
-        static const QITAB c_tab[] =
-        {
-            QITABENT(CDummyOleWindow, IOleWindow),
-            { NULL }
-        };
-        return ::QISearch(this, c_tab, riid, ppvObj);
-    }
-    STDMETHODIMP_(ULONG) AddRef() override
-    {
-        return ++m_cRefs;
-    }
-    STDMETHODIMP_(ULONG) Release() override
-    {
-        if (--m_cRefs == 0)
-        {
-            delete this;
-            return 0;
-        }
-        return m_cRefs;
-    }
-
-    // IOleWindow methods
-    STDMETHODIMP GetWindow(HWND *phWnd) override
-    {
-        *phWnd = m_hWnd;
-        if (!m_hWnd)
-            return E_NOTIMPL;
-        return S_OK;
-    }
-    STDMETHODIMP ContextSensitiveHelp(BOOL fEnterMode) override
-    {
-        return E_NOTIMPL;
-    }
-};
-
-EXTERN_C HRESULT
-BindCtx_RegisterObjectParam(
-    _In_ IBindCtx *pBindCtx,
-    _In_ LPOLESTR pszKey,
-    _In_opt_ IUnknown *punk,
-    _Out_ LPBC *ppbc)
-{
-    HRESULT hr = S_OK;
-    CDummyOleWindow *pUnknown = NULL;
-
-    *ppbc = pBindCtx;
-
-    if (pBindCtx)
-    {
-        pBindCtx->AddRef();
-    }
-    else
-    {
-        hr = CreateBindCtx(0, ppbc);
-        if (FAILED(hr))
-            return hr;
-    }
-
-    if (!punk)
-        punk = pUnknown = new CDummyOleWindow();
-
-    hr = (*ppbc)->RegisterObjectParam(pszKey, punk);
-
-    if (pUnknown)
-        pUnknown->Release();
-
-    if (FAILED(hr))
-    {
-        (*ppbc)->Release();
-        *ppbc = NULL;
-    }
-
-    return hr;
-}
-
 /*************************************************************************
  *                SHSetFolderPathA (SHELL32.231)
  *
@@ -697,6 +239,64 @@ SHSetFolderPathA(
     TRACE("(%d, %p, 0x%X, %s)\n", csidl, hToken, dwFlags, debugstr_a(pszPath));
     CStringW strPathW(pszPath);
     return SHSetFolderPathW(csidl, hToken, dwFlags, strPathW);
+}
+
+/*************************************************************************
+ *                PathIsSlowW (SHELL32.239)
+ *
+ * @param[in] pszFile
+ * Path to check for slowness.
+ *
+ * @param[in] dwAttr
+ * File attributes of pszFile or INVALID_FILE_ATTRIBUTES to get them.
+ *
+ * @return
+ * TRUE if the path is considered slow, FALSE if not.
+ *
+ * @see https://learn.microsoft.com/en-us/windows/win32/api/shlobj/nf-shlobj-pathissloww
+ **/
+EXTERN_C BOOL
+WINAPI
+PathIsSlowW(
+    _In_ LPCWSTR pszFile,
+    _In_ DWORD dwAttr)
+{
+    TRACE("PathIsSlowW(%s, %lx)\n", debugstr_w(pszFile), dwAttr);
+
+    /* If we didn't get attributes, get them */
+    if (dwAttr == INVALID_FILE_ATTRIBUTES)
+        dwAttr = GetFileAttributesW(pszFile);
+
+    /* Offline files are always considered slow */
+    if (dwAttr != INVALID_FILE_ATTRIBUTES &&
+        (dwAttr & FILE_ATTRIBUTE_OFFLINE))
+    {
+        return TRUE;
+    }
+
+    /* Only network paths can be slow bandwidth-wise */
+    if (!PathIsNetworkPathW(pszFile))
+        return FALSE;
+
+    /* Query connection speed with MPR */
+    NETRESOURCEW nr = {0};
+    NETCONNECTINFOSTRUCT nci = { sizeof(nci) };
+
+    WCHAR szRoot[MAX_PATH];
+    if (FAILED(StringCchCopyW(szRoot, _countof(szRoot), pszFile)))
+        return FALSE;
+    PathStripToRootW(szRoot);
+
+    nr.lpRemoteName = szRoot;
+    nr.dwType = RESOURCETYPE_DISK;
+
+    if (MultinetGetConnectionPerformanceW(&nr, &nci) == NO_ERROR)
+    {
+        if (nci.dwSpeed <= 400)
+            return TRUE;
+    }
+
+    return FALSE;
 }
 
 /*************************************************************************
@@ -966,7 +566,9 @@ SHELL_ReadSingleUnreadMailCount(
     DWORD error = SHQueryValueExW(hKey, L"MessageCount", 0, &dwType, &dwCount, &cbSize);
     if (error)
         return error;
-    if (pdwCount && dwType == REG_DWORD)
+    if (dwType != REG_DWORD || cbSize != sizeof(dwCount))
+        return ERROR_INVALID_DATA;
+    if (pdwCount)
         *pdwCount = dwCount;
 
     FILETIME FileTime;
@@ -974,7 +576,9 @@ SHELL_ReadSingleUnreadMailCount(
     error = SHQueryValueExW(hKey, L"TimeStamp", 0, &dwType, &FileTime, &cbSize);
     if (error)
         return error;
-    if (pFileTime && dwType == REG_BINARY)
+    if (dwType != REG_BINARY || cbSize != sizeof(FileTime))
+        return ERROR_INVALID_DATA;
+    if (pFileTime)
         *pFileTime = FileTime;
 
     WCHAR szName[2 * MAX_PATH];
@@ -982,8 +586,13 @@ SHELL_ReadSingleUnreadMailCount(
     error = SHQueryValueExW(hKey, L"Application", 0, &dwType, szName, &cbSize);
     if (error)
         return error;
+    if (dwType != REG_SZ || cbSize < sizeof(WCHAR) || cbSize > sizeof(szName) ||
+        cbSize % sizeof(WCHAR) || szName[cbSize / sizeof(WCHAR) - 1])
+    {
+        return ERROR_INVALID_DATA;
+    }
 
-    if (pszShellExecuteCommand && dwType == REG_SZ &&
+    if (pszShellExecuteCommand &&
         FAILED(StringCchCopyW(pszShellExecuteCommand, cchShellExecuteCommand, szName)))
     {
         return ERROR_INSUFFICIENT_BUFFER;
@@ -1031,7 +640,8 @@ SHGetUnreadMailCountW(
         if (pszShellExecuteCommand || cchShellExecuteCommand)
             return E_INVALIDARG;
 
-        *pdwCount = 0;
+        if (pdwCount)
+            *pdwCount = 0;
 
         error = RegOpenKeyExW(hKeyUser, L"Software\\Microsoft\\Windows\\CurrentVersion\\UnreadMail",
                               0, KEY_ENUMERATE_SUB_KEYS, &hKey);
@@ -1055,7 +665,7 @@ SHGetUnreadMailCountW(
             FILETIME FileTime;
             DWORD dwCount;
             error = SHELL_ReadSingleUnreadMailCount(hSubKey, &dwCount, &FileTime, NULL, 0);
-            if (!error && (!pFileTime || CompareFileTime(&FileTime, pFileTime) >= 0))
+            if (!error && pdwCount && (!pFileTime || CompareFileTime(&FileTime, pFileTime) >= 0))
                 *pdwCount += dwCount;
 
             RegCloseKey(hSubKey);
@@ -1813,63 +1423,6 @@ GetDfmCmd(_In_ IContextMenu *pCM, _In_ LPCSTR verba)
 }
 
 HRESULT
-SHELL_MapContextMenuVerbToCmdId(LPCMINVOKECOMMANDINFO pICI, const CMVERBMAP *pMap)
-{
-    LPCSTR pVerbA = pICI->lpVerb;
-    CHAR buf[MAX_PATH];
-    LPCMINVOKECOMMANDINFOEX pICIX = (LPCMINVOKECOMMANDINFOEX)pICI;
-    if (IsUnicode(*pICIX) && !IS_INTRESOURCE(pICIX->lpVerbW))
-    {
-        if (SHUnicodeToAnsi(pICIX->lpVerbW, buf, _countof(buf)))
-            pVerbA = buf;
-    }
-
-    if (IS_INTRESOURCE(pVerbA))
-        return LOWORD(pVerbA);
-    for (SIZE_T i = 0; pMap[i].Verb; ++i)
-    {
-        assert(SUCCEEDED((int)(pMap[i].CmdId))); // The id must be >= 0 and ideally in the 0..0x7fff range
-        if (!lstrcmpiA(pMap[i].Verb, pVerbA) && pVerbA[0])
-            return pMap[i].CmdId;
-    }
-    return E_FAIL;
-}
-
-static const CMVERBMAP*
-FindVerbMapEntry(UINT_PTR CmdId, const CMVERBMAP *pMap)
-{
-    for (SIZE_T i = 0; pMap[i].Verb; ++i)
-    {
-        if (pMap[i].CmdId == CmdId)
-            return &pMap[i];
-    }
-    return NULL;
-}
-
-HRESULT
-SHELL_GetCommandStringImpl(SIZE_T CmdId, UINT uFlags, LPSTR Buf, UINT cchBuf, const CMVERBMAP *pMap)
-{
-    const CMVERBMAP* pEntry;
-    switch (uFlags | GCS_UNICODE)
-    {
-        case GCS_VALIDATEW:
-        case GCS_VERBW:
-            pEntry = FindVerbMapEntry(CmdId, pMap);
-            if ((uFlags | GCS_UNICODE) == GCS_VERBW)
-            {
-                if (!pEntry)
-                    return E_INVALIDARG;
-                else if (uFlags & GCS_UNICODE)
-                    return SHAnsiToUnicode(pEntry->Verb, (LPWSTR)Buf, cchBuf) ? S_OK : E_FAIL;
-                else
-                    return StringCchCopyA(Buf, cchBuf, pEntry->Verb);
-            }
-            return pEntry ? S_OK : S_FALSE; // GCS_VALIDATE
-    }
-    return E_NOTIMPL;
-}
-
-HRESULT
 SHELL_CreateShell32DefaultExtractIcon(int IconIndex, REFIID riid, LPVOID *ppvOut)
 {
     CComPtr<IDefaultExtractIconInit> initIcon;
@@ -2140,109 +1693,64 @@ SHGetComputerDisplayNameW(
     return SHELL_BuildDisplayMachineName(pszName, cchNameMax, pszServerName, szDesc);
 }
 
-typedef struct tagALIAS_MAPPING
-{
-    BYTE bFlagMask;      // The combination of ALIAS_USER_FOLDER and/or ALIAS_DESKTOP
-    BYTE bCommonDesktop;
-    WORD nCsidlSrc;      // CSIDL_... (source)
-    WORD nCsidlDest;     // CSIDL_... (destination)
-} ALIAS_MAPPING, *PALIAS_MAPPING;
-
-//! PIDL alias table
-static const ALIAS_MAPPING g_AliasTable[] =
-{
-    {
-        ALIAS_USER_FOLDER,
-        FALSE,
-        CSIDL_PERSONAL | CSIDL_FLAG_NO_ALIAS,
-        CSIDL_PERSONAL
-    },
-    {
-        ALIAS_USER_FOLDER | ALIAS_DESKTOP,
-        FALSE,
-        CSIDL_COMMON_DOCUMENTS | CSIDL_FLAG_NO_ALIAS,
-        CSIDL_COMMON_DOCUMENTS
-    },
-    {
-        ALIAS_DESKTOP,
-        FALSE,
-        CSIDL_DESKTOPDIRECTORY,
-        CSIDL_DESKTOP
-    },
-    {
-        ALIAS_DESKTOP,
-        TRUE,
-        CSIDL_COMMON_DESKTOPDIRECTORY,
-        CSIDL_DESKTOP
-    }
-};
-
-//! Translate a PIDL to an "alias" PIDL.
-EXTERN_C BOOL
-SHELL32_ReparentAsAliasPidl(
-    _In_opt_ HWND hwnd,
-    _In_opt_ HANDLE hToken,
-    _In_ LPCITEMIDLIST pidlTarget,
-    _Out_ LPITEMIDLIST *ppidlNew,
-    _In_ DWORD dwFlags)
-{
-    if (!pidlTarget || !ppidlNew)
-        return FALSE;
-
-    *ppidlNew = NULL;
-
-    for (SIZE_T iEntry = 0; iEntry < _countof(g_AliasTable); ++iEntry)
-    {
-        const ALIAS_MAPPING *pEntry = &g_AliasTable[iEntry];
-
-        if (!(dwFlags & pEntry->bFlagMask))
-            continue;
-
-        // Get the source root PIDL
-        LPITEMIDLIST pidlSrcRoot = NULL;
-        HRESULT hr = SHGetFolderLocation(hwnd, pEntry->nCsidlSrc, hToken, 0, &pidlSrcRoot);
-        if (FAILED(hr))
-            continue;
-
-        // Check whether the input pidlTarget is under the source folder.
-        // If it matches, ILFindChild returns the relative PIDL in the pidlTarget.
-        LPCITEMIDLIST pidlRelative = ILFindChild(pidlSrcRoot, pidlTarget);
-        if (!pidlRelative) // Not found?
-        {
-            ILFree(pidlSrcRoot);
-            continue;
-        }
-
-        // Found. Get the destination root PIDL
-        LPITEMIDLIST pidlDestRoot = NULL;
-        hr = SHGetFolderLocation(hwnd, pEntry->nCsidlDest, hToken, 0, &pidlDestRoot);
-        if (SUCCEEDED(hr))
-        {
-            // Create a new PIDL by combining the destination root PIDL and the relative PIDL
-            *ppidlNew = ILCombine(pidlDestRoot, pidlRelative);
-            if (*ppidlNew)
-            {
-                // Manipulate specific flags in the PIDL if necessary
-                if (pEntry->bCommonDesktop && (*ppidlNew)->mkid.cb >= 3)
-                {
-                    (*ppidlNew)->mkid.abID[0] |= (PT_FS | PT_FS_COMMON_FLAG);
-                }
-            }
-            ILFree(pidlDestRoot);
-        }
-
-        ILFree(pidlSrcRoot);
-        break; // A match was found, so exit the loop
-    }
-
-    return (*ppidlNew != NULL);
-}
-
 /*************************************************************************
  *              SHSetLocalizedName (SHELL32.@)
  *
  * https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shsetlocalizedname
  */
+static HRESULT
+SHELL_GetLocalizedNameLocation(
+    _In_ PCWSTR pszPath,
+    _Out_writes_(MAX_PATH) PWSTR pszFolder,
+    _Out_writes_(MAX_PATH) PWSTR pszIni,
+    _Out_ PCWSTR *ppszSection,
+    _Out_ PCWSTR *ppszKey)
+{
+    DWORD dwAttrs;
+
+    if (!pszPath)
+        return E_INVALIDARG;
+
+    dwAttrs = GetFileAttributesW(pszPath);
+    if (dwAttrs == INVALID_FILE_ATTRIBUTES)
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+
+    if (FAILED(StringCchCopyW(pszFolder, MAX_PATH, pszPath)))
+        return E_INVALIDARG;
+
+    if (dwAttrs & FILE_ATTRIBUTE_DIRECTORY)
+    {
+        *ppszSection = L".ShellClassInfo";
+        *ppszKey = L"LocalizedResourceName";
+    }
+    else
+    {
+        *ppszSection = L"LocalizedFileNames";
+        *ppszKey = PathFindFileNameW(pszPath);
+        PathRemoveFileSpecW(pszFolder);
+    }
+
+    if (FAILED(StringCchCopyW(pszIni, MAX_PATH, pszFolder)) || !PathAppendW(pszIni, L"desktop.ini"))
+        return E_INVALIDARG;
+    return S_OK;
+}
+
+static BOOL
+SHELL_IniHasKeys(_In_ PCWSTR pszIni)
+{
+    WCHAR szSections[1024], szKeys[64];
+    PCWSTR pszSection;
+
+    if (!GetPrivateProfileSectionNamesW(szSections, _countof(szSections), pszIni))
+        return FALSE;
+    for (pszSection = szSections; *pszSection; pszSection += wcslen(pszSection) + 1)
+    {
+        if (GetPrivateProfileSectionW(pszSection, szKeys, _countof(szKeys), pszIni))
+            return TRUE;
+    }
+    return FALSE;
+}
+
 EXTERN_C
 HRESULT WINAPI
 SHSetLocalizedName(
@@ -2250,80 +1758,285 @@ SHSetLocalizedName(
     _In_ PCWSTR pszResModule,
     _In_ INT idsRes)
 {
+    WCHAR szFolder[MAX_PATH], szIni[MAX_PATH], szShort[MAX_PATH], szValue[MAX_PATH + 16];
+    PCWSTR pszSection, pszKey;
+    DWORD dwAttrs;
     HRESULT hr;
-    IShellFolder *pDesktop = NULL, *pParent = NULL;
-    LPITEMIDLIST pidl = NULL;
-    LPCITEMIDLIST pidlLast;
-    HANDLE hProcessHeap;
-    INT cchShortMax, cchShort, cchName;
-    PWSTR pszShortPath = NULL, pszName = NULL;
 
-    hr = SHCoInitializeAnyApartment();
-    if (FAILED_UNEXPECTEDLY(hr))
+    hr = SHELL_GetLocalizedNameLocation(pszPath, szFolder, szIni, &pszSection, &pszKey);
+    if (FAILED(hr))
         return hr;
 
-    hr = SHGetDesktopFolder(&pDesktop);
-    if (FAILED_UNEXPECTEDLY(hr))
-        goto Cleanup;
+    if (GetShortPathNameW(pszResModule, szShort, _countof(szShort)))
+        pszResModule = szShort;
 
-    hr = pDesktop->ParseDisplayName(NULL, NULL, (PWSTR)pszPath, NULL, &pidl, NULL);
-    if (FAILED_UNEXPECTEDLY(hr))
-        goto Cleanup;
+    hr = StringCchPrintfW(szValue, _countof(szValue), L"@%s,%d", pszResModule, -idsRes);
+    if (FAILED(hr))
+        return hr;
 
-    hr = SHBindToParent(pidl, IID_PPV_ARG(IShellFolder, &pParent), &pidlLast);
-    if (FAILED_UNEXPECTEDLY(hr))
-        goto Cleanup;
+    dwAttrs = GetFileAttributesW(szIni);
+    if (dwAttrs != INVALID_FILE_ATTRIBUTES)
+        SetFileAttributesW(szIni, FILE_ATTRIBUTE_NORMAL);
 
-    hProcessHeap = GetProcessHeap();
-    cchShortMax = lstrlenW(pszResModule) + 1;
-    pszShortPath = (PWSTR)HeapAlloc(hProcessHeap, 0, cchShortMax * sizeof(WCHAR));
-    if (!pszShortPath)
+    if (!WritePrivateProfileStringW(pszSection, pszKey, szValue, szIni))
     {
-        hr = E_OUTOFMEMORY;
-        goto Cleanup;
+        hr = HRESULT_FROM_WIN32(GetLastError());
+        if (dwAttrs != INVALID_FILE_ATTRIBUTES)
+            SetFileAttributesW(szIni, dwAttrs);
+        return hr;
     }
+    WritePrivateProfileStringW(NULL, NULL, NULL, szIni);
 
-    cchShort = GetShortPathNameW(pszResModule, pszShortPath, cchShortMax);
-    if (cchShort)
-        pszResModule = pszShortPath;
-    else
-        cchShort = cchShortMax;
-
-    /* 14 == '@' + ',' + '-' + (digits of max width 10) + NUL */
-    cchName = cchShort + 14;
-    pszName = (PWSTR)HeapAlloc(hProcessHeap, 0, cchName * sizeof(WCHAR));
-    if (!pszName)
-    {
-        hr = E_OUTOFMEMORY;
-        goto Cleanup;
-    }
-
-    wnsprintfW(pszName, cchName, L"@%s,%d", pszResModule, -idsRes);
-    hr = pParent->SetNameOf(NULL, pidlLast, pszName, 0, NULL);
-
-Cleanup:
-    if (pszName)
-        HeapFree(hProcessHeap, 0, pszName);
-    if (pszShortPath)
-        HeapFree(hProcessHeap, 0, pszShortPath);
-    if (pParent)
-        pParent->Release();
-    if (pidl)
-        SHFree(pidl);
-    if (pDesktop)
-        pDesktop->Release();
-    CoUninitialize();
-    return hr;
+    SetFileAttributesW(szIni, FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM);
+    PathMakeSystemFolderW(szFolder);
+    return S_OK;
 }
 
-//! Translate a PIDL to an "alias" PIDL.
-EXTERN_C HRESULT
-SHELL32_AliasTranslatePidl(
-    _In_ LPCITEMIDLIST pidl,
-    _Out_ LPITEMIDLIST *ppidlNew,
-    _In_ DWORD dwFlags)
+EXTERN_C
+HRESULT WINAPI
+SHRemoveLocalizedName(_In_ PCWSTR pszPath)
 {
-    return SHELL32_ReparentAsAliasPidl(NULL, NULL, pidl, ppidlNew, dwFlags) ? S_OK : E_FAIL;
+    WCHAR szFolder[MAX_PATH], szIni[MAX_PATH];
+    PCWSTR pszSection, pszKey;
+    DWORD dwAttrs;
+    HRESULT hr;
+
+    hr = SHELL_GetLocalizedNameLocation(pszPath, szFolder, szIni, &pszSection, &pszKey);
+    if (FAILED(hr))
+        return hr;
+
+    dwAttrs = GetFileAttributesW(szIni);
+    if (dwAttrs == INVALID_FILE_ATTRIBUTES)
+        return S_OK;
+
+    SetFileAttributesW(szIni, FILE_ATTRIBUTE_NORMAL);
+    WritePrivateProfileStringW(pszSection, pszKey, NULL, szIni);
+    WritePrivateProfileStringW(NULL, NULL, NULL, szIni);
+
+    if (!SHELL_IniHasKeys(szIni))
+        DeleteFileW(szIni);
+    else
+        SetFileAttributesW(szIni, dwAttrs);
+    return S_OK;
+}
+
+EXTERN_C
+HRESULT WINAPI
+SHGetLocalizedName(
+    _In_ PCWSTR pszPath,
+    _Out_writes_(cch) PWSTR pszResModule,
+    _In_ UINT cch,
+    _Out_ int *pidsRes)
+{
+    WCHAR szFolder[MAX_PATH], szIni[MAX_PATH], szValue[MAX_PATH + 32];
+    PCWSTR pszSection, pszKey;
+    PWSTR pszModule, pszComma;
+    int idsRes;
+    HRESULT hr;
+
+    TRACE("(%s, %p, %u, %p)\n", debugstr_w(pszPath), pszResModule, cch, pidsRes);
+
+    if (!pszResModule || !cch || !pidsRes)
+        return E_INVALIDARG;
+
+    *pszResModule = UNICODE_NULL;
+    *pidsRes = 0;
+
+    hr = SHELL_GetLocalizedNameLocation(pszPath, szFolder, szIni, &pszSection, &pszKey);
+    if (FAILED(hr))
+        return hr;
+
+    if (!PathIsSystemFolderW(szFolder, 0))
+        return E_INVALIDARG;
+
+    if (!GetPrivateProfileStringW(pszSection, pszKey, L"", szValue, _countof(szValue), szIni) || !szValue[0])
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+
+    pszComma = wcsrchr(szValue, L',');
+    if (!pszComma)
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+
+    *pszComma++ = UNICODE_NULL;
+    idsRes = _wtoi(pszComma);
+    if (idsRes >= 0)
+        return HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+
+    pszModule = (szValue[0] == L'@') ? &szValue[1] : szValue;
+    if (wcslen(pszModule) >= cch)
+        return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+
+    StringCchCopyW(pszResModule, cch, pszModule);
+    *pidsRes = -idsRes;
+    return S_OK;
+}
+
+EXTERN_C
+HRESULT WINAPI
+SHGetDriveMedia(
+    _In_ PCWSTR pszDrive,
+    _Out_ DWORD *pdwMediaContent)
+{
+    WCHAR szRoot[] = L"A:\\";
+    int iDrive;
+
+    *pdwMediaContent = ARCONTENT_NONE;
+
+    iDrive = PathGetDriveNumberW(pszDrive);
+    if (iDrive < 0)
+        return E_INVALIDARG;
+
+    szRoot[0] += iDrive;
+    switch (GetDriveTypeW(szRoot))
+    {
+        case DRIVE_UNKNOWN:
+        case DRIVE_NO_ROOT_DIR:
+            return E_INVALIDARG;
+    }
+
+    /* FIXME: optical media (audio CD, DVD movie, blank discs) is not classified; media without a file system is reported as ARCONTENT_NONE */
+    if (GetVolumeInformationW(szRoot, NULL, 0, NULL, NULL, NULL, NULL, 0))
+        *pdwMediaContent = ARCONTENT_UNKNOWNCONTENT;
+    return S_OK;
+}
+
+static HRESULT
+SHELL_AddDefaultsFromList(
+    _In_ HKEY hkey,
+    _In_opt_ PCWSTR pszSubKey,
+    _In_ IPropertyStore *pStore,
+    _In_ PCWSTR pszUser)
+{
+    WCHAR szList[1024];
+    DWORD cbList = sizeof(szList);
+    PWSTR pszName, pszNext;
+    FILETIME ftNow;
+
+    if (RegGetValueW(hkey, pszSubKey, L"SetDefaultsFor", RRF_RT_REG_SZ, NULL, szList, &cbList) != ERROR_SUCCESS)
+        return S_OK;
+    if (_wcsnicmp(szList, L"prop:", 5))
+        return S_OK;
+
+    GetSystemTimeAsFileTime(&ftNow);
+    for (pszName = szList + 5; *pszName; pszName = pszNext)
+    {
+        CComPtr<IPropertyDescription> pDesc;
+        PROPERTYKEY key;
+        PROPVARIANT pv;
+        VARTYPE vt;
+
+        pszNext = wcschr(pszName, L';');
+        if (pszNext)
+            *pszNext++ = UNICODE_NULL;
+        else
+            pszNext = pszName + wcslen(pszName);
+        if (!*pszName)
+            continue;
+
+        if (FAILED(PSGetPropertyKeyFromName(pszName, &key)))
+            continue;
+
+        PropVariantInit(&pv);
+        if (SUCCEEDED(pStore->GetValue(key, &pv)) && pv.vt != VT_EMPTY)
+        {
+            PropVariantClear(&pv);
+            continue;
+        }
+
+        if (IsEqualPropertyKey(key, PKEY_Author))
+        {
+            if (FAILED(InitPropVariantFromStringVector(&pszUser, 1, &pv)))
+                continue;
+        }
+        else if (SUCCEEDED(PSGetPropertyDescription(key, IID_PPV_ARG(IPropertyDescription, &pDesc))) &&
+                 SUCCEEDED(pDesc->GetPropertyType(&vt)) && vt == VT_FILETIME)
+        {
+            InitPropVariantFromFileTime(&ftNow, &pv);
+        }
+        else
+        {
+            FIXME("No default value for %s\n", debugstr_w(pszName));
+            continue;
+        }
+
+        pStore->SetValue(key, pv);
+        PropVariantClear(&pv);
+    }
+    return S_OK;
+}
+
+EXTERN_C
+HRESULT WINAPI
+SHAddDefaultPropertiesByExt(
+    _In_ PCWSTR pszExt,
+    _In_ IPropertyStore *pPropStore)
+{
+    WCHAR szUser[UNLEN + 1], szKey[MAX_PATH];
+    DWORD cchUser = _countof(szUser);
+
+    if (!pszExt || !*pszExt || !pPropStore)
+        return E_INVALIDARG;
+    if (*pszExt != L'.')
+        return HRESULT_FROM_WIN32(ERROR_NO_ASSOCIATION);
+
+    if (!GetUserNameW(szUser, &cchUser))
+        szUser[0] = UNICODE_NULL;
+
+    if (SUCCEEDED(StringCchPrintfW(szKey, _countof(szKey), L"SystemFileAssociations\\%s", pszExt)))
+        SHELL_AddDefaultsFromList(HKEY_CLASSES_ROOT, szKey, pPropStore, szUser);
+    SHELL_AddDefaultsFromList(HKEY_CLASSES_ROOT, L"*", pPropStore, szUser);
+    SHELL_AddDefaultsFromList(HKEY_CLASSES_ROOT, L"AllFilesystemObjects", pPropStore, szUser);
+    return S_OK;
+}
+
+EXTERN_C
+HRESULT WINAPI
+SHCreateDefaultPropertiesOp(
+    _In_ IShellItem *psi,
+    _Outptr_ IFileOperation **ppFileOp)
+{
+    CComPtr<IShellItem2> pItem;
+    CComPtr<IPropertyStore> pStore;
+    HRESULT hr;
+
+    *ppFileOp = NULL;
+
+    hr = psi->QueryInterface(IID_PPV_ARG(IShellItem2, &pItem));
+    if (FAILED(hr))
+        return hr;
+    hr = pItem->GetPropertyStore(GPS_READWRITE, IID_PPV_ARG(IPropertyStore, &pStore));
+    if (FAILED(hr))
+        return E_FAIL;
+
+    /* FIXME: applying the defaults needs property change arrays, which propsys does not implement */
+    return E_NOTIMPL;
+}
+
+EXTERN_C
+HRESULT WINAPI
+SHSetDefaultProperties(
+    _In_opt_ HWND hwnd,
+    _In_ IShellItem *psi,
+    DWORD dwFileOpFlags,
+    _In_opt_ IFileOperationProgressSink *pfops)
+{
+    CComPtr<IFileOperation> pOperation;
+    DWORD dwCookie = 0;
+    HRESULT hr;
+
+    hr = SHCreateDefaultPropertiesOp(psi, &pOperation);
+    if (FAILED(hr))
+        return hr;
+
+    if (hwnd)
+        pOperation->SetOwnerWindow(hwnd);
+    hr = pOperation->SetOperationFlags(dwFileOpFlags);
+    if (SUCCEEDED(hr) && pfops)
+        hr = pOperation->Advise(pfops, &dwCookie);
+    if (SUCCEEDED(hr))
+        hr = pOperation->PerformOperations();
+    if (dwCookie)
+        pOperation->Unadvise(dwCookie);
+    return hr;
 }
 
 /*************************************************************************

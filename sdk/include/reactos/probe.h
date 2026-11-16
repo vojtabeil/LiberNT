@@ -7,6 +7,14 @@
 #error Header intended for use by NTOSKRNL/WIN32K only!
 #endif
 
+#ifndef ROS_PROBE_UNUSED
+#if defined(__GNUC__)
+#define ROS_PROBE_UNUSED __attribute__((unused))
+#else
+#define ROS_PROBE_UNUSED
+#endif
+#endif
+
 static const UNICODE_STRING __emptyUnicodeString = {0, 0, NULL};
 static const LARGE_INTEGER __emptyLargeInteger = {{0, 0}};
 static const ULARGE_INTEGER __emptyULargeInteger = {{0, 0}};
@@ -19,6 +27,11 @@ static const LARGE_STRING __emptyLargeString = {0, 0, 0, NULL};
 /*
  * NOTE: Alignment of the pointers is not verified!
  */
+#if defined(_M_ARM64) && defined(_NTOSKRNL_)
+#define ProbeForWriteGenericType(Ptr, Type) MiArm64ProbeForWriteSmall((PVOID)(Ptr), sizeof(Type))
+#elif defined(_M_ARM64)
+#define ProbeForWriteGenericType(Ptr, Type) ProbeForWrite((PVOID)(Ptr), sizeof(Type), 1)
+#else
 #define ProbeForWriteGenericType(Ptr, Type)                                    \
     do {                                                                       \
         if ((ULONG_PTR)(Ptr) + sizeof(Type) - 1 < (ULONG_PTR)(Ptr) ||          \
@@ -27,6 +40,7 @@ static const LARGE_STRING __emptyLargeString = {0, 0, 0, NULL};
         }                                                                      \
         *(volatile Type *)(Ptr) = *(volatile Type *)(Ptr);                     \
     } while (0)
+#endif
 
 #define ProbeForWriteBoolean(Ptr) ProbeForWriteGenericType(Ptr, BOOLEAN)
 #define ProbeForWriteUchar(Ptr) ProbeForWriteGenericType(Ptr, UCHAR)
@@ -137,6 +151,7 @@ ProbeArrayForWrite(IN OUT PVOID ArrayPtr,
 }
 #endif /* _WIN32K_ */
 
+ROS_PROBE_UNUSED
 static __inline
 NTSTATUS
 ProbeAndCaptureUnicodeString(OUT PUNICODE_STRING Dest,
@@ -165,9 +180,9 @@ ProbeAndCaptureUnicodeString(OUT PUNICODE_STRING Dest,
                     ProbeForRead(Dest->Buffer, Dest->Length, sizeof(WCHAR));
 
                     /* Allocate space for the buffer */
-                    Buffer = (PWCHAR)ExAllocatePoolWithTag(PagedPool,
-                                                   Dest->Length + sizeof(WCHAR),
-                                                   'RTSU');
+                    Buffer = (PWCHAR)ExAllocatePoolZero(PagedPool,
+                                                        ALIGN_UP_BY(Dest->Length, sizeof(WCHAR)) + sizeof(WCHAR),
+                                                        'RTSU');
                     if (Buffer == NULL)
                     {
                         Status = STATUS_INSUFFICIENT_RESOURCES;
@@ -176,14 +191,9 @@ ProbeAndCaptureUnicodeString(OUT PUNICODE_STRING Dest,
 
                     /* Copy it */
                     RtlCopyMemory(Buffer, Dest->Buffer, Dest->Length);
-                    Buffer[Dest->Length / sizeof(WCHAR)] = UNICODE_NULL;
 
                     /* Set it as the buffer */
                     Dest->Buffer = Buffer;
-                    if (Dest->Length % sizeof(WCHAR))
-                    {
-                        Dest->Length--;
-                    }
                     if (Dest->Length >= UNICODE_STRING_MAX_BYTES)
                     {
                         Dest->MaximumLength = Dest->Length;

@@ -100,6 +100,7 @@ TestCreateSection(
     PVOID SectionObject;
     LARGE_INTEGER MaximumSize;
     ULONG PointerCount1, PointerCount2;
+    BOOLEAN NewDataControl;
 
     _SEH2_TRY
     {
@@ -300,8 +301,16 @@ TestCreateSection(
         else if (GetNTVersion() >= _WIN32_WINNT_WIN8)
             --PointerCount2;
         CheckObject(FileHandle2, PointerCount2, 1L);
-        CheckSection(SectionObject, 0);
-        TestMapView(SectionObject, TRUE, TRUE);
+        if (GetNTVersion() < _WIN32_WINNT_WIN8)
+        {
+            CheckSection(SectionObject, 0);
+            TestMapView(SectionObject, TRUE, TRUE);
+        }
+        else
+        {
+            /* A rejected FileObject argument must not create a section. */
+            ok_eq_pointer(SectionObject, KmtInvalidPointer);
+        }
 
         if (SectionObject && SectionObject != KmtInvalidPointer)
             ObDereferenceObject(SectionObject);
@@ -325,8 +334,16 @@ TestCreateSection(
         if (GetNTVersion() >= _WIN32_WINNT_WIN8)
             PointerCount2--;
         CheckObject(FileHandle2, PointerCount2, 1L);
-        CheckSection(SectionObject, 0);
-        TestMapView(SectionObject, TRUE, TRUE);
+        if (GetNTVersion() < _WIN32_WINNT_WIN8)
+        {
+            CheckSection(SectionObject, 0);
+            TestMapView(SectionObject, TRUE, TRUE);
+        }
+        else
+        {
+            /* A rejected FileObject argument must not create a section. */
+            ok_eq_pointer(SectionObject, KmtInvalidPointer);
+        }
 
         if (SectionObject && SectionObject != KmtInvalidPointer)
             ObDereferenceObject(SectionObject);
@@ -369,8 +386,16 @@ TestCreateSection(
         else if (GetNTVersion() >= _WIN32_WINNT_WIN8)
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
-        CheckSection(SectionObject, 0);
-        TestMapView(SectionObject, TRUE, FALSE);
+        if (GetNTVersion() < _WIN32_WINNT_WIN8)
+        {
+            CheckSection(SectionObject, 0);
+            TestMapView(SectionObject, TRUE, FALSE);
+        }
+        else
+        {
+            /* A rejected FileObject argument must not create a section. */
+            ok_eq_pointer(SectionObject, KmtInvalidPointer);
+        }
 
         if (SectionObject && SectionObject != KmtInvalidPointer)
             ObDereferenceObject(SectionObject);
@@ -394,8 +419,16 @@ TestCreateSection(
         if (GetNTVersion() >= _WIN32_WINNT_WIN8)
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
-        CheckSection(SectionObject, 0);
-        TestMapView(SectionObject, TRUE, FALSE);
+        if (GetNTVersion() < _WIN32_WINNT_WIN8)
+        {
+            CheckSection(SectionObject, 0);
+            TestMapView(SectionObject, TRUE, FALSE);
+        }
+        else
+        {
+            /* A rejected FileObject argument must not create a section. */
+            ok_eq_pointer(SectionObject, KmtInvalidPointer);
+        }
 
         if (SectionObject && SectionObject != KmtInvalidPointer)
             ObDereferenceObject(SectionObject);
@@ -424,8 +457,16 @@ TestCreateSection(
         }
         CheckObject(FileHandle1, PointerCount1, 1L);
         CheckObject(FileHandle2, PointerCount2, 1L);
-        CheckSection(SectionObject, 0);
-        TestMapView(SectionObject, TRUE, TRUE);
+        if (GetNTVersion() < _WIN32_WINNT_WIN8)
+        {
+            CheckSection(SectionObject, 0);
+            TestMapView(SectionObject, TRUE, TRUE);
+        }
+        else
+        {
+            /* A rejected FileObject argument must not create a section. */
+            ok_eq_pointer(SectionObject, KmtInvalidPointer);
+        }
 
         if (SectionObject && SectionObject != KmtInvalidPointer)
             ObDereferenceObject(SectionObject);
@@ -453,13 +494,22 @@ TestCreateSection(
         }
         CheckObject(FileHandle1, PointerCount1, 1L);
         CheckObject(FileHandle2, PointerCount2, 1L);
-        CheckSection(SectionObject, 0);
-        TestMapView(SectionObject, TRUE, FALSE);
+        if (GetNTVersion() < _WIN32_WINNT_WIN8)
+        {
+            CheckSection(SectionObject, 0);
+            TestMapView(SectionObject, TRUE, FALSE);
+        }
+        else
+        {
+            /* A rejected FileObject argument must not create a section. */
+            ok_eq_pointer(SectionObject, KmtInvalidPointer);
+        }
 
         if (SectionObject && SectionObject != KmtInvalidPointer)
             ObDereferenceObject(SectionObject);
 
         /* data file section */
+        NewDataControl = (FileObject1->SectionObjectPointer->DataSectionObject == NULL);
         if (GetNTVersion() >= _WIN32_WINNT_WIN8)
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
@@ -474,6 +524,10 @@ TestCreateSection(
         ok(SectionObject != NULL, "Section object pointer NULL\n");
         if (GetNTVersion() >= _WIN32_WINNT_WIN8)
             PointerCount1 -= 2;
+        if (NewDataControl)
+            ++PointerCount1;
+        ok(FileObject1->SectionObjectPointer->DataSectionObject != NULL,
+           "Data section has no control area\n");
         CheckObject(FileHandle1, PointerCount1, 1L);
         if (GetNTVersion() < _WIN32_WINNT_WIN8)
             CheckSection(SectionObject, 0);
@@ -528,6 +582,16 @@ TestCreateSection(
         if (GetNTVersion() >= _WIN32_WINNT_WIN8)
             --PointerCount1;
         CheckObject(FileHandle1, PointerCount1, 1L);
+        if (NewDataControl)
+        {
+            ok_bool_true(MmForceSectionClosed(FileObject1->SectionObjectPointer, FALSE),
+                         "Closing the unused data section");
+            ok_eq_pointer(FileObject1->SectionObjectPointer->DataSectionObject, NULL);
+            --PointerCount1;
+            if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+                --PointerCount1;
+            CheckObject(FileHandle1, PointerCount1, 1L);
+        }
     }
 }
 
@@ -558,6 +622,7 @@ TestPhysicalMemorySection(VOID)
     } *UserStruct;
     PVOID UserMem;
     SIZE_T UserSize;
+    PPHYSICAL_MEMORY_RANGE Ranges;
 
     MyPage = ExAllocatePoolWithTag(NonPagedPool, PAGE_SIZE, 'MPmK');
     if (skip(MyPage != NULL, "Out of memory\n"))
@@ -574,7 +639,17 @@ TestPhysicalMemorySection(VOID)
         ExFreePoolWithTag(MyPage, 'MPmK');
         return;
     }
-    ZeroPagePhysical.QuadPart = 0;
+    Ranges = MmGetPhysicalMemoryRanges();
+    if (skip(Ranges != NULL && Ranges[0].NumberOfBytes.QuadPart != 0, "No physical memory ranges\n"))
+    {
+        if (Ranges != NULL)
+            ExFreePool(Ranges);
+        ExFreePoolWithTag(ZeroPageContents, 'ZPmK');
+        ExFreePoolWithTag(MyPage, 'MPmK');
+        return;
+    }
+    ZeroPagePhysical = Ranges[0].BaseAddress;
+    ExFreePool(Ranges);
 
     Mapping = MmMapIoSpace(ZeroPagePhysical, PAGE_SIZE, MmCached);
     if (skip(Mapping != NULL, "Failed to map zero page\n"))
@@ -995,10 +1070,17 @@ START_TEST(MmSection)
     LARGE_INTEGER FileOffset;
     UCHAR FileData = 0;
 
+    if (skip(GetNTVersion() >= _WIN32_WINNT_VISTA,
+             "MmSection file-backed section coverage hangs on NT 5.x\n"))
+        return;
+
     ok(ExGetPreviousMode() == UserMode, "Previous mode is kernel mode\n");
     /* create a one-byte file that we can use */
     InitializeObjectAttributes(&ObjectAttributes, &FileName1, OBJ_CASE_INSENSITIVE, NULL, NULL);
     Status = ZwCreateFile(&FileHandle1, GENERIC_WRITE | SYNCHRONIZE, &ObjectAttributes, &IoStatusBlock, NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SUPERSEDE, FILE_NON_DIRECTORY_FILE, NULL, 0);
+    if (skip(NT_SUCCESS(Status) && FileHandle1 != NULL,
+             "Failed to create section scratch file: 0x%lx\n", Status))
+        return;
     ok_eq_hex(Status, STATUS_SUCCESS);
     ok_eq_ulongptr(IoStatusBlock.Information, FILE_CREATED);
     ok(FileHandle1 != NULL, "FileHandle1 is NULL\n");
@@ -1017,6 +1099,9 @@ START_TEST(MmSection)
 
     InitializeObjectAttributes(&ObjectAttributes, &FileName1, OBJ_CASE_INSENSITIVE, NULL, NULL);
     Status = ZwCreateFile(&FileHandle1, GENERIC_ALL, &ObjectAttributes, &IoStatusBlock, NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_OPEN, FILE_NON_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE, NULL, 0);
+    if (skip(NT_SUCCESS(Status) && FileHandle1 != NULL,
+             "Failed to reopen section scratch file: 0x%lx\n", Status))
+        return;
     ok_eq_hex(Status, STATUS_SUCCESS);
     ok_eq_ulongptr(IoStatusBlock.Information, FILE_OPENED);
     ok(FileHandle1 != NULL, "FileHandle1 is NULL\n");
@@ -1032,6 +1117,9 @@ START_TEST(MmSection)
 
     InitializeObjectAttributes(&ObjectAttributes, &FileName2, OBJ_CASE_INSENSITIVE, NULL, NULL);
     Status = ZwCreateFile(&FileHandle2, GENERIC_READ, &ObjectAttributes, &IoStatusBlock, NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_OPEN, FILE_NON_DIRECTORY_FILE, NULL, 0);
+    if (skip(NT_SUCCESS(Status) && FileHandle2 != NULL,
+             "Failed to open image file for section tests: 0x%lx\n", Status))
+        return;
     ok_eq_hex(Status, STATUS_SUCCESS);
     ok_eq_ulongptr(IoStatusBlock.Information, FILE_OPENED);
     ok(FileHandle2 != NULL, "FileHandle2 is NULL\n");

@@ -57,6 +57,7 @@ SysAudio_Shutdown(
     DPRINT("SysAudio_Shutdown called\n");
 
     DeviceExtension = (PSYSAUDIODEVEXT)DeviceObject->DeviceExtension;
+    InterlockedExchange((PLONG)&DeviceExtension->NumberOfKsAudioDevices, 0);
 
     while(!IsListEmpty(&DeviceExtension->KsAudioDeviceList))
     {
@@ -75,6 +76,14 @@ SysAudio_Shutdown(
         RtlFreeUnicodeString(&DeviceEntry->DeviceName);
 
         /* free audio device entry */
+        FreeItem(DeviceEntry);
+    }
+
+    while (!IsListEmpty(&DeviceExtension->RemovedKsAudioDeviceList))
+    {
+        Entry = RemoveHeadList(&DeviceExtension->RemovedKsAudioDeviceList);
+        DeviceEntry = (PKSAUDIO_DEVICE_ENTRY)CONTAINING_RECORD(Entry, KSAUDIO_DEVICE_ENTRY, Entry);
+        RtlFreeUnicodeString(&DeviceEntry->DeviceName);
         FreeItem(DeviceEntry);
     }
 
@@ -137,6 +146,7 @@ SysAudio_AddDevice(
     SYSAUDIODEVEXT *DeviceExtension;
 
     DPRINT("SysAudio_AddDevice called\n");
+    DPRINT1("SYSAUDIO: AddDevice PDO %p\n", PhysicalDeviceObject);
 
     /* Create the device */
     Status = IoCreateDevice(DriverObject,
@@ -154,21 +164,6 @@ SysAudio_AddDevice(
         return Status;
     }
 
-    /* Register device interfaces */
-    Status = SysAudioRegisterDeviceInterfaces(PhysicalDeviceObject);
-    if (!NT_SUCCESS(Status))
-    {
-        /* Failed to register
-         * Create a hack interface
-         */
-        Status = IoCreateSymbolicLink(&SymlinkName, &DeviceName);
-        if (!NT_SUCCESS(Status))
-        {
-            IoDeleteDevice(DeviceObject);
-            DPRINT1("Failed to create sysaudio symlink!\n");
-            return Status;
-        }
-    }
     /* Acquire device extension */
     DeviceExtension = (SYSAUDIODEVEXT*)DeviceObject->DeviceExtension;
     /* Initialize device extension */
@@ -179,6 +174,7 @@ SysAudio_AddDevice(
 
     /* Initialize the ks audio device list */
     InitializeListHead(&DeviceExtension->KsAudioDeviceList);
+    InitializeListHead(&DeviceExtension->RemovedKsAudioDeviceList);
 
     /* Allocate kernel streaming device header */
     Status = SysAudioAllocateDeviceHeader(DeviceExtension);
@@ -207,12 +203,32 @@ SysAudio_AddDevice(
 
      /* set io flags */
      DeviceObject->Flags |= DO_DIRECT_IO | DO_POWER_PAGABLE;
-     /* clear initializing flag */
-     DeviceObject->Flags &= ~ DO_DEVICE_INITIALIZING;
 
      /* atttach to device stack */
      NextDeviceObject = IoAttachDeviceToDeviceStack(DeviceObject, PhysicalDeviceObject);
      KsSetDevicePnpAndBaseObject(DeviceExtension->KsDeviceHeader, NextDeviceObject, DeviceObject);
+
+     /* clear initializing flag */
+     DeviceObject->Flags &= ~ DO_DEVICE_INITIALIZING;
+
+    /* Publish the device only now. A client notified of the interface
+     * arrival opens it at once, and an open fails while the device is
+     * still initializing. */
+    Status = SysAudioRegisterDeviceInterfaces(PhysicalDeviceObject);
+    if (!NT_SUCCESS(Status))
+    {
+        /* Failed to register
+         * Create a hack interface
+         */
+        Status = IoCreateSymbolicLink(&SymlinkName, &DeviceName);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("Failed to create sysaudio symlink!\n");
+            if (NextDeviceObject)
+                IoDetachDevice(NextDeviceObject);
+            goto cleanup;
+        }
+    }
 
      /* register shutdown notification */
      IoRegisterShutdownNotification(DeviceObject);

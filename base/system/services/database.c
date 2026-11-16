@@ -27,9 +27,11 @@
 LIST_ENTRY ImageListHead;
 LIST_ENTRY ServiceListHead;
 
+static LONG ScmImageSerial;
+
 static RTL_RESOURCE DatabaseLock;
 static DWORD ResumeCount = 1;
-static DWORD NoInteractiveServices = 0;
+static DWORD NoInteractiveServices = 1;
 static DWORD ServiceTag = 0;
 
 /* The critical section synchronizes service control requests */
@@ -45,6 +47,134 @@ ScmIsSecurityService(
     _In_ PSERVICE_IMAGE pServiceImage)
 {
     return (wcsstr(pServiceImage->pszImagePath, L"\\system32\\lsass.exe") != NULL);
+}
+
+static
+DWORD
+ScmGetSafeBootMode(VOID)
+{
+    DWORD dwError, dwType, dwSize;
+    DWORD SafeBootMode = 0;
+    HKEY hKey;
+
+    dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                            L"SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\Option",
+                            0,
+                            KEY_READ,
+                            &hKey);
+    if (dwError != ERROR_SUCCESS)
+        return 0;
+
+    dwSize = sizeof(SafeBootMode);
+    dwError = RegQueryValueExW(hKey,
+                               L"OptionValue",
+                               NULL,
+                               &dwType,
+                               (LPBYTE)&SafeBootMode,
+                               &dwSize);
+    RegCloseKey(hKey);
+
+    if ((dwError != ERROR_SUCCESS) ||
+        (dwType != REG_DWORD) ||
+        (dwSize != sizeof(SafeBootMode)))
+    {
+        return 0;
+    }
+
+    return SafeBootMode;
+}
+
+static
+DWORD
+ScmOpenSafeBootKey(
+    _In_ DWORD SafeBootEnabled,
+    _Out_ PHKEY phKey)
+{
+    LPCWSTR pszSafeBootPath;
+
+    switch (SafeBootEnabled)
+    {
+        case 1:
+        case 3:
+            pszSafeBootPath = L"SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\Minimal";
+            break;
+
+        case 2:
+            pszSafeBootPath = L"SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\Network";
+            break;
+
+        default:
+            return ERROR_FILE_NOT_FOUND;
+    }
+
+    return RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                         pszSafeBootPath,
+                         0,
+                         KEY_READ,
+                         phKey);
+}
+
+static
+BOOL
+ScmHasSafeBootEntry(
+    _In_ HKEY hSafeBootKey,
+    _In_opt_ PCWSTR pszEntryName)
+{
+    HKEY hKey;
+
+    if ((pszEntryName == NULL) || (*pszEntryName == UNICODE_NULL))
+        return FALSE;
+
+    if (RegOpenKeyExW(hSafeBootKey,
+                      pszEntryName,
+                      0,
+                      KEY_READ,
+                      &hKey) != ERROR_SUCCESS)
+    {
+        return FALSE;
+    }
+
+    RegCloseKey(hKey);
+    return TRUE;
+}
+
+static
+BOOL
+ScmIsSafeBootServiceAllowed(
+    _In_ PSERVICE Service,
+    _In_opt_ HKEY hSafeBootKey)
+{
+    if (hSafeBootKey == NULL)
+        return FALSE;
+
+    if ((Service->lpGroup != NULL) &&
+        ScmHasSafeBootEntry(hSafeBootKey, Service->lpGroup->lpGroupName))
+    {
+        return TRUE;
+    }
+
+    return ScmHasSafeBootEntry(hSafeBootKey, Service->lpServiceName);
+}
+
+static
+BOOL
+ScmIsSafeBootStartAllowed(
+    _In_ PSERVICE Service)
+{
+    DWORD SafeBootEnabled;
+    HKEY hSafeBootKey;
+    BOOL bAllowed;
+
+    SafeBootEnabled = ScmGetSafeBootMode();
+    if (SafeBootEnabled == 0)
+        return TRUE;
+
+    if (ScmOpenSafeBootKey(SafeBootEnabled, &hSafeBootKey) != ERROR_SUCCESS)
+        return FALSE;
+
+    bAllowed = ScmIsSafeBootServiceAllowed(Service, hSafeBootKey);
+    RegCloseKey(hSafeBootKey);
+    return bAllowed;
 }
 
 
@@ -162,7 +292,7 @@ ScmGetServiceImageByImagePath(LPWSTR lpImagePath)
         CurrentImage = CONTAINING_RECORD(ImageEntry,
                                          SERVICE_IMAGE,
                                          ImageListEntry);
-        if (_wcsicmp(CurrentImage->pszImagePath, lpImagePath) == 0)
+        if (!CurrentImage->bStopping && _wcsicmp(CurrentImage->pszImagePath, lpImagePath) == 0)
         {
             DPRINT("Found image: '%S'\n", CurrentImage->pszImagePath);
             return CurrentImage;
@@ -308,11 +438,22 @@ ScmIsLocalSystemAccount(
 
 static
 BOOL
+ScmIsBuiltinServiceAccount(
+    _In_ PCWSTR pszAccountName)
+{
+    return (_wcsicmp(pszAccountName, L"NT AUTHORITY\\LocalService") == 0 ||
+            _wcsicmp(pszAccountName, L"NT AUTHORITY\\NetworkService") == 0);
+}
+
+
+static
+BOOL
 ScmEnableBackupRestorePrivileges(
     _In_ HANDLE hToken,
     _In_ BOOL bEnable)
 {
     PTOKEN_PRIVILEGES pTokenPrivileges = NULL;
+    PLUID_AND_ATTRIBUTES Privileges;
     DWORD dwSize;
     BOOL bRet = FALSE;
 
@@ -327,12 +468,13 @@ ScmEnableBackupRestorePrivileges(
     }
 
     pTokenPrivileges->PrivilegeCount = 2;
-    pTokenPrivileges->Privileges[0].Luid.LowPart = SE_BACKUP_PRIVILEGE;
-    pTokenPrivileges->Privileges[0].Luid.HighPart = 0;
-    pTokenPrivileges->Privileges[0].Attributes = (bEnable ? SE_PRIVILEGE_ENABLED : 0);
-    pTokenPrivileges->Privileges[1].Luid.LowPart = SE_RESTORE_PRIVILEGE;
-    pTokenPrivileges->Privileges[1].Luid.HighPart = 0;
-    pTokenPrivileges->Privileges[1].Attributes = (bEnable ? SE_PRIVILEGE_ENABLED : 0);
+    Privileges = pTokenPrivileges->Privileges;
+    Privileges[0].Luid.LowPart = SE_BACKUP_PRIVILEGE;
+    Privileges[0].Luid.HighPart = 0;
+    Privileges[0].Attributes = (bEnable ? SE_PRIVILEGE_ENABLED : 0);
+    Privileges[1].Luid.LowPart = SE_RESTORE_PRIVILEGE;
+    Privileges[1].Luid.HighPart = 0;
+    Privileges[1].Attributes = (bEnable ? SE_PRIVILEGE_ENABLED : 0);
 
     bRet = AdjustTokenPrivileges(hToken, FALSE, pTokenPrivileges, 0, NULL, NULL);
     if (!bRet)
@@ -341,7 +483,7 @@ ScmEnableBackupRestorePrivileges(
     }
     else if (GetLastError() == ERROR_NOT_ALL_ASSIGNED)
     {
-        DPRINT1("AdjustTokenPrivileges() succeeded, but with not all privileges assigned\n");
+        DPRINT("AdjustTokenPrivileges() succeeded, but with not all privileges assigned\n");
         bRet = FALSE;
     }
 
@@ -369,7 +511,8 @@ ScmLogonService(
     DPRINT("ScmLogonService(%p %p)\n", pService, pImage);
     DPRINT("Service %S\n", pService->lpServiceName);
 
-    if (ScmIsLocalSystemAccount(pImage->pszAccountName) || ScmLiveSetup || ScmSetupInProgress)
+    if (ScmIsLocalSystemAccount(pImage->pszAccountName) ||
+        ((ScmLiveSetup || ScmSetupInProgress) && !ScmIsBuiltinServiceAccount(pImage->pszAccountName)))
         return ERROR_SUCCESS;
 
     /* Get the user and domain names */
@@ -453,6 +596,81 @@ done:
 }
 
 
+static
+BOOL
+ScmSystemProfileHiveExists(VOID)
+{
+    WCHAR szRawPath[MAX_PATH];
+    WCHAR szHivePath[MAX_PATH];
+    DWORD dwSize = sizeof(szRawPath);
+    DWORD dwType;
+    DWORD cch;
+    HKEY hKey;
+    LONG Error;
+
+    Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                          L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\S-1-5-18",
+                          0,
+                          KEY_QUERY_VALUE,
+                          &hKey);
+    if (Error != ERROR_SUCCESS)
+        return FALSE;
+
+    Error = RegQueryValueExW(hKey, L"ProfileImagePath", NULL, &dwType, (LPBYTE)szRawPath, &dwSize);
+    RegCloseKey(hKey);
+    if (Error != ERROR_SUCCESS || (dwType != REG_SZ && dwType != REG_EXPAND_SZ) ||
+        dwSize < sizeof(WCHAR) || dwSize > sizeof(szRawPath))
+    {
+        return FALSE;
+    }
+    szRawPath[ARRAYSIZE(szRawPath) - 1] = UNICODE_NULL;
+
+    cch = ExpandEnvironmentStringsW(szRawPath, szHivePath, ARRAYSIZE(szHivePath));
+    if (cch == 0 || cch > ARRAYSIZE(szHivePath) ||
+        FAILED(StringCchCatW(szHivePath, ARRAYSIZE(szHivePath), L"\\ntuser.dat")))
+    {
+        return FALSE;
+    }
+
+    return GetFileAttributesW(szHivePath) != INVALID_FILE_ATTRIBUTES;
+}
+
+
+/* The hive is made by setup from the default profile, so it is only loaded, never made here */
+VOID
+ScmLoadSystemProfile(VOID)
+{
+    PROFILEINFOW ProfileInfo;
+    HANDLE hToken;
+
+    /* TODO: on the first boot of a preinstalled image setup makes the hive only after the first services started, which then get the Default profile */
+    if (!ScmSystemProfileHiveExists())
+        return;
+
+    if (!OpenProcessToken(GetCurrentProcess(),
+                          TOKEN_QUERY | TOKEN_IMPERSONATE | TOKEN_DUPLICATE | TOKEN_ADJUST_PRIVILEGES,
+                          &hToken))
+    {
+        DPRINT1("OpenProcessToken() failed (Error %lu)\n", GetLastError());
+        return;
+    }
+
+    ZeroMemory(&ProfileInfo, sizeof(ProfileInfo));
+    ProfileInfo.dwSize = sizeof(ProfileInfo);
+    ProfileInfo.dwFlags = PI_NOUI;
+    ProfileInfo.lpUserName = L"SYSTEM";
+
+    ScmEnableBackupRestorePrivileges(hToken, TRUE);
+    if (!LoadUserProfileW(hToken, &ProfileInfo))
+        DPRINT1("LoadUserProfileW() for the system account failed (Error %lu)\n", GetLastError());
+    else
+        RegCloseKey(ProfileInfo.hProfile);
+    ScmEnableBackupRestorePrivileges(hToken, FALSE);
+
+    CloseHandle(hToken);
+}
+
+
 static DWORD
 ScmCreateOrReferenceServiceImage(PSERVICE pService)
 {
@@ -516,6 +734,7 @@ ScmCreateOrReferenceServiceImage(PSERVICE pService)
         pServiceImage->dwImageRunCount = 1;
         pServiceImage->hControlPipe = INVALID_HANDLE_VALUE;
         pServiceImage->hProcess = INVALID_HANDLE_VALUE;
+        pServiceImage->ImageSerial = (ULONG)InterlockedIncrement(&ScmImageSerial);
 
         pString = (PWSTR)((INT_PTR)pServiceImage + sizeof(SERVICE_IMAGE));
 
@@ -620,7 +839,7 @@ done:
 VOID
 ScmRemoveServiceImage(PSERVICE_IMAGE pServiceImage)
 {
-    DPRINT1("ScmRemoveServiceImage() called\n");
+    DPRINT("ScmRemoveServiceImage() called\n");
 
     /* FIXME: Terminate the process */
 
@@ -649,6 +868,226 @@ ScmRemoveServiceImage(PSERVICE_IMAGE pServiceImage)
 
     /* Release the service image */
     HeapFree(GetProcessHeap(), 0, pServiceImage);
+}
+
+
+typedef struct _SCM_IMAGE_WATCH
+{
+    HANDLE hProcess;
+    ULONG ImageSerial;
+} SCM_IMAGE_WATCH, *PSCM_IMAGE_WATCH;
+
+/* The database lock must be held exclusively. */
+static VOID
+ScmServiceImageTerminated(ULONG ImageSerial)
+{
+    PSERVICE_IMAGE pServiceImage = NULL;
+    PLIST_ENTRY Entry;
+
+    if (ScmShutdown)
+        return;
+
+    for (Entry = ImageListHead.Flink; Entry != &ImageListHead; Entry = Entry->Flink)
+    {
+        PSERVICE_IMAGE pCurrent = CONTAINING_RECORD(Entry, SERVICE_IMAGE, ImageListEntry);
+
+        if (pCurrent->ImageSerial == ImageSerial)
+        {
+            pServiceImage = pCurrent;
+            break;
+        }
+    }
+    if (pServiceImage == NULL)
+        return;
+
+    Entry = ServiceListHead.Flink;
+    while (Entry != &ServiceListHead)
+    {
+        PSERVICE lpService = CONTAINING_RECORD(Entry, SERVICE, ServiceListEntry);
+
+        Entry = Entry->Flink;
+        if (lpService->lpImage != pServiceImage ||
+            lpService->Status.dwCurrentState == SERVICE_STOPPED)
+            continue;
+
+        DPRINT1("Service %S terminated unexpectedly\n", lpService->lpServiceName);
+        lpService->Status.dwCurrentState = SERVICE_STOPPED;
+        lpService->Status.dwControlsAccepted = 0;
+        lpService->Status.dwWin32ExitCode = ERROR_PROCESS_ABORTED;
+        lpService->Status.dwServiceSpecificExitCode = 0;
+        lpService->Status.dwCheckPoint = 0;
+        lpService->Status.dwWaitHint = 0;
+        ScmNotifyServiceStatus(lpService);
+        ScmServiceFailure(lpService, TRUE);
+
+        pServiceImage->dwImageRunCount--;
+        lpService->lpImage = NULL;
+
+        /* Release the reference a service holds while it is not stopped */
+        ScmDereferenceService(lpService);
+    }
+
+    if (pServiceImage->dwImageRunCount == 0)
+        ScmRemoveServiceImage(pServiceImage);
+}
+
+static DWORD
+WINAPI
+ScmWatchServiceImageThread(PVOID pParam)
+{
+    PSCM_IMAGE_WATCH pWatch = (PSCM_IMAGE_WATCH)pParam;
+
+    WaitForSingleObject(pWatch->hProcess, INFINITE);
+
+    ScmLockDatabaseExclusive();
+    ScmServiceImageTerminated(pWatch->ImageSerial);
+    ScmUnlockDatabase();
+
+    CloseHandle(pWatch->hProcess);
+    HeapFree(GetProcessHeap(), 0, pWatch);
+    return 0;
+}
+
+/* The database lock must be held exclusively. */
+static VOID
+ScmWatchServiceImage(PSERVICE_IMAGE pServiceImage)
+{
+    PSCM_IMAGE_WATCH pWatch;
+    HANDLE hThread;
+
+    if (pServiceImage->bProcessWatched ||
+        pServiceImage->hProcess == NULL ||
+        pServiceImage->hProcess == INVALID_HANDLE_VALUE)
+        return;
+
+    pWatch = HeapAlloc(GetProcessHeap(), 0, sizeof(*pWatch));
+    if (pWatch == NULL)
+        return;
+    pWatch->ImageSerial = pServiceImage->ImageSerial;
+    if (!DuplicateHandle(GetCurrentProcess(), pServiceImage->hProcess, GetCurrentProcess(),
+                         &pWatch->hProcess, SYNCHRONIZE, FALSE, 0))
+    {
+        DPRINT1("Cannot watch the process of %S (Error %lu)\n", pServiceImage->pszImagePath, GetLastError());
+        HeapFree(GetProcessHeap(), 0, pWatch);
+        return;
+    }
+
+    hThread = CreateThread(NULL, 64 * 1024, ScmWatchServiceImageThread, pWatch,
+                           STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+    if (hThread == NULL)
+    {
+        DPRINT1("Cannot watch the process of %S (Error %lu)\n", pServiceImage->pszImagePath, GetLastError());
+        CloseHandle(pWatch->hProcess);
+        HeapFree(GetProcessHeap(), 0, pWatch);
+        return;
+    }
+    CloseHandle(hThread);
+    pServiceImage->bProcessWatched = TRUE;
+}
+
+
+/* Whether a service still runs in the image; stopped services are detached from theirs. The database lock must be held. */
+BOOL
+ScmImageHasServices(PSERVICE_IMAGE pServiceImage)
+{
+    PLIST_ENTRY Entry;
+
+    for (Entry = ServiceListHead.Flink; Entry != &ServiceListHead; Entry = Entry->Flink)
+    {
+        if (CONTAINING_RECORD(Entry, SERVICE, ServiceListEntry)->lpImage == pServiceImage)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+/* A LocalSystem service gets the environment of that account, the one the manager runs as, with its profile */
+static BOOL
+ScmCreateServiceEnvironment(HANDLE hToken, LPVOID *lpEnvironment)
+{
+    HANDLE hSystemToken;
+    BOOL bResult;
+
+    if (hToken != NULL)
+        return CreateEnvironmentBlock(lpEnvironment, hToken, FALSE);
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &hSystemToken))
+        return FALSE;
+
+    bResult = CreateEnvironmentBlock(lpEnvironment, hSystemToken, TRUE);
+    CloseHandle(hSystemToken);
+    return bResult;
+}
+
+/* A recovery program runs under the account of the service, like its processes. */
+DWORD
+ScmRunServiceCommand(PSERVICE pService, LPWSTR lpCommandLine)
+{
+    PROCESS_INFORMATION ProcessInformation;
+    STARTUPINFOW StartupInfo;
+    SERVICE_IMAGE Image;
+    LPVOID lpEnvironment = NULL;
+    HKEY hServiceKey;
+    DWORD dwError;
+    BOOL bResult = FALSE;
+
+    ZeroMemory(&Image, sizeof(Image));
+    if (ScmOpenServiceKey(pService->lpServiceName, KEY_READ, &hServiceKey) == ERROR_SUCCESS)
+    {
+        ScmReadString(hServiceKey, L"ObjectName", &Image.pszAccountName);
+        RegCloseKey(hServiceKey);
+    }
+
+    dwError = ScmLogonService(pService, &Image);
+    if (dwError == ERROR_SUCCESS)
+    {
+        ZeroMemory(&StartupInfo, sizeof(StartupInfo));
+        StartupInfo.cb = sizeof(StartupInfo);
+        if (!ScmCreateServiceEnvironment(Image.hToken, &lpEnvironment))
+            lpEnvironment = NULL;
+
+        if (Image.hToken != NULL)
+        {
+            if (ImpersonateLoggedOnUser(Image.hToken))
+            {
+                bResult = CreateProcessAsUserW(Image.hToken, NULL, lpCommandLine, NULL, NULL, FALSE,
+                                               CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS,
+                                               lpEnvironment, NULL, &StartupInfo, &ProcessInformation);
+                dwError = bResult ? ERROR_SUCCESS : GetLastError();
+                RevertToSelf();
+            }
+            else
+            {
+                dwError = GetLastError();
+            }
+        }
+        else
+        {
+            bResult = CreateProcessW(NULL, lpCommandLine, NULL, NULL, FALSE,
+                                     CREATE_UNICODE_ENVIRONMENT | DETACHED_PROCESS,
+                                     lpEnvironment, NULL, &StartupInfo, &ProcessInformation);
+            dwError = bResult ? ERROR_SUCCESS : GetLastError();
+        }
+
+        if (bResult)
+        {
+            CloseHandle(ProcessInformation.hThread);
+            CloseHandle(ProcessInformation.hProcess);
+        }
+        if (lpEnvironment != NULL)
+            DestroyEnvironmentBlock(lpEnvironment);
+        if (Image.hProfile != NULL)
+        {
+            ScmEnableBackupRestorePrivileges(Image.hToken, TRUE);
+            UnloadUserProfile(Image.hToken, Image.hProfile);
+            ScmEnableBackupRestorePrivileges(Image.hToken, FALSE);
+        }
+        if (Image.hToken != NULL)
+            CloseHandle(Image.hToken);
+    }
+
+    if (Image.pszAccountName != NULL)
+        HeapFree(GetProcessHeap(), 0, Image.pszAccountName);
+    return dwError;
 }
 
 
@@ -705,6 +1144,27 @@ ScmGetServiceEntryByDisplayName(LPCWSTR lpDisplayName)
     }
 
     DPRINT("Couldn't find a matching service\n");
+
+    return NULL;
+}
+
+
+PSERVICE
+ScmGetServiceEntryByStatusHandle(DWORD hServiceStatus)
+{
+    PLIST_ENTRY ServiceEntry;
+    PSERVICE CurrentService;
+
+    for (ServiceEntry = ServiceListHead.Flink;
+         ServiceEntry != &ServiceListHead;
+         ServiceEntry = ServiceEntry->Flink)
+    {
+        CurrentService = CONTAINING_RECORD(ServiceEntry,
+                                           SERVICE,
+                                           ServiceListEntry);
+        if (CurrentService->dwResumeCount == hServiceStatus)
+            return CurrentService;
+    }
 
     return NULL;
 }
@@ -791,6 +1251,8 @@ ScmCreateNewServiceRecord(LPCWSTR lpServiceName,
 
     /* Set the resume count */
     lpService->dwResumeCount = ResumeCount++;
+
+    InitializeListHead(&lpService->HandleListHead);
 
     /* Append service record */
     InsertTailList(&ServiceListHead,
@@ -1493,7 +1955,7 @@ ScmControlServiceEx(
     _In_ HANDLE hControlPipe,
     _In_ PCWSTR pServiceName,
     _In_ DWORD dwControl,
-    _In_ SERVICE_STATUS_HANDLE hServiceStatus,
+    _In_ DWORD hServiceStatus,
     _In_opt_ DWORD dwServiceTag,
     _In_opt_ DWORD argc,
     _In_reads_opt_(argc) const PCWSTR* argv)
@@ -1521,8 +1983,8 @@ ScmControlServiceEx(
      */
     if (argc > 0 && argv != NULL)
     {
-        PacketSize = ALIGN_UP(PacketSize, PWSTR);
-        PacketSize += (argc * sizeof(PWSTR));
+        PacketSize = ALIGN_UP(PacketSize, DWORD);
+        PacketSize += (argc * sizeof(DWORD));
 
         DPRINT("Argc: %lu\n", argc);
         for (i = 0; i < argc; i++)
@@ -1553,11 +2015,12 @@ ScmControlServiceEx(
     /* Copy the argument vector */
     if (argc > 0 && argv != NULL)
     {
-        PWSTR *pOffPtr, pArgPtr;
+        PDWORD pOffPtr;
+        PWSTR pArgPtr;
 
         Ptr += wcslen(pServiceName) + 1;
-        pOffPtr = (PWSTR*)ALIGN_UP_POINTER(Ptr, PWSTR);
-        pArgPtr = (PWSTR)((ULONG_PTR)pOffPtr + argc * sizeof(PWSTR));
+        pOffPtr = (PDWORD)ALIGN_UP_POINTER(Ptr, DWORD);
+        pArgPtr = (PWSTR)((ULONG_PTR)pOffPtr + argc * sizeof(DWORD));
 
         ControlPacket->dwArgumentsCount  = argc;
         ControlPacket->dwArgumentsOffset = (DWORD)((ULONG_PTR)pOffPtr - (ULONG_PTR)ControlPacket);
@@ -1568,8 +2031,8 @@ ScmControlServiceEx(
         for (i = 0; i < argc; i++)
         {
             wcscpy(pArgPtr, argv[i]);
-            pOffPtr[i] = (PWSTR)((ULONG_PTR)pArgPtr - (ULONG_PTR)pOffPtr);
-            DPRINT("offset[%lu]: %p\n", i, pOffPtr[i]);
+            pOffPtr[i] = (DWORD)((ULONG_PTR)pArgPtr - (ULONG_PTR)pOffPtr);
+            DPRINT("offset[%lu]: %lu\n", i, pOffPtr[i]);
             pArgPtr += wcslen(argv[i]) + 1;
         }
     }
@@ -1593,7 +2056,7 @@ ScmControlService(
     _In_ HANDLE hControlPipe,
     _In_ PCWSTR pServiceName,
     _In_ DWORD dwControl,
-    _In_ SERVICE_STATUS_HANDLE hServiceStatus)
+    _In_ DWORD hServiceStatus)
 {
     DWORD dwError = ERROR_SUCCESS;
     PSCM_CONTROL_PACKET ControlPacket;
@@ -1661,16 +2124,23 @@ ScmWaitForServiceConnect(PSERVICE Service)
         dwError = GetLastError();
         if (dwError == ERROR_IO_PENDING)
         {
+            HANDLE WaitHandles[2];
+            DWORD WaitCount = 1;
+
             DPRINT("dwError: ERROR_IO_PENDING\n");
 
-            dwError = WaitForSingleObject(Service->lpImage->hControlPipe,
-                                          PipeTimeout);
-            DPRINT("WaitForSingleObject() returned %lu\n", dwError);
+            WaitHandles[0] = Service->lpImage->hControlPipe;
+            if (Service->lpImage->hProcess != NULL)
+                WaitHandles[WaitCount++] = Service->lpImage->hProcess;
 
-            if (dwError == WAIT_TIMEOUT)
+            dwError = WaitForMultipleObjects(WaitCount,
+                                             WaitHandles,
+                                             FALSE,
+                                             PipeTimeout);
+            DPRINT("WaitForMultipleObjects() returned %lu\n", dwError);
+
+            if (dwError == WAIT_TIMEOUT || dwError == WAIT_OBJECT_0 + 1)
             {
-                DPRINT("WaitForSingleObject() returned WAIT_TIMEOUT\n");
-
                 bResult = CancelIo(Service->lpImage->hControlPipe);
                 if (bResult == FALSE)
                 {
@@ -1687,7 +2157,15 @@ ScmWaitForServiceConnect(PSERVICE Service)
                             2,
                             lpLogStrings);
 #endif
-                DPRINT1("Log EVENT_CONNECTION_TIMEOUT by %S\n", Service->lpDisplayName);
+                if (dwError == WAIT_OBJECT_0 + 1)
+                {
+                    DPRINT1("Service %S exited without connecting the control pipe\n",
+                            Service->lpDisplayName);
+                }
+                else
+                {
+                    DPRINT1("Log EVENT_CONNECTION_TIMEOUT by %S\n", Service->lpDisplayName);
+                }
 
                 return ERROR_SERVICE_REQUEST_TIMEOUT;
             }
@@ -1730,14 +2208,21 @@ ScmWaitForServiceConnect(PSERVICE Service)
         dwError = GetLastError();
         if (dwError == ERROR_IO_PENDING)
         {
+            HANDLE WaitHandles[2];
+            DWORD WaitCount = 1;
+
             DPRINT("dwError: ERROR_IO_PENDING\n");
 
-            dwError = WaitForSingleObject(Service->lpImage->hControlPipe,
-                                          PipeTimeout);
-            if (dwError == WAIT_TIMEOUT)
-            {
-                DPRINT("WaitForSingleObject() returned WAIT_TIMEOUT\n");
+            WaitHandles[0] = Service->lpImage->hControlPipe;
+            if (Service->lpImage->hProcess != NULL)
+                WaitHandles[WaitCount++] = Service->lpImage->hProcess;
 
+            dwError = WaitForMultipleObjects(WaitCount,
+                                             WaitHandles,
+                                             FALSE,
+                                             PipeTimeout);
+            if (dwError == WAIT_TIMEOUT || dwError == WAIT_OBJECT_0 + 1)
+            {
                 bResult = CancelIo(Service->lpImage->hControlPipe);
                 if (bResult == FALSE)
                 {
@@ -1787,8 +2272,11 @@ ScmWaitForServiceConnect(PSERVICE Service)
         }
     }
 
-    if ((ScmIsSecurityService(Service->lpImage) == FALSE)&&
-        (dwProcessId != Service->lpImage->dwProcessId))
+    if (ScmIsSecurityService(Service->lpImage))
+    {
+        Service->lpImage->dwProcessId = dwProcessId;
+    }
+    else if (dwProcessId != Service->lpImage->dwProcessId)
     {
 #if 0
         _ultow(Service->lpImage->dwProcessId, szBuffer1, 10);
@@ -1879,7 +2367,7 @@ ScmStartUserModeService(PSERVICE Service,
     {
         /* No user token: Run the service under the LocalSystem account */
 
-        if (!CreateEnvironmentBlock(&lpEnvironment, NULL, TRUE))
+        if (!ScmCreateServiceEnvironment(NULL, &lpEnvironment))
         {
             /* We failed, run the service with the current environment */
             DPRINT1("CreateEnvironmentBlock() failed with error %d; service '%S' will run with current environment\n",
@@ -1947,19 +2435,128 @@ ScmStartUserModeService(PSERVICE Service,
     if (dwError != ERROR_SUCCESS)
     {
         DPRINT1("Connecting control pipe failed! (Error %lu)\n", dwError);
+
+        /* A process that never connected cannot be controlled as a service. */
+        if (Service->lpImage->dwImageRunCount <= 1 &&
+            Service->lpImage->hProcess != NULL &&
+            !ScmIsSecurityService(Service->lpImage) &&
+            WaitForSingleObject(Service->lpImage->hProcess, 0) == WAIT_TIMEOUT)
+        {
+            DPRINT1("Terminating unresponsive service process '%S'\n",
+                    Service->lpServiceName);
+            TerminateProcess(Service->lpImage->hProcess,
+                             ERROR_SERVICE_REQUEST_TIMEOUT);
+        }
+
         Service->lpImage->dwProcessId = 0;
         return dwError;
     }
 
 Quit:
     /* Send the start command and return */
-    return ScmControlServiceEx(Service->lpImage->hControlPipe,
-                               Service->lpServiceName,
-                               (Service->Status.dwServiceType & SERVICE_WIN32_OWN_PROCESS)
-                                  ? SERVICE_CONTROL_START_OWN : SERVICE_CONTROL_START_SHARE,
-                               (SERVICE_STATUS_HANDLE)Service,
-                               Service->dwServiceTag,
-                               argc, argv);
+    dwError = ScmControlServiceEx(Service->lpImage->hControlPipe,
+                                  Service->lpServiceName,
+                                  (Service->Status.dwServiceType & SERVICE_WIN32_OWN_PROCESS)
+                                     ? SERVICE_CONTROL_START_OWN : SERVICE_CONTROL_START_SHARE,
+                                  Service->dwResumeCount,
+                                  Service->dwServiceTag,
+                                  argc, argv);
+    return dwError;
+}
+
+
+static DWORD
+ScmLoadService(PSERVICE Service,
+               DWORD argc,
+               const PCWSTR* argv);
+
+
+static
+DWORD
+ScmWaitForDependency(
+    _In_ PSERVICE Dependency)
+{
+    ULONGLONG Deadline = GetTickCount64() + PipeTimeout;
+    ULONGLONG Now;
+    DWORD dwState;
+
+    EnterCriticalSection(&ScmStatusChangeLock);
+    for (;;)
+    {
+        dwState = Dependency->Status.dwCurrentState;
+        Now = GetTickCount64();
+        if (dwState != SERVICE_START_PENDING || Now >= Deadline)
+            break;
+        SleepConditionVariableCS(&ScmStatusChanged, &ScmStatusChangeLock, (DWORD)(Deadline - Now));
+    }
+    LeaveCriticalSection(&ScmStatusChangeLock);
+
+    if (dwState == SERVICE_RUNNING)
+        return ERROR_SUCCESS;
+    DPRINT1("Dependency %S of a starting service is in state %lu\n", Dependency->lpServiceName, dwState);
+    return ERROR_SERVICE_DEPENDENCY_FAIL;
+}
+
+
+static
+DWORD
+ScmStartDependencies(
+    _In_ PSERVICE Service)
+{
+    static ULONG Depth;
+    PSERVICE Dependency;
+    LPWSTR lpServices = NULL;
+    LPWSTR lpName;
+    HKEY hServiceKey;
+    DWORD dwError = ERROR_SUCCESS;
+
+    if (ScmOpenServiceKey(Service->lpServiceName, KEY_READ, &hServiceKey) != ERROR_SUCCESS)
+        return ERROR_SUCCESS;
+    ScmReadString(hServiceKey, L"DependOnService", &lpServices);
+    RegCloseKey(hServiceKey);
+    if (lpServices == NULL)
+        return ERROR_SUCCESS;
+
+    /* TODO: DependOnGroup is not checked before a start. */
+    if (++Depth > 32)
+    {
+        dwError = ERROR_CIRCULAR_DEPENDENCY;
+        goto Done;
+    }
+    for (lpName = lpServices; *lpName != UNICODE_NULL; lpName += wcslen(lpName) + 1)
+    {
+        Dependency = ScmGetServiceEntryByName(lpName);
+        if (Dependency == NULL)
+        {
+            DPRINT1("Service %S depends on the missing service %S\n", Service->lpServiceName, lpName);
+            dwError = ERROR_SERVICE_DEPENDENCY_DELETED;
+            break;
+        }
+        if (Dependency == Service)
+            continue;
+        if (Dependency->Status.dwCurrentState == SERVICE_STOPPED)
+        {
+            if (Dependency->dwStartType == SERVICE_DISABLED)
+            {
+                dwError = ERROR_SERVICE_DEPENDENCY_FAIL;
+                break;
+            }
+            dwError = ScmLoadService(Dependency, 0, NULL);
+            if (dwError != ERROR_SUCCESS && dwError != ERROR_SERVICE_ALREADY_RUNNING)
+            {
+                dwError = dwError == ERROR_CIRCULAR_DEPENDENCY ? dwError : ERROR_SERVICE_DEPENDENCY_FAIL;
+                break;
+            }
+        }
+        dwError = ScmWaitForDependency(Dependency);
+        if (dwError != ERROR_SUCCESS)
+            break;
+    }
+
+Done:
+    --Depth;
+    HeapFree(GetProcessHeap(), 0, lpServices);
+    return dwError;
 }
 
 
@@ -1976,15 +2573,35 @@ ScmLoadService(PSERVICE Service,
     DPRINT("ScmLoadService() called\n");
     DPRINT("Start Service %p (%S)\n", Service, Service->lpServiceName);
 
+    /*
+     * The state of a driver is what the object directory says, not what was
+     * recorded last: a driver whose unload had to wait for open handles has
+     * gone by itself since, and must be loaded again when asked for.
+     */
+    if (Service->Status.dwServiceType & SERVICE_DRIVER)
+        ScmControlDriver(Service, SERVICE_CONTROL_INTERROGATE, NULL);
+
     if (Service->Status.dwCurrentState != SERVICE_STOPPED)
     {
         DPRINT("Service %S is already running\n", Service->lpServiceName);
         return ERROR_SERVICE_ALREADY_RUNNING;
     }
 
+    if (!ScmIsSafeBootStartAllowed(Service))
+    {
+        return (Service->Status.dwServiceType & SERVICE_DRIVER) ?
+               ERROR_NOT_SAFE_MODE_DRIVER :
+               ERROR_NOT_SAFEBOOT_SERVICE;
+    }
+
     DPRINT("Service->Type: %lu\n", Service->Status.dwServiceType);
 
-    if (Service->Status.dwServiceType & SERVICE_DRIVER)
+    dwError = ScmStartDependencies(Service);
+    if (dwError != ERROR_SUCCESS)
+    {
+        DPRINT1("Service %S cannot start, its dependencies failed: %lu\n", Service->lpServiceName, dwError);
+    }
+    else if (Service->Status.dwServiceType & SERVICE_DRIVER)
     {
         /* Start the driver */
         dwError = ScmStartDriver(Service);
@@ -1995,12 +2612,20 @@ ScmLoadService(PSERVICE Service,
         dwError = ScmCreateOrReferenceServiceImage(Service);
         if (dwError == ERROR_SUCCESS)
         {
+            ScmLockDatabaseExclusive();
+            Service->Status.dwCurrentState = SERVICE_START_PENDING;
+            Service->Status.dwControlsAccepted = 0;
+            ScmNotifyServiceStatus(Service);
+            ScmReferenceService(Service);
+            ScmUnlockDatabase();
+
             dwError = ScmStartUserModeService(Service, argc, argv);
             if (dwError == ERROR_SUCCESS)
             {
-                Service->Status.dwCurrentState = SERVICE_START_PENDING;
-                Service->Status.dwControlsAccepted = 0;
-                ScmReferenceService(Service);
+                ScmLockDatabaseExclusive();
+                if (Service->lpImage != NULL)
+                    ScmWatchServiceImage(Service->lpImage);
+                ScmUnlockDatabase();
             }
             else
             {
@@ -2010,28 +2635,34 @@ ScmLoadService(PSERVICE Service,
                     ScmRemoveServiceImage(Service->lpImage);
                     Service->lpImage = NULL;
                 }
+
+                ScmLockDatabaseExclusive();
+                if (Service->Status.dwCurrentState == SERVICE_START_PENDING)
+                {
+                    Service->Status.dwCurrentState = SERVICE_STOPPED;
+                    ScmNotifyServiceStatus(Service);
+                    ScmDereferenceService(Service);
+                }
+                ScmUnlockDatabase();
             }
         }
     }
 
     DPRINT("ScmLoadService() done (Error %lu)\n", dwError);
 
-    if (dwError == ERROR_SUCCESS)
+    if (dwError == ERROR_SERVICE_ALREADY_RUNNING)
     {
         if (Group != NULL)
         {
             Group->ServicesRunning = TRUE;
         }
-
-        /* Log a successful service start */
-        LoadStringW(GetModuleHandle(NULL), IDS_SERVICE_START, szLogBuffer, 80);
-        lpLogStrings[0] = Service->lpDisplayName;
-        lpLogStrings[1] = szLogBuffer;
-
-        ScmLogEvent(EVENT_SERVICE_CONTROL_SUCCESS,
-                    EVENTLOG_INFORMATION_TYPE,
-                    2,
-                    lpLogStrings);
+    }
+    else if (dwError == ERROR_SUCCESS)
+    {
+        if (Group != NULL)
+        {
+            Group->ServicesRunning = TRUE;
+        }
     }
     else
     {
@@ -2082,7 +2713,6 @@ ScmStartService(PSERVICE Service,
                 const PCWSTR* argv)
 {
     DWORD dwError = ERROR_SUCCESS;
-    SC_RPC_LOCK Lock = NULL;
 
     DPRINT("ScmStartService() called\n");
     DPRINT("Start Service %p (%S)\n", Service, Service->lpServiceName);
@@ -2090,30 +2720,40 @@ ScmStartService(PSERVICE Service,
     /* Acquire the service control critical section, to synchronize starts */
     EnterCriticalSection(&ControlServiceCriticalSection);
 
-    /*
-     * Acquire the user service start lock while the service is starting, if
-     * needed (i.e. if we are not starting it during the initialization phase).
-     * If we don't success, bail out.
-     */
-    if (!ScmInitialize)
-    {
-        dwError = ScmAcquireServiceStartLock(TRUE, &Lock);
-        if (dwError != ERROR_SUCCESS)
-            goto done;
-    }
-
     /* Really start the service */
     dwError = ScmLoadService(Service, argc, argv);
 
-    /* Release the service start lock, if needed, and the critical section */
-    if (Lock) ScmReleaseServiceStartLock(&Lock);
-
-done:
     LeaveCriticalSection(&ControlServiceCriticalSection);
 
     DPRINT("ScmStartService() done (Error %lu)\n", dwError);
 
     return dwError;
+}
+
+
+static
+BOOL
+ScmIsDeferredDuringSetup(
+    _In_ PSERVICE pService)
+{
+    HKEY hServiceKey;
+    LPWSTR pszAccountName = NULL;
+    BOOL bDeferred = FALSE;
+
+    if (!ScmSetupInProgress || !(pService->Status.dwServiceType & SERVICE_WIN32))
+        return FALSE;
+
+    if (ScmOpenServiceKey(pService->lpServiceName, KEY_READ, &hServiceKey) != ERROR_SUCCESS)
+        return FALSE;
+
+    if (ScmReadString(hServiceKey, L"ObjectName", &pszAccountName) == ERROR_SUCCESS)
+    {
+        bDeferred = ScmIsBuiltinServiceAccount(pszAccountName);
+        HeapFree(GetProcessHeap(), 0, pszAccountName);
+    }
+
+    RegCloseKey(hServiceKey);
+    return bDeferred;
 }
 
 
@@ -2125,10 +2765,8 @@ ScmAutoStartServices(VOID)
     PLIST_ENTRY ServiceEntry;
     PSERVICE_GROUP CurrentGroup;
     PSERVICE CurrentService;
-    WCHAR szSafeBootServicePath[MAX_PATH];
     DWORD SafeBootEnabled;
-    HKEY hKey;
-    DWORD dwKeySize;
+    HKEY hSafeBootKey = NULL;
     ULONG i;
 
     /*
@@ -2137,27 +2775,14 @@ ScmAutoStartServices(VOID)
      */
     ASSERT(ScmInitialize);
 
-    /* Retrieve the SafeBoot parameter */
-    dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                            L"SYSTEM\\CurrentControlSet\\Control\\SafeBoot\\Option",
-                            0,
-                            KEY_READ,
-                            &hKey);
-    if (dwError == ERROR_SUCCESS)
-    {
-        dwKeySize = sizeof(SafeBootEnabled);
-        dwError = RegQueryValueExW(hKey,
-                                   L"OptionValue",
-                                   0,
-                                   NULL,
-                                   (LPBYTE)&SafeBootEnabled,
-                                   &dwKeySize);
-        RegCloseKey(hKey);
-    }
+    SafeBootEnabled = ScmGetSafeBootMode();
 
-    /* Default to Normal boot if the value doesn't exist */
-    if (dwError != ERROR_SUCCESS)
-        SafeBootEnabled = 0;
+    if (SafeBootEnabled != 0)
+    {
+        dwError = ScmOpenSafeBootKey(SafeBootEnabled, &hSafeBootKey);
+        if (dwError != ERROR_SUCCESS)
+            DPRINT1("WARNING: Could not open the associated Safe Boot key\n");
+    }
 
     /* Acquire the service control critical section, to synchronize starts */
     EnterCriticalSection(&ControlServiceCriticalSection);
@@ -2168,68 +2793,17 @@ ScmAutoStartServices(VOID)
     {
         CurrentService = CONTAINING_RECORD(ServiceEntry, SERVICE, ServiceListEntry);
 
-        /* Build the safe boot path */
-        StringCchCopyW(szSafeBootServicePath, ARRAYSIZE(szSafeBootServicePath),
-                       L"SYSTEM\\CurrentControlSet\\Control\\SafeBoot");
-
-        switch (SafeBootEnabled)
-        {
-            /* NOTE: Assumes MINIMAL (1) and DSREPAIR (3) load same items */
-            case 1:
-            case 3:
-                StringCchCatW(szSafeBootServicePath, ARRAYSIZE(szSafeBootServicePath),
-                              L"\\Minimal\\");
-                break;
-
-            case 2:
-                StringCchCatW(szSafeBootServicePath, ARRAYSIZE(szSafeBootServicePath),
-                              L"\\Network\\");
-                break;
-        }
-
-        if (SafeBootEnabled != 0)
-        {
-            /* If key does not exist then do not assume safe mode */
-            dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                                    szSafeBootServicePath,
-                                    0,
-                                    KEY_READ,
-                                    &hKey);
-            if (dwError == ERROR_SUCCESS)
-            {
-                RegCloseKey(hKey);
-
-                /* Finish Safe Boot path off */
-                StringCchCatW(szSafeBootServicePath, ARRAYSIZE(szSafeBootServicePath),
-                              CurrentService->lpServiceName);
-
-                /* Check that the key is in the Safe Boot path */
-                dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                                        szSafeBootServicePath,
-                                        0,
-                                        KEY_READ,
-                                        &hKey);
-                if (dwError != ERROR_SUCCESS)
-                {
-                    /* Mark service as visited so it is not auto-started */
-                    CurrentService->ServiceVisited = TRUE;
-                }
-                else
-                {
-                    /* Must be auto-started in safe mode - mark as unvisited */
-                    RegCloseKey(hKey);
-                    CurrentService->ServiceVisited = FALSE;
-                }
-            }
-            else
-            {
-                DPRINT1("WARNING: Could not open the associated Safe Boot key\n");
-                CurrentService->ServiceVisited = FALSE;
-            }
-        }
+        CurrentService->ServiceVisited =
+            ((SafeBootEnabled != 0) &&
+             !ScmIsSafeBootServiceAllowed(CurrentService, hSafeBootKey)) ||
+            ScmIsDeferredDuringSetup(CurrentService);
 
         ServiceEntry = ServiceEntry->Flink;
     }
+
+    /* Close the SafeBoot key now, it's no longer needed */
+    if (hSafeBootKey != NULL)
+        RegCloseKey(hSafeBootKey);
 
     /* Start all services which are members of an existing group */
     GroupEntry = GroupListHead.Flink;
@@ -2333,6 +2907,8 @@ ScmAutoShutdownServices(VOID)
 {
     PLIST_ENTRY ServiceEntry;
     PSERVICE CurrentService;
+    HANDLE hControlPipe;
+    DWORD dwResumeCount;
 
     DPRINT("ScmAutoShutdownServices() called\n");
 
@@ -2350,10 +2926,18 @@ ScmAutoShutdownServices(VOID)
         {
             /* Send the shutdown notification */
             DPRINT("Shutdown service: %S\n", CurrentService->lpServiceName);
-            ScmControlService(CurrentService->lpImage->hControlPipe,
+            hControlPipe = CurrentService->lpImage->hControlPipe;
+            dwResumeCount = CurrentService->dwResumeCount;
+            ScmReferenceService(CurrentService);
+            ScmUnlockDatabase();
+            ScmControlService(hControlPipe,
                               CurrentService->lpServiceName,
                               SERVICE_CONTROL_SHUTDOWN,
-                              (SERVICE_STATUS_HANDLE)CurrentService);
+                              dwResumeCount);
+            ScmLockDatabaseExclusive();
+            ServiceEntry = ServiceEntry->Flink;
+            ScmDereferenceService(CurrentService);
+            continue;
         }
 
         ServiceEntry = ServiceEntry->Flink;

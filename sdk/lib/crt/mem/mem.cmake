@@ -3,6 +3,7 @@ list(APPEND LIBCNTPR_MEM_SOURCE
     mem/memccpy.c
     mem/memcmp.c
     mem/memicmp.c
+    mem/mem_s.c
 )
 
 if(ARCH STREQUAL "i386")
@@ -14,6 +15,30 @@ if(ARCH STREQUAL "i386")
     #list(APPEND CRT_MEM_ASM_SOURCE
     #    ${LIBCNTPR_MEM_ASM_SOURCE}
     #)
+elseif(ARCH STREQUAL "amd64")
+    list(APPEND LIBCNTPR_MEM_SOURCE
+        mem/memchr.c
+        mem/amd64/memmove_nt.c
+        mem/amd64/memset_nt.c
+    )
+    list(APPEND LIBCNTPR_MEM_ASM_SOURCE
+        mem/amd64/memmove_asm.s
+        mem/amd64/memset_asm.s
+    )
+elseif(ARCH STREQUAL "arm64")
+    list(REMOVE_ITEM LIBCNTPR_MEM_SOURCE mem/memcmp.c)
+    list(APPEND LIBCNTPR_MEM_ASM_SOURCE
+        mem/arm64/mem_asm.s
+        string/arm64/memchr.S
+        string/arm64/memcmp.S
+    )
+elseif(ARCH STREQUAL "riscv64")
+    list(REMOVE_ITEM LIBCNTPR_MEM_SOURCE mem/memcmp.c)
+    list(APPEND LIBCNTPR_MEM_SOURCE
+        mem/memchr.c
+        string/riscv64/rvmemcmp.c
+    )
+    set_source_files_properties(string/riscv64/rvmemcmp.c PROPERTIES COMPILE_OPTIONS "-fno-builtin")
 else()
     list(APPEND LIBCNTPR_MEM_SOURCE
         mem/memchr.c
@@ -34,5 +59,9 @@ endif()
 #)
 
 # Needed by ext2fs. Should use RtlCompareMemory instead?
-add_library(memcmp mem/memcmp.c)
+if(ARCH STREQUAL "riscv64")
+    add_library(memcmp string/riscv64/rvmemcmp.c)
+else()
+    add_library(memcmp mem/memcmp.c)
+endif()
 add_dependencies(memcmp psdk)

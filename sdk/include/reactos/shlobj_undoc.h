@@ -10,6 +10,7 @@
 #pragma once
 
 #include <winreg.h> /* REGSAM */
+#include <shdeprecated.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -203,6 +204,7 @@ struct DEFFOLDERSETTINGS
 #endif
     UINT Statusbar : 1; // "StatusBarOther" is the new location for this
     UINT Toolbar : 1; // Not used when Explorer uses ReBar
+    UINT : 0; // End the bitfield allocation unit before the serialized fields
     FOLDERSETTINGS FolderSettings;
     SHELLVIEWID vid;
     UINT Version;
@@ -318,19 +320,19 @@ DECLARE_INTERFACE_(INscTree, IUnknown)
 	STDMETHOD_(ULONG,AddRef)(THIS) PURE;
 	STDMETHOD_(ULONG,Release)(THIS) PURE;
     /*** INscTree ***/
-	STDMETHOD(CreateTree)(THIS_ long paramC, long param10, long param14) PURE;
-	STDMETHOD(Initialize)(THIS_ long paramC, long param10, long param14) PURE;
-	STDMETHOD(ShowWindow)(THIS_ long paramC) PURE;
+	STDMETHOD(CreateTree)(THIS_ HWND hwndParent, DWORD dwStyles, HWND *phwnd) PURE;
+	STDMETHOD(Initialize)(THIS_ PCIDLIST_ABSOLUTE pidlRoot, DWORD grfEnumFlags, DWORD dwFlags) PURE;
+	STDMETHOD(ShowWindow)(THIS_ BOOL fShow) PURE;
 	STDMETHOD(Refresh)(THIS) PURE;
-	STDMETHOD(GetSelectedItem)(THIS_ long paramC, long param10) PURE;
-	STDMETHOD(SetSelectedItem)(THIS_ long paramC, long param10, long param14, long param18) PURE;
-	STDMETHOD(GetNscMode)(THIS_ long paramC) PURE;
-	STDMETHOD(SetNscMode)(THIS_ long paramC) PURE;
-	STDMETHOD(GetSelectedItemName)(THIS_ long paramC, long param10) PURE;
-	STDMETHOD(BindToSelectedItemParent)(THIS_ long paramC, long param10, long param14) PURE;
-	STDMETHOD(InLabelEdit)(THIS) PURE;
-	STDMETHOD(RightPaneNavigationStarted)(THIS_ long paramC) PURE;
-	STDMETHOD(RightPaneNavigationFinished)(THIS_ long paramC) PURE;
+	STDMETHOD(GetSelectedItem)(THIS_ PIDLIST_ABSOLUTE *ppidl, int nItem) PURE;
+	STDMETHOD(SetSelectedItem)(THIS_ PCIDLIST_ABSOLUTE pidl, BOOL fCreate, BOOL fReinsert, int nItem) PURE;
+	STDMETHOD(GetNscMode)(THIS_ UINT *pnMode) PURE;
+	STDMETHOD(SetNscMode)(THIS_ UINT nMode) PURE;
+	STDMETHOD(GetSelectedItemName)(THIS_ LPWSTR pszName, DWORD cchName) PURE;
+	STDMETHOD(BindToSelectedItemParent)(THIS_ REFIID riid, void **ppv, PITEMID_CHILD *ppidlLast) PURE;
+	STDMETHOD_(BOOL,InLabelEdit)(THIS) PURE;
+	STDMETHOD(RightPaneNavigationStarted)(THIS_ PCIDLIST_ABSOLUTE pidl) PURE;
+	STDMETHOD(RightPaneNavigationFinished)(THIS_ PCIDLIST_ABSOLUTE pidl) PURE;
 };
 #undef INTERFACE
 
@@ -364,21 +366,23 @@ DECLARE_INTERFACE_(INscTree2, INscTree)
 	STDMETHOD_(ULONG,AddRef)(THIS) PURE;
 	STDMETHOD_(ULONG,Release)(THIS) PURE;
 	/*** INscTree ***/
-	STDMETHOD(CreateTree)(THIS_ long paramC, long param10, long param14) PURE;
-	STDMETHOD(Initialize)(THIS_ long paramC, long param10, long param14) PURE;
-	STDMETHOD(ShowWindow)(THIS_ long paramC) PURE;
+	STDMETHOD(CreateTree)(THIS_ HWND hwndParent, DWORD dwStyles, HWND *phwnd) PURE;
+	STDMETHOD(Initialize)(THIS_ PCIDLIST_ABSOLUTE pidlRoot, DWORD grfEnumFlags, DWORD dwFlags) PURE;
+	STDMETHOD(ShowWindow)(THIS_ BOOL fShow) PURE;
 	STDMETHOD(Refresh)(THIS) PURE;
-	STDMETHOD(GetSelectedItem)(THIS_ long paramC, long param10) PURE;
-	STDMETHOD(SetSelectedItem)(THIS_ long paramC, long param10, long param14, long param18) PURE;
-	STDMETHOD(GetNscMode)(THIS_ long paramC) PURE;
-	STDMETHOD(SetNscMode)(THIS_ long paramC) PURE;
-	STDMETHOD(GetSelectedItemName)(THIS_ long paramC, long param10) PURE;
-	STDMETHOD(BindToSelectedItemParent)(THIS_ long paramC, long param10, long param14) PURE;
-	STDMETHOD(InLabelEdit)(THIS) PURE;
-	STDMETHOD(RightPaneNavigationStarted)(THIS_ long paramC) PURE;
-	STDMETHOD(RightPaneNavigationFinished)(THIS_ long paramC) PURE;
+	STDMETHOD(GetSelectedItem)(THIS_ PIDLIST_ABSOLUTE *ppidl, int nItem) PURE;
+	STDMETHOD(SetSelectedItem)(THIS_ PCIDLIST_ABSOLUTE pidl, BOOL fCreate, BOOL fReinsert, int nItem) PURE;
+	STDMETHOD(GetNscMode)(THIS_ UINT *pnMode) PURE;
+	STDMETHOD(SetNscMode)(THIS_ UINT nMode) PURE;
+	STDMETHOD(GetSelectedItemName)(THIS_ LPWSTR pszName, DWORD cchName) PURE;
+	STDMETHOD(BindToSelectedItemParent)(THIS_ REFIID riid, void **ppv, PITEMID_CHILD *ppidlLast) PURE;
+	STDMETHOD_(BOOL,InLabelEdit)(THIS) PURE;
+	STDMETHOD(RightPaneNavigationStarted)(THIS_ PCIDLIST_ABSOLUTE pidl) PURE;
+	STDMETHOD(RightPaneNavigationFinished)(THIS_ PCIDLIST_ABSOLUTE pidl) PURE;
 	/*** INscTree2 ***/
-	STDMETHOD(CreateTree2)(THIS_ long paramC, long param10, long param14, long param18) PURE;
+	STDMETHOD(CreateTree2)(THIS_ HWND hwndParent, DWORD dwStyles, DWORD dwExStyles, HWND *phwnd) PURE;
+	STDMETHOD(InvalidateDisplayInfo)(THIS_ PIDLIST_ABSOLUTE pidl) PURE;
+	STDMETHOD(AdjustLineSpacing)(THIS_ UINT uSpacing, BOOL fApply) PURE;
 };
 #undef INTERFACE
 
@@ -400,6 +404,8 @@ DECLARE_INTERFACE_(INscTree2, INscTree)
 #define INscTree2_RightPaneNavigationStarted(T,a) (T)->lpVtbl->RightPaneNavigationStarted(T,a)
 #define INscTree2_RightPaneNavigationFinished(T,a) (T)->lpVtbl->RightPaneNavigationFinished(T,a)
 #define INscTree2_CreateTree2(T,a,b,c,d) (T)->lpVtbl->CreateTree2(T,a,b,c,d)
+#define INscTree2_InvalidateDisplayInfo(T,a) (T)->lpVtbl->InvalidateDisplayInfo(T,a)
+#define INscTree2_AdjustLineSpacing(T,a,b) (T)->lpVtbl->AdjustLineSpacing(T,a,b)
 #endif
 
 /*****************************************************************************
@@ -521,6 +527,8 @@ typedef enum tagWALK_TREE_CMD
 
 #define HKEY_REGTREEOPTION_GRAYED ( (HKEY)INVALID_HANDLE_VALUE ) /* ROS extension */
 
+typedef struct IRegTreeOptionsEventListener IRegTreeOptionsEventListener;
+
 #define INTERFACE IRegTreeOptions
 DECLARE_INTERFACE_(IRegTreeOptions, IUnknown)
 {
@@ -533,6 +541,7 @@ DECLARE_INTERFACE_(IRegTreeOptions, IUnknown)
 	STDMETHOD(WalkTree)(THIS_ WALK_TREE_CMD Command) PURE;
 	STDMETHOD(ToggleItem)(THIS_ HTREEITEM hTI) PURE;
 	STDMETHOD(ShowHelp)(THIS_ HTREEITEM hTI, unsigned long Unknown) PURE;
+	STDMETHOD(SetEventListener)(THIS_ IRegTreeOptionsEventListener *pListener) PURE;
 };
 #undef INTERFACE
 
@@ -766,7 +775,25 @@ DECLARE_INTERFACE_(IShellBrowserService, IUnknown)
 	STDMETHOD_(ULONG,AddRef)(THIS) PURE;
 	STDMETHOD_(ULONG,Release)(THIS) PURE;
 	 /*** IShellBrowserService ***/
-	STDMETHOD(GetPropertyBag)(THIS_ long flags, REFIID riid, void **ppvObject) PURE;
+	STDMETHOD(Unknown)(THIS_ PVOID,PVOID,PVOID) PURE;
+	STDMETHOD(GetTravelLog)(THIS_ ITravelLog **pptl) PURE;
+	STDMETHOD(ShowControlWindow)(THIS_ UINT id, BOOL fShow) PURE;
+	STDMETHOD(IsControlWindowShown)(THIS_ UINT id, BOOL *pfShown) PURE;
+	STDMETHOD(DisplayParseError)(THIS_ HRESULT hres, LPCWSTR pwszPath) PURE;
+	STDMETHOD(SetNavigateState)(THIS_ BNSTATE bnstate) PURE;
+	STDMETHOD(GetNavigateState)(THIS_ BNSTATE *pbnstate) PURE;
+	STDMETHOD(UpdateWindowList)(THIS) PURE;
+	STDMETHOD(UpdateBackForwardState)(THIS) PURE;
+	STDMETHOD(SetFlags)(THIS_ DWORD dwFlags, DWORD dwFlagMask) PURE;
+	STDMETHOD(GetFlags)(THIS_ DWORD *pdwFlags) PURE;
+	STDMETHOD(GetPidl)(THIS_ PIDLIST_ABSOLUTE *ppidl) PURE;
+	STDMETHOD_(DWORD,GetBrowserIndex)(THIS) PURE;
+	STDMETHOD(GetHistoryObject)(THIS_ IOleObject **ppole, IStream **pstm, IBindCtx **ppbc) PURE;
+	STDMETHOD(GetPalette)(THIS_ HPALETTE *hpal) PURE;
+	STDMETHOD(RegisterWindow)(THIS_ BOOL fForceRegister, int swc) PURE;
+	STDMETHOD(GetPropertyBag)(THIS_ DWORD flags, REFIID riid, void **ppvObject) PURE;
+	STDMETHOD(SetAsDefFolderSettings)(THIS) PURE;
+	STDMETHOD(CreateViewWindow)(THIS_ IShellItem *psi, IShellView *psvNew, IShellView *psvOld, RECT *prcView, HWND *phwnd) PURE;
 };
 #undef INTERFACE
 
@@ -774,6 +801,8 @@ DECLARE_INTERFACE_(IShellBrowserService, IUnknown)
 #define IShellBrowserService_QueryInterface(T,a,b) (T)->lpVtbl->QueryInterface(T,a,b)
 #define IShellBrowserService_AddRef(T) (T)->lpVtbl->AddRef(T)
 #define IShellBrowserService_Release(T) (T)->lpVtbl->Release(T)
+#define IShellBrowserService_GetTravelLog(T,a) (T)->lpVtbl->GetTravelLog(T,a)
+#define IShellBrowserService_GetPidl(T,a) (T)->lpVtbl->GetPidl(T,a)
 #define IShellBrowserService_GetPropertyBag(T,a,b,c) (T)->lpVtbl->GetPropertyBag(T,a,b,c)
 #endif
 
@@ -790,10 +819,43 @@ DECLARE_INTERFACE_(IMruDataList, IUnknown)
     /*** IMruDataList ***/
     STDMETHOD(InitData)(THIS_ UINT, UINT, HKEY, LPCWSTR, SLOTCOMPARE) PURE;
     STDMETHOD(AddData)(THIS_ LPCVOID , DWORD, UINT*) PURE;
+    STDMETHOD(InsertData)(THIS_ LPCVOID, UINT, DWORD, UINT*) PURE;
     STDMETHOD(FindData)(THIS_ LPCVOID , DWORD, UINT*) PURE;
     STDMETHOD(GetData)(THIS_ UINT, LPVOID, DWORD) PURE;
     STDMETHOD(QueryInfo)(THIS_ UINT, UINT*, DWORD*) PURE;
     STDMETHOD(Delete)(THIS_ UINT) PURE;
+};
+#undef INTERFACE
+
+#define INTERFACE IMruDataCompare
+DECLARE_INTERFACE_(IMruDataCompare, IUnknown)
+{
+    /*** IUnknown ***/
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    /*** IMruDataCompare ***/
+    STDMETHOD(CompareItems)(THIS_ const BYTE*, INT, const BYTE*, INT) PURE;
+};
+#undef INTERFACE
+
+#define INTERFACE IMruDataList2
+DECLARE_INTERFACE_(IMruDataList2, IMruDataList)
+{
+    /*** IUnknown ***/
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    /*** IMruDataList ***/
+    STDMETHOD(InitData)(THIS_ UINT, UINT, HKEY, LPCWSTR, SLOTCOMPARE) PURE;
+    STDMETHOD(AddData)(THIS_ LPCVOID , DWORD, UINT*) PURE;
+    STDMETHOD(InsertData)(THIS_ LPCVOID, UINT, DWORD, UINT*) PURE;
+    STDMETHOD(FindData)(THIS_ LPCVOID , DWORD, UINT*) PURE;
+    STDMETHOD(GetData)(THIS_ UINT, LPVOID, DWORD) PURE;
+    STDMETHOD(QueryInfo)(THIS_ UINT, UINT*, DWORD*) PURE;
+    STDMETHOD(Delete)(THIS_ UINT) PURE;
+    /*** IMruDataList2 ***/
+    STDMETHOD(InitData2)(THIS_ UINT, UINT, HKEY, LPCWSTR, IMruDataCompare*) PURE;
 };
 #undef INTERFACE
 
@@ -803,11 +865,52 @@ DECLARE_INTERFACE_(IMruDataList, IUnknown)
 #define IMruDataList_Release(T)             (T)->lpVtbl->Release(T)
 #define IMruDataList_InitData(T,a,b,c,d,e)  (T)->lpVtbl->InitData(T,a,b,c,d,e)
 #define IMruDataList_AddData(T,a,b,c)       (T)->lpVtbl->AddData(T,a,b,c)
+#define IMruDataList_InsertData(T,a,b,c,d)  (T)->lpVtbl->InsertData(T,a,b,c,d)
 #define IMruDataList_FindData(T,a,b,c)      (T)->lpVtbl->FindData(T,a,b,c)
 #define IMruDataList_GetData(T,a,b,c)       (T)->lpVtbl->GetData(T,a,b,c)
 #define IMruDataList_QueryInfo(T,a,b,c)     (T)->lpVtbl->QueryInfo(T,a,b,c)
 #define IMruDataList_Delete(T,a)            (T)->lpVtbl->Delete(T,a)
 #endif
+
+/*****************************************************************************
+ * IShellTaskScheduler2 interface
+ */
+#define INTERFACE IShellTaskScheduler2
+DECLARE_INTERFACE_(IShellTaskScheduler2, IShellTaskScheduler)
+{
+    /*** IUnknown ***/
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    /*** IShellTaskScheduler ***/
+    STDMETHOD(AddTask)(THIS_ IRunnableTask*, REFGUID, DWORD_PTR, DWORD) PURE;
+    STDMETHOD(RemoveTasks)(THIS_ REFGUID, DWORD_PTR, BOOL) PURE;
+    STDMETHOD_(UINT,CountTasks)(THIS_ REFGUID) PURE;
+    STDMETHOD(Status)(THIS_ DWORD, DWORD) PURE;
+    /*** IShellTaskScheduler2 ***/
+    STDMETHOD(AddTask2)(THIS_ IRunnableTask*, REFGUID, DWORD_PTR, DWORD, DWORD) PURE;
+    STDMETHOD(MoveTask)(THIS_ REFGUID, DWORD_PTR, DWORD, DWORD) PURE;
+};
+#undef INTERFACE
+
+/*****************************************************************************
+ * IShellTaskSchedulerSettings interface
+ */
+#define INTERFACE IShellTaskSchedulerSettings
+DECLARE_INTERFACE_(IShellTaskSchedulerSettings, IUnknown)
+{
+    /*** IUnknown ***/
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    /*** IShellTaskSchedulerSettings ***/
+    STDMETHOD(SetWorkerThreadCountMax)(THIS_ INT) PURE;
+    STDMETHOD(GetWorkerThreadCountMax)(THIS_ INT*) PURE;
+    STDMETHOD(SetWorkerThreadPriority)(THIS_ INT) PURE;
+    STDMETHOD(SetFlags)(THIS_ DWORD, DWORD) PURE;
+    STDMETHOD(GetFlags)(THIS_ DWORD*) PURE;
+};
+#undef INTERFACE
 
 /*****************************************************************************
  * IMruPidlList interface
@@ -821,7 +924,7 @@ DECLARE_INTERFACE_(IMruPidlList, IUnknown)
     STDMETHOD_(ULONG,Release)(THIS) PURE;
     /*** IMruPidlList ***/
     STDMETHOD(InitList)(THIS_ UINT, HKEY, LPCWSTR) PURE;
-    STDMETHOD(UsePidl)(THIS_ LPCITEMIDLIST, UINT*) PURE;
+    STDMETHOD(UsePidl)(THIS_ LPCITEMIDLIST, UINT*, INT*) PURE;
     STDMETHOD(QueryPidl)(THIS_ LPCITEMIDLIST, UINT, UINT*, UINT*) PURE;
     STDMETHOD(PruneKids)(THIS_ LPCITEMIDLIST) PURE;
 };
@@ -832,7 +935,7 @@ DECLARE_INTERFACE_(IMruPidlList, IUnknown)
 #define IMruPidlList_AddRef(T)              (T)->lpVtbl->AddRef(T)
 #define IMruPidlList_Release(T)             (T)->lpVtbl->Release(T)
 #define IMruPidlList_InitList(T,a,b,c)      (T)->lpVtbl->InitList(T,a,b,c)
-#define IMruPidlList_UsePidl(T,a,b)         (T)->lpVtbl->UsePidl(T,a,b)
+#define IMruPidlList_UsePidl(T,a,b,c)       (T)->lpVtbl->UsePidl(T,a,b,c)
 #define IMruPidlList_QueryPidl(T,a,b,c,d)   (T)->lpVtbl->QueryPidl(T,a,b,c,d)
 #define IMruPidlList_PruneKids(T,a)         (T)->lpVtbl->PruneKids(T,a)
 #endif
@@ -1223,6 +1326,245 @@ DECLARE_INTERFACE_(IPersistString2, IPersist) // {3C44BA76-DE0E-4049-B6E4-6B31A5
 #define IPersistString2_Release(T) (T)->lpVtbl->Release(T)
 #define IPersistString2_SetString(T,a) (T)->lpVtbl->SetString(T,a)
 #define IPersistString2_GetString(T,a) (T)->lpVtbl->GetString(T,a)
+#endif
+
+/*****************************************************************************
+ * IFolderType interface
+ */
+#define INTERFACE IFolderType
+DECLARE_INTERFACE_(IFolderType, IUnknown) // {053B4A86-0DC9-40A3-B7ED-BC6A2E951F48}
+{
+    /*** IUnknown ***/
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    /*** IFolderType ***/
+    STDMETHOD(GetFolderType)(THIS_ FOLDERTYPEID *pftid) PURE;
+};
+#undef INTERFACE
+
+#ifdef COBJMACROS
+#define IFolderType_QueryInterface(T,a,b) (T)->lpVtbl->QueryInterface(T,a,b)
+#define IFolderType_AddRef(T) (T)->lpVtbl->AddRef(T)
+#define IFolderType_Release(T) (T)->lpVtbl->Release(T)
+#define IFolderType_GetFolderType(T,a) (T)->lpVtbl->GetFolderType(T,a)
+#endif
+
+#define INTERFACE INewItemAdvisor
+DECLARE_INTERFACE_(INewItemAdvisor, IUnknown)
+{
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    STDMETHOD(IsTypeSupported)(THIS_ LPCWSTR pszType) PURE;
+    STDMETHOD(GetPropertiesToApply)(THIS_ IPropertyStore *pps, REFIID riid, void **ppv) PURE;
+    STDMETHOD(CreateNewIDList)(THIS_ LPCWSTR pszType, PCIDLIST_ABSOLUTE pidlFolder, PITEMID_CHILD *ppidl) PURE;
+};
+#undef INTERFACE
+
+#ifdef COBJMACROS
+#define INewItemAdvisor_QueryInterface(T,a,b) (T)->lpVtbl->QueryInterface(T,a,b)
+#define INewItemAdvisor_AddRef(T) (T)->lpVtbl->AddRef(T)
+#define INewItemAdvisor_Release(T) (T)->lpVtbl->Release(T)
+#define INewItemAdvisor_IsTypeSupported(T,a) (T)->lpVtbl->IsTypeSupported(T,a)
+#define INewItemAdvisor_GetPropertiesToApply(T,a,b,c) (T)->lpVtbl->GetPropertiesToApply(T,a,b,c)
+#define INewItemAdvisor_CreateNewIDList(T,a,b,c) (T)->lpVtbl->CreateNewIDList(T,a,b,c)
+#endif
+
+typedef struct tagControlPanelCategoryInfo ControlPanelCategoryInfo;
+
+#define INTERFACE IRegItemCustomAttributes
+DECLARE_INTERFACE_(IRegItemCustomAttributes, IUnknown)
+{
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    STDMETHOD(GetCustomAttributes)(THIS_ PCUITEMID_CHILD pidl, DWORD dwFlags, ControlPanelCategoryInfo *pInfo, DWORD *pdwAttributes) PURE;
+};
+#undef INTERFACE
+
+#ifdef COBJMACROS
+#define IRegItemCustomAttributes_QueryInterface(T,a,b) (T)->lpVtbl->QueryInterface(T,a,b)
+#define IRegItemCustomAttributes_AddRef(T) (T)->lpVtbl->AddRef(T)
+#define IRegItemCustomAttributes_Release(T) (T)->lpVtbl->Release(T)
+#define IRegItemCustomAttributes_GetCustomAttributes(T,a,b,c,d) (T)->lpVtbl->GetCustomAttributes(T,a,b,c,d)
+#endif
+
+/*****************************************************************************
+ * IBackReferencedObject interface
+ */
+#define INTERFACE IBackReferencedObject
+DECLARE_INTERFACE_(IBackReferencedObject, IUnknown) // {C938B119-D3AD-4D02-B5EE-164C2EC8160E}
+{
+    /*** IUnknown ***/
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    /*** IBackReferencedObject ***/
+    STDMETHOD(AddRefBackReference)(THIS) PURE;
+    STDMETHOD(ReleaseBackReference)(THIS) PURE;
+};
+#undef INTERFACE
+
+#ifdef COBJMACROS
+#define IBackReferencedObject_QueryInterface(T,a,b) (T)->lpVtbl->QueryInterface(T,a,b)
+#define IBackReferencedObject_AddRef(T) (T)->lpVtbl->AddRef(T)
+#define IBackReferencedObject_Release(T) (T)->lpVtbl->Release(T)
+#define IBackReferencedObject_AddRefBackReference(T) (T)->lpVtbl->AddRefBackReference(T)
+#define IBackReferencedObject_ReleaseBackReference(T) (T)->lpVtbl->ReleaseBackReference(T)
+#endif
+
+/*****************************************************************************
+ * ISLTracker interface
+ */
+typedef struct tagDOMAIN_RELATIVE_OBJECTID
+{
+    GUID guidVolume;
+    GUID guidObject;
+} DOMAIN_RELATIVE_OBJECTID;
+
+typedef struct tagMACHINE_ID
+{
+    CHAR szMachine[16];
+} MACHINE_ID;
+
+#define INTERFACE ISLTracker
+DECLARE_INTERFACE_(ISLTracker, IUnknown) // {7C9E512F-41D7-11D1-8E2E-00C04FB9386D}
+{
+    /*** IUnknown ***/
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    /*** ISLTracker ***/
+    STDMETHOD(Resolve)(THIS_ HWND hwnd, ULONG fFlags, ULONG fRestrictions) PURE;
+    STDMETHOD(GetIDs)(THIS_ DOMAIN_RELATIVE_OBJECTID *pdroidCurrent, DOMAIN_RELATIVE_OBJECTID *pdroidBirth, MACHINE_ID *pmcid) PURE;
+    STDMETHOD(CancelSearch)(THIS) PURE;
+};
+#undef INTERFACE
+
+#ifdef COBJMACROS
+#define ISLTracker_QueryInterface(T,a,b) (T)->lpVtbl->QueryInterface(T,a,b)
+#define ISLTracker_AddRef(T) (T)->lpVtbl->AddRef(T)
+#define ISLTracker_Release(T) (T)->lpVtbl->Release(T)
+#define ISLTracker_Resolve(T,a,b,c) (T)->lpVtbl->Resolve(T,a,b,c)
+#define ISLTracker_GetIDs(T,a,b,c) (T)->lpVtbl->GetIDs(T,a,b,c)
+#define ISLTracker_CancelSearch(T) (T)->lpVtbl->CancelSearch(T)
+#endif
+
+/*****************************************************************************
+ * ICustomizeInfoTip interface
+ */
+#define INTERFACE ICustomizeInfoTip
+DECLARE_INTERFACE_(ICustomizeInfoTip, IUnknown) // {DA22171F-70B4-43DB-B38F-296741D1494C}
+{
+    /*** IUnknown ***/
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    /*** ICustomizeInfoTip ***/
+    STDMETHOD(SetPrefixText)(THIS_ LPCWSTR pszPrefix) PURE;
+    STDMETHOD(SetExtraProperties)(THIS_ const PROPERTYKEY *pkey, UINT cProps) PURE;
+};
+#undef INTERFACE
+
+#ifdef COBJMACROS
+#define ICustomizeInfoTip_QueryInterface(T,a,b) (T)->lpVtbl->QueryInterface(T,a,b)
+#define ICustomizeInfoTip_AddRef(T) (T)->lpVtbl->AddRef(T)
+#define ICustomizeInfoTip_Release(T) (T)->lpVtbl->Release(T)
+#define ICustomizeInfoTip_SetPrefixText(T,a) (T)->lpVtbl->SetPrefixText(T,a)
+#define ICustomizeInfoTip_SetExtraProperties(T,a,b) (T)->lpVtbl->SetExtraProperties(T,a,b)
+#endif
+
+/*****************************************************************************
+ * IDelegateHostItemContainer interface
+ */
+#define INTERFACE IDelegateHostItemContainer
+DECLARE_INTERFACE_(IDelegateHostItemContainer, IUnknown) // {02468693-E7E5-4C6B-9995-64CE5F51CEC4}
+{
+    /*** IUnknown ***/
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    /*** IDelegateHostItemContainer ***/
+    STDMETHOD(SetRemoteComputer)(THIS_ LPCWSTR pszComputer) PURE;
+};
+#undef INTERFACE
+
+/*****************************************************************************
+ * IFadeTask interface
+ */
+#define INTERFACE IFadeTask
+DECLARE_INTERFACE_(IFadeTask, IUnknown) // {FADB55B4-D382-4FC4-81D7-ABB325C7F12A}
+{
+    /*** IUnknown ***/
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    /*** IFadeTask ***/
+    STDMETHOD(FadeRect)(THIS_ const RECT *prc) PURE;
+};
+#undef INTERFACE
+
+/*****************************************************************************
+ * IThumbnail3 interface
+ */
+#define INTERFACE IThumbnail3
+DECLARE_INTERFACE_(IThumbnail3, IUnknown)
+{
+    /*** IUnknown ***/
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    /*** IThumbnail3 ***/
+    STDMETHOD(Init)(THIS_ HWND hwnd, UINT uMsg) PURE;
+    STDMETHOD(GetBitmap)(THIS_ LPCWSTR pszFile, DWORD dwItemID, LONG lWidth, LONG lHeight) PURE;
+    STDMETHOD(GetBitmapFromIDList)(THIS_ PCIDLIST_ABSOLUTE pidl, DWORD dwItemID, LONG lWidth, LONG lHeight) PURE;
+    STDMETHOD(GetBitmapFromShellItem)(THIS_ IShellItem *psi, DWORD dwItemID, LONG lWidth, LONG lHeight) PURE;
+};
+#undef INTERFACE
+
+/*****************************************************************************
+ * IInitializeLoadTrust interface
+ */
+#define INTERFACE IInitializeLoadTrust
+DECLARE_INTERFACE_(IInitializeLoadTrust, IUnknown) // {C2AA8366-6694-47F9-A15B-324D6A75D4CD}
+{
+    /*** IUnknown ***/
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    /*** IInitializeLoadTrust ***/
+    STDMETHOD(LoadingDataFromRegistry)(THIS) PURE;
+};
+#undef INTERFACE
+
+#define INTERFACE IDriveFolderExt
+DECLARE_INTERFACE_(IDriveFolderExt, IUnknown)
+{
+    STDMETHOD(QueryInterface)(THIS_ REFIID,PVOID*) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    STDMETHOD(Initialize)(THIS_ int iDrive) PURE;
+    STDMETHOD(DriveSupportsBurning)(THIS_ int iDrive) PURE;
+    STDMETHOD(Bind)(THIS_ PCIDLIST_ABSOLUTE pidl, IBindCtx *pbc, REFIID riid, void **ppv) PURE;
+    STDMETHOD(GetSpace)(THIS_ ULONGLONG *pullFree, ULONGLONG *pullTotal) PURE;
+};
+#undef INTERFACE
+
+#ifdef __cplusplus
+typedef struct QUERYNAMESPACEINFO QUERYNAMESPACEINFO;
+
+interface IAugmentedShellFolder : public IShellFolder // {2F711B17-773C-41D4-93FA-7F23EDCECB66}
+{
+    STDMETHOD(AddNameSpace)(const GUID *pguidObject, IShellFolder *psf, PCIDLIST_ABSOLUTE pidl, ULONG dwFlags, UINT uGroupId) PURE;
+    STDMETHOD(GetNameSpaceID)(PCUITEMID_CHILD pidl, GUID *pguidOut) PURE;
+    STDMETHOD(QueryNameSpace)(ULONG uNameSpace, GUID *pguidOut, IShellFolder **ppsf) PURE;
+    STDMETHOD(EnumNameSpace)(ULONG uNameSpace, ULONG *pdwID) PURE;
+    STDMETHOD(UnWrapIDList)(PCUITEMID_CHILD pidl, LONG cPidls, IShellFolder **ppsf, PIDLIST_ABSOLUTE *ppidlFolder, PIDLIST_ABSOLUTE *ppidlItem, LONG *pcPidls) PURE;
+    STDMETHOD(QueryNameSpace2)(ULONG uNameSpace, QUERYNAMESPACEINFO *pqnsi) PURE;
+    STDMETHOD(GetNameSpaceGroupID)(PCUITEMID_CHILD pidl, UINT *puGroupId) PURE;
+    STDMETHOD(GetFlagsForChild)(PCUITEMID_CHILD pidl, REFGUID guidNameSpace, DWORD *pdwFlags) PURE;
+};
 #endif
 
 /*****************************************************************************

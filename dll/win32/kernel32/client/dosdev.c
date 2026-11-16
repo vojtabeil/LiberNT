@@ -28,7 +28,7 @@ IsGlobalDeviceMap(
     HANDLE DirectoryHandle,
     PBOOLEAN IsGlobal)
 {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
     DWORD ReturnLength;
     UNICODE_STRING GlobalString;
     OBJECT_NAME_INFORMATION NameInfo, *PNameInfo;
@@ -546,8 +546,8 @@ QueryDosDeviceW(
     )
 {
     PWSTR Ptr;
-    PVOID Buffer;
-    NTSTATUS Status;
+    PVOID _SEH2_VOLATILE Buffer;
+    NTSTATUS _SEH2_VOLATILE Status;
     USHORT i, TotalEntries;
     UNICODE_STRING UnicodeString;
     OBJECT_ATTRIBUTES ObjectAttributes;
@@ -555,7 +555,8 @@ QueryDosDeviceW(
     BOOLEAN IsGlobal, GlobalNeeded, Found;
     POBJECT_DIRECTORY_INFORMATION DirInfo;
     OBJECT_DIRECTORY_INFORMATION NullEntry = {{0}};
-    ULONG ReturnLength, NameLength, Length, Context, BufferLength;
+    ULONG ReturnLength, NameLength, Context, BufferLength;
+    ULONG _SEH2_VOLATILE Length = 0;
 
     /* Open the '\??' directory */
     RtlInitUnicodeString(&UnicodeString, L"\\??");
@@ -911,10 +912,8 @@ QueryDosDeviceW(
                                     NameLength > ucchMax - Length ||
                                     ucchMax - NameLength - Length < sizeof(WCHAR))
                                 {
-                                    RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
-                                    NtClose(DirectoryHandle);
-                                    BaseSetLastNTError(STATUS_BUFFER_TOO_SMALL);
-                                    return 0;
+                                    Status = STATUS_BUFFER_TOO_SMALL;
+                                    _SEH2_LEAVE;
                                 }
 
                                 /* Copy and NULL terminate string */

@@ -7,11 +7,13 @@
  */
 
 #include <rosdhcp.h>
+#include <netioapi.h>
 
 #define NDEBUG
 #include <reactos/debug.h>
 
 static CRITICAL_SECTION ApiCriticalSection;
+static CONDITION_VARIABLE LeaseCondition = CONDITION_VARIABLE_INIT;
 
 extern HANDLE hAdapterStateChangedEvent;
 
@@ -31,6 +33,56 @@ VOID ApiFree() {
     DeleteCriticalSection( &ApiCriticalSection );
 }
 
+VOID ApiSignalLeaseChange(VOID)
+{
+    WakeAllConditionVariable(&LeaseCondition);
+}
+
+static BOOL ApiLeaseAddressUsable(PDHCP_ADAPTER Adapter)
+{
+    struct client_lease *Lease = Adapter->DhclientState.active;
+    PMIB_UNICASTIPADDRESS_TABLE Table;
+    BOOL Usable = TRUE;
+    ULONG Address, Index;
+
+    if (Lease == NULL || Lease->address.len != sizeof(Address))
+        return TRUE;
+    memcpy(&Address, Lease->address.iabuf, sizeof(Address));
+    if (GetUnicastIpAddressTable(AF_INET, &Table) != NO_ERROR)
+        return TRUE;
+    for (Index = 0; Index < Table->NumEntries; Index++)
+    {
+        if (Table->Table[Index].InterfaceIndex == Adapter->IfMib.dwIndex &&
+            Table->Table[Index].Address.Ipv4.sin_addr.s_addr == Address)
+        {
+            Usable = Table->Table[Index].DadState == IpDadStatePreferred;
+            break;
+        }
+    }
+    FreeMibTable(Table);
+    return Usable;
+}
+
+DWORD ApiWaitForLease(const WCHAR *AdapterName)
+{
+    ULONGLONG Deadline = GetTickCount64() + DHCP_ACQUIRE_TIMEOUT * 1000ULL;
+    PDHCP_ADAPTER Adapter;
+    ULONGLONG Now;
+
+    for (;;)
+    {
+        Adapter = AdapterFindName(AdapterName);
+        if (Adapter == NULL || Adapter->DhclientState.state == S_STATIC)
+            return ERROR_FILE_NOT_FOUND;
+        if (Adapter->DhclientState.state == S_BOUND && ApiLeaseAddressUsable(Adapter))
+            return ERROR_SUCCESS;
+        Now = GetTickCount64();
+        if (Now >= Deadline)
+            return ERROR_SEM_TIMEOUT;
+        SleepConditionVariableCS(&LeaseCondition, &ApiCriticalSection, (DWORD)(Deadline - Now));
+    }
+}
+
 DWORD
 WINAPI
 RpcThreadRoutine(
@@ -39,7 +91,7 @@ RpcThreadRoutine(
     RPC_STATUS Status;
 
     Status = RpcServerUseProtseqEpW(L"ncacn_np", 20, L"\\pipe\\dhcpcsvc", NULL);
-    if (Status != RPC_S_OK)
+    if (Status != RPC_S_OK && Status != RPC_S_ALREADY_LISTENING)
     {
         DPRINT1("RpcServerUseProtseqEpW() failed (Status %lx)\n", Status);
         return 0;
@@ -53,7 +105,7 @@ RpcThreadRoutine(
     }
 
     Status = RpcServerListen(1, RPC_C_LISTEN_MAX_CALLS_DEFAULT, FALSE);
-    if (Status != RPC_S_OK)
+    if (Status != RPC_S_OK && Status != RPC_S_ALREADY_LISTENING)
     {
         DPRINT1("RpcServerListen() failed (Status %lx)\n", Status);
     }
@@ -81,18 +133,25 @@ GetVendorOption(
     _In_ ULONG OptionId)
 {
     DWORD Offset, OptionLength;
-    PBYTE Ptr;
 
-    Ptr = Data;
     Offset = 0;
     while (Offset < Length)
     {
-        if ((DWORD)*Ptr == OptionId)
-            return Ptr;
+        if (Data[Offset] == DHO_PAD)
+        {
+            Offset++;
+            continue;
+        }
+        if (Data[Offset] == DHO_END || Length - Offset < 2)
+            break;
 
-        OptionLength = (DWORD)*(Ptr + 1);
-        Offset += (OptionLength + 2);
-        Ptr += (OptionLength + 2);
+        OptionLength = Data[Offset + 1];
+        if (OptionLength > Length - Offset - 2)
+            break;
+        if (Data[Offset] == OptionId)
+            return &Data[Offset];
+
+        Offset += OptionLength + 2;
     }
 
     return NULL;
@@ -156,6 +215,7 @@ Server_EnableDhcp(
         proto = find_protocol_by_adapter(&Adapter->DhclientInfo);
         if (proto)
             remove_protocol(proto);
+        ApiSignalLeaseChange();
     }
 
     if (hAdapterStateChangedEvent != NULL)
@@ -204,6 +264,8 @@ Server_AcquireParameters(
 
     if (hAdapterStateChangedEvent != NULL)
         SetEvent(hAdapterStateChangedEvent);
+
+    ret = ApiWaitForLease(AdapterName);
 
 done:
     ApiUnlock();
@@ -336,6 +398,8 @@ Server_StaticRefreshParams(
         DeleteIPAddress(Adapter->NteContext);
         Adapter->NteContext = 0;
     }
+    Adapter->ApipaAddress = 0;
+    set_dhcp_router_discovery(Adapter, FALSE);
     if (Adapter->RouterMib.dwForwardNextHop)
     {
         DeleteIpForwardEntry(&Adapter->RouterMib);
@@ -352,6 +416,8 @@ Server_StaticRefreshParams(
                        AdapterIndex,
                        &Adapter->NteContext,
                        &Adapter->NteInstance);
+    if (ret == NO_ERROR)
+        Adapter->NteNetmask = Netmask;
 
     if (hAdapterStateChangedEvent != NULL)
         SetEvent(hAdapterStateChangedEvent);
@@ -434,6 +500,12 @@ Server_RequestParams(
         goto done;
     }
 
+    if (RecdParams == NULL || RecdResults == NULL)
+    {
+        ret = ERROR_INVALID_PARAMETER;
+        goto done;
+    }
+
     dwReturnCount = 0;
     dwReturnLength = 0;
 
@@ -444,6 +516,8 @@ Server_RequestParams(
         for (i = 0; i < RecdParams->nParams; i++)
         {
             OptionId = RecdParams->Params[i].OptionId;
+            if (OptionId >= 256)
+                continue;
             if (RecdParams->Params[i].IsVendor == FALSE)
             {
                 DPRINT("Option %u: Length %d \n", OptionId, Options[OptionId].len);
@@ -481,7 +555,14 @@ Server_RequestParams(
             goto done;
         }
 
-        Results->ResultsCount = dwReturnCount;
+        ZeroMemory(Results, sizeof(*Results));
+        if (dwReturnCount == 0)
+        {
+            *RecdResults = Results;
+            Results = NULL;
+            goto done;
+        }
+
         Results->Results = MIDL_user_allocate(dwReturnCount * sizeof(DHCPCAPI_RESULTS));
         if (Results->Results == NULL)
         {
@@ -489,8 +570,8 @@ Server_RequestParams(
             ret = ERROR_NOT_ENOUGH_MEMORY;
             goto done;
         }
+        Results->ResultsCount = dwReturnCount;
 
-        Results->DataSize = dwReturnLength;
         Results->Data = MIDL_user_allocate(dwReturnLength);
         if (Results->Data == NULL)
         {
@@ -498,12 +579,15 @@ Server_RequestParams(
             ret = ERROR_NOT_ENOUGH_MEMORY;
             goto done;
         }
+        Results->DataSize = dwReturnLength;
 
         Offset = 0;
         Index = 0;
         for (i = 0; i < RecdParams->nParams; i++)
         {
             OptionId = RecdParams->Params[i].OptionId;
+            if (OptionId >= 256)
+                continue;
 
             if (RecdParams->Params[i].IsVendor == FALSE)
             {
@@ -555,10 +639,44 @@ Server_RequestParams(
         }
 
         *RecdResults = Results;
+        Results = NULL;
     }
 
 done:
     ApiUnlock();
 
+    if (Results)
+    {
+        if (Results->Results)
+            MIDL_user_free(Results->Results);
+        if (Results->Data)
+            MIDL_user_free(Results->Data);
+        MIDL_user_free(Results);
+    }
+
     return ret;
+}
+
+/* Function 8 */
+DWORD
+__stdcall
+Server_AcquireParametersV6(
+    _In_ PDHCP_SERVER_NAME ServerName,
+    _In_ LPWSTR AdapterName)
+{
+    DPRINT("Server_AcquireParametersV6(%S)\n", AdapterName);
+
+    return Dhcp6RenewAdapter(AdapterName);
+}
+
+/* Function 9 */
+DWORD
+__stdcall
+Server_ReleaseParametersV6(
+    _In_ PDHCP_SERVER_NAME ServerName,
+    _In_ LPWSTR AdapterName)
+{
+    DPRINT("Server_ReleaseParametersV6(%S)\n", AdapterName);
+
+    return Dhcp6ReleaseAdapter(AdapterName);
 }

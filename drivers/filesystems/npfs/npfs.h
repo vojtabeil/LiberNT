@@ -14,6 +14,7 @@
 /* System Headers */
 #include <ntifs.h>
 #include <ndk/obfuncs.h>
+#include <ndk/psfuncs.h>
 #include <pseh/pseh2.h>
 //#define UNIMPLEMENTED
 //#define DPRINT1 DbgPrint
@@ -183,8 +184,8 @@ typedef struct _NP_EVENT_BUFFER
 typedef struct _NP_ROOT_DCB_CCB
 {
     NODE_TYPE_CODE NodeType;
-    PVOID Unknown;
-    ULONG Unknown2;
+    PUNICODE_STRING QueryTemplate;
+    ULONG IndexOfLastCcbReturned;
 } NP_ROOT_DCB_CCB, *PNP_ROOT_DCB_FCB;
 
 /* The header that both FCB and DCB share */
@@ -267,6 +268,10 @@ typedef struct _NP_CCB
     PFILE_OBJECT FileObject[2];
     PEPROCESS Process;
     PVOID ClientSession;
+    ULONG ClientProcessId;
+    ULONG ClientSessionId;
+    ULONG ServerProcessId;
+    ULONG ServerSessionId;
     PNP_NONPAGED_CCB NonPagedCcb;
     NP_DATA_QUEUE DataQueue[2];
     PSECURITY_CLIENT_CONTEXT ClientContext;
@@ -467,6 +472,11 @@ NpDeleteCcb(IN PNP_CCB Ccb,
 VOID
 NTAPI
 NpDeleteFcb(IN PNP_FCB Fcb,
+            IN PLIST_ENTRY ListEntry);
+
+VOID
+NTAPI
+NpUnlinkFcb(IN PNP_FCB Fcb,
             IN PLIST_ENTRY ListEntry);
 
 NTSTATUS
@@ -686,6 +696,11 @@ NTSTATUS
 NTAPI
 NpFsdSetSecurityInfo(IN PDEVICE_OBJECT DeviceObject,
                      IN PIRP Irp);
+
+NTSTATUS
+NTAPI
+NpFsdDirectoryControl(IN PDEVICE_OBJECT DeviceObject,
+                      IN PIRP Irp);
 
 NTSTATUS
 NTAPI

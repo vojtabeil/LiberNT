@@ -68,7 +68,7 @@
  #pragma strict_gs_check(push, on)
 #endif
 
-#if defined(_M_MRX000) || defined(_M_ALPHA) || defined(_M_PPC) || defined(_M_IA64) || defined(_M_AMD64) || defined(_M_ARM) || defined(_M_ARM64)
+#if !defined(_M_IX86) && !defined(__i386__)
  #define ALIGNMENT_MACHINE
  #define UNALIGNED __unaligned
  #if defined(_WIN64)
@@ -100,18 +100,20 @@
 /* Returns the base address of a structure from a structure member */
 #ifndef CONTAINING_RECORD
  #define CONTAINING_RECORD(address, type, field) \
-   ((type *)(((ULONG_PTR)address) - (ULONG_PTR)(&(((type *)0)->field))))
+   ((type *)(((ULONG_PTR)(address)) - (ULONG_PTR)(&(((type *)0)->field))))
 #endif
 
 /* Returns the byte offset of the specified structure's member */
 #if !defined(__GNUC__) && !defined(__clang__)
  #define FIELD_OFFSET(Type, Field) ((LONG)(LONG_PTR)&(((Type*) 0)->Field))
+ #define UFIELD_OFFSET(Type, Field) ((ULONG)(LONG_PTR)&(((Type*) 0)->Field))
 #else
  #define FIELD_OFFSET(Type, Field) ((LONG)__builtin_offsetof(Type, Field))
+ #define UFIELD_OFFSET(Type, Field) ((ULONG)__builtin_offsetof(Type, Field))
 #endif /* __GNUC__ */
 
 /* Returns the type's alignment */
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || defined(__cplusplus)
  #define TYPE_ALIGNMENT(t) __alignof(t)
 #else
  #define TYPE_ALIGNMENT(t) FIELD_OFFSET(struct { char x; t test; }, test)
@@ -119,10 +121,8 @@
 
 #if defined(_AMD64_) || defined(_X86_)
  #define PROBE_ALIGNMENT(_s) TYPE_ALIGNMENT($ULONG)
-#elif defined(_IA64_) || defined(_ARM_) || defined(_ARM64_)
- #define PROBE_ALIGNMENT(_s) max((TYPE_ALIGNMENT(_s), TYPE_ALIGNMENT($ULONG))
-#elif !defined(RC_INVOKED)
- #error "Unknown architecture"
+#else
+ #define PROBE_ALIGNMENT(_s) max(TYPE_ALIGNMENT(_s), TYPE_ALIGNMENT($ULONG))
 #endif
 
 #if defined(_WIN64)
@@ -131,8 +131,12 @@
 
 #ifdef __cplusplus
  #define EXTERN_C extern "C"
+ #define EXTERN_C_START extern "C" {
+ #define EXTERN_C_END }
 #else
  #define EXTERN_C extern
+ #define EXTERN_C_START
+ #define EXTERN_C_END
 #endif /* __cplusplus */
 
 #define NTAPI __stdcall
@@ -376,6 +380,15 @@ typedef LONG *PLONG;
 typedef unsigned char FCHAR;
 typedef unsigned short FSHORT;
 typedef unsigned long FLONG;
+
+/* Handle LP64 and LLP64 differences in numeric constants with an 'l' suffix. */
+#ifndef __MSABI_LONG
+#if !defined(__LP64__) && !defined(WINE_NO_LONG_TYPES) && !defined(WINE_UNIX_LIB)
+#define __MSABI_LONG(x) x ## l
+#else
+#define __MSABI_LONG(x) x
+#endif
+#endif
 
 typedef unsigned char BOOLEAN, *PBOOLEAN;
 $if(_NTDEF_)
@@ -655,6 +668,9 @@ typedef struct _PROCESSOR_NUMBER {
 
 #define ALL_PROCESSOR_GROUPS 0xffff
 
+struct _EXCEPTION_RECORD;
+struct _CONTEXT;
+
 typedef
 _IRQL_requires_same_
 _Function_class_(EXCEPTION_ROUTINE)
@@ -692,13 +708,13 @@ typedef struct _GROUP_AFFINITY {
 #if defined(__cplusplus)
 extern "C++" {
  template <typename T, size_t N>
- static char (& SAFE_RTL_NUMBER_OF(T (&)[N]))[N];
+ char (& SAFE_RTL_NUMBER_OF(T (&)[N]))[N];
 }
  #define RTL_NUMBER_OF_V2(A) sizeof(SAFE_RTL_NUMBER_OF(A))
 #elif defined(__GNUC__)
  #define RTL_NUMBER_OF_V2(A) \
-     (({ int _check_array_type[__builtin_types_compatible_p(typeof(A), typeof(&A[0])) ? -1 : 1]; (void)_check_array_type; }), \
-     RTL_NUMBER_OF_V1(A))
+     (RTL_NUMBER_OF_V1(A) + \
+      0 * sizeof(char[__builtin_types_compatible_p(typeof(A), typeof(&A[0])) ? -1 : 1]))
 #else
  #define RTL_NUMBER_OF_V2(A) RTL_NUMBER_OF_V1(A)
 #endif
@@ -775,7 +791,7 @@ $endif(_WINNT_)
  #define UInt32x32To64(a,b) ((unsigned __int64)(unsigned int)(a)*(unsigned __int64)(unsigned int)(b))
 #endif
 
-#if defined(MIDL_PASS)|| defined(RC_INVOKED) || defined(_M_CEE_PURE) || defined(_M_ARM)
+#if defined(MIDL_PASS)|| defined(RC_INVOKED) || defined(_M_CEE_PURE) || defined(_M_ARM) || defined(_M_ARM64)
 /* Use native math */
  #define Int64ShllMod32(a,b) ((unsigned __int64)(a)<<(b))
  #define Int64ShraMod32(a,b) (((__int64)(a))>>(b))
@@ -792,12 +808,12 @@ $endif(_WINNT_)
 #define RotateRight32 _rotr
 #define RotateRight64 _rotr64
 
-#if defined(_M_AMD64)
+#if defined(_WIN64)
  #define RotateLeft8 _rotl8
  #define RotateLeft16 _rotl16
  #define RotateRight8 _rotr8
  #define RotateRight16 _rotr16
-#endif /* _M_AMD64 */
+#endif /* _WIN64 */
 
 /* C_ASSERT Definition */
 #define C_ASSERT(expr) extern char (*c_assert(void)) [(expr) ? 1 : -1]
@@ -811,12 +827,14 @@ $endif(_WINNT_)
  #define DEFAULT_UNREACHABLE default: break
 #endif
 
+#ifndef UNREACHABLE
 #if defined(__GNUC__) || defined(__clang__)
  #define UNREACHABLE __builtin_unreachable()
 #elif defined(_MSC_VER)
  #define UNREACHABLE __assume(0)
 #else
  #define UNREACHABLE
+#endif
 #endif
 
 #define VER_WORKSTATION_NT                  0x40000000

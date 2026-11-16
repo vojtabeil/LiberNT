@@ -520,10 +520,7 @@ HRESULT CMenuToolbarBase::GetWindow(HWND *phwnd)
     if (!phwnd)
         return E_FAIL;
 
-    if (m_pager.m_hWnd)
-        *phwnd = m_pager.m_hWnd;
-    else
-        *phwnd = m_hWnd;
+    *phwnd = m_hWnd;
 
     return S_OK;
 }
@@ -1200,7 +1197,6 @@ HRESULT CMenuStaticToolbar::FillToolbar(BOOL clearFirst)
         ClearToolbar();
     }
 
-    int count = 0;
     for (i = 0; i < ic; i++)
     {
         BOOL last = i + 1 == ic;
@@ -1216,8 +1212,6 @@ HRESULT CMenuStaticToolbar::FillToolbar(BOOL clearFirst)
             TRACE("Error obtaining info for menu item at pos=%d\n", i);
             continue;
         }
-
-        count++;
 
         if (info.fType & MFT_SEPARATOR)
         {

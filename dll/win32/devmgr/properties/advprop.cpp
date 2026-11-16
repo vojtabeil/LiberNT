@@ -535,8 +535,7 @@ UpdateDriver(
 {
     TOKEN_PRIVILEGES Privileges;
     HANDLE hToken;
-    DWORD dwReboot;
-    BOOL NeedReboot = FALSE;
+    DWORD dwReboot = 0;
 
     // Better use InstallDevInst:
     //     BOOL
@@ -551,7 +550,7 @@ UpdateDriver(
     if (!InstallDevInst(hwndDlg, dap->szDeviceID, TRUE, &dwReboot))
         return;
 
-    if (NeedReboot == FALSE)
+    if (!(dwReboot & (DI_NEEDRESTART | DI_NEEDREBOOT)))
         return;
 
     //FIXME: load text from resource file
@@ -898,7 +897,7 @@ DisplayDevicePropertyText(IN PDEVADVPROP_INFO dap,
                                      &dwSize);
     if (dwSize == 0)
     {
-        if (GetLastError() != ERROR_FILE_NOT_FOUND)
+        if (GetLastError() != ERROR_INVALID_DATA)
         {
             _swprintf(dap->szTemp, L"Error: Getting the size failed! (Error: %ld)", GetLastError());
             SetListViewText(hwndListView, 0, dap->szTemp);

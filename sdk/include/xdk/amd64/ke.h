@@ -46,6 +46,7 @@ typedef XSAVE_FORMAT XMM_SAVE_AREA32, *PXMM_SAVE_AREA32;
 #define KeGetDcacheFillSize() 1L
 
 #define YieldProcessor _mm_pause
+#define ReadTimeStampCounter() ((ULONG64)__rdtsc())
 #define MemoryBarrier __faststorefence
 #define FastFence __faststorefence
 #define LoadFence _mm_lfence
@@ -181,8 +182,11 @@ $if (_NTDDK_)
 
 #define PAUSE_PROCESSOR YieldProcessor();
 
-#define KERNEL_STACK_SIZE 0x6000
-#define KERNEL_LARGE_STACK_SIZE 0x12000
+#ifndef KERNEL_STACK_SCALE
+#define KERNEL_STACK_SCALE 1
+#endif
+#define KERNEL_STACK_SIZE (0x6000 * KERNEL_STACK_SCALE)
+#define KERNEL_LARGE_STACK_SIZE (0x12000 * KERNEL_STACK_SCALE)
 #define KERNEL_LARGE_STACK_COMMIT KERNEL_STACK_SIZE
 
 #define KERNEL_MCA_EXCEPTION_STACK_SIZE 0x2000
@@ -333,14 +337,13 @@ KeGetPcr(VOID)
     return (PKPCR)__readgsqword(FIELD_OFFSET(KPCR, Self));
 }
 
-#if (NTDDI_VERSION >= NTDDI_WIN7)
-_CRT_DEPRECATE_TEXT("KeGetCurrentProcessorNumber is deprecated. Use KeGetCurrentProcessorNumberEx or KeGetCurrentProcessorIndex instead.")
-#endif
+#if (NTDDI_VERSION < NTDDI_WIN7) || !defined(NT_PROCESSOR_GROUPS)
 FORCEINLINE
 ULONG
 KeGetCurrentProcessorNumber(VOID)
 {
     return __readgsbyte(0x184);
 }
+#endif
 
 $endif /* _NTDDK_ */

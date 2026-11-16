@@ -10,6 +10,8 @@
 
 #include "precomp.h"
 
+#include <icmp.h>
+
 #define __LWIP_INET_H__
 #include "lwip/netifapi.h"
 
@@ -18,6 +20,7 @@ LIST_ENTRY InterfaceListHead;
 KSPIN_LOCK InterfaceListLock;
 LIST_ENTRY NetTableListHead;
 KSPIN_LOCK NetTableListLock;
+FAST_MUTEX NetTableMutex;
 BOOLEAN IPInitialized = FALSE;
 BOOLEAN IpWorkItemQueued = FALSE;
 /* Work around calling timer at Dpc level */
@@ -51,20 +54,9 @@ VOID DeinitializePacket(
     /* Check if there's a packet to free */
     if (IPPacket->NdisPacket != NULL)
     {
-        if (IPPacket->ReturnPacket)
-        {
-            /* Return the packet to the miniport driver */
-            TI_DbgPrint(MAX_TRACE, ("Returning packet 0x%p\n",
-                                    IPPacket->NdisPacket));
-            NdisReturnPackets(&IPPacket->NdisPacket, 1);
-        }
-        else
-        {
-            /* Free it the conventional way */
-            TI_DbgPrint(MAX_TRACE, ("Freeing packet 0x%p\n",
-                                    IPPacket->NdisPacket));
-            FreeNdisPacket(IPPacket->NdisPacket);
-        }
+        TI_DbgPrint(MAX_TRACE, ("Freeing packet 0x%p\n",
+                                IPPacket->NdisPacket));
+        FreeNdisPacket(IPPacket->NdisPacket);
     }
 
     /* Check if we have a pool-allocated header */
@@ -87,6 +79,18 @@ VOID FreeIF(
  */
 {
     ExFreePoolWithTag(Object, IP_INTERFACE_TAG);
+}
+
+BOOLEAN IPReferenceInterface(
+    PIP_INTERFACE IF)
+{
+    return ExAcquireRundownProtection(&IF->Rundown);
+}
+
+VOID IPDereferenceInterface(
+    PIP_INTERFACE IF)
+{
+    ExReleaseRundownProtection(&IF->Rundown);
 }
 
 PIP_PACKET IPInitializePacket(
@@ -129,13 +133,31 @@ VOID NTAPI IPTimeoutDpcFn(PKDPC Dpc,
     if ((IpTimerExpirations % 10) == 0)
     {
         LogActiveObjects();
+        PathTimeout();
     }
 
     /* Check if datagram fragments have taken too long to assemble */
     IPDatagramReassemblyTimeout();
 
+    RouterAgeAdvertisedRoutes();
+
     /* Clean possible outdated cached neighbor addresses */
     NBTimeout();
+
+    IGMPTimeout();
+}
+
+
+VOID NTAPI NeighborTimeoutDpcFn(PKDPC Dpc,
+                                PVOID DeferredContext,
+                                PVOID SystemArgument1,
+                                PVOID SystemArgument2)
+{
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+
+    NBFastTimeout();
+    NteDadTimeout();
+    RdiscTimeout();
 }
 
 
@@ -215,6 +237,16 @@ PIP_INTERFACE IPCreateInterface(
     IF->Context    = BindInfo->Context;
     IF->HeaderSize = BindInfo->HeaderSize;
     IF->MinFrameSize = BindInfo->MinFrameSize;
+    IF->MTU          = BindInfo->MTU;
+    IF->LinkMTU      = BindInfo->MTU;
+    IF->RetransmitTime = 1000;
+    IF->BaseReachableTime = 30000;
+    IF->ReachableTime = IF->BaseReachableTime / 2 + (ULONG)(Random() % IF->BaseReachableTime);
+    IF->DadTransmits = 3;
+    IF->RouterDiscoveryBehavior = 2;
+    IF->PathMtuDiscoveryTimeout = 600000;
+    IF->LinkLocalAddressTimeout = 6500;
+    IF->SitePrefixLength = 64;
     IF->Address       = BindInfo->Address;
     IF->AddressLength = BindInfo->AddressLength;
     IF->Transmit      = BindInfo->Transmit;
@@ -222,12 +254,12 @@ PIP_INTERFACE IPCreateInterface(
 	IF->Unicast.Type = IP_ADDRESS_V4;
 	IF->PointToPoint.Type = IP_ADDRESS_V4;
 	IF->Netmask.Type = IP_ADDRESS_V4;
-	IF->Broadcast.Type = IP_ADDRESS_V4;
+	AddrInitIPv4(&IF->Broadcast, 0xFFFFFFFF);
 
     TcpipInitializeSpinLock(&IF->Lock);
+    ExInitializeRundownProtection(&IF->Rundown);
 
-    IF->TCPContext = ExAllocatePool
-	( NonPagedPool, sizeof(struct netif));
+    IF->TCPContext = ExAllocatePoolZero(NonPagedPool, sizeof(struct netif), IP_INTERFACE_TAG);
     if (!IF->TCPContext) {
         ExFreePoolWithTag(IF, IP_INTERFACE_TAG);
         return NULL;
@@ -235,7 +267,8 @@ PIP_INTERFACE IPCreateInterface(
 
     TCPRegisterInterface(IF);
 
-    InsertTDIInterfaceEntity( IF );
+    InsertTDIInterfaceEntity(IF);
+    IF->EntityRegistered = TRUE;
 
     return IF;
 }
@@ -251,39 +284,22 @@ VOID IPDestroyInterface(
 {
     TI_DbgPrint(DEBUG_IP, ("Called. IF (0x%X).\n", IF));
 
-    RemoveTDIInterfaceEntity( IF );
+    if (IF->EntityRegistered)
+    {
+        RemoveTDIInterfaceEntity(IF);
+        IF->EntityRegistered = FALSE;
+    }
+
+    if (!IF->RundownStarted)
+    {
+        IF->RundownStarted = TRUE;
+        ExWaitForRundownProtectionRelease(&IF->Rundown);
+    }
 
     TCPUnregisterInterface(IF);
 
     ExFreePool(IF->TCPContext);
     ExFreePoolWithTag(IF, IP_INTERFACE_TAG);
-}
-
-VOID IPAddInterfaceRoute( PIP_INTERFACE IF ) {
-    PNEIGHBOR_CACHE_ENTRY NCE;
-    IP_ADDRESS NetworkAddress;
-
-    /* Add a permanent neighbor for this NTE */
-    NCE = NBAddNeighbor(IF, &IF->Unicast,
-			IF->Address, IF->AddressLength,
-			NUD_PERMANENT, 0);
-    if (!NCE) {
-	TI_DbgPrint(MIN_TRACE, ("Could not create NCE.\n"));
-        return;
-    }
-
-    AddrWidenAddress( &NetworkAddress, &IF->Unicast, &IF->Netmask );
-
-    if (!RouterAddRoute(&NetworkAddress, &IF->Netmask, NCE, 1)) {
-	TI_DbgPrint(MIN_TRACE, ("Could not add route due to insufficient resources.\n"));
-    }
-
-    /* Send a gratuitous ARP packet to update the route caches of
-     * other computers */
-    if (IF != Loopback)
-       ARPTransmit(NULL, NULL, IF);
-
-    TCPUpdateInterfaceIPInformation(IF);
 }
 
 BOOLEAN IPRegisterInterface(
@@ -297,13 +313,13 @@ BOOLEAN IPRegisterInterface(
  */
 {
     KIRQL OldIrql;
-    UINT ChosenIndex = 0;
+    UINT ChosenIndex = 1;
     BOOLEAN IndexHasBeenChosen;
     IF_LIST_ITER(Interface);
 
     TI_DbgPrint(MID_TRACE, ("Called. IF (0x%X).\n", IF));
 
-    TcpipAcquireSpinLock(&IF->Lock, &OldIrql);
+    TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
 
     /* Choose an index */
     do {
@@ -319,31 +335,12 @@ BOOLEAN IPRegisterInterface(
     IF->Index = ChosenIndex;
 
     /* Add interface to the global interface list */
-    TcpipInterlockedInsertTailList(&InterfaceListHead,
-				   &IF->ListEntry,
-				   &InterfaceListLock);
+    InsertTailList(&InterfaceListHead, &IF->ListEntry);
+    IF->Registered = TRUE;
 
-    TcpipReleaseSpinLock(&IF->Lock, OldIrql);
+    TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
 
     return TRUE;
-}
-
-VOID IPRemoveInterfaceRoute( PIP_INTERFACE IF ) {
-    PNEIGHBOR_CACHE_ENTRY NCE;
-    IP_ADDRESS GeneralRoute;
-
-    NCE = NBLocateNeighbor(&IF->Unicast, IF);
-    if (NCE)
-    {
-       TI_DbgPrint(DEBUG_IP,("Removing interface Addr %s\n", A2S(&IF->Unicast)));
-       TI_DbgPrint(DEBUG_IP,("                   Mask %s\n", A2S(&IF->Netmask)));
-
-       AddrWidenAddress(&GeneralRoute,&IF->Unicast,&IF->Netmask);
-
-       RouterRemoveRoute(&GeneralRoute, &IF->Unicast);
-
-       NBRemoveNeighbor(NCE);
-    }
 }
 
 VOID IPUnregisterInterface(
@@ -354,15 +351,30 @@ VOID IPUnregisterInterface(
  *     IF = Pointer to interface to unregister
  */
 {
-    KIRQL OldIrql3;
+    KIRQL OldIrql;
 
     TI_DbgPrint(DEBUG_IP, ("Called. IF (0x%X).\n", IF));
 
-    IPRemoveInterfaceRoute( IF );
-
-    TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql3);
+    TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
+    ASSERT(IF->Registered);
     RemoveEntryList(&IF->ListEntry);
-    TcpipReleaseSpinLock(&InterfaceListLock, OldIrql3);
+    IF->Registered = FALSE;
+    TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
+
+    if (IF->EntityRegistered)
+    {
+        RemoveTDIInterfaceEntity(IF);
+        IF->EntityRegistered = FALSE;
+    }
+    RdiscStop(IF);
+    PmtuFlushInterface(IF);
+    RouterRemoveRoutesForInterface(IF);
+    NBDestroyNeighborsForInterface(IF);
+
+    IF->RundownStarted = TRUE;
+    ExWaitForRundownProtectionRelease(&IF->Rundown);
+
+    IPDeleteInterfaceAddresses(IF);
 }
 
 
@@ -376,6 +388,9 @@ VOID DefaultProtocolHandler(
  *     IPPacket = Pointer to an IP packet that was received
  */
 {
+    if (RawIpReceive(Interface, IPPacket))
+        return;
+
     TI_DbgPrint(MID_TRACE, ("[IF %x] Packet of unknown Internet protocol "
 			    "discarded.\n", Interface));
 
@@ -459,6 +474,7 @@ NTSTATUS IPStartup(PUNICODE_STRING RegistryPath)
     /* Initialize NTE list and protecting lock */
     InitializeListHead(&NetTableListHead);
     TcpipInitializeSpinLock(&NetTableListLock);
+    ExInitializeFastMutex(&NetTableMutex);
 
     /* Initialize reassembly list and protecting lock */
     InitializeListHead(&ReassemblyListHead);

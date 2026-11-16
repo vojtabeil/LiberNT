@@ -1,5 +1,6 @@
 #ifndef _WINREG_H
 #define _WINREG_H
+#define _WINREG_
 
 #ifdef __cplusplus
 extern "C" {
@@ -71,6 +72,8 @@ extern "C" {
 #endif // _WIN32_WINNT >= _WIN32_WINNT_WIN10
 #define RRF_NOEXPAND            (1 << 28)
 #define RRF_ZEROONFAILURE       (1 << 29)
+
+#define REG_PROCESS_APPKEY      0x00000001
 
 #ifndef RC_INVOKED
 typedef ACCESS_MASK REGSAM;
@@ -299,6 +302,7 @@ LSTATUS WINAPI RegOpenKeyA(_In_ HKEY, _In_opt_ LPCSTR, _Out_ PHKEY);
 LSTATUS WINAPI RegOpenKeyW(_In_ HKEY, _In_opt_ LPCWSTR, _Out_ PHKEY);
 LSTATUS WINAPI RegOpenKeyExA(_In_ HKEY, _In_opt_ LPCSTR, _In_opt_ DWORD, _In_ REGSAM, _Out_ PHKEY);
 LSTATUS WINAPI RegOpenKeyExW(_In_ HKEY, _In_opt_ LPCWSTR, _In_opt_ DWORD, _In_ REGSAM, _Out_ PHKEY);
+LSTATUS WINAPI RegOverridePredefKey(_In_ HKEY, _In_opt_ HKEY);
 
 LSTATUS
 WINAPI

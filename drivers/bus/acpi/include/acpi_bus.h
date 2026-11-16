@@ -161,7 +161,9 @@ struct acpi_device_flags {
 	UINT32			performance_manageable:1;
 	UINT32			wake_capable:1;
 	UINT32			force_power_state:1;
-	UINT32			reserved:20;
+	UINT32			processor_id:1;
+	UINT32			class_code:1;
+	UINT32			reserved:18;
 };
 
 /* Plug and Play */
@@ -169,7 +171,8 @@ struct acpi_device_flags {
 typedef char			acpi_bus_id[8];
 typedef unsigned long		acpi_bus_address;
 typedef char			*acpi_hardware_id;
-typedef char			acpi_unique_id[9];
+typedef char			acpi_unique_id[200];
+typedef char			acpi_class_code[ACPI_PCICLS_STRING_SIZE];
 typedef char			acpi_device_name[40];
 typedef char			acpi_device_class[20];
 
@@ -178,7 +181,9 @@ struct acpi_device_pnp {
 	acpi_bus_address	bus_address;	                      /* _ADR */
 	acpi_hardware_id	hardware_id;	                      /* _HID */
 	ACPI_PNP_DEVICE_ID_LIST *cid_list;		     /* _CIDs */
+	acpi_class_code		class_code;	                      /* _CLS */
 	acpi_unique_id		unique_id;	                      /* _UID */
+	UINT32			processor_id;
 	acpi_device_name	device_name;	         /* Driver-determined */
 	acpi_device_class	device_class;	         /*        "          */
 };
@@ -215,7 +220,7 @@ struct acpi_device_power_state {
 struct acpi_device_power {
 	int			state;		             /* Current state */
 	struct acpi_device_power_flags flags;
-	struct acpi_device_power_state states[4];     /* Power states (D0-D3) */
+	struct acpi_device_power_state states[ACPI_STATE_D3_COLD + 1];
 };
 
 
@@ -260,6 +265,7 @@ struct acpi_device_wakeup {
 	struct acpi_device_wakeup_state state;
 	struct acpi_device_wakeup_flags flags;
 	int prepare_count;
+	void *context;
 };
 
 
@@ -268,6 +274,8 @@ struct acpi_device_wakeup {
 struct acpi_device {
 	int device_type;
 	ACPI_HANDLE		handle;
+	PDEVICE_OBJECT		pdo;
+	FAST_MUTEX		power_lock;
 	struct acpi_device	*parent;
 	struct list_head 	children;
 	struct list_head 	node;
@@ -324,6 +332,17 @@ BOOLEAN acpi_bus_can_wakeup(ACPI_HANDLE handle);
 int acpi_bus_generate_proc_event(struct acpi_device *device, UINT8 type, int data);
 int acpi_bus_generate_event(struct acpi_device *device, UINT8 type, int data);
 int acpi_bus_receive_event(struct acpi_bus_event *event);
+typedef BOOLEAN (*acpi_bus_event_filter)(const struct acpi_bus_event *event, void *context);
+struct acpi_bus_event_waiter {
+	LIST_ENTRY		link;
+	KEVENT			wake;
+	acpi_bus_event_filter	filter;
+	void			*context;
+};
+void acpi_bus_event_listen(struct acpi_bus_event_waiter *waiter, acpi_bus_event_filter filter, void *context);
+int acpi_bus_event_wait(struct acpi_bus_event_waiter *waiter, struct acpi_bus_event *event);
+void acpi_bus_event_unlisten(struct acpi_bus_event_waiter *waiter);
+int acpi_bus_receive_event_filtered(acpi_bus_event_filter filter, void *context, struct acpi_bus_event *event);
 int acpi_bus_register_driver(struct acpi_driver *driver);
 void acpi_bus_unregister_driver(struct acpi_driver *driver);
 int acpi_bus_add(struct acpi_device **child, struct acpi_device *parent,

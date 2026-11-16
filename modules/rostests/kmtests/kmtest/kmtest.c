@@ -27,6 +27,7 @@ typedef enum
     KMT_LIST_TESTS,
     KMT_LIST_ALL_TESTS,
     KMT_RUN_TEST,
+    KMT_RUN_ALL_TESTS,
 } KMT_OPERATION;
 
 HANDLE KmtestHandle;
@@ -34,10 +35,12 @@ SC_HANDLE KmtestServiceHandle;
 PCSTR ErrorFileAndLine = "No error";
 
 static void OutputError(IN DWORD Error);
+static DWORD GetDriverTests(OUT PSTR *TestNames);
 static DWORD ListTests(IN BOOLEAN IncludeHidden);
 static PKMT_TESTFUNC FindTest(IN PCSTR TestName);
 static DWORD OutputResult(IN PCSTR TestName);
 static DWORD RunTest(IN PCSTR TestName);
+static DWORD RunAllTests(OUT PBOOLEAN TestFailed);
 int __cdecl main(int ArgCount, char **Arguments);
 
 /**
@@ -94,6 +97,44 @@ CompareTestNames(
     return *Str1 - *Str2;
 }
 
+static
+DWORD
+GetDriverTests(
+    OUT PSTR *TestNames)
+{
+    DWORD Error = ERROR_SUCCESS;
+    PSTR Buffer = NULL;
+    DWORD BufferSize = 1024;
+    DWORD BytesRead = BufferSize;
+
+    *TestNames = NULL;
+
+    while (TRUE)
+    {
+        Buffer = HeapAlloc(GetProcessHeap(), 0, BufferSize);
+        if (!Buffer)
+            error_goto(Error, cleanup);
+
+        if (!DeviceIoControl(KmtestHandle, IOCTL_KMTEST_GET_TESTS, NULL, 0, Buffer, BufferSize, &BytesRead, NULL))
+            error_goto(Error, cleanup);
+        if (BytesRead < BufferSize)
+            break;
+
+        HeapFree(GetProcessHeap(), 0, Buffer);
+        Buffer = NULL;
+        BufferSize *= 2;
+    }
+
+    *TestNames = Buffer;
+    Buffer = NULL;
+
+cleanup:
+    if (Buffer)
+        HeapFree(GetProcessHeap(), 0, Buffer);
+
+    return Error;
+}
+
 /**
  * @name ListTests
  *
@@ -113,66 +154,49 @@ ListTests(
 {
     DWORD Error = ERROR_SUCCESS;
     PSTR Buffer = NULL;
-    DWORD BufferSize = 1024;
-    DWORD BytesRead = BufferSize;
     PCSTR TestName;
-    PCKMT_TEST TestEntry = TestList;
+    PCKMT_TEST TestEntry;
     PCSTR NextTestName;
 
     puts("Valid test names:");
 
     // get test list from driver
-    while (TRUE)
+    Error = GetDriverTests(&Buffer);
+    if (Error)
+        goto cleanup;
+
+    /* Output every driver test in the order returned by the driver. */
+    TestName = Buffer;
+    while (*TestName)
     {
-        Buffer = HeapAlloc(GetProcessHeap(), 0, BufferSize);
-        if (!Buffer)
-            error_goto(Error, cleanup);
+        NextTestName = TestName;
+        TestName += strlen(TestName) + 1;
 
-        if (!DeviceIoControl(KmtestHandle, IOCTL_KMTEST_GET_TESTS, NULL, 0, Buffer, BufferSize, &BytesRead, NULL))
-            error_goto(Error, cleanup);
-        if (BytesRead < BufferSize)
-            break;
+        if (IncludeHidden && NextTestName[0] == '-')
+            ++NextTestName;
 
-        HeapFree(GetProcessHeap(), 0, Buffer);
-        BufferSize *= 2;
+        if (NextTestName[0] != '-')
+            printf("    %s\n", NextTestName);
     }
 
-    // output test list plus user-mode tests
-    TestName = Buffer;
-    while (TestEntry->TestName || *TestName)
+    /* Append user-mode tests that the driver did not already advertise. */
+    for (TestEntry = TestList; TestEntry->TestName; ++TestEntry)
     {
-        if (!TestEntry->TestName)
-        {
-            NextTestName = TestName;
-            TestName += strlen(TestName) + 1;
-        }
-        else if (!*TestName)
-        {
-            NextTestName = TestEntry->TestName;
-            ++TestEntry;
-        }
-        else
-        {
-            INT Result = CompareTestNames(TestEntry->TestName, TestName);
+        BOOLEAN Found = FALSE;
 
-            if (Result == 0)
+        for (TestName = Buffer; *TestName; TestName += strlen(TestName) + 1)
+        {
+            if (CompareTestNames(TestEntry->TestName, TestName) == 0)
             {
-                NextTestName = TestEntry->TestName;
-                TestName += strlen(TestName) + 1;
-                ++TestEntry;
-            }
-            else if (Result < 0)
-            {
-                NextTestName = TestEntry->TestName;
-                ++TestEntry;
-            }
-            else
-            {
-                NextTestName = TestName;
-                TestName += strlen(TestName) + 1;
+                Found = TRUE;
+                break;
             }
         }
 
+        if (Found)
+            continue;
+
+        NextTestName = TestEntry->TestName;
         if (IncludeHidden && NextTestName[0] == '-')
             ++NextTestName;
 
@@ -238,6 +262,7 @@ OutputResult(
     DWORD BytesWritten;
     DWORD LogBufferLength;
     DWORD Offset = 0;
+    CHAR DebugBlock[8 * 1024 + 1];
     /* A console window can't handle a single
      * huge block of data, so split it up */
     const DWORD BlockSize = 8 * 1024;
@@ -250,6 +275,9 @@ OutputResult(
         DWORD Length = min(LogBufferLength - Offset, BlockSize);
         if (!WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), ResultBuffer->LogBuffer + Offset, Length, &BytesWritten, NULL))
             error(Error);
+        memcpy(DebugBlock, ResultBuffer->LogBuffer + Offset, Length);
+        DebugBlock[Length] = ANSI_NULL;
+        OutputDebugStringA(DebugBlock);
     }
 
     return Error;
@@ -299,9 +327,87 @@ RunTest(
 
 cleanup:
     if (!Error)
+    {
         Error = OutputResult(TestName);
+        if (!Error && ResultBuffer->Failures)
+            Error = ERROR_ASSERTION_FAILURE;
+    }
 
     return Error;
+}
+
+static
+VOID
+RunTestInSequence(
+    IN PCSTR TestName,
+    IN OUT PBOOLEAN TestFailed)
+{
+    DWORD Error;
+
+    if (ResultBuffer)
+    {
+        ResultBuffer->Successes = 0;
+        ResultBuffer->Failures = 0;
+        ResultBuffer->Skipped = 0;
+        ResultBuffer->LogBufferLength = 0;
+    }
+
+    Error = RunTest(TestName);
+    if (Error)
+    {
+        *TestFailed = TRUE;
+        if (Error != ERROR_ASSERTION_FAILURE)
+        {
+            fprintf(stderr, "%s: ", TestName);
+            OutputError(Error);
+        }
+    }
+}
+
+static
+DWORD
+RunAllTests(
+    OUT PBOOLEAN TestFailed)
+{
+    DWORD Error;
+    PSTR Buffer = NULL;
+    PCSTR TestName;
+    PCKMT_TEST TestEntry;
+    BOOLEAN Found;
+
+    *TestFailed = FALSE;
+
+    Error = GetDriverTests(&Buffer);
+    if (Error)
+        return Error;
+
+    for (TestName = Buffer; *TestName; TestName += strlen(TestName) + 1)
+    {
+        if (TestName[0] != '-')
+            RunTestInSequence(TestName, TestFailed);
+    }
+
+    for (TestEntry = TestList; TestEntry->TestName; ++TestEntry)
+    {
+        if (TestEntry->TestName[0] == '-')
+            continue;
+
+        Found = FALSE;
+        for (TestName = Buffer; *TestName; TestName += strlen(TestName) + 1)
+        {
+            if (CompareTestNames(TestEntry->TestName, TestName) == 0)
+            {
+                Found = TRUE;
+                break;
+            }
+        }
+
+        if (!Found)
+            RunTestInSequence(TestEntry->TestName, TestFailed);
+    }
+
+    HeapFree(GetProcessHeap(), 0, Buffer);
+    return ERROR_SUCCESS;
 }
 
 /**
@@ -325,6 +431,7 @@ main(
     PCSTR TestName = NULL;
     KMT_OPERATION Operation = KMT_DO_NOTHING;
     BOOLEAN ShowHidden = FALSE;
+    BOOLEAN TestFailed = FALSE;
 
     Error = KmtServiceInit();
     if (Error)
@@ -335,7 +442,12 @@ main(
 
     if (ArgCount <= 1)
     {
-        printf("Usage: %s <test_name>                 - run the specified test (creates/starts the driver(s) as appropriate)\n", AppName);
+        Operation = KMT_RUN_ALL_TESTS;
+    }
+    else if (!lstrcmpA(Arguments[1], "--help") || !lstrcmpA(Arguments[1], "/?"))
+    {
+        printf("Usage: %s                             - run all tests\n", AppName);
+        printf("       %s <test_name>                 - run the specified test (creates/starts the driver(s) as appropriate)\n", AppName);
         printf("       %s --list                      - list available tests\n", AppName);
         printf("       %s --list-all                  - list available tests, including hidden\n", AppName);
         printf("       %s <create|delete|start|stop>  - manage the kmtest driver\n\n", AppName);
@@ -381,6 +493,11 @@ main(
                 break;
             case KMT_RUN_TEST:
                 Error = RunTest(TestName);
+                if (!Error && ResultBuffer && ResultBuffer->Failures != 0)
+                    TestFailed = TRUE;
+                break;
+            case KMT_RUN_ALL_TESTS:
+                Error = RunAllTests(&TestFailed);
                 break;
             default:
                 assert(FALSE);
@@ -405,6 +522,10 @@ cleanup:
     {
         OutputError(Error);
 
+        Status = EXIT_FAILURE;
+    }
+    else if (TestFailed)
+    {
         Status = EXIT_FAILURE;
     }
 

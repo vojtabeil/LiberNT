@@ -215,9 +215,12 @@ $if (_NTDDK_)
 
 #define PAUSE_PROCESSOR YieldProcessor();
 
-#define KERNEL_STACK_SIZE                   12288
-#define KERNEL_LARGE_STACK_SIZE             61440
-#define KERNEL_LARGE_STACK_COMMIT           12288
+#ifndef KERNEL_STACK_SCALE
+#define KERNEL_STACK_SCALE 1
+#endif
+#define KERNEL_STACK_SIZE                   (12288 * KERNEL_STACK_SCALE)
+#define KERNEL_LARGE_STACK_SIZE             (61440 * KERNEL_STACK_SCALE)
+#define KERNEL_LARGE_STACK_COMMIT           (12288 * KERNEL_STACK_SCALE)
 
 #define SIZE_OF_80387_REGISTERS   80
 
@@ -239,6 +242,11 @@ $if (_NTDDK_)
 
 #define CONTEXT_XSTATE          (CONTEXT_i386 | 0x00000040L)
 
+#define CONTEXT_EXCEPTION_ACTIVE 0x8000000
+#define CONTEXT_SERVICE_ACTIVE 0x10000000
+#define CONTEXT_EXCEPTION_REQUEST 0x40000000
+#define CONTEXT_EXCEPTION_REPORTING 0x80000000
+
 #endif /* !defined(RC_INVOKED) */
 
 typedef struct _FLOATING_SAVE_AREA {
@@ -253,7 +261,7 @@ typedef struct _FLOATING_SAVE_AREA {
   ULONG Cr0NpxState;
 } FLOATING_SAVE_AREA, *PFLOATING_SAVE_AREA;
 
-#include "pshpack4.h"
+#pragma pack(push, 4)
 typedef struct _CONTEXT {
   ULONG ContextFlags;
   ULONG Dr0;
@@ -281,7 +289,7 @@ typedef struct _CONTEXT {
   ULONG SegSs;
   UCHAR ExtendedRegisters[MAXIMUM_SUPPORTED_EXTENSION];
 } CONTEXT;
-#include "poppack.h"
+#pragma pack(pop)
 
 #define PCR_MINOR_VERSION 1
 #define PCR_MAJOR_VERSION 1

@@ -15,6 +15,367 @@
 
 IO_COMPLETION_ROUTINE USBPORT_FdoStartCompletion;
 
+#if (NTDDI_VERSION < NTDDI_VISTA)
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoConnectInterruptEx(
+    _Inout_ PIO_CONNECT_INTERRUPT_PARAMETERS Parameters);
+
+NTKERNELAPI
+VOID
+NTAPI
+IoDisconnectInterruptEx(
+    _In_ PIO_DISCONNECT_INTERRUPT_PARAMETERS Parameters);
+#endif
+
+typedef NTSTATUS (NTAPI *PFN_IO_CONNECT_INTERRUPT_EX)(PIO_CONNECT_INTERRUPT_PARAMETERS Parameters);
+typedef VOID (NTAPI *PFN_IO_DISCONNECT_INTERRUPT_EX)(PIO_DISCONNECT_INTERRUPT_PARAMETERS Parameters);
+
+static PFN_IO_CONNECT_INTERRUPT_EX UsbPortIoConnectInterruptEx = NULL;
+static PFN_IO_DISCONNECT_INTERRUPT_EX UsbPortIoDisconnectInterruptEx = NULL;
+static BOOLEAN UsbPortInterruptApiResolved = FALSE;
+
+#if defined(_M_ARM64)
+/*
+ * USBPORT_GetLegacyInterruptVector - Get legacy INTx vector for ARM64 fallback
+ *
+ * When MSI-X programming fails on ARM64 (e.g., when ITS is unavailable), this
+ * function queries the PCI bus interface to get the device's legacy interrupt
+ * line and translates it to a system vector using HalGetInterruptVector.
+ *
+ * Parameters:
+ *   FdoDevice       - The FDO device object for the USB controller
+ *   PdoDevice       - The PDO device object (physical device)
+ *   OutVector       - Receives the translated system vector
+ *   OutLevel        - Receives the IRQL level
+ *   OutAffinity     - Receives the processor affinity
+ *
+ * Returns:
+ *   STATUS_SUCCESS if the legacy interrupt vector was obtained
+ *   STATUS_NOT_SUPPORTED if legacy interrupts are not available
+ *   STATUS_INSUFFICIENT_RESOURCES on allocation failure
+ */
+static
+NTSTATUS
+USBPORT_GetLegacyInterruptVector(
+    _In_ PDEVICE_OBJECT FdoDevice,
+    _In_ PDEVICE_OBJECT PdoDevice,
+    _Out_ PULONG OutVector,
+    _Out_ PKIRQL OutLevel,
+    _Out_ PKAFFINITY OutAffinity)
+{
+    BUS_INTERFACE_STANDARD BusInterface;
+    KEVENT Event;
+    NTSTATUS Status;
+    PIRP Irp;
+    IO_STATUS_BLOCK IoStatusBlock;
+    PIO_STACK_LOCATION IrpSp;
+    PDEVICE_OBJECT TargetDevice;
+    UCHAR InterruptLine;
+    ULONG BusNumber;
+    ULONG ResultLength;
+    ULONG Vector;
+    KIRQL Irql;
+    KAFFINITY Affinity;
+
+    UNREFERENCED_PARAMETER(FdoDevice);
+
+    *OutVector = 0;
+    *OutLevel = 0;
+    *OutAffinity = 0;
+
+    if (!PdoDevice)
+        return STATUS_INVALID_PARAMETER;
+
+    /* Get the bus number */
+    Status = IoGetDeviceProperty(PdoDevice,
+                                 DevicePropertyBusNumber,
+                                 sizeof(BusNumber),
+                                 &BusNumber,
+                                 &ResultLength);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("USBPORT_GetLegacyInterruptVector: Failed to get bus number (0x%lx)\n", Status);
+        return Status;
+    }
+
+    /* Get the top of the device stack to send the query */
+    TargetDevice = IoGetAttachedDeviceReference(PdoDevice);
+
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+
+    /* Build IRP to query bus interface */
+    Irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP,
+                                        TargetDevice,
+                                        NULL,
+                                        0,
+                                        NULL,
+                                        &Event,
+                                        &IoStatusBlock);
+    if (!Irp)
+    {
+        ObDereferenceObject(TargetDevice);
+        DPRINT1("USBPORT_GetLegacyInterruptVector: Failed to allocate IRP\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+    RtlZeroMemory(&BusInterface, sizeof(BusInterface));
+
+    IrpSp = IoGetNextIrpStackLocation(Irp);
+    IrpSp->MajorFunction = IRP_MJ_PNP;
+    IrpSp->MinorFunction = IRP_MN_QUERY_INTERFACE;
+    IrpSp->Parameters.QueryInterface.InterfaceType = &GUID_BUS_INTERFACE_STANDARD;
+    IrpSp->Parameters.QueryInterface.Size = sizeof(BUS_INTERFACE_STANDARD);
+    IrpSp->Parameters.QueryInterface.Version = 1;
+    IrpSp->Parameters.QueryInterface.Interface = (PINTERFACE)&BusInterface;
+    IrpSp->Parameters.QueryInterface.InterfaceSpecificData = NULL;
+
+    Status = IoCallDriver(TargetDevice, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = IoStatusBlock.Status;
+    }
+
+    ObDereferenceObject(TargetDevice);
+
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("USBPORT_GetLegacyInterruptVector: Bus interface query failed (0x%lx)\n", Status);
+        return Status;
+    }
+
+    /*
+     * Read the PCI common header from offset 0 with full length.
+     *
+     * On ARM64, the HAL's bus data hook translates the InterruptLine field
+     * using ACPI _PRT routing tables ONLY when reading from offset 0 with
+     * length >= PCI_COMMON_HDR_LENGTH (64 bytes). Reading just the
+     * InterruptLine byte directly bypasses this translation and returns
+     * the raw PCI config value (often 0xFF on UEFI systems).
+     *
+     * By reading the full header, we ensure the HAL applies the _PRT
+     * translation and returns the correct GSI in the InterruptLine field.
+     */
+    if (!BusInterface.GetBusData)
+    {
+        if (BusInterface.InterfaceDereference)
+            BusInterface.InterfaceDereference(BusInterface.Context);
+        DPRINT1("USBPORT_GetLegacyInterruptVector: GetBusData not available\n");
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    {
+        PCI_COMMON_CONFIG PciConfig;
+        ULONG ReadLen;
+
+        RtlZeroMemory(&PciConfig, sizeof(PciConfig));
+
+        /* Read PCI common header from offset 0 to trigger HAL _PRT translation */
+        ReadLen = BusInterface.GetBusData(BusInterface.Context,
+                                          PCI_WHICHSPACE_CONFIG,
+                                          &PciConfig,
+                                          0,
+                                          PCI_COMMON_HDR_LENGTH);
+
+        /* Release the bus interface reference */
+        if (BusInterface.InterfaceDereference)
+            BusInterface.InterfaceDereference(BusInterface.Context);
+
+        if (ReadLen < PCI_COMMON_HDR_LENGTH)
+        {
+            DPRINT1("USBPORT_GetLegacyInterruptVector: Failed to read PCI header (read %lu/%lu)\n",
+                    ReadLen, (ULONG)PCI_COMMON_HDR_LENGTH);
+            return STATUS_NOT_SUPPORTED;
+        }
+
+        InterruptLine = PciConfig.u.type0.InterruptLine;
+        DPRINT1("USBPORT_GetLegacyInterruptVector: PCI Header read - InterruptLine=0x%02x Pin=%u\n",
+                InterruptLine, PciConfig.u.type0.InterruptPin);
+    }
+
+    if (InterruptLine == 0xFF || InterruptLine == 0)
+    {
+        DPRINT1("USBPORT_GetLegacyInterruptVector: No legacy interrupt line (InterruptLine=0x%02x)\n",
+                InterruptLine);
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    DPRINT1("USBPORT_GetLegacyInterruptVector: PCI InterruptLine=%u (0x%02x) Bus=%lu\n",
+            InterruptLine, InterruptLine, BusNumber);
+
+    /* Translate the interrupt line to system vector using HalGetInterruptVector.
+     * On ARM64, the interrupt line from PCI config is typically a GSI (Global System Interrupt).
+     * HalGetInterruptVector will translate it to the correct SPI vector for the GIC.
+     */
+    Vector = HalGetInterruptVector(PCIBus,
+                                   BusNumber,
+                                   InterruptLine,  /* BusInterruptLevel */
+                                   InterruptLine,  /* BusInterruptVector */
+                                   &Irql,
+                                   &Affinity);
+
+    if (Vector == 0)
+    {
+        DPRINT1("USBPORT_GetLegacyInterruptVector: HalGetInterruptVector returned 0\n");
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    DPRINT1("USBPORT_GetLegacyInterruptVector: Translated to Vector=%lu IRQL=%u Affinity=0x%lx\n",
+            Vector, Irql, (ULONG)Affinity);
+
+    *OutVector = Vector;
+    *OutLevel = Irql;
+    *OutAffinity = Affinity;
+
+    return STATUS_SUCCESS;
+}
+#endif /* _M_ARM64 */
+
+static
+VOID
+USBPORT_EnsureInterruptApis(VOID)
+{
+    UNICODE_STRING RoutineName;
+
+    if (UsbPortInterruptApiResolved)
+        return;
+
+    RtlInitUnicodeString(&RoutineName, L"IoConnectInterruptEx");
+    UsbPortIoConnectInterruptEx =
+        (PFN_IO_CONNECT_INTERRUPT_EX)MmGetSystemRoutineAddress(&RoutineName);
+
+    RtlInitUnicodeString(&RoutineName, L"IoDisconnectInterruptEx");
+    UsbPortIoDisconnectInterruptEx =
+        (PFN_IO_DISCONNECT_INTERRUPT_EX)MmGetSystemRoutineAddress(&RoutineName);
+
+    if (!UsbPortIoConnectInterruptEx)
+        UsbPortIoConnectInterruptEx = IoConnectInterruptEx;
+    if (!UsbPortIoDisconnectInterruptEx)
+        UsbPortIoDisconnectInterruptEx = IoDisconnectInterruptEx;
+
+    UsbPortInterruptApiResolved = TRUE;
+}
+
+#define USBPORT_XHCI_HCCPARAMS_OFFSET 0x10
+#define USBPORT_XHCI_HCC_64BIT_ADDR   0x00000001u
+
+static
+BOOLEAN
+USBPORT_XhciReadHcc64Bit(
+    _In_ PUSBPORT_RESOURCES Resources,
+    _Out_ PBOOLEAN Supports64Bit)
+{
+    ULONG HccParams;
+
+    if (!Resources || !Supports64Bit)
+        return FALSE;
+
+    if (!(Resources->ResourcesTypes & USBPORT_RESOURCES_MEMORY) ||
+        !Resources->ResourceBase ||
+        Resources->IoSpaceLength < (USBPORT_XHCI_HCCPARAMS_OFFSET + sizeof(ULONG)))
+    {
+        return FALSE;
+    }
+
+    HccParams = READ_REGISTER_ULONG((PULONG)((PUCHAR)Resources->ResourceBase +
+                                             USBPORT_XHCI_HCCPARAMS_OFFSET));
+    if (HccParams == 0 || HccParams == MAXULONG)
+        return FALSE;
+
+    *Supports64Bit = ((HccParams & USBPORT_XHCI_HCC_64BIT_ADDR) != 0);
+    return TRUE;
+}
+
+static
+BOOLEAN
+USBPORT_DetermineDma64Bit(
+    _In_ PUSBPORT_RESOURCES Resources,
+    _In_ PUSBPORT_REGISTRATION_PACKET Packet)
+{
+    BOOLEAN Use64Bit = FALSE;
+
+    if (Packet && (Packet->MiniPortFlags & USB_MINIPORT_FLAGS_USB3))
+        Use64Bit = TRUE;
+
+    if (Packet && Packet->MiniPortVersion == USB_MINIPORT_VERSION_XHCI)
+    {
+        BOOLEAN Xhci64 = FALSE;
+
+        if (USBPORT_XhciReadHcc64Bit(Resources, &Xhci64))
+            Use64Bit = Xhci64;
+    }
+
+    return Use64Bit;
+}
+
+static
+VOID
+USBPORT_CleanupTransportRegistrations(IN PUSBPORT_DEVICE_EXTENSION FdoExtension)
+{
+    KIRQL OldIrql;
+    PLIST_ENTRY Entry;
+    PUSBPORT_TRANSPORT_REGISTRATION Registration;
+    PIRP PendingIrp;
+
+    for (;;)
+    {
+        KeAcquireSpinLock(&FdoExtension->Aux.TransportListSpinLock, &OldIrql);
+        if (IsListEmpty(&FdoExtension->Aux.TransportRegistrationList))
+        {
+            KeReleaseSpinLock(&FdoExtension->Aux.TransportListSpinLock, OldIrql);
+            break;
+        }
+
+        Entry = RemoveHeadList(&FdoExtension->Aux.TransportRegistrationList);
+        Registration = CONTAINING_RECORD(Entry,
+                                         USBPORT_TRANSPORT_REGISTRATION,
+                                         ListEntry);
+        PendingIrp = Registration->PendingIrp;
+        Registration->PendingIrp = NULL;
+        KeReleaseSpinLock(&FdoExtension->Aux.TransportListSpinLock, OldIrql);
+
+        if (PendingIrp)
+        {
+            USBPORT_CompleteTransportNotificationIrp(FdoExtension,
+                                                     PendingIrp,
+                                                     STATUS_CANCELLED,
+                                                     FALSE);
+        }
+
+        ExFreePoolWithTag(Registration, USB_PORT_TAG);
+    }
+}
+
+static
+VOID
+USBPORT_CleanupTimeSyncContexts(IN PUSBPORT_DEVICE_EXTENSION FdoExtension)
+{
+    KIRQL OldIrql;
+    PLIST_ENTRY Entry;
+    PUSBPORT_TIMESYNC_CONTEXT Context;
+
+    for (;;)
+    {
+        KeAcquireSpinLock(&FdoExtension->Aux.TimeSyncSpinLock, &OldIrql);
+        if (IsListEmpty(&FdoExtension->Aux.TimeSyncTrackingList))
+        {
+            KeReleaseSpinLock(&FdoExtension->Aux.TimeSyncSpinLock, OldIrql);
+            break;
+        }
+
+        Entry = RemoveHeadList(&FdoExtension->Aux.TimeSyncTrackingList);
+        KeReleaseSpinLock(&FdoExtension->Aux.TimeSyncSpinLock, OldIrql);
+
+        Context = CONTAINING_RECORD(Entry,
+                                    USBPORT_TIMESYNC_CONTEXT,
+                                    ListEntry);
+        ExFreePoolWithTag(Context, USB_PORT_TAG);
+    }
+}
+
 NTSTATUS
 NTAPI
 USBPORT_FdoStartCompletion(IN PDEVICE_OBJECT DeviceObject,
@@ -93,6 +454,7 @@ USBPORT_IsSelectiveSuspendEnabled(IN PDEVICE_OBJECT FdoDevice)
     DPRINT("USBPORT_IsSelectiveSuspendEnabled: ... \n");
 
     FdoExtension = FdoDevice->DeviceExtension;
+    FdoExtension->Flags &= ~USBPORT_FLAG_RH_STOPPED;
 
     USBPORT_GetRegistryKeyValueFullInfo(FdoDevice,
                                         FdoExtension->CommonExtension.LowerPdoDevice,
@@ -278,7 +640,7 @@ USBPORT_IsCompanionController(IN PDEVICE_OBJECT DeviceObject,
         return Status;
     }
 
-    Parameters.Size = sizeof(PCI_DEVICE_PRESENT_INTERFACE);
+    Parameters.Size = sizeof(PCI_DEVICE_PRESENCE_PARAMETERS);
 
     Parameters.BaseClass = PCI_CLASS_SERIAL_BUS_CTLR;
     Parameters.SubClass = PCI_SUBCLASS_SB_USB;
@@ -453,6 +815,8 @@ USBPORT_CreateLegacySymbolicLink(IN PDEVICE_OBJECT FdoDevice)
     WCHAR CharDosName[255] = {0};
     UNICODE_STRING DeviceName;
     NTSTATUS Status;
+    USHORT DosLength;
+    PWSTR DosBuffer;
 
     FdoExtension = FdoDevice->DeviceExtension;
 
@@ -468,7 +832,24 @@ USBPORT_CreateLegacySymbolicLink(IN PDEVICE_OBJECT FdoDevice)
                        L"\\DosDevices\\HCD%d",
                        FdoExtension->FdoNameNumber);
 
-    RtlInitUnicodeString(&FdoExtension->DosDeviceSymbolicName, CharDosName);
+    DosLength = (USHORT)((wcslen(CharDosName) + 1) * sizeof(WCHAR));
+
+    DosBuffer = ExAllocatePoolWithTag(PagedPool,
+                                      DosLength,
+                                      USB_PORT_TAG);
+
+    if (!DosBuffer)
+    {
+        DPRINT1("USBPORT_CreateLegacySymbolicLink: Allocation failed\n");
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    RtlZeroMemory(DosBuffer, DosLength);
+    RtlCopyMemory(DosBuffer, CharDosName, DosLength);
+
+    FdoExtension->DosDeviceSymbolicName.Buffer = DosBuffer;
+    FdoExtension->DosDeviceSymbolicName.MaximumLength = DosLength;
+    FdoExtension->DosDeviceSymbolicName.Length = DosLength - sizeof(WCHAR);
 
     DPRINT("USBPORT_CreateLegacySymbolicLink: DeviceName - %wZ, DosSymbolicName - %wZ\n",
            &DeviceName,
@@ -481,6 +862,18 @@ USBPORT_CreateLegacySymbolicLink(IN PDEVICE_OBJECT FdoDevice)
     {
         FdoExtension->Flags |= USBPORT_FLAG_DOS_SYMBOLIC_NAME;
     }
+    else
+    {
+        DPRINT1("USBPORT_CreateLegacySymbolicLink: IoCreateSymbolicLink failed - %lx\n",
+                Status);
+        if (FdoExtension->DosDeviceSymbolicName.Buffer)
+        {
+            ExFreePoolWithTag(FdoExtension->DosDeviceSymbolicName.Buffer, USB_PORT_TAG);
+            FdoExtension->DosDeviceSymbolicName.Buffer = NULL;
+            FdoExtension->DosDeviceSymbolicName.MaximumLength = 0;
+            FdoExtension->DosDeviceSymbolicName.Length = 0;
+        }
+    }
 
     return Status;
 }
@@ -489,8 +882,285 @@ NTSTATUS
 NTAPI
 USBPORT_StopDevice(IN PDEVICE_OBJECT FdoDevice)
 {
-    DPRINT1("USBPORT_StopDevice: UNIMPLEMENTED. FIXME\n");
+    PUSBPORT_DEVICE_EXTENSION FdoExtension;
+    PUSBPORT_REGISTRATION_PACKET Packet;
+    PUSBPORT_RESOURCES UsbPortResources;
+
+    DPRINT("USBPORT_StopDevice: FdoDevice - %p\n", FdoDevice);
+
+    FdoExtension = FdoDevice->DeviceExtension;
+    Packet = FdoExtension->MiniPortInterface ?
+             &FdoExtension->MiniPortInterface->Packet :
+             NULL;
+    UsbPortResources = &FdoExtension->UsbPortResources;
+
+    if (FdoExtension->Aux.TtClearRundown)
+        USBPORT_StopTtClearRundown(FdoExtension);
+
+    if (FdoExtension->MiniPortFlags & USBPORT_MPFLAG_INTERRUPTS_ENABLED)
+    {
+        USBPORT_MiniportInterrupts(FdoDevice, FALSE);
+        FdoExtension->MiniPortFlags &= ~(USBPORT_MPFLAG_INTERRUPTS_ENABLED |
+                                         USBPORT_MPFLAG_SUSPENDED);
+    }
+
+    USBPORT_StopControllerTimer(FdoExtension);
+    /*
+     * TimerSoftInterrupt is only initialized when USBPORT_SoftInterrupt
+     * has been used. Guard KeCancelTimer so we do not assert on an
+     * uninitialized KTIMER when StartDevice fails early. Any non-zero
+     * object type here indicates an initialized dispatcher header.
+     */
+    if (FdoExtension->TimerSoftInterrupt.Header.Type != 0)
+    {
+        KeCancelTimer(&FdoExtension->TimerSoftInterrupt);
+    }
+    FdoExtension->TimerFlags = 0;
+    USBPORT_StopIsrDpcRundown(FdoExtension);
+
+    if (FdoExtension->Aux.TtClearRundown)
+    {
+        ExFreePoolWithTag(FdoExtension->Aux.TtClearRundown, USB_PORT_TAG);
+        FdoExtension->Aux.TtClearRundown = NULL;
+    }
+
+    if (Packet && (FdoExtension->Flags & USBPORT_FLAG_HC_STARTED) &&
+        Packet->StopController)
+    {
+        Packet->StopController(FdoExtension->MiniPortExt, FALSE);
+    }
+
+    FdoExtension->Flags &= ~(USBPORT_FLAG_HC_STARTED |
+                             USBPORT_FLAG_INTERRUPT_ENABLED |
+                             USBPORT_FLAG_LEGACY_SUPPORT |
+                             USBPORT_FLAG_HC_POLLING |
+                             USBPORT_FLAG_HC_SUSPEND |
+                             USBPORT_FLAG_RH_INIT_CALLBACK);
+
+    if (FdoExtension->CommonExtension.IsInterfaceEnabled)
+    {
+        USBPORT_RegisterDeviceInterface(FdoExtension->CommonExtension.LowerPdoDevice,
+                                        FdoDevice,
+                                        &GUID_DEVINTERFACE_USB_HOST_CONTROLLER,
+                                        FALSE);
+    }
+
+    if ((FdoExtension->Flags & USBPORT_FLAG_DOS_SYMBOLIC_NAME) &&
+        FdoExtension->DosDeviceSymbolicName.Buffer)
+    {
+        IoDeleteSymbolicLink(&FdoExtension->DosDeviceSymbolicName);
+        ExFreePoolWithTag(FdoExtension->DosDeviceSymbolicName.Buffer, USB_PORT_TAG);
+        FdoExtension->DosDeviceSymbolicName.Buffer = NULL;
+        FdoExtension->DosDeviceSymbolicName.MaximumLength = 0;
+        FdoExtension->DosDeviceSymbolicName.Length = 0;
+        FdoExtension->Flags &= ~USBPORT_FLAG_DOS_SYMBOLIC_NAME;
+    }
+
+    USBPORT_FlushMapTransfers(FdoDevice);
+
+    if (FdoExtension->InterruptMessageInfo)
+    {
+        if (UsbPortIoDisconnectInterruptEx)
+        {
+            IO_DISCONNECT_INTERRUPT_PARAMETERS DisconnectParameters;
+            RtlZeroMemory(&DisconnectParameters, sizeof(DisconnectParameters));
+            DisconnectParameters.Version = CONNECT_MESSAGE_BASED;
+            DisconnectParameters.ConnectionContext.InterruptMessageTable =
+                FdoExtension->InterruptMessageInfo;
+            UsbPortIoDisconnectInterruptEx(&DisconnectParameters);
+        }
+        FdoExtension->InterruptMessageInfo = NULL;
+        FdoExtension->MessageInterruptsEnabled = FALSE;
+        FdoExtension->MessageInterruptCount = 0;
+        FdoExtension->InterruptObject = NULL;
+    }
+    else if (FdoExtension->InterruptObject)
+    {
+        IoDisconnectInterrupt(FdoExtension->InterruptObject);
+        FdoExtension->InterruptObject = NULL;
+    }
+
+    FdoExtension->Flags &= ~USBPORT_FLAG_INT_CONNECTED;
+
+    if (FdoExtension->MiniPortCommonBuffer)
+    {
+        USBPORT_FreeCommonBuffer(FdoDevice, FdoExtension->MiniPortCommonBuffer);
+        FdoExtension->MiniPortCommonBuffer = NULL;
+    }
+
+    if (FdoExtension->ActiveIrpTable)
+    {
+        ExFreePoolWithTag(FdoExtension->ActiveIrpTable, USB_PORT_TAG);
+        FdoExtension->ActiveIrpTable = NULL;
+    }
+
+    if (FdoExtension->PendingIrpTable)
+    {
+        ExFreePoolWithTag(FdoExtension->PendingIrpTable, USB_PORT_TAG);
+        FdoExtension->PendingIrpTable = NULL;
+    }
+
+    if (FdoExtension->DmaAdapter)
+    {
+        FdoExtension->DmaAdapter->DmaOperations->PutDmaAdapter(FdoExtension->DmaAdapter);
+        FdoExtension->DmaAdapter = NULL;
+        FdoExtension->NumberMapRegs = 0;
+    }
+
+    if ((UsbPortResources->ResourcesTypes & USBPORT_RESOURCES_MEMORY) &&
+        UsbPortResources->ResourceBase)
+    {
+        MmUnmapIoSpace(UsbPortResources->ResourceBase,
+                       UsbPortResources->IoSpaceLength);
+    }
+
+    RtlZeroMemory(UsbPortResources, sizeof(USBPORT_RESOURCES));
+
+    if (FdoExtension->BusInterface.InterfaceDereference &&
+        FdoExtension->BusInterface.Context)
+    {
+        FdoExtension->BusInterface.InterfaceDereference(FdoExtension->BusInterface.Context);
+    }
+
+    RtlZeroMemory(&FdoExtension->BusInterface, sizeof(BUS_INTERFACE_STANDARD));
+
+    FdoExtension->CommonExtension.DevicePowerState = PowerDeviceD3;
+
+    USBPORT_CleanupTransportRegistrations(FdoExtension);
+    USBPORT_CleanupTimeSyncContexts(FdoExtension);
+    FdoExtension->Aux.NextTimeSyncId = 1;
+
     return STATUS_SUCCESS;
+}
+
+static
+VOID
+USBPORT_StopRootHub(IN PDEVICE_OBJECT PdoDevice)
+{
+    PUSBPORT_RHDEVICE_EXTENSION PdoExtension;
+    PDEVICE_OBJECT FdoDevice;
+    PUSBPORT_DEVICE_EXTENSION FdoExtension;
+    PIRP WakeIrp = NULL;
+    KIRQL OldIrql;
+
+    PdoExtension = PdoDevice->DeviceExtension;
+    FdoDevice = PdoExtension->FdoDevice;
+
+    DPRINT1("USBPORT_StopRootHub: PDO=%p FDO=%p\n", PdoDevice, FdoDevice);
+
+    if (!FdoDevice)
+    {
+        goto CleanupDeviceHandle;
+    }
+
+    FdoExtension = FdoDevice->DeviceExtension;
+
+    if (FdoExtension->Flags & USBPORT_FLAG_RH_STOPPED)
+    {
+        DPRINT1("USBPORT_StopRootHub: root hub already marked stopped (Flags=0x%lx)\n",
+                FdoExtension->Flags);
+    }
+
+    if (FdoExtension->MiniPortInterface &&
+        FdoExtension->MiniPortInterface->Packet.RH_DisableIrq)
+    {
+        DPRINT1("USBPORT_StopRootHub: disabling miniport root hub interrupts\n");
+        FdoExtension->MiniPortInterface->Packet.RH_DisableIrq(FdoExtension->MiniPortExt);
+    }
+
+    if (PdoExtension->CommonExtension.IsInterfaceEnabled)
+    {
+        USBPORT_RegisterDeviceInterface(PdoDevice,
+                                        PdoDevice,
+                                        &GUID_DEVINTERFACE_USB_HUB,
+                                        FALSE);
+    }
+
+    FdoExtension->Flags |= USBPORT_FLAG_RH_STOPPED;
+    USBPORT_StopControllerTimer(FdoExtension);
+
+    KeAcquireSpinLock(&FdoExtension->PowerWakeSpinLock, &OldIrql);
+
+    if (PdoExtension->WakeIrp && IoSetCancelRoutine(PdoExtension->WakeIrp, NULL))
+    {
+        WakeIrp = PdoExtension->WakeIrp;
+        PdoExtension->WakeIrp = NULL;
+    }
+
+    KeReleaseSpinLock(&FdoExtension->PowerWakeSpinLock, OldIrql);
+
+    if (WakeIrp)
+    {
+        WakeIrp->IoStatus.Status = STATUS_CANCELLED;
+        WakeIrp->IoStatus.Information = 0;
+        IoCompleteRequest(WakeIrp, IO_NO_INCREMENT);
+    }
+
+    if (USBPORT_ValidateDeviceHandle(FdoDevice, &PdoExtension->DeviceHandle))
+    {
+        DPRINT1("USBPORT_StopRootHub: removing handle %p\n",
+                &PdoExtension->DeviceHandle);
+        USBPORT_RemoveDevice(FdoDevice, &PdoExtension->DeviceHandle, 0);
+    }
+    else
+    {
+        DPRINT1("USBPORT_StopRootHub: handle %p no longer on DeviceHandle list\n",
+                &PdoExtension->DeviceHandle);
+    }
+
+CleanupDeviceHandle:
+    RtlZeroMemory(&PdoExtension->DeviceHandle, sizeof(USBPORT_DEVICE_HANDLE));
+    InitializeListHead(&PdoExtension->DeviceHandle.PipeHandleList);
+    InitializeListHead(&PdoExtension->DeviceHandle.TtList);
+
+    if (PdoExtension->RootHubDescriptors)
+    {
+        ExFreePoolWithTag(PdoExtension->RootHubDescriptors, USB_PORT_TAG);
+        PdoExtension->RootHubDescriptors = NULL;
+    }
+
+    if (PdoExtension->RootHubCallbackData)
+    {
+        USBPORT_DereferenceRootHubCallbackData(PdoExtension->RootHubCallbackData);
+        PdoExtension->RootHubCallbackData = NULL;
+    }
+
+    PdoExtension->Endpoint = NULL;
+    PdoExtension->ConfigurationValue = 0;
+    PdoExtension->RootHubInitCallback = NULL;
+    PdoExtension->RootHubInitContext = NULL;
+    PdoExtension->CommonExtension.DevicePowerState = PowerDeviceD3;
+}
+
+static
+VOID
+USBPORT_SetLineInterruptDisable(
+    _In_ PUSBPORT_DEVICE_EXTENSION FdoExtension,
+    _In_ BOOLEAN Disable)
+{
+    PBUS_INTERFACE_STANDARD BusInterface = &FdoExtension->BusInterface;
+    USHORT Command;
+
+    if (!BusInterface->GetBusData || !BusInterface->SetBusData)
+        return;
+
+    if (BusInterface->GetBusData(BusInterface->Context,
+                                 PCI_WHICHSPACE_CONFIG,
+                                 &Command,
+                                 FIELD_OFFSET(PCI_COMMON_CONFIG, Command),
+                                 sizeof(Command)) != sizeof(Command))
+        return;
+
+    if (Disable)
+        Command |= PCI_DISABLE_LEVEL_INTERRUPT;
+    else
+        Command &= ~PCI_DISABLE_LEVEL_INTERRUPT;
+
+    BusInterface->SetBusData(BusInterface->Context,
+                             PCI_WHICHSPACE_CONFIG,
+                             &Command,
+                             FIELD_OFFSET(PCI_COMMON_CONFIG, Command),
+                             sizeof(Command));
 }
 
 NTSTATUS
@@ -500,6 +1170,7 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
 {
     PUSBPORT_DEVICE_EXTENSION FdoExtension;
     PUSBPORT_REGISTRATION_PACKET Packet;
+    PUSBPORT_TT_CLEAR_RUNDOWN TtClearRundown;
     NTSTATUS Status;
     PCI_COMMON_CONFIG PciConfig;
     ULONG BytesRead;
@@ -516,6 +1187,7 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
     ULONG Limit2GB = 0;
     ULONG TotalBusBandwidth = 0;
     BOOLEAN IsCompanion = FALSE;
+    BOOLEAN Use64BitDma = FALSE;
     ULONG LegacyBIOS;
     ULONG MiniportFlags;
     ULONG ix;
@@ -528,36 +1200,69 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
     Packet = &FdoExtension->MiniPortInterface->Packet;
 
     Status = USBPORT_QueryPciBusInterface(FdoDevice);
-    if (!NT_SUCCESS(Status))
-        goto ExitWithError;
 
-    BytesRead = (*FdoExtension->BusInterface.GetBusData)(FdoExtension->BusInterface.Context,
-                                                         PCI_WHICHSPACE_CONFIG,
-                                                         &PciConfig,
-                                                         0,
-                                                         PCI_COMMON_HDR_LENGTH);
-
-    if (BytesRead != PCI_COMMON_HDR_LENGTH)
+    if (NT_SUCCESS(Status))
     {
-        DPRINT1("USBPORT_StartDevice: Failed to get pci config information!\n");
-        goto ExitWithError;
+        BytesRead = (*FdoExtension->BusInterface.GetBusData)(FdoExtension->BusInterface.Context,
+                                                             PCI_WHICHSPACE_CONFIG,
+                                                             &PciConfig,
+                                                             0,
+                                                             PCI_COMMON_HDR_LENGTH);
+    }
+    else
+    {
+        BytesRead = 0;
     }
 
-    FdoExtension->VendorID = PciConfig.VendorID;
-    FdoExtension->DeviceID = PciConfig.DeviceID;
-    FdoExtension->RevisionID = PciConfig.RevisionID;
-    FdoExtension->ProgIf = PciConfig.ProgIf;
-    FdoExtension->SubClass = PciConfig.SubClass;
-    FdoExtension->BaseClass = PciConfig.BaseClass;
+    if (BytesRead == PCI_COMMON_HDR_LENGTH)
+    {
+        FdoExtension->VendorID = PciConfig.VendorID;
+        FdoExtension->DeviceID = PciConfig.DeviceID;
+        FdoExtension->RevisionID = PciConfig.RevisionID;
+        FdoExtension->ProgIf = PciConfig.ProgIf;
+        FdoExtension->SubClass = PciConfig.SubClass;
+        FdoExtension->BaseClass = PciConfig.BaseClass;
+    }
+    else
+    {
+        /* No PCI parent: an ACPI-enumerated controller (e.g. an xHCI exposed
+         * via _HID under ACPI) has no PCI config space, so either the bus
+         * interface query failed or GetBusData returned fewer than a full
+         * PCI header. The firmware has already programmed MEM decode / bus
+         * mastering and the HAL provides the DMA window, so tolerate this and
+         * continue with zeroed identity fields instead of failing the start.
+         * Modelled on the null-guard in USBPORT_GetSetConfigSpaceData. */
+        DPRINT1("USBPORT_StartDevice: no PCI config space (ACPI-enumerated controller), continuing\n");
+        FdoExtension->VendorID = 0;
+        FdoExtension->DeviceID = 0;
+        FdoExtension->RevisionID = 0;
+        FdoExtension->ProgIf = 0;
+        FdoExtension->SubClass = 0;
+        FdoExtension->BaseClass = 0;
+    }
 
     RtlZeroMemory(&DeviceDescription, sizeof(DeviceDescription));
 
     DeviceDescription.Version = DEVICE_DESCRIPTION_VERSION;
     DeviceDescription.Master = TRUE;
     DeviceDescription.ScatterGather = TRUE;
-    DeviceDescription.Dma32BitAddresses = TRUE;
-    DeviceDescription.InterfaceType = PCIBus;
-    DeviceDescription.DmaWidth = Width32Bits;
+    Use64BitDma = USBPORT_DetermineDma64Bit(UsbPortResources, Packet);
+    if (Use64BitDma)
+    {
+        DeviceDescription.Dma32BitAddresses = FALSE;
+        DeviceDescription.Dma64BitAddresses = TRUE;
+        DeviceDescription.DmaWidth = Width64Bits;
+    }
+    else
+    {
+        DeviceDescription.Dma32BitAddresses = TRUE;
+        DeviceDescription.Dma64BitAddresses = FALSE;
+        DeviceDescription.DmaWidth = Width32Bits;
+    }
+    UsbPortResources->Reserved &= ~USBPORT_RES_DMA_ADDR_MASK;
+    UsbPortResources->Reserved |= Use64BitDma ? USBPORT_RES_DMA_ADDR_64BIT
+                                              : USBPORT_RES_DMA_ADDR_32BIT;
+    DeviceDescription.InterfaceType = FdoExtension->BusInterfaceType;
     DeviceDescription.DmaSpeed = Compatible;
     DeviceDescription.MaximumLength = MAXULONG;
 
@@ -572,6 +1277,13 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
         DPRINT1("USBPORT_StartDevice: Failed to get DmaAdapter!\n");
         Status = STATUS_INSUFFICIENT_RESOURCES;
         goto ExitWithError;
+    }
+
+    UsbPortResources->Reserved &= ~USBPORT_RES_DMA_NONCOHERENT;
+    if (DmaAdapter->DmaOperations->GetDmaAlignment &&
+        DmaAdapter->DmaOperations->GetDmaAlignment(DmaAdapter) > 1)
+    {
+        UsbPortResources->Reserved |= USBPORT_RES_DMA_NONCOHERENT;
     }
 
     Status = USBPORT_CreateWorkerThread(FdoDevice);
@@ -607,15 +1319,38 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
     KeInitializeSpinLock(&FdoExtension->WorkerThreadEventSpinLock);
     KeInitializeSpinLock(&FdoExtension->MiniportSpinLock);
     KeInitializeSpinLock(&FdoExtension->TimerFlagsSpinLock);
+    KeInitializeEvent(&FdoExtension->TimerDpcEvent, NotificationEvent, TRUE);
+    KeInitializeEvent(&FdoExtension->IsrDpcRundownEvent, NotificationEvent, TRUE);
+    ASSERT(FdoExtension->Aux.TtClearRundown == NULL);
+    TtClearRundown = ExAllocatePoolWithTag(NonPagedPool,
+                                           sizeof(*TtClearRundown),
+                                           USB_PORT_TAG);
+    if (!TtClearRundown)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto ExitWithError;
+    }
+    RtlZeroMemory(TtClearRundown, sizeof(*TtClearRundown));
+    KeInitializeEvent(&TtClearRundown->Event, NotificationEvent, FALSE);
+    KeInitializeSpinLock(&TtClearRundown->QueueLock);
+    InitializeListHead(&TtClearRundown->Queue);
+    FdoExtension->Aux.TtClearRundown = TtClearRundown;
     KeInitializeSpinLock(&FdoExtension->PowerWakeSpinLock);
+    KeInitializeEvent(&FdoExtension->HcWakeDone, NotificationEvent, FALSE);
     KeInitializeSpinLock(&FdoExtension->SetPowerD0SpinLock);
     KeInitializeSpinLock(&FdoExtension->RootHubCallbackSpinLock);
     KeInitializeSpinLock(&FdoExtension->TtSpinLock);
+    KeInitializeSpinLock(&FdoExtension->Aux.TransportListSpinLock);
+    KeInitializeSpinLock(&FdoExtension->Aux.TimeSyncSpinLock);
 
     KeInitializeDpc(&FdoExtension->IsrDpc, USBPORT_IsrDpc, FdoDevice);
 
     KeInitializeDpc(&FdoExtension->TransferFlushDpc,
                     USBPORT_TransferFlushDpc,
+                    FdoDevice);
+
+    KeInitializeDpc(&FdoExtension->MapTransferDpc,
+                    USBPORT_MapTransferDpc,
                     FdoDevice);
 
     KeInitializeDpc(&FdoExtension->WorkerRequestDpc,
@@ -644,6 +1379,7 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
 
     FdoExtension->IsrDpcCounter = -1;
     FdoExtension->IsrDpcHandlerCounter = -1;
+    FdoExtension->IsrDpcRundownState = USBPORT_ISR_DPC_RUNDOWN_STOPPING;
     FdoExtension->IdleLockCounter = -1;
     FdoExtension->BadRequestLockCounter = -1;
     FdoExtension->ChirpRootPortLock = -1;
@@ -721,7 +1457,7 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
     {
         Status = USBPORT_IsCompanionController(FdoDevice, &IsCompanion);
 
-        if (!NT_SUCCESS(Status))
+        if (NT_SUCCESS(Status))
         {
             if (IsCompanion)
             {
@@ -768,6 +1504,7 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
     if (!FdoExtension->ActiveIrpTable)
     {
         DPRINT1("USBPORT_StartDevice: Allocate ActiveIrpTable failed!\n");
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto ExitWithError;
     }
 
@@ -780,31 +1517,164 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
     if (!FdoExtension->PendingIrpTable)
     {
         DPRINT1("USBPORT_StartDevice: Allocate PendingIrpTable failed!\n");
+        Status = STATUS_INSUFFICIENT_RESOURCES;
         goto ExitWithError;
     }
 
     RtlZeroMemory(FdoExtension->PendingIrpTable, sizeof(USBPORT_IRP_TABLE));
 
-    Status = IoConnectInterrupt(&FdoExtension->InterruptObject,
-                                USBPORT_InterruptService,
-                                (PVOID)FdoDevice,
-                                0,
-                                UsbPortResources->InterruptVector,
-                                UsbPortResources->InterruptLevel,
-                                UsbPortResources->InterruptLevel,
-                                UsbPortResources->InterruptMode,
-                                UsbPortResources->ShareVector,
-                                UsbPortResources->InterruptAffinity,
-                                0);
-
-
-    if (!NT_SUCCESS(Status))
+    if (!UsbPortResources->ShareVector &&
+        (Packet->MiniPortFlags & USB_MINIPORT_FLAGS_USB3) &&
+        !(UsbPortResources->InterruptFlags & CM_RESOURCE_INTERRUPT_MESSAGE))
     {
-        DPRINT1("USBPORT_StartDevice: IoConnectInterrupt failed!\n");
-        goto ExitWithError;
+        DPRINT1("USBPORT_StartDevice: forcing shared IRQ for xHCI controller\n");
+        UsbPortResources->ShareVector = TRUE;
     }
 
-    FdoExtension->Flags &= ~USBPORT_FLAG_INT_CONNECTED;
+    USBPORT_EnsureInterruptApis();
+    USBPORT_SetLineInterruptDisable(FdoExtension, TRUE);
+
+    if ((UsbPortResources->InterruptFlags & CM_RESOURCE_INTERRUPT_MESSAGE) &&
+        UsbPortResources->InterruptMessageCount != 0 &&
+        UsbPortIoConnectInterruptEx)
+    {
+        IO_CONNECT_INTERRUPT_PARAMETERS ConnectParameters;
+
+        RtlZeroMemory(&ConnectParameters, sizeof(ConnectParameters));
+        ConnectParameters.Version = CONNECT_MESSAGE_BASED;
+        ConnectParameters.MessageBased.PhysicalDeviceObject =
+            FdoExtension->CommonExtension.LowerPdoDevice;
+        ConnectParameters.MessageBased.ConnectionContext.InterruptMessageTable =
+            &FdoExtension->InterruptMessageInfo;
+        ConnectParameters.MessageBased.MessageServiceRoutine =
+            USBPORT_MessageInterruptService;
+        ConnectParameters.MessageBased.ServiceContext = FdoDevice;
+        ConnectParameters.MessageBased.SpinLock = NULL;
+        ConnectParameters.MessageBased.SynchronizeIrql =
+            UsbPortResources->InterruptLevel;
+        ConnectParameters.MessageBased.FloatingSave = FALSE;
+        ConnectParameters.MessageBased.FallBackServiceRoutine =
+            USBPORT_InterruptService;
+
+        Status = UsbPortIoConnectInterruptEx(&ConnectParameters);
+        if (NT_SUCCESS(Status) && ConnectParameters.Version == CONNECT_LINE_BASED)
+        {
+            FdoExtension->InterruptObject = (PKINTERRUPT)FdoExtension->InterruptMessageInfo;
+            FdoExtension->InterruptMessageInfo = NULL;
+            FdoExtension->MessageInterruptsEnabled = FALSE;
+            FdoExtension->MessageInterruptCount = 0;
+            FdoExtension->Flags |= USBPORT_FLAG_INT_CONNECTED;
+        }
+        else if (NT_SUCCESS(Status) && FdoExtension->InterruptMessageInfo)
+        {
+            /* The PCI bus driver programmed and enabled these messages when it started the controller */
+            FdoExtension->InterruptObject =
+                FdoExtension->InterruptMessageInfo->MessageInfo[0].InterruptObject;
+            FdoExtension->MessageInterruptsEnabled = TRUE;
+            FdoExtension->MessageInterruptCount =
+                (UCHAR)FdoExtension->InterruptMessageInfo->MessageCount;
+            FdoExtension->Flags |= USBPORT_FLAG_INT_CONNECTED;
+        }
+        else
+        {
+            NTSTATUS ConnectStatus = Status;
+
+            if (FdoExtension->InterruptMessageInfo && UsbPortIoDisconnectInterruptEx)
+            {
+                IO_DISCONNECT_INTERRUPT_PARAMETERS DisconnectParameters;
+                RtlZeroMemory(&DisconnectParameters, sizeof(DisconnectParameters));
+                DisconnectParameters.Version = CONNECT_MESSAGE_BASED;
+                DisconnectParameters.ConnectionContext.InterruptMessageTable =
+                    FdoExtension->InterruptMessageInfo;
+                UsbPortIoDisconnectInterruptEx(&DisconnectParameters);
+            }
+
+            FdoExtension->InterruptMessageInfo = NULL;
+            FdoExtension->MessageInterruptsEnabled = FALSE;
+            FdoExtension->MessageInterruptCount = 0;
+            Status = STATUS_UNSUCCESSFUL;
+
+            DPRINT1("USBPORT_StartDevice: IoConnectInterruptEx failed (Status=0x%lx MsgInfo=%p)\n",
+                    ConnectStatus,
+                    FdoExtension->InterruptMessageInfo);
+        }
+    }
+    else
+    {
+        Status = STATUS_NOT_SUPPORTED;
+    }
+
+    if (!(FdoExtension->Flags & USBPORT_FLAG_INT_CONNECTED))
+    {
+        ULONG FallbackVector = UsbPortResources->InterruptVector;
+        KIRQL FallbackLevel = UsbPortResources->InterruptLevel;
+        KAFFINITY FallbackAffinity = UsbPortResources->InterruptAffinity;
+
+#if defined(_M_ARM64)
+        /*
+         * On ARM64, if the resources contain a message interrupt (LPI vector)
+         * but MSI-X programming failed, we need to fall back to the legacy
+         * INTx interrupt line. The LPI vector (e.g., 8192+) cannot be used
+         * with IoConnectInterrupt because it requires ITS device mapping.
+         *
+         * Query the PCI bus interface to get the legacy interrupt line and
+         * translate it to a system vector using HalGetInterruptVector.
+         */
+        if (UsbPortResources->InterruptFlags & CM_RESOURCE_INTERRUPT_MESSAGE)
+        {
+            ULONG LegacyVector = 0;
+            KIRQL LegacyLevel = 0;
+            KAFFINITY LegacyAffinity = 0;
+            NTSTATUS LegacyStatus;
+
+            DPRINT1("USBPORT_StartDevice: ARM64 MSI-X fallback - querying legacy INTx\n");
+
+            LegacyStatus = USBPORT_GetLegacyInterruptVector(
+                FdoDevice,
+                FdoExtension->CommonExtension.LowerPdoDevice,
+                &LegacyVector,
+                &LegacyLevel,
+                &LegacyAffinity);
+
+            if (NT_SUCCESS(LegacyStatus) && LegacyVector != 0)
+            {
+                DPRINT1("USBPORT_StartDevice: Using legacy INTx Vector=%lu Level=%u Affinity=0x%lx\n",
+                        LegacyVector, LegacyLevel, (ULONG)LegacyAffinity);
+                FallbackVector = LegacyVector;
+                FallbackLevel = LegacyLevel;
+                FallbackAffinity = LegacyAffinity;
+                /* Legacy INTx is level-triggered, shared */
+                UsbPortResources->InterruptMode = LevelSensitive;
+                UsbPortResources->ShareVector = TRUE;
+            }
+            else
+            {
+                DPRINT1("USBPORT_StartDevice: Failed to get legacy INTx (0x%lx), trying original vector\n",
+                        LegacyStatus);
+            }
+        }
+#endif /* _M_ARM64 */
+
+        Status = IoConnectInterrupt(&FdoExtension->InterruptObject,
+                                    USBPORT_InterruptService,
+                                    (PVOID)FdoDevice,
+                                    0,
+                                    FallbackVector,
+                                    FallbackLevel,
+                                    FallbackLevel,
+                                    UsbPortResources->InterruptMode,
+                                    UsbPortResources->ShareVector,
+                                    FallbackAffinity,
+                                    0);
+
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("USBPORT_StartDevice: IoConnectInterrupt failed (Vector=%lu)!\n", FallbackVector);
+            goto ExitWithError;
+        }
+
+        FdoExtension->Flags |= USBPORT_FLAG_INT_CONNECTED;
+    }
 
     if (Packet->MiniPortExtensionSize)
     {
@@ -833,6 +1703,23 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
         FdoExtension->MiniPortCommonBuffer = NULL;
     }
 
+    /*
+     * Provide the lower device object to the miniport.
+     * This allows miniport drivers to send IOCTLs (e.g., ACPI _OSC)
+     * to the device stack below the FDO.
+     */
+    UsbPortResources->LowerDeviceObject = FdoExtension->CommonExtension.LowerDevice;
+
+    /*
+     * Provide PCI location information to the miniport.
+     * This allows miniport drivers to look up their ACPI device node
+     * using AcpiFindPciDeviceInNamespace() for _OSC evaluation.
+     */
+    UsbPortResources->PciSegment = 0;  /* Assume segment 0 for most systems */
+    UsbPortResources->PciBusNumber = FdoExtension->BusNumber;
+    UsbPortResources->PciDeviceNumber = FdoExtension->PciDeviceNumber;
+    UsbPortResources->PciFunctionNumber = FdoExtension->PciFunctionNumber;
+
     MiniPortStatus = Packet->StartController(FdoExtension->MiniPortExt,
                                              UsbPortResources);
 
@@ -858,9 +1745,53 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
         DPRINT1("USBPORT_StartDevice: Failed to Start MiniPort. MiniPortStatus - %x\n",
                 MiniPortStatus);
 
+        switch (MiniPortStatus)
+        {
+            case MP_STATUS_NO_RESOURCES:
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+
+            case MP_STATUS_NO_BANDWIDTH:
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+
+            case MP_STATUS_HW_ERROR:
+                Status = STATUS_DEVICE_HARDWARE_ERROR;
+                break;
+
+            case MP_STATUS_NOT_SUPPORTED:
+                Status = STATUS_NOT_SUPPORTED;
+                break;
+
+            case MP_STATUS_ERROR:
+            case MP_STATUS_FAILURE:
+            case MP_STATUS_RESERVED1:
+            case MP_STATUS_UNSUCCESSFUL:
+            default:
+                Status = STATUS_UNSUCCESSFUL;
+                break;
+        }
+
         if (FdoExtension->Flags & USBPORT_FLAG_INT_CONNECTED)
         {
-            IoDisconnectInterrupt(FdoExtension->InterruptObject);
+            if (FdoExtension->InterruptMessageInfo && UsbPortIoDisconnectInterruptEx)
+            {
+                IO_DISCONNECT_INTERRUPT_PARAMETERS DisconnectParameters;
+                RtlZeroMemory(&DisconnectParameters, sizeof(DisconnectParameters));
+                DisconnectParameters.Version = CONNECT_MESSAGE_BASED;
+                DisconnectParameters.ConnectionContext.InterruptMessageTable =
+                    FdoExtension->InterruptMessageInfo;
+                UsbPortIoDisconnectInterruptEx(&DisconnectParameters);
+                FdoExtension->InterruptMessageInfo = NULL;
+                FdoExtension->MessageInterruptsEnabled = FALSE;
+                FdoExtension->MessageInterruptCount = 0;
+            }
+            else if (FdoExtension->InterruptObject)
+            {
+                IoDisconnectInterrupt(FdoExtension->InterruptObject);
+            }
+
+            FdoExtension->InterruptObject = NULL;
             FdoExtension->Flags &= ~USBPORT_FLAG_INT_CONNECTED;
         }
 
@@ -874,8 +1805,11 @@ USBPORT_StartDevice(IN PDEVICE_OBJECT FdoDevice,
     }
     else
     {
+        USBPORT_StartIsrDpcRundown(FdoExtension);
         FdoExtension->MiniPortFlags |= USBPORT_MPFLAG_INTERRUPTS_ENABLED;
         USBPORT_MiniportInterrupts(FdoDevice, TRUE);
+        if (!FdoExtension->MessageInterruptsEnabled)
+            USBPORT_SetLineInterruptDisable(FdoExtension, FALSE);
     }
 
     FdoExtension->TimerValue = 500;
@@ -930,7 +1864,17 @@ USBPORT_ParseResources(IN PDEVICE_OBJECT FdoDevice,
 
     if (AllocatedResourcesTranslated)
     {
+        PUSBPORT_DEVICE_EXTENSION ResourceFdoExtension = FdoDevice->DeviceExtension;
+
         RtlZeroMemory(UsbPortResources, sizeof(USBPORT_RESOURCES));
+
+        /*
+         * A controller of the platform itself, described by the firmware
+         * instead of a PCI function, needs its own bus named when its DMA
+         * adapter is asked for.
+         */
+        ResourceFdoExtension->BusInterfaceType =
+            AllocatedResourcesTranslated->List[0].InterfaceType;
 
         ResourceList = &AllocatedResourcesTranslated->List[0].PartialResourceList;
 
@@ -945,8 +1889,16 @@ USBPORT_ParseResources(IN PDEVICE_OBJECT FdoDevice,
             }
             else if (PartialDescriptor->Type == CmResourceTypeInterrupt)
             {
+                /* Prefer message interrupts over legacy if both are present. */
                 if (!InterruptDescriptor)
+                {
                     InterruptDescriptor = PartialDescriptor;
+                }
+                else if (!(InterruptDescriptor->Flags & CM_RESOURCE_INTERRUPT_MESSAGE) &&
+                         (PartialDescriptor->Flags & CM_RESOURCE_INTERRUPT_MESSAGE))
+                {
+                    InterruptDescriptor = PartialDescriptor;
+                }
             }
             else if (PartialDescriptor->Type == CmResourceTypeMemory)
             {
@@ -984,6 +1936,8 @@ USBPORT_ParseResources(IN PDEVICE_OBJECT FdoDevice,
 
         if (MemoryDescriptor && NT_SUCCESS(Status))
         {
+            PUSBPORT_DEVICE_EXTENSION FdoExtension = FdoDevice->DeviceExtension;
+
             UsbPortResources->IoSpaceLength = MemoryDescriptor->u.Memory.Length;
 
             UsbPortResources->ResourceBase = MmMapIoSpace(MemoryDescriptor->u.Memory.Start,
@@ -993,6 +1947,8 @@ USBPORT_ParseResources(IN PDEVICE_OBJECT FdoDevice,
             if (UsbPortResources->ResourceBase)
             {
                 UsbPortResources->ResourcesTypes |= USBPORT_RESOURCES_MEMORY;
+                /* Store physical address for MSI-X table programming */
+                FdoExtension->MemoryBasePhysical = MemoryDescriptor->u.Memory.Start;
             }
             else
             {
@@ -1003,16 +1959,61 @@ USBPORT_ParseResources(IN PDEVICE_OBJECT FdoDevice,
         if (InterruptDescriptor && NT_SUCCESS(Status))
         {
             UsbPortResources->ResourcesTypes |= USBPORT_RESOURCES_INTERRUPT;
+            UsbPortResources->InterruptFlags = InterruptDescriptor->Flags;
+            UsbPortResources->InterruptMessageCount = 0;
 
-            UsbPortResources->InterruptVector = InterruptDescriptor->u.Interrupt.Vector;
-            UsbPortResources->InterruptLevel = InterruptDescriptor->u.Interrupt.Level;
-            UsbPortResources->InterruptAffinity = InterruptDescriptor->u.Interrupt.Affinity;
+            if (InterruptDescriptor->Flags & CM_RESOURCE_INTERRUPT_MESSAGE)
+            {
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+                UsbPortResources->InterruptVector =
+                    InterruptDescriptor->u.MessageInterrupt.Translated.Vector;
+                UsbPortResources->InterruptLevel =
+                    (KIRQL)InterruptDescriptor->u.MessageInterrupt.Translated.Level;
+                UsbPortResources->InterruptAffinity =
+                    InterruptDescriptor->u.MessageInterrupt.Translated.Affinity;
 
-            UsbPortResources->ShareVector = InterruptDescriptor->ShareDisposition ==
-                                            CmResourceShareShared;
+                if (InterruptDescriptor->u.MessageInterrupt.Raw.MessageCount)
+                {
+                    UsbPortResources->InterruptMessageCount =
+                        InterruptDescriptor->u.MessageInterrupt.Raw.MessageCount;
+                }
+                else
+                {
+                    UsbPortResources->InterruptMessageCount = 1;
+                }
+#else
+                UsbPortResources->InterruptVector = InterruptDescriptor->u.Interrupt.Vector;
+                UsbPortResources->InterruptLevel = InterruptDescriptor->u.Interrupt.Level;
+                UsbPortResources->InterruptAffinity = InterruptDescriptor->u.Interrupt.Affinity;
+                UsbPortResources->InterruptMessageCount = 1;
+#endif
+            }
+            else
+            {
+                UsbPortResources->InterruptVector = InterruptDescriptor->u.Interrupt.Vector;
+                UsbPortResources->InterruptLevel = InterruptDescriptor->u.Interrupt.Level;
+                UsbPortResources->InterruptAffinity = InterruptDescriptor->u.Interrupt.Affinity;
+            }
 
-            UsbPortResources->InterruptMode = InterruptDescriptor->Flags ==
-                                              CM_RESOURCE_INTERRUPT_LATCHED;
+            UsbPortResources->ShareVector =
+                (InterruptDescriptor->ShareDisposition == CmResourceShareShared);
+
+            /*
+             * MSI/MSI-X interrupts are inherently edge-triggered. The LATCHED flag
+             * may not be set in the resource descriptor, but we must use edge-
+             * triggered mode to prevent interrupt storms.
+             */
+            if (InterruptDescriptor->Flags & CM_RESOURCE_INTERRUPT_MESSAGE)
+            {
+                UsbPortResources->InterruptMode = Latched;
+                UsbPortResources->ShareVector = FALSE; /* MSI can't be shared */
+            }
+            else
+            {
+                UsbPortResources->InterruptMode =
+                    (InterruptDescriptor->Flags & CM_RESOURCE_INTERRUPT_LATCHED) ?
+                        Latched : LevelSensitive;
+            }
         }
     }
     else
@@ -1029,6 +2030,8 @@ USBPORT_CreatePdo(IN PDEVICE_OBJECT FdoDevice,
                   OUT PDEVICE_OBJECT *RootHubPdo)
 {
     PUSBPORT_DEVICE_EXTENSION FdoExtension;
+    PUSBPORT_ROOT_HUB_CALLBACK_DATA CallbackData;
+    BOOLEAN CallbackDataReferenced = FALSE;
     PUSBPORT_RHDEVICE_EXTENSION PdoExtension;
     UNICODE_STRING DeviceName;
     ULONG DeviceNumber = 0;
@@ -1041,6 +2044,26 @@ USBPORT_CreatePdo(IN PDEVICE_OBJECT FdoDevice,
            RootHubPdo);
 
     FdoExtension = FdoDevice->DeviceExtension;
+
+    CallbackData = FdoExtension->RootHubCallbackData;
+
+    if (!CallbackData)
+    {
+        CallbackData = ExAllocatePoolWithTag(NonPagedPool,
+                                             sizeof(USBPORT_ROOT_HUB_CALLBACK_DATA),
+                                             USB_PORT_TAG);
+
+        if (!CallbackData)
+        {
+            *RootHubPdo = NULL;
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        RtlZeroMemory(CallbackData, sizeof(*CallbackData));
+        CallbackData->RefCount = 1;
+        KeInitializeSpinLock(&CallbackData->Lock);
+        FdoExtension->RootHubCallbackData = CallbackData;
+    }
 
     do
     {
@@ -1083,6 +2106,9 @@ USBPORT_CreatePdo(IN PDEVICE_OBJECT FdoDevice,
 
         PdoExtension->FdoDevice = FdoDevice;
         PdoExtension->PdoNameNumber = DeviceNumber;
+        PdoExtension->RootHubCallbackData = CallbackData;
+        USBPORT_ReferenceRootHubCallbackData(CallbackData);
+        CallbackDataReferenced = TRUE;
 
         USBPORT_AdjustDeviceCapabilities(FdoDevice, DeviceObject);
 
@@ -1097,12 +2123,128 @@ USBPORT_CreatePdo(IN PDEVICE_OBJECT FdoDevice,
     }
 
     if (!NT_SUCCESS(Status))
-        *RootHubPdo = NULL;
-    else
-        *RootHubPdo = DeviceObject;
+    {
+        if (CallbackDataReferenced)
+        {
+            USBPORT_DereferenceRootHubCallbackData(CallbackData);
+        }
 
-    DPRINT("USBPORT_CreatePdo: HubPdo - %p\n", DeviceObject);
+        *RootHubPdo = NULL;
+    }
+    else
+    {
+        *RootHubPdo = DeviceObject;
+    }
+
+    if (NT_SUCCESS(Status) && DeviceObject)
+    {
+        FdoExtension->RootHubPdoExtension = DeviceObject->DeviceExtension;
+#if DBG
+        DPRINT("USBPORT_CreatePdo: HubPdo=%p DevExt=%p\n",
+                DeviceObject,
+                FdoExtension->RootHubPdoExtension);
+#else
+        DPRINT("USBPORT_CreatePdo: HubPdo - %p\n", DeviceObject);
+#endif
+    }
+    else if (!NT_SUCCESS(Status))
+    {
+        FdoExtension->RootHubPdoExtension = NULL;
+        DPRINT("USBPORT_CreatePdo: HubPdo - %p\n", DeviceObject);
+    }
+    else
+    {
+        DPRINT("USBPORT_CreatePdo: HubPdo - %p\n", DeviceObject);
+    }
+
     return Status;
+}
+
+static
+VOID
+USBPORT_LimitMessageInterrupts(IN PIO_RESOURCE_REQUIREMENTS_LIST Requirements)
+{
+    PIO_RESOURCE_LIST SourceList, DestinationList;
+    ULONG Limit, i;
+
+    if (!Requirements)
+        return;
+
+    Limit = KeQueryActiveProcessorCount(NULL) + 1;
+    SourceList = &Requirements->List[0];
+    DestinationList = &Requirements->List[0];
+    for (i = 0; i < Requirements->AlternativeLists; i++)
+    {
+        PIO_RESOURCE_LIST NextSourceList;
+        PIO_RESOURCE_DESCRIPTOR Source, Destination;
+        ULONG SourceCount, Remaining, j;
+
+        SourceCount = SourceList->Count;
+        NextSourceList = (PIO_RESOURCE_LIST)&SourceList->Descriptors[SourceCount];
+        DestinationList->Version = SourceList->Version;
+        DestinationList->Revision = SourceList->Revision;
+        DestinationList->Count = 0;
+        Source = &SourceList->Descriptors[0];
+        Destination = &DestinationList->Descriptors[0];
+        Remaining = Limit;
+
+        for (j = 0; j < SourceCount; j++, Source++)
+        {
+            ULONG Granted = 0;
+
+            if (Source->Type == CmResourceTypeInterrupt &&
+                (Source->Flags & CM_RESOURCE_INTERRUPT_MESSAGE))
+            {
+                if (Source->u.Interrupt.MaximumVector == CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN &&
+                    Source->u.Interrupt.MinimumVector <= CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN)
+                {
+                    Granted = CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN - Source->u.Interrupt.MinimumVector + 1;
+                }
+                else if (Source->u.Interrupt.MinimumVector == Source->u.Interrupt.MaximumVector)
+                {
+                    /* Compatibility with the count encoding emitted by older
+                     * ReactOS bus drivers. */
+                    Granted = Source->u.Interrupt.MaximumVector;
+                }
+
+                if (Granted != 0)
+                {
+                    ULONG Allowed = Granted;
+
+                    if (Allowed > Remaining)
+                        Allowed = Remaining;
+                    while (Allowed != 0 && (Allowed & (Allowed - 1)) != 0)
+                        Allowed &= Allowed - 1;
+                    if (Allowed == 0)
+                        continue;
+
+                    *Destination = *Source;
+                    if (Source->u.Interrupt.MaximumVector == CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN)
+                    {
+                        Destination->u.Interrupt.MinimumVector = CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN - Allowed + 1;
+                        Destination->u.Interrupt.MaximumVector = CM_RESOURCE_INTERRUPT_MESSAGE_TOKEN;
+                    }
+                    else
+                    {
+                        Destination->u.Interrupt.MinimumVector = Allowed;
+                        Destination->u.Interrupt.MaximumVector = Allowed;
+                    }
+                    Remaining -= Allowed;
+                    Destination++;
+                    DestinationList->Count++;
+                    continue;
+                }
+            }
+
+            *Destination++ = *Source;
+            DestinationList->Count++;
+        }
+
+        SourceList = NextSourceList;
+        DestinationList = (PIO_RESOURCE_LIST)&DestinationList->Descriptors[DestinationList->Count];
+    }
+
+    Requirements->ListSize = (ULONG)((PUCHAR)DestinationList - (PUCHAR)Requirements);
 }
 
 NTSTATUS
@@ -1219,12 +2361,23 @@ Exit:
         case IRP_MN_REMOVE_DEVICE:
             DPRINT("USBPORT_FdoPnP: IRP_MN_REMOVE_DEVICE\n");
             FdoCommonExtension->PnpStateFlags |= USBPORT_PNP_STATE_FAILED;
+            USBPORT_DisarmHcWake(FdoDevice);
+
+            USBPORT_FreeDumpContext(FdoExtension->Aux.DumpContext);
+            FdoExtension->Aux.DumpContext = NULL;
+            USBPORT_FreeDumpContext(InterlockedExchangePointer(&FdoExtension->Aux.KeyboardContext, NULL));
 
             if (FdoCommonExtension->PnpStateFlags & USBPORT_PNP_STATE_STARTED &&
                !(FdoCommonExtension->PnpStateFlags & USBPORT_PNP_STATE_NOT_INIT))
             {
-                DPRINT1("USBPORT_FdoPnP: stop fdo FIXME\n");
+                USBPORT_StopWorkerThread(FdoDevice);
+                USBPORT_StopDevice(FdoDevice);
                 FdoCommonExtension->PnpStateFlags |= USBPORT_PNP_STATE_NOT_INIT;
+            }
+
+            if (FdoExtension->Flags & USBPORT_FLAG_REGISTERED_FDO)
+            {
+                USBPORT_RemoveUSBxFdo(FdoDevice);
             }
 
             Irp->IoStatus.Status = STATUS_SUCCESS;
@@ -1239,7 +2392,21 @@ Exit:
 
             if (RootHubPdo)
             {
+                PUSBPORT_RHDEVICE_EXTENSION RootHubExtension = RootHubPdo->DeviceExtension;
+                if (RootHubExtension && RootHubExtension->RootHubCallbackData)
+                {
+                    USBPORT_DereferenceRootHubCallbackData(RootHubExtension->RootHubCallbackData);
+                    RootHubExtension->RootHubCallbackData = NULL;
+                }
                 IoDeleteDevice(RootHubPdo);
+                FdoExtension->RootHubPdo = NULL;
+                FdoExtension->RootHubPdoExtension = NULL;
+            }
+
+            if (FdoExtension->RootHubCallbackData)
+            {
+                USBPORT_DereferenceRootHubCallbackData(FdoExtension->RootHubCallbackData);
+                FdoExtension->RootHubCallbackData = NULL;
             }
 
             return Status;
@@ -1253,10 +2420,15 @@ Exit:
             DPRINT("IRP_MN_STOP_DEVICE\n");
             if (FdoCommonExtension->PnpStateFlags & USBPORT_PNP_STATE_STARTED)
             {
-                DPRINT1("USBPORT_FdoPnP: stop fdo FIXME\n");
-
+                USBPORT_StopWorkerThread(FdoDevice);
+                USBPORT_StopDevice(FdoDevice);
+                if (FdoExtension->Flags & USBPORT_FLAG_REGISTERED_FDO)
+                {
+                    USBPORT_RemoveUSBxFdo(FdoDevice);
+                }
                 FdoCommonExtension->PnpStateFlags &= ~USBPORT_PNP_STATE_STARTED;
                 FdoCommonExtension->PnpStateFlags |= USBPORT_PNP_STATE_NOT_INIT;
+                FdoCommonExtension->PnpStateFlags |= USBPORT_PNP_STATE_STOPPED;
             }
 
             Irp->IoStatus.Status = STATUS_SUCCESS;
@@ -1276,6 +2448,29 @@ Exit:
             DPRINT("IRP_MN_QUERY_DEVICE_RELATIONS\n");
             if (RelationType == BusRelations)
             {
+                if (!(FdoCommonExtension->PnpStateFlags & USBPORT_PNP_STATE_STARTED))
+                {
+                    DeviceRelations = ExAllocatePoolWithTag(PagedPool,
+                                                            sizeof(DEVICE_RELATIONS),
+                                                            USB_PORT_TAG);
+
+                    if (!DeviceRelations)
+                    {
+                        Status = STATUS_INSUFFICIENT_RESOURCES;
+                        Irp->IoStatus.Status = Status;
+                        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                        return Status;
+                    }
+
+                    DeviceRelations->Count = 0;
+                    DeviceRelations->Objects[0] = NULL;
+
+                    Irp->IoStatus.Status = STATUS_SUCCESS;
+                    Irp->IoStatus.Information = (ULONG_PTR)DeviceRelations;
+                    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                    return STATUS_SUCCESS;
+                }
+
                 DeviceRelations = ExAllocatePoolWithTag(PagedPool,
                                                         sizeof(DEVICE_RELATIONS),
                                                         USB_PORT_TAG);
@@ -1306,6 +2501,8 @@ Exit:
                 {
                     Status = STATUS_SUCCESS;
                 }
+
+                FdoExtension->RootHubPdoExtension = USBPORT_GetRootHubExtension(FdoExtension);
 
                 DeviceRelations->Count = 1;
                 DeviceRelations->Objects[0] = FdoExtension->RootHubPdo;
@@ -1348,6 +2545,7 @@ Exit:
 
         case IRP_MN_FILTER_RESOURCE_REQUIREMENTS:
             DPRINT("IRP_MN_FILTER_RESOURCE_REQUIREMENTS\n");
+            USBPORT_LimitMessageInterrupts((PIO_RESOURCE_REQUIREMENTS_LIST)Irp->IoStatus.Information);
             goto ForwardIrp;
 
         case IRP_MN_READ_CONFIG:
@@ -1380,7 +2578,20 @@ Exit:
 
         case IRP_MN_DEVICE_USAGE_NOTIFICATION:
             DPRINT("IRP_MN_DEVICE_USAGE_NOTIFICATION\n");
-            goto ForwardIrp;
+            Status = STATUS_UNSUCCESSFUL;
+            if (IoForwardIrpSynchronously(FdoCommonExtension->LowerDevice, Irp))
+                Status = Irp->IoStatus.Status;
+
+            if (NT_SUCCESS(Status) &&
+                IoStack->Parameters.UsageNotification.Type == DeviceUsageTypeHibernation)
+            {
+                IoAdjustPagingPathCount(&FdoExtension->HibernationPathCount,
+                                        IoStack->Parameters.UsageNotification.InPath);
+            }
+
+            Irp->IoStatus.Status = Status;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return Status;
 
         case IRP_MN_SURPRISE_REMOVAL:
             DPRINT1("IRP_MN_SURPRISE_REMOVAL\n");
@@ -1388,6 +2599,19 @@ Exit:
             {
                 USBPORT_InvalidateControllerHandler(FdoDevice,
                                                     USBPORT_INVALIDATE_CONTROLLER_SURPRISE_REMOVE);
+            }
+
+            if (FdoCommonExtension->PnpStateFlags & USBPORT_PNP_STATE_STARTED)
+            {
+                USBPORT_StopWorkerThread(FdoDevice);
+                USBPORT_StopDevice(FdoDevice);
+                if (FdoExtension->Flags & USBPORT_FLAG_REGISTERED_FDO)
+                {
+                    USBPORT_RemoveUSBxFdo(FdoDevice);
+                }
+
+                FdoCommonExtension->PnpStateFlags &= ~USBPORT_PNP_STATE_STARTED;
+                FdoCommonExtension->PnpStateFlags |= USBPORT_PNP_STATE_FAILED;
             }
             goto ForwardIrp;
 
@@ -1416,6 +2640,7 @@ USBPORT_GetDeviceHwIds(IN PDEVICE_OBJECT FdoDevice,
     SIZE_T Length = 0;
     size_t Remaining = sizeof(Buffer);
     PWCHAR EndBuffer;
+    PCWSTR Prefix;
 
     FdoExtension = FdoDevice->DeviceExtension;
     Packet = &FdoExtension->MiniPortInterface->Packet;
@@ -1424,74 +2649,47 @@ USBPORT_GetDeviceHwIds(IN PDEVICE_OBJECT FdoDevice,
            FdoDevice,
            Packet->MiniPortFlags);
 
-    if (Packet->MiniPortFlags & USB_MINIPORT_FLAGS_USB2)
-    {
-        RtlStringCbPrintfExW(Buffer,
-                             Remaining,
-                             &EndBuffer,
-                             &Remaining,
-                             0,
-                             L"USB\\ROOT_HUB20&VID%04x&PID%04x&REV%04x",
-                             VendorID,
-                             DeviceID,
-                             RevisionID);
-
-        EndBuffer++;
-        Remaining -= sizeof(UNICODE_NULL);
-
-        RtlStringCbPrintfExW(EndBuffer,
-                             Remaining,
-                             &EndBuffer,
-                             &Remaining,
-                             0,
-                             L"USB\\ROOT_HUB20&VID%04x&PID%04x",
-                             VendorID,
-                             DeviceID);
-
-        EndBuffer++;
-        Remaining -= sizeof(UNICODE_NULL);
-
-        RtlStringCbPrintfExW(EndBuffer,
-                             Remaining,
-                             NULL,
-                             &Remaining,
-                             0,
-                             L"USB\\ROOT_HUB20");
-    }
+    if (Packet->MiniPortFlags & USB_MINIPORT_FLAGS_USB3)
+        Prefix = L"USB\\ROOT_HUB30";
+    else if (Packet->MiniPortFlags & USB_MINIPORT_FLAGS_USB2)
+        Prefix = L"USB\\ROOT_HUB20";
     else
-    {
-        RtlStringCbPrintfExW(Buffer,
-                             Remaining,
-                             &EndBuffer,
-                             &Remaining,
-                             0,
-                             L"USB\\ROOT_HUB&VID%04x&PID%04x&REV%04x",
-                             VendorID,
-                             DeviceID,
-                             RevisionID);
+        Prefix = L"USB\\ROOT_HUB";
 
-        EndBuffer++;
-        Remaining -= sizeof(UNICODE_NULL);
+    RtlStringCbPrintfExW(Buffer,
+                         Remaining,
+                         &EndBuffer,
+                         &Remaining,
+                         0,
+                         L"%ls&VID%04X&PID%04X&REV%04X",
+                         Prefix,
+                         VendorID,
+                         DeviceID,
+                         RevisionID);
 
-        RtlStringCbPrintfExW(EndBuffer,
-                             Remaining,
-                             &EndBuffer,
-                             &Remaining,
-                             0,
-                             L"USB\\ROOT_HUB&VID%04x&PID%04x",
-                             VendorID,
-                             DeviceID);
+    EndBuffer++;
+    Remaining -= sizeof(UNICODE_NULL);
 
-        EndBuffer++;
-        Remaining -= sizeof(UNICODE_NULL);
+    RtlStringCbPrintfExW(EndBuffer,
+                         Remaining,
+                         &EndBuffer,
+                         &Remaining,
+                         0,
+                         L"%ls&VID%04X&PID%04X",
+                         Prefix,
+                         VendorID,
+                         DeviceID);
 
-        RtlStringCbPrintfExW(EndBuffer,
-                             Remaining,
-                             NULL,
-                             &Remaining,
-                             0,
-                             L"USB\\ROOT_HUB");
-    }
+    EndBuffer++;
+    Remaining -= sizeof(UNICODE_NULL);
+
+    RtlStringCbPrintfExW(EndBuffer,
+                         Remaining,
+                         NULL,
+                         &Remaining,
+                         0,
+                         L"%ls",
+                         Prefix);
 
     Length = (sizeof(Buffer) - Remaining + 2 * sizeof(UNICODE_NULL));
 
@@ -1510,6 +2708,42 @@ USBPORT_GetDeviceHwIds(IN PDEVICE_OBJECT FdoDevice,
     RtlMoveMemory(Id, Buffer, Length);
 
     return Id;
+}
+
+static
+NTSTATUS
+USBPORT_NotifyParentUsage(IN PDEVICE_OBJECT ParentDevice,
+                          IN PIO_STACK_LOCATION IoStack)
+{
+    PDEVICE_OBJECT TopDevice;
+    PIO_STACK_LOCATION NextStack;
+    IO_STATUS_BLOCK IoStatus;
+    KEVENT Event;
+    NTSTATUS Status;
+    PIRP Irp;
+
+    TopDevice = IoGetAttachedDeviceReference(ParentDevice);
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP, TopDevice, NULL, 0, NULL, &Event, &IoStatus);
+    if (Irp == NULL)
+    {
+        ObDereferenceObject(TopDevice);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+    NextStack = IoGetNextIrpStackLocation(Irp);
+    NextStack->MinorFunction = IRP_MN_DEVICE_USAGE_NOTIFICATION;
+    NextStack->Parameters.UsageNotification = IoStack->Parameters.UsageNotification;
+    Status = IoCallDriver(TopDevice, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = IoStatus.Status;
+    }
+
+    ObDereferenceObject(TopDevice);
+    return Status;
 }
 
 NTSTATUS
@@ -1557,7 +2791,10 @@ USBPORT_PdoPnP(IN PDEVICE_OBJECT PdoDevice,
                 if (NT_SUCCESS(Status))
                 {
                     PdoCommonExtension->DevicePowerState = PowerDeviceD0;
-                    PdoCommonExtension->PnpStateFlags = USBPORT_PNP_STATE_STARTED;
+                    PdoCommonExtension->PnpStateFlags &= ~USBPORT_PNP_STATE_STOPPED;
+                    PdoCommonExtension->PnpStateFlags &= ~USBPORT_PNP_STATE_FAILED;
+                    PdoCommonExtension->PnpStateFlags &= ~USBPORT_PNP_STATE_NOT_INIT;
+                    PdoCommonExtension->PnpStateFlags |= USBPORT_PNP_STATE_STARTED;
                 }
             }
 
@@ -1569,10 +2806,18 @@ USBPORT_PdoPnP(IN PDEVICE_OBJECT PdoDevice,
             break;
 
         case IRP_MN_REMOVE_DEVICE:
-            DPRINT1("USBPORT_PdoPnP: IRP_MN_REMOVE_DEVICE UNIMPLEMENTED. FIXME. \n");
-            //USBPORT_StopRootHub();
-            Status = STATUS_SUCCESS;
-            break;
+            DPRINT("USBPORT_PdoPnP: IRP_MN_REMOVE_DEVICE\n");
+
+            USBPORT_StopRootHub(PdoDevice);
+
+            PdoCommonExtension->PnpStateFlags &= ~USBPORT_PNP_STATE_STARTED;
+            PdoCommonExtension->PnpStateFlags |= USBPORT_PNP_STATE_NOT_INIT |
+                                                 USBPORT_PNP_STATE_STOPPED |
+                                                 USBPORT_PNP_STATE_FAILED;
+
+            Irp->IoStatus.Status = STATUS_SUCCESS;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_SUCCESS;
 
         case IRP_MN_CANCEL_REMOVE_DEVICE:
             DPRINT("IRP_MN_CANCEL_REMOVE_DEVICE\n");
@@ -1580,8 +2825,16 @@ USBPORT_PdoPnP(IN PDEVICE_OBJECT PdoDevice,
             break;
 
         case IRP_MN_STOP_DEVICE:
-            DPRINT1("USBPORT_PdoPnP: IRP_MN_STOP_DEVICE UNIMPLEMENTED. FIXME. \n");
-            //USBPORT_StopRootHub();
+            DPRINT("USBPORT_PdoPnP: IRP_MN_STOP_DEVICE\n");
+
+            if (PdoCommonExtension->PnpStateFlags & USBPORT_PNP_STATE_STARTED)
+            {
+                USBPORT_StopRootHub(PdoDevice);
+                PdoCommonExtension->PnpStateFlags &= ~USBPORT_PNP_STATE_STARTED;
+                PdoCommonExtension->PnpStateFlags |= USBPORT_PNP_STATE_NOT_INIT |
+                                                     USBPORT_PNP_STATE_STOPPED;
+            }
+
             Status = STATUS_SUCCESS;
             break;
 
@@ -1661,23 +2914,31 @@ USBPORT_PdoPnP(IN PDEVICE_OBJECT PdoDevice,
 
         case IRP_MN_READ_CONFIG:
             DPRINT("IRP_MN_READ_CONFIG\n");
-            ASSERT(FALSE);
-            break;
+            DPRINT1("USBPORT_PdoPnP: IRP_MN_READ_CONFIG not supported\n");
+            Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_NOT_SUPPORTED;
 
         case IRP_MN_WRITE_CONFIG:
             DPRINT("IRP_MN_WRITE_CONFIG\n");
-            ASSERT(FALSE);
-            break;
+            DPRINT1("USBPORT_PdoPnP: IRP_MN_WRITE_CONFIG not supported\n");
+            Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_NOT_SUPPORTED;
 
         case IRP_MN_EJECT:
             DPRINT("IRP_MN_EJECT\n");
-            ASSERT(FALSE);
-            break;
+            DPRINT1("USBPORT_PdoPnP: IRP_MN_EJECT not supported\n");
+            Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_NOT_SUPPORTED;
 
         case IRP_MN_SET_LOCK:
             DPRINT("IRP_MN_SET_LOCK\n");
-            ASSERT(FALSE);
-            break;
+            DPRINT1("USBPORT_PdoPnP: IRP_MN_SET_LOCK not supported\n");
+            Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_NOT_SUPPORTED;
 
         case IRP_MN_QUERY_ID:
         {
@@ -1696,7 +2957,13 @@ USBPORT_PdoPnP(IN PDEVICE_OBJECT PdoDevice,
                 PUSBPORT_REGISTRATION_PACKET Packet;
                 Packet = &FdoExtension->MiniPortInterface->Packet;
 
-                if (Packet->MiniPortFlags & USB_MINIPORT_FLAGS_USB2)
+                if (Packet->MiniPortFlags & USB_MINIPORT_FLAGS_USB3)
+                {
+                    RtlStringCbPrintfW(Buffer,
+                                       sizeof(Buffer),
+                                       L"USB\\ROOT_HUB30");
+                }
+                else if (Packet->MiniPortFlags & USB_MINIPORT_FLAGS_USB2)
                 {
                     RtlStringCbPrintfW(Buffer,
                                        sizeof(Buffer),
@@ -1789,10 +3056,18 @@ USBPORT_PdoPnP(IN PDEVICE_OBJECT PdoDevice,
 
         case IRP_MN_DEVICE_USAGE_NOTIFICATION:
             DPRINT("IRP_MN_DEVICE_USAGE_NOTIFICATION\n");
+            Status = USBPORT_NotifyParentUsage(FdoDevice, IoStack);
             break;
 
         case IRP_MN_SURPRISE_REMOVAL:
             DPRINT("USBPORT_PdoPnP: IRP_MN_SURPRISE_REMOVAL\n");
+
+            USBPORT_StopRootHub(PdoDevice);
+
+            PdoCommonExtension->PnpStateFlags &= ~USBPORT_PNP_STATE_STARTED;
+            PdoCommonExtension->PnpStateFlags |= USBPORT_PNP_STATE_FAILED |
+                                                 USBPORT_PNP_STATE_NOT_INIT;
+
             Status = STATUS_SUCCESS;
             break;
 

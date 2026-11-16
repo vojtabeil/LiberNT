@@ -30,6 +30,14 @@ typedef struct localeinfo_struct
 #define DEFINED_localeinfo_struct 1
 #endif
 
+#ifndef _CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES
+    #if __STDC_WANT_SECURE_LIB__
+        #define _CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES 1
+    #else
+        #define _CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES 0
+    #endif
+#endif
+
 #ifndef RC_INVOKED
     #if defined __cplusplus && _CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES
 
@@ -191,6 +199,21 @@ typedef struct localeinfo_struct
         #define __DEFINE_CPP_OVERLOAD_SECURE_FUNC_SPLITPATH(_ReturnType, _FuncName, _DstType, _Src)
 
     #endif // !_CRT_SECURE_CPP_OVERLOAD_SECURE_NAMES
+#endif
+
+/*
+ * Newer MinGW-w64/libstdc++ headers unconditionally import quick_exit and
+ * at_quick_exit into namespace std for C++11+. Their stdlib.h only declares
+ * them when building against UCRT, but ReactOS also provides msvcrt-side
+ * implementations. Declare them here so GCC 15 C++ headers compile cleanly.
+ */
+#ifndef _CRT_QUICK_EXIT_DEFINED
+#define _CRT_QUICK_EXIT_DEFINED
+#if (!defined(__cplusplus) && defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L)) || \
+    (defined(__cplusplus) && (__cplusplus >= 201103L))
+    __declspec(noreturn) void __cdecl quick_exit(int);
+    int __cdecl at_quick_exit(void (__cdecl *)(void));
+#endif
 #endif
 
 #ifdef __cplusplus

@@ -26,6 +26,7 @@ typedef struct IP_ADDRESS {
         IPv4_RAW_ADDRESS IPv4Address;/* IPv4 address (in network byte order) */
         IPv6_RAW_ADDRESS IPv6Address;/* IPv6 address (in network byte order) */
     } Address;
+    ULONG ScopeId;
 } IP_ADDRESS, *PIP_ADDRESS;
 
 /* IP type constants */
@@ -66,6 +67,7 @@ typedef union _IP_HEADER {
 #define IPv4_MF_MASK            0x2000 /* More fragments (host byte order) */
 #define IPv4_DF_MASK            0x4000 /* Don't fragment (host byte order) */
 #define IPv4_MAX_HEADER_SIZE    60
+#define IP_DHCP_CLIENT_PORT     68
 
 /* Packet completion handler prototype */
 typedef VOID (*PACKET_COMPLETION_ROUTINE)(
@@ -79,7 +81,6 @@ typedef struct _IP_PACKET {
     UCHAR Type;                         /* Type of IP packet (see IP_ADDRESS_xx above) */
     UCHAR Flags;                        /* Flags for packet (see IP_PACKET_FLAG_xx below)*/
     BOOLEAN MappedHeader;               /* States whether Header is from an MDL or allocated from pool */
-    BOOLEAN ReturnPacket;               /* States whether NdisPacket should be passed to NdisReturnPackets */
     PVOID Header;                       /* Pointer to IP header for this packet */
     UINT HeaderSize;                    /* Size of IP header */
     PVOID Data;                         /* Current pointer into packet data */
@@ -88,6 +89,8 @@ typedef struct _IP_PACKET {
     PNDIS_PACKET NdisPacket;            /* Pointer to NDIS packet */
     IP_ADDRESS SrcAddr;                 /* Source address */
     IP_ADDRESS DstAddr;                 /* Destination address */
+    WFP_SHIM_TAG WfpTag;
+    BOOLEAN WfpAccepted;
 } IP_PACKET, *PIP_PACKET;
 
 #define IP_PACKET_FLAG_RAW      0x01    /* Raw IP packet */
@@ -100,6 +103,7 @@ typedef struct _PACKET_CONTEXT {
 					   * in a queue */
     PVOID Context;                        /* Context information for handler */
     UINT  PacketType;                     /* Type of packet */
+    WFP_SHIM_TAG WfpTag;
 } PACKET_CONTEXT, *PPACKET_CONTEXT;
 
 /* The ProtocolReserved field is structured as a PACKET_CONTEXT */
@@ -127,6 +131,7 @@ typedef struct _LLIP_BIND_INFO {
     PVOID Context;                /* Pointer to link layer context information */
     UINT  HeaderSize;             /* Size of link level header */
     UINT  MinFrameSize;           /* Minimum frame size in bytes */
+    UINT  MTU;                    /* Maximum IP datagram size on the link */
     PUCHAR Address;               /* Pointer to interface address */
     UINT  AddressLength;          /* Length of address in bytes */
     LL_TRANSMIT_ROUTINE Transmit; /* Transmit function for this interface */
@@ -151,12 +156,15 @@ typedef struct _IP_INTERFACE {
     LIST_ENTRY ListEntry;         /* Entry on list */
     OBJECT_FREE_ROUTINE Free;     /* Routine used to free resources used by the object */
     KSPIN_LOCK Lock;              /* Spin lock for this object */
+    EX_RUNDOWN_REF Rundown;       /* Protects users outside the interface list lock */
+    BOOLEAN Registered;           /* Interface is visible in global lists */
+    BOOLEAN EntityRegistered;     /* Interface is visible through TDI entities */
+    BOOLEAN RundownStarted;       /* New interface references are blocked */
     PVOID Context;                /* Pointer to link layer context information */
     UINT  HeaderSize;             /* Size of link level header */
     UINT  MinFrameSize;           /* Minimum frame size in bytes */
     UINT  MTU;                    /* Maximum transmission unit */
     UINT  Speed;                  /* Link speed */
-    UINT  Metric;                 /* Interface metric */
     IP_ADDRESS Unicast;           /* Unicast address */
     IP_ADDRESS PointToPoint;      /* Point to point address */
     IP_ADDRESS Netmask;           /* Netmask */
@@ -169,7 +177,47 @@ typedef struct _IP_INTERFACE {
     LL_TRANSMIT_ROUTINE Transmit; /* Pointer to transmit function */
     PVOID TCPContext;             /* TCP Content for this interface */
     SEND_RECV_STATS Stats;        /* Send/Receive statistics */
+    BOOLEAN Wireless;
+    BOOLEAN HalfDuplex;
+    ULONG PhysicalMedium;
+    ULONG64 TransmitLinkSpeed;
+    BOOLEAN ManualMetric;
+    UINT  InterfaceMetric;
+    BOOLEAN Forwarding;
+    BOOLEAN WeakHostSend;
+    BOOLEAN WeakHostReceive;
+    BOOLEAN DisableDefaultRoutes;
+    BOOLEAN AdvertiseDefaultRoute;
+    UINT  LinkMTU;
+    ULONG RetransmitTime;
+    ULONG BaseReachableTime;
+    ULONG ReachableTime;
+    ULONG DadTransmits;
+    ULONG RouterDiscoveryBehavior;
+    ULONG PathMtuDiscoveryTimeout;
+    ULONG LinkLocalAddressTimeout;
+    ULONG SitePrefixLength;
+    ULONG ZoneIndices[16];
+    BOOLEAN DhcpRouterDiscovery;
 } IP_INTERFACE, *PIP_INTERFACE;
+
+typedef struct _IP_NTE {
+    LIST_ENTRY ListEntry;
+    PIP_INTERFACE Interface;
+    IP_ADDRESS Unicast;
+    IP_ADDRESS Netmask;
+    IP_ADDRESS Broadcast;
+    ULONG Context;
+    ULONG Instance;
+    BOOLEAN RouteOwner;
+    PVOID TCPContext;
+    ULONG DadState;
+    ULONG DadProbes;
+    ULONG DadAnnounces;
+    BOOLEAN DadActive;
+    ULONGLONG DadNext;
+    LARGE_INTEGER Created;
+} IP_NTE, *PIP_NTE;
 
 typedef struct _IP_SET_ADDRESS {
     ULONG NteIndex;
@@ -199,12 +247,14 @@ typedef VOID (*IP_PROTOCOL_HANDLER)(
 
 /* Timeout timer constants */
 #define IP_TIMEOUT 1000 /* Timeout in milliseconds */
+#define NB_FAST_TIMEOUT 100
 #define IP_DEFAULT_LINK_SPEED  10000
 
 extern LIST_ENTRY InterfaceListHead;
 extern KSPIN_LOCK InterfaceListLock;
 extern LIST_ENTRY NetTableListHead;
 extern KSPIN_LOCK NetTableListLock;
+extern FAST_MUTEX NetTableMutex;
 
 PIP_PACKET IPCreatePacket(
   ULONG Type);
@@ -216,10 +266,10 @@ PIP_PACKET IPInitializePacket(
 PIP_INTERFACE IPCreateInterface(
     PLLIP_BIND_INFO BindInfo);
 
-VOID IPAddInterfaceRoute(
+BOOLEAN IPReferenceInterface(
     PIP_INTERFACE IF);
 
-VOID IPRemoveInterfaceRoute(
+VOID IPDereferenceInterface(
     PIP_INTERFACE IF);
 
 VOID IPDestroyInterface(
@@ -230,6 +280,34 @@ BOOLEAN IPRegisterInterface(
 
 VOID IPUnregisterInterface(
     PIP_INTERFACE IF);
+
+UINT IPAutomaticMetric(
+    PIP_INTERFACE Interface);
+
+UINT IPInterfaceMetric(
+    PIP_INTERFACE Interface);
+
+struct _IP4_INTERFACE_INFO;
+
+NTSTATUS IPQueryInterfaceV4(
+    struct _IP4_INTERFACE_INFO *Info);
+
+NTSTATUS IPSetInterfaceV4(
+    struct _IP4_INTERFACE_INFO *Info);
+
+BOOLEAN IPv4AcceptDestination(
+    PIP_INTERFACE Interface,
+    PIP_ADDRESS Destination,
+    PBOOLEAN Forward);
+
+VOID IPv4Forward(
+    PIP_INTERFACE Interface,
+    PIP_PACKET IPPacket);
+
+VOID NTAPI NeighborTimeoutDpcFn(PKDPC Dpc,
+                                PVOID DeferredContext,
+                                PVOID SystemArgument1,
+                                PVOID SystemArgument2);
 
 VOID NTAPI IPTimeoutDpcFn(PKDPC Dpc,
                           PVOID DeferredContext,

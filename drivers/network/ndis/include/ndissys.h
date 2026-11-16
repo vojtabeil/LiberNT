@@ -18,13 +18,26 @@
 #include "efilter.h"
 #include "buffer.h"
 
+FORCEINLINE
+ULONG
+NdisICurrentProcessorIndex(VOID)
+{
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    ULONG ProcessorIndex = KeGetCurrentProcessorIndex();
+#else
+    ULONG ProcessorIndex = KeGetCurrentProcessorNumber();
+#endif
+
+    ASSERT(ProcessorIndex < MAXIMUM_PROCESSORS);
+    return ProcessorIndex;
+}
+
 /* Exported functions */
 #ifndef EXPORT
 #define EXPORT NTAPI
 #endif
 
-/* the version of NDIS we claim to be */
-#define NDIS_VERSION 0x00050001
+#define NDIS_VERSION ((6 << 16) | 89)
 
 #define NDIS_TAG 'SIDN' // "NDIS"
 
@@ -34,7 +47,7 @@
 #define MAX(value1, value2) \
     ((value1 > value2)? value1 : value2)
 
-#define RTL_CONSTANT_LARGE_INTEGER(quad_part) {{(quad_part), (quad_part) >> 32}}
+#define RTL_CONSTANT_LARGE_INTEGER(quad_part) { { (quad_part), (quad_part)>>32 } }
 
 #define ExInterlockedRemoveEntryList(_List,_Lock) \
  { KIRQL OldIrql; \
@@ -55,11 +68,6 @@ VOID
 NTAPI
 ExGetCurrentProcessorCpuUsage(
     PULONG CpuUsage);
-
-
-NTSTATUS
-NdisQueryPciBusInterface(
-    IN PLOGICAL_ADAPTER Adapter);
 
 /* portability fixes */
 #ifdef _M_AMD64

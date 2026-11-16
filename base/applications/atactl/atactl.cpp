@@ -1018,7 +1018,7 @@ ata_adapter_info(
             if(AdapterInfo->AdapterInterfaceType == PCIBus) {
                 slotData.u.AsULONG = AdapterInfo->slotNumber;
                 printf("  PCI Bus/Dev/Func:   %lu/%lu/%lu%s\n",
-                    AdapterInfo->SystemIoBusNumber, slotData.u.bits.DeviceNumber, slotData.u.bits.FunctionNumber,
+                    AdapterInfo->SystemIoBusNumber, (ULONG)slotData.u.bits.DeviceNumber, (ULONG)slotData.u.bits.FunctionNumber,
                     AdapterInfo->AdapterInterfaceType == AdapterInfo->OrigAdapterInterfaceType ? "" : " (ISA-Bridged)");
                 printf("  VendorId/DevId/Rev: %#04x/%#04x/%#02x\n",
                     (USHORT)(AdapterInfo->DevID >> 16),
@@ -1031,7 +1031,7 @@ ata_adapter_info(
             if(AdapterInfo->AdapterInterfaceType == Isa) {
                 printf("  ISA Bus\n");
             }
-            printf("  IRQ: %ld\n", AdapterInfo->BusInterruptLevel);
+            printf("  IRQ: %lu\n", AdapterInfo->BusInterruptLevel);
         }
     }
     ata_close_dev(h);
@@ -1607,7 +1607,7 @@ ata_bblk(
         while(len >= sizeof(LONGLONG)*2) {
             tmp_bb_lba = ((LONGLONG*)bblist)[i*2+0];
             tmp_bb_len = ((LONGLONG*)bblist)[i*2+1] - tmp_bb_lba;
-            b = sprintf(BB_Msg, "%I64u\t%I64u\n", tmp_bb_lba, tmp_bb_len);
+            b = sprintf(BB_Msg, "%I64d\t%I64d\n", tmp_bb_lba, tmp_bb_len);
             WriteFile(hf, BB_Msg, b, &returned, NULL);
             i++;
             len -= sizeof(LONGLONG)*2;

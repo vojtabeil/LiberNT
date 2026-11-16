@@ -2347,7 +2347,7 @@ HRESULT WINAPI VarI8FromDec(const DECIMAL *pdecIn, LONG64* pi64Out)
   {
     /* Decimal contains a floating point number */
     HRESULT hRet;
-    double dbl;
+    DOUBLE dbl;
 
     hRet = VarR8FromDec(pdecIn, &dbl);
     if (SUCCEEDED(hRet))
@@ -2685,7 +2685,7 @@ HRESULT WINAPI VarUI8FromDec(const DECIMAL *pdecIn, ULONG64* pui64Out)
   {
     /* Decimal contains a floating point number */
     HRESULT hRet;
-    double dbl;
+    DOUBLE dbl;
 
     hRet = VarR8FromDec(pdecIn, &dbl);
     if (SUCCEEDED(hRet))
@@ -3036,7 +3036,7 @@ HRESULT WINAPI VarR4CmpR8(float fltLeft, double dblRight)
  * RETURNS
  *  S_OK.
  */
-HRESULT WINAPI VarR8FromUI1(BYTE bIn, double *pDblOut)
+HRESULT WINAPI VarR8FromUI1(BYTE bIn, DOUBLE *pDblOut)
 {
   return _VarR8FromUI1(bIn, pDblOut);
 }
@@ -3053,7 +3053,7 @@ HRESULT WINAPI VarR8FromUI1(BYTE bIn, double *pDblOut)
  * RETURNS
  *  S_OK.
  */
-HRESULT WINAPI VarR8FromI2(SHORT sIn, double *pDblOut)
+HRESULT WINAPI VarR8FromI2(SHORT sIn, DOUBLE *pDblOut)
 {
   return _VarR8FromI2(sIn, pDblOut);
 }
@@ -3070,7 +3070,7 @@ HRESULT WINAPI VarR8FromI2(SHORT sIn, double *pDblOut)
  * RETURNS
  *  S_OK.
  */
-HRESULT WINAPI VarR8FromI4(LONG lIn, double *pDblOut)
+HRESULT WINAPI VarR8FromI4(LONG lIn, DOUBLE *pDblOut)
 {
   return _VarR8FromI4(lIn, pDblOut);
 }
@@ -3087,7 +3087,7 @@ HRESULT WINAPI VarR8FromI4(LONG lIn, double *pDblOut)
  * RETURNS
  *  S_OK.
  */
-HRESULT WINAPI VarR8FromR4(FLOAT fltIn, double *pDblOut)
+HRESULT WINAPI VarR8FromR4(FLOAT fltIn, DOUBLE *pDblOut)
 {
   return _VarR8FromR4(fltIn, pDblOut);
 }
@@ -3104,7 +3104,7 @@ HRESULT WINAPI VarR8FromR4(FLOAT fltIn, double *pDblOut)
  * RETURNS
  *  S_OK.
  */
-HRESULT WINAPI VarR8FromCy(CY cyIn, double *pDblOut)
+HRESULT WINAPI VarR8FromCy(CY cyIn, DOUBLE *pDblOut)
 {
   return _VarR8FromCy(cyIn, pDblOut);
 }
@@ -3121,7 +3121,7 @@ HRESULT WINAPI VarR8FromCy(CY cyIn, double *pDblOut)
  * RETURNS
  *  S_OK.
  */
-HRESULT WINAPI VarR8FromDate(DATE dateIn, double *pDblOut)
+HRESULT WINAPI VarR8FromDate(DATE dateIn, DOUBLE *pDblOut)
 {
   return _VarR8FromDate(dateIn, pDblOut);
 }
@@ -3142,7 +3142,7 @@ HRESULT WINAPI VarR8FromDate(DATE dateIn, double *pDblOut)
  *  Failure: E_INVALIDARG, if strIn or pDblOut is invalid.
  *           DISP_E_TYPEMISMATCH, if the type cannot be converted
  */
-HRESULT WINAPI VarR8FromStr(const OLECHAR* strIn, LCID lcid, ULONG dwFlags, double *pDblOut)
+HRESULT WINAPI VarR8FromStr(const OLECHAR* strIn, LCID lcid, ULONG dwFlags, DOUBLE *pDblOut)
 {
   return VARIANT_NumberFromBstr(strIn, lcid, dwFlags, pDblOut, VT_R8);
 }
@@ -3163,7 +3163,7 @@ HRESULT WINAPI VarR8FromStr(const OLECHAR* strIn, LCID lcid, ULONG dwFlags, doub
  *           DISP_E_OVERFLOW, if the value will not fit in the destination
  *           DISP_E_TYPEMISMATCH, if the type cannot be converted
  */
-HRESULT WINAPI VarR8FromDisp(IDispatch* pdispIn, LCID lcid, double *pDblOut)
+HRESULT WINAPI VarR8FromDisp(IDispatch* pdispIn, LCID lcid, DOUBLE *pDblOut)
 {
   return VARIANT_FromDisp(pdispIn, lcid, pDblOut, VT_R8, 0);
 }
@@ -3180,7 +3180,7 @@ HRESULT WINAPI VarR8FromDisp(IDispatch* pdispIn, LCID lcid, double *pDblOut)
  * RETURNS
  *  S_OK.
  */
-HRESULT WINAPI VarR8FromBool(VARIANT_BOOL boolIn, double *pDblOut)
+HRESULT WINAPI VarR8FromBool(VARIANT_BOOL boolIn, DOUBLE *pDblOut)
 {
   return VarR8FromI2(boolIn, pDblOut);
 }
@@ -3200,7 +3200,7 @@ HRESULT WINAPI VarR8FromBool(VARIANT_BOOL boolIn, double *pDblOut)
  *           DISP_E_OVERFLOW, if the value will not fit in the destination
  *           DISP_E_TYPEMISMATCH, if the type cannot be converted
  */
-HRESULT WINAPI VarR8FromI1(signed char cIn, double *pDblOut)
+HRESULT WINAPI VarR8FromI1(signed char cIn, DOUBLE *pDblOut)
 {
   return _VarR8FromI1(cIn, pDblOut);
 }
@@ -3220,7 +3220,7 @@ HRESULT WINAPI VarR8FromI1(signed char cIn, double *pDblOut)
  *           DISP_E_OVERFLOW, if the value will not fit in the destination
  *           DISP_E_TYPEMISMATCH, if the type cannot be converted
  */
-HRESULT WINAPI VarR8FromUI2(USHORT usIn, double *pDblOut)
+HRESULT WINAPI VarR8FromUI2(USHORT usIn, DOUBLE *pDblOut)
 {
   return _VarR8FromUI2(usIn, pDblOut);
 }
@@ -3240,7 +3240,7 @@ HRESULT WINAPI VarR8FromUI2(USHORT usIn, double *pDblOut)
  *           DISP_E_OVERFLOW, if the value will not fit in the destination
  *           DISP_E_TYPEMISMATCH, if the type cannot be converted
  */
-HRESULT WINAPI VarR8FromUI4(ULONG ulIn, double *pDblOut)
+HRESULT WINAPI VarR8FromUI4(ULONG ulIn, DOUBLE *pDblOut)
 {
   return _VarR8FromUI4(ulIn, pDblOut);
 }
@@ -3258,7 +3258,7 @@ HRESULT WINAPI VarR8FromUI4(ULONG ulIn, double *pDblOut)
  *  Success: S_OK.
  *  Failure: E_INVALIDARG, if the source value is invalid.
  */
-HRESULT WINAPI VarR8FromDec(const DECIMAL* pDecIn, double *pDblOut)
+HRESULT WINAPI VarR8FromDec(const DECIMAL* pDecIn, DOUBLE *pDblOut)
 {
   BYTE scale = pDecIn->scale;
   double divisor = 1.0, highPart;
@@ -3297,7 +3297,7 @@ HRESULT WINAPI VarR8FromDec(const DECIMAL* pDecIn, double *pDblOut)
  * RETURNS
  *  S_OK.
  */
-HRESULT WINAPI VarR8FromI8(LONG64 llIn, double *pDblOut)
+HRESULT WINAPI VarR8FromI8(LONG64 llIn, DOUBLE *pDblOut)
 {
   return _VarR8FromI8(llIn, pDblOut);
 }
@@ -3314,7 +3314,7 @@ HRESULT WINAPI VarR8FromI8(LONG64 llIn, double *pDblOut)
  * RETURNS
  *  S_OK.
  */
-HRESULT WINAPI VarR8FromUI8(ULONG64 ullIn, double *pDblOut)
+HRESULT WINAPI VarR8FromUI8(ULONG64 ullIn, DOUBLE *pDblOut)
 {
   return _VarR8FromUI8(ullIn, pDblOut);
 }
@@ -3494,9 +3494,9 @@ HRESULT WINAPI VarCyFromR4(FLOAT fltIn, CY* pCyOut)
  *           DISP_E_OVERFLOW, if the value will not fit in the destination
  *           DISP_E_TYPEMISMATCH, if the type cannot be converted
  */
-HRESULT WINAPI VarCyFromR8(double dblIn, CY* pCyOut)
+HRESULT WINAPI VarCyFromR8(DOUBLE dblIn, CY* pCyOut)
 {
-#if defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__))
+#if defined(__GNUC__) && (defined(__i386__) || (defined(__x86_64__) && !defined(__arm64ec__)))
   /* This code gives identical results to Win32 on Intel.
    * Here we use fp exceptions to catch overflows when storing the value.
    */
@@ -3519,6 +3519,65 @@ HRESULT WINAPI VarCyFromR8(double dblIn, CY* pCyOut)
 
   if (result_fpstatus & 0x9) /* Overflow | Invalid */
     return DISP_E_OVERFLOW;
+#elif defined(__REACTOS__)
+  ULONG64 bits, mant, hi, lo, low, q, rem, half;
+  unsigned int exp, shift;
+  BOOL neg, up;
+
+  memcpy(&bits, &dblIn, sizeof(bits));
+  neg = (bits >> 63) != 0;
+  exp = (unsigned int)((bits >> 52) & 0x7ff);
+  mant = bits & 0xfffffffffffffULL;
+  if (exp == 0x7ff)
+    return DISP_E_OVERFLOW;
+  if (exp)
+    mant |= 1ULL << 52;
+  else
+    exp = 1;
+  if (!mant)
+  {
+    pCyOut->int64 = 0;
+    return S_OK;
+  }
+  if (exp > 1072)
+    return DISP_E_OVERFLOW;
+  shift = 1075 - exp;
+
+  low = (mant & 0xffffffff) * CY_MULTIPLIER;
+  hi = (mant >> 32) * CY_MULTIPLIER;
+  lo = low + (hi << 32);
+  hi = (hi >> 32) + (lo < low);
+
+  if (shift >= 128)
+  {
+    q = 0;
+    up = FALSE;
+  }
+  else if (shift > 64)
+  {
+    q = hi >> (shift - 64);
+    rem = hi & ((1ULL << (shift - 64)) - 1);
+    half = 1ULL << (shift - 65);
+    up = rem > half || (rem == half && (lo || (q & 1)));
+  }
+  else if (shift == 64)
+  {
+    q = hi;
+    half = 1ULL << 63;
+    up = lo > half || (lo == half && (q & 1));
+  }
+  else
+  {
+    q = (lo >> shift) | (hi << (64 - shift));
+    rem = lo & ((1ULL << shift) - 1);
+    half = 1ULL << (shift - 1);
+    up = rem > half || (rem == half && (q & 1));
+  }
+  if (up && ++q == 0)
+    return DISP_E_OVERFLOW;
+  if (q > (neg ? 0x8000000000000000ULL : 0x7fffffffffffffffULL))
+    return DISP_E_OVERFLOW;
+  pCyOut->int64 = neg ? (LONG64)(0 - q) : (LONG64)q;
 #else
   /* This version produces slightly different results for boundary cases */
   if (dblIn < -922337203685477.5807 || dblIn >= 922337203685477.5807)
@@ -3680,6 +3739,11 @@ HRESULT WINAPI VarCyFromUI4(ULONG ulIn, CY* pCyOut)
     return S_OK;
 }
 
+#ifdef __REACTOS__
+static unsigned char VARIANT_int_divbychar(DWORD * p, unsigned int n, unsigned char divisor);
+static unsigned char VARIANT_int_mulbychar(DWORD * p, unsigned int n, unsigned char m);
+#endif
+
 /************************************************************************
  * VarCyFromDec (OLEAUT32.228)
  *
@@ -3697,6 +3761,43 @@ HRESULT WINAPI VarCyFromUI4(ULONG ulIn, CY* pCyOut)
  */
 HRESULT WINAPI VarCyFromDec(const DECIMAL* pdecIn, CY* pCyOut)
 {
+#ifdef __REACTOS__
+  DWORD n[3];
+  unsigned char digit = 0;
+  BOOL sticky = FALSE;
+  ULONG64 value;
+  unsigned int i;
+
+  if ((pdecIn->sign & ~DECIMAL_NEG) || pdecIn->scale > DEC_MAX_SCALE)
+    return E_INVALIDARG;
+
+  n[0] = pdecIn->Lo32;
+  n[1] = pdecIn->Mid32;
+  n[2] = pdecIn->Hi32;
+
+  for (i = pdecIn->scale; i > 4; i--)
+  {
+    if (digit) sticky = TRUE;
+    digit = VARIANT_int_divbychar(n, 3, 10);
+  }
+  if (digit > 5 || (digit == 5 && (sticky || (n[0] & 1))))
+  {
+    if (!++n[0] && !++n[1]) ++n[2];
+  }
+  for (i = pdecIn->scale; i < 4; i++)
+  {
+    if (VARIANT_int_mulbychar(n, 3, 10))
+      return DISP_E_OVERFLOW;
+  }
+  if (n[2])
+    return DISP_E_OVERFLOW;
+
+  value = ((ULONG64)n[1] << 32) | n[0];
+  if (value > ((pdecIn->sign & DECIMAL_NEG) ? 0x8000000000000000ULL : 0x7fffffffffffffffULL))
+    return DISP_E_OVERFLOW;
+  pCyOut->int64 = (pdecIn->sign & DECIMAL_NEG) ? (LONG64)(0 - value) : (LONG64)value;
+  return S_OK;
+#else
   DECIMAL rounded;
   HRESULT hRet;
 
@@ -3716,6 +3817,7 @@ HRESULT WINAPI VarCyFromDec(const DECIMAL* pdecIn, CY* pCyOut)
     return VarCyFromR8(d, pCyOut);
   }
   return hRet;
+#endif
 }
 
 /************************************************************************
@@ -4192,7 +4294,7 @@ HRESULT WINAPI VarDecFromR4(FLOAT fltIn, DECIMAL* pDecOut)
  * RETURNS
  *  S_OK.
  */
-HRESULT WINAPI VarDecFromR8(double dblIn, DECIMAL* pDecOut)
+HRESULT WINAPI VarDecFromR8(DOUBLE dblIn, DECIMAL* pDecOut)
 {
   VARIANT_DI di;
   HRESULT hres;
@@ -5746,7 +5848,7 @@ HRESULT WINAPI VarDecAbs(const DECIMAL* pDecIn, DECIMAL* pDecOut)
  */
 HRESULT WINAPI VarDecFix(const DECIMAL* pDecIn, DECIMAL* pDecOut)
 {
-  double dbl;
+  DOUBLE dbl;
   HRESULT hr;
 
   if (pDecIn->sign & ~DECIMAL_NEG)
@@ -5786,7 +5888,7 @@ HRESULT WINAPI VarDecFix(const DECIMAL* pDecIn, DECIMAL* pDecOut)
  */
 HRESULT WINAPI VarDecInt(const DECIMAL* pDecIn, DECIMAL* pDecOut)
 {
-  double dbl;
+  DOUBLE dbl;
   HRESULT hr;
 
   if (pDecIn->sign & ~DECIMAL_NEG)
@@ -6034,7 +6136,7 @@ HRESULT WINAPI VarBoolFromR4(FLOAT fltIn, VARIANT_BOOL *pBoolOut)
  * RETURNS
  *  S_OK.
  */
-HRESULT WINAPI VarBoolFromR8(double dblIn, VARIANT_BOOL *pBoolOut)
+HRESULT WINAPI VarBoolFromR8(DOUBLE dblIn, VARIANT_BOOL *pBoolOut)
 {
   *pBoolOut = dblIn ? VARIANT_TRUE : VARIANT_FALSE;
   return S_OK;
@@ -6200,7 +6302,7 @@ VarBoolFromStr_CheckLocalised:
     *pBoolOut = VARIANT_TRUE;
   else
   {
-    double d;
+    DOUBLE d;
 
     /* If this string is a number, convert it as one */
     hRes = VarR8FromStr(strIn, lcid, dwFlags, &d);
@@ -6540,21 +6642,15 @@ static BSTR VARIANT_BstrReplaceDecimal(const WCHAR * buff, LCID lcid, ULONG dwFl
 static HRESULT VARIANT_BstrFromReal(DOUBLE dblIn, LCID lcid, ULONG dwFlags,
                                     BSTR* pbstrOut, int ndigits)
 {
-#ifndef __REACTOS__
   _locale_t locale;
-#endif
   WCHAR *e, buff[256];
   int len;
 
   if (!pbstrOut)
     return E_INVALIDARG;
 
-#ifdef __REACTOS__ /* FIXME: Inspect */
-    len = swprintf(buff, ARRAY_SIZE(buff), L"%.*G", ndigits, dblIn);
-#else
   if (!(locale = _create_locale(LC_ALL, "C"))) return E_OUTOFMEMORY;
   len = _swprintf_l(buff, ARRAY_SIZE(buff), L"%.*G", locale, ndigits, dblIn);
-#endif
   e = wcschr(buff, 'E');
   if (e)
   {
@@ -6565,18 +6661,12 @@ static HRESULT VARIANT_BstrFromReal(DOUBLE dblIn, LCID lcid, ULONG dwFlags,
       extra_decimals = dot ? e - dot - 2 : 0;
       if (labs(wcstol(e+1, NULL, 10)) + extra_decimals < ndigits)
       {
-#ifdef __REACTOS__ /* FIXME: Inspect */
-          len = swprintf(buff, ARRAY_SIZE(buff), L"%.*f", ndigits, dblIn);
-#else
           len = _swprintf_l(buff, ARRAY_SIZE(buff), L"%.*f", locale, ndigits, dblIn);
-#endif
           while (len > 0 && (buff[len-1] == '0')) len--;
       }
   }
   buff[len] = 0;
-#ifndef __REACTOS__
   _free_locale(locale);
-#endif
 
   /* Negative zeroes are disallowed (some applications depend on this).
      If buff starts with a minus, and then nothing follows but zeroes
@@ -6645,7 +6735,7 @@ HRESULT WINAPI VarBstrFromR4(FLOAT fltIn, LCID lcid, ULONG dwFlags, BSTR* pbstrO
  *  Failure: E_INVALIDARG, if pbstrOut is invalid.
  *           E_OUTOFMEMORY, if memory allocation fails.
  */
-HRESULT WINAPI VarBstrFromR8(double dblIn, LCID lcid, ULONG dwFlags, BSTR* pbstrOut)
+HRESULT WINAPI VarBstrFromR8(DOUBLE dblIn, LCID lcid, ULONG dwFlags, BSTR* pbstrOut)
 {
     return VARIANT_BstrFromReal(dblIn, lcid, dwFlags, pbstrOut, 15);
 }
@@ -7350,7 +7440,7 @@ HRESULT WINAPI VarDateFromR4(FLOAT fltIn, DATE* pdateOut)
  * RETURNS
  *  S_OK.
  */
-HRESULT WINAPI VarDateFromR8(double dblIn, DATE* pdateOut)
+HRESULT WINAPI VarDateFromR8(DOUBLE dblIn, DATE* pdateOut)
 {
   if (dblIn <= (DATE_MIN - 1.0) || dblIn >= (DATE_MAX + 1.0)) return DISP_E_OVERFLOW;
   *pdateOut = (DATE)dblIn;

@@ -83,6 +83,8 @@
 #define IDC_ROSHOMEPAGE_LINK 109
 #define IDC_ROSVERSION       110
 #define IDC_UPTIME           111
+#define IDC_ROSTARGET        117
+#define IDC_ROSBUILD         118
 
 /* Propsheet - hardware */
 #define IDD_PROPPAGEHARDWARE        300
@@ -98,7 +100,7 @@
 #define IDC_STAREC           403
 #define IDC_PERFOR           404
 #define IDC_USERPROFILE      405
-#define IDC_ERRORREPORT      406
+
 
 /* System settings */
 #define IDD_SYSSETTINGS         800

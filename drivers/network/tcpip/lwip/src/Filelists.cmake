@@ -253,13 +253,13 @@ set(lwipallapps_SRCS
 )
 
 # Generate lwip/init.h (version info)
-configure_file(${LWIP_DIR}/src/include/lwip/init.h.cmake.in ${LWIP_DIR}/src/include/lwip/init.h)
+configure_file(${LWIP_DIR}/src/include/lwip/init.h.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/lwip/init.h)
 
 # Documentation
 set(DOXYGEN_DIR ${LWIP_DIR}/doc/doxygen)
 set(DOXYGEN_OUTPUT_DIR output)
 set(DOXYGEN_IN  ${LWIP_DIR}/doc/doxygen/lwip.Doxyfile.cmake.in)
-set(DOXYGEN_OUT ${LWIP_DIR}/doc/doxygen/lwip.Doxyfile)
+set(DOXYGEN_OUT ${CMAKE_CURRENT_BINARY_DIR}/lwip.Doxyfile)
 configure_file(${DOXYGEN_IN} ${DOXYGEN_OUT})
 
 #find_package(Doxygen)

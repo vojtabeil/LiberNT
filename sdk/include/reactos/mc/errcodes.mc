@@ -18,6 +18,7 @@ SeverityNames=(Success=0x0:STATUS_SEVERITY_SUCCESS
 FacilityNames=(System=0x0:FACILITY_SYSTEM
                ITF=0x4:FACILITY_ITF
                WIN32=0x7:FACILITY_GENERAL
+               CERT=0xB:FACILITY_CERT
               )
 
 LanguageNames=(English=0x409:MSG00409
@@ -811,19 +812,19 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_REM_NOT_LIST
 Language=English
-ReactOS cannot find the network path. Verify that the network path is correct and the destination computer is not busy or turned off. If ReactOS still cannot find the network path, contact your network administrator.
+LiberNT cannot find the network path. Verify that the network path is correct and the destination computer is not busy or turned off. If LiberNT still cannot find the network path, contact your network administrator.
 .
 Language=Russian
 Невозможно найти сетевой путь. Убедитесь, что сетевой путь указан верно, а конечный компьютер включен и не занят. Если система вновь не сможет найти путь, обратитесь к сетевому администратору.
 .
 Language=Polish
-System ReactOS nie może odnaleźć ścieżki sieciowej. Sprawdź, czy ścieżka sieciowa jest poprawna i czy komputer docelowy nie jest zajęty lub wyłączony. Jeśli system ReactOS nadal nie będzie mógł odnaleźć ścieżki sieciowej, skontaktuj się z administratorem sieci.
+System LiberNT nie może odnaleźć ścieżki sieciowej. Sprawdź, czy ścieżka sieciowa jest poprawna i czy komputer docelowy nie jest zajęty lub wyłączony. Jeśli system LiberNT nadal nie będzie mógł odnaleźć ścieżki sieciowej, skontaktuj się z administratorem sieci.
 .
 Language=Romanian
 Calea în rețea nu a fost găsită. Asigurați-vă că este corectă și că destinația în rețea este disponibilă fizic. Dacă veți întâmpina această problemă în continuare, contactați administratorul de rețea.
 .
 Language=Japanese
-ReactOSでネットワークパスが見つかりません。ネットワークパスが正しく、宛先コンピュータがビジー状態または電源オフになっていないことを確認します。それでもReactOSがネットワークパスを見つけられない場合は、ネットワーク管理者に連絡してください。
+LiberNTでネットワークパスが見つかりません。ネットワークパスが正しく、宛先コンピュータがビジー状態または電源オフになっていないことを確認します。それでもLiberNTがネットワークパスを見つけられない場合は、ネットワーク管理者に連絡してください。
 .
 
 MessageId=52
@@ -3363,7 +3364,7 @@ Language=Romanian
 Fișierul imagine «%1» este valid, însă nu pentru tipul mașinii de calcul curente.
 .
 Language=Japanese
-このバージョンの %1 は、実行している ReactOS のバージョンと互換性がありません。コンピュータのシステム情報を確認してから、ソフトウェア発行元に連絡してください。
+このバージョンの %1 は、実行している LiberNT のバージョンと互換性がありません。コンピュータのシステム情報を確認してから、ソフトウェア発行元に連絡してください。
 .
 
 MessageId=217
@@ -4648,7 +4649,7 @@ Language=Romanian
 The SAM database on a Windows Server is significantly out of synchronization with the copy on the Domain Controller. A complete synchronization is required.
 .
 Language=Japanese
-ReactOS Server上のSAMデータベースがドメイン コントローラー上のコピーと同期していません。完全な同期が必要です。
+LiberNT Server上のSAMデータベースがドメイン コントローラー上のコピーと同期していません。完全な同期が必要です。
 .
 
 MessageId=570
@@ -4668,7 +4669,7 @@ Language=Romanian
 The NtCreateFile API failed. This error should never be returned to an application, it is a place holder for the Windows Lan Manager Redirector to use in its internal error mapping routines.
 .
 Language=Japanese
-NtCreateFile APIが失敗しました。このエラーはReactOS Lan Manager Redirectorが内部のエラーマップルーチンで使用するプレースホルダーです。
+NtCreateFile APIが失敗しました。このエラーはLiberNT Lan Manager Redirectorが内部のエラーマップルーチンで使用するプレースホルダーです。
 .
 
 MessageId=571
@@ -4868,7 +4869,7 @@ Language=Romanian
 A Windows Server has an incorrect configuration.
 .
 Language=Japanese
-ReactOSサーバーの構成が正しくありません。
+LiberNTサーバーの構成が正しくありません。
 .
 
 MessageId=582
@@ -5156,19 +5157,19 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_LOST_WRITEBEHIND_DATA
 Language=English
-ReactOS was unable to save all the data for the file %hs. The data has been lost. This error may be caused by a failure of your computer hardware or network connection. Please try to save this file elsewhere.
+LiberNT was unable to save all the data for the file %hs. The data has been lost. This error may be caused by a failure of your computer hardware or network connection. Please try to save this file elsewhere.
 .
 Language=Russian
-ReactOS was unable to save all the data for the file %hs. The data has been lost. This error may be caused by a failure of your computer hardware or network connection. Please try to save this file elsewhere.
+LiberNT was unable to save all the data for the file %hs. The data has been lost. This error may be caused by a failure of your computer hardware or network connection. Please try to save this file elsewhere.
 .
 Language=Polish
-System ReactOS nie mógł zapisać wszystkich danych dla pliku %hs. Dane zostały utracone. Powodem tego błędu mogła być awaria sprzętu komputerowego lub połączenia sieciowego. Spróbuj zapisać ten plik w innym miejscu.
+System LiberNT nie mógł zapisać wszystkich danych dla pliku %hs. Dane zostały utracone. Powodem tego błędu mogła być awaria sprzętu komputerowego lub połączenia sieciowego. Spróbuj zapisać ten plik w innym miejscu.
 .
 Language=Romanian
-ReactOS was unable to save all the data for the file %hs. The data has been lost. This error may be caused by a failure of your computer hardware or network connection. Please try to save this file elsewhere.
+LiberNT was unable to save all the data for the file %hs. The data has been lost. This error may be caused by a failure of your computer hardware or network connection. Please try to save this file elsewhere.
 .
 Language=Japanese
-ReactOS はファイル %hs のすべてのデータを保存できませんでした。
+LiberNT はファイル %hs のすべてのデータを保存できませんでした。
 このエラーは、コンピュータのハードウェアまたはネットワーク接続の障害によって発生した可能性があります。このファイルを別の場所に保存してください。
 .
 
@@ -5695,7 +5696,7 @@ Language=Romanian
 The evaluation period for this installation of Windows has expired. This system will shutdown in 1 hour. To restore access to this installation of Windows, please upgrade this installation using a licensed distribution of this product.
 .
 Language=Japanese
-このReactOSインストールの評価期間が終了しました。このシステムは1時間後にシャットダウンされます。ReactOSのこのインストールへのアクセスを回復するには、この製品のライセンス配布を使用してこのインストールをアップグレードしてください。
+このLiberNTインストールの評価期間が終了しました。このシステムは1時間後にシャットダウンされます。LiberNTのこのインストールへのアクセスを回復するには、この製品のライセンス配布を使用してこのインストールをアップグレードしてください。
 .
 
 MessageId=623
@@ -5703,19 +5704,19 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_ILLEGAL_DLL_RELOCATION
 Language=English
-The system DLL %hs was relocated in memory. The application will not run properly. The relocation occurred because the DLL %hs occupied an address range reserved for ReactOS system DLLs. The vendor supplying the DLL should be contacted for a new DLL.
+The system DLL %hs was relocated in memory. The application will not run properly. The relocation occurred because the DLL %hs occupied an address range reserved for LiberNT system DLLs. The vendor supplying the DLL should be contacted for a new DLL.
 .
 Language=Russian
-The system DLL %hs was relocated in memory. The application will not run properly. The relocation occurred because the DLL %hs occupied an address range reserved for ReactOS system DLLs. The vendor supplying the DLL should be contacted for a new DLL.
+The system DLL %hs was relocated in memory. The application will not run properly. The relocation occurred because the DLL %hs occupied an address range reserved for LiberNT system DLLs. The vendor supplying the DLL should be contacted for a new DLL.
 .
 Language=Polish
-Biblioteka systemowa DLL %hs została zrelokowana w pamięci. Aplikacja nie będzie działać prawidłowo. Powodem relokacji było to, że biblioteka DLL %hs zajmowała zakres adresów zarezerwowany dla ReactOS systemowej biblioteki DLL. Należy skontaktować się z dostawcą w sprawie nowej biblioteki DLL.
+Biblioteka systemowa DLL %hs została zrelokowana w pamięci. Aplikacja nie będzie działać prawidłowo. Powodem relokacji było to, że biblioteka DLL %hs zajmowała zakres adresów zarezerwowany dla LiberNT systemowej biblioteki DLL. Należy skontaktować się z dostawcą w sprawie nowej biblioteki DLL.
 .
 Language=Romanian
-The system DLL %hs was relocated in memory. The application will not run properly. The relocation occurred because the DLL %hs occupied an address range reserved for ReactOS system DLLs. The vendor supplying the DLL should be contacted for a new DLL.
+The system DLL %hs was relocated in memory. The application will not run properly. The relocation occurred because the DLL %hs occupied an address range reserved for LiberNT system DLLs. The vendor supplying the DLL should be contacted for a new DLL.
 .
 Language=Japanese
-システム DLL %hs がメモリ内に再配置されました。アプリは適切に動作しないかもしれません。再配置は、DLL %hs が ReactOS システム DLL 用に予約されているアドレス範囲を占有していたために発生しました。DLL を提供しているベンダーに連絡して、新しい DLL を入手してください。
+システム DLL %hs がメモリ内に再配置されました。アプリは適切に動作しないかもしれません。再配置は、DLL %hs が LiberNT システム DLL 用に予約されているアドレス範囲を占有していたために発生しました。DLL を提供しているベンダーに連絡して、新しい DLL を入手してください。
 .
 
 MessageId=624
@@ -5943,16 +5944,16 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_COMMITMENT_MINIMUM
 Language=English
-Your system is low on virtual memory. ReactOS is increasing the size of your virtual memory paging file. During this process, memory requests for some applications may be denied. For more information, see Help.
+Your system is low on virtual memory. LiberNT is increasing the size of your virtual memory paging file. During this process, memory requests for some applications may be denied. For more information, see Help.
 .
 Language=Russian
-Your system is low on virtual memory. ReactOS is increasing the size of your virtual memory paging file. During this process, memory requests for some applications may be denied. For more information, see Help.
+Your system is low on virtual memory. LiberNT is increasing the size of your virtual memory paging file. During this process, memory requests for some applications may be denied. For more information, see Help.
 .
 Language=Polish
-System ma za mało pamięci wirtualnej. System ReactOS zwiększa rozmiar pliku stronicowania pamięci wirtualnej. W czasie trwania tego procesu, może wystąpić odmowa na żądania pamięci niektórych aplikacji. Więcej informacji możesz znaleźć w Pomocy.
+System ma za mało pamięci wirtualnej. System LiberNT zwiększa rozmiar pliku stronicowania pamięci wirtualnej. W czasie trwania tego procesu, może wystąpić odmowa na żądania pamięci niektórych aplikacji. Więcej informacji możesz znaleźć w Pomocy.
 .
 Language=Romanian
-Your system is low on virtual memory. ReactOS is increasing the size of your virtual memory paging file. During this process, memory requests for some applications may be denied. For more information, see Help.
+Your system is low on virtual memory. LiberNT is increasing the size of your virtual memory paging file. During this process, memory requests for some applications may be denied. For more information, see Help.
 .
 Language=Japanese
 システムの仮想メモリが不足しています。このプロセスの間、一部のアプリケーションのメモリ要求が拒否されることがあります。詳細については、ヘルプを参照してください。
@@ -6085,19 +6086,19 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_DS_VERSION_CHECK_FAILURE
 Language=English
-This version of ReactOS is not compatible with the behavior version of directory forest, domain or domain controller.
+This version of LiberNT is not compatible with the behavior version of directory forest, domain or domain controller.
 .
 Language=Russian
-This version of ReactOS is not compatible with the behavior version of directory forest, domain or domain controller.
+This version of LiberNT is not compatible with the behavior version of directory forest, domain or domain controller.
 .
 Language=Polish
-Ta wersja systemu ReactOS jest niezgodna z wersją zachowania lasu katalogów, domeny lub kontrolera domeny.
+Ta wersja systemu LiberNT jest niezgodna z wersją zachowania lasu katalogów, domeny lub kontrolera domeny.
 .
 Language=Romanian
-This version of ReactOS is not compatible with the behavior version of directory forest, domain or domain controller.
+This version of LiberNT is not compatible with the behavior version of directory forest, domain or domain controller.
 .
 Language=Japanese
-このバージョンのReactOSは、ディレクトリ フォレスト、ドメイン、またはドメイン コントローラの動作バージョンと互換性がありません。
+このバージョンのLiberNTは、ディレクトリ フォレスト、ドメイン、またはドメイン コントローラの動作バージョンと互換性がありません。
 .
 
 MessageId=644
@@ -6357,7 +6358,7 @@ Language=Romanian
 The %hs display driver has stopped working normally. Save your work and reboot the system to restore full display functionality. The next time you reboot the machine a dialog will be displayed giving you a chance to report this failure to Microsoft.
 .
 Language=Japanese
-ディスプレイドライバ%hsが正常に動作しなくなりました。作業を保存してシステムを再起動し、ディスプレイ機能を完全に回復してください。次にマシンを再起動するとダイアログが表示され、ReactOSにこの障害を報告することができます。
+ディスプレイドライバ%hsが正常に動作しなくなりました。作業を保存してシステムを再起動し、ディスプレイ機能を完全に回復してください。次にマシンを再起動するとダイアログが表示され、LiberNTにこの障害を報告することができます。
 .
 
 MessageId=665
@@ -6639,7 +6640,7 @@ Language=Romanian
 During the translation of a global identifier (GUID) to a Windows security ID (SID), no administratively-defined GUID prefix was found. A substitute prefix was used, which will not compromise system security. However, this may provide a more restrictive access than intended.
 .
 Language=Japanese
-グローバル識別子 (GUID)  から ReactOS セキュリティ ID (SID)  への変換中に、管理上定義された GUID 接頭辞が見つかりませんでした。システムのセキュリティを損なわない代替接頭辞が使用されました。代替接頭辞が使用されました。
+グローバル識別子 (GUID)  から LiberNT セキュリティ ID (SID)  への変換中に、管理上定義された GUID 接頭辞が見つかりませんでした。システムのセキュリティを損なわない代替接頭辞が使用されました。代替接頭辞が使用されました。
 .
 
 MessageId=681
@@ -7507,19 +7508,19 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_FIRMWARE_UPDATED
 Language=English
-ReactOS has detected that the system firmware (BIOS) was updated [previous firmware date = %2, current firmware date %3].
+LiberNT has detected that the system firmware (BIOS) was updated [previous firmware date = %2, current firmware date %3].
 .
 Language=Russian
-ReactOS has detected that the system firmware (BIOS) was updated [previous firmware date = %2, current firmware date %3].
+LiberNT has detected that the system firmware (BIOS) was updated [previous firmware date = %2, current firmware date %3].
 .
 Language=Polish
-System ReactOS wykrył, że oprogramowanie układowe systemu (BIOS) zostało zaktualizowane [poprzednia data oprogramowania układowego = %2, bieżąca data oprogramowania układowego %3].
+System LiberNT wykrył, że oprogramowanie układowe systemu (BIOS) zostało zaktualizowane [poprzednia data oprogramowania układowego = %2, bieżąca data oprogramowania układowego %3].
 .
 Language=Romanian
-ReactOS has detected that the system firmware (BIOS) was updated [previous firmware date = %2, current firmware date %3].
+LiberNT has detected that the system firmware (BIOS) was updated [previous firmware date = %2, current firmware date %3].
 .
 Language=Japanese
-ReactOS はシステムのファームウェア (BIOS)  が更新されたことを検出しました [以前のファームウェアの日付 = %2、現在のファームウェアの日付 %3]。
+LiberNT はシステムのファームウェア (BIOS)  が更新されたことを検出しました [以前のファームウェアの日付 = %2、現在のファームウェアの日付 %3]。
 .
 
 MessageId=729
@@ -10310,19 +10311,19 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_OLD_WIN_VERSION
 Language=English
-The specified program requires a newer version of ReactOS.
+The specified program requires a newer version of LiberNT.
 .
 Language=Russian
-The specified program requires a newer version of ReactOS.
+The specified program requires a newer version of LiberNT.
 .
 Language=Polish
-Określony program wymaga nowszej wersji systemu ReactOS.
+Określony program wymaga nowszej wersji systemu LiberNT.
 .
 Language=Romanian
-The specified program requires a newer version of ReactOS.
+The specified program requires a newer version of LiberNT.
 .
 Language=Japanese
-指定されたプログラムには新しいバージョンの ReactOS が必要です。
+指定されたプログラムには新しいバージョンの LiberNT が必要です。
 .
 
 MessageId=1151
@@ -10342,7 +10343,7 @@ Language=Romanian
 The specified program is not a Windows or MS-DOS program.
 .
 Language=Japanese
-指定されたプログラムは ReactOS または MS-DOS プログラムではありません。
+指定されたプログラムは LiberNT または MS-DOS プログラムではありません。
 .
 
 MessageId=1152
@@ -10370,19 +10371,19 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_RMODE_APP
 Language=English
-The specified program was written for an earlier version of ReactOS.
+The specified program was written for an earlier version of LiberNT.
 .
 Language=Russian
-The specified program was written for an earlier version of ReactOS.
+The specified program was written for an earlier version of LiberNT.
 .
 Language=Polish
-Określony program został napisany dla starszej wersji systemu ReactOS.
+Określony program został napisany dla starszej wersji systemu LiberNT.
 .
 Language=Romanian
-The specified program was written for an earlier version of ReactOS.
+The specified program was written for an earlier version of LiberNT.
 .
 Language=Japanese
-指定されたプログラムは以前のバージョンの ReactOS 用に作成されました。
+指定されたプログラムは以前のバージョンの LiberNT 用に作成されました。
 .
 
 MessageId=1154
@@ -11553,16 +11554,16 @@ Language=English
 The network location cannot be reached. For information about network troubleshooting, see ReactOS Help.
 .
 Language=Russian
-Сетевая папка недоступна. За информацией о разрешении проблем в сети обратитесь к справочной системе ReactOS.
+Сетевая папка недоступна. За информацией о разрешении проблем в сети обратитесь к справочной системе LiberNT.
 .
 Language=Polish
-Lokalizacja sieciowa jest nieosiągalna. Informacje na temat rozwiązywania problemów z siecią można znaleźć w Pomocy systemu ReactOS.
+Lokalizacja sieciowa jest nieosiągalna. Informacje na temat rozwiązywania problemów z siecią można znaleźć w Pomocy systemu LiberNT.
 .
 Language=Romanian
 The network location cannot be reached. For information about network troubleshooting, see ReactOS Help.
 .
 Language=Japanese
-ネットワークの場所にアクセスできません。ネットワークのトラブルシューティングについては、ReactOSヘルプを参照してください。
+ネットワークの場所にアクセスできません。ネットワークのトラブルシューティングについては、LiberNTヘルプを参照してください。
 .
 
 MessageId=1232
@@ -11573,16 +11574,16 @@ Language=English
 The network location cannot be reached. For information about network troubleshooting, see ReactOS Help.
 .
 Language=Russian
-Сетевая папка недоступна. За информацией о разрешении проблем в сети обратитесь к справочной системе ReactOS.
+Сетевая папка недоступна. За информацией о разрешении проблем в сети обратитесь к справочной системе LiberNT.
 .
 Language=Polish
-Lokalizacja sieciowa jest nieosiągalna. Informacje na temat rozwiązywania problemów z siecią można znaleźć w Pomocy systemu ReactOS.
+Lokalizacja sieciowa jest nieosiągalna. Informacje na temat rozwiązywania problemów z siecią można znaleźć w Pomocy systemu LiberNT.
 .
 Language=Romanian
 The network location cannot be reached. For information about network troubleshooting, see ReactOS Help.
 .
 Language=Japanese
-ネットワークの場所にアクセスできません。ネットワークのトラブルシューティングについては、ReactOSヘルプを参照してください。
+ネットワークの場所にアクセスできません。ネットワークのトラブルシューティングについては、LiberNTヘルプを参照してください。
 .
 
 MessageId=1233
@@ -11593,16 +11594,16 @@ Language=English
 The network location cannot be reached. For information about network troubleshooting, see ReactOS Help.
 .
 Language=Russian
-Сетевая папка недоступна. За информацией о разрешении проблем в сети обратитесь к справочной системе ReactOS.
+Сетевая папка недоступна. За информацией о разрешении проблем в сети обратитесь к справочной системе LiberNT.
 .
 Language=Polish
-Lokalizacja sieciowa jest nieosiągalna. Informacje na temat rozwiązywania problemów z siecią można znaleźć w Pomocy systemu ReactOS.
+Lokalizacja sieciowa jest nieosiągalna. Informacje na temat rozwiązywania problemów z siecią można znaleźć w Pomocy systemu LiberNT.
 .
 Language=Romanian
 The network location cannot be reached. For information about network troubleshooting, see ReactOS Help.
 .
 Language=Japanese
-ネットワークの場所にアクセスできません。ネットワークのトラブルシューティングについては、ReactOSヘルプを参照してください。
+ネットワークの場所にアクセスできません。ネットワークのトラブルシューティングについては、LiberNTヘルプを参照してください。
 .
 
 MessageId=1234
@@ -12022,7 +12023,7 @@ Language=Romanian
 This operation is not supported on a computer running Windows Server 2003 for Small Business Server.
 .
 Language=Japanese
-この操作は、ReactOS Server を実行しているコンピュータではサポートされていません。
+この操作は、LiberNT Server を実行しているコンピュータではサポートされていません。
 .
 
 MessageId=1255
@@ -12053,16 +12054,16 @@ Language=English
 The remote system is not available. For information about network troubleshooting, see ReactOS Help.
 .
 Language=Russian
-Удаленная система недоступна. За информацией о разрешении проблем в сети, обратитесь к справочной системе ReactOS.
+Удаленная система недоступна. За информацией о разрешении проблем в сети, обратитесь к справочной системе LiberNT.
 .
 Language=Polish
-System zdalny jest niedostępny. Aby uzyskać informacje dotyczące rozwiązywania problemów z siecią, zobacz Pomoc systemu ReactOS.
+System zdalny jest niedostępny. Aby uzyskać informacje dotyczące rozwiązywania problemów z siecią, zobacz Pomoc systemu LiberNT.
 .
 Language=Romanian
 The remote system is not available. For information about network troubleshooting, see ReactOS Help.
 .
 Language=Japanese
-リモート システムが使用できません。ネットワークのトラブルシューティングについては、ReactOSヘルプを参照してください。
+リモート システムが使用できません。ネットワークのトラブルシューティングについては、LiberNTヘルプを参照してください。
 .
 
 MessageId=1257
@@ -12130,7 +12131,7 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_ACCESS_DISABLED_BY_POLICY
 Language=English
-ReactOS cannot open this program because it has been prevented by a software restriction policy. For more information, open Event Viewer or contact your system administrator.
+LiberNT cannot open this program because it has been prevented by a software restriction policy. For more information, open Event Viewer or contact your system administrator.
 .
 Language=Russian
 Эта программа заблокирована групповой политикой. За дополнительными сведениями обращайтесь к системному администратору.
@@ -12139,7 +12140,7 @@ Language=Polish
 Ten program jest blokowany przez zasady grupy. Aby uzyskać więcej informacji, otwórz Podgląd zdarzeń lub skontaktuj się z administratorem systemu.
 .
 Language=Romanian
-ReactOS cannot open this program because it has been prevented by a software restriction policy. For more information, open Event Viewer or contact your system administrator.
+LiberNT cannot open this program because it has been prevented by a software restriction policy. For more information, open Event Viewer or contact your system administrator.
 .
 Language=Japanese
 このプログラムはグループ ポリシーでブロックされています。詳細については、システム管理者にお問い合わせください。
@@ -12450,19 +12451,19 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_ACCESS_DISABLED_WEBBLADE
 Language=English
-ReactOS cannot open this program since it has been disabled.
+LiberNT cannot open this program since it has been disabled.
 .
 Language=Russian
-ReactOS не удается запустить эту программу, так как она отключена.
+LiberNT не удается запустить эту программу, так как она отключена.
 .
 Language=Polish
-System ReactOS nie może otworzyć tego programu, ponieważ został on wyłączony.
+System LiberNT nie może otworzyć tego programu, ponieważ został on wyłączony.
 .
 Language=Romanian
-ReactOS cannot open this program since it has been disabled.
+LiberNT cannot open this program since it has been disabled.
 .
 Language=Japanese
-ReactOSが無効になっているため、このプログラムを開くことができません。
+LiberNTが無効になっているため、このプログラムを開くことができません。
 .
 
 MessageId=1278
@@ -12470,19 +12471,19 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_ACCESS_DISABLED_WEBBLADE_TAMPER
 Language=English
-ReactOS cannot open this program because the license enforcement system has been tampered with or become corrupted.
+LiberNT cannot open this program because the license enforcement system has been tampered with or become corrupted.
 .
 Language=Russian
-ReactOS не удается открыть эту программу, так как система учета лицензий изменена или повреждена.
+LiberNT не удается открыть эту программу, так как система учета лицензий изменена или повреждена.
 .
 Language=Polish
-System ReactOS nie może otworzyć tego programu, ponieważ system wymuszania licencji został zmieniony lub uszkodzony.
+System LiberNT nie może otworzyć tego programu, ponieważ system wymuszania licencji został zmieniony lub uszkodzony.
 .
 Language=Romanian
-ReactOS cannot open this program because the license enforcement system has been tampered with or become corrupted.
+LiberNT cannot open this program because the license enforcement system has been tampered with or become corrupted.
 .
 Language=Japanese
-ライセンス実施システムが改ざんされたか破損しているため、ReactOS でこのプログラムを開くことができません。
+ライセンス実施システムが改ざんされたか破損しているため、LiberNT でこのプログラムを開くことができません。
 .
 
 MessageId=1279
@@ -12863,7 +12864,7 @@ Language=Romanian
 An operation attempted to exceed an implementation-defined limit.
 .
 Language=Japanese
-サービス ReactOS 管理コンソール (MMC) スナップイン (services.msc) およびローカルセキュリティ設定MMCスナップイン (secpol.msc) を使用して、サービス構成とアカウント構成を表示できます。
+サービス LiberNT 管理コンソール (MMC) スナップイン (services.msc) およびローカルセキュリティ設定MMCスナップイン (secpol.msc) を使用して、サービス構成とアカウント構成を表示できます。
 .
 
 MessageId=1298
@@ -16191,16 +16192,16 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_INSTALL_SERVICE_FAILURE
 Language=English
-The ReactOS Installer service could not be accessed. This can occur if you are running ReactOS in safe mode, or if the ReactOS Installer is not correctly installed. Contact your support personnel for assistance.
+The ReactOS Installer service could not be accessed. This can occur if you are running LiberNT in safe mode, or if the ReactOS Installer is not correctly installed. Contact your support personnel for assistance.
 .
 Language=Russian
-The ReactOS Installer service could not be accessed. This can occur if you are running ReactOS in safe mode, or if the ReactOS Installer is not correctly installed. Contact your support personnel for assistance.
+The ReactOS Installer service could not be accessed. This can occur if you are running LiberNT in safe mode, or if the ReactOS Installer is not correctly installed. Contact your support personnel for assistance.
 .
 Language=Polish
-Nie można uzyskać dostępu do usługi Instalator ReactOS. Może mieć to miejsce, jeśli system ReactOS jest uruchomiony w trybie awaryjnym lub Instalator ReactOS jest niepoprawnie zainstalowany. Skontaktuj się z pomocą techniczną, aby uzyskać pomoc.
+Nie można uzyskać dostępu do usługi Instalator LiberNT. Może mieć to miejsce, jeśli system LiberNT jest uruchomiony w trybie awaryjnym lub Instalator LiberNT jest niepoprawnie zainstalowany. Skontaktuj się z pomocą techniczną, aby uzyskać pomoc.
 .
 Language=Romanian
-The ReactOS Installer service could not be accessed. This can occur if you are running ReactOS in safe mode, or if the ReactOS Installer is not correctly installed. Contact your support personnel for assistance.
+The ReactOS Installer service could not be accessed. This can occur if you are running LiberNT in safe mode, or if the ReactOS Installer is not correctly installed. Contact your support personnel for assistance.
 .
 Language=Japanese
 ReactOS Installer サービスにアクセスできませんでした。ReactOS Installerが正しくインストールされていない場合に発生する可能性があります。サポート担当者にお問い合わせください。
@@ -16431,19 +16432,19 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_INSTALL_PACKAGE_VERSION
 Language=English
-This installation package cannot be installed by the ReactOS Installer service. You must install a ReactOS service pack that contains a newer version of the ReactOS Installer service.
+This installation package cannot be installed by the ReactOS Installer service. You must install a LiberNT service pack that contains a newer version of the ReactOS Installer service.
 .
 Language=Russian
-This installation package cannot be installed by the ReactOS Installer service. You must install a ReactOS service pack that contains a newer version of the ReactOS Installer service.
+This installation package cannot be installed by the ReactOS Installer service. You must install a LiberNT service pack that contains a newer version of the ReactOS Installer service.
 .
 Language=Polish
-Usługa Instalator ReactOS nie może zainstalować tego pakietu instalacyjnego. Musisz zainstalować dodatek ReactOS Service Pack, zawierający nowszą wersję usługi Instalator ReactOS.
+Usługa Instalator LiberNT nie może zainstalować tego pakietu instalacyjnego. Musisz zainstalować dodatek LiberNT Service Pack, zawierający nowszą wersję usługi Instalator LiberNT.
 .
 Language=Romanian
-This installation package cannot be installed by the ReactOS Installer service. You must install a ReactOS service pack that contains a newer version of the ReactOS Installer service.
+This installation package cannot be installed by the ReactOS Installer service. You must install a LiberNT service pack that contains a newer version of the ReactOS Installer service.
 .
 Language=Japanese
-このインストール パッケージは ReactOS Installer サービスではインストールできません。新しいバージョンのReactOS Installerサービスが含まれているReactOSサービスパックをインストールする必要があります。
+このインストール パッケージは ReactOS Installer サービスではインストールできません。新しいバージョンのReactOS Installerサービスが含まれているLiberNTサービスパックをインストールする必要があります。
 .
 
 MessageId=1614
@@ -16597,7 +16598,7 @@ Language=Russian
 There was an error starting the ReactOS Installer service user interface. Contact your support personnel.
 .
 Language=Polish
-Podczas uruchamiania interfejsu użytkownika usługi Instalator ReactOS wystąpił błąd. Skontaktuj się z personelem technicznym.
+Podczas uruchamiania interfejsu użytkownika usługi Instalator LiberNT wystąpił błąd. Skontaktuj się z personelem technicznym.
 .
 Language=Romanian
 There was an error starting the ReactOS Installer service user interface. Contact your support personnel.
@@ -16797,7 +16798,7 @@ Language=Russian
 The ReactOS Installer service failed to start. Contact your support personnel.
 .
 Language=Polish
-Nie można uruchomić usługi Instalator ReactOS. Skontaktuj się z działem Pomocy technicznej.
+Nie można uruchomić usługi Instalator LiberNT. Skontaktuj się z działem Pomocy technicznej.
 .
 Language=Romanian
 The ReactOS Installer service failed to start. Contact your support personnel.
@@ -16911,19 +16912,19 @@ Severity=Success
 Facility=System
 SymbolicName=ERROR_PATCH_PACKAGE_UNSUPPORTED
 Language=English
-This patch package cannot be processed by the ReactOS Installer service. You must install a ReactOS service pack that contains a newer version of the ReactOS Installer service.
+This patch package cannot be processed by the ReactOS Installer service. You must install a LiberNT service pack that contains a newer version of the ReactOS Installer service.
 .
 Language=Russian
-This patch package cannot be processed by the ReactOS Installer service. You must install a ReactOS service pack that contains a newer version of the ReactOS Installer service.
+This patch package cannot be processed by the ReactOS Installer service. You must install a LiberNT service pack that contains a newer version of the ReactOS Installer service.
 .
 Language=Polish
-Usługa Instalator ReactOS nie może przetworzyć tego pakietu aktualizacji. Musisz zainstalować dodatek ReactOS Service Pack, zawierający nowszą wersję usługi Instalator ReactOS.
+Usługa Instalator LiberNT nie może przetworzyć tego pakietu aktualizacji. Musisz zainstalować dodatek LiberNT Service Pack, zawierający nowszą wersję usługi Instalator LiberNT.
 .
 Language=Romanian
-This patch package cannot be processed by the ReactOS Installer service. You must install a ReactOS service pack that contains a newer version of the ReactOS Installer service.
+This patch package cannot be processed by the ReactOS Installer service. You must install a LiberNT service pack that contains a newer version of the ReactOS Installer service.
 .
 Language=Japanese
-この更新パッケージは ReactOS Installer サービスで処理できません。新しいバージョンの ReactOS Installer サービスが含まれている ReactOS サービス パックをインストールする必要があります。
+この更新パッケージは ReactOS Installer サービスで処理できません。新しいバージョンの ReactOS Installer サービスが含まれている LiberNT サービス パックをインストールする必要があります。
 .
 
 MessageId=1638
@@ -17017,7 +17018,7 @@ Language=Russian
 The upgrade patch cannot be installed by the ReactOS Installer service because the program to be upgraded may be missing, or the upgrade patch may update a different version of the program. Verify that the program to be upgraded exists on your computer and that you have the correct upgrade patch.
 .
 Language=Polish
-Uaktualnienia nie można zainstalować przez usługę Instalator ReactOS, ponieważ nie ma programu do uaktualnienia albo uaktualnienie jest przeznaczone do innej wersji tego programu. Sprawdź, czy program, który ma być uaktualniony, znajduje się na dysku i czy masz prawidłowe uaktualnienie.
+Uaktualnienia nie można zainstalować przez usługę Instalator LiberNT, ponieważ nie ma programu do uaktualnienia albo uaktualnienie jest przeznaczone do innej wersji tego programu. Sprawdź, czy program, który ma być uaktualniony, znajduje się na dysku i czy masz prawidłowe uaktualnienie.
 .
 Language=Romanian
 The upgrade patch cannot be installed by the ReactOS Installer service because the program to be upgraded may be missing, or the upgrade patch may update a different version of the program. Verify that the program to be upgraded exists on your computer and that you have the correct upgrade patch.
@@ -17077,13 +17078,13 @@ Language=Russian
 The ReactOS Installer does not permit installation from a Remote Desktop Connection.
 .
 Language=Polish
-Instalator ReactOS nie zezwala na instalację przy użyciu podłączania pulpitu zdalnego.
+Instalator LiberNT nie zezwala na instalację przy użyciu podłączania pulpitu zdalnego.
 .
 Language=Romanian
 The ReactOS Installer does not permit installation from a Remote Desktop Connection.
 .
 Language=Japanese
-ReactOS インストーラは、リモート デスクトップ接続からのインストールを許可しません。
+LiberNT インストーラは、リモート デスクトップ接続からのインストールを許可しません。
 .
 
 MessageId=1654
@@ -19503,7 +19504,7 @@ Language=Romanian
 The error specified is not a valid Windows RPC error code.
 .
 Language=Japanese
-指定されたエラーは有効な ReactOS RPC エラーコードではありません。
+指定されたエラーは有効な LiberNT RPC エラーコードではありません。
 .
 
 MessageId=1824
@@ -25145,7 +25146,7 @@ Language=Romanian
 This computer cannot be made a member of a cluster because it does not have the correct version of Windows installed.
 .
 Language=Japanese
-このコンピュータには正しいバージョンのReactOSがインストールされていないため、クラスタのメンバにできません。
+このコンピュータには正しいバージョンのLiberNTがインストールされていないため、クラスタのメンバにできません。
 .
 
 MessageId=5900
@@ -25245,7 +25246,7 @@ Language=Romanian
 One or more nodes in the cluster are running a version of Windows that does not support this operation.
 .
 Language=Japanese
-クラスタ内の1つまたは複数のノードで、この操作をサポートしないバージョンのReactOSが実行されています。
+クラスタ内の1つまたは複数のノードで、この操作をサポートしないバージョンのLiberNTが実行されています。
 .
 
 MessageId=5905
@@ -32108,7 +32109,7 @@ Language=Romanian
 The directory cannot validate the proposed naming context name because it does not hold a replica of the naming context above the proposed naming context. Please ensure that the domain naming master role is held by a server that is configured as a global catalog server, and that the server is up to date with its replication partners. (Applies only to Windows 2000 Domain Naming masters)
 .
 Language=Japanese
-ディレクトリが提案されたネーミング コンテキストの上のネーミング コンテキストのレプリカを保持していないため、提案されたネーミング コンテキスト名を検証できません。グローバルカタログサーバーとして構成されているサーバーによってドメインネーミングマスターの役割が保持され、そのサーバーがレプリケーションパートナーと最新であることを確認してください。 (ReactOS 2000ドメイン ネーミング マスターにのみ適用されます) 。
+ディレクトリが提案されたネーミング コンテキストの上のネーミング コンテキストのレプリカを保持していないため、提案されたネーミング コンテキスト名を検証できません。グローバルカタログサーバーとして構成されているサーバーによってドメインネーミングマスターの役割が保持され、そのサーバーがレプリケーションパートナーと最新であることを確認してください。 (LiberNT 2000ドメイン ネーミング マスターにのみ適用されます) 。
 .
 
 MessageId=8496
@@ -32674,7 +32675,7 @@ Language=Romanian
 Only DSAs configured to be Global Catalog servers should be allowed to hold the Domain Naming Master FSMO role. (Applies only to Windows 2000 servers)
 .
 Language=Japanese
-グローバルカタログサーバーとして構成されたDSAのみがドメインネーミングマスターFSMOロールを保持できます。 (ReactOS 2000サーバーにのみ適用されます) 。
+グローバルカタログサーバーとして構成されたDSAのみがドメインネーミングマスターFSMOロールを保持できます。 (LiberNT 2000サーバーにのみ適用されます) 。
 .
 
 MessageId=8524
@@ -36373,7 +36374,7 @@ Language=Romanian
 The application directory partition operation failed. The domain controller holding the domain naming master role is down or unable to service the request or is not running Windows Server 2003.
 .
 Language=Japanese
-ドメインネーミングマスターFSMOロールに到達できなかったため、操作は失敗しました。ドメイン ネーミング マスター FSMO ロールを保持するドメイン コントローラーがダウンしているか、要求を処理できないか、ReactOS Server 2003 以降が実行されていません。
+ドメインネーミングマスターFSMOロールに到達できなかったため、操作は失敗しました。ドメイン ネーミング マスター FSMO ロールを保持するドメイン コントローラーがダウンしているか、要求を処理できないか、LiberNT Server 2003 以降が実行されていません。
 .
 
 MessageId=10004
@@ -37153,7 +37154,7 @@ Language=Romanian
 A Windows Sockets implementation may have a limit on the number of applications that may use it simultaneously.
 .
 Language=Japanese
-ReactOS ソケットの実装では、同時に使用できるアプリケーションの数に制限がある場合があります。
+LiberNT ソケットの実装では、同時に使用できるアプリケーションの数に制限がある場合があります。
 .
 
 MessageId=10068
@@ -37273,7 +37274,7 @@ Language=Romanian
 The Windows Sockets version requested is not supported.
 .
 Language=Japanese
-要求された ReactOS ソケットのバージョンはサポートされていません。
+要求された LiberNT ソケットのバージョンはサポートされていません。
 .
 
 MessageId=10093
@@ -38154,586 +38155,6 @@ A reserved policy element was found in the QOS provider-specific buffer.
 .
 Language=Japanese
 QOSプロバイダ固有のバッファで予約されたポリシー要素が見つかりました。
-.
-
-MessageId=12000
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_IO_COMPLETE
-Language=English
-The IO was completed by a filter.
-.
-Language=Russian
-The IO was completed by a filter.
-.
-Language=Polish
-The IO was completed by a filter.
-.
-Language=Romanian
-The IO was completed by a filter.
-.
-Language=Japanese
-IOはフィルターによって完成されました。
-.
-
-MessageId=12001
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_BUFFER_TOO_SMALL
-Language=English
-The buffer is too small to contain the entry. No information has been written to the buffer.
-.
-Language=Russian
-The buffer is too small to contain the entry. No information has been written to the buffer.
-.
-Language=Polish
-The buffer is too small to contain the entry. No information has been written to the buffer.
-.
-Language=Romanian
-The buffer is too small to contain the entry. No information has been written to the buffer.
-.
-Language=Japanese
-バッファが小さすぎてエントリを格納できません。バッファに情報が書き込まれませんでした。
-.
-
-MessageId=12002
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_NO_HANDLER_DEFINED
-Language=English
-A handler was not defined by the filter for this operation.
-.
-Language=Russian
-A handler was not defined by the filter for this operation.
-.
-Language=Polish
-A handler was not defined by the filter for this operation.
-.
-Language=Romanian
-A handler was not defined by the filter for this operation.
-.
-Language=Japanese
-この操作に対するハンドラがフィルターによって定義されていません。
-.
-
-MessageId=12003
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_CONTEXT_ALREADY_DEFINED
-Language=English
-A context is already defined for this object.
-.
-Language=Russian
-A context is already defined for this object.
-.
-Language=Polish
-A context is already defined for this object.
-.
-Language=Romanian
-A context is already defined for this object.
-.
-Language=Japanese
-このオブジェクトにはすでにコンテキストが定義済みです。
-.
-
-MessageId=12004
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_INVALID_ASYNCHRONOUS_REQUEST
-Language=English
-Asynchronous requests are not valid for this operation.
-.
-Language=Russian
-Asynchronous requests are not valid for this operation.
-.
-Language=Polish
-Asynchronous requests are not valid for this operation.
-.
-Language=Romanian
-Asynchronous requests are not valid for this operation.
-.
-Language=Japanese
-この操作では、非同期リクエストは無効です。
-.
-
-MessageId=12005
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_DISALLOW_FAST_IO
-Language=English
-Disallow the Fast IO path for this operation.
-.
-Language=Russian
-Disallow the Fast IO path for this operation.
-.
-Language=Polish
-Disallow the Fast IO path for this operation.
-.
-Language=Romanian
-Disallow the Fast IO path for this operation.
-.
-Language=Japanese
-この操作の Fast IO パスを許可しません。
-.
-
-MessageId=12006
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_INVALID_NAME_REQUEST
-Language=English
-An invalid name request was made. The name requested cannot be retrieved at this time.
-.
-Language=Russian
-An invalid name request was made. The name requested cannot be retrieved at this time.
-.
-Language=Polish
-An invalid name request was made. The name requested cannot be retrieved at this time.
-.
-Language=Romanian
-An invalid name request was made. The name requested cannot be retrieved at this time.
-.
-Language=Japanese
-無効な名前要求が行われました。要求された名前は現在取得できません。
-.
-
-MessageId=12007
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_NOT_SAFE_TO_POST_OPERATION
-Language=English
-Posting this operation to a worker thread for further processing is not safe at this time because it could lead to a system deadlock.
-.
-Language=Russian
-Posting this operation to a worker thread for further processing is not safe at this time because it could lead to a system deadlock.
-.
-Language=Polish
-Posting this operation to a worker thread for further processing is not safe at this time because it could lead to a system deadlock.
-.
-Language=Romanian
-Posting this operation to a worker thread for further processing is not safe at this time because it could lead to a system deadlock.
-.
-Language=Japanese
-さらなる処理のためにこの操作をワーカースレッドにポストすることは、システムのデッドロックにつながる可能性があるため、現時点では安全ではありません。
-.
-
-MessageId=12008
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_NOT_INITIALIZED
-Language=English
-The Filter Manager was not initialized when a filter tried to register. Make sure that the Filter Manager is getting loaded as a driver.
-.
-Language=Russian
-The Filter Manager was not initialized when a filter tried to register. Make sure that the Filter Manager is getting loaded as a driver.
-.
-Language=Polish
-The Filter Manager was not initialized when a filter tried to register. Make sure that the Filter Manager is getting loaded as a driver.
-.
-Language=Romanian
-The Filter Manager was not initialized when a filter tried to register. Make sure that the Filter Manager is getting loaded as a driver.
-.
-Language=Japanese
-フィルターが登録しようとしたときに、フィルターマネージャーが初期化されませんでした。フィルタマネージャがドライバとしてロードされていることを確認してください。
-.
-
-MessageId=12009
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_FILTER_NOT_READY
-Language=English
-The filter is not ready for attachment to volumes because it has not finished initializing (FltStartFiltering has not been called).
-.
-Language=Russian
-The filter is not ready for attachment to volumes because it has not finished initializing (FltStartFiltering has not been called).
-.
-Language=Polish
-The filter is not ready for attachment to volumes because it has not finished initializing (FltStartFiltering has not been called).
-.
-Language=Romanian
-The filter is not ready for attachment to volumes because it has not finished initializing (FltStartFiltering has not been called).
-.
-Language=Japanese
-フィルタの初期化が完了していない（FltStartFilteringが呼び出されていない）ため、フィルタをボリュームにアタッチする準備ができていません。
-.
-
-MessageId=12010
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_POST_OPERATION_CLEANUP
-Language=English
-The filter must cleanup any operation specific context at this time because it is being removed from the system before the operation is completed by the lower drivers.
-.
-Language=Russian
-The filter must cleanup any operation specific context at this time because it is being removed from the system before the operation is completed by the lower drivers.
-.
-Language=Polish
-The filter must cleanup any operation specific context at this time because it is being removed from the system before the operation is completed by the lower drivers.
-.
-Language=Romanian
-The filter must cleanup any operation specific context at this time because it is being removed from the system before the operation is completed by the lower drivers.
-.
-Language=Japanese
-フィルターは、下位ドライバーによって操作が完了する前にシステムから削除されるため、この時点で操作固有のコンテキストをクリーンアップしなければなりません。
-.
-
-MessageId=12011
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_INTERNAL_ERROR
-Language=English
-The Filter Manager had an internal error from which it cannot recover, therefore the operation has been failed. This is usually the result of a filter returning an invalid value from a pre-operation callback.
-.
-Language=Russian
-The Filter Manager had an internal error from which it cannot recover, therefore the operation has been failed. This is usually the result of a filter returning an invalid value from a pre-operation callback.
-.
-Language=Polish
-The Filter Manager had an internal error from which it cannot recover, therefore the operation has been failed. This is usually the result of a filter returning an invalid value from a pre-operation callback.
-.
-Language=Romanian
-The Filter Manager had an internal error from which it cannot recover, therefore the operation has been failed. This is usually the result of a filter returning an invalid value from a pre-operation callback.
-.
-Language=Japanese
-フィルター マネージャーに回復できない内部エラーが発生したため、操作が失敗しました。これは通常、フィルタが操作前のコールバックから無効な値を返した結果です。
-.
-
-MessageId=12012
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_DELETING_OBJECT
-Language=English
-The object specified for this action is in the process of being deleted, therefore the action requested cannot be completed at this time.
-.
-Language=Russian
-The object specified for this action is in the process of being deleted, therefore the action requested cannot be completed at this time.
-.
-Language=Polish
-The object specified for this action is in the process of being deleted, therefore the action requested cannot be completed at this time.
-.
-Language=Romanian
-The object specified for this action is in the process of being deleted, therefore the action requested cannot be completed at this time.
-.
-Language=Japanese
-このアクションに指定されたオブジェクトは削除処理中であるため、要求されたアクションは現時点では完了できません。
-.
-
-MessageId=12013
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_MUST_BE_NONPAGED_POOL
-Language=English
-Non-paged pool must be used for this type of context.
-.
-Language=Russian
-Non-paged pool must be used for this type of context.
-.
-Language=Polish
-Non-paged pool must be used for this type of context.
-.
-Language=Romanian
-Non-paged pool must be used for this type of context.
-.
-Language=Japanese
-このタイプのコンテキストには、ページングされていないプールを使用しなければなりません。
-.
-
-MessageId=12014
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_DUPLICATE_ENTRY
-Language=English
-A duplicate handler definition has been provided for an operation.
-.
-Language=Russian
-A duplicate handler definition has been provided for an operation.
-.
-Language=Polish
-A duplicate handler definition has been provided for an operation.
-.
-Language=Romanian
-A duplicate handler definition has been provided for an operation.
-.
-Language=Japanese
-ある操作に対して重複したハンドラ定義が提供されました。
-.
-
-MessageId=12015
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_CBDQ_DISABLED
-Language=English
-The callback data queue has been disabled.
-.
-Language=Russian
-The callback data queue has been disabled.
-.
-Language=Polish
-The callback data queue has been disabled.
-.
-Language=Romanian
-The callback data queue has been disabled.
-.
-Language=Japanese
-コールバック・データ・キューが無効になりました。
-.
-
-MessageId=12016
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_DO_NOT_ATTACH
-Language=English
-Do not attach the filter to the volume at this time.
-.
-Language=Russian
-Do not attach the filter to the volume at this time.
-.
-Language=Polish
-Do not attach the filter to the volume at this time.
-.
-Language=Romanian
-Do not attach the filter to the volume at this time.
-.
-Language=Japanese
-この時点では、フィルターをボリュームに取り付けないでください。
-.
-
-MessageId=12017
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_DO_NOT_DETACH
-Language=English
-Do not detach the filter from the volume at this time.
-.
-Language=Russian
-Do not detach the filter from the volume at this time.
-.
-Language=Polish
-Do not detach the filter from the volume at this time.
-.
-Language=Romanian
-Do not detach the filter from the volume at this time.
-.
-Language=Japanese
-この時、フィルターをボリュームから取り外さないでください。
-.
-
-MessageId=12018
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_INSTANCE_ALTITUDE_COLLISION
-Language=English
-An instance already exists at this altitude on the volume specified.
-.
-Language=Russian
-An instance already exists at this altitude on the volume specified.
-.
-Language=Polish
-An instance already exists at this altitude on the volume specified.
-.
-Language=Romanian
-An instance already exists at this altitude on the volume specified.
-.
-Language=Japanese
-指定されたボリュームに、この高度ですでにインスタンスが存在します。
-.
-
-MessageId=12019
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_INSTANCE_NAME_COLLISION
-Language=English
-An instance already exists with this name on the volume specified.
-.
-Language=Russian
-An instance already exists with this name on the volume specified.
-.
-Language=Polish
-An instance already exists with this name on the volume specified.
-.
-Language=Romanian
-An instance already exists with this name on the volume specified.
-.
-Language=Japanese
-指定されたボリュームに、この名前のインスタンスがすでに存在しています。
-.
-
-MessageId=12020
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_FILTER_NOT_FOUND
-Language=English
-The system could not find the filter specified.
-.
-Language=Russian
-The system could not find the filter specified.
-.
-Language=Polish
-The system could not find the filter specified.
-.
-Language=Romanian
-The system could not find the filter specified.
-.
-Language=Japanese
-指定されたフィルターが見つかりませんでした。
-.
-
-MessageId=12021
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_VOLUME_NOT_FOUND
-Language=English
-The system could not find the volume specified.
-.
-Language=Russian
-The system could not find the volume specified.
-.
-Language=Polish
-The system could not find the volume specified.
-.
-Language=Romanian
-The system could not find the volume specified.
-.
-Language=Japanese
-指定されたボリュームが見つかりません。
-.
-
-MessageId=12022
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_INSTANCE_NOT_FOUND
-Language=English
-The system could not find the instance specified.
-.
-Language=Russian
-The system could not find the instance specified.
-.
-Language=Polish
-The system could not find the instance specified.
-.
-Language=Romanian
-The system could not find the instance specified.
-.
-Language=Japanese
-指定されたインスタンスが見つかりませんでした。
-.
-
-MessageId=12023
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_CONTEXT_ALLOCATION_NOT_FOUND
-Language=English
-No registered context allocation definition was found for the given request.
-.
-Language=Russian
-No registered context allocation definition was found for the given request.
-.
-Language=Polish
-No registered context allocation definition was found for the given request.
-.
-Language=Romanian
-No registered context allocation definition was found for the given request.
-.
-Language=Japanese
-指定されたリクエストに対して、登録されているコンテキスト割り当て定義が見つかりませんでした。
-.
-
-MessageId=12024
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_INVALID_CONTEXT_REGISTRATION
-Language=English
-An invalid parameter was specified during context registration.
-.
-Language=Russian
-An invalid parameter was specified during context registration.
-.
-Language=Polish
-An invalid parameter was specified during context registration.
-.
-Language=Romanian
-An invalid parameter was specified during context registration.
-.
-Language=Japanese
-コンテキスト登録時に無効なパラメータが指定されました。
-.
-
-MessageId=12025
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_NAME_CACHE_MISS
-Language=English
-The name requested was not found in Filter Manager's name cache and could not be retrieved from the file system.
-.
-Language=Russian
-The name requested was not found in Filter Manager's name cache and could not be retrieved from the file system.
-.
-Language=Polish
-The name requested was not found in Filter Manager's name cache and could not be retrieved from the file system.
-.
-Language=Romanian
-The name requested was not found in Filter Manager's name cache and could not be retrieved from the file system.
-.
-Language=Japanese
-要求された名前はフィルターマネージャーの名前キャッシュに見つからず、ファイルシステムから取得できませんでした。
-.
-
-MessageId=12026
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_NO_DEVICE_OBJECT
-Language=English
-The requested device object does not exist for the given volume.
-.
-Language=Russian
-The requested device object does not exist for the given volume.
-.
-Language=Polish
-The requested device object does not exist for the given volume.
-.
-Language=Romanian
-The requested device object does not exist for the given volume.
-.
-Language=Japanese
-要求されたデバイス・オブジェクトは、指定されたボリュームに存在しません。
-.
-
-MessageId=12027
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_VOLUME_ALREADY_MOUNTED
-Language=English
-The specified volume is already mounted.
-.
-Language=Russian
-The specified volume is already mounted.
-.
-Language=Polish
-The specified volume is already mounted.
-.
-Language=Romanian
-The specified volume is already mounted.
-.
-Language=Japanese
-指定されたボリュームはすでにマウントされています。
-.
-
-MessageId=12028
-Severity=Success
-Facility=System
-SymbolicName=ERROR_FLT_NO_WAITER_FOR_REPLY
-Language=English
-No waiter is present for the filter's reply to this message.
-.
-Language=Russian
-No waiter is present for the filter's reply to this message.
-.
-Language=Polish
-No waiter is present for the filter's reply to this message.
-.
-Language=Romanian
-No waiter is present for the filter's reply to this message.
-.
-Language=Japanese
-このメッセージに対するフィルターの返答にはウェイターは存在しません。
 .
 
 MessageId=13000
@@ -40793,7 +40214,7 @@ Language=Romanian
 The lifetime value received in the Responder Lifetime Notify is below the Windows 2000 configured minimum value. Please fix the policy on the peer machine.
 .
 Language=Japanese
-レスポンダライフタイム通知で受信したライフタイム値が、ReactOS 2000で設定されている最小値を下回っています。対向マシンのポリシーを修正してください。
+レスポンダライフタイム通知で受信したライフタイム値が、LiberNT 2000で設定されている最小値を下回っています。対向マシンのポリシーを修正してください。
 .
 
 MessageId=13881
@@ -42976,7 +42397,7 @@ Language=Japanese
 指定されたチャネルパスが、複数のチャネルのインスタンスを選択する。この操作では、1 つのチャネルのみが選択される必要があります。1つのインスタンスのみを選択するために、チャネルパスを version / publicKeyToken にスコープする必要があるかもしれません。
 .
 
-MessageId=0x0001
+MessageId=0x4001
 Severity=Warning
 Facility=System
 SymbolicName=E_NOTIMPL
@@ -43838,4 +43259,644 @@ Class is not licensed for use
 .
 Language=Japanese
 クラスの使用が許可されていません。
+.
+
+MessageId=0x0001
+Severity=Warning
+Facility=CERT
+SymbolicName=TRUST_E_PROVIDER_UNKNOWN
+Language=English
+Unknown trust provider.
+.
+Language=Russian
+Unknown trust provider.
+.
+Language=Polish
+Unknown trust provider.
+.
+Language=Romanian
+Unknown trust provider.
+.
+Language=Japanese
+Unknown trust provider.
+.
+
+MessageId=0x0002
+Severity=Warning
+Facility=CERT
+SymbolicName=TRUST_E_ACTION_UNKNOWN
+Language=English
+The trust verification action specified is not supported by the specified trust provider.
+.
+Language=Russian
+The trust verification action specified is not supported by the specified trust provider.
+.
+Language=Polish
+The trust verification action specified is not supported by the specified trust provider.
+.
+Language=Romanian
+The trust verification action specified is not supported by the specified trust provider.
+.
+Language=Japanese
+The trust verification action specified is not supported by the specified trust provider.
+.
+
+MessageId=0x0003
+Severity=Warning
+Facility=CERT
+SymbolicName=TRUST_E_SUBJECT_FORM_UNKNOWN
+Language=English
+The form specified for the subject is not one supported or known by the specified trust provider.
+.
+Language=Russian
+The form specified for the subject is not one supported or known by the specified trust provider.
+.
+Language=Polish
+The form specified for the subject is not one supported or known by the specified trust provider.
+.
+Language=Romanian
+The form specified for the subject is not one supported or known by the specified trust provider.
+.
+Language=Japanese
+The form specified for the subject is not one supported or known by the specified trust provider.
+.
+
+MessageId=0x0004
+Severity=Warning
+Facility=CERT
+SymbolicName=TRUST_E_SUBJECT_NOT_TRUSTED
+Language=English
+The subject is not trusted for the specified action.
+.
+Language=Russian
+The subject is not trusted for the specified action.
+.
+Language=Polish
+The subject is not trusted for the specified action.
+.
+Language=Romanian
+The subject is not trusted for the specified action.
+.
+Language=Japanese
+The subject is not trusted for the specified action.
+.
+
+MessageId=0x0005
+Severity=Warning
+Facility=CERT
+SymbolicName=DIGSIG_E_ENCODE
+Language=English
+Error due to problem in ASN.1 encoding process.
+.
+Language=Russian
+Error due to problem in ASN.1 encoding process.
+.
+Language=Polish
+Error due to problem in ASN.1 encoding process.
+.
+Language=Romanian
+Error due to problem in ASN.1 encoding process.
+.
+Language=Japanese
+Error due to problem in ASN.1 encoding process.
+.
+
+MessageId=0x0006
+Severity=Warning
+Facility=CERT
+SymbolicName=DIGSIG_E_DECODE
+Language=English
+Error due to problem in ASN.1 decoding process.
+.
+Language=Russian
+Error due to problem in ASN.1 decoding process.
+.
+Language=Polish
+Error due to problem in ASN.1 decoding process.
+.
+Language=Romanian
+Error due to problem in ASN.1 decoding process.
+.
+Language=Japanese
+Error due to problem in ASN.1 decoding process.
+.
+
+MessageId=0x0007
+Severity=Warning
+Facility=CERT
+SymbolicName=DIGSIG_E_EXTENSIBILITY
+Language=English
+Reading / writing Extensions where Attributes are appropriate, and vice versa.
+.
+Language=Russian
+Reading / writing Extensions where Attributes are appropriate, and vice versa.
+.
+Language=Polish
+Reading / writing Extensions where Attributes are appropriate, and vice versa.
+.
+Language=Romanian
+Reading / writing Extensions where Attributes are appropriate, and vice versa.
+.
+Language=Japanese
+Reading / writing Extensions where Attributes are appropriate, and vice versa.
+.
+
+MessageId=0x0008
+Severity=Warning
+Facility=CERT
+SymbolicName=DIGSIG_E_CRYPTO
+Language=English
+Unspecified cryptographic failure.
+.
+Language=Russian
+Unspecified cryptographic failure.
+.
+Language=Polish
+Unspecified cryptographic failure.
+.
+Language=Romanian
+Unspecified cryptographic failure.
+.
+Language=Japanese
+Unspecified cryptographic failure.
+.
+
+MessageId=0x0009
+Severity=Warning
+Facility=CERT
+SymbolicName=PERSIST_E_SIZEDEFINITE
+Language=English
+The size of the data could not be determined.
+.
+Language=Russian
+The size of the data could not be determined.
+.
+Language=Polish
+The size of the data could not be determined.
+.
+Language=Romanian
+The size of the data could not be determined.
+.
+Language=Japanese
+The size of the data could not be determined.
+.
+
+MessageId=0x000A
+Severity=Warning
+Facility=CERT
+SymbolicName=PERSIST_E_SIZEINDEFINITE
+Language=English
+The size of the indefinite-sized data could not be determined.
+.
+Language=Russian
+The size of the indefinite-sized data could not be determined.
+.
+Language=Polish
+The size of the indefinite-sized data could not be determined.
+.
+Language=Romanian
+The size of the indefinite-sized data could not be determined.
+.
+Language=Japanese
+The size of the indefinite-sized data could not be determined.
+.
+
+MessageId=0x000B
+Severity=Warning
+Facility=CERT
+SymbolicName=PERSIST_E_NOTSELFSIZING
+Language=English
+This object does not read and write self-sizing data.
+.
+Language=Russian
+This object does not read and write self-sizing data.
+.
+Language=Polish
+This object does not read and write self-sizing data.
+.
+Language=Romanian
+This object does not read and write self-sizing data.
+.
+Language=Japanese
+This object does not read and write self-sizing data.
+.
+
+MessageId=0x0100
+Severity=Warning
+Facility=CERT
+SymbolicName=TRUST_E_NOSIGNATURE
+Language=English
+No signature was present in the subject.
+.
+Language=Russian
+No signature was present in the subject.
+.
+Language=Polish
+No signature was present in the subject.
+.
+Language=Romanian
+No signature was present in the subject.
+.
+Language=Japanese
+No signature was present in the subject.
+.
+
+MessageId=0x0101
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_EXPIRED
+Language=English
+A required certificate is not within its validity period when verifying against the current system clock or the timestamp in the signed file.
+.
+Language=Russian
+A required certificate is not within its validity period when verifying against the current system clock or the timestamp in the signed file.
+.
+Language=Polish
+A required certificate is not within its validity period when verifying against the current system clock or the timestamp in the signed file.
+.
+Language=Romanian
+A required certificate is not within its validity period when verifying against the current system clock or the timestamp in the signed file.
+.
+Language=Japanese
+A required certificate is not within its validity period when verifying against the current system clock or the timestamp in the signed file.
+.
+
+MessageId=0x0102
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_VALIDITYPERIODNESTING
+Language=English
+The validity periods of the certification chain do not nest correctly.
+.
+Language=Russian
+The validity periods of the certification chain do not nest correctly.
+.
+Language=Polish
+The validity periods of the certification chain do not nest correctly.
+.
+Language=Romanian
+The validity periods of the certification chain do not nest correctly.
+.
+Language=Japanese
+The validity periods of the certification chain do not nest correctly.
+.
+
+MessageId=0x0103
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_ROLE
+Language=English
+A certificate that can only be used as an end-entity is being used as a CA or vice versa.
+.
+Language=Russian
+A certificate that can only be used as an end-entity is being used as a CA or vice versa.
+.
+Language=Polish
+A certificate that can only be used as an end-entity is being used as a CA or vice versa.
+.
+Language=Romanian
+A certificate that can only be used as an end-entity is being used as a CA or vice versa.
+.
+Language=Japanese
+A certificate that can only be used as an end-entity is being used as a CA or vice versa.
+.
+
+MessageId=0x0104
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_PATHLENCONST
+Language=English
+A path length constraint in the certification chain has been violated.
+.
+Language=Russian
+A path length constraint in the certification chain has been violated.
+.
+Language=Polish
+A path length constraint in the certification chain has been violated.
+.
+Language=Romanian
+A path length constraint in the certification chain has been violated.
+.
+Language=Japanese
+A path length constraint in the certification chain has been violated.
+.
+
+MessageId=0x0105
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_CRITICAL
+Language=English
+A certificate contains an unknown extension that is marked 'critical'.
+.
+Language=Russian
+A certificate contains an unknown extension that is marked 'critical'.
+.
+Language=Polish
+A certificate contains an unknown extension that is marked 'critical'.
+.
+Language=Romanian
+A certificate contains an unknown extension that is marked 'critical'.
+.
+Language=Japanese
+A certificate contains an unknown extension that is marked 'critical'.
+.
+
+MessageId=0x0106
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_PURPOSE
+Language=English
+A certificate being used for a purpose other than the ones specified by its CA.
+.
+Language=Russian
+A certificate being used for a purpose other than the ones specified by its CA.
+.
+Language=Polish
+A certificate being used for a purpose other than the ones specified by its CA.
+.
+Language=Romanian
+A certificate being used for a purpose other than the ones specified by its CA.
+.
+Language=Japanese
+A certificate being used for a purpose other than the ones specified by its CA.
+.
+
+MessageId=0x0107
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_ISSUERCHAINING
+Language=English
+A parent of a given certificate in fact did not issue that child certificate.
+.
+Language=Russian
+A parent of a given certificate in fact did not issue that child certificate.
+.
+Language=Polish
+A parent of a given certificate in fact did not issue that child certificate.
+.
+Language=Romanian
+A parent of a given certificate in fact did not issue that child certificate.
+.
+Language=Japanese
+A parent of a given certificate in fact did not issue that child certificate.
+.
+
+MessageId=0x0108
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_MALFORMED
+Language=English
+A certificate is missing or has an empty value for an important field, such as a subject or issuer name.
+.
+Language=Russian
+A certificate is missing or has an empty value for an important field, such as a subject or issuer name.
+.
+Language=Polish
+A certificate is missing or has an empty value for an important field, such as a subject or issuer name.
+.
+Language=Romanian
+A certificate is missing or has an empty value for an important field, such as a subject or issuer name.
+.
+Language=Japanese
+A certificate is missing or has an empty value for an important field, such as a subject or issuer name.
+.
+
+MessageId=0x0109
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_UNTRUSTEDROOT
+Language=English
+A certificate chain processed, but terminated in a root certificate which is not trusted by the trust provider.
+.
+Language=Russian
+A certificate chain processed, but terminated in a root certificate which is not trusted by the trust provider.
+.
+Language=Polish
+A certificate chain processed, but terminated in a root certificate which is not trusted by the trust provider.
+.
+Language=Romanian
+A certificate chain processed, but terminated in a root certificate which is not trusted by the trust provider.
+.
+Language=Japanese
+A certificate chain processed, but terminated in a root certificate which is not trusted by the trust provider.
+.
+
+MessageId=0x010A
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_CHAINING
+Language=English
+A certificate chain could not be built to a trusted root authority.
+.
+Language=Russian
+A certificate chain could not be built to a trusted root authority.
+.
+Language=Polish
+A certificate chain could not be built to a trusted root authority.
+.
+Language=Romanian
+A certificate chain could not be built to a trusted root authority.
+.
+Language=Japanese
+A certificate chain could not be built to a trusted root authority.
+.
+
+MessageId=0x010B
+Severity=Warning
+Facility=CERT
+SymbolicName=TRUST_E_FAIL
+Language=English
+Generic trust failure.
+.
+Language=Russian
+Generic trust failure.
+.
+Language=Polish
+Generic trust failure.
+.
+Language=Romanian
+Generic trust failure.
+.
+Language=Japanese
+Generic trust failure.
+.
+
+MessageId=0x010C
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_REVOKED
+Language=English
+A certificate was explicitly revoked by its issuer.
+.
+Language=Russian
+A certificate was explicitly revoked by its issuer.
+.
+Language=Polish
+A certificate was explicitly revoked by its issuer.
+.
+Language=Romanian
+A certificate was explicitly revoked by its issuer.
+.
+Language=Japanese
+A certificate was explicitly revoked by its issuer.
+.
+
+MessageId=0x010D
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_UNTRUSTEDTESTROOT
+Language=English
+The certification path terminates with the test root which is not trusted with the current policy settings.
+.
+Language=Russian
+The certification path terminates with the test root which is not trusted with the current policy settings.
+.
+Language=Polish
+The certification path terminates with the test root which is not trusted with the current policy settings.
+.
+Language=Romanian
+The certification path terminates with the test root which is not trusted with the current policy settings.
+.
+Language=Japanese
+The certification path terminates with the test root which is not trusted with the current policy settings.
+.
+
+MessageId=0x010E
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_REVOCATION_FAILURE
+Language=English
+The revocation process could not continue - the certificate(s) could not be checked.
+.
+Language=Russian
+The revocation process could not continue - the certificate(s) could not be checked.
+.
+Language=Polish
+The revocation process could not continue - the certificate(s) could not be checked.
+.
+Language=Romanian
+The revocation process could not continue - the certificate(s) could not be checked.
+.
+Language=Japanese
+The revocation process could not continue - the certificate(s) could not be checked.
+.
+
+MessageId=0x010F
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_CN_NO_MATCH
+Language=English
+The certificate's CN name does not match the passed value.
+.
+Language=Russian
+The certificate's CN name does not match the passed value.
+.
+Language=Polish
+The certificate's CN name does not match the passed value.
+.
+Language=Romanian
+The certificate's CN name does not match the passed value.
+.
+Language=Japanese
+The certificate's CN name does not match the passed value.
+.
+
+MessageId=0x0110
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_WRONG_USAGE
+Language=English
+The certificate is not valid for the requested usage.
+.
+Language=Russian
+The certificate is not valid for the requested usage.
+.
+Language=Polish
+The certificate is not valid for the requested usage.
+.
+Language=Romanian
+The certificate is not valid for the requested usage.
+.
+Language=Japanese
+The certificate is not valid for the requested usage.
+.
+
+MessageId=0x0111
+Severity=Warning
+Facility=CERT
+SymbolicName=TRUST_E_EXPLICIT_DISTRUST
+Language=English
+The certificate was explicitly marked as untrusted by the user.
+.
+Language=Russian
+The certificate was explicitly marked as untrusted by the user.
+.
+Language=Polish
+The certificate was explicitly marked as untrusted by the user.
+.
+Language=Romanian
+The certificate was explicitly marked as untrusted by the user.
+.
+Language=Japanese
+The certificate was explicitly marked as untrusted by the user.
+.
+
+MessageId=0x0112
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_UNTRUSTEDCA
+Language=English
+A certification chain processed correctly, but one of the CA certificates is not trusted by the policy provider.
+.
+Language=Russian
+A certification chain processed correctly, but one of the CA certificates is not trusted by the policy provider.
+.
+Language=Polish
+A certification chain processed correctly, but one of the CA certificates is not trusted by the policy provider.
+.
+Language=Romanian
+A certification chain processed correctly, but one of the CA certificates is not trusted by the policy provider.
+.
+Language=Japanese
+A certification chain processed correctly, but one of the CA certificates is not trusted by the policy provider.
+.
+
+MessageId=0x0113
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_INVALID_POLICY
+Language=English
+The certificate has invalid policy.
+.
+Language=Russian
+The certificate has invalid policy.
+.
+Language=Polish
+The certificate has invalid policy.
+.
+Language=Romanian
+The certificate has invalid policy.
+.
+Language=Japanese
+The certificate has invalid policy.
+.
+
+MessageId=0x0114
+Severity=Warning
+Facility=CERT
+SymbolicName=CERT_E_INVALID_NAME
+Language=English
+The certificate has an invalid name. The name is not included in the permitted list or is explicitly excluded.
+.
+Language=Russian
+The certificate has an invalid name. The name is not included in the permitted list or is explicitly excluded.
+.
+Language=Polish
+The certificate has an invalid name. The name is not included in the permitted list or is explicitly excluded.
+.
+Language=Romanian
+The certificate has an invalid name. The name is not included in the permitted list or is explicitly excluded.
+.
+Language=Japanese
+The certificate has an invalid name. The name is not included in the permitted list or is explicitly excluded.
 .

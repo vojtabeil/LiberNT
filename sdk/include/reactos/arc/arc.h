@@ -1,6 +1,8 @@
 #ifndef _ARC_
 #define _ARC_
 
+#include <reactos/loader_framebuffer.h>
+
 typedef ULONG ARC_STATUS;
 
 /* Avoid conflicts with errno.h */
@@ -236,6 +238,17 @@ typedef struct _FILEINFORMATION
     UCHAR Attributes;
     CHAR FileName[32];
 } FILEINFORMATION;
+
+typedef struct _LOADER_PARAMETER_BGRT
+{
+    BOOLEAN Valid;
+    UCHAR ImageType;
+    USHORT Reserved;
+    ULONGLONG ImageAddress;
+    ULONG ImageSize;
+    ULONG ImageOffsetX;
+    ULONG ImageOffsetY;
+} LOADER_PARAMETER_BGRT, *PLOADER_PARAMETER_BGRT;
 
 typedef
 ARC_STATUS
@@ -621,15 +634,34 @@ typedef struct _LOADER_PARAMETER_EXTENSION
     ULONG IumEnabled:1;
 #endif
 #if (OSVER(NTDDI_VERSION) == NTDDI_LONGHORN)
+#if defined(__REACTOS__)
+    ULONG BootViaEFI:1;
+    ULONG Reserved:30;
+#else
     ULONG Reserved:31;
+#endif
 #elif (NTDDI_VERSION == NTDDI_WIN7)
+#if defined(__REACTOS__)
+    /* ReactOS-specific flags consumed by freeldr/ntoskrnl UEFI path */
+    ULONG BootViaWinload:1;
+    ULONG BootViaEFI:1;
+    ULONG Reserved:27;
+#else
     ULONG Reserved:29;
+#endif
 #elif (NTDDI_VERSION == NTDDI_WIN8)
     ULONG Reserved:28;
 #elif (NTDDI_VERSION == NTDDI_WINBLUE)
     ULONG Reserved:25;
 #elif (NTDDI_VERSION == NTDDI_WIN10)
+#if defined(__REACTOS__)
+    /* Keep the ReactOS loader flags within this version's existing flag word. */
+    ULONG BootViaWinload:1;
+    ULONG BootViaEFI:1;
+    ULONG Reserved:20;
+#else
     ULONG Reserved:22;
+#endif
 #elif defined(__REACTOS__)
     ULONG BootViaWinload:1;
     ULONG BootViaEFI:1;
@@ -692,6 +724,13 @@ typedef struct _LOADER_PARAMETER_EXTENSION
     LOADER_PARAMETER_CI_EXTENSION *CodeIntegrityData;
     ULONG CodeIntegrityDataSize;
 #endif
+#if defined(__REACTOS__)
+    /* ReactOS extension: placed after all Windows-defined fields to preserve
+     * Windows-compatible offsets for WINBLUE+ and WIN10+ fields above. */
+    LOADER_PARAMETER_FRAMEBUFFER GopFramebuffer;
+    LOADER_PARAMETER_BGRT BgrtInfo;
+    LOADER_PARAMETER_FRAMEBUFFER_TRANSFORM GopFramebufferTransform;
+#endif
 } LOADER_PARAMETER_EXTENSION, *PLOADER_PARAMETER_EXTENSION;
 
 //
@@ -714,10 +753,81 @@ typedef struct _I386_LOADER_BLOCK
     ULONG VirtualBias;
 } I386_LOADER_BLOCK, *PI386_LOADER_BLOCK;
 
+/*
+ * Windows NT PowerPC (little-endian) loader contract.
+ *
+ * The loader enters the kernel with MSR = ME | IR | DR | ILE | LE and no
+ * pending firmware state. KSEG0 maps physical memory linearly at
+ * PPC_LOADER_KSEG0_BASE through IBAT0/DBAT0 and is also described by the
+ * software page tables. Every structure the kernel touches before it
+ * installs its exception vectors (images, loader block, PCR, stacks) lives
+ * in KSEG0, so no hashed page table miss can occur before then.
+ *
+ * Software page tables use 64-bit PAE-format entries in three levels: a
+ * 4-entry root indexed by VA[31:30], then two 512-entry levels.
+ * Supervisor segment registers 8-15 hold PPC_KERNEL_VSID(n); the boot
+ * address space uses PPC_BOOT_USER_VSID(n) for segments 0-7.
+ */
+#define PPC_LOADER_BLOCK_VERSION        1
+#define PPC_LOADER_KSEG0_BASE           0x80000000UL
+#define PPC_LOADER_KSEG0_SIZE           0x10000000UL
+/* DBAT1: cache-inhibited, guarded window onto the PReP I/O space. */
+#define PPC_LOADER_IO_WINDOW_BASE       0xB0000000UL
+#define PPC_LOADER_IO_WINDOW_SIZE       0x01000000UL
+/* The loader populates only the top-level slot 0x80000000-0xBFFFFFFF, which
+ * the memory manager adopts whole; 0xC0000000 and above stay dynamic. */
+#define PPC_LOADER_SYSTEM_SLOT_END      0xC0000000UL
+#define PPC_KERNEL_VSID(Segment)        (0x00FFFFF0UL | (Segment))
+#define PPC_BOOT_USER_VSID(Segment)     (0x00FFFFE0UL | (Segment))
+
+#define PPC_MACHINE_UNKNOWN             0
+#define PPC_MACHINE_PREP                1
+
+#define PPC_LOADER_FLAG_HASH_TABLE      0x00000001
+#define PPC_LOADER_FLAG_FRAMEBUFFER     0x00000002
+#define PPC_LOADER_FLAG_EARLY_CONSOLE   0x00000004
+
 typedef struct _PPC_LOADER_BLOCK
 {
+#if defined(_PPC_) || defined(_M_PPC)
+    ULONG Version;
+    ULONG Size;
+    ULONG Flags;
+    ULONG MachineType;                  /* PPC_MACHINE_* */
+    ULONG ProcessorVersion;             /* PVR */
+    ULONG ProcessorFrequency;           /* Hz */
+    ULONG BusFrequency;                 /* Hz */
+    ULONG TimebaseFrequency;            /* Hz */
+    ULONG DcacheLineSize;
+    ULONG IcacheLineSize;
+    ULONG DcacheSize;
+    ULONG IcacheSize;
+    ULONG HashTable;                    /* Physical base programmed into SDR1. */
+    ULONG HashTableSize;                /* Bytes, a power of two >= 64 KiB. */
+    ULONG PageTableRoot;                /* Physical root of the boot address space. */
+    ULONG Kseg0Base;
+    ULONG Kseg0Size;
+    ULONG HighestMappedPhysicalAddress; /* Highest RAM byte inside KSEG0. */
+    ULONG PcrPage;                      /* Physical page of the boot KPCR. */
+    ULONG PanicStack;                   /* KSEG0 top of stack. */
+    ULONG DpcStack;                     /* KSEG0 top of stack. */
+    ULONG SharedUserDataPage;           /* Physical page mapped at KI_USER_SHARED_DATA. */
+    ULONG IsaIoPhysicalBase;            /* PReP: ISA/PCI I/O window. */
+    ULONG IsaIoVirtualBase;             /* PPC_LOADER_IO_WINDOW_BASE when mapped. */
+    ULONG PciMemoryPhysicalBase;        /* PReP: PCI memory window. */
+    ULONG PciDmaOffset;                 /* Bus address of physical page 0. */
+    ULONG EarlyConsolePort;             /* ISA port of a 16550 console, 0 if none. */
+    ULONG EarlyConsoleBaud;
+    ULONG FramebufferPhysical;
+    ULONG FramebufferWidth;
+    ULONG FramebufferHeight;
+    ULONG FramebufferPitch;
+    ULONG FramebufferDepth;
+    ULONG ResidualData;                 /* PReP residual data (KSEG0), 0 if none. */
+#else
     PVOID BootInfo;
     ULONG MachineType;
+#endif
 } PPC_LOADER_BLOCK, *PPPC_LOADER_BLOCK;
 
 typedef struct _ARM_LOADER_BLOCK
@@ -741,6 +851,126 @@ typedef struct _ARM_LOADER_BLOCK
     ULONG PlaceHolder;
 #endif
 } ARM_LOADER_BLOCK, *PARM_LOADER_BLOCK;
+
+#define ARM64_LOADER_MAX_EARLY_DEVICE_RANGES 16
+
+/* BCM2837 (Raspberry Pi 3) identification and MMIO windows, shared between
+ * the loader's early-device-range population and the HAL platform backend. */
+#define BCM2837_ACPI_OEM_ID          "BC2836"
+#define BCM2837_ACPI_OEM_TABLE_ID    "RPI3"
+#define BCM2837_PERIPHERAL_BASE      0x3F000000ULL
+#define BCM2837_PERIPHERAL_LENGTH    0x01000000
+#define BCM2837_LOCAL_BASE           0x40000000ULL
+
+typedef struct _ARM64_LOADER_EARLY_DEVICE_RANGE
+{
+    ULONGLONG BaseAddress;
+    ULONGLONG Length;
+} ARM64_LOADER_EARLY_DEVICE_RANGE, *PARM64_LOADER_EARLY_DEVICE_RANGE;
+
+typedef struct _ARM64_LOADER_BLOCK
+{
+#if defined(_ARM64_) || defined(__aarch64__) || defined(__arm64__)
+    ULONG FirstLevelDcacheSize;
+    ULONG FirstLevelDcacheFillSize;
+    ULONG FirstLevelIcacheSize;
+    ULONG FirstLevelIcacheFillSize;
+    ULONG SecondLevelDcacheSize;
+    ULONG SecondLevelDcacheFillSize;
+    ULONG SecondLevelIcacheSize;
+    ULONG SecondLevelIcacheFillSize;
+    ULONG PsciConduit;
+    ULONG PsciFlags;
+    ULONG_PTR PanicStack;
+    ULONG_PTR InterruptStack;
+    ULONG_PTR DpcStack;
+    ULONG_PTR PcrPage;
+    ULONG_PTR PdrPage;
+    ULONGLONG EarlyUartAddress;
+    ULONG EarlyUartInterface;
+    ULONG EarlyDeviceRangeCount;
+    ARM64_LOADER_EARLY_DEVICE_RANGE EarlyDeviceRanges[ARM64_LOADER_MAX_EARLY_DEVICE_RANGES];
+    ULONGLONG DeviceTree;
+    ULONGLONG DeviceTreeSize;
+#else
+    ULONG PlaceHolder;
+#endif
+} ARM64_LOADER_BLOCK, *PARM64_LOADER_BLOCK;
+
+/* ReactOS-private RISC-V loader payload. No Microsoft NT/RISC-V loader
+ * contract exists; version and size must be checked before adding fields.
+ *
+ * The loader hands over one Sv39 root whose supervisor half is laid out as:
+ *
+ *   0xFFFFFFC000000000  KSEG0: loader allocations at KSEG0 + physical address,
+ *                       4 KiB leaves, boot images with their section
+ *                       protections and all other pages read/write/no-execute
+ *   0xFFFFFFD000000000  direct map: every RAM page and early device window at
+ *                       direct map + physical address, read/write/no-execute
+ *   0xFFFFFFE000000000  owned by the memory manager, except the shared user
+ *                       data page the loader maps at KI_USER_SHARED_DATA
+ *
+ * The low half holds a temporary identity map that the kernel removes. */
+#define RISCV64_LOADER_BLOCK_VERSION                 5
+#define RISCV64_LOADER_FLAG_BOOT_HART_VALID          0x0000000000000001ULL
+#define RISCV64_LOADER_FLAG_SV39                     0x0000000000000002ULL
+#define RISCV64_LOADER_FLAG_IDENTITY_MAP_ACTIVE      0x0000000000000004ULL
+/* Boot images carry their section protections; other KSEG0 pages are NX. */
+#define RISCV64_LOADER_FLAG_IMAGE_PROTECTIONS        0x0000000000000008ULL
+#define RISCV64_LOADER_FLAG_DEVICE_TREE_VALID         0x0000000000000010ULL
+/* KSEG0 contains only 4 KiB leaves, so the memory manager can protect and
+ * release loader pages individually. */
+#define RISCV64_LOADER_FLAG_KSEG0_4K                  0x0000000000000020ULL
+/* EarlyConsole* fields describe a firmware-selected console device. */
+#define RISCV64_LOADER_FLAG_EARLY_CONSOLE_VALID       0x0000000000000040ULL
+#define RISCV64_LOADER_REQUIRED_FLAGS                 0x000000000000003FULL
+#define RISCV64_LOADER_OPTIONAL_FLAGS                 0x0000000000000040ULL
+#define RISCV64_LOADER_PAGE_SHIFT                     12
+#define RISCV64_LOADER_PAGE_SIZE                      (1ULL << RISCV64_LOADER_PAGE_SHIFT)
+#define RISCV64_LOADER_SATP_MODE_SV39                 (8ULL << 60)
+#define RISCV64_LOADER_SATP_MODE_MASK                 (0xFULL << 60)
+#define RISCV64_LOADER_SATP_ASID_MASK                 (0xFFFFULL << 44)
+#define RISCV64_LOADER_SATP_PPN_MASK                  ((1ULL << 44) - 1)
+#define RISCV64_LOADER_KSEG0_BASE                     0xFFFFFFC000000000ULL
+#define RISCV64_LOADER_DIRECT_MAP_BASE                0xFFFFFFD000000000ULL
+/* Both windows cover the same physical range. */
+#define RISCV64_LOADER_PHYSICAL_LIMIT                 0x0000001000000000ULL
+#define RISCV64_LOADER_BOOT_PROTOCOL_MINIMUM_REVISION 0x00010000ULL
+
+/* Early console register interfaces. Values are wire constants. */
+#define RISCV64_EARLY_CONSOLE_NONE                    0
+#define RISCV64_EARLY_CONSOLE_NS16550                 1 /* 8250/16550 register file, reg-shift/reg-io-width applied */
+#define RISCV64_EARLY_CONSOLE_SBI_DEBUG               2 /* SBI DBCN extension, no MMIO */
+
+typedef struct _RISCV64_LOADER_BLOCK
+{
+#if defined(_RISCV64_) || defined(_M_RISCV64)
+    ULONG Version;
+    ULONG Size;
+    ULONGLONG Flags;
+    ULONGLONG FirmwareBootProtocolRevision;
+    ULONGLONG BootHartId;
+    ULONGLONG PageTableRoot;
+    ULONGLONG Satp;
+    ULONGLONG Kseg0Base;
+    ULONGLONG DirectMapBase;
+    ULONGLONG PhysicalLimit;             /* Size of both windows. */
+    ULONGLONG HighestMappedPhysicalAddress; /* Highest RAM byte in the direct map. */
+    ULONGLONG PcrPage;
+    ULONGLONG DpcStack;
+    ULONGLONG SharedUserDataPage;        /* Physical address of the page at KI_USER_SHARED_DATA. */
+    ULONGLONG DeviceTree;
+    ULONGLONG DeviceTreeSize;
+    /* Version 3: firmware-described early console (from /chosen/stdout-path). */
+    ULONGLONG EarlyConsoleAddress;       /* Physical MMIO base, 0 if none. */
+    ULONGLONG EarlyConsoleLength;        /* Length of the register window. */
+    ULONG EarlyConsoleInterface;         /* RISCV64_EARLY_CONSOLE_* */
+    ULONG EarlyConsoleRegisterShift;     /* reg-shift, default 0. */
+    ULONG EarlyConsoleRegisterWidth;     /* reg-io-width in bytes, default 1. */
+#else
+    ULONG PlaceHolder;
+#endif
+} RISCV64_LOADER_BLOCK, *PRISCV64_LOADER_BLOCK;
 
 //
 // Firmware information block (NT6+)
@@ -863,6 +1093,8 @@ typedef struct _LOADER_PARAMETER_BLOCK
         IA64_LOADER_BLOCK IA64;
         PPC_LOADER_BLOCK PowerPC;
         ARM_LOADER_BLOCK Arm;
+        ARM64_LOADER_BLOCK Arm64;
+        RISCV64_LOADER_BLOCK Riscv64;
     } u;
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     FIRMWARE_INFORMATION_LOADER_BLOCK FirmwareInformation;

@@ -7,6 +7,7 @@
 
 /* INCLUDES ******************************************************************/
 
+#include <sdkddkver.h>
 #include <asm.inc>
 #include <ksamd64.inc>
 
@@ -31,7 +32,7 @@ PUBLIC RtlCaptureContext
     mov [rcx + CxRax], rax
 
     /* Set ContextFlags */
-    mov dword ptr [rcx + CxContextFlags], (CONTEXT_FULL or CONTEXT_SEGMENTS)
+    mov dword ptr [rcx + CxContextFlags], (CONTEXT_FULL OR CONTEXT_SEGMENTS)
 
     /* Store the basic register context */
     mov [rcx + CxRcx], rcx
@@ -83,6 +84,15 @@ PUBLIC RtlCaptureContext
     /* Check if we are in kernel mode */
     test byte ptr [rcx + CxSegCs], MODE_MASK
     jnz RtlCaptureContextUM
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* NT 6.2+ initializes the non-register part of the kernel FP save area. */
+    mov dword ptr [rcx + CxFltSave + LfControlWord], HEX(27f)
+    mov word ptr [rcx + CxFltSave + LfTagWord], 0
+    mov eax, [rcx + CxMxCsr]
+    mov [rcx + CxFltSave + LfMxCsr], eax
+    mov eax, [rcx + CxEFlags]
+#endif
 
     /* Store xmm registers */
     movaps [rcx + CxXmm0], xmm0
@@ -141,6 +151,40 @@ PUBLIC RtlpRestoreContextInternal
     /* Load rdx restore value into r9 */
     mov r9, [rcx + CxRdx]
 
+    /* Check if we go to user mode */
+    test byte ptr [rcx + CxSegCs], MODE_MASK
+    jnz RestoreLegacyState
+
+    /* Restore MXCSR */
+    ldmxcsr [rcx + CxMxCsr]
+
+    /* Restore xmm registers */
+    movaps xmm0, [rcx + CxXmm0]
+    movaps xmm1, [rcx + CxXmm1]
+    movaps xmm2, [rcx + CxXmm2]
+    movaps xmm3, [rcx + CxXmm3]
+    movaps xmm4, [rcx + CxXmm4]
+    movaps xmm5, [rcx + CxXmm5]
+    movaps xmm6, [rcx + CxXmm6]
+    movaps xmm7, [rcx + CxXmm7]
+    movaps xmm8, [rcx + CxXmm8]
+    movaps xmm9, [rcx + CxXmm9]
+    movaps xmm10, [rcx + CxXmm10]
+    movaps xmm11, [rcx + CxXmm11]
+    movaps xmm12, [rcx + CxXmm12]
+    movaps xmm13, [rcx + CxXmm13]
+    movaps xmm14, [rcx + CxXmm14]
+    movaps xmm15, [rcx + CxXmm15]
+
+    jmp RestoreStateDone
+
+RestoreLegacyState:
+
+    /* Restore MXCSR, legacy floating point, MMX and XMM registers */
+    fxrstor [rcx + CxFltSave]
+
+RestoreStateDone:
+
     /* Copy Return address (now in r8) to the target stack */
     mov [rdx - 2 * 8], r8
 
@@ -172,40 +216,6 @@ PUBLIC RtlpRestoreContextInternal
     /* Restore the registers we used */
     mov r8,  [rcx + CxR8]
     mov r9,  [rcx + CxR9]
-
-    /* Check if we go to user mode */
-    test byte ptr [rcx + CxSegCs], MODE_MASK
-    jnz RtlRestoreContextUM
-
-    /* Restore MXCSR */
-    ldmxcsr [rcx + CxMxCsr]
-
-    /* Restore xmm registers */
-    movaps xmm0, [rcx + CxXmm0]
-    movaps xmm1, [rcx + CxXmm1]
-    movaps xmm2, [rcx + CxXmm2]
-    movaps xmm3, [rcx + CxXmm3]
-    movaps xmm4, [rcx + CxXmm4]
-    movaps xmm5, [rcx + CxXmm5]
-    movaps xmm6, [rcx + CxXmm6]
-    movaps xmm7, [rcx + CxXmm7]
-    movaps xmm8, [rcx + CxXmm8]
-    movaps xmm9, [rcx + CxXmm9]
-    movaps xmm10, [rcx + CxXmm10]
-    movaps xmm11, [rcx + CxXmm11]
-    movaps xmm12, [rcx + CxXmm12]
-    movaps xmm13, [rcx + CxXmm13]
-    movaps xmm14, [rcx + CxXmm14]
-    movaps xmm15, [rcx + CxXmm15]
-
-    jmp RtlRestoreContextExit
-
-RtlRestoreContextUM:
-
-    /* Restore MXCSR, legacy floating point, MMX and XMM registers */
-    fxrstor [rcx + CxFltSave]
-
-RtlRestoreContextExit:
 
     /* Check if we go to a different cs */
     mov ax, cs
@@ -254,7 +264,7 @@ ReturnFar:
     popfq
 
     /* Return far */
-    retf
+    .byte HEX(48), HEX(CB)
 
 .ENDP
 
@@ -274,12 +284,12 @@ PUBLIC RtlRaiseException
 
     /* Allocate stack space for a CONTEXT record */
     sub rsp, CONTEXT_FRAME_LENGTH + 8
-    .allocstack CONTEXT_FRAME_LENGTH + 8
+    .ALLOCSTACK CONTEXT_FRAME_LENGTH + 8
 
     /* Save the ExceptionRecord pointer */
     mov [rsp + CONTEXT_FRAME_LENGTH + 8 + P1Home], rcx
 
-    .endprolog
+    .ENDPROLOG
 
     /* Save the return address in EXCEPTION_RECORD.ExceptionAddress */
     mov rdx, [rsp + CONTEXT_FRAME_LENGTH + 8]
@@ -334,6 +344,78 @@ RaiseStatus:
 .ENDP
 
 
+/*
+ * PVOID
+ * RtlpCallConsolidateCallback(
+ *     _In_ PCONTEXT ContextRecord@<rcx>,
+ *     _In_ PVOID (*Callback)(PEXCEPTION_RECORD)@<rdx>,
+ *     _In_ PEXCEPTION_RECORD ExceptionRecord@<r8>);
+ */
+PUBLIC RtlpCallConsolidateCallback
+.PROC RtlpCallConsolidateCallback
+
+    /* Unwinding this frame resumes at the target context, past the frames already unwound */
+    sub rsp, HEX(28)
+    lea rax, [rcx + HEX(80)]
+    mov r10, [rax + CxRip - HEX(80)]
+    mov [rsp], r10
+    mov r10, [rax + CxRsp - HEX(80)]
+    mov [rsp + HEX(18)], r10
+    .PUSHFRAME
+
+    sub rsp, HEX(110)
+    .ALLOCSTACK HEX(110)
+    mov r10, [rax + CxRbx - HEX(80)]
+    mov [rsp + HEX(20)], r10
+    .SAVEREG rbx, HEX(20)
+    mov r10, [rax + CxRsi - HEX(80)]
+    mov [rsp + HEX(28)], r10
+    .SAVEREG rsi, HEX(28)
+    mov r10, [rax + CxRdi - HEX(80)]
+    mov [rsp + HEX(30)], r10
+    .SAVEREG rdi, HEX(30)
+    mov r10, [rax + CxR12 - HEX(80)]
+    mov [rsp + HEX(38)], r10
+    .SAVEREG r12, HEX(38)
+    mov r10, [rax + CxR13 - HEX(80)]
+    mov [rsp + HEX(40)], r10
+    .SAVEREG r13, HEX(40)
+    mov r10, [rax + CxR14 - HEX(80)]
+    mov [rsp + HEX(48)], r10
+    .SAVEREG r14, HEX(48)
+    mov r10, [rax + CxR15 - HEX(80)]
+    mov [rsp + HEX(50)], r10
+    .SAVEREG r15, HEX(50)
+    mov r10, [rax + CxRbp - HEX(80)]
+    mov [rsp + HEX(100)], r10
+    .SAVEREG rbp, HEX(100)
+    push rsi
+    push rdi
+    lea rsi, [rcx + CxXmm6]
+    lea rdi, [rsp + HEX(70)]
+    mov ecx, 20
+    cld
+    rep movsq
+    pop rdi
+    pop rsi
+    .SAVEXMM128 xmm6, HEX(60)
+    .SAVEXMM128 xmm7, HEX(70)
+    .SAVEXMM128 xmm8, HEX(80)
+    .SAVEXMM128 xmm9, HEX(90)
+    .SAVEXMM128 xmm10, HEX(A0)
+    .SAVEXMM128 xmm11, HEX(B0)
+    .SAVEXMM128 xmm12, HEX(C0)
+    .SAVEXMM128 xmm13, HEX(D0)
+    .SAVEXMM128 xmm14, HEX(E0)
+    .SAVEXMM128 xmm15, HEX(F0)
+    .ENDPROLOG
+
+    mov rcx, r8
+    call rdx
+    nop
+    add rsp, HEX(138)
+    ret
+.ENDP
+
+
 END
-
-

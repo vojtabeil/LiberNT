@@ -9,6 +9,19 @@
 #pragma once
 
 VOID
+VidpInitializeFrameBufferFlush(
+    _In_ PHYSICAL_ADDRESS PhysicalAddress,
+    _In_ PVOID VirtualAddress,
+    _In_ ULONG Size);
+
+VOID
+VidpFlushFrameBuffer(
+    _In_ PVOID Start,
+    _In_ ULONG Width,
+    _In_ ULONG Height,
+    _In_ ULONG Stride);
+
+VOID
 InitPaletteWithTable(
     _In_reads_(Count) const ULONG* Table,
     _In_ ULONG Count);
@@ -20,3 +33,22 @@ SetPixel(
     _In_ ULONG Left,
     _In_ ULONG Top,
     _In_ UCHAR Color);
+
+#define HAS_NATIVE_BUFFER_TO_SCREEN_BLT
+
+#define HAS_TEXT_UPDATE_BATCH
+
+VOID
+BeginTextUpdate(VOID);
+
+VOID
+EndTextUpdate(VOID);
+
+BOOLEAN
+VidBufferToScreenBltNative(
+    _In_reads_bytes_(Delta * Height) PUCHAR Buffer,
+    _In_ ULONG Left,
+    _In_ ULONG Top,
+    _In_ ULONG Width,
+    _In_ ULONG Height,
+    _In_ ULONG Delta);

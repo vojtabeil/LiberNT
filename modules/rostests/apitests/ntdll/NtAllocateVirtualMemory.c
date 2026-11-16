@@ -220,7 +220,7 @@ CheckSize(ULONG_PTR Base, SIZE_T InSize, SIZE_T ExpectedSize)
                                      PAGE_NOACCESS);
     ok(NT_SUCCESS(Status), "NtAllocateVirtualMemory failed!\n");
     ok(BaseAddress == (PVOID)(Base & ~((ULONG_PTR)0xFFFF)), "Got back wrong base address: %p\n", BaseAddress);
-    ok(Size == ExpectedSize, "Alloc of 0x%Ix: got back wrong size: 0x%Ix, expected 0x%Ix\n", InSize, Size, ExpectedSize);
+    ok(Size == ExpectedSize, "Alloc of 0x%Ix: got back wrong size: 0x%Ix, expected 0x%Ix\n", (size_t)InSize, (size_t)Size, (size_t)ExpectedSize);
     Status = NtFreeVirtualMemory(NtCurrentProcess(), &BaseAddress, &Size, MEM_RELEASE);
     ok(NT_SUCCESS(Status), "NtFreeVirtualMemory failed!\n");
 }
@@ -251,7 +251,7 @@ CheckAlignment()
                                      PAGE_NOACCESS);
     ok_ntstatus(Status, STATUS_SUCCESS);
     ok(BaseAddress == UlongToPtr(0x50000000), "Got back wrong base address: %p", BaseAddress);
-    ok(Size == 0x3000, "Got back wrong size: 0x%Ix", Size);
+    ok(Size == 0x3000, "Got back wrong size: 0x%Ix", (size_t)Size);
 
     /* Try to reserve again in the same 64k region */
     BaseAddress = UlongToPtr(0x50008000);
@@ -275,7 +275,7 @@ CheckAlignment()
                                      PAGE_NOACCESS);
     ok_ntstatus(Status, STATUS_SUCCESS);
     ok(BaseAddress == UlongToPtr(0x50002000), "Got back wrong base address: %p", BaseAddress);
-    ok(Size == 0x1000, "Got back wrong size: 0x%Ix", Size);
+    ok(Size == 0x1000, "Got back wrong size: 0x%Ix", (size_t)Size);
 
     /* Commit the same address again with a different protection */
     BaseAddress = UlongToPtr(0x50002000);
@@ -288,7 +288,7 @@ CheckAlignment()
                                      PAGE_READWRITE);
     ok_ntstatus(Status, STATUS_SUCCESS);
     ok(BaseAddress == UlongToPtr(0x50002000), "Got back wrong base address: %p", BaseAddress);
-    ok(Size == 0x1000, "Got back wrong size: 0x%Ix", Size);
+    ok(Size == 0x1000, "Got back wrong size: 0x%Ix", (size_t)Size);
 
     /* Commit memory at a too high address */
     BaseAddress = UlongToPtr(0x50003000);
@@ -342,7 +342,7 @@ CheckAlignment()
                                      PAGE_READWRITE);
     ok_ntstatus(Status, STATUS_SUCCESS);
     ok(BaseAddress == UlongToPtr(0x50000000), "Got back wrong base address: %p", BaseAddress);
-    ok(Size == 0x6000, "Got back wrong size: 0x%Ix", Size);
+    ok(Size == 0x6000, "Got back wrong size: 0x%Ix", (size_t)Size);
 
     _SEH2_TRY
     {
@@ -634,7 +634,7 @@ CheckSomeDefaultAddresses(VOID)
 
         // Double-check that it is not forbidden "in order to catch null pointer accesses".
         StartSeh()
-            *(int*)UlongToPtr(0x00000000) = 1;
+            *(volatile int*)UlongToPtr(0x00000000) = 1;
         EndSeh(STATUS_SUCCESS)
 
         Status = NtFreeVirtualMemory(NtCurrentProcess(), &BaseAddress, &Size, MEM_RELEASE);
@@ -796,12 +796,47 @@ CheckSomeDefaultAddresses(VOID)
 
 #define RUNS 32
 
+static
+VOID
+CheckZeroBits(VOID)
+{
+    static const struct
+    {
+        ULONG_PTR ZeroBits;
+        NTSTATUS Status;
+    } Tests[] =
+    {
+        { 21, STATUS_INVALID_PARAMETER },
+        { 22, STATUS_INVALID_PARAMETER },
+        { 31, STATUS_INVALID_PARAMETER },
+    };
+    ULONG i;
+
+    for (i = 0; i < RTL_NUMBER_OF(Tests); i++)
+    {
+        PVOID Base = NULL;
+        SIZE_T Size = PAGE_SIZE;
+        NTSTATUS Status;
+
+        Status = NtAllocateVirtualMemory(NtCurrentProcess(), &Base, Tests[i].ZeroBits, &Size,
+                                         MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        ok(Status == Tests[i].Status, "ZeroBits %Iu: Status = 0x%08lx\n", (size_t)Tests[i].ZeroBits, Status);
+        ok(Base == NULL, "ZeroBits %Iu: Base = %p\n", (size_t)Tests[i].ZeroBits, Base);
+        if (NT_SUCCESS(Status))
+        {
+            Size = 0;
+            NtFreeVirtualMemory(NtCurrentProcess(), &Base, &Size, MEM_RELEASE);
+        }
+    }
+}
+
 START_TEST(NtAllocateVirtualMemory)
 {
     PVOID Mem1, Mem2;
     SIZE_T Size1, Size2;
     ULONG i;
 
+    CheckZeroBits();
     CheckAlignment();
     CheckAdjacentVADs();
     CheckSomeDefaultAddresses();

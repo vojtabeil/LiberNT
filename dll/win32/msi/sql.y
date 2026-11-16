@@ -115,6 +115,7 @@ query:
     {
         SQL_input* sql = (SQL_input*) info;
         *sql->view = $1;
+        (void)sql_nerrs; /* avoid unused variable warning */
     }
     ;
 
@@ -431,11 +432,22 @@ selcollist:
     selcolumn
   | selcolumn TK_COMMA selcollist
         {
-            $1->next = $3;
+            $1->next = $3 ? $3 : parser_alloc_column( info, NULL, NULL );
+            if( !$1->next )
+                YYABORT;
         }
   | TK_STAR
         {
             $$ = NULL;
+        }
+  | TK_STAR TK_COMMA selcollist
+        {
+            $$ = parser_alloc_column( info, NULL, NULL );
+            if( !$$ )
+                YYABORT;
+            $$->next = $3 ? $3 : parser_alloc_column( info, NULL, NULL );
+            if( !$$->next )
+                YYABORT;
         }
     ;
 
@@ -459,7 +471,7 @@ from:
             UINT r;
 
             r = TABLE_CreateView( sql->db, $2, &table );
-            if( r != ERROR_SUCCESS || !$$ )
+            if( r != ERROR_SUCCESS || !table )
                 YYABORT;
 
             PARSER_BUBBLE_UP_VIEW( sql, $$, table );
@@ -717,7 +729,7 @@ table:
 id:
     TK_ID
         {
-            if ( SQL_getstring( info, &$1, &$$ ) != ERROR_SUCCESS || !$$ )
+            if ( SQL_getstring( info, &$1, &$$ ) != ERROR_SUCCESS || !$$ || !$$[0] )
                 YYABORT;
         }
     ;
@@ -760,6 +772,10 @@ static void *parser_alloc( void *info, unsigned int sz )
     struct list *mem;
 
     mem = malloc( sizeof (struct list) + sz );
+#ifdef __REACTOS__
+    if (!mem)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     list_add_tail( sql->mem, mem );
     return &mem[1];
 }
@@ -949,6 +965,10 @@ static void swap_columns( column_info **cols, column_info *A, int idx )
         ptr = ptr->next;
     }
 
+#ifdef __REACTOS__
+    if( !B )
+        return;
+#endif
     if( preB ) preB->next = A;
     if( preA ) preA->next = B;
     ptr = A->next;

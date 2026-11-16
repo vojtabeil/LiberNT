@@ -22,9 +22,12 @@ list(APPEND SOURCE
     misc/hwprofiles.c
     misc/logon.c
     misc/msi.c
+    misc/perflib.c
+    misc/seclogon.c
     misc/shutdown.c
     misc/sysfunc.c
     misc/unicode.c
+    misc/wmi.c
     sec/ac.c
     sec/audit.c
     sec/lsa.c
@@ -59,14 +62,21 @@ add_custom_target(advapi32_rpc_headers DEPENDS
     ${CMAKE_CURRENT_BINARY_DIR}/svcctl_c.h
     ${CMAKE_CURRENT_BINARY_DIR}/winreg_c.h)
 
+add_library(win32_registry_hkcr STATIC
+    reg/hkcr.c
+)
+
+add_dependencies(win32_registry_hkcr advapi32_rpc_headers xdk)
+target_link_libraries(win32_registry_hkcr ${PSEH_LIB})
+target_compile_definitions(win32_registry_hkcr PRIVATE _KERNEL32_ UNICODE _UNICODE)
+
 # This static library is for kernelbase and vista APIs in kernel32
 add_library(win32_registry STATIC
-    reg/hkcr.c
     reg/reg.c
 )
 
-add_dependencies(win32_registry advapi32_rpc_headers)
-target_link_libraries(win32_registry ${PSEH_LIB})
+add_dependencies(win32_registry advapi32_rpc_headers xdk)
+target_link_libraries(win32_registry win32_registry_hkcr ${PSEH_LIB})
 target_compile_definitions(win32_registry PRIVATE _KERNEL32_ UNICODE _UNICODE)
 
 add_library(advapi32 MODULE
@@ -76,11 +86,11 @@ add_library(advapi32 MODULE
     ${CMAKE_CURRENT_BINARY_DIR}/advapi32.def)
 
 set_module_type(advapi32 win32dll UNICODE ENTRYPOINT DllMain 12)
-target_link_libraries(advapi32 win32_registry cryptlib wine ${PSEH_LIB})
+target_link_libraries(advapi32 win32_registry cryptlib csprng wine ${PSEH_LIB})
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     target_link_libraries(advapi32 etwtrace)
 endif()
-add_delay_importlibs(advapi32 secur32)
-add_importlibs(advapi32 advapi32_vista rpcrt4 kernel32 ntdll)
+add_delay_importlibs(advapi32 cryptsp netapi32 secur32 user32 userenv)
+add_importlibs(advapi32 sechost kernelbase advapi32_vista rpcrt4 msvcrt kernel32 ntdll)
 add_pch(advapi32 advapi32.h "${PCH_SKIP_SOURCE}")
 add_cd_file(TARGET advapi32 DESTINATION reactos/system32 FOR all)

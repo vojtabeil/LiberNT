@@ -105,6 +105,21 @@ NtAllocateVirtualMemory(
     _In_ ULONG Protect
 );
 
+_Must_inspect_result_
+__kernel_entry
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtAllocateVirtualMemoryEx(
+    _In_ HANDLE ProcessHandle,
+    _Inout_ _Outptr_result_buffer_(*RegionSize) PVOID *BaseAddress,
+    _Inout_ PSIZE_T RegionSize,
+    _In_ ULONG AllocationType,
+    _In_ ULONG Protect,
+    _In_reads_opt_(ExtendedParameterCount) PMEM_EXTENDED_PARAMETER ExtendedParameters,
+    _In_ ULONG ExtendedParameterCount
+);
+
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -285,6 +300,18 @@ NtReadVirtualMemory(
     _Out_opt_ PSIZE_T NumberOfBytesRead
 );
 
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtSetInformationVirtualMemory(
+    _In_ HANDLE ProcessHandle,
+    _In_ VIRTUAL_MEMORY_INFORMATION_CLASS VirtualMemoryInformationClass,
+    _In_ ULONG_PTR NumberOfEntries,
+    _In_reads_(NumberOfEntries) PMEMORY_RANGE_ENTRY VirtualAddresses,
+    _In_reads_bytes_(VirtualMemoryInformationLength) PVOID VirtualMemoryInformation,
+    _In_ ULONG VirtualMemoryInformationLength
+);
+
 NTSTATUS
 NTAPI
 NtResetWriteWatch(
@@ -309,6 +336,15 @@ NTAPI
 NtUnmapViewOfSection(
     _In_ HANDLE ProcessHandle,
     _In_ PVOID BaseAddress
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtUnmapViewOfSectionEx(
+    _In_ HANDLE ProcessHandle,
+    _In_opt_ PVOID BaseAddress,
+    _In_ ULONG Flags
 );
 
 NTSYSCALLAPI
@@ -343,6 +379,19 @@ ZwAllocateVirtualMemory(
     _Inout_ PSIZE_T RegionSize,
     _In_ ULONG AllocationType,
     _In_ ULONG Protect
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwAllocateVirtualMemoryEx(
+    _In_ HANDLE ProcessHandle,
+    _Inout_ _Outptr_result_buffer_(*RegionSize) PVOID *BaseAddress,
+    _Inout_ PSIZE_T RegionSize,
+    _In_ ULONG AllocationType,
+    _In_ ULONG Protect,
+    _In_reads_opt_(ExtendedParameterCount) PMEM_EXTENDED_PARAMETER ExtendedParameters,
+    _In_ ULONG ExtendedParameterCount
 );
 
 NTSYSAPI
@@ -467,6 +516,18 @@ ZwReadVirtualMemory(
     _Out_ PVOID Buffer,
     _In_ SIZE_T NumberOfBytesToRead,
     _Out_opt_ PSIZE_T NumberOfBytesRead
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwSetInformationVirtualMemory(
+    _In_ HANDLE ProcessHandle,
+    _In_ VIRTUAL_MEMORY_INFORMATION_CLASS VirtualMemoryInformationClass,
+    _In_ ULONG_PTR NumberOfEntries,
+    _In_reads_(NumberOfEntries) PMEMORY_RANGE_ENTRY VirtualAddresses,
+    _In_reads_bytes_(VirtualMemoryInformationLength) PVOID VirtualMemoryInformation,
+    _In_ ULONG VirtualMemoryInformationLength
 );
 
 NTSYSAPI

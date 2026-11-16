@@ -83,6 +83,15 @@ extern ULONG NTSYSAPI NtBuildNumber;
 //
 #define MUTANT_INCREMENT                    1
 
+#ifndef _MEMORY_RESERVE_OBJECT_TYPE_DEFINED
+#define _MEMORY_RESERVE_OBJECT_TYPE_DEFINED
+typedef enum _MEMORY_RESERVE_OBJECT_TYPE
+{
+    MemoryReserveObjectTypeUserApc,
+    MemoryReserveObjectTypeIoCompletion
+} MEMORY_RESERVE_OBJECT_TYPE, PMEMORY_RESERVE_OBJECT_TYPE;
+#endif
+
 //
 // Callback Object Access Mask
 //
@@ -386,7 +395,7 @@ typedef enum _SYSTEM_INFORMATION_CLASS
     SystemEdidInformation                                 = 156, // 0x9C
 #endif // (NTDDI_VERSION >= NTDDI_WINBLUE)
 
-#if (NTDDI_VERSION >= NTDDI_WIN10)
+#if (NTDDI_VERSION >= NTDDI_WIN10) || defined(__REACTOS__)
     SystemManufacturingInformation                        = 157, // 0x9D
     SystemEnergyEstimationConfigInformation               = 158, // 0x9E
     SystemHypervisorDetailInformation                     = 159, // 0x9F
@@ -460,7 +469,7 @@ typedef enum _SYSTEM_INFORMATION_CLASS
     SystemPoolZeroingInformation                          = 227, // 0xE3
 #endif // (NTDDI_VERSION >= NTDDI_WIN10)
 
-#if (NTDDI_VERSION >= NTDDI_WIN11)
+#if (NTDDI_VERSION >= NTDDI_WIN11) || defined(__REACTOS__)
     SystemDpcWatchdogInformation                          = 228, // 0xE4
     SystemDpcWatchdogInformation2                         = 229, // 0xE5
     SystemSupportedProcessorArchitectures2                = 230, // 0xE6
@@ -591,7 +600,11 @@ typedef struct _EX_FAST_REF
     union
     {
         PVOID Object;
+#ifdef _WIN64
+        ULONG_PTR RefCnt:4;
+#else
         ULONG_PTR RefCnt:3;
+#endif
         ULONG_PTR Value;
     };
 } EX_FAST_REF, *PEX_FAST_REF;
@@ -767,13 +780,20 @@ typedef struct _HANDLE_TABLE_ENTRY
 {
     union
     {
+#ifdef _WIN64
+        volatile LONGLONG VolatileLowValue;
+        LONGLONG LowValue;
+#endif
         PVOID Object;
         ULONG_PTR ObAttributes;
-        PHANDLE_TABLE_ENTRY_INFO InfoTable;
+        volatile PHANDLE_TABLE_ENTRY_INFO InfoTable;
         ULONG_PTR Value;
     };
     union
     {
+        ULONG_PTR HighValue;
+        struct _HANDLE_TABLE_ENTRY *NextFreeHandleEntry;
+        ULONG_PTR LeafHandleValue;
         ULONG GrantedAccess;
         struct
         {
@@ -784,37 +804,76 @@ typedef struct _HANDLE_TABLE_ENTRY
     };
 } HANDLE_TABLE_ENTRY, *PHANDLE_TABLE_ENTRY;
 
+typedef struct DECLSPEC_ALIGN(128) _HANDLE_TABLE_FREE_LIST
+{
+    EX_PUSH_LOCK FreeListLock;
+    PHANDLE_TABLE_ENTRY FirstFreeHandleEntry;
+    PHANDLE_TABLE_ENTRY LastFreeHandleEntry;
+    LONG HandleCount;
+    ULONG HighWaterMark;
+    UCHAR Reserved[128 - sizeof(EX_PUSH_LOCK) - (2 * sizeof(PHANDLE_TABLE_ENTRY)) - sizeof(LONG) - sizeof(ULONG)];
+} HANDLE_TABLE_FREE_LIST, *PHANDLE_TABLE_FREE_LIST;
+
 typedef struct _HANDLE_TABLE
 {
-#if (NTDDI_VERSION >= NTDDI_WINXP)
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    ULONG NextHandleNeedingPool;
+    LONG ExtraInfoPages;
+    volatile ULONG_PTR TableCode;
+    PEPROCESS QuotaProcess;
+    LIST_ENTRY HandleTableList;
+    ULONG UniqueProcessId;
+    union
+    {
+        ULONG Flags;
+        struct
+        {
+            UCHAR StrictFIFO:1;
+            UCHAR EnableHandleExceptions:1;
+            UCHAR Rundown:1;
+            UCHAR Duplicated:1;
+            UCHAR RaiseUMExceptionOnInvalidHandleClose:1;
+        };
+    };
+    EX_PUSH_LOCK HandleContentionEvent;
+    EX_PUSH_LOCK HandleTableLock;
+    UCHAR Reserved[128 - (2 * sizeof(ULONG)) - (2 * sizeof(PVOID)) - sizeof(LIST_ENTRY) - (2 * sizeof(ULONG)) - (2 * sizeof(EX_PUSH_LOCK))];
+    union
+    {
+        HANDLE_TABLE_FREE_LIST FreeLists[1];
+        struct
+        {
+            UCHAR ActualEntry[32];
+            PHANDLE_TRACE_DEBUG_INFO DebugInfo;
+        };
+    };
+#elif (NTDDI_VERSION >= NTDDI_WINXP)
     ULONG_PTR TableCode;
-#else
-    PHANDLE_TABLE_ENTRY **Table;
-#endif
     PEPROCESS QuotaProcess;
     PVOID UniqueProcessId;
-#if (NTDDI_VERSION >= NTDDI_WINXP)
     EX_PUSH_LOCK HandleTableLock[4];
     LIST_ENTRY HandleTableList;
     EX_PUSH_LOCK HandleContentionEvent;
-#else
-    ERESOURCE HandleLock;
-    LIST_ENTRY HandleTableList;
-    KEVENT HandleContentionEvent;
-#endif
     PHANDLE_TRACE_DEBUG_INFO DebugInfo;
     LONG ExtraInfoPages;
-#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    ULONG FirstFree;
+    ULONG LastFree;
+    ULONG NextHandleNeedingPool;
+    LONG HandleCount;
     union
     {
         ULONG Flags;
         UCHAR StrictFIFO:1;
     };
-    LONG FirstFreeHandle;
-    PHANDLE_TABLE_ENTRY LastFreeHandleEntry;
-    LONG HandleCount;
-    ULONG NextHandleNeedingPool;
 #else
+    PHANDLE_TABLE_ENTRY **Table;
+    PEPROCESS QuotaProcess;
+    PVOID UniqueProcessId;
+    ERESOURCE HandleLock;
+    LIST_ENTRY HandleTableList;
+    KEVENT HandleContentionEvent;
+    PHANDLE_TRACE_DEBUG_INFO DebugInfo;
+    LONG ExtraInfoPages;
     ULONG FirstFree;
     ULONG LastFree;
     ULONG NextHandleNeedingPool;
@@ -938,6 +997,32 @@ typedef struct _SYSTEM_PROCESSOR_INFORMATION
     ULONG ProcessorFeatureBits;
 #endif
 } SYSTEM_PROCESSOR_INFORMATION, *PSYSTEM_PROCESSOR_INFORMATION;
+
+typedef struct _SYSTEM_PROCESSOR_FEATURES_INFORMATION
+{
+    ULONGLONG ProcessorFeatureBits;
+    ULONGLONG Reserved[3];
+} SYSTEM_PROCESSOR_FEATURES_INFORMATION, *PSYSTEM_PROCESSOR_FEATURES_INFORMATION;
+
+typedef struct _SYSTEM_PROCESS_ID_INFORMATION
+{
+    HANDLE ProcessId;
+    UNICODE_STRING ImageName;
+} SYSTEM_PROCESS_ID_INFORMATION, *PSYSTEM_PROCESS_ID_INFORMATION;
+
+#ifndef _SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION_DEFINED
+#define _SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION_DEFINED
+typedef struct _SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION
+{
+    ULONG Machine : 16;
+    ULONG KernelMode : 1;
+    ULONG UserMode : 1;
+    ULONG Native : 1;
+    ULONG Process : 1;
+    ULONG WoW64Container : 1;
+    ULONG ReservedZero0 : 11;
+} SYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION, *PSYSTEM_SUPPORTED_PROCESSOR_ARCHITECTURES_INFORMATION;
+#endif
 
 // Class 2
 typedef struct _SYSTEM_PERFORMANCE_INFORMATION
@@ -1629,12 +1714,6 @@ typedef struct _SYSTEM_HANDLE_INFORMATION_EX
 
 // FIXME: Class 65-89
 
-// Class 83 - SystemProcessorIdleCycleTimeInformation
-typedef struct _SYSTEM_PROCESSOR_IDLE_CYCLE_TIME_INFORMATION
-{
-    ULONGLONG CycleTime;
-} SYSTEM_PROCESSOR_IDLE_CYCLE_TIME_INFORMATION, *PSYSTEM_PROCESSOR_IDLE_CYCLE_TIME_INFORMATION;
-
 // Class 90
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
 typedef struct _SYSTEM_BOOT_ENVIRONMENT_INFORMATION
@@ -1670,6 +1749,13 @@ typedef struct _SYSTEM_SYSTEM_DISK_INFORMATION
     UNICODE_STRING SystemDisk;
 } SYSTEM_SYSTEM_DISK_INFORMATION, *PSYSTEM_SYSTEM_DISK_INFORMATION;
 #endif
+
+// Class 101
+typedef struct _SYSTEM_NUMA_PROXIMITY_MAP
+{
+    ULONG NodeProximityId;
+    USHORT NodeNumber;
+} SYSTEM_NUMA_PROXIMITY_MAP, *PSYSTEM_NUMA_PROXIMITY_MAP;
 
 //
 // Hotpatch flags
@@ -1776,6 +1862,16 @@ typedef struct _SYSTEM_MEMORY_LIST_INFORMATION
     SIZE_T RepurposedPagesByPriority[8];
     SIZE_T ModifiedPageCountPageFile;
 } SYSTEM_MEMORY_LIST_INFORMATION, *PSYSTEM_MEMORY_LIST_INFORMATION;
+
+//
+// Class 184
+//
+typedef struct _SYSTEM_PHYSICAL_MEMORY_INFORMATION
+{
+    ULONGLONG TotalPhysicalBytes;
+    ULONGLONG LowestPhysicalAddress;
+    ULONGLONG HighestPhysicalAddress;
+} SYSTEM_PHYSICAL_MEMORY_INFORMATION, *PSYSTEM_PHYSICAL_MEMORY_INFORMATION;
 
 //
 // Firmware variable attributes

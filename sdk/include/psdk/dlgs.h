@@ -26,10 +26,6 @@ extern "C" {
 #define NEWFILEOPENV3ORD 1553
 #endif /* (WINVER >= 0x0400) */
 
-#if (NTDDI_VERSION >= NTDDI_VISTA) || defined(__REACTOS__)
-#define NEWFILEOPENV3ORD 1553
-#endif /* (NTDDI_VERSION >= NTDDI_VISTA) */
-
 #define ctlFirst 0x400
 #define ctlLast 0x4ff
 

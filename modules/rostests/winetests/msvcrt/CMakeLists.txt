@@ -23,18 +23,21 @@ add_executable(msvcrt_winetest
     ${PCH_SKIP_SOURCE})
 
 target_compile_definitions(msvcrt_winetest PRIVATE
+    __WINESRC__
     WINETEST_USE_DBGSTR_LONGLONG
     USE_WINE_TODOS
     USE_WIN_SKIP
     _CRT_NONSTDC_NO_DEPRECATE
     _USE_MATH_DEFINES
+    WINETEST_WAIT_CHILD_PROCESS_INFO
     WIN32_NO_STATUS=
     __msvcrt_ulong=ULONG)
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    target_compile_options(msvcrt_winetest PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wno-format -Wno-overflow>)
+    target_compile_options(msvcrt_winetest PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wno-overflow>)
     if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
         target_compile_options(msvcrt_winetest PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wno-stringop-truncation>)
+        target_compile_options(msvcrt_winetest PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wno-nonnull>)
     endif()
 endif()
 
@@ -49,3 +52,7 @@ target_link_libraries(msvcrt_winetest oldnames)
 
 add_pch(msvcrt_winetest precomp.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET msvcrt_winetest)
+
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(msvcrt_winetest PRIVATE -Wno-fortify-source)
+endif()

@@ -61,8 +61,11 @@ BOOLEAN DllShutdownInProgress(VOID)
 BOOL IsInteractiveUserLogon(VOID)
 {
     BOOL bOK, IsMember = FALSE;
+    DWORD dwLength;
+    HWINSTA hWinSta;
     PSID pSid;
     SID_IDENTIFIER_AUTHORITY IdentAuth = { SECURITY_NT_AUTHORITY };
+    USEROBJECTFLAGS UserObjectFlags;
 
     if (!AllocateAndInitializeSid(&IdentAuth, 1, SECURITY_INTERACTIVE_RID,
                                   0, 0, 0, 0, 0, 0, 0, &pSid))
@@ -76,7 +79,11 @@ BOOL IsInteractiveUserLogon(VOID)
     if (pSid)
         FreeSid(pSid);
 
-    return bOK && IsMember;
+    if (bOK && IsMember)
+        return TRUE;
+
+    hWinSta = GetProcessWindowStation();
+    return hWinSta && GetUserObjectInformationW(hWinSta, UOI_FLAGS, &UserObjectFlags, sizeof(UserObjectFlags), &dwLength) && (UserObjectFlags.dwFlags & WSF_VISIBLE);
 }
 
 /// Gets the charset from a language ID.
@@ -134,9 +141,9 @@ ITfCategoryMgr *GetUIMCat(PCIC_LIBTHREAD pLibThread)
     if (pLibThread->m_pCategoryMgr)
         return pLibThread->m_pCategoryMgr;
 
-    if (FAILED(cicCoCreateInstance(CLSID_TF_CategoryMgr, NULL, CLSCTX_INPROC_SERVER,
-                                   IID_ITfCategoryMgr, (void **)&pLibThread->m_pCategoryMgr)))
+    if (FAILED(TF_CreateCategoryMgr(&pLibThread->m_pCategoryMgr)))
     {
+        pLibThread->m_pCategoryMgr = NULL;
         return NULL;
     }
     return pLibThread->m_pCategoryMgr;
@@ -164,15 +171,15 @@ HRESULT InitDisplayAttrbuteLib(PCIC_LIBTHREAD pLibThread)
         pLibThread->m_pDisplayAttrMgr = NULL;
     }
 
-    if (FAILED(cicCoCreateInstance(CLSID_TF_DisplayAttributeMgr, NULL, CLSCTX_INPROC_SERVER,
-                                   IID_ITfDisplayAttributeMgr,
-                                   (void **)&pLibThread->m_pDisplayAttrMgr)))
+    if (FAILED(TF_CreateDisplayAttributeMgr(&pLibThread->m_pDisplayAttrMgr)))
     {
+        pLibThread->m_pDisplayAttrMgr = NULL;
         return E_FAIL;
     }
 
-    IEnumGUID *pEnumGuid;
-    LibEnumItemsInCategory(pLibThread, GUID_TFCAT_DISPLAYATTRIBUTEPROPERTY, &pEnumGuid);
+    IEnumGUID *pEnumGuid = NULL;
+    if (FAILED(LibEnumItemsInCategory(pLibThread, GUID_TFCAT_DISPLAYATTRIBUTEPROPERTY, &pEnumGuid)))
+        pEnumGuid = NULL;
 
     HRESULT hr = E_OUTOFMEMORY;
 
@@ -193,6 +200,9 @@ HRESULT InitDisplayAttrbuteLib(PCIC_LIBTHREAD pLibThread)
         }
     }
     ::LeaveCriticalSection(&g_csLock);
+
+    if (pEnumGuid)
+        pEnumGuid->Release();
 
     return hr;
 }

@@ -73,7 +73,7 @@ typedef struct _HDAC_STREAM {
     HDAC_ISR_CALLBACK isr;
 
     BOOLEAN running;
-    BOOLEAN irqReceived;
+    volatile LONG notificationPending;
 } HDAC_STREAM, *PHDAC_STREAM;
 
 typedef struct _HDAC_RIRB {
@@ -117,11 +117,14 @@ typedef struct _FDO_CONTEXT
     UINT16 venId;
     UINT16 devId;
     UINT8 revId;
+    UINT8 subClass;
 
     PCI_BAR m_BAR0; //required
     PCI_BAR m_BAR4; //Intel AudioDSP
     BUS_INTERFACE_STANDARD BusInterface; //PCI Bus Interface
     WDFINTERRUPT Interrupt;
+    BOOLEAN InterruptResourcePresent;
+    BOOLEAN InterruptConnected;
 
     //Graphics Notifications
     PVOID GraphicsNotificationHandle;
@@ -163,6 +166,7 @@ typedef struct _FDO_CONTEXT
     HDAC_RB corb;
     HDAC_RB rirb;
     BOOL processRirb;
+    KEVENT verbLock[HDA_MAX_CODECS];
 
     UINT8 *rb; //CORB and RIRB buffers
     PVOID posbuf;

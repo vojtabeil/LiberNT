@@ -544,7 +544,7 @@ BaseUpdateVDMEntry(IN ULONG UpdateIndex,
                    IN ULONG IndexInfo,
                    IN ULONG BinaryType)
 {
-    BASE_API_MESSAGE ApiMessage;
+    BASE_API_MESSAGE ApiMessage = {0};
     PBASE_UPDATE_VDM_ENTRY UpdateVdmEntry = &ApiMessage.Data.UpdateVDMEntryRequest;
 
     /* Check what update is being sent */
@@ -567,6 +567,16 @@ BaseUpdateVDMEntry(IN ULONG UpdateIndex,
             UpdateVdmEntry->iTask = IndexInfo;
             break;
         }
+
+        case VdmEntryUpdateControlCHandler:
+        {
+            UpdateVdmEntry->iTask = IndexInfo;
+            break;
+        }
+
+        default:
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
     }
 
     /* Also check what kind of binary this is for the console handle */
@@ -754,7 +764,8 @@ BaseCreateVDMEnvironment(IN PWCHAR lpEnvironment,
 
     BOOL Success = FALSE;
     NTSTATUS Status;
-    ULONG EnvironmentSize = 0;
+    SIZE_T EnvironmentSize = 0;
+    SIZE_T EnvironmentSizeInBytes = 0;
     SIZE_T RegionSize;
     PWCHAR Environment, NewEnvironment = NULL;
     ENV_NAME_TYPE NameType;
@@ -794,10 +805,18 @@ BaseCreateVDMEnvironment(IN PWCHAR lpEnvironment,
      * Count how much space the whole environment takes. The environment block is
      * doubly NULL-terminated (NULL from last string and final NULL terminator).
      */
-    SourcePtr = Environment;
-    while (!(*SourcePtr++ == UNICODE_NULL && *SourcePtr == UNICODE_NULL))
-        ++EnvironmentSize;
-    EnvironmentSize += 2; // Add the two terminating NULLs
+    Status = BasepQueryEnvironmentSizeW(Environment, &EnvironmentSizeInBytes);
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastError(ERROR_BAD_ENVIRONMENT);
+        goto Cleanup;
+    }
+    EnvironmentSize = EnvironmentSizeInBytes / sizeof(WCHAR);
+    if (EnvironmentSize > (MAXULONG_PTR / sizeof(WCHAR)) - MAX_PATH)
+    {
+        SetLastError(ERROR_BAD_ENVIRONMENT);
+        goto Cleanup;
+    }
 
     /*
      * Allocate a new copy large enough to hold all the environment with paths
@@ -1817,9 +1836,6 @@ GetVDMCurrentDirectories(DWORD cchCurDirs, PCHAR lpszzCurDirs)
 }
 
 
-/*
- * @implemented (undocumented)
- */
 BOOL
 WINAPI
 RegisterConsoleVDM(IN DWORD dwRegisterFlags,
@@ -1828,91 +1844,14 @@ RegisterConsoleVDM(IN DWORD dwRegisterFlags,
                    IN HANDLE hErrorHardwareEvent,
                    IN DWORD dwUnusedVar,
                    OUT LPDWORD lpVideoStateLength,
-                   OUT PVOID* lpVideoState, // PVIDEO_HARDWARE_STATE_HEADER*
+                   OUT PVOID* lpVideoState,
                    IN PVOID lpUnusedBuffer,
                    IN DWORD dwUnusedBufferLength,
                    IN COORD dwVDMBufferSize,
                    OUT PVOID* lpVDMBuffer)
 {
-    BOOL Success;
-    CONSOLE_API_MESSAGE ApiMessage;
-    PCONSOLE_REGISTERVDM RegisterVDMRequest = &ApiMessage.Data.RegisterVDMRequest;
-    PCSR_CAPTURE_BUFFER CaptureBuffer = NULL;
-
-    /* Set up the data to send to the Console Server */
-    RegisterVDMRequest->ConsoleHandle = NtCurrentPeb()->ProcessParameters->ConsoleHandle;
-    RegisterVDMRequest->RegisterFlags = dwRegisterFlags;
-
-    if (dwRegisterFlags != 0)
-    {
-        RegisterVDMRequest->StartHardwareEvent = hStartHardwareEvent;
-        RegisterVDMRequest->EndHardwareEvent   = hEndHardwareEvent;
-        RegisterVDMRequest->ErrorHardwareEvent = hErrorHardwareEvent;
-
-        RegisterVDMRequest->VDMBufferSize = dwVDMBufferSize;
-
-#if 0
-        RegisterVDMRequest->UnusedBufferLength = dwUnusedBufferLength;
-
-        /* Allocate a Capture Buffer */
-        CaptureBuffer = CsrAllocateCaptureBuffer(1, dwUnusedBufferLength);
-        if (CaptureBuffer == NULL)
-        {
-            DPRINT1("CsrAllocateCaptureBuffer failed!\n");
-            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-            return FALSE;
-        }
-
-        /* Capture the buffer to write */
-        CsrCaptureMessageBuffer(CaptureBuffer,
-                                (PVOID)lpUnusedBuffer,
-                                dwUnusedBufferLength,
-                                (PVOID*)&RegisterVDMRequest->UnusedBuffer);
-#endif
-    }
-    else
-    {
-        // CaptureBuffer = NULL;
-    }
-
-    /* Call the server */
-    CsrClientCallServer((PCSR_API_MESSAGE)&ApiMessage,
-                        CaptureBuffer,
-                        CSR_CREATE_API_NUMBER(CONSRV_SERVERDLL_INDEX, ConsolepRegisterVDM),
-                        sizeof(*RegisterVDMRequest));
-
-    /* Check for success */
-    Success = NT_SUCCESS(ApiMessage.Status);
-
-    /* Release the capture buffer if needed */
-    if (CaptureBuffer) CsrFreeCaptureBuffer(CaptureBuffer);
-
-    /* Retrieve the results */
-    if (Success)
-    {
-        if (dwRegisterFlags != 0)
-        {
-            _SEH2_TRY
-            {
-                *lpVideoStateLength = RegisterVDMRequest->VideoStateLength;
-                *lpVideoState       = RegisterVDMRequest->VideoState;
-                *lpVDMBuffer        = RegisterVDMRequest->VDMBuffer;
-            }
-            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
-            {
-                SetLastError(ERROR_INVALID_ACCESS);
-                Success = FALSE;
-            }
-            _SEH2_END;
-        }
-    }
-    else
-    {
-        BaseSetLastNTError(ApiMessage.Status);
-    }
-
-    /* Return success status */
-    return Success;
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return FALSE;
 }
 
 

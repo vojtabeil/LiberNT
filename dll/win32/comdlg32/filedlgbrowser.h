@@ -47,6 +47,7 @@
  * Data structure
  */
 
+
 #ifdef __REACTOS__
 typedef struct FileOpenDlgInfos
 #else

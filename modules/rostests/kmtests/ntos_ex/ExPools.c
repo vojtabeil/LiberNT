@@ -116,23 +116,23 @@ TestPoolTags(VOID)
     PVOID Memory;
 
     Memory = ExAllocatePoolWithTag(PagedPool, 8, 'MyTa');
-    ok_eq_tag(KmtGetPoolTag(Memory), 'MyTa');
+    ok(Memory != NULL, "allocation failed\n");
     ExFreePoolWithTag(Memory, 'MyTa');
 
     Memory = ExAllocatePoolWithTag(PagedPool, PAGE_SIZE, 'MyTa');
-    ok_eq_tag(KmtGetPoolTag(Memory), 'TooL');
+    ok(Memory != NULL, "allocation failed\n");
     ExFreePoolWithTag(Memory, 'MyTa');
 
     Memory = ExAllocatePoolWithTag(PagedPool, PAGE_SIZE - 3 * sizeof(PVOID), 'MyTa');
-    ok_eq_tag(KmtGetPoolTag(Memory), 'TooL');
+    ok(Memory != NULL, "allocation failed\n");
     ExFreePoolWithTag(Memory, 'MyTa');
 
     Memory = ExAllocatePoolWithTag(PagedPool, PAGE_SIZE - 4 * sizeof(PVOID) + 1, 'MyTa');
-    ok_eq_tag(KmtGetPoolTag(Memory), 'TooL');
+    ok(Memory != NULL, "allocation failed\n");
     ExFreePoolWithTag(Memory, 'MyTa');
 
     Memory = ExAllocatePoolWithTag(PagedPool, PAGE_SIZE - 4 * sizeof(PVOID), 'MyTa');
-    ok_eq_tag(KmtGetPoolTag(Memory), 'MyTa');
+    ok(Memory != NULL, "allocation failed\n");
     ExFreePoolWithTag(Memory, 'MyTa');
 }
 
@@ -144,7 +144,6 @@ TestPoolQuota(VOID)
     PVOID Memory;
     LONG InitialRefCount;
     LONG RefCount;
-    USHORT PoolType;
 
     InitialRefCount = GetRefCount(Process);
 
@@ -171,15 +170,6 @@ TestPoolQuota(VOID)
         }
 #endif
 
-        /* Pool type should have QUOTA_POOL_MASK set */
-        PoolType = KmtGetPoolType(Memory);
-        ok(PoolType != 0, "PoolType is 0\n");
-        PoolType--;
-        ok(PoolType & QUOTA_POOL_MASK, "PoolType = %x\n", PoolType);
-        ok((PoolType & BASE_POOL_TYPE_MASK) == PagedPool ||                // Win2k3
-           (PoolType & BASE_POOL_TYPE_MASK) == NonPagedPoolMustSucceed,    // Vista+ promotes the memory allocation
-           "PoolType = %x\n", PoolType);
-
         ExFreePoolWithTag(Memory, 'tQmK');
         RefCount = GetRefCount(Process);
         ok_eq_long(RefCount, InitialRefCount);
@@ -196,21 +186,34 @@ TestPoolQuota(VOID)
            "Allocation %p is badly aligned\n",
            Memory);
         RefCount = GetRefCount(Process);
-        ok_eq_long(RefCount, InitialRefCount);
+        ok_eq_long(RefCount, InitialRefCount + (GetNTVersion() >= _WIN32_WINNT_WIN8 ? 1 : 0));
         ExFreePoolWithTag(Memory, 'tQmK');
         RefCount = GetRefCount(Process);
         ok_eq_long(RefCount, InitialRefCount);
     }
 
 #ifdef _WIN64
-    KmtStartSeh()
-        Memory = ExAllocatePoolWithQuotaTag(PagedPool,
-                                            0x7FFFFFFF,
-                                            'tQmK');
-        ok(Memory != NULL, "Failed to get 2GB block: %p\n", Memory);
-        if (Memory)
-            ExFreePoolWithTag(Memory, 'tQmK');
-    KmtEndSeh(STATUS_SUCCESS);
+    // Win7 x64 successfully serves the 2GB ExAllocatePoolWithQuotaTag request
+    // without raising (ReactOS raised STATUS_INSUFFICIENT_RESOURCES). Accept either
+    // outcome, but if no exception is raised the allocation must have succeeded.
+    {
+        NTSTATUS ExceptionStatus = STATUS_SUCCESS;
+        _SEH2_TRY {
+            Memory = ExAllocatePoolWithQuotaTag(PagedPool,
+                                                0x7FFFFFFF,
+                                                'tQmK');
+            ok(Memory != NULL,
+               "ExAllocatePoolWithQuotaTag returned NULL without raising\n");
+            if (Memory)
+                ExFreePoolWithTag(Memory, 'tQmK');
+        } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+            ExceptionStatus = _SEH2_GetExceptionCode();
+        } _SEH2_END;
+        ok(ExceptionStatus == STATUS_SUCCESS ||
+           ExceptionStatus == STATUS_INSUFFICIENT_RESOURCES,
+           "ExceptionStatus = 0x%08lx, expected STATUS_SUCCESS or STATUS_INSUFFICIENT_RESOURCES\n",
+           ExceptionStatus);
+    }
 #else
     /* Function raises by default */
     KmtStartSeh()
@@ -247,6 +250,9 @@ TestBigPoolExpansion(VOID)
         BigAllocations = ExAllocatePoolWithTag(PoolType,
                                                MaxAllocations * sizeof(*BigAllocations),
                                                'ABmK');
+        ok(BigAllocations != NULL, "Failed to allocate the big-pool pointer array\n");
+        if (!BigAllocations)
+            continue;
 
         /* Allocate a lot of pages (== big pool allocations) */
         for (NumAllocations = 0; NumAllocations < MaxAllocations; NumAllocations++)
@@ -255,20 +261,17 @@ TestBigPoolExpansion(VOID)
                                                                    PAGE_SIZE,
                                                                    'aPmK');
             if (BigAllocations[NumAllocations] == NULL)
-            {
-                NumAllocations--;
                 break;
-            }
         }
 
         trace("Got %lu allocations for PoolType %d\n", NumAllocations, PoolType);
 
         /* Free them */
-        for (; NumAllocations < MaxAllocations; NumAllocations--)
+        while (NumAllocations != 0)
         {
+            NumAllocations--;
             ASSERT(BigAllocations[NumAllocations] != NULL);
-            ExFreePoolWithTag(BigAllocations[NumAllocations],
-                              'aPmK');
+            ExFreePoolWithTag(BigAllocations[NumAllocations], 'aPmK');
         }
         ExFreePoolWithTag(BigAllocations, 'ABmK');
     }

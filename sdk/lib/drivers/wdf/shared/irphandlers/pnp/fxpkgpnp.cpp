@@ -226,6 +226,10 @@ FxPkgPnp::~FxPkgPnp()
         //
         pDI->m_Entry.Next = NULL;
 
+        if (pDI->m_State) {
+            pDI->SetState(FALSE);
+        }
+
         delete pDI;
     }
     m_DeviceInterfaceHead.Next = NULL;
@@ -1691,7 +1695,7 @@ FxPkgPnp::QueryForCapabilities(
     if (NT_SUCCESS(status)) {
         ULONG states, i;
 
-        ASSERT(caps.DeviceCaps.DeviceWake <= 0xFF && caps.DeviceCaps.SystemWake <= 0xFF);
+        ASSERT((ULONG) caps.DeviceCaps.DeviceWake <= 0xFF && (ULONG) caps.DeviceCaps.SystemWake <= 0xFF);
 
         m_SystemWake = (BYTE) caps.DeviceCaps.SystemWake;
 
@@ -3019,7 +3023,6 @@ Return Value:
     //
     // IdleTimeoutType is available only on > 1.9
     //
-#ifndef __REACTOS__
     if (Settings->Size > sizeof(WDF_DEVICE_POWER_POLICY_IDLE_SETTINGS_V1_9)) {
         if (firstTime) {
              if ((SystemManagedIdleTimeout == Settings->IdleTimeoutType) ||
@@ -3083,7 +3086,6 @@ Return Value:
             }
         }
     }
-#endif
 
     if (Settings->IdleCaps == IdleCannotWakeFromS0) {
         //
@@ -4143,7 +4145,7 @@ FxPkgPnp::PnpDeviceUsageNotification(
                         // about yet another failure. So we ignore the return
                         // value.
                         //
-                        (void) SendDeviceUsageNotification(&dependentDevice,
+                        (void)!SendDeviceUsageNotification(&dependentDevice,
                                                            &relatedIrp,
                                                            &workItem,
                                                            Irp,
@@ -4246,7 +4248,7 @@ FxPkgPnp::PnpDeviceUsageNotification(
                     //
                     // Ignore the status because we can't do anything on failure
                     //
-                    (void) SendDeviceUsageNotification(&topOfParentStack,
+                    (void)!SendDeviceUsageNotification(&topOfParentStack,
                                                        &parentIrp,
                                                        &workItem,
                                                        Irp,
@@ -4305,7 +4307,7 @@ FxPkgPnp::PnpDeviceUsageNotification(
                     // We're already in a failure path. We can't do anything
                     // about yet another failure. So we ignore the return value.
                     //
-                    (void) SendDeviceUsageNotification(&dependentDevice,
+                    (void)!SendDeviceUsageNotification(&dependentDevice,
                                                        &relatedIrp,
                                                        &workItem,
                                                        Irp,
@@ -4370,7 +4372,7 @@ FxPkgPnp::PnpDeviceUsageNotification(
                     //
                     // Ignore the status because we can't do anything on failure
                     //
-                    (void) SendDeviceUsageNotification(&topOfParentStack,
+                    (void)!SendDeviceUsageNotification(&topOfParentStack,
                                                        &parentIrp,
                                                        &workItem,
                                                        Irp,
@@ -4422,7 +4424,7 @@ FxPkgPnp::PnpDeviceUsageNotification(
                         // We're already in a failure path. We can't do anything
                         // about yet another failure. So we ignore the return value.
                         //
-                        (void) SendDeviceUsageNotification(&dependentDevice,
+                        (void)!SendDeviceUsageNotification(&dependentDevice,
                                                            &relatedIrp,
                                                            &workItem,
                                                            Irp,
@@ -6244,196 +6246,194 @@ FxPkgPnp::AssignPowerFrameworkSettings(
     __in PWDF_POWER_FRAMEWORK_SETTINGS PowerFrameworkSettings
     )
 {
-//     NTSTATUS status;
-//     PPO_FX_COMPONENT_IDLE_STATE idleStates = NULL;
-//     ULONG idleStatesSize = 0;
-//     PPO_FX_COMPONENT component = NULL;
-//     ULONG componentSize = 0;
-//     PPOX_SETTINGS poxSettings = NULL;
-//     ULONG poxSettingsSize = 0;
-//     BYTE * buffer = NULL;
+    NTSTATUS status;
+    PPO_FX_COMPONENT_IDLE_STATE idleStates = NULL;
+    ULONG idleStatesSize = 0;
+    PPO_FX_COMPONENT component = NULL;
+    ULONG componentSize = 0;
+    PPOX_SETTINGS poxSettings = NULL;
+    ULONG poxSettingsSize = 0;
+    BYTE * buffer = NULL;
 
-//     if (FALSE==(IdleTimeoutManagement::_SystemManagedIdleTimeoutAvailable())) {
-//         //
-//         // If system-managed idle timeout is not available on this OS, then
-//         // there is nothing to do.
-//         //
-//         DoTraceLevelMessage(
-//             GetDriverGlobals(), TRACE_LEVEL_INFORMATION, TRACINGPNP,
-//             "WDFDEVICE %p !devobj %p Power framework is not supported on the "
-//             "current OS. Therefore, the power framework settings will not take "
-//             "effect.",
-//             m_Device->GetHandle(),
-//             m_Device->GetDeviceObject()
-//             );
-//         return STATUS_SUCCESS;
-//     }
+    if (FALSE==(IdleTimeoutManagement::_SystemManagedIdleTimeoutAvailable())) {
+        //
+        // If system-managed idle timeout is not available on this OS, then
+        // there is nothing to do.
+        //
+        DoTraceLevelMessage(
+            GetDriverGlobals(), TRACE_LEVEL_INFORMATION, TRACINGPNP,
+            "WDFDEVICE %p !devobj %p Power framework is not supported on the "
+            "current OS. Therefore, the power framework settings will not take "
+            "effect.",
+            m_Device->GetHandle(),
+            m_Device->GetDeviceObject()
+            );
+        return STATUS_SUCCESS;
+    }
 
-//     if (NULL != PowerFrameworkSettings->Component) {
-//         //
-//         // Caller should ensure that IdleStateCount is not zero
-//         //
-//         ASSERT(0 != PowerFrameworkSettings->Component->IdleStateCount);
+    if (NULL != PowerFrameworkSettings->Component) {
+        //
+        // Caller should ensure that IdleStateCount is not zero
+        //
+        ASSERT(0 != PowerFrameworkSettings->Component->IdleStateCount);
 
-//         //
-//         // Compute buffer size needed for storing F-states
-//         //
-//         status = RtlULongMult(
-//                     PowerFrameworkSettings->Component->IdleStateCount,
-//                     sizeof(*(PowerFrameworkSettings->Component->IdleStates)),
-//                     &idleStatesSize
-//                     );
-//         if (FALSE == NT_SUCCESS(status)) {
-//             DoTraceLevelMessage(
-//                 GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
-//                 "WDFDEVICE %p !devobj %p Unable to compute length of buffer "
-//                 "required to store F-states. RtlULongMult failed with "
-//                 "%!STATUS!",
-//                 m_Device->GetHandle(),
-//                 m_Device->GetDeviceObject(),
-//                 status
-//                 );
-//             goto exit;
-//         }
+        //
+        // Compute buffer size needed for storing F-states
+        //
+        status = RtlULongMult(
+                    PowerFrameworkSettings->Component->IdleStateCount,
+                    sizeof(*(PowerFrameworkSettings->Component->IdleStates)),
+                    &idleStatesSize
+                    );
+        if (FALSE == NT_SUCCESS(status)) {
+            DoTraceLevelMessage(
+                GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
+                "WDFDEVICE %p !devobj %p Unable to compute length of buffer "
+                "required to store F-states. RtlULongMult failed with "
+                "%!STATUS!",
+                m_Device->GetHandle(),
+                m_Device->GetDeviceObject(),
+                status
+                );
+            goto exit;
+        }
 
-//         //
-//         // Compute buffer size needed for storing component information
-//         // (including F-states)
-//         //
-//         status = RtlULongAdd(idleStatesSize,
-//                              sizeof(*component),
-//                              &componentSize);
-//         if (FALSE == NT_SUCCESS(status)) {
-//             DoTraceLevelMessage(
-//                 GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
-//                 "WDFDEVICE %p !devobj %p Unable to compute length of buffer "
-//                 "required to store driver's component information. RtlULongAdd "
-//                 "failed with %!STATUS!",
-//                 m_Device->GetHandle(),
-//                 m_Device->GetDeviceObject(),
-//                 status
-//                 );
-//             goto exit;
-//         }
-//     }
+        //
+        // Compute buffer size needed for storing component information
+        // (including F-states)
+        //
+        status = RtlULongAdd(idleStatesSize,
+                             sizeof(*component),
+                             &componentSize);
+        if (FALSE == NT_SUCCESS(status)) {
+            DoTraceLevelMessage(
+                GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
+                "WDFDEVICE %p !devobj %p Unable to compute length of buffer "
+                "required to store driver's component information. RtlULongAdd "
+                "failed with %!STATUS!",
+                m_Device->GetHandle(),
+                m_Device->GetDeviceObject(),
+                status
+                );
+            goto exit;
+        }
+    }
 
-//     //
-//     // Compute total buffer size needed for power framework settings
-//     //
-//     status = RtlULongAdd(componentSize,
-//                          sizeof(*poxSettings),
-//                          &poxSettingsSize);
-//     if (FALSE == NT_SUCCESS(status)) {
-//         DoTraceLevelMessage(
-//             GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
-//             "WDFDEVICE %p !devobj %p Unable to compute length of buffer "
-//             "required to store driver's power framework settings. RtlULongAdd "
-//             "failed with %!STATUS!",
-//             m_Device->GetHandle(),
-//             m_Device->GetDeviceObject(),
-//             status
-//             );
-//         goto exit;
-//     }
+    //
+    // Compute total buffer size needed for power framework settings
+    //
+    status = RtlULongAdd(componentSize,
+                         sizeof(*poxSettings),
+                         &poxSettingsSize);
+    if (FALSE == NT_SUCCESS(status)) {
+        DoTraceLevelMessage(
+            GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
+            "WDFDEVICE %p !devobj %p Unable to compute length of buffer "
+            "required to store driver's power framework settings. RtlULongAdd "
+            "failed with %!STATUS!",
+            m_Device->GetHandle(),
+            m_Device->GetDeviceObject(),
+            status
+            );
+        goto exit;
+    }
 
-//     //
-//     // Allocate memory to copy the settings
-//     //
-//     buffer = (BYTE *) MxMemory::MxAllocatePoolWithTag(NonPagedPool,
-//                                                       poxSettingsSize,
-//                                                       GetDriverGlobals()->Tag);
-//     if (NULL == buffer) {
-//         status = STATUS_INSUFFICIENT_RESOURCES;
-//         DoTraceLevelMessage(
-//             GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
-//             "WDFDEVICE %p !devobj %p Unable to allocate buffer required to "
-//             "store F-states. %!STATUS!",
-//             m_Device->GetHandle(),
-//             m_Device->GetDeviceObject(),
-//             status
-//             );
-//         goto exit;
-//     }
+    //
+    // Allocate memory to copy the settings
+    //
+    buffer = (BYTE *) MxMemory::MxAllocatePoolWithTag(NonPagedPool,
+                                                      poxSettingsSize,
+                                                      GetDriverGlobals()->Tag);
+    if (NULL == buffer) {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+        DoTraceLevelMessage(
+            GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
+            "WDFDEVICE %p !devobj %p Unable to allocate buffer required to "
+            "store F-states. %!STATUS!",
+            m_Device->GetHandle(),
+            m_Device->GetDeviceObject(),
+            status
+            );
+        goto exit;
+    }
 
-//     //
-//     // Set our pointers to point to appropriate locations in the buffer.
-//     //
-//     // NOTES:
-//     //   - The array of F-states comes first because it has ULONGLONG members
-//     //     because of which it has the biggest alignment requirement.
-//     //   - The logic below works even if the client driver did not specify any
-//     //     component information. In that case idleStatesSize and componentSize
-//     //     are both 0 and 'poxSettings' points to the beginning of the allocated
-//     //     buffer
-//     //
-//     idleStates = (PPO_FX_COMPONENT_IDLE_STATE) buffer;
-//     component = (PPO_FX_COMPONENT) (buffer + idleStatesSize);
-//     poxSettings = (PPOX_SETTINGS) (buffer + componentSize);
+    //
+    // Set our pointers to point to appropriate locations in the buffer.
+    //
+    // NOTES:
+    //   - The array of F-states comes first because it has ULONGLONG members
+    //     because of which it has the biggest alignment requirement.
+    //   - The logic below works even if the client driver did not specify any
+    //     component information. In that case idleStatesSize and componentSize
+    //     are both 0 and 'poxSettings' points to the beginning of the allocated
+    //     buffer
+    //
+    idleStates = (PPO_FX_COMPONENT_IDLE_STATE) buffer;
+    component = (PPO_FX_COMPONENT) (buffer + idleStatesSize);
+    poxSettings = (PPOX_SETTINGS) (buffer + componentSize);
 
-//     //
-//     // Copy the relevant parts of the settings buffer
-//     //
-//     poxSettings->EvtDeviceWdmPostPoFxRegisterDevice =
-//         PowerFrameworkSettings->EvtDeviceWdmPostPoFxRegisterDevice;
-//     poxSettings->EvtDeviceWdmPrePoFxUnregisterDevice =
-//         PowerFrameworkSettings->EvtDeviceWdmPrePoFxUnregisterDevice;
-//     poxSettings->Component = PowerFrameworkSettings->Component;
-//     poxSettings->ComponentActiveConditionCallback =
-//         PowerFrameworkSettings->ComponentActiveConditionCallback;
-//     poxSettings->ComponentIdleConditionCallback =
-//         PowerFrameworkSettings->ComponentIdleConditionCallback;
-//     poxSettings->ComponentIdleStateCallback =
-//         PowerFrameworkSettings->ComponentIdleStateCallback;
-//     poxSettings->PowerControlCallback =
-//         PowerFrameworkSettings->PowerControlCallback;
-//     poxSettings->PoFxDeviceContext = PowerFrameworkSettings->PoFxDeviceContext;
+    //
+    // Copy the relevant parts of the settings buffer
+    //
+    poxSettings->EvtDeviceWdmPostPoFxRegisterDevice =
+        PowerFrameworkSettings->EvtDeviceWdmPostPoFxRegisterDevice;
+    poxSettings->EvtDeviceWdmPrePoFxUnregisterDevice =
+        PowerFrameworkSettings->EvtDeviceWdmPrePoFxUnregisterDevice;
+    poxSettings->Component = PowerFrameworkSettings->Component;
+    poxSettings->ComponentActiveConditionCallback =
+        PowerFrameworkSettings->ComponentActiveConditionCallback;
+    poxSettings->ComponentIdleConditionCallback =
+        PowerFrameworkSettings->ComponentIdleConditionCallback;
+    poxSettings->ComponentIdleStateCallback =
+        PowerFrameworkSettings->ComponentIdleStateCallback;
+    poxSettings->PowerControlCallback =
+        PowerFrameworkSettings->PowerControlCallback;
+    poxSettings->PoFxDeviceContext = PowerFrameworkSettings->PoFxDeviceContext;
 
-//     if (NULL != PowerFrameworkSettings->Component) {
-//         //
-//         // Copy the component information
-//         //
-//         poxSettings->Component = component;
-//         RtlCopyMemory(poxSettings->Component,
-//                       PowerFrameworkSettings->Component,
-//                       sizeof(*component));
+    if (NULL != PowerFrameworkSettings->Component) {
+        //
+        // Copy the component information
+        //
+        poxSettings->Component = component;
+        RtlCopyMemory(poxSettings->Component,
+                      PowerFrameworkSettings->Component,
+                      sizeof(*component));
 
-//         //
-//         // Caller should ensure that IdleStates is not NULL
-//         //
-//         ASSERT(NULL != PowerFrameworkSettings->Component->IdleStates);
+        //
+        // Caller should ensure that IdleStates is not NULL
+        //
+        ASSERT(NULL != PowerFrameworkSettings->Component->IdleStates);
 
-//         //
-//         // Copy the F-states
-//         //
-//         poxSettings->Component->IdleStates = idleStates;
-//         RtlCopyMemory(poxSettings->Component->IdleStates,
-//                       PowerFrameworkSettings->Component->IdleStates,
-//                       idleStatesSize);
-//     }
+        //
+        // Copy the F-states
+        //
+        poxSettings->Component->IdleStates = idleStates;
+        RtlCopyMemory(poxSettings->Component->IdleStates,
+                      PowerFrameworkSettings->Component->IdleStates,
+                      idleStatesSize);
+    }
 
-//     //
-//     // Commit these settings
-//     //
-//     status = m_PowerPolicyMachine.m_Owner->
-//                 m_IdleSettings.m_TimeoutMgmt.CommitPowerFrameworkSettings(
-//                                                             GetDriverGlobals(),
-//                                                             poxSettings
-//                                                             );
-//     if (FALSE == NT_SUCCESS(status)) {
-//         goto exit;
-//     }
+    //
+    // Commit these settings
+    //
+    status = m_PowerPolicyMachine.m_Owner->
+                m_IdleSettings.m_TimeoutMgmt.CommitPowerFrameworkSettings(
+                                                            GetDriverGlobals(),
+                                                            poxSettings
+                                                            );
+    if (FALSE == NT_SUCCESS(status)) {
+        goto exit;
+    }
 
-//     status = STATUS_SUCCESS;
+    status = STATUS_SUCCESS;
 
-// exit:
-//     if (FALSE == NT_SUCCESS(status)) {
-//         if (NULL != buffer) {
-//             MxMemory::MxFreePool(buffer);
-//         }
-//     }
-//     return status;
-    ROSWDFNOTIMPLEMENTED;
-    return STATUS_SUCCESS;
+exit:
+    if (FALSE == NT_SUCCESS(status)) {
+        if (NULL != buffer) {
+            MxMemory::MxFreePool(buffer);
+        }
+    }
+    return status;
 }
 
 DEVICE_POWER_STATE

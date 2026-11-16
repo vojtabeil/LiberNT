@@ -51,10 +51,7 @@ LsapCloseLsaPort(VOID)
 NTSTATUS
 LsapOpenLsaPort(VOID)
 {
-    UNICODE_STRING PortName;
-    SECURITY_QUALITY_OF_SERVICE SecurityQos;
     LSA_CONNECTION_INFO ConnectInfo;
-    ULONG ConnectInfoLength;
     NTSTATUS Status;
 
     TRACE("LsapOpenLsaPort()\n");
@@ -62,32 +59,16 @@ LsapOpenLsaPort(VOID)
     if (LsaPortHandle != NULL)
         return STATUS_SUCCESS;
 
-    RtlInitUnicodeString(&PortName,
-                         L"\\LsaAuthenticationPort");
-
-    SecurityQos.Length              = sizeof(SecurityQos);
-    SecurityQos.ImpersonationLevel  = SecurityIdentification;
-    SecurityQos.ContextTrackingMode = SECURITY_DYNAMIC_TRACKING;
-    SecurityQos.EffectiveOnly       = TRUE;
-
     RtlZeroMemory(&ConnectInfo,
                   sizeof(ConnectInfo));
 
     ConnectInfo.CreateContext = FALSE;
     ConnectInfo.TrustedCaller = YES;
 
-    ConnectInfoLength = sizeof(LSA_CONNECTION_INFO);
-    Status = NtConnectPort(&LsaPortHandle,
-                           &PortName,
-                           &SecurityQos,
-                           NULL,
-                           NULL,
-                           NULL,
-                           &ConnectInfo,
-                           &ConnectInfoLength);
+    Status = LsapClientConnect(&LsaPortHandle, &ConnectInfo);
     if (!NT_SUCCESS(Status))
     {
-        TRACE("NtConnectPort failed (Status 0x%08lx)\n", Status);
+        TRACE("LsapClientConnect failed (Status 0x%08lx)\n", Status);
     }
 
     return Status;
@@ -112,10 +93,7 @@ NTAPI
 LsaConnectUntrusted(
     OUT PHANDLE LsaHandle)
 {
-    UNICODE_STRING PortName;
-    SECURITY_QUALITY_OF_SERVICE SecurityQos;
     LSA_CONNECTION_INFO ConnectInfo;
-    ULONG ConnectInfoLength = sizeof(ConnectInfo);
     OBJECT_ATTRIBUTES ObjectAttributes;
     UNICODE_STRING EventName;
     HANDLE EventHandle;
@@ -163,31 +141,16 @@ LsaConnectUntrusted(
     }
 
     /* Connect to the authentication port */
-    RtlInitUnicodeString(&PortName,
-                         L"\\LsaAuthenticationPort");
-
-    SecurityQos.Length              = sizeof(SecurityQos);
-    SecurityQos.ImpersonationLevel  = SecurityIdentification;
-    SecurityQos.ContextTrackingMode = SECURITY_DYNAMIC_TRACKING;
-    SecurityQos.EffectiveOnly       = TRUE;
-
     RtlZeroMemory(&ConnectInfo,
-                  ConnectInfoLength);
+                  sizeof(ConnectInfo));
 
     ConnectInfo.CreateContext = TRUE;
     ConnectInfo.TrustedCaller = NO;
 
-    Status = NtConnectPort(LsaHandle,
-                           &PortName,
-                           &SecurityQos,
-                           NULL,
-                           NULL,
-                           NULL,
-                           &ConnectInfo,
-                           &ConnectInfoLength);
+    Status = LsapClientConnect(LsaHandle, &ConnectInfo);
     if (!NT_SUCCESS(Status))
     {
-        ERR("NtConnectPort failed (Status 0x%08lx)\n", Status);
+        ERR("LsapClientConnect failed (Status 0x%08lx)\n", Status);
         return Status;
     }
 
@@ -219,27 +182,26 @@ LsaEnumerateLogonSessions(
         return Status;
 
     ApiMessage.ApiNumber = LSASS_REQUEST_ENUM_LOGON_SESSIONS;
+    ApiMessage.EnumLogonSessions.Request.PointerSize = sizeof(PVOID);
     ApiMessage.h.u1.s1.DataLength = LSA_PORT_DATA_SIZE(ApiMessage.EnumLogonSessions);
     ApiMessage.h.u1.s1.TotalLength = LSA_PORT_MESSAGE_SIZE;
     ApiMessage.h.u2.ZeroInit = 0;
 
-    Status = NtRequestWaitReplyPort(LsaPortHandle,
-                                    (PPORT_MESSAGE)&ApiMessage,
-                                    (PPORT_MESSAGE)&ApiMessage);
+    Status = LsapClientCall(LsaPortHandle, &ApiMessage);
     if (!NT_SUCCESS(Status))
     {
-        ERR("NtRequestWaitReplyPort() failed (Status 0x%08lx)\n", Status);
+        ERR("LsapClientCall() failed (Status 0x%08lx)\n", Status);
         return Status;
     }
 
     if (!NT_SUCCESS(ApiMessage.Status))
     {
-        ERR("NtRequestWaitReplyPort() failed (ApiMessage.Status 0x%08lx)\n", ApiMessage.Status);
+        ERR("LsapClientCall() failed (ApiMessage.Status 0x%08lx)\n", ApiMessage.Status);
         return ApiMessage.Status;
     }
 
     *LogonSessionCount = ApiMessage.EnumLogonSessions.Reply.LogonSessionCount;
-    *LogonSessionList = ApiMessage.EnumLogonSessions.Reply.LogonSessionBuffer;
+    *LogonSessionList = (PLUID)(ULONG_PTR)ApiMessage.EnumLogonSessions.Reply.LogonSessionBuffer;
 
     return Status;
 }
@@ -271,19 +233,18 @@ LsaGetLogonSessionData(
 
     RtlCopyLuid(&ApiMessage.GetLogonSessionData.Request.LogonId,
                 LogonId);
+    ApiMessage.GetLogonSessionData.Request.PointerSize = sizeof(PVOID);
 
-    Status = NtRequestWaitReplyPort(LsaPortHandle,
-                                    (PPORT_MESSAGE)&ApiMessage,
-                                    (PPORT_MESSAGE)&ApiMessage);
+    Status = LsapClientCall(LsaPortHandle, &ApiMessage);
     if (!NT_SUCCESS(Status))
     {
-        ERR("NtRequestWaitReplyPort() failed (Status 0x%08lx)\n", Status);
+        ERR("LsapClientCall() failed (Status 0x%08lx)\n", Status);
         return Status;
     }
 
     if (!NT_SUCCESS(ApiMessage.Status))
     {
-        ERR("NtRequestWaitReplyPort() failed (ApiMessage.Status 0x%08lx)\n", ApiMessage.Status);
+        ERR("LsapClientCall() failed (ApiMessage.Status 0x%08lx)\n", ApiMessage.Status);
         return ApiMessage.Status;
     }
 
@@ -351,18 +312,16 @@ LsaRegisterPolicyChangeNotification(
     ApiMessage.PolicyChangeNotify.Request.NotificationEventHandle = NotificationEventHandle;
     ApiMessage.PolicyChangeNotify.Request.Register = TRUE;
 
-    Status = NtRequestWaitReplyPort(LsaPortHandle,
-                                    (PPORT_MESSAGE)&ApiMessage,
-                                    (PPORT_MESSAGE)&ApiMessage);
+    Status = LsapClientCall(LsaPortHandle, &ApiMessage);
     if (!NT_SUCCESS(Status))
     {
-        ERR("NtRequestWaitReplyPort() failed (Status 0x%08lx)\n", Status);
+        ERR("LsapClientCall() failed (Status 0x%08lx)\n", Status);
         return Status;
     }
 
     if (!NT_SUCCESS(ApiMessage.Status))
     {
-        ERR("NtRequestWaitReplyPort() failed (ApiMessage.Status 0x%08lx)\n", ApiMessage.Status);
+        ERR("LsapClientCall() failed (ApiMessage.Status 0x%08lx)\n", ApiMessage.Status);
         return ApiMessage.Status;
     }
 
@@ -398,18 +357,16 @@ LsaUnregisterPolicyChangeNotification(
     ApiMessage.PolicyChangeNotify.Request.NotificationEventHandle = NotificationEventHandle;
     ApiMessage.PolicyChangeNotify.Request.Register = FALSE;
 
-    Status = NtRequestWaitReplyPort(LsaPortHandle,
-                                    (PPORT_MESSAGE)&ApiMessage,
-                                    (PPORT_MESSAGE)&ApiMessage);
+    Status = LsapClientCall(LsaPortHandle, &ApiMessage);
     if (!NT_SUCCESS(Status))
     {
-        ERR("NtRequestWaitReplyPort() failed (Status 0x%08lx)\n", Status);
+        ERR("LsapClientCall() failed (Status 0x%08lx)\n", Status);
         return Status;
     }
 
     if (!NT_SUCCESS(ApiMessage.Status))
     {
-        ERR("NtRequestWaitReplyPort() failed (ApiMessage.Status 0x%08lx)\n", ApiMessage.Status);
+        ERR("LsapClientCall() failed (ApiMessage.Status 0x%08lx)\n", ApiMessage.Status);
         return ApiMessage.Status;
     }
 

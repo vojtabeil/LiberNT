@@ -10,10 +10,46 @@
 #define NDEBUG
 #include <debug.h>
 
-#define NDEBUG_USBPORT_MINIPORT
-#define NDEBUG_USBPORT_URB
-//#define NDEBUG_USBPORT_USB2
+/* Define to disable all USBPORT debug output */
+#define NDEBUG_USBPORT_ALL
 #include "usbdebug.h"
+
+#if DBG
+#ifdef ExAllocatePoolWithTag
+#undef ExAllocatePoolWithTag
+#endif
+#ifdef ExFreePoolWithTag
+#undef ExFreePoolWithTag
+#endif
+
+PVOID
+USBPORT_AllocPoolWithTagDbg(
+    _In_ POOL_TYPE PoolType,
+    _In_ SIZE_T NumberOfBytes,
+    _In_ ULONG Tag,
+    _In_ PCSTR File,
+    _In_ ULONG Line)
+{
+    UNREFERENCED_PARAMETER(File);
+    UNREFERENCED_PARAMETER(Line);
+
+    return ExAllocatePoolWithTag(PoolType, NumberOfBytes, Tag);
+}
+
+VOID
+USBPORT_FreePoolWithTagDbg(
+    _In_ PVOID P,
+    _In_ ULONG Tag,
+    _In_ PCSTR File,
+    _In_ ULONG Line)
+{
+    UNREFERENCED_PARAMETER(File);
+    UNREFERENCED_PARAMETER(Line);
+    UNREFERENCED_PARAMETER(Tag);
+
+    ExFreePoolWithTag(P, Tag);
+}
+#endif
 
 ULONG
 USBPORT_DbgPrint(IN PVOID MiniPortExtension,
@@ -21,15 +57,37 @@ USBPORT_DbgPrint(IN PVOID MiniPortExtension,
                  IN PCH Format,
                  ...)
 {
-    DPRINT("USBPORT_DbgPrint: UNIMPLEMENTED. FIXME. \n");
-    return 0;
+    va_list Arguments;
+    ULONG Result;
+
+    UNREFERENCED_PARAMETER(MiniPortExtension);
+
+    if (!Format)
+        return 0;
+
+    va_start(Arguments, Format);
+    Result = vDbgPrintExWithPrefix("USBMINI: ",
+                                   DPFLTR_IHVBUS_ID,
+                                   Level,
+                                   Format,
+                                   Arguments);
+    va_end(Arguments);
+
+    return Result;
 }
 
 ULONG
 NTAPI
 USBPORT_TestDebugBreak(IN PVOID MiniPortExtension)
 {
-    DPRINT("USBPORT_TestDebugBreak: UNIMPLEMENTED. FIXME. \n");
+    UNREFERENCED_PARAMETER(MiniPortExtension);
+
+    if (KD_DEBUGGER_ENABLED && !KD_DEBUGGER_NOT_PRESENT)
+    {
+        DbgBreakPoint();
+        return TRUE;
+    }
+
     return 0;
 }
 
@@ -50,9 +108,11 @@ VOID
 NTAPI
 USBPORT_BugCheck(IN PVOID MiniPortExtension)
 {
-    DPRINT1("USBPORT_BugCheck: FIXME \n");
-    //KeBugCheckEx(BUGCODE_USB_DRIVER, ...);
-    ASSERT(FALSE);
+    KeBugCheckEx(BUGCODE_USB_DRIVER,
+                 0,
+                 (ULONG_PTR)MiniPortExtension,
+                 0,
+                 0);
 }
 
 ULONG
@@ -310,4 +370,3 @@ USBPORT_DumpingTtEndpoint(IN PUSB2_TT_ENDPOINT TtEndpoint)
     DPRINT_USB2("Nums            - %X\n", TtEndpoint->Nums.AsULONG);
     DPRINT_USB2("nextTtEndpoint  - %X\n", TtEndpoint->NextTtEndpoint);
 }
-

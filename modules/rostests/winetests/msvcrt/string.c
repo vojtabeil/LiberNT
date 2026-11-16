@@ -37,9 +37,6 @@
 #include "winbase.h"
 #include "winnls.h"
 #include "winuser.h"
-#ifdef __REACTOS__
-#include <versionhelpers.h>
-#endif
 
 static char *buf_to_string(const unsigned char *bin, int len, int nr)
 {
@@ -589,10 +586,15 @@ static void test_mbcp(void)
 
     _setmbcp(1361);
     expect_eq(_ismbblead(0x80), 0, int, "%d");
+#ifdef __REACTOS__
+    expect_eq(_ismbblead(0x81), 1, int, "%d");
+    expect_eq(_ismbblead(0x83), 1, int, "%d");
+#else
     todo_wine {
       expect_eq(_ismbblead(0x81), 1, int, "%d");
       expect_eq(_ismbblead(0x83), 1, int, "%d");
     }
+#endif
     expect_eq(_ismbblead(0x84), 1, int, "%d");
     expect_eq(_ismbblead(0xd3), 1, int, "%d");
     expect_eq(_ismbblead(0xd7), 0, int, "%d");
@@ -1769,7 +1771,11 @@ static void test_ismbclegal(void) {
             break;
         }
     }
+#ifdef __REACTOS__
+    ok(!err, "_ismbclegal (1361) : Expected 0x%x, got 0x%x (0x%x)\n", exp, ret, i);
+#else
     todo_wine ok(!err, "_ismbclegal (1361) : Expected 0x%x, got 0x%x (0x%x)\n", exp, ret, i);
+#endif
 
     _setmbcp(prev_cp);
 }
@@ -2120,13 +2126,6 @@ static void test__strtod(void)
 
     for (i=0; i<ARRAY_SIZE(tests); i++)
     {
-#ifdef __REACTOS__
-        if ((i == 19) && IsReactOS())
-        {
-            skip("Skipping i == 19, because it crashes on ReactOS\n");
-            continue;
-        }
-#endif
         errno = 0xdeadbeef;
         d = strtod(tests[i].str, &end);
         ok(d == tests[i].ret, "%d) d = %.16e\n", i, d);
@@ -4718,8 +4717,12 @@ static void test___STRINGTOLD(void)
     {
         errno = 0xdeadbeef;
         r = __STRINGTOLD(&v, &endptr, tests[i].str, 0);
+#ifdef __REACTOS__
+        ok(r == tests[i].r, "%d) r = %d\n", i, r);
+#else
         todo_wine_if(tests[i].todo)
             ok(r == tests[i].r, "%d) r = %d\n", i, r);
+#endif
         ok(endptr == tests[i].str + tests[i].endptr, "%d) endptr = %p, expected %p\n",
                 i, endptr, tests[i].str+tests[i].endptr);
         ok(!memcmp(&v, &tests[i].v, sizeof(v)), "%d) v = %s\n", i, debugstr_ldouble(&v));
@@ -4897,7 +4900,6 @@ static void test_mbsrev(void)
     _setmbcp(cp);
 }
 
-#ifndef __REACTOS__
 static void test__tolower_l(void)
 {
     int ret;
@@ -4928,7 +4930,6 @@ static void test__tolower_l(void)
 
     setlocale(LC_ALL, "C");
 }
-#endif
 
 static void test__strnicmp_l(void)
 {
@@ -5215,9 +5216,7 @@ START_TEST(string)
     test__mbbtype();
     test_wcsncpy();
     test_mbsrev();
-#ifndef __REACTOS__
     test__tolower_l();
-#endif
     test__strnicmp_l();
     test_toupper();
 }

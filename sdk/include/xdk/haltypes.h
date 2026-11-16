@@ -52,7 +52,11 @@ typedef enum _HAL_QUERY_INFORMATION_CLASS {
   HalProcessorBrandString,
   HalHypervisorInformation,
   HalPlatformTimerInformation,
-  HalAcpiAuditInformation
+  HalAcpiAuditInformation,
+  HalIrtInformation,
+  HalSecondaryInterruptInformation,
+  HalParkingPageInformation,
+  HalNumaRangeTableInformation
 } HAL_QUERY_INFORMATION_CLASS, *PHAL_QUERY_INFORMATION_CLASS;
 
 typedef enum _HAL_SET_INFORMATION_CLASS {
@@ -68,7 +72,11 @@ typedef enum _HAL_SET_INFORMATION_CLASS {
   HalGenerateCmcInterrupt,
   HalProfileSourceTimerHandler,
   HalEnlightenment,
-  HalProfileDpgoSourceInterruptHandler
+  HalProfileDpgoSourceInterruptHandler,
+  HalRegisterSecondaryInterruptInterface,
+  HalSetChannelPowerInformation,
+  HalI386ExceptionChainTerminatorInformation,
+  HalSetResetParkDisposition
 } HAL_SET_INFORMATION_CLASS, *PHAL_SET_INFORMATION_CLASS;
 
 typedef NTSTATUS
@@ -201,6 +209,32 @@ typedef UCHAR
 (NTAPI *pHalVectorToIDTEntry)(
   ULONG Vector);
 
+typedef struct _HAL_INTERRUPT_TARGET_INFORMATION {
+  ULONG Version;
+  KAFFINITY TargetProcessors;
+  ULONG ProcessorNumber;
+  ULONG DestinationId;
+} HAL_INTERRUPT_TARGET_INFORMATION, *PHAL_INTERRUPT_TARGET_INFORMATION;
+
+#define HAL_INTERRUPT_TARGET_INFORMATION_VERSION 1
+
+typedef struct _HAL_MESSAGE_ROUTING_INFO {
+  ULONG Version;
+  ULONG Flags;
+  KIRQL DesiredIrql;
+  ULONG MessageCount;
+  ULONG Vector;
+  KIRQL Irql;
+  KAFFINITY TargetProcessors;
+  ULONG DestinationId;
+  PHYSICAL_ADDRESS MessageAddress;
+  USHORT MessageData;
+  USHORT Reserved;
+} HAL_MESSAGE_ROUTING_INFO, *PHAL_MESSAGE_ROUTING_INFO;
+
+#define HAL_MESSAGE_ROUTING_INFO_VERSION 1
+#define HAL_MSI_ROUTING_ALLOCATE_VECTOR  0x00000001
+
 typedef BOOLEAN
 (NTAPI *pHalFindBusAddressTranslation)(
   _In_ PHYSICAL_ADDRESS BusAddress,
@@ -237,15 +271,6 @@ typedef VOID
 (NTAPI *pHalSetPciErrorHandlerCallback)(
   _In_ PCI_ERROR_HANDLER_CALLBACK Callback);
 
-#if 1 /* Not present in WDK 7600 */
-typedef VOID
-(FASTCALL *pHalIoAssignDriveLetters)(
-  _In_ struct _LOADER_PARAMETER_BLOCK *LoaderBlock,
-  _In_ PSTRING NtDeviceName,
-  _Out_ PUCHAR NtSystemPath,
-  _Out_ PSTRING NtSystemPathString);
-#endif
-
 typedef struct {
   ULONG Version;
   pHalQuerySystemInformation HalQuerySystemInformation;
@@ -253,9 +278,6 @@ typedef struct {
   pHalQueryBusSlots HalQueryBusSlots;
   ULONG Spare1;
   pHalExamineMBR HalExamineMBR;
-#if 1 /* Not present in WDK 7600 */
-  pHalIoAssignDriveLetters HalIoAssignDriveLetters;
-#endif
   pHalIoReadPartitionTable HalIoReadPartitionTable;
   pHalIoSetPartitionInformation HalIoSetPartitionInformation;
   pHalIoWritePartitionTable HalIoWritePartitionTable;
@@ -365,6 +387,10 @@ typedef struct _HAL_POWER_INFORMATION {
   ULONG TBD;
 } HAL_POWER_INFORMATION, *PHAL_POWER_INFORMATION;
 
+typedef struct _HAL_ACPI_ROOT_POINTER_INFORMATION {
+  PHYSICAL_ADDRESS RsdpPhysicalAddress;
+} HAL_ACPI_ROOT_POINTER_INFORMATION, *PHAL_ACPI_ROOT_POINTER_INFORMATION;
+
 typedef struct _HAL_PROCESSOR_SPEED_INFO {
   ULONG ProcessorSpeed;
 } HAL_PROCESSOR_SPEED_INFORMATION, *PHAL_PROCESSOR_SPEED_INFORMATION;
@@ -430,7 +456,7 @@ typedef ERROR_SEVERITY
 
 #endif
 
-#if defined(_ARM_) || defined(_ARM64_)
+#if !defined(_AMD64_) && !defined(_X86_) && !defined(_IA64_)
 
 struct _KTRAP_FRAME;
 struct _KEXCEPTION_FRAME;
@@ -445,7 +471,7 @@ typedef VOID
     _In_ struct _KEXCEPTION_FRAME *ExceptionFrame,
     _In_ PVOID Exception);
 
-#endif /* defined(_ARM_) || defined(_ARM64_) */
+#endif /* !defined(_AMD64_) && !defined(_X86_) && !defined(_IA64_) */
 
 #if defined(_X86_) || defined(_IA64_)
 typedef

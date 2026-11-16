@@ -396,7 +396,8 @@ typedef struct _ATAPORT_PORT_DATA
     ULONG PortNumber;
     ULONG MaxSlotsBitmap;
     PVOID LocalBuffer;
-    SCATTER_GATHER_LIST LocalSgList;
+    DECLSPEC_ALIGN(8) UCHAR LocalSgListBuffer[FIELD_OFFSET(SCATTER_GATHER_LIST, Elements) +
+                                             sizeof(SCATTER_GATHER_ELEMENT)];
     ATA_WORKER_CONTEXT Worker;
 } ATAPORT_PORT_DATA, *PATAPORT_PORT_DATA;
 

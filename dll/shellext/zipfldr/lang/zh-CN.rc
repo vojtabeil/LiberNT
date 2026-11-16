@@ -81,6 +81,7 @@ BEGIN
     IDS_DECOMPRESSERROR "不支持的压缩方式 %d 。您想要继续吗？"
     IDS_UNKNOWNERROR "未知错误 0x%08x."
     IDS_CANTDELETEFILE "Failed to delete the file(s)."
+    IDS_DRAGEXTRACT "&Extract..."
 
     IDS_WIZ_TITLE "解压向导"
     IDS_WIZ_DEST_TITLE "选择一个目标文件夹"
@@ -96,5 +97,7 @@ BEGIN
 
     IDS_MENUITEM "解压全部(&A)..."
     IDS_HELPTEXT "解压文件夹内容"
+    IDS_MENUITEM_HERE "解压到此处(&H)"
+    IDS_HELPTEXT_HERE "将内容解压到此文件夹"
     IDS_FRIENDLYNAME "压缩文件夹"
 END

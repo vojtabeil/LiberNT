@@ -62,7 +62,8 @@ NTSTATUS
 Ext2WriteVolume (IN PEXT2_IRP_CONTEXT IrpContext);
 
 VOID
-Ext2DeferWrite(IN PEXT2_IRP_CONTEXT, PIRP Irp);
+NTAPI
+Ext2DeferWrite(IN PVOID Context1, IN PVOID Context2);
 
 
 /* FUNCTIONS *************************************************************/
@@ -129,6 +130,8 @@ Ext2FloppyFlushDpc (
     PEXT2_FLPFLUSH_CONTEXT Context;
 
     Context = (PEXT2_FLPFLUSH_CONTEXT) DeferredContext;
+
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
 
     DEBUG(DL_FLP, ("Ext2FloppyFlushDpc is to be started...\n"));
 
@@ -224,9 +227,12 @@ Ext2ZeroData (
 }
 
 VOID
-Ext2DeferWrite(IN PEXT2_IRP_CONTEXT IrpContext, PIRP Irp)
+NTAPI
+Ext2DeferWrite(IN PVOID Context1, IN PVOID Context2)
 {
-    ASSERT(IrpContext->Irp == Irp);
+    PEXT2_IRP_CONTEXT IrpContext = Context1;
+
+    ASSERT(IrpContext->Irp == (PIRP)Context2);
 
     Ext2QueueRequest(IrpContext);
 }
@@ -345,7 +351,7 @@ Ext2WriteVolume (IN PEXT2_IRP_CONTEXT IrpContext)
                 if (NT_SUCCESS(Status)) {
                     SetFlag(IrpContext->Flags, IRP_CONTEXT_FLAG_DEFERRED);
                     CcDeferWrite( FileObject,
-                                  (PCC_POST_DEFERRED_WRITE)Ext2DeferWrite,
+                                  Ext2DeferWrite,
                                   IrpContext,
                                   Irp,
                                   Length,
@@ -889,7 +895,7 @@ Ext2WriteFile(IN PEXT2_IRP_CONTEXT IrpContext)
                 if (NT_SUCCESS(Status)) {
                     SetFlag(IrpContext->Flags, IRP_CONTEXT_FLAG_DEFERRED);
                     CcDeferWrite( FileObject,
-                                  (PCC_POST_DEFERRED_WRITE)Ext2DeferWrite,
+                                  Ext2DeferWrite,
                                   IrpContext,
                                   Irp,
                                   Length,
@@ -1354,7 +1360,7 @@ Ext2WriteComplete (IN PEXT2_IRP_CONTEXT IrpContext)
 NTSTATUS
 Ext2Write (IN PEXT2_IRP_CONTEXT IrpContext)
 {
-    NTSTATUS            Status;
+    NTSTATUS            Status = STATUS_UNSUCCESSFUL;
     PEXT2_FCBVCB        FcbOrVcb;
     PDEVICE_OBJECT      DeviceObject;
     PFILE_OBJECT        FileObject;

@@ -29,6 +29,16 @@ typedef enum
     KDP_PACKET_RESEND   = 2
 } KDP_STATUS;
 
+extern BOOLEAN KdpScreenMode;
+
+extern NTKERNELAPI PKUSER_SHARED_DATA MmWriteableSharedUserData;
+
+VOID
+NTAPI
+KdpScreenPrint(
+    _In_reads_bytes_(Length) PCCH String,
+    _In_ ULONG Length);
+
 VOID
 NTAPI
 KdpSendBuffer(

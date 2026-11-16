@@ -46,15 +46,17 @@ CsrpConnectToServer(
     NTSTATUS Status;
     SIZE_T PortNameLength;
     UNICODE_STRING PortName;
-    LARGE_INTEGER CsrSectionViewSize;
-    HANDLE CsrSectionHandle;
-    PORT_VIEW LpcWrite;
-    REMOTE_PORT_VIEW LpcRead;
-    SECURITY_QUALITY_OF_SERVICE SecurityQos;
+    ALPC_PORT_ATTRIBUTES PortAttributes;
     SID_IDENTIFIER_AUTHORITY NtSidAuthority = {SECURITY_NT_AUTHORITY};
     PSID SystemSid = NULL;
-    CSR_API_CONNECTINFO ConnectionInfo;
-    ULONG ConnectionInfoLength = sizeof(ConnectionInfo);
+    struct
+    {
+        PORT_MESSAGE Header;
+        CSR_API_CONNECTINFO ConnectionInfo;
+    } ConnectMsg;
+    PCSR_API_CONNECTINFO ConnectionInfo = &ConnectMsg.ConnectionInfo;
+    SIZE_T BufferLength = sizeof(ConnectMsg);
+    OBJECT_HANDLE_ATTRIBUTE_INFORMATION HandleInfo;
 
     DPRINT("%s(%S)\n", __FUNCTION__, ObjectDirectory);
 
@@ -83,39 +85,18 @@ CsrpConnectToServer(
     RtlAppendUnicodeToString(&PortName, L"\\");
     RtlAppendUnicodeToString(&PortName, CSR_PORT_NAME);
 
-    /* Create a section for the port memory */
-    CsrSectionViewSize.QuadPart = CSR_CSRSS_SECTION_SIZE;
-    Status = NtCreateSection(&CsrSectionHandle,
-                             SECTION_ALL_ACCESS,
-                             NULL,
-                             &CsrSectionViewSize,
-                             PAGE_READWRITE,
-                             SEC_RESERVE,
-                             NULL);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("Failure allocating CSR Section\n");
-        return Status;
-    }
-
-    /* Set up the port view structures to match them with the section */
-    LpcWrite.Length = sizeof(LpcWrite);
-    LpcWrite.SectionHandle = CsrSectionHandle;
-    LpcWrite.SectionOffset = 0;
-    LpcWrite.ViewSize = CsrSectionViewSize.u.LowPart;
-    LpcWrite.ViewBase = 0;
-    LpcWrite.ViewRemoteBase = 0;
-    LpcRead.Length = sizeof(LpcRead);
-    LpcRead.ViewSize = 0;
-    LpcRead.ViewBase = 0;
-
     /* Setup the QoS */
-    SecurityQos.ImpersonationLevel = SecurityImpersonation;
-    SecurityQos.ContextTrackingMode = SECURITY_DYNAMIC_TRACKING;
-    SecurityQos.EffectiveOnly = TRUE;
+    RtlZeroMemory(&PortAttributes, sizeof(PortAttributes));
+    PortAttributes.MaxMessageLength = PAGE_SIZE;
+    PortAttributes.SecurityQos.Length = sizeof(PortAttributes.SecurityQos);
+    PortAttributes.SecurityQos.ImpersonationLevel = SecurityImpersonation;
+    PortAttributes.SecurityQos.ContextTrackingMode = SECURITY_DYNAMIC_TRACKING;
+    PortAttributes.SecurityQos.EffectiveOnly = TRUE;
 
     /* Setup the connection info */
-    ConnectionInfo.DebugFlags = 0;
+    RtlZeroMemory(&ConnectMsg, sizeof(ConnectMsg));
+    ConnectMsg.Header.u1.s1.DataLength = sizeof(*ConnectionInfo);
+    ConnectMsg.Header.u1.s1.TotalLength = sizeof(ConnectMsg.Header) + sizeof(*ConnectionInfo);
 
     /* Create a SID for us */
     Status = RtlAllocateAndInitializeSid(&NtSidAuthority,
@@ -133,22 +114,22 @@ CsrpConnectToServer(
     {
         /* Failure */
         DPRINT1("Couldn't allocate SID\n");
-        NtClose(CsrSectionHandle);
         return Status;
     }
 
     /* Connect to the port */
-    Status = NtSecureConnectPort(&CsrApiPort,
-                                 &PortName,
-                                 &SecurityQos,
-                                 &LpcWrite,
-                                 SystemSid,
-                                 &LpcRead,
-                                 NULL,
-                                 &ConnectionInfo,
-                                 &ConnectionInfoLength);
+    Status = NtAlpcConnectPort(&CsrApiPort,
+                               &PortName,
+                               NULL,
+                               &PortAttributes,
+                               ALPC_SYNC_CONNECTION,
+                               SystemSid,
+                               &ConnectMsg.Header,
+                               &BufferLength,
+                               NULL,
+                               NULL,
+                               NULL);
     RtlFreeSid(SystemSid);
-    NtClose(CsrSectionHandle);
     if (!NT_SUCCESS(Status))
     {
         /* Failure */
@@ -157,21 +138,26 @@ CsrpConnectToServer(
     }
 
     /* Save the delta between the sections, for capture usage later */
-    CsrPortMemoryDelta = (ULONG_PTR)LpcWrite.ViewRemoteBase -
-                         (ULONG_PTR)LpcWrite.ViewBase;
+    CsrPortMemoryDelta = (ULONG_PTR)ConnectionInfo->PortViewRemoteBase -
+                         (ULONG_PTR)ConnectionInfo->PortViewBase;
 
     /* Save the Process */
-    CsrProcessId = ConnectionInfo.ServerProcessId;
+    CsrProcessId = ConnectionInfo->ServerProcessId;
 
     /* Save CSR Section data */
-    NtCurrentPeb()->ReadOnlySharedMemoryBase = ConnectionInfo.SharedSectionBase;
-    NtCurrentPeb()->ReadOnlySharedMemoryHeap = ConnectionInfo.SharedSectionHeap;
-    NtCurrentPeb()->ReadOnlyStaticServerData = ConnectionInfo.SharedStaticServerData;
+    NtCurrentPeb()->ReadOnlySharedMemoryBase = ConnectionInfo->SharedSectionBase;
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    /* ReadOnlySharedMemoryHeap was replaced by HotpatchInformation at Vista */
+    NtCurrentPeb()->HotpatchInformation = ConnectionInfo->SharedSectionHeap;
+#else
+    NtCurrentPeb()->ReadOnlySharedMemoryHeap = ConnectionInfo->SharedSectionHeap;
+#endif
+    NtCurrentPeb()->ReadOnlyStaticServerData = ConnectionInfo->SharedStaticServerData;
 
     /* Create the port heap */
     CsrPortHeap = RtlCreateHeap(0,
-                                LpcWrite.ViewBase,
-                                LpcWrite.ViewSize,
+                                ConnectionInfo->PortViewBase,
+                                CSR_CSRSS_SECTION_SIZE,
                                 PAGE_SIZE,
                                 0,
                                 0);
@@ -182,6 +168,23 @@ CsrpConnectToServer(
         NtClose(CsrApiPort);
         CsrApiPort = NULL;
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    /* The CSR connection is process infrastructure, not an application handle. */
+    HandleInfo.Inherit = FALSE;
+    HandleInfo.ProtectFromClose = TRUE;
+    Status = NtSetInformationObject(CsrApiPort,
+                                    ObjectHandleFlagInformation,
+                                    &HandleInfo,
+                                    sizeof(HandleInfo));
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Couldn't protect CSR port handle (Status 0x%lx)\n", Status);
+        RtlDestroyHeap(CsrPortHeap);
+        CsrPortHeap = NULL;
+        NtClose(CsrApiPort);
+        CsrApiPort = NULL;
+        return Status;
     }
 
     /* Return success */
@@ -370,6 +373,7 @@ CsrClientCallServer(
     _In_ ULONG DataLength)
 {
     NTSTATUS Status;
+    SIZE_T BufferLength;
 
     /* Make sure the length is valid */
     if (DataLength > (MAXSHORT - sizeof(CSR_API_MESSAGE)))
@@ -379,14 +383,13 @@ CsrClientCallServer(
     }
 
     /* Fill out the Port Message Header */
-    ApiMessage->Header.u2.ZeroInit = 0;
+    RtlZeroMemory(&ApiMessage->Header, sizeof(ApiMessage->Header));
     /* DataLength = user_data_size + anything between
      * header and data, including intermediate padding */
     ApiMessage->Header.u1.s1.DataLength = (CSHORT)DataLength +
         FIELD_OFFSET(CSR_API_MESSAGE, Data) - sizeof(ApiMessage->Header);
-    /* TotalLength = header_size + DataLength + any structure trailing padding */
-    ApiMessage->Header.u1.s1.TotalLength = (CSHORT)DataLength +
-        sizeof(CSR_API_MESSAGE) - sizeof(ApiMessage->Data);
+    ApiMessage->Header.u1.s1.TotalLength = ApiMessage->Header.u1.s1.DataLength +
+        sizeof(ApiMessage->Header);
 
     /* Fill out the CSR Header */
     ApiMessage->ApiNumber = ApiNumber;
@@ -402,6 +405,15 @@ CsrClientCallServer(
     {
         ULONG PointerCount;
         PULONG_PTR OffsetPointer;
+
+        /* Native-created threads can enter Win32 without BaseThreadStartup.
+         * Register their death notification before the server tracks them. */
+        Status = CsrNewThread();
+        if (!NT_SUCCESS(Status))
+        {
+            ApiMessage->Status = Status;
+            return Status;
+        }
 
         /* Check if we got a Capture Buffer */
         if (CaptureBuffer)
@@ -435,9 +447,15 @@ CsrClientCallServer(
         }
 
         /* Send the LPC Message */
-        Status = NtRequestWaitReplyPort(CsrApiPort,
-                                        &ApiMessage->Header,
-                                        &ApiMessage->Header);
+        BufferLength = ApiMessage->Header.u1.s1.TotalLength;
+        Status = NtAlpcSendWaitReceivePort(CsrApiPort,
+                                           ALPC_MSGFLG_SYNC_REQUEST,
+                                           &ApiMessage->Header,
+                                           NULL,
+                                           &ApiMessage->Header,
+                                           &BufferLength,
+                                           NULL,
+                                           NULL);
 
         /* Check if we got a Capture Buffer */
         if (CaptureBuffer)

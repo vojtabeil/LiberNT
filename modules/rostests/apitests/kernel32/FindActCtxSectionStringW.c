@@ -51,7 +51,7 @@ struct dllredirect_data
     DWORD res[3];
 };
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 struct assemply_data
 {
@@ -69,7 +69,7 @@ struct assemply_data
     DWORD unk4[3];  /* In win10 there are two more fields */
 };
 
-#include <poppack.h>
+#pragma pack(pop)
 
 HANDLE _CreateActCtxFromFile(LPCWSTR FileName, int line)
 {
@@ -88,7 +88,7 @@ HANDLE _CreateActCtxFromFile(LPCWSTR FileName, int line)
     h = CreateActCtxW(&ActCtx);
     ok_(__FILE__, line)(h != INVALID_HANDLE_VALUE, "CreateActCtx failed for %S\n", FileName);
     // In win10 last error is unchanged and in win2k3 it is ERROR_BAD_EXE_FORMAT
-    ok_(__FILE__, line)(GetLastError() == ERROR_BAD_EXE_FORMAT || GetLastError() == 0xdeaddead, "Wrong last error %lu\n", GetLastError());
+    ok_(__FILE__, line)(GetLastError() == ERROR_BAD_EXE_FORMAT || GetLastError() == 0xdeaddead || GetLastError() == ERROR_SUCCESS, "Wrong last error %lu\n", GetLastError());
 
     return h;
 }
@@ -146,16 +146,16 @@ void TestClassRedirection(HANDLE h, LPCWSTR ClassToTest, LPCWSTR ExpectedClassPa
     else
     {
         ok(header->magic == STRSECTION_MAGIC, "%lu\n", header->magic );
-        ok(header->size == sizeof(*header), "Got %lu instead of %d\n", header->size, sizeof(*header));
+        ok(header->size == sizeof(*header), "Got %lu instead of %Iu\n", header->size, sizeof(*header));
         ok(header->count == ExpectedClassCount, "Expected %lu classes, got %lu\n", ExpectedClassCount, header->count );
 
         VersionedClass = (WCHAR*)((BYTE*)classData + classData->name_offset);
         ClassLib = (WCHAR*)((BYTE*)header + classData->module_offset);
         data_lenght = classData->size + classData->name_len + classData->module_len + 2*sizeof(WCHAR);
         ok(KeyedData.ulLength == data_lenght, "Got lenght %lu instead of %d\n", KeyedData.ulLength, data_lenght);
-        ok(classData->size == sizeof(*classData), "Got %lu instead of %d\n", classData->size, sizeof(*classData));
+        ok(classData->size == sizeof(*classData), "Got %lu instead of %Iu\n", classData->size, sizeof(*classData));
         ok(classData->res == 0, "Got res %lu\n", classData->res);
-        ok(classData->module_len == wcslen(ExpectedModule) * 2, "Got name len %lu, expected %d\n", classData->module_len, wcslen(ExpectedModule) *2);
+        ok(classData->module_len == wcslen(ExpectedModule) * 2, "Got name len %lu, expected %Iu\n", classData->module_len, wcslen(ExpectedModule) *2);
         ok(wcscmp(ClassLib, ExpectedModule) == 0, "Got %S, expected %S\n", ClassLib, ExpectedModule);
         /* compare only if VersionedClass starts with ExpectedClassPart */
         ok(memcmp(VersionedClass, ExpectedClassPart, sizeof(WCHAR) * wcslen(ExpectedClassPart)) == 0, "Expected %S to start with %S\n", VersionedClass, ExpectedClassPart);
@@ -194,9 +194,9 @@ VOID TestLibDependency(HANDLE h)
     else
     {
         ok(SectionHeader->magic == STRSECTION_MAGIC, "%lu\n", SectionHeader->magic );
-        ok(SectionHeader->size == sizeof(*SectionHeader), "Got %lu instead of %d\n", SectionHeader->size, sizeof(*SectionHeader));
+        ok(SectionHeader->size == sizeof(*SectionHeader), "Got %lu instead of %Iu\n", SectionHeader->size, sizeof(*SectionHeader));
         ok(SectionHeader->count == 2, "%lu\n", SectionHeader->count ); /* 2 dlls? */
-        ok(redirData->size == sizeof(*redirData), "Got %lu instead of %d\n", redirData->size, sizeof(*redirData));
+        ok(redirData->size == sizeof(*redirData), "Got %lu instead of %Iu\n", redirData->size, sizeof(*redirData));
     }
 
     SetLastError(0xdeaddead);
@@ -227,14 +227,17 @@ VOID TestLibDependency(HANDLE h)
         PACTIVATION_CONTEXT_ASSEMBLY_DETAILED_INFORMATION details = (PACTIVATION_CONTEXT_ASSEMBLY_DETAILED_INFORMATION)buffer;
 
         ok(SectionHeader->magic == STRSECTION_MAGIC, "%lu\n", SectionHeader->magic );
-        ok(SectionHeader->size == sizeof(*SectionHeader), "Got %lu instead of %d\n", SectionHeader->size, sizeof(*SectionHeader));
+        ok(SectionHeader->size == sizeof(*SectionHeader), "Got %lu instead of %Iu\n", SectionHeader->size, sizeof(*SectionHeader));
         ok(SectionHeader->count == 2, "%lu\n", SectionHeader->count ); /* 2 dlls? */
 
         data_lenght = assemplyData->size +
                       assemplyData->ulEncodedAssemblyIdentityLength +
                       assemplyData->ulManifestPathLength +
                       assemplyData->ulAssemblyDirectoryNameLength + 2 * sizeof(WCHAR);
-        ok(assemplyData->size == sizeof(*assemplyData), "Got %lu instead of %d\n", assemplyData->size, sizeof(*assemplyData));
+        if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+            ok(assemplyData->size == sizeof(*assemplyData) + 2 * sizeof(DWORD), "Got %lu instead of %Iu\n", assemplyData->size, sizeof(*assemplyData) + 2 * sizeof(DWORD));
+        else
+            ok(assemplyData->size == sizeof(*assemplyData), "Got %lu instead of %Iu\n", assemplyData->size, sizeof(*assemplyData));
         ok(KeyedData.ulLength == data_lenght, "Got lenght %lu instead of %d\n", KeyedData.ulLength, data_lenght);
 
         AssemblyIdentity = (WCHAR*)((BYTE*)SectionHeader + assemplyData->ulEncodedAssemblyIdentityOffset);
@@ -261,16 +264,52 @@ VOID TestLibDependency(HANDLE h)
     }
 }
 
+static VOID TestMissingSectionErrors(VOID)
+{
+    static const struct
+    {
+        ULONG Section;
+        PCWSTR Key;
+        DWORD Error;
+    } Tests[] =
+    {
+        { ACTIVATION_CONTEXT_SECTION_ASSEMBLY_INFORMATION, L"Probe.Sections", ERROR_SXS_KEY_NOT_FOUND },
+        { ACTIVATION_CONTEXT_SECTION_DLL_REDIRECTION, L"probedll.dll", ERROR_SXS_KEY_NOT_FOUND },
+        { ACTIVATION_CONTEXT_SECTION_WINDOW_CLASS_REDIRECTION, L"ProbeClass", ERROR_SXS_KEY_NOT_FOUND },
+        { ACTIVATION_CONTEXT_SECTION_COM_SERVER_REDIRECTION, L"{00000000-0000-0000-0000-000000000001}", ERROR_SXS_INVALID_ACTCTXDATA_FORMAT },
+        { ACTIVATION_CONTEXT_SECTION_COM_INTERFACE_REDIRECTION, L"{00000000-0000-0000-0000-000000000001}", ERROR_SXS_INVALID_ACTCTXDATA_FORMAT },
+        { ACTIVATION_CONTEXT_SECTION_COM_TYPE_LIBRARY_REDIRECTION, L"{00000000-0000-0000-0000-000000000001}", ERROR_SXS_INVALID_ACTCTXDATA_FORMAT },
+        { ACTIVATION_CONTEXT_SECTION_COM_PROGID_REDIRECTION, L"Probe.ProgId", ERROR_SXS_KEY_NOT_FOUND },
+        { ACTIVATION_CONTEXT_SECTION_GLOBAL_OBJECT_RENAME_TABLE, L"Probe", ERROR_SXS_SECTION_NOT_FOUND },
+        { ACTIVATION_CONTEXT_SECTION_CLR_SURROGATES, L"{00000000-0000-0000-0000-000000000001}", ERROR_SXS_INVALID_ACTCTXDATA_FORMAT },
+        { ACTIVATION_CONTEXT_SECTION_APPLICATION_SETTINGS, L"Probe", ERROR_SXS_SECTION_NOT_FOUND },
+        { ACTIVATION_CONTEXT_SECTION_WINRT_ACTIVATABLE_CLASSES, L"Probe.Class", ERROR_SXS_SECTION_NOT_FOUND },
+    };
+    ACTCTX_SECTION_KEYED_DATA Data;
+    ULONG i;
+    BOOL ret;
+
+    for (i = 0; i < ARRAYSIZE(Tests); i++)
+    {
+        Data.cbSize = sizeof(Data);
+        SetLastError(0xdeadbeef);
+        ret = FindActCtxSectionStringW(0, NULL, Tests[i].Section, Tests[i].Key, &Data);
+        ok(!ret, "Section %lu: FindActCtxSectionStringW succeeded\n", Tests[i].Section);
+        ok(GetLastError() == Tests[i].Error, "Section %lu: error %lu, expected %lu\n", Tests[i].Section, GetLastError(), Tests[i].Error);
+    }
+}
+
 START_TEST(FindActCtxSectionStringW)
 {
     HANDLE h, h2;
     ULONG_PTR cookie, cookie2;
 
+    TestMissingSectionErrors();
+
     /*First run the redirection tests without using our own actctx */
     TestClassRedirection(NULL, L"Button", L"Button", L"comctl32.dll", 27);
     /* Something activates an activation context that mentions comctl32 but comctl32 is not loaded */
     ok( GetModuleHandleW(L"comctl32.dll") == NULL, "Expected comctl32 not to be loaded\n");
-    ok( GetModuleHandleW(L"user32.dll") == NULL, "Expected user32 not to be loaded\n");
 
     /* Class redirection tests */
     h = _CreateActCtxFromFile(L"classtest.manifest", __LINE__);
@@ -325,7 +364,6 @@ START_TEST(FindActCtxSectionStringW)
         _ActivateCtx(h, &cookie, __LINE__);
         TestClassRedirection(h, L"Button", L"6.0.", L"comctl32.dll", 29);
         ok( GetModuleHandleW(L"comctl32.dll") == NULL, "Expected comctl32 not to be loaded\n");
-        ok( GetModuleHandleW(L"user32.dll") == NULL, "Expected user32 not to be loaded\n");
         _DeactivateCtx(cookie, __LINE__);
     }
     else

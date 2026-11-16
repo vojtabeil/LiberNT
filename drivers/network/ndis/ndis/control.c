@@ -61,7 +61,7 @@ NdisAcquireReadWriteLock(
       KeAcquireSpinLock(&Lock->SpinLock, &LockState->OldIrql);
       /* Check if any other processor helds a shared lock. */
       for (ProcessorNumber = KeNumberProcessors; ProcessorNumber--; ) {
-        if (ProcessorNumber != KeGetCurrentProcessorNumber()) {
+        if (ProcessorNumber != NdisICurrentProcessorIndex()) {
           /* Wait till the shared lock is released. */
           while (Lock->RefCount[ProcessorNumber].RefCount != 0) {
             for (BusyLoop = 32; BusyLoop--; )
@@ -74,15 +74,15 @@ NdisAcquireReadWriteLock(
     }
   } else {
     KeRaiseIrql(DISPATCH_LEVEL, &LockState->OldIrql);
-    RefCount = InterlockedIncrement((PLONG)&Lock->RefCount[KeGetCurrentProcessorNumber()].RefCount);
+    RefCount = InterlockedIncrement((PLONG)&Lock->RefCount[NdisICurrentProcessorIndex()].RefCount);
     /* Racing with a exclusive write lock case. */
     if (Lock->SpinLock != 0) {
       if (RefCount == 1) {
         if (Lock->Context != PsGetCurrentThread()) {
           /* Wait for the exclusive lock to be released. */
-          Lock->RefCount[KeGetCurrentProcessorNumber()].RefCount--;
+          Lock->RefCount[NdisICurrentProcessorIndex()].RefCount--;
           KeAcquireSpinLockAtDpcLevel(&Lock->SpinLock);
-          Lock->RefCount[KeGetCurrentProcessorNumber()].RefCount++;
+          Lock->RefCount[NdisICurrentProcessorIndex()].RefCount++;
           KeReleaseSpinLockFromDpcLevel(&Lock->SpinLock);
         }
       }
@@ -112,7 +112,7 @@ NdisReleaseReadWriteLock(
       return;
 
     case 3: /* Shared read lock */
-      Lock->RefCount[KeGetCurrentProcessorNumber()].RefCount--;
+      Lock->RefCount[NdisICurrentProcessorIndex()].RefCount--;
       LockState->LockState = -1;
       if (LockState->OldIrql < DISPATCH_LEVEL)
         KeLowerIrql(LockState->OldIrql);
@@ -124,6 +124,48 @@ NdisReleaseReadWriteLock(
       KeReleaseSpinLock(&Lock->SpinLock, LockState->OldIrql);
       return;
   }
+}
+
+VOID
+EXPORT
+NdisDprAcquireReadWriteLock(
+    IN  PNDIS_RW_LOCK   Lock,
+    IN  BOOLEAN         fWrite,
+    IN  PLOCK_STATE     LockState)
+{
+  ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+  NdisAcquireReadWriteLock(Lock, fWrite, LockState);
+}
+
+VOID
+EXPORT
+NdisDprReleaseReadWriteLock(
+    IN  PNDIS_RW_LOCK   Lock,
+    IN  PLOCK_STATE     LockState)
+{
+  ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+  NdisReleaseReadWriteLock(Lock, LockState);
+}
+
+#undef NdisInterlockedPushEntryList
+PSINGLE_LIST_ENTRY
+EXPORT
+NdisInterlockedPushEntryList(
+    IN  PSINGLE_LIST_ENTRY  ListHead,
+    IN  PSINGLE_LIST_ENTRY  ListEntry,
+    IN  PNDIS_SPIN_LOCK     Lock)
+{
+  return ExInterlockedPushEntryList(ListHead, ListEntry, &Lock->SpinLock);
+}
+
+#undef NdisInterlockedPopEntryList
+PSINGLE_LIST_ENTRY
+EXPORT
+NdisInterlockedPopEntryList(
+    IN  PSINGLE_LIST_ENTRY  ListHead,
+    IN  PNDIS_SPIN_LOCK     Lock)
+{
+  return ExInterlockedPopEntryList(ListHead, &Lock->SpinLock);
 }
 
 /*
@@ -300,11 +342,22 @@ NdisWaitEvent(
  */
 {
   LARGE_INTEGER Timeout;
+  PLARGE_INTEGER pTimeout;
   NTSTATUS Status;
 
-  Timeout.QuadPart = Int32x32To64(MsToWait, -10000);
+  /* Per the NDIS contract (matching Windows), MsToWait == 0 means wait
+   * indefinitely, not "poll and return immediately". */
+  if (MsToWait == 0)
+  {
+      pTimeout = NULL;
+  }
+  else
+  {
+      Timeout.QuadPart = Int32x32To64(MsToWait, -10000);
+      pTimeout = &Timeout;
+  }
 
-  Status = KeWaitForSingleObject(&Event->Event, Executive, KernelMode, TRUE, &Timeout);
+  Status = KeWaitForSingleObject(&Event->Event, Executive, KernelMode, TRUE, pTimeout);
 
   return (Status == STATUS_SUCCESS);
 }

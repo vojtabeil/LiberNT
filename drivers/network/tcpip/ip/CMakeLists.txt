@@ -5,6 +5,7 @@ endif()
 
 list(APPEND SOURCE
     lwip_glue/ip.c
+    lwip_glue/ip6cfg.c
     lwip_glue/memory.c
     lwip_glue/sys_arch.c
     lwip_glue/tcp.c
@@ -12,11 +13,14 @@ list(APPEND SOURCE
     network/arp.c
     network/checksum.c
     network/icmp.c
+    network/igmp.c
     network/interface.c
     network/ip.c
     network/loopback.c
     network/neighbor.c
+    network/pmtu.c
     network/ports.c
+    network/rdisc.c
     network/receive.c
     network/router.c
     network/routines.c
@@ -30,6 +34,8 @@ list(APPEND SOURCE
     transport/udp/udp.c)
 
 add_library(ip OBJECT ${SOURCE} ${ip_asm})
+target_compile_definitions(ip PRIVATE NDIS60 NDIS_LEGACY_DRIVER=1)
+add_dependencies(ip bugcodes xdk)
 
 target_link_libraries(ip lwipcore)
 add_importlibs(lwipcore ntoskrnl)

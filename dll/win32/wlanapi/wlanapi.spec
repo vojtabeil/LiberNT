@@ -9,11 +9,11 @@
 @ stdcall WlanGetAvailableNetworkList (ptr ptr long ptr ptr)
 @ stub WlanGetFilterList
 @ stdcall WlanGetInterfaceCapability (ptr ptr ptr ptr)
-@ stub WlanGetNetworkBssList
+@ stdcall WlanGetNetworkBssList (ptr ptr ptr long long ptr ptr)
 @ stdcall WlanGetProfile (ptr ptr ptr ptr ptr long ptr)
 @ stdcall WlanGetProfileCustomUserData (ptr ptr ptr ptr ptr ptr)
 @ stdcall WlanGetProfileList (ptr ptr ptr ptr)
-@ stub WlanGetSecuritySettings
+@ stdcall WlanGetSecuritySettings (ptr long ptr ptr ptr)
 @ stdcall WlanIhvControl (ptr ptr ptr long ptr long ptr ptr)
 @ stdcall WlanOpenHandle (long ptr ptr ptr)
 @ stub WlanQueryAutoConfigParameter
@@ -25,7 +25,7 @@
 @ stdcall WlanScan (ptr ptr ptr ptr ptr)
 @ stub WlanSetAutoConfigParameter
 @ stub WlanSetFilterList
-@ stub WlanSetInterface
+@ stdcall WlanSetInterface (ptr ptr long long ptr ptr)
 @ stdcall WlanSetProfile (ptr ptr long ptr ptr long ptr ptr)
 @ stdcall WlanSetProfileCustomUserData (ptr ptr ptr long ptr ptr)
 @ stub WlanSetProfileEapUserData
@@ -34,3 +34,5 @@
 @ stub WlanSetProfilePosition
 @ stub WlanSetPsdIEDataList
 @ stdcall WlanSetSecuritySettings (ptr long ptr)
+@ stdcall WlanConnect2(ptr ptr ptr ptr)
+@ stdcall WlanGetAvailableNetworkList2(ptr ptr long ptr ptr)

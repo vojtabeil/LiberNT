@@ -10,6 +10,28 @@
 
 #include "precomp.h"
 
+/* TODO: bound the queue by the socket's SO_RCVBUF; AFD enforces it on what it takes, this caps what waits for its next receive */
+#define DG_QUEUE_LIMIT 0x10000
+
+typedef struct _DATAGRAM_INFO
+{
+    IP_ADDRESS SrcAddress;
+    IP_ADDRESS DstAddress;
+    USHORT SrcPort;
+    BOOLEAN PacketIsV4;
+    UCHAR Ttl;
+    UCHAR Tos;
+    ULONG InterfaceIndex;
+} DATAGRAM_INFO, *PDATAGRAM_INFO;
+
+typedef struct _DATAGRAM_QUEUED_DATA
+{
+    LIST_ENTRY ListEntry;
+    DATAGRAM_INFO Info;
+    ULONG DataSize;
+    UCHAR Data[ANYSIZE_ARRAY];
+} DATAGRAM_QUEUED_DATA, *PDATAGRAM_QUEUED_DATA;
+
 BOOLEAN DGRemoveIRP(
     PADDRESS_FILE AddrFile,
     PIRP Irp)
@@ -48,6 +70,180 @@ BOOLEAN DGRemoveIRP(
     return Found;
 }
 
+static ULONG
+DGAppendControl(
+    PUCHAR Buffer,
+    ULONG BufferLength,
+    LONG Level,
+    LONG Type,
+    PVOID Data,
+    ULONG DataLength)
+{
+    if (TDI_CMSG_SPACE(DataLength) > BufferLength)
+        return 0;
+
+    RtlZeroMemory(Buffer, TDI_CMSG_SPACE(DataLength));
+    TDI_INIT_CMSGHDR(Buffer, Level, Type, DataLength);
+    RtlCopyMemory(TDI_CMSG_DATA(Buffer), Data, DataLength);
+    return TDI_CMSG_SPACE(DataLength);
+}
+
+static ULONG
+DGBuildControlData(
+    PADDRESS_FILE AddrFile,
+    PDATAGRAM_INFO Info,
+    PUCHAR Buffer,
+    ULONG BufferLength)
+{
+    PIP_ADDRESS DstAddress = &Info->DstAddress;
+    ULONG Written = 0;
+    ULONG PktInfo[2];
+    INT Value;
+
+    if (!Buffer || !Info->PacketIsV4 || DstAddress->Type != IP_ADDRESS_V4)
+        return 0;
+
+    if (AddrFile->RecvPktInfo)
+    {
+        PktInfo[0] = DstAddress->Address.IPv4Address;
+        PktInfo[1] = Info->InterfaceIndex;
+        Written += DGAppendControl(Buffer + Written, BufferLength - Written,
+                                   WS_IPPROTO_IP, WS_IP_PKTINFO, PktInfo, sizeof(PktInfo));
+    }
+
+    if (AddrFile->RecvTtl)
+    {
+        Value = Info->Ttl;
+        Written += DGAppendControl(Buffer + Written, BufferLength - Written,
+                                   WS_IPPROTO_IP, WS_IP_TTL, &Value, sizeof(Value));
+    }
+
+    if (AddrFile->RecvTos)
+    {
+        Value = Info->Tos;
+        Written += DGAppendControl(Buffer + Written, BufferLength - Written,
+                                   WS_IPPROTO_IP, WS_IP_TOS, &Value, sizeof(Value));
+    }
+
+    if (AddrFile->RecvEcn)
+    {
+        Value = Info->Tos & 3;
+        Written += DGAppendControl(Buffer + Written, BufferLength - Written,
+                                   WS_IPPROTO_IP, WS_IP_ECN, &Value, sizeof(Value));
+    }
+
+    if (AddrFile->RecvDstAddr)
+    {
+        Written += DGAppendControl(Buffer + Written, BufferLength - Written,
+                                   WS_IPPROTO_IP, WS_IP_RECVDSTADDR,
+                                   &DstAddress->Address.IPv4Address, sizeof(IPv4_RAW_ADDRESS));
+    }
+
+    return Written;
+}
+
+static ULONG
+DGCopyDatagram(
+    PADDRESS_FILE AddrFile,
+    PDATAGRAM_INFO Info,
+    PVOID Data,
+    ULONG DataSize,
+    PCHAR Buffer,
+    ULONG BufferSize,
+    PTDI_CONNECTION_INFORMATION ReturnInfo)
+{
+    PTA_IP_ADDRESS RTAIPAddress;
+    ULONG Copied = MIN(BufferSize, DataSize);
+
+    RtlCopyMemory(Buffer, Data, Copied);
+
+    RTAIPAddress = (PTA_IP_ADDRESS)ReturnInfo->RemoteAddress;
+    if (Info->SrcAddress.Type == IP_ADDRESS_V6)
+    {
+        AddrBuildTransportAddress(&Info->SrcAddress, Info->SrcPort,
+                                  (PTRANSPORT_ADDRESS)RTAIPAddress,
+                                  ReturnInfo->RemoteAddressLength);
+    }
+    else if (AddrFile->Family == TDI_ADDRESS_TYPE_IP6)
+    {
+        IP_ADDRESS MappedSource = Info->SrcAddress;
+
+        TCPMapToDualStack(&MappedSource);
+        AddrBuildTransportAddress(&MappedSource, Info->SrcPort,
+                                  (PTRANSPORT_ADDRESS)RTAIPAddress,
+                                  ReturnInfo->RemoteAddressLength);
+    }
+    else
+    {
+        RTAIPAddress->TAAddressCount = 1;
+        RTAIPAddress->Address->AddressType = TDI_ADDRESS_TYPE_IP;
+        RTAIPAddress->Address->AddressLength = TDI_ADDRESS_LENGTH_IP;
+        RTAIPAddress->Address->Address->sin_port = Info->SrcPort;
+        RTAIPAddress->Address->Address->in_addr = Info->SrcAddress.Address.IPv4Address;
+        RtlZeroMemory(RTAIPAddress->Address->Address->sin_zero, 8);
+    }
+
+    if (ReturnInfo->Options)
+    {
+        ReturnInfo->OptionsLength =
+            DGBuildControlData(AddrFile,
+                               Info,
+                               ReturnInfo->Options,
+                               ReturnInfo->OptionsLength > 0 ? ReturnInfo->OptionsLength : 0);
+    }
+
+    TI_DbgPrint(MAX_TRACE, ("(A: %08x) Addr %08x Port %04x\n",
+                RTAIPAddress,
+                Info->SrcAddress.Address.IPv4Address, Info->SrcPort));
+
+    return Copied;
+}
+
+static VOID
+DGQueueDatagram(
+    PADDRESS_FILE AddrFile,
+    PDATAGRAM_INFO Info,
+    PVOID Data,
+    ULONG DataSize)
+{
+    PDATAGRAM_QUEUED_DATA Queued;
+
+    ASSERT_TCPIP_OBJECT_LOCKED(AddrFile);
+
+    if (DataSize > DG_QUEUE_LIMIT - AddrFile->QueuedBytes)
+    {
+        TI_DbgPrint(MAX_TRACE, ("Receive queue full, discarding datagram.\n"));
+        return;
+    }
+
+    Queued = ExAllocatePoolWithTag(NonPagedPool,
+                                   FIELD_OFFSET(DATAGRAM_QUEUED_DATA, Data) + DataSize,
+                                   DATAGRAM_QUEUE_TAG);
+    if (!Queued)
+        return;
+
+    Queued->Info = *Info;
+    Queued->DataSize = DataSize;
+    RtlCopyMemory(Queued->Data, Data, DataSize);
+    AddrFile->QueuedBytes += DataSize;
+    InsertTailList(&AddrFile->DatagramQueue, &Queued->ListEntry);
+}
+
+VOID
+DGFreeQueuedDatagrams(
+    PADDRESS_FILE AddrFile)
+{
+    PDATAGRAM_QUEUED_DATA Queued;
+
+    while (!IsListEmpty(&AddrFile->DatagramQueue))
+    {
+        Queued = CONTAINING_RECORD(RemoveHeadList(&AddrFile->DatagramQueue),
+                                   DATAGRAM_QUEUED_DATA, ListEntry);
+        AddrFile->QueuedBytes -= Queued->DataSize;
+        ExFreePoolWithTag(Queued, DATAGRAM_QUEUE_TAG);
+    }
+}
+
 VOID
 DGDeliverData(
     PADDRESS_FILE AddrFile,
@@ -56,7 +252,8 @@ DGDeliverData(
     USHORT SrcPort,
     USHORT DstPort,
     PIP_PACKET IPPacket,
-    UINT DataSize)
+    UINT DataSize,
+    PIP_INTERFACE Interface)
 /*
  * FUNCTION: Delivers datagram data to a user
  * ARGUMENTS:
@@ -77,32 +274,29 @@ DGDeliverData(
     ULONG BytesTaken;
     NTSTATUS Status;
     PVOID DataBuffer;
+    DATAGRAM_INFO Info;
 
     TI_DbgPrint(MIN_TRACE, ("Called.\n"));
 
+    Info.SrcAddress = *SrcAddress;
+    Info.DstAddress = *DstAddress;
+    Info.SrcPort = SrcPort;
+    Info.PacketIsV4 = IPPacket->Type == IP_ADDRESS_V4;
+    Info.Ttl = Info.PacketIsV4 ? ((PIPv4_HEADER)IPPacket->Header)->Ttl : 0;
+    Info.Tos = Info.PacketIsV4 ? ((PIPv4_HEADER)IPPacket->Header)->Tos : 0;
+    Info.InterfaceIndex = Interface ? Interface->Index : 0;
+
     LockObject(AddrFile);
 
-    if (AddrFile->Protocol == IPPROTO_UDP)
-    {
+    if (AddrFile->Protocol == IPPROTO_UDP && !AddrFile->Raw)
         DataBuffer = IPPacket->Data;
-    }
-    else if (AddrFile->HeaderIncl)
-    {
-        DataBuffer = IPPacket->Header;
-    }
     else
-    {
-        DataBuffer = IPPacket->Data;
-        DataSize -= IPPacket->HeaderSize;
-    }
+        DataBuffer = IPPacket->Header;
 
     if (!IsListEmpty(&AddrFile->ReceiveQueue))
     {
         PLIST_ENTRY CurrentEntry;
         PDATAGRAM_RECEIVE_REQUEST Current = NULL;
-        PTA_IP_ADDRESS RTAIPAddress;
-
-        TI_DbgPrint(MAX_TRACE, ("There is a receive request.\n"));
 
         /* Search receive request list to find a match */
         CurrentEntry = AddrFile->ReceiveQueue.Flink;
@@ -110,12 +304,8 @@ DGDeliverData(
         {
             Current = CONTAINING_RECORD(CurrentEntry, DATAGRAM_RECEIVE_REQUEST, ListEntry);
             CurrentEntry = CurrentEntry->Flink;
-            if (DstPort == AddrFile->Port &&
-               (AddrIsEqual(DstAddress, &AddrFile->Address) ||
-                AddrIsUnspecified(&AddrFile->Address) ||
-                AddrIsUnspecified(DstAddress)))
+            if (DstPort == AddrFile->Port && AddrFileReceiveMatch(AddrFile, DstAddress))
             {
-
                 /* Remove the request from the queue */
                 RemoveEntryList(&Current->ListEntry);
 
@@ -125,22 +315,8 @@ DGDeliverData(
                            ("Target Buffer: %x, Source Buffer: %x, Size %d\n",
                             Current->Buffer, DataBuffer, DataSize));
 
-                /* Copy the data into buffer provided by the user */
-                RtlCopyMemory(Current->Buffer,
-                     DataBuffer,
-                     MIN(Current->BufferSize, DataSize));
-
-                RTAIPAddress = (PTA_IP_ADDRESS)Current->ReturnInfo->RemoteAddress;
-                RTAIPAddress->TAAddressCount = 1;
-                RTAIPAddress->Address->AddressType = TDI_ADDRESS_TYPE_IP;
-                RTAIPAddress->Address->AddressLength = TDI_ADDRESS_LENGTH_IP;
-                RTAIPAddress->Address->Address->sin_port = SrcPort;
-                RTAIPAddress->Address->Address->in_addr = SrcAddress->Address.IPv4Address;
-                RtlZeroMemory(RTAIPAddress->Address->Address->sin_zero, 8);
-
-                TI_DbgPrint(MAX_TRACE, ("(A: %08x) Addr %08x Port %04x\n",
-                            RTAIPAddress,
-                            SrcAddress->Address.IPv4Address, SrcPort));
+                DGCopyDatagram(AddrFile, &Info, DataBuffer, DataSize,
+                               Current->Buffer, Current->BufferSize, Current->ReturnInfo);
 
                 ReferenceObject(AddrFile);
                 UnlockObject(AddrFile);
@@ -153,12 +329,14 @@ DGDeliverData(
 
                 LockObject(AddrFile);
                 DereferenceObject(AddrFile);
+                break;
             }
         }
 
         UnlockObject(AddrFile);
     }
-    else if (AddrFile->RegisteredReceiveDatagramHandler)
+    else if (AddrFile->RegisteredReceiveDatagramHandler &&
+             ExAcquireRundownProtection(&AddrFile->ReceiveDatagramRundown))
     {
         PTDI_IND_RECEIVE_DATAGRAM ReceiveHandler = AddrFile->ReceiveDatagramHandler;
         PVOID HandlerContext = AddrFile->ReceiveDatagramHandlerContext;
@@ -203,7 +381,13 @@ DGDeliverData(
         if (STATUS_SUCCESS != Status)
             TI_DbgPrint(MAX_TRACE, ("receive handler signaled failure with Status 0x%x\n", Status));
 
+        ExReleaseRundownProtection(&AddrFile->ReceiveDatagramRundown);
         DereferenceObject(AddrFile);
+    }
+    else if (DstPort == AddrFile->Port && AddrFileReceiveMatch(AddrFile, DstAddress))
+    {
+        DGQueueDatagram(AddrFile, &Info, DataBuffer, DataSize);
+        UnlockObject(AddrFile);
     }
     else
     {
@@ -252,10 +436,25 @@ NTSTATUS DGReceiveDatagram(
 {
     NTSTATUS Status;
     PDATAGRAM_RECEIVE_REQUEST ReceiveRequest;
+    PDATAGRAM_QUEUED_DATA Queued;
 
     TI_DbgPrint(MAX_TRACE, ("Called.\n"));
 
     LockObject(AddrFile);
+
+    if (!IsListEmpty(&AddrFile->DatagramQueue))
+    {
+        Queued = CONTAINING_RECORD(RemoveHeadList(&AddrFile->DatagramQueue),
+                                   DATAGRAM_QUEUED_DATA, ListEntry);
+        AddrFile->QueuedBytes -= Queued->DataSize;
+        *BytesReceived = DGCopyDatagram(AddrFile, &Queued->Info, Queued->Data, Queued->DataSize,
+                                        BufferData, ReceiveLength, ReturnInfo);
+        UnlockObject(AddrFile);
+
+        Status = Queued->DataSize > ReceiveLength ? STATUS_BUFFER_OVERFLOW : STATUS_SUCCESS;
+        ExFreePoolWithTag(Queued, DATAGRAM_QUEUE_TAG);
+        return Status;
+    }
 
     ReceiveRequest = ExAllocatePoolWithTag(NonPagedPool, sizeof(DATAGRAM_RECEIVE_REQUEST),
                                            DATAGRAM_RECV_TAG);

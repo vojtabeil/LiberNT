@@ -18,7 +18,7 @@
 /* Note: Move these to some smbios.h header */
 #define SYSID_TYPE_UUID "_UUID_"
 #define SYSID_UUID_DATA_SIZE 16
-#include <pshpack1.h>
+#pragma pack(push, 1)
 typedef struct _SYSID_UUID_ENTRY
 {
     UCHAR Type[6];
@@ -26,7 +26,7 @@ typedef struct _SYSID_UUID_ENTRY
     USHORT Length;
     UCHAR UUID[SYSID_UUID_DATA_SIZE];
 } SYSID_UUID_ENTRY, *PSYSID_UUID_ENTRY;
-#include <poppack.h>
+#pragma pack(pop)
 
 /* GLOBALS ********************************************************************/
 
@@ -49,7 +49,10 @@ VOID
 WinLdrLoadGUID(
     _Out_ PGUID SystemGuid)
 {
-#if (defined(_M_IX86) || defined(_M_AMD64)) && !defined(UEFIBOOT)
+#if defined(UEFIBOOT)
+    if (UefiGetSmbiosSystemUuid(SystemGuid))
+        return;
+#elif defined(_M_IX86) || defined(_M_AMD64)
     PSYSID_UUID_ENTRY CurrentAddress;
 
     CurrentAddress = (PSYSID_UUID_ENTRY)0xE0000;
@@ -101,17 +104,17 @@ WinLdrPortInitialize(
 #else
         static const ULONG TestPorts[] = {2, 1};
 #endif
-        PortAddress = UlongToPtr(BaseArray[TestPorts[0]]);
+        PortNumber = (TestPorts[0] <= MAX_COM_PORTS) ? TestPorts[0] : 1;
+        PortAddress = UlongToPtr(BaseArray[PortNumber]);
         if (CpDoesPortExist(PortAddress))
         {
-            PortNumber = TestPorts[0];
         }
         else
         {
-            PortAddress = UlongToPtr(BaseArray[TestPorts[1]]);
+            PortNumber = TestPorts[1];
+            PortAddress = UlongToPtr(BaseArray[PortNumber]);
             if (!CpDoesPortExist(PortAddress))
                 return FALSE;
-            PortNumber = TestPorts[1];
         }
     }
 

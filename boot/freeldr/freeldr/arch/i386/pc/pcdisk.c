@@ -27,7 +27,7 @@ DBG_DEFAULT_CHANNEL(DISK);
 /* Enable this line if you want to support multi-drive caching (increases FreeLdr size!) */
 // #define CACHE_MULTI_DRIVES
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 typedef struct
 {
@@ -90,7 +90,7 @@ typedef struct _EXTENDED_GEOMETRY
     ULONG       PDPTE;
 } EXTENDED_GEOMETRY, *PEXTENDED_GEOMETRY;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 typedef struct _PC_DISK_DRIVE
 {
@@ -769,10 +769,6 @@ PcDiskReadLogicalSectors(
     OUT PVOID Buffer)
 {
     PPC_DISK_DRIVE DiskDrive;
-
-    TRACE("PcDiskReadLogicalSectors() DriveNumber: 0x%x SectorNumber: %I64u SectorCount: %u Buffer: 0x%x\n",
-          DriveNumber, SectorNumber, SectorCount, Buffer);
-
     /* 16-bit BIOS addressing limitation */
     ASSERT(((ULONG_PTR)Buffer) <= 0xFFFFF);
 
@@ -783,7 +779,6 @@ PcDiskReadLogicalSectors(
     if ((DriveNumber >= 0x80) && DiskDrive->Int13ExtensionsSupported)
     {
         /* LBA is easy, nothing to calculate. Just do the read. */
-        TRACE("--> Using LBA\n");
         return PcDiskReadLogicalSectorsLBA(DriveNumber, SectorNumber, SectorCount, Buffer);
     }
     else

@@ -226,6 +226,18 @@ _Must_inspect_result_
 NTSYSAPI
 NTSTATUS
 NTAPI
+RtlUnicodeToUTF8N(
+    _Out_writes_bytes_to_(UTF8StringMaxByteCount, *UTF8StringActualByteCount)
+        PCHAR UTF8StringDestination,
+    _In_ ULONG UTF8StringMaxByteCount,
+    _Out_ PULONG UTF8StringActualByteCount,
+    _In_reads_bytes_(UnicodeStringByteCount) PCWCH UnicodeStringSource,
+    _In_ ULONG UnicodeStringByteCount);
+
+_Must_inspect_result_
+NTSYSAPI
+NTSTATUS
+NTAPI
 RtlUTF8ToUnicodeN(
     _Out_writes_bytes_to_(UnicodeStringMaxByteCount, *UnicodeStringActualByteCount)
         PWSTR UnicodeStringDestination,
@@ -769,6 +781,20 @@ RtlGetThreadErrorMode(
     VOID
 );
 
+NTSYSAPI
+HANDLE
+NTAPI
+RtlGetCurrentTransaction(
+    VOID
+);
+
+NTSYSAPI
+LOGICAL
+NTAPI
+RtlSetCurrentTransaction(
+    _In_opt_ HANDLE TransactionHandle
+);
+
 #endif /* NTOS_MODE_USER */
 
 NTSYSAPI
@@ -839,7 +865,7 @@ RtlUnwind(
 
 #define RTL_STACK_WALKING_MODE_FRAMES_TO_SKIP_SHIFT 8
 
-#ifdef _M_AMD64
+#if defined(_WIN64)
 
 NTSYSAPI
 PRUNTIME_FUNCTION
@@ -864,7 +890,26 @@ RtlVirtualUnwind(
     _Inout_opt_ PKNONVOLATILE_CONTEXT_POINTERS ContextPointers
 );
 
-#endif // _M_AMD64
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlVirtualUnwind2(
+    _In_ ULONG HandlerType,
+    _In_ ULONG_PTR ImageBase,
+    _In_ ULONG_PTR ControlPc,
+    _In_opt_ PRUNTIME_FUNCTION FunctionEntry,
+    _Inout_ PCONTEXT Context,
+    _Out_opt_ PBOOLEAN MachineFrameUnwound,
+    _Out_opt_ PVOID* HandlerData,
+    _Out_opt_ PULONG_PTR EstablisherFrame,
+    _Out_opt_ PKNONVOLATILE_CONTEXT_POINTERS ContextPointers,
+    _Out_opt_ PULONG_PTR LowLimit,
+    _Out_opt_ PULONG_PTR HighLimit,
+    _Out_opt_ PEXCEPTION_ROUTINE* HandlerRoutine,
+    _In_ ULONG UnwindFlags
+);
+
+#endif // _WIN64
 
 //
 // Tracing Functions
@@ -977,6 +1022,19 @@ RtlGetProcessHeaps(
     _In_ ULONG HeapCount,
     _Out_cap_(HeapCount) HANDLE *HeapArray
 );
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlEnumProcessHeaps(
+    _In_ PHEAP_ENUMERATION_ROUTINE HeapEnumerationRoutine,
+    _In_ PVOID Parameter
+);
+
+NTSYSAPI
+BOOLEAN
+NTAPI
+RtlValidateProcessHeaps(VOID);
 
 _Success_(return != 0)
 BOOLEAN
@@ -1372,6 +1430,78 @@ RtlCopySidAndAttributesArray(
 
 _IRQL_requires_max_(APC_LEVEL)
 NTSYSAPI
+PVOID
+NTAPI
+RtlCreateBoundaryDescriptor(
+    _In_ PUNICODE_STRING Name,
+    _In_ ULONG Flags
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlAddSIDToBoundaryDescriptor(
+    _Inout_ PVOID *BoundaryDescriptor,
+    _In_ PSID RequiredSid
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlAddIntegrityLabelToBoundaryDescriptor(
+    _Inout_ PVOID *BoundaryDescriptor,
+    _In_ PSID IntegrityLabel
+);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlDeleteBoundaryDescriptor(
+    _In_ PVOID BoundaryDescriptor
+);
+
+NTSYSAPI
+BOOLEAN
+NTAPI
+RtlIsCapabilitySid(
+    _In_ PSID Sid
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlGetAppContainerSidType(
+    _In_ PSID AppContainerSid,
+    _Out_ PULONG AppContainerSidType
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlGetAppContainerParent(
+    _In_ PSID AppContainerSid,
+    _Out_ PSID *AppContainerSidParent
+);
+
+NTSYSAPI
+BOOLEAN
+NTAPI
+RtlIsParentOfChildAppContainer(
+    _In_ PSID ParentAppContainerSid,
+    _In_ PSID ChildAppContainerSid
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlCheckTokenMembershipEx(
+    _In_opt_ HANDLE TokenHandle,
+    _In_ PSID SidToCheck,
+    _In_ ULONG Flags,
+    _Out_ PBOOLEAN IsMember
+);
+
+NTSYSAPI
 NTSTATUS
 NTAPI
 RtlConvertSidToUnicodeString(
@@ -1536,6 +1666,15 @@ NTSTATUS
 NTAPI
 RtlImpersonateSelf(IN SECURITY_IMPERSONATION_LEVEL ImpersonationLevel);
 
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlDeriveCapabilitySidsFromName(
+    _In_ PUNICODE_STRING CapabilityName,
+    _Out_ PSID CapabilityGroupSid,
+    _Out_ PSID CapabilitySid
+);
+
 _IRQL_requires_max_(APC_LEVEL)
 NTSYSAPI
 NTSTATUS
@@ -1580,6 +1719,45 @@ RtlMapGenericMask(
 );
 
 #ifdef NTOS_MODE_USER
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlFlsAlloc(
+    _In_opt_ PFLS_CALLBACK_FUNCTION Callback,
+    _Out_ PULONG Index
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlFlsFree(
+    _In_ ULONG Index
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlFlsGetValue(
+    _In_ ULONG Index,
+    _Out_ PVOID *Data
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlFlsSetValue(
+    _In_ ULONG Index,
+    _In_opt_ PVOID Data
+);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlProcessFlsData(
+    _In_opt_ PVOID FlsData,
+    _In_ ULONG Flags
+);
 
 NTSYSAPI
 NTSTATUS
@@ -1830,6 +2008,57 @@ NTSYSAPI
 WCHAR
 NTAPI
 RtlDowncaseUnicodeChar(IN WCHAR Source);
+
+#ifdef NTOS_MODE_USER
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlNormalizeString(
+    _In_ ULONG NormForm,
+    _In_ PCWSTR SourceString,
+    _In_ LONG SourceStringLength,
+    _Out_writes_to_(*DestinationStringLength, *DestinationStringLength) PWSTR DestinationString,
+    _Inout_ PLONG DestinationStringLength);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlIsNormalizedString(
+    _In_ ULONG NormForm,
+    _In_ PCWSTR SourceString,
+    _In_ LONG SourceStringLength,
+    _Out_ PBOOLEAN Normalized);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlIdnToAscii(
+    _In_ ULONG Flags,
+    _In_ PCWSTR SourceString,
+    _In_ LONG SourceStringLength,
+    _Out_writes_to_(*DestinationStringLength, *DestinationStringLength) PWSTR DestinationString,
+    _Inout_ PLONG DestinationStringLength);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlIdnToUnicode(
+    _In_ ULONG Flags,
+    _In_ PCWSTR SourceString,
+    _In_ LONG SourceStringLength,
+    _Out_writes_to_(*DestinationStringLength, *DestinationStringLength) PWSTR DestinationString,
+    _Inout_ PLONG DestinationStringLength);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlIdnToNameprepUnicode(
+    _In_ ULONG Flags,
+    _In_ PCWSTR SourceString,
+    _In_ LONG SourceStringLength,
+    _Out_writes_to_(*DestinationStringLength, *DestinationStringLength) PWSTR DestinationString,
+    _Inout_ PLONG DestinationStringLength);
+#endif
 
 NTSYSAPI
 NTSTATUS
@@ -2231,7 +2460,7 @@ RtlFindCharInUnicodeString(
 //
 // Memory Functions
 //
-#if defined(_M_AMD64)
+#if defined(_M_AMD64) && !defined(_M_ARM64EC)
 
 FORCEINLINE
 VOID
@@ -2595,6 +2824,28 @@ RtlInitAnsiStringEx(
     _In_opt_z_ __drv_aliasesMem PCSZ SourceString
 );
 
+_IRQL_requires_max_(DISPATCH_LEVEL)
+NTSYSAPI
+VOID
+NTAPI
+RtlInitUTF8String(
+    _Out_ PUTF8_STRING DestinationString,
+    _In_opt_z_ __drv_aliasesMem PCSZ SourceString
+);
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlUTF8StringToUnicodeString(
+    _When_(AllocateDestinationString, _Out_ _At_(DestinationString->Buffer, __drv_allocatesMem(Mem)))
+    _When_(!AllocateDestinationString, _Inout_)
+        PUNICODE_STRING DestinationString,
+    _In_ PUTF8_STRING SourceString,
+    _In_ BOOLEAN AllocateDestinationString
+);
+
 //
 // OEM String Functions
 //
@@ -2728,6 +2979,23 @@ RtlCreateProcessParameters (
 NTSYSAPI
 NTSTATUS
 NTAPI
+RtlCreateProcessParametersEx (
+    _Out_ PRTL_USER_PROCESS_PARAMETERS *ProcessParameters,
+    _In_ PUNICODE_STRING ImagePathName,
+    _In_opt_ PUNICODE_STRING DllPath,
+    _In_opt_ PUNICODE_STRING CurrentDirectory,
+    _In_opt_ PUNICODE_STRING CommandLine,
+    _In_opt_ PWSTR Environment,
+    _In_opt_ PUNICODE_STRING WindowTitle,
+    _In_opt_ PUNICODE_STRING DesktopInfo,
+    _In_opt_ PUNICODE_STRING ShellInfo,
+    _In_opt_ PUNICODE_STRING RuntimeInfo,
+    _In_ ULONG Flags
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
 RtlCreateUserProcess(
     _In_ PUNICODE_STRING ImageFileName,
     _In_ ULONG Attributes,
@@ -2741,7 +3009,12 @@ RtlCreateUserProcess(
     _Out_ PRTL_USER_PROCESS_INFORMATION ProcessInfo
 );
 
-#if (NTDDI_VERSION >= NTDDI_WIN7)
+/*
+ * ReactOS always exports the pre-Win7 RtlCreateUserThread signature.
+ * The Win7+ variant has a completely different parameter layout that
+ * ReactOS does not implement.
+ */
+#if (NTDDI_VERSION >= NTDDI_WIN7) && !defined(__REACTOS__)
 NTSYSAPI
 NTSTATUS
 NTAPI
@@ -2801,8 +3074,32 @@ RtlInitializeContext(
     _Out_ PCONTEXT ThreadContext,
     _In_opt_ PVOID ThreadStartParam,
     _In_ PTHREAD_START_ROUTINE ThreadStartAddress,
-    _In_ PVOID StackBase
+    _In_ PINITIAL_TEB InitialTeb
 );
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlInitializeNtUserPfn(
+    _In_reads_bytes_(ClientASize) const VOID *ClientA,
+    _In_ ULONG ClientASize,
+    _In_reads_bytes_(ClientWSize) const VOID *ClientW,
+    _In_ ULONG ClientWSize,
+    _In_reads_bytes_(ClientWorkerSize) const VOID *ClientWorker,
+    _In_ ULONG ClientWorkerSize);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlRetrieveNtUserPfn(
+    _Out_ const VOID **ClientA,
+    _Out_ const VOID **ClientW,
+    _Out_ const VOID **ClientWorker);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlResetNtUserPfn(VOID);
 
 #ifdef _M_AMD64
 typedef struct _WOW64_CONTEXT *PWOW64_CONTEXT;
@@ -2841,6 +3138,13 @@ VOID
 NTAPI
 RtlReleasePebLock(VOID);
 
+#ifdef NTOS_MODE_USER
+NTSYSAPI
+LOGICAL
+NTAPI
+RtlTryAcquirePebLock(VOID);
+#endif
+
 NTSYSAPI
 NTSTATUS
 NTAPI
@@ -2878,6 +3182,30 @@ NTAPI
 RtlGetCurrentProcessorNumber(
     VOID
 );
+
+NTSYSAPI
+BOOLEAN
+NTAPI
+RtlIsCurrentProcess(
+    _In_ HANDLE ProcessHandle
+);
+
+NTSYSAPI
+BOOLEAN
+NTAPI
+RtlIsProcessorFeaturePresent(
+    _In_ ULONG ProcessorFeature
+);
+
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTSYSAPI
+ULONG64
+NTAPI
+RtlGetEnabledExtendedFeatures(
+    _In_ ULONG64 FeatureMask
+);
+#endif
 
 
 //
@@ -2957,10 +3285,18 @@ RtlComputePrivatizedDllName_U(
 );
 
 NTSYSAPI
-VOID
+NTSTATUS
 NTAPI
 RtlDestroyEnvironment(
     _In_ PWSTR Environment
+);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlSetCurrentEnvironment(
+    _In_ PWSTR NewEnvironment,
+    _Out_opt_ PWSTR *OldEnvironment
 );
 
 NTSYSAPI
@@ -3009,6 +3345,16 @@ BOOLEAN
 NTAPI
 RtlDosPathNameToNtPathName_U(
     _In_opt_z_ PCWSTR DosPathName,
+    _Out_ PUNICODE_STRING NtPathName,
+    _Out_opt_ PCWSTR *NtFileNamePart,
+    _Out_opt_ PRTL_RELATIVE_NAME_U DirectoryInfo
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlDosPathNameToNtPathName_U_WithStatus(
+    _In_ PCWSTR DosPathName,
     _Out_ PUNICODE_STRING NtPathName,
     _Out_opt_ PCWSTR *NtFileNamePart,
     _Out_opt_ PRTL_RELATIVE_NAME_U DirectoryInfo
@@ -3127,6 +3473,17 @@ RtlIsDosDeviceName_Ustr(
 );
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlGenerate8dot3Name(
+    _In_ PCUNICODE_STRING Name,
+    _In_ BOOLEAN AllowExtendedCharacters,
+    _Inout_ PGENERATE_NAME_CONTEXT Context,
+    _Inout_ PUNICODE_STRING Name8dot3
+);
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
 _Must_inspect_result_
 NTSYSAPI
 BOOLEAN
@@ -3198,6 +3555,15 @@ NTAPI
 RtlInitializeCriticalSectionAndSpinCount(
     _In_ PRTL_CRITICAL_SECTION CriticalSection,
     _In_ ULONG SpinCount
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlInitializeCriticalSectionEx(
+    _Out_ PRTL_CRITICAL_SECTION CriticalSection,
+    _In_ ULONG SpinCount,
+    _In_ ULONG Flags
 );
 
 NTSYSAPI
@@ -3385,6 +3751,13 @@ NTAPI
 RtlQueryProcessDebugInformation(
     _In_ ULONG ProcessId,
     _In_ ULONG DebugInfoClassMask,
+    _Inout_ PRTL_DEBUG_INFORMATION DebugBuffer
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlQueryProcessHeapInformation(
     _Inout_ PRTL_DEBUG_INFORMATION DebugBuffer
 );
 
@@ -3671,6 +4044,14 @@ RtlDeleteTimerQueue(HANDLE TimerQueue);
 //
 // SList functions
 //
+_Must_inspect_result_
+NTSYSAPI
+PSLIST_ENTRY
+NTAPI
+RtlFirstEntrySList(
+    _In_ const SLIST_HEADER *ListHead
+);
+
 PSLIST_ENTRY
 FASTCALL
 InterlockedPushListSList(
@@ -3726,17 +4107,6 @@ RtlInvertRangeList(
 NTSYSAPI
 NTSTATUS
 NTAPI
-RtlInvertRangeListEx(
-    _Out_ PRTL_RANGE_LIST InvertedRangeList,
-    _In_ PRTL_RANGE_LIST RangeList,
-    _In_ UCHAR Attributes,
-    _In_opt_ PVOID UserData,
-    _In_opt_ PVOID Owner
-);
-
-NTSYSAPI
-NTSTATUS
-NTAPI
 RtlAddRange(
     _Inout_ PRTL_RANGE_LIST RangeList,
     _In_ ULONGLONG Start,
@@ -3772,8 +4142,8 @@ RtlFindRange(
     _In_ PRTL_RANGE_LIST RangeList,
     _In_ ULONGLONG Minimum,
     _In_ ULONGLONG Maximum,
-    _In_ ULONGLONG Length,
-    _In_ ULONGLONG Alignment,
+    _In_ ULONG Length,
+    _In_ ULONG Alignment,
     _In_ ULONG Flags,
     _In_ UCHAR AttributeAvailableMask,
     _In_opt_ PVOID Context,
@@ -3799,15 +4169,6 @@ NTSYSAPI
 NTSTATUS
 NTAPI
 RtlGetFirstRange(
-    _In_ PRTL_RANGE_LIST RangeList,
-    _Out_ PRTL_RANGE_LIST_ITERATOR Iterator,
-    _Outptr_ PRTL_RANGE *Range
-);
-
-NTSYSAPI
-NTSTATUS
-NTAPI
-RtlGetLastRange(
     _In_ PRTL_RANGE_LIST RangeList,
     _Out_ PRTL_RANGE_LIST_ITERATOR Iterator,
     _Outptr_ PRTL_RANGE *Range
@@ -4081,7 +4442,7 @@ RtlReleaseActivationContext(
 );
 
 NTSYSAPI
-NTSTATUS
+VOID
 NTAPI
 RtlDeactivateActivationContext(
     _In_ ULONG dwFlags,
@@ -4101,7 +4462,7 @@ NTAPI
 RtlFreeThreadActivationContextStack(VOID);
 
 NTSYSAPI
-PRTL_ACTIVATION_CONTEXT_STACK_FRAME
+VOID
 FASTCALL
 RtlDeactivateActivationContextUnsafeFast(
     _In_ PRTL_CALLER_ALLOCATED_ACTIVATION_CONTEXT_STACK_FRAME_EXTENDED Frame
@@ -4159,6 +4520,19 @@ RtlQueryInformationActiveActivationContext(
 NTSYSAPI
 NTSTATUS
 NTAPI
+RtlQueryActivationContextApplicationSettings(
+    _In_ DWORD dwFlags,
+    _In_opt_ HANDLE Context,
+    _In_opt_ PCWSTR SettingsNameSpace,
+    _In_ PCWSTR SettingName,
+    _Out_writes_opt_(Size) PWSTR Buffer,
+    _In_ SIZE_T Size,
+    _Out_opt_ SIZE_T *WrittenOrRequired
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
 RtlZombifyActivationContext(
     PVOID Context
 );
@@ -4166,6 +4540,29 @@ RtlZombifyActivationContext(
 //
 // WOW64 Functions
 //
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlWow64GetCpuAreaInfo(
+    _In_ PWOW64_CPURESERVED CpuReserved,
+    _In_ ULONG Reserved,
+    _Out_ PWOW64_CPU_AREA_INFO CpuAreaInfo
+);
+
+NTSYSAPI
+USHORT
+NTAPI
+RtlWow64GetCurrentMachine(VOID);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlWow64GetProcessMachines(
+    _In_ HANDLE ProcessHandle,
+    _Out_opt_ PUSHORT ProcessMachine,
+    _Out_opt_ PUSHORT NativeMachine
+);
+
 NTSYSAPI
 NTSTATUS
 NTAPI
@@ -4179,6 +4576,54 @@ NTAPI
 RtlWow64EnableFsRedirectionEx(
     _In_ PVOID Wow64FsEnableRedirection,
     _Out_ PVOID *OldFsRedirectionLevel
+);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlOpenCrossProcessEmulatorWorkConnection(
+    _In_ HANDLE ProcessHandle,
+    _Out_ PHANDLE SectionHandle,
+    _Out_ PVOID *MappedAddress
+);
+
+NTSYSAPI
+PCROSS_PROCESS_WORK_ENTRY
+NTAPI
+RtlWow64PopAllCrossProcessWorkFromWorkList(
+    _Inout_ PCROSS_PROCESS_WORK_HDR List,
+    _Out_ PBOOLEAN Flush
+);
+
+NTSYSAPI
+PCROSS_PROCESS_WORK_ENTRY
+NTAPI
+RtlWow64PopCrossProcessWorkFromFreeList(
+    _Inout_ PCROSS_PROCESS_WORK_HDR List
+);
+
+NTSYSAPI
+BOOLEAN
+NTAPI
+RtlWow64PushCrossProcessWorkOntoFreeList(
+    _Inout_ PCROSS_PROCESS_WORK_HDR List,
+    _Inout_ PCROSS_PROCESS_WORK_ENTRY Entry
+);
+
+NTSYSAPI
+BOOLEAN
+NTAPI
+RtlWow64PushCrossProcessWorkOntoWorkList(
+    _Inout_ PCROSS_PROCESS_WORK_HDR List,
+    _Inout_ PCROSS_PROCESS_WORK_ENTRY Entry,
+    _Out_ PVOID *Unknown
+);
+
+NTSYSAPI
+BOOLEAN
+NTAPI
+RtlWow64RequestCrossProcessHeavyFlush(
+    _Inout_ PCROSS_PROCESS_WORK_HDR List
 );
 
 #endif
@@ -4195,6 +4640,18 @@ RtlCheckRegistryKey(
     _In_ ULONG RelativeTo,
     _In_ PWSTR Path
 );
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlCheckPortableOperatingSystem(
+    _Out_ PBOOLEAN IsPortable);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlSetPortableOperatingSystem(
+    _In_ BOOLEAN IsPortable);
 
 NTSYSAPI
 NTSTATUS
@@ -4225,6 +4682,19 @@ NTSYSAPI
 NTSTATUS
 NTAPI
 RtlQueryRegistryValues(
+    _In_ ULONG RelativeTo,
+    _In_ PCWSTR Path,
+    _Inout_ _At_(*(*QueryTable).EntryContext, _Pre_unknown_)
+        PRTL_QUERY_REGISTRY_TABLE QueryTable,
+    _In_opt_ PVOID Context,
+    _In_opt_ PVOID Environment
+);
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlQueryRegistryValuesEx(
     _In_ ULONG RelativeTo,
     _In_ PCWSTR Path,
     _Inout_ _At_(*(*QueryTable).EntryContext, _Pre_unknown_)
@@ -4409,7 +4879,7 @@ RtlEnlargedUnsignedMultiply(
     return Product;
 }
 
-#if defined(_AMD64_) || defined(_IA64_)
+#if defined(_WIN64)
 static __inline
 LARGE_INTEGER
 NTAPI_INLINE
@@ -4435,7 +4905,7 @@ RtlExtendedLargeIntegerDivide(
     _Out_opt_ PULONG Remainder
 );
 
-#endif /* defined(_AMD64_) || defined(_IA64_) */
+#endif /* _WIN64 */
 
 #endif
 
@@ -4492,6 +4962,7 @@ RtlIpv4AddressToStringExA(
     _Inout_ PULONG AddressStringLength
 );
 
+NTSYSAPI
 NTSTATUS
 NTAPI
 RtlIpv4AddressToStringExW(
@@ -4621,6 +5092,34 @@ RtlIpv6StringToAddressExW(
 //
 // Time Functions
 //
+#ifdef NTOS_MODE_USER
+NTSYSAPI
+LONGLONG
+NTAPI
+RtlGetSystemTimePrecise(VOID);
+
+_Success_(return != FALSE)
+NTSYSAPI
+BOOL
+NTAPI
+RtlQueryPerformanceCounter(
+    _Out_ PLARGE_INTEGER PerformanceCounter);
+
+_Success_(return != FALSE)
+NTSYSAPI
+BOOL
+NTAPI
+RtlQueryPerformanceFrequency(
+    _Out_ PLARGE_INTEGER PerformanceFrequency);
+
+_Success_(return != FALSE)
+NTSYSAPI
+BOOL
+NTAPI
+RtlQueryUnbiasedInterruptTime(
+    _Out_ PULONGLONG UnbiasedTime);
+#endif
+
 NTSYSAPI
 BOOLEAN
 NTAPI
@@ -4635,6 +5134,12 @@ NTSTATUS
 NTAPI
 RtlQueryTimeZoneInformation(
     _Out_ PRTL_TIME_ZONE_INFORMATION TimeZoneInformation);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlQueryDynamicTimeZoneInformation(
+    _Out_ PRTL_DYNAMIC_TIME_ZONE_INFORMATION TimeZoneInformation);
 
 NTSYSAPI
 VOID
@@ -4712,9 +5217,26 @@ RtlGetVersion(
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
 NTSYSAPI
+VOID
+NTAPI
+RtlGetDeviceFamilyInfoEnum(
+    _Out_opt_ PULONGLONG pullUAPInfo,
+    _Out_opt_ PULONG pulDeviceFamily,
+    _Out_opt_ PULONG pulDeviceForm
+);
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTSYSAPI
 BOOLEAN
 NTAPI
 RtlGetNtProductType(_Out_ PNT_PRODUCT_TYPE ProductType);
+
+#ifndef NTOS_MODE_USER
+NTSYSAPI
+VOID
+NTAPI
+RtlSetActiveConsoleId(_In_ ULONG ActiveConsoleId);
+#endif
 
 #if (_WIN32_WINNT >= _WIN32_WINNT_VISTA)
 //
@@ -4810,6 +5332,53 @@ NTAPI
 RtlReleaseSRWLockExclusive(IN OUT PRTL_SRWLOCK SRWLock);
 
 //
+// Synchronization Barrier Functions
+//
+#ifdef NTOS_MODE_USER
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlInitBarrier(
+    _Out_ PRTL_BARRIER Barrier,
+    _In_ LONG TotalThreads,
+    _In_ LONG SpinCount);
+
+NTSYSAPI
+BOOLEAN
+NTAPI
+RtlBarrier(
+    _Inout_ PRTL_BARRIER Barrier,
+    _In_ ULONG Flags);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlDeleteBarrier(
+    _In_ PRTL_BARRIER Barrier);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlWaitOnAddress(
+    _In_ const VOID *Address,
+    _In_ const VOID *CompareAddress,
+    _In_ SIZE_T AddressSize,
+    _In_opt_ const LARGE_INTEGER *Timeout);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlWakeAddressAll(
+    _In_ const VOID *Address);
+
+NTSYSAPI
+VOID
+NTAPI
+RtlWakeAddressSingle(
+    _In_ const VOID *Address);
+#endif
+
+//
 // Secure Memory Functions
 //
 #ifdef NTOS_MODE_USER
@@ -4817,6 +5386,12 @@ NTSYSAPI
 NTSTATUS
 NTAPI
 RtlRegisterSecureMemoryCacheCallback(
+    _In_ PRTL_SECURE_MEMORY_CACHE_CALLBACK Callback);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlDeregisterSecureMemoryCacheCallback(
     _In_ PRTL_SECURE_MEMORY_CACHE_CALLBACK Callback);
 
 NTSYSAPI
@@ -5169,6 +5744,14 @@ RtlLCIDToCultureName(
 NTSYSAPI
 NTSTATUS
 NTAPI
+RtlGetLocaleFileMappingAddress(
+    _Out_ PVOID *BaseAddress,
+    _Out_ PLCID DefaultLocaleId,
+    _Out_opt_ PLARGE_INTEGER DefaultCasingTableSize);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
 RtlLcidToLocaleName(
     _In_ LCID Lcid,
     _Inout_ PUNICODE_STRING LocaleName,
@@ -5182,6 +5765,60 @@ RtlLocaleNameToLcid(
     _In_ PCWSTR LocaleName,
     _Out_ PLCID Lcid,
     _In_ ULONG Flags);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlGetProcessPreferredUILanguages(
+    _In_ DWORD Flags,
+    _Out_ PULONG Count,
+    _Out_writes_opt_(*Size) PWSTR Buffer,
+    _Inout_ PULONG Size);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlSetProcessPreferredUILanguages(
+    _In_ DWORD Flags,
+    _In_opt_ PCZZWSTR Buffer,
+    _Out_opt_ PULONG Count);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlGetUserPreferredUILanguages(
+    _In_ DWORD Flags,
+    _In_ ULONG Reserved,
+    _Out_ PULONG Count,
+    _Out_writes_opt_(*Size) PWSTR Buffer,
+    _Inout_ PULONG Size);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlGetSystemPreferredUILanguages(
+    _In_ DWORD Flags,
+    _In_ ULONG Reserved,
+    _Out_ PULONG Count,
+    _Out_writes_opt_(*Size) PWSTR Buffer,
+    _Inout_ PULONG Size);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlGetThreadPreferredUILanguages(
+    _In_ DWORD Flags,
+    _Out_ PULONG Count,
+    _Out_writes_opt_(*Size) PWSTR Buffer,
+    _Inout_ PULONG Size);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlSetThreadPreferredUILanguages(
+    _In_ DWORD Flags,
+    _In_opt_ PCZZWSTR Buffer,
+    _Out_opt_ PULONG Count);
 
 NTSYSAPI
 BOOLEAN

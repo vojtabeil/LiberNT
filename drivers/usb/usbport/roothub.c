@@ -13,6 +13,83 @@
 #define NDEBUG_USBPORT_CORE
 #include "usbdebug.h"
 
+#if DBG
+#ifndef USBPORT_DBG_RH_TRACE
+#define USBPORT_DBG_RH_TRACE 0
+#endif
+#if USBPORT_DBG_RH_TRACE
+#define USBPORT_RH_TRACE DPRINT1
+#else
+#define USBPORT_RH_TRACE(...) do { } while (0)
+#endif
+#else
+#define USBPORT_RH_TRACE(...) do { } while (0)
+#endif
+
+#if DBG
+static
+VOID
+USBPORT_DumpDeviceHandleList(IN PUSBPORT_DEVICE_EXTENSION FdoExtension)
+{
+    PLIST_ENTRY Entry;
+    ULONG Index = 0;
+    PUSBPORT_RHDEVICE_EXTENSION RhExtension;
+    PUSBPORT_DEVICE_HANDLE RootHubHandle = NULL;
+
+    if (!FdoExtension)
+    {
+        USBPORT_RH_TRACE("USBPORT_DumpDeviceHandleList: FdoExtension is NULL\n");
+        return;
+    }
+
+    RhExtension = USBPORT_GetRootHubExtension(FdoExtension);
+    if (RhExtension)
+        RootHubHandle = &RhExtension->DeviceHandle;
+
+    UNREFERENCED_PARAMETER(RootHubHandle);
+
+    USBPORT_RH_TRACE("USBPORT_DumpDeviceHandleList: Fdo=%p ListHead=%p RootHubHandle=%p\n",
+                     FdoExtension->CommonExtension.SelfDevice,
+                     &FdoExtension->DeviceHandleList,
+                     RootHubHandle);
+
+    Entry = FdoExtension->DeviceHandleList.Flink;
+
+    while (Entry != &FdoExtension->DeviceHandleList && Index < 32)
+    {
+        PUSBPORT_DEVICE_HANDLE Handle;
+        ULONG Flags;
+
+        Handle = CONTAINING_RECORD(Entry,
+                                   USBPORT_DEVICE_HANDLE,
+                                   DeviceHandleLink);
+
+        Flags = Handle->Flags;
+
+        UNREFERENCED_PARAMETER(Flags);
+
+        USBPORT_RH_TRACE("  [%lu] Handle=%p Flags=0x%lx Addr=%lu Removed=%lu Lock=%ld\n",
+                         Index,
+                         Handle,
+                         Flags,
+                         Handle->DeviceAddress,
+                         (Flags & DEVICE_HANDLE_FLAG_REMOVED) ? 1 : 0,
+                         Handle->DeviceHandleLock);
+
+        Entry = Entry->Flink;
+        Index++;
+    }
+
+    if (Entry != &FdoExtension->DeviceHandleList)
+    {
+        USBPORT_RH_TRACE("USBPORT_DumpDeviceHandleList: truncated output (more than %lu entries)\n",
+                         Index);
+    }
+}
+#else
+#define USBPORT_DumpDeviceHandleList(x) ((VOID)0)
+#endif
+
 RHSTATUS
 NTAPI
 USBPORT_MPStatusToRHStatus(IN MPSTATUS MPStatus)
@@ -72,9 +149,10 @@ USBPORT_RH_SetFeatureUSB2PortPower(IN PDEVICE_OBJECT FdoDevice,
         CompanionFdoExtension = CompanionFdoDevice->DeviceExtension;
         CompanionPacket = &CompanionFdoExtension->MiniPortInterface->Packet;
 
-        PdoExtension = CompanionFdoExtension->RootHubPdo->DeviceExtension;
+        PdoExtension = USBPORT_GetRootHubExtension(CompanionFdoExtension);
 
         for (ix = 0;
+             PdoExtension && PdoExtension->RootHubDescriptors &&
              (PdoExtension->CommonExtension.PnpStateFlags & USBPORT_PNP_STATE_STARTED) &&
               ix < PdoExtension->RootHubDescriptors->Descriptor.bNumberOfPorts;
              ++ix)
@@ -118,7 +196,7 @@ USBPORT_RootHubClassCommand(IN PDEVICE_OBJECT FdoDevice,
            *BufferLength);
 
     FdoExtension = FdoDevice->DeviceExtension;
-    PdoExtension = FdoExtension->RootHubPdo->DeviceExtension;
+    PdoExtension = USBPORT_GetRootHubExtension(FdoExtension);
     Packet = &FdoExtension->MiniPortInterface->Packet;
 
     Port = SetupPacket->wIndex.W;
@@ -186,7 +264,7 @@ USBPORT_RootHubClassCommand(IN PDEVICE_OBJECT FdoDevice,
                     return RHStatus;
                 }
 
-                DbgBreakPoint();
+                DPRINT1("USBPORT_RootHubClearFeature: unknown hub feature %x\n", Feature);
                 return RHStatus;
             }
 
@@ -248,6 +326,7 @@ USBPORT_RootHubClassCommand(IN PDEVICE_OBJECT FdoDevice,
             }
 
             Feature = SetupPacket->wValue.W;
+
             switch (Feature)
             {
                 case FEATURE_PORT_ENABLE:
@@ -289,22 +368,32 @@ USBPORT_RootHubClassCommand(IN PDEVICE_OBJECT FdoDevice,
 
         case USB_REQUEST_GET_DESCRIPTOR:
             if (Buffer &&
-                SetupPacket->wValue.W == 0 &&
                 SetupPacket->bmRequestType.Dir == BMREQUEST_DEVICE_TO_HOST)
             {
                 SIZE_T DescriptorLength;
+                UCHAR DescriptorIndex;
+                UCHAR DescriptorType;
 
-                DescriptorLength = PdoExtension->RootHubDescriptors->Descriptor.bDescriptorLength;
+                DescriptorIndex = SetupPacket->wValue.LowByte;
+                DescriptorType = SetupPacket->wValue.HiByte;
 
-                if (*BufferLength < DescriptorLength)
-                    DescriptorLength = *BufferLength;
+                if (DescriptorIndex == 0 &&
+                    (DescriptorType == PdoExtension->RootHubDescriptors->Descriptor.bDescriptorType ||
+                     DescriptorType == USB_20_HUB_DESCRIPTOR_TYPE ||
+                     DescriptorType == USB_30_HUB_DESCRIPTOR_TYPE))
+                {
+                    DescriptorLength = PdoExtension->RootHubDescriptors->Descriptor.bDescriptorLength;
 
-                RtlCopyMemory(Buffer,
-                              &PdoExtension->RootHubDescriptors->Descriptor,
-                              DescriptorLength);
+                    if (*BufferLength < DescriptorLength)
+                        DescriptorLength = *BufferLength;
 
-                *BufferLength = DescriptorLength;
-                RHStatus = RH_STATUS_SUCCESS;
+                    RtlCopyMemory(Buffer,
+                                  &PdoExtension->RootHubDescriptors->Descriptor,
+                                  DescriptorLength);
+
+                    *BufferLength = DescriptorLength;
+                    RHStatus = RH_STATUS_SUCCESS;
+                }
             }
 
             break;
@@ -347,7 +436,7 @@ USBPORT_RootHubStandardCommand(IN PDEVICE_OBJECT FdoDevice,
            TransferLength);
 
     FdoExtension = FdoDevice->DeviceExtension;
-    PdoExtension = FdoExtension->RootHubPdo->DeviceExtension;
+    PdoExtension = USBPORT_GetRootHubExtension(FdoExtension);
     Packet = &FdoExtension->MiniPortInterface->Packet;
 
     switch (SetupPacket->bRequest)
@@ -356,6 +445,9 @@ USBPORT_RootHubStandardCommand(IN PDEVICE_OBJECT FdoDevice,
             if (SetupPacket->wValue.LowByte ||
                 !(SetupPacket->bmRequestType.Dir))
             {
+                DPRINT1("USBPORT_RootHubStandardCommand: GET_DESCRIPTOR invalid params value=0x%04x dir=%u\n",
+                        SetupPacket->wValue.W,
+                        SetupPacket->bmRequestType.Dir);
                 return RHStatus;
             }
 
@@ -384,6 +476,11 @@ USBPORT_RootHubStandardCommand(IN PDEVICE_OBJECT FdoDevice,
                 return RHStatus;
             }
 
+            USBPORT_RH_TRACE("USBPORT_RootHubStandardCommand: GET_DESCRIPTOR type=0x%x reqLen=%lu descLen=%lu\n",
+                             SetupPacket->wValue.HiByte,
+                             *TransferLength,
+                             DescriptorLength);
+
             if (*TransferLength >= DescriptorLength)
                 Length = DescriptorLength;
             else
@@ -391,6 +488,25 @@ USBPORT_RootHubStandardCommand(IN PDEVICE_OBJECT FdoDevice,
 
             RtlCopyMemory(Buffer, Descriptor, Length);
             *TransferLength = Length;
+
+            USBPORT_RH_TRACE("USBPORT_RootHubStandardCommand: descriptor copy len=%lu\n",
+                             Length);
+
+#if DBG
+            if (Length && SetupPacket->wValue.HiByte == USB_CONFIGURATION_DESCRIPTOR_TYPE)
+            {
+                ULONG dumpLen = (Length < 64) ? Length : 64;
+                ULONG ix;
+
+                USBPORT_RH_TRACE("USBPORT_RootHubStandardCommand: config descriptor bytes (len=%lu)\n",
+                                 Length);
+
+                for (ix = 0; ix < dumpLen; ix++)
+                {
+                    USBPORT_RH_TRACE("  [%02lu] = %02x\n", ix, ((PUCHAR)Buffer)[ix]);
+                }
+            }
+#endif
 
             RHStatus = RH_STATUS_SUCCESS;
             break;
@@ -420,8 +536,16 @@ USBPORT_RootHubStandardCommand(IN PDEVICE_OBJECT FdoDevice,
                 SetupPacket->wLength != 1 ||
                 SetupPacket->bmRequestType.Dir == BMREQUEST_HOST_TO_DEVICE)
             {
+                DPRINT1("USBPORT_RootHubStandardCommand: GET_CONFIGURATION invalid params value=%u index=%u length=%u dir=%u\n",
+                        SetupPacket->wValue.W,
+                        SetupPacket->wIndex.W,
+                        SetupPacket->wLength,
+                        SetupPacket->bmRequestType.Dir);
                 return RHStatus;
             }
+
+            USBPORT_RH_TRACE("USBPORT_RootHubStandardCommand: GET_CONFIGURATION current=%u\n",
+                             PdoExtension->ConfigurationValue);
 
             Length = 0;
 
@@ -432,6 +556,9 @@ USBPORT_RootHubStandardCommand(IN PDEVICE_OBJECT FdoDevice,
             }
 
             *TransferLength = Length;
+
+            USBPORT_RH_TRACE("USBPORT_RootHubStandardCommand: returning config value len=%lu\n",
+                             Length);
 
             RHStatus = RH_STATUS_SUCCESS;
             break;
@@ -526,7 +653,32 @@ USBPORT_RootHubEndpoint0(IN PUSBPORT_TRANSFER Transfer)
     }
 
     if (RHStatus == RH_STATUS_SUCCESS)
+    {
+        SIZE_T BytesToCopy;
+
         Transfer->CompletedTransferLen = TransferLength;
+
+        if ((Transfer->Flags & TRANSFER_FLAG_BOUNCE) &&
+            Transfer->BounceBuffer &&
+            Transfer->BounceOriginalVa &&
+            TransferLength)
+        {
+            BytesToCopy = TransferLength;
+
+            if (BytesToCopy > Transfer->BounceBufferLength)
+                BytesToCopy = Transfer->BounceBufferLength;
+
+            if (BytesToCopy)
+            {
+                RtlCopyMemory(Transfer->BounceOriginalVa,
+                              (PVOID)Transfer->BounceBuffer->VirtualAddress,
+                              BytesToCopy);
+                USBPORT_RH_TRACE("USBPORT_RootHubEndpoint0: copied %Iu bytes from bounce buffer to %p\n",
+                                 BytesToCopy,
+                                 Transfer->BounceOriginalVa);
+            }
+        }
+    }
 
     return RHStatus;
 }
@@ -543,7 +695,7 @@ USBPORT_RootHubSCE(IN PUSBPORT_TRANSFER Transfer)
     USB_PORT_STATUS_AND_CHANGE PortStatus;
     USB_HUB_STATUS_AND_CHANGE HubStatus;
     PVOID Buffer;
-    PULONG AddressBitMap;
+    PUCHAR AddressBitMap;
     ULONG Port;
     PURB Urb;
     RHSTATUS RHStatus = RH_STATUS_NO_CHANGES;
@@ -555,7 +707,7 @@ USBPORT_RootHubSCE(IN PUSBPORT_TRANSFER Transfer)
     Endpoint = Transfer->Endpoint;
 
     FdoExtension = Endpoint->FdoDevice->DeviceExtension;
-    PdoExtension = FdoExtension->RootHubPdo->DeviceExtension;
+    PdoExtension = USBPORT_GetRootHubExtension(FdoExtension);
     Packet = &FdoExtension->MiniPortInterface->Packet;
 
     HubDescriptor = &PdoExtension->RootHubDescriptors->Descriptor;
@@ -585,14 +737,22 @@ USBPORT_RootHubSCE(IN PUSBPORT_TRANSFER Transfer)
         return RH_STATUS_UNSUCCESSFUL;
     }
 
-    if ((TransferLength < (NumberOfPorts / 8 + 1)))
+    /* We need one bit for the hub and one bit per port. */
     {
-        /* Not valid parameters */
-        DPRINT1("USBPORT_RootHubSCE: Error! TransferLength - %x, NumberOfPorts - %x\n",
-                TransferLength,
-                NumberOfPorts);
+        ULONG RequiredBytes;
 
-        return RH_STATUS_UNSUCCESSFUL;
+        RequiredBytes = (((ULONG)NumberOfPorts + 1) + 7) >> 3;
+
+        if (TransferLength < RequiredBytes)
+        {
+            /* Not valid parameters */
+            DPRINT1("USBPORT_RootHubSCE: Error! TransferLength - %x, NumberOfPorts - %x (RequiredBytes=%lx)\n",
+                    TransferLength,
+                    NumberOfPorts,
+                    RequiredBytes);
+
+            return RH_STATUS_UNSUCCESSFUL;
+        }
     }
 
     RtlZeroMemory(Buffer, TransferLength);
@@ -618,10 +778,34 @@ USBPORT_RootHubSCE(IN PUSBPORT_TRANSFER Transfer)
             PortStatus.PortChange.Usb20PortChange.PortEnableDisableChange ||
             PortStatus.PortChange.Usb20PortChange.SuspendChange ||
             PortStatus.PortChange.Usb20PortChange.OverCurrentIndicatorChange ||
-            PortStatus.PortChange.Usb20PortChange.ResetChange)
+            PortStatus.PortChange.Usb20PortChange.ResetChange ||
+            PortStatus.PortChange.Usb30PortChange.ConnectStatusChange ||
+            PortStatus.PortChange.Usb30PortChange.OverCurrentIndicatorChange ||
+            PortStatus.PortChange.Usb30PortChange.ResetChange ||
+            PortStatus.PortChange.Usb30PortChange.BHResetChange ||
+            PortStatus.PortChange.Usb30PortChange.PortLinkStateChange ||
+            PortStatus.PortChange.Usb30PortChange.PortConfigErrorChange)
         {
-            /* At the port status there is a change */
-            AddressBitMap[Port >> 5] |= 1 << (Port & 0x1F);
+            /*
+             * Encode port change bits per USB 2.0 spec:
+             *  - bit 0 in the change bitmap is the HUB change.
+             *  - bit N (1..bNumberOfPorts) corresponds to PORT N.
+             *
+             * Our usbhub logic interprets the bitmap as:
+             *   bit 0  -> hub change
+             *   bit N  -> port N (1..bNumberOfPorts)
+             *
+             * The map is byte-addressed, eight ports per byte.
+             * Use 'Port' as the bit index so that port 1 maps to
+             * bit 1, port 2 to bit 2, etc.
+             */
+            {
+                ULONG BitIndex = Port;
+                ULONG ByteIndex = BitIndex >> 3;
+                UCHAR BitMask = (UCHAR)(1u << (BitIndex & 7));
+
+                AddressBitMap[ByteIndex] |= BitMask;
+            }
             RHStatus = RH_STATUS_SUCCESS;
         }
     }
@@ -716,6 +900,16 @@ USBPORT_RootHubEndpointWorker(IN PUSBPORT_ENDPOINT Endpoint)
         return;
     }
 
+    if (Transfer->Flags & TRANSFER_FLAG_COMPLETED)
+    {
+        KeReleaseSpinLock(&Endpoint->EndpointSpinLock, Endpoint->EndpointOldIrql);
+
+        /* Completion already queued: drain DoneTransferList before reprocessing. */
+        USBPORT_FlushDoneTransfers(FdoDevice);
+        USBPORT_FlushCancelList(Endpoint);
+        return;
+    }
+
     KeReleaseSpinLock(&Endpoint->EndpointSpinLock, Endpoint->EndpointOldIrql);
 
     if (Endpoint->EndpointProperties.TransferType == USBPORT_TRANSFER_TYPE_CONTROL)
@@ -731,9 +925,11 @@ USBPORT_RootHubEndpointWorker(IN PUSBPORT_ENDPOINT Endpoint)
             USBDStatus = USBD_STATUS_STALL_PID;
 
         KeAcquireSpinLock(&Endpoint->EndpointSpinLock, &Endpoint->EndpointOldIrql);
-        USBPORT_QueueDoneTransfer(Transfer, USBDStatus);
+        USBPORT_QueueDoneTransfer(Transfer, USBDStatus, TRUE);
         KeReleaseSpinLock(&Endpoint->EndpointSpinLock, Endpoint->EndpointOldIrql);
 
+        /* Root hub control transfers are synchronous; flush done queue immediately. */
+        USBPORT_FlushDoneTransfers(FdoDevice);
         USBPORT_FlushCancelList(Endpoint);
         return;
     }
@@ -772,9 +968,27 @@ USBPORT_RootHubCreateDevice(IN PDEVICE_OBJECT FdoDevice,
     Packet = &FdoExtension->MiniPortInterface->Packet;
 
     DeviceHandle = &PdoExtension->DeviceHandle;
+
+    RtlZeroMemory(DeviceHandle, sizeof(USBPORT_DEVICE_HANDLE));
+    InitializeListHead(&DeviceHandle->PipeHandleList);
+    InitializeListHead(&DeviceHandle->TtList);
+
     USBPORT_AddDeviceHandle(FdoDevice, DeviceHandle);
 
-    InitializeListHead(&DeviceHandle->PipeHandleList);
+#if DBG
+    if (!USBPORT_ValidateDeviceHandle(FdoDevice, DeviceHandle))
+    {
+        USBPORT_RH_TRACE("USBPORT_RootHubCreateDevice: failed to validate root hub handle %p\n",
+                         DeviceHandle);
+        USBPORT_DumpDeviceHandleList(FdoExtension);
+    }
+    else
+    {
+        USBPORT_RH_TRACE("USBPORT_RootHubCreateDevice: registered root hub handle %p\n",
+                         DeviceHandle);
+        USBPORT_DumpDeviceHandleList(FdoExtension);
+    }
+#endif
 
     DeviceHandle->IsRootHub = TRUE;
     DeviceHandle->DeviceSpeed = UsbFullSpeed;
@@ -784,7 +998,14 @@ USBPORT_RootHubCreateDevice(IN PDEVICE_OBJECT FdoDevice,
 
     Packet->RH_GetRootHubData(FdoExtension->MiniPortExt, &RootHubData);
 
-    ASSERT(RootHubData.NumberOfPorts != 0);
+    if (RootHubData.NumberOfPorts == 0)
+    {
+#if DBG
+        DPRINT1("USBPORT_RootHubCreateDevice: miniport reported 0 root hub ports, failing root hub start\n");
+#endif
+        return STATUS_UNSUCCESSFUL;
+    }
+
     NumMaskByte = (RootHubData.NumberOfPorts - 1) / 8 + 1;
 
     DescriptorsLength = sizeof(USB_DEVICE_DESCRIPTOR) +
@@ -835,6 +1056,8 @@ USBPORT_RootHubCreateDevice(IN PDEVICE_OBJECT FdoDevice,
         RH_ConfigurationDescriptor->bmAttributes = USB_CONFIG_SELF_POWERED;
         RH_ConfigurationDescriptor->MaxPower = 0x00;
 
+        PdoExtension->ConfigurationValue = RH_ConfigurationDescriptor->bConfigurationValue;
+
         RH_InterfaceDescriptor = &PdoExtension->RootHubDescriptors->InterfaceDescriptor;
 
         RH_InterfaceDescriptor->bLength = sizeof(USB_INTERFACE_DESCRIPTOR);
@@ -874,8 +1097,6 @@ USBPORT_RootHubCreateDevice(IN PDEVICE_OBJECT FdoDevice,
         {
             DPRINT1("USBPORT_RootHubCreateDevice: Unknown MiniPortVersion - %x\n",
                     Packet->MiniPortVersion);
-
-            DbgBreakPoint();
         }
 
         RH_HubDescriptor->bNumberOfPorts = RootHubData.NumberOfPorts;
@@ -920,6 +1141,7 @@ USBPORT_InvalidateRootHub(PVOID MiniPortExtension)
     PDEVICE_OBJECT PdoDevice;
     PUSBPORT_RHDEVICE_EXTENSION PdoExtension;
     PUSBPORT_ENDPOINT Endpoint = NULL;
+    PUSBPORT_REGISTRATION_PACKET Packet;
 
     DPRINT("USBPORT_InvalidateRootHub ... \n");
 
@@ -927,6 +1149,7 @@ USBPORT_InvalidateRootHub(PVOID MiniPortExtension)
                                                sizeof(USBPORT_DEVICE_EXTENSION));
 
     FdoDevice = FdoExtension->CommonExtension.SelfDevice;
+    Packet = &FdoExtension->MiniPortInterface->Packet;
 
     if (FdoExtension->Flags & USBPORT_FLAG_HC_SUSPEND &&
         FdoExtension->Flags & USBPORT_FLAG_HC_WAKE_SUPPORT &&
@@ -937,20 +1160,71 @@ USBPORT_InvalidateRootHub(PVOID MiniPortExtension)
         return 0;
     }
 
-    FdoExtension->MiniPortInterface->Packet.RH_DisableIrq(FdoExtension->MiniPortExt);
+    Packet->RH_DisableIrq(FdoExtension->MiniPortExt);
 
+    /*
+     * Keep the root-hub interrupt masked until the SCE worker has drained
+     * the current port changes. EHCI port-change interrupts are level
+     * triggered and re-enabling them while a PORTSC change bit is still set
+     * can continuously reassert the interrupt and starve that worker.
+     * USBPORT_RootHubSCE rearms the interrupt after it observes no changes.
+     */
     PdoDevice = FdoExtension->RootHubPdo;
+    PdoExtension = USBPORT_GetRootHubExtension(FdoExtension);
 
-    if (PdoDevice)
+    if (PdoDevice && !PdoExtension)
     {
-        PdoExtension = PdoDevice->DeviceExtension;
+        DPRINT1("USBPORT_InvalidateRootHub: RootHubPdo=%p has NULL extension\n",
+                PdoDevice);
+        return 0;
+    }
+
+    if (PdoExtension && (LONG_PTR)PdoExtension > 0)
+    {
+        DPRINT1("USBPORT_InvalidateRootHub: invalid RootHubExt=%p (pdo=%p)\n",
+                PdoExtension,
+                PdoDevice);
+        return 0;
+    }
+
+    if (PdoExtension)
+    {
+        /* If the PDO device handle is no longer valid, drop any cached endpoint */
+        if (!USBPORT_ValidateDeviceHandle(FdoDevice, &PdoExtension->DeviceHandle))
+        {
+            if (PdoExtension->Endpoint)
+            {
+                DPRINT1("USBPORT_InvalidateRootHub: device handle invalid, dropping endpoint %p\n",
+                        PdoExtension->Endpoint);
+                PdoExtension->Endpoint = NULL;
+            }
+
+            USBPORT_DumpDeviceHandleList(FdoExtension);
+            return 0;
+        }
+
         Endpoint = PdoExtension->Endpoint;
 
-        if (Endpoint)
+        if (!Endpoint)
+        {
+            DPRINT("USBPORT_InvalidateRootHub: no SCE endpoint registered\n");
+            return 0;
+        }
+
+        if (Endpoint && Endpoint->FdoDevice == FdoDevice &&
+            USBPORT_IsEndpointOnList(FdoExtension, Endpoint))
         {
             USBPORT_InvalidateEndpointHandler(FdoDevice,
-                                              PdoExtension->Endpoint,
+                                              Endpoint,
                                               INVALIDATE_ENDPOINT_WORKER_THREAD);
+        }
+        else if (Endpoint)
+        {
+            DPRINT1("USBPORT_InvalidateRootHub: ignoring stale root hub endpoint %p (pdo=%p fdo=%p)\n",
+                    Endpoint,
+                    PdoDevice,
+                    FdoDevice);
+            PdoExtension->Endpoint = NULL;
         }
     }
 
@@ -1006,9 +1280,9 @@ USBPORT_RootHubPowerAndChirpAllCcPorts(IN PDEVICE_OBJECT FdoDevice)
              NumController < CompanionControllersList->Count;
              NumController++)
         {
-            CompanionPacket = &FdoExtension->MiniPortInterface->Packet;
-
             CompanionFdoExtension = (*Entry)->DeviceExtension;
+
+            CompanionPacket = &CompanionFdoExtension->MiniPortInterface->Packet;
 
             CompanionPacket->RH_GetRootHubData(CompanionFdoExtension->MiniPortExt,
                                                &RootHubData);

@@ -16,14 +16,39 @@ START_TEST(IoMdl)
     PIRP Irp;
     PVOID VirtualAddress;
     ULONG MdlSize = 2*4096+184; // 2 pages and some random value
+    ULONG LargeMdlSize = 64 * 1024 * 1024;
     ULONG TooLargeMdlSize = (0x10000 - sizeof(MDL)) / sizeof(ULONG_PTR) * PAGE_SIZE;
+
+    Mdl = IoAllocateMdl(NULL, 0, FALSE, FALSE, NULL);
+    ok(Mdl != NULL, "Empty MDL allocation failed\n");
+    if (Mdl != NULL)
+    {
+        ok_eq_ulong(Mdl->ByteCount, 0);
+        ok_eq_ulong(Mdl->ByteOffset, 0);
+        ok_eq_pointer(Mdl->StartVa, NULL);
+        ok_eq_pointer(Mdl->Next, NULL);
+        IoFreeMdl(Mdl);
+    }
 
     // Try to alloc 2Gb MDL
     Mdl = IoAllocateMdl(NULL, 2048UL*0x100000, FALSE, FALSE, NULL);
 
-    ok(Mdl == NULL,
-      "IoAllocateMdl should fail allocation of 2Gb or more, but got Mdl=0x%X\n",
-      (UINT_PTR)Mdl);
+    if (GetNTVersion() >= _WIN32_WINNT_WIN7)
+    {
+        ok(Mdl != NULL, "MDL allocation for 2 GB failed\n");
+        if (Mdl != NULL)
+            ok_eq_ulong(Mdl->ByteCount, 2048UL * 0x100000);
+    }
+    else if (GetNTVersion() >= _WIN32_WINNT_VISTA && Mdl != NULL)
+    {
+        skip(FALSE, "Vista+ may allocate an MDL for 2 GB\n");
+    }
+    else
+    {
+        ok(Mdl == NULL,
+          "IoAllocateMdl should fail allocation of 2Gb or more, but got Mdl=0x%X\n",
+          (UINT_PTR)Mdl);
+    }
 
     if (Mdl)
         IoFreeMdl(Mdl);
@@ -44,15 +69,46 @@ START_TEST(IoMdl)
 
     // Test maximum size for an MDL
     Mdl = IoAllocateMdl(NULL, TooLargeMdlSize, FALSE, FALSE, NULL);
-    ok(Mdl == NULL, "Mdl allocation for %lu bytes succeeded\n", TooLargeMdlSize);
+    if (GetNTVersion() >= _WIN32_WINNT_WIN7)
+    {
+        ok(Mdl != NULL, "MDL allocation for %lu bytes failed\n", TooLargeMdlSize);
+        if (Mdl != NULL)
+            ok_eq_ulong(Mdl->ByteCount, TooLargeMdlSize);
+    }
+    else if (GetNTVersion() >= _WIN32_WINNT_VISTA && Mdl != NULL)
+        skip(FALSE, "Vista+ may allocate an MDL for %lu bytes\n", TooLargeMdlSize);
+    else
+        ok(Mdl == NULL, "Mdl allocation for %lu bytes succeeded\n", TooLargeMdlSize);
     if (Mdl) IoFreeMdl(Mdl);
 
     Mdl = IoAllocateMdl(NULL, TooLargeMdlSize - PAGE_SIZE + 1, FALSE, FALSE, NULL);
-    ok(Mdl == NULL, "Mdl allocation for %lu bytes succeeded\n", TooLargeMdlSize - PAGE_SIZE + 1);
+    if (GetNTVersion() >= _WIN32_WINNT_WIN7)
+    {
+        ok(Mdl != NULL, "MDL allocation for %lu bytes failed\n", TooLargeMdlSize - PAGE_SIZE + 1);
+        if (Mdl != NULL)
+            ok_eq_ulong(Mdl->ByteCount, TooLargeMdlSize - PAGE_SIZE + 1);
+    }
+    else if (GetNTVersion() >= _WIN32_WINNT_VISTA && Mdl != NULL)
+        skip(FALSE, "Vista+ may allocate an MDL for %lu bytes\n", TooLargeMdlSize - PAGE_SIZE + 1);
+    else
+        ok(Mdl == NULL, "Mdl allocation for %lu bytes succeeded\n", TooLargeMdlSize - PAGE_SIZE + 1);
     if (Mdl) IoFreeMdl(Mdl);
 
     Mdl = IoAllocateMdl(NULL, TooLargeMdlSize - PAGE_SIZE, FALSE, FALSE, NULL);
     ok(Mdl != NULL, "Mdl allocation for %lu bytes failed\n", TooLargeMdlSize - PAGE_SIZE);
+    if (Mdl) IoFreeMdl(Mdl);
+
+    /* Windows 7 and later support MDLs larger than the 16-bit Size field. */
+    Mdl = IoAllocateMdl(NULL, LargeMdlSize, FALSE, FALSE, NULL);
+    if (GetNTVersion() >= _WIN32_WINNT_WIN7)
+    {
+        ok(Mdl != NULL, "Mdl allocation for %lu bytes failed\n", LargeMdlSize);
+        if (Mdl != NULL)
+            ok(Mdl->ByteCount == LargeMdlSize,
+               "Mdl->ByteCount is %lu, expected %lu\n",
+               Mdl->ByteCount,
+               LargeMdlSize);
+    }
     if (Mdl) IoFreeMdl(Mdl);
 
     Mdl = IoAllocateMdl(NULL, TooLargeMdlSize / 2, FALSE, FALSE, NULL);

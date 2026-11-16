@@ -8,6 +8,8 @@
 #include <ntsecapi.h>
 #endif
 
+#include <powersetting.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -151,7 +153,11 @@ typedef enum _POWER_DATA_ACCESSOR {
 } POWER_DATA_ACCESSOR, *PPOWER_DATA_ACCESSOR;
 
 typedef BOOLEAN (CALLBACK* PWRSCHEMESENUMPROC)(UINT, DWORD, LPWSTR, DWORD, LPWSTR, PPOWER_POLICY, LPARAM);
+
+#ifndef _HPOWERNOTIFY_DEF_
+#define _HPOWERNOTIFY_DEF_
 typedef PVOID HPOWERNOTIFY, *PHPOWERNOTIFY;
+#endif
 
 NTSTATUS WINAPI CallNtPowerInformation(POWER_INFORMATION_LEVEL, PVOID, ULONG, PVOID, ULONG);
 BOOLEAN WINAPI CanUserWritePwrScheme(VOID);
@@ -166,11 +172,37 @@ BOOLEAN WINAPI IsPwrHibernateAllowed(VOID);
 BOOLEAN WINAPI IsPwrShutdownAllowed(VOID);
 BOOLEAN WINAPI IsPwrSuspendAllowed(VOID);
 DWORD   WINAPI PowerEnumerate(HKEY, const GUID *, const GUID *, POWER_DATA_ACCESSOR, ULONG, UCHAR *, DWORD *);
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+DWORD   WINAPI PowerReadFriendlyName(_In_opt_ HKEY, _In_opt_ const GUID *, _In_opt_ const GUID *, _In_opt_ const GUID *, _Out_writes_bytes_opt_(*BufferSize) PUCHAR, _Inout_ LPDWORD BufferSize);
+DWORD   WINAPI PowerReadDescription(_In_opt_ HKEY, _In_opt_ const GUID *, _In_opt_ const GUID *, _In_opt_ const GUID *, _Out_writes_bytes_opt_(*BufferSize) PUCHAR, _Inout_ LPDWORD BufferSize);
+DWORD   WINAPI PowerReadACValueIndex(_In_opt_ HKEY, _In_opt_ const GUID *, _In_opt_ const GUID *, _In_opt_ const GUID *, _Out_ LPDWORD);
+DWORD   WINAPI PowerReadDCValueIndex(_In_opt_ HKEY, _In_opt_ const GUID *, _In_opt_ const GUID *, _In_opt_ const GUID *, _Out_ LPDWORD);
+#endif
 DWORD   WINAPI PowerRegisterSuspendResumeNotification(DWORD, HANDLE, PHPOWERNOTIFY);
 DWORD   WINAPI PowerUnregisterSuspendResumeNotification(HPOWERNOTIFY);
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+DWORD   WINAPI PowerSettingAccessCheck(_In_ POWER_DATA_ACCESSOR, _In_opt_ const GUID *);
+#endif
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+DWORD   WINAPI PowerSettingAccessCheckEx(_In_ POWER_DATA_ACCESSOR, _In_opt_ const GUID *, _In_ REGSAM);
+#endif
 DWORD   WINAPI PowerSettingRegisterNotification(const GUID *, DWORD, HANDLE, PHPOWERNOTIFY);
 DWORD   WINAPI PowerSettingUnregisterNotification(HPOWERNOTIFY);
-DWORD   WINAPI PowerWriteACValueIndex(HKEY, const GUID *, const GUID *, const GUID *, DWORD);
+DWORD   WINAPI PowerCreatePossibleSetting(_In_opt_ HKEY, _In_ const GUID *, _In_ const GUID *, _In_ ULONG);
+DWORD   WINAPI PowerCreateSetting(_In_opt_ HKEY, _In_ const GUID *, _In_ const GUID *);
+DWORD   WINAPI PowerRemovePowerSetting(_In_ const GUID *, _In_ const GUID *);
+DWORD   WINAPI PowerWriteACDefaultIndex(_In_opt_ HKEY, _In_ const GUID *, _In_opt_ const GUID *, _In_ const GUID *, _In_ DWORD);
+DWORD   WINAPI PowerWriteDCDefaultIndex(_In_opt_ HKEY, _In_ const GUID *, _In_opt_ const GUID *, _In_ const GUID *, _In_ DWORD);
+DWORD   WINAPI PowerWriteDescription(_In_opt_ HKEY, _In_ const GUID *, _In_opt_ const GUID *, _In_opt_ const GUID *, _In_reads_bytes_(BufferSize) UCHAR *, _In_ DWORD BufferSize);
+DWORD   WINAPI PowerWriteFriendlyName(_In_opt_ HKEY, _In_ const GUID *, _In_opt_ const GUID *, _In_opt_ const GUID *, _In_reads_bytes_(BufferSize) UCHAR *, _In_ DWORD BufferSize);
+DWORD   WINAPI PowerWritePossibleDescription(_In_opt_ HKEY, _In_opt_ const GUID *, _In_opt_ const GUID *, _In_ ULONG, _In_reads_bytes_(BufferSize) UCHAR *, _In_ DWORD BufferSize);
+DWORD   WINAPI PowerWritePossibleFriendlyName(_In_opt_ HKEY, _In_opt_ const GUID *, _In_opt_ const GUID *, _In_ ULONG, _In_reads_bytes_(BufferSize) UCHAR *, _In_ DWORD BufferSize);
+DWORD   WINAPI PowerWritePossibleValue(_In_opt_ HKEY, _In_opt_ const GUID *, _In_opt_ const GUID *, _In_ ULONG, _In_ ULONG, _In_reads_bytes_(BufferSize) UCHAR *, _In_ DWORD BufferSize);
+DWORD   WINAPI PowerWriteSettingAttributes(_In_opt_ const GUID *, _In_opt_ const GUID *, _In_ DWORD);
+DWORD   WINAPI PowerWriteValueIncrement(_In_opt_ HKEY, _In_opt_ const GUID *, _In_opt_ const GUID *, _In_ DWORD);
+DWORD   WINAPI PowerWriteValueMax(_In_opt_ HKEY, _In_opt_ const GUID *, _In_opt_ const GUID *, _In_ DWORD);
+DWORD   WINAPI PowerWriteValueMin(_In_opt_ HKEY, _In_opt_ const GUID *, _In_opt_ const GUID *, _In_ DWORD);
+DWORD   WINAPI PowerWriteValueUnitsSpecifier(_In_opt_ HKEY, _In_opt_ const GUID *, _In_opt_ const GUID *, _In_reads_bytes_(BufferSize) UCHAR *, _In_ DWORD BufferSize);
 BOOLEAN WINAPI ReadGlobalPwrPolicy(PGLOBAL_POWER_POLICY);
 BOOLEAN WINAPI ReadProcessorPwrScheme(UINT, PMACHINE_PROCESSOR_POWER_POLICY);
 BOOLEAN WINAPI ReadPwrScheme(UINT, PPOWER_POLICY);

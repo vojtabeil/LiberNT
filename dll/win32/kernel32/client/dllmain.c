@@ -30,6 +30,7 @@ static BOOL DllInitialized = FALSE;
 
 /* Critical section for various kernel32 data structures */
 RTL_CRITICAL_SECTION BaseDllDirectoryLock;
+LIST_ENTRY BaseDllDirectoryList;
 
 extern BOOL FASTCALL NlsInit(VOID);
 extern VOID FASTCALL NlsUninit(VOID);
@@ -106,6 +107,7 @@ DllMain(HANDLE hDll,
         {
             /* Set no filter initially */
             GlobalTopLevelExceptionFilter = RtlEncodePointer(NULL);
+            RtlSetUnhandledExceptionFilter((PRTLP_UNHANDLED_EXCEPTION_FILTER)UnhandledExceptionFilter);
 
             /* Enable the Rtl thread pool and timer queue to use proper Win32 thread */
             RtlSetThreadPoolStartFunc(BaseCreateThreadPoolThread, BaseExitThreadPoolThread);
@@ -129,7 +131,7 @@ DllMain(HANDLE hDll,
             {
                 /* Use the session path */
                 _swprintf(SessionDir,
-                          L"%ws\\%lu%ws",
+                          L"%ws\\%ld%ws",
                           SESSION_DIR,
                           SessionId,
                           WIN_OBJ_DIR);
@@ -198,6 +200,8 @@ DllMain(HANDLE hDll,
 
             /* Initialize the DLL critical section */
             RtlInitializeCriticalSection(&BaseDllDirectoryLock);
+            InitializeListHead(&BaseDllDirectoryList);
+            BasepInheritDllDirectory();
 
             /* Initialize the National Language Support routines */
             if (!NlsInit())
@@ -206,16 +210,16 @@ DllMain(HANDLE hDll,
                 return FALSE;
             }
 
+            /* Initialize application certification globals */
+            InitializeListHead(&BasepAppCertDllsList);
+            RtlInitializeCriticalSection(&gcsAppCert);
+
             /* Initialize Console Support */
             if (!ConDllInitialize(dwReason, SessionDir))
             {
                 DPRINT1("Failed to set up console\n");
                 return FALSE;
             }
-
-            /* Initialize application certification globals */
-            InitializeListHead(&BasepAppCertDllsList);
-            RtlInitializeCriticalSection(&gcsAppCert);
 
             /* Insert more dll attach stuff here! */
             DllInitialized = TRUE;

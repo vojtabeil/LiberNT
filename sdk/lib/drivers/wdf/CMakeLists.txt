@@ -1,8 +1,9 @@
 
 add_subdirectory(wdfldr)
 add_subdirectory(wdfdriverentry)
+add_subdirectory(cx)
 
-remove_definitions(-D_WIN32_WINNT=0x502)
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
 
 list(APPEND SOURCE_SHARED
     shared/core/fxcxdeviceinit.cpp
@@ -193,15 +194,17 @@ add_cd_file(TARGET wdf01000 DESTINATION reactos/system32/drivers NO_CAB FOR all)
 add_registry_inf(wdf01000_reg.inf)
 
 target_compile_definitions(wdf01000
-    PUBLIC WDF_DEVICE_NO_WDMSEC_H _WIN32_WINNT=0x603 NTDDI_VERSION=0x06030000 # NTDDI_WINBLUE
-    PRIVATE FX_CORE_MODE=1 FX_CORE_KERNEL_MODE=1
-    PRIVATE __WDF_MAJOR_VERSION=1 __WDF_MINOR_VERSION=17 __WDF_BUILD_NUMBER=7600
-    PRIVATE __WDF_MAJOR_VERSION_STRING=01
+    PRIVATE FX_CORE_MODE=1 FX_CORE_KERNEL_MODE=1 WDF_EVERYTHING_ALWAYS_AVAILABLE
+    PRIVATE __WDF_MAJOR_VERSION=1 __WDF_MINOR_VERSION=33 __WDF_BUILD_NUMBER=22000
+    PRIVATE __WDF_MAJOR_VERSION_STRING=01 __WDF_MINOR_VERSION_STRING=33
     # wdf01000 is primarily 3rd party code, and we cannot control what crap vendor drivers do
     PRIVATE NO_KERNEL_LIST_ENTRY_CHECKS)
+target_compile_options(wdf01000 PUBLIC # NTDDI_WINBLUE
+    -U_WIN32_WINNT -D_WIN32_WINNT=0x603
+    -UNTDDI_VERSION -DNTDDI_VERSION=0x06030000)
 
 target_include_directories(wdf01000
-    PUBLIC ${REACTOS_SOURCE_DIR}/sdk/include/wdf/kmdf/1.17
+    PUBLIC ${REACTOS_SOURCE_DIR}/sdk/include/wdf/kmdf/1.33
     PRIVATE
         ${REACTOS_SOURCE_DIR}/sdk/lib/drivers/wdf/wdfldr
         shared/inc/primitives/common
@@ -217,11 +220,20 @@ target_include_directories(wdf01000
         shared/irphandlers/pnp/km # pnpprivkm.hpp
     )
 
-target_link_libraries(wdf01000 aux_klib usbdex ntoskrnl_vista ${PSEH_LIB})
+target_link_libraries(wdf01000 aux_klib usbdex wdmsec ntoskrnl_vista ${PSEH_LIB})
 add_importlibs(wdf01000 wdfldr ntoskrnl hal)
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
     target_compile_options(wdf01000
         PRIVATE -Wno-write-strings -Wno-unknown-pragmas -Wno-switch
-        PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wno-reorder -Wno-invalid-offsetof -Wno-delete-non-virtual-dtor -Wno-class-memaccess>)
+        PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wno-reorder -Wno-invalid-offsetof>)
+endif()
+
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(wdf01000 PRIVATE -Wno-missing-braces -Wno-multichar -Wno-unused-but-set-variable)
+endif()
+
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    # The class operator new takes the driver globals and FxStump's operator delete frees the same pool block
+    target_compile_options(wdf01000 PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wno-mismatched-new-delete>)
 endif()

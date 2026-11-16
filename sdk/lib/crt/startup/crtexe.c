@@ -31,7 +31,7 @@ _CRTIMP extern char** __initenv;
 #endif
 
 /* This symbol is defined by ld.  */
-extern IMAGE_DOS_HEADER __ImageBase;
+extern IMAGE_DOS_HEADER __ImageBase[];
 
 extern void __cdecl _fpreset (void);
 #define SPACECHAR _T(' ')
@@ -134,6 +134,8 @@ pre_cpp_init (void)
 #else
   argret = __getmainargs(&argc,&argv,&envp,_dowildcard,&startinfo);
 #endif
+  if (argret < 0)
+    _amsg_exit (8);
 }
 
 static int __cdecl __tmainCRTStartup (void);
@@ -143,7 +145,7 @@ int __cdecl WinMainCRTStartup (void);
 int __cdecl WinMainCRTStartup (void)
 {
   int ret = 255;
-#ifdef __SEH__
+#if defined(__SEH__) && defined(__x86_64__)
   asm ("\t.l_startw:\n"
     "\t.seh_handler __C_specific_handler, @except\n"
     "\t.seh_handlerdata\n"
@@ -155,7 +157,7 @@ int __cdecl WinMainCRTStartup (void)
   mingw_app_type = 1;
   __security_init_cookie ();
   ret = __tmainCRTStartup ();
-#ifdef __SEH__
+#if defined(__SEH__) && defined(__x86_64__)
   asm ("\tnop\n"
     "\t.l_endw: nop\n");
 #endif
@@ -178,7 +180,7 @@ int __cdecl mainCRTStartup (void)
       return -1;
   }
 #endif
-#ifdef __SEH__
+#if defined(__SEH__) && defined(__x86_64__)
   asm ("\t.l_start:\n"
     "\t.seh_handler __C_specific_handler, @except\n"
     "\t.seh_handlerdata\n"
@@ -190,7 +192,7 @@ int __cdecl mainCRTStartup (void)
   mingw_app_type = 0;
   __security_init_cookie ();
   ret = __tmainCRTStartup ();
-#ifdef __SEH__
+#if defined(__SEH__) && defined(__x86_64__)
   asm ("\tnop\n"
     "\t.l_end: nop\n");
 #endif
@@ -213,7 +215,7 @@ __tmainCRTStartup (void)
      or in functions inlined into main.  */
   lpszCommandLine = (_TCHAR *) _alloca (32);
   memset (lpszCommandLine, 0xcc, 32);
-#ifdef __GNUC__
+#if defined(__GNUC__) && defined(__i386__)
   asm  __volatile__  ("andl $-16, %%esp" : : : "%esp");
 #endif
 #endif
@@ -382,11 +384,13 @@ static void duplicate_ppstrings (int ac, wchar_t ***av)
 	int i;
 	wchar_t **n = (wchar_t **) malloc (sizeof (wchar_t *) * (ac + 1));
 
+	if (!n) _amsg_exit (8);
 	avl=*av;
 	for (i=0; i < ac; i++)
 	  {
 		size_t l = wbytelen (avl[i]);
 		n[i] = (wchar_t *) malloc (l);
+		if (!n[i]) _amsg_exit (8);
 		memcpy (n[i], avl[i], l);
 	  }
 	n[i] = NULL;
@@ -399,11 +403,13 @@ static void duplicate_ppstrings (int ac, char ***av)
 	int i;
 	char **n = (char **) malloc (sizeof (char *) * (ac + 1));
 
+	if (!n) _amsg_exit (8);
 	avl=*av;
 	for (i=0; i < ac; i++)
 	  {
 		size_t l = strlen (avl[i]) + 1;
 		n[i] = (char *) malloc (l);
+		if (!n[i]) _amsg_exit (8);
 		memcpy (n[i], avl[i], l);
 	  }
 	n[i] = NULL;

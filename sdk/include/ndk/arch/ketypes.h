@@ -27,11 +27,13 @@ Author:
 #elif defined(_M_AMD64)
 #include <amd64/ketypes.h>
 #elif defined(_M_PPC)
-#include <powerpc/ketypes.h>
+#include <ppc/ketypes.h>
 #elif defined(_M_ARM)
 #include <arm/ketypes.h>
 #elif defined(_M_ARM64)
 #include <arm64/ketypes.h>
+#elif defined(_M_RISCV64)
+#include <riscv64/ketypes.h>
 #else
 #error "Unknown processor"
 #endif

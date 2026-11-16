@@ -35,7 +35,11 @@
 
 #include "msipriv.h"
 #include "query.h"
+#ifdef __REACTOS__
 #include "winemsi_s.h"
+#else
+#include "winemsi.h"
+#endif
 
 #include "initguid.h"
 
@@ -146,6 +150,10 @@ UINT WINAPIV MSI_OpenQuery( MSIDATABASE *db, MSIQUERY **view, LPCWSTR fmt, ... )
     {
         va_list va;
         query = malloc(size * sizeof(WCHAR));
+#ifdef __REACTOS__
+        if (!query)
+            RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
         va_start(va, fmt);
         res = vswprintf(query, size, fmt, va);
         va_end(va);
@@ -211,6 +219,10 @@ MSIRECORD * WINAPIV MSI_QueryGetRecord( MSIDATABASE *db, LPCWSTR fmt, ... )
     {
         va_list va;
         query = malloc(size * sizeof(WCHAR));
+#ifdef __REACTOS__
+        if (!query)
+            RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
         va_start(va, fmt);
         res = vswprintf(query, size, fmt, va);
         va_end(va);
@@ -238,7 +250,7 @@ UINT WINAPI MsiDatabaseOpenViewW(MSIHANDLE hdb,
 {
     MSIDATABASE *db;
     MSIQUERY *query = NULL;
-    UINT ret;
+    UINT ret = 0;
 
     TRACE("%s %p\n", debugstr_w(szQuery), phView);
 
@@ -287,8 +299,6 @@ UINT WINAPI MsiDatabaseOpenViewW(MSIHANDLE hdb,
 UINT msi_view_refresh_row(MSIDATABASE *db, MSIVIEW *view, UINT row, MSIRECORD *rec)
 {
     UINT row_count = 0, col_count = 0, i, ival, ret, type;
-
-    TRACE("%p %p %d %p\n", db, view, row, rec);
 
     ret = view->ops->get_dimensions(view, &row_count, &col_count);
     if (ret)
@@ -355,8 +365,6 @@ UINT msi_view_get_row(MSIDATABASE *db, MSIVIEW *view, UINT row, MSIRECORD **rec)
     UINT row_count = 0, col_count = 0, r;
     MSIRECORD *object;
 
-    TRACE("view %p, row %u, rec %p.\n", view, row, rec);
-
     if ((r = view->ops->get_dimensions(view, &row_count, &col_count)))
         return r;
 
@@ -405,7 +413,7 @@ UINT WINAPI MsiViewFetch( MSIHANDLE hView, MSIHANDLE *record )
 {
     MSIQUERY *query;
     MSIRECORD *rec = NULL;
-    UINT ret;
+    UINT ret = 0;
 
     TRACE( "%lu, %p\n", hView, record );
 
@@ -469,7 +477,7 @@ UINT MSI_ViewClose(MSIQUERY *query)
 UINT WINAPI MsiViewClose( MSIHANDLE hView )
 {
     MSIQUERY *query;
-    UINT ret;
+    UINT ret = 0;
 
     TRACE( "%lu\n", hView );
 
@@ -519,7 +527,7 @@ UINT WINAPI MsiViewExecute( MSIHANDLE hView, MSIHANDLE hRec )
 {
     MSIQUERY *query;
     MSIRECORD *rec = NULL;
-    UINT ret;
+    UINT ret = 0;
 
     TRACE( "%lu, %lu\n", hView, hRec );
 
@@ -642,7 +650,7 @@ UINT WINAPI MsiViewGetColumnInfo( MSIHANDLE hView, MSICOLINFO info, MSIHANDLE *h
 {
     MSIQUERY *query = NULL;
     MSIRECORD *rec = NULL;
-    UINT r;
+    UINT r = 0;
 
     TRACE( "%lu, %d, %p\n", hView, info, hRec );
 
@@ -783,7 +791,11 @@ MSIDBERROR WINAPI MsiViewGetErrorW( MSIHANDLE handle, WCHAR *buffer, DWORD *bufl
         MSIHANDLE remote;
 
         if (!(remote = msi_get_remote(handle)))
+#ifdef __REACTOS__
+            return rpc_handle ? MSIDBERROR_FUNCTIONERROR : MSIDBERROR_INVALIDARG;
+#else
             return MSIDBERROR_INVALIDARG;
+#endif
 
         if (!*buflen)
             return MSIDBERROR_FUNCTIONERROR;
@@ -813,6 +825,9 @@ MSIDBERROR WINAPI MsiViewGetErrorW( MSIHANDLE handle, WCHAR *buffer, DWORD *bufl
     if (msi_strncpyW(column, -1, buffer, buflen) == ERROR_MORE_DATA)
         r = MSIDBERROR_MOREDATA;
 
+#ifdef __REACTOS__
+    if (buffer) query->view->error = MSIDBERROR_NOERROR;
+#endif
     msiobj_release( &query->hdr );
     return r;
 }
@@ -834,7 +849,11 @@ MSIDBERROR WINAPI MsiViewGetErrorA( MSIHANDLE handle, char *buffer, DWORD *bufle
         MSIHANDLE remote;
 
         if (!(remote = msi_get_remote(handle)))
+#ifdef __REACTOS__
+            return rpc_handle ? MSIDBERROR_FUNCTIONERROR : MSIDBERROR_INVALIDARG;
+#else
             return MSIDBERROR_INVALIDARG;
+#endif
 
         if (!*buflen)
             return MSIDBERROR_FUNCTIONERROR;
@@ -864,6 +883,9 @@ MSIDBERROR WINAPI MsiViewGetErrorA( MSIHANDLE handle, char *buffer, DWORD *bufle
     if (msi_strncpyWtoA(column, -1, buffer, buflen, FALSE) == ERROR_MORE_DATA)
         r = MSIDBERROR_MOREDATA;
 
+#ifdef __REACTOS__
+    if (buffer) query->view->error = MSIDBERROR_NOERROR;
+#endif
     msiobj_release( &query->hdr );
     return r;
 }
@@ -948,6 +970,16 @@ UINT WINAPI MsiDatabaseApplyTransformA( MSIHANDLE hdb, const char *transform, in
 UINT WINAPI MsiDatabaseGenerateTransformA( MSIHANDLE hdb, MSIHANDLE hdbref, const char *szTransformFile,
                                            int iReserved1, int iReserved2 )
 {
+#ifdef __REACTOS__
+    MSIDATABASE *db, *ref;
+
+    if (!(db = msihandle2msiinfo( hdb, MSIHANDLETYPE_DATABASE )))
+        return ERROR_INVALID_HANDLE;
+    msiobj_release( &db->hdr );
+    if (!(ref = msihandle2msiinfo( hdbref, MSIHANDLETYPE_DATABASE )))
+        return ERROR_INVALID_HANDLE;
+    msiobj_release( &ref->hdr );
+#endif
     FIXME( "%lu, %lu, %s, %d, %d\n", hdb, hdbref, debugstr_a(szTransformFile), iReserved1, iReserved2 );
     return ERROR_CALL_NOT_IMPLEMENTED;
 }
@@ -955,6 +987,16 @@ UINT WINAPI MsiDatabaseGenerateTransformA( MSIHANDLE hdb, MSIHANDLE hdbref, cons
 UINT WINAPI MsiDatabaseGenerateTransformW( MSIHANDLE hdb, MSIHANDLE hdbref, const WCHAR *szTransformFile,
                                            int iReserved1, int iReserved2 )
 {
+#ifdef __REACTOS__
+    MSIDATABASE *db, *ref;
+
+    if (!(db = msihandle2msiinfo( hdb, MSIHANDLETYPE_DATABASE )))
+        return ERROR_INVALID_HANDLE;
+    msiobj_release( &db->hdr );
+    if (!(ref = msihandle2msiinfo( hdbref, MSIHANDLETYPE_DATABASE )))
+        return ERROR_INVALID_HANDLE;
+    msiobj_release( &ref->hdr );
+#endif
     FIXME( "%lu, %lu, %s, %d, %d\n", hdb, hdbref, debugstr_w(szTransformFile), iReserved1, iReserved2 );
     return ERROR_CALL_NOT_IMPLEMENTED;
 }
@@ -997,6 +1039,15 @@ UINT WINAPI MsiDatabaseCommit( MSIHANDLE hdb )
 
     /* FIXME: unlock the database */
 
+#ifdef __REACTOS__
+    if (r == ERROR_SUCCESS && !db->memory_only)
+    {
+        free( db->deletefile );
+        db->deletefile = NULL;
+    }
+
+    msiobj_release( &db->hdr );
+#else
     msiobj_release( &db->hdr );
 
     if (r == ERROR_SUCCESS)
@@ -1004,6 +1055,7 @@ UINT WINAPI MsiDatabaseCommit( MSIHANDLE hdb )
         free( db->deletefile );
         db->deletefile = NULL;
     }
+#endif
 
     return r;
 }
@@ -1079,7 +1131,7 @@ UINT WINAPI MsiDatabaseGetPrimaryKeysW( MSIHANDLE hdb, const WCHAR *table, MSIHA
 {
     MSIRECORD *rec = NULL;
     MSIDATABASE *db;
-    UINT r;
+    UINT r = 0;
 
     TRACE( "%lu, %s, %p\n", hdb, debugstr_w(table), phRec );
 
@@ -1165,7 +1217,7 @@ MSICONDITION WINAPI MsiDatabaseIsTablePersistentA( MSIHANDLE hDatabase, const ch
 MSICONDITION WINAPI MsiDatabaseIsTablePersistentW( MSIHANDLE hDatabase, const WCHAR *szTableName )
 {
     MSIDATABASE *db;
-    MSICONDITION r;
+    MSICONDITION r = MSICONDITION_ERROR;
 
     TRACE( "%lu, %s\n", hDatabase, debugstr_w(szTableName) );
 
@@ -1240,6 +1292,14 @@ UINT __cdecl s_remote_ViewGetColumnInfo(MSIHANDLE view, MSICOLINFO info, struct 
 
 MSIDBERROR __cdecl s_remote_ViewGetError(MSIHANDLE view, LPWSTR *column)
 {
+#ifdef __REACTOS__
+    DWORD size = 0;
+
+    MsiViewGetErrorW(view, NULL, &size);
+    if (!(*column = midl_user_allocate(++size * sizeof(WCHAR))))
+        return MSIDBERROR_FUNCTIONERROR;
+    return MsiViewGetErrorW(view, *column, &size);
+#else
     WCHAR empty[1];
     DWORD size = 1;
     UINT r;
@@ -1252,6 +1312,7 @@ MSIDBERROR __cdecl s_remote_ViewGetError(MSIHANDLE view, LPWSTR *column)
         r = MsiViewGetErrorW(view, *column, &size);
     }
     return r;
+#endif
 }
 
 UINT __cdecl s_remote_ViewModify(MSIHANDLE view, MSIMODIFY mode,

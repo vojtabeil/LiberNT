@@ -18,7 +18,9 @@
 #include <UgaDraw.h>
 #include <AppleGraphInfo.h>
 #include <BlockIo.h>
+#include <SerialIo.h>
 #include <Acpi.h>
+#include <Cpu.h>
 #include <GlobalVariable.h>
 #include <debug.h>
 #include <machuefi.h>
@@ -35,3 +37,4 @@ typedef struct _REACTOS_INTERNAL_BGCONTEXT
 } REACTOS_INTERNAL_BGCONTEXT, *PREACTOS_INTERNAL_BGCONTEXT;
 
 VOID __cdecl BootMain(IN PCCH CmdLine);
+VOID StallExecutionProcessor(ULONG Microseconds);

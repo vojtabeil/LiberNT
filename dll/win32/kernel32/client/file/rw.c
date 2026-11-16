@@ -13,7 +13,6 @@
 #include <k32.h>
 #define NDEBUG
 #include <debug.h>
-DEBUG_CHANNEL(kernel32file);
 
 /* FUNCTIONS ****************************************************************/
 
@@ -31,20 +30,10 @@ WriteFile(
 {
     NTSTATUS Status;
 
-    TRACE("WriteFile(hFile %p)\n", hFile);
-
     if (lpNumberOfBytesWritten != NULL) *lpNumberOfBytesWritten = 0;
 
     hFile = TranslateStdHandle(hFile);
 
-    if (IsConsoleHandle(hFile))
-    {
-        return WriteConsoleA(hFile,
-                             lpBuffer,
-                             nNumberOfBytesToWrite,
-                             lpNumberOfBytesWritten,
-                             lpOverlapped);
-    }
 
     if (lpOverlapped != NULL)
     {
@@ -113,7 +102,6 @@ WriteFile(
         }
     }
 
-    TRACE("WriteFile() succeeded\n");
     return TRUE;
 }
 
@@ -132,31 +120,9 @@ ReadFile(
 {
     NTSTATUS Status;
 
-    TRACE("ReadFile(hFile %p)\n", hFile);
-
     if (lpNumberOfBytesRead != NULL) *lpNumberOfBytesRead = 0;
 
     hFile = TranslateStdHandle(hFile);
-
-    if (IsConsoleHandle(hFile))
-    {
-        if (ReadConsoleA(hFile,
-                         lpBuffer,
-                         nNumberOfBytesToRead,
-                         lpNumberOfBytesRead,
-                         NULL))
-        {
-            DWORD dwMode;
-            GetConsoleMode(hFile, &dwMode);
-            if ((dwMode & ENABLE_PROCESSED_INPUT) && *(PCHAR)lpBuffer == 0x1a)
-            {
-                /* EOF character entered; simulate end-of-file */
-                *lpNumberOfBytesRead = 0;
-            }
-            return TRUE;
-        }
-        return FALSE;
-    }
 
     if (lpOverlapped != NULL)
     {
@@ -237,7 +203,6 @@ ReadFile(
         }
     }
 
-    TRACE("ReadFile() succeeded\n");
     return TRUE;
 }
 
@@ -355,16 +320,16 @@ ReadFileScatter(HANDLE hFile,
     pIOStatus->Information = 0;
 
     Status = NtReadFileScatter(hFile,
+                               lpOverlapped->hEvent,
                                NULL,
-                               NULL,
-                               NULL,
+                               ((ULONG_PTR)lpOverlapped->hEvent & 1) ? NULL : lpOverlapped,
                                pIOStatus,
                                aSegmentArray,
                                nNumberOfBytesToRead,
                                &Offset,
                                NULL);
 
-    if (!NT_SUCCESS(Status))
+    if (Status != STATUS_SUCCESS)
     {
         SetLastError(RtlNtStatusToDosError(Status));
         return FALSE;
@@ -397,16 +362,16 @@ WriteFileGather(HANDLE hFile,
     IOStatus->Information = 0;
 
     Status = NtWriteFileGather(hFile,
+                               lpOverlapped->hEvent,
                                NULL,
-                               NULL,
-                               NULL,
+                               ((ULONG_PTR)lpOverlapped->hEvent & 1) ? NULL : lpOverlapped,
                                IOStatus,
                                aSegmentArray,
                                nNumberOfBytesToWrite,
                                &Offset,
                                NULL);
 
-    if (!NT_SUCCESS(Status))
+    if (Status != STATUS_SUCCESS)
     {
         SetLastError(RtlNtStatusToDosError(Status));
         return FALSE;

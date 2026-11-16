@@ -4,11 +4,16 @@ spec2def(ws2_32.dll ws2_32.spec ADD_IMPORTLIB)
 
 include_directories(
     inc
+    ${REACTOS_SOURCE_DIR}/sdk/include/reactos/drivers
     ${REACTOS_SOURCE_DIR}/sdk/include/reactos/winsock)
+
+add_library(ws2_32_inaddr STATIC src/inaddr.c)
+add_dependencies(ws2_32_inaddr psdk)
 
 list(APPEND SOURCE
     src/addrconv.c
     src/addrinfo.c
+    src/addrinfoex.c
     src/async.c
     src/bhook.c
     src/dcatalog.c
@@ -57,6 +62,7 @@ target_link_libraries(ws2_32 ${PSEH_LIB})
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     target_link_libraries(ws2_32 ws2help_static)
 endif()
-add_importlibs(ws2_32 user32 advapi32 ws2help msvcrt kernel32 ntdll)
+add_importlibs(ws2_32 advapi32 ws2help msvcrt kernel32 ntdll)
+add_delay_importlibs(ws2_32 user32)
 add_pch(ws2_32 inc/ws2_32.h SOURCE)
 add_cd_file(TARGET ws2_32 DESTINATION reactos/system32 FOR all)

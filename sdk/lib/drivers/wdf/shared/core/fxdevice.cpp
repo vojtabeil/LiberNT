@@ -438,6 +438,13 @@ FxDevice::_Create(
         goto Done;
     }
 
+    if (pInit->CxContextObject != NULL) {
+        status = pInit->CxContextObject->MoveContexts(pDevice);
+        if (!NT_SUCCESS(status)) {
+            goto Done;
+        }
+    }
+
     //
     // NOTE: ---> DO NOT FAIL FROM HERE FORWARD <---
     //
@@ -545,7 +552,7 @@ Done:
         //
         // We want to propagate the original error code
         //
-        (void) pDevice->DeleteDeviceFromFailedCreate(status, FALSE);
+        (void)!pDevice->DeleteDeviceFromFailedCreate(status, FALSE);
         pDevice = NULL;
     }
 
@@ -746,6 +753,12 @@ Return Value:
         cxDeviceInfo->IoInCallerContextCallback.m_Method =
                         cxInit->IoInCallerContextCallback;
         cxDeviceInfo->RequestAttributes = cxInit->RequestAttributes;
+        if (cxInit->PnpPowerCallbacks.Set) {
+            cxDeviceInfo->PnpPowerCallbacks =
+                cxInit->PnpPowerCallbacks.PnpPowerCallbacks;
+            cxDeviceInfo->PowerPolicyCallbacks =
+                cxInit->PnpPowerCallbacks.PowerPolicyCallbacks;
+        }
 
         InsertTailList(&m_CxDeviceInfoListHead, &cxDeviceInfo->ListEntry);
 
@@ -1017,8 +1030,7 @@ FxDevice::CreateDevice(
             // administrator complete control over the device. No other users
             // may access the device.
             //
-            // pSddl = (PUNICODE_STRING) &SDDL_DEVOBJ_SYS_ALL_ADM_ALL;
-            pSddl = NULL; // __REACTOS__ : wdmsec.lib is not supported
+            pSddl = (PUNICODE_STRING) &SDDL_DEVOBJ_SYS_ALL_ADM_ALL;
         }
 
         status = Mx::MxCreateDeviceSecure(
@@ -1189,7 +1201,7 @@ Return Value:
             //
             // Cleanup the device and then let the super class delete the object.
             //
-            (void) DeleteDeviceFromFailedCreateNoDelete(
+            (void)!DeleteDeviceFromFailedCreateNoDelete(
                 STATUS_UNSUCCESSFUL, TRUE);
         }
     }
@@ -1623,7 +1635,7 @@ FxDevice::InstallPackage(
     //       an existing reference count model.
     //
     Package->AddRef();
-    Package->AssignParentObject(this);
+    (VOID)!Package->AssignParentObject(this);
 }
 
 PVOID

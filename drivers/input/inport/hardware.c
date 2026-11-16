@@ -126,6 +126,9 @@ InPortDpcForIsr(
     /* Copy raw data */
     OldIrql = KeAcquireInterruptSpinLock(DeviceExtension->InterruptObject);
     RawData = DeviceExtension->RawData;
+
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+
     KeReleaseInterruptSpinLock(DeviceExtension->InterruptObject, OldIrql);
 
     /* Fill out fields */
@@ -227,9 +230,9 @@ InPortIsr(
     _In_ PKINTERRUPT Interrupt,
     _In_ PVOID Context)
 {
-    UCHAR Buttons;
+    UCHAR Buttons = 0;
     ULONG ButtonDiff;
-    CHAR DeltaX, DeltaY;
+    CHAR DeltaX = 0, DeltaY = 0;
     PINPORT_DEVICE_EXTENSION DeviceExtension = Context;
 
     UNREFERENCED_PARAMETER(Interrupt);

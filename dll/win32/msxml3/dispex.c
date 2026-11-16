@@ -20,9 +20,6 @@
 
 #include <stdarg.h>
 
-#ifdef __REACTOS__
-#include <ole2.h>
-#endif
 #include "msxml2.h"
 #include "msxml2did.h"
 #include "dispex.h"
@@ -94,19 +91,24 @@ static tid_id_t tid_ids[] = {
     { &IID_IXMLDOMDocumentFragment, LibXml2 },
     { &IID_IXMLDOMDocumentType, LibXml2 },
     { &IID_IXMLDOMElement, LibXml2 },
+    { &IID_IXMLDOMEntity, LibXml2 },
     { &IID_IXMLDOMEntityReference, LibXml2 },
     { &IID_IXMLDOMImplementation, LibXml2 },
     { &IID_IXMLDOMNamedNodeMap, LibXml2 },
     { &IID_IXMLDOMNode, LibXml2 },
     { &IID_IXMLDOMNodeList, LibXml2 },
+    { &IID_IXMLDOMNotation, LibXml2 },
     { &IID_IXMLDOMParseError2, LibXml2 },
     { &IID_IXMLDOMProcessingInstruction, LibXml2 },
     { &IID_IXMLDOMSchemaCollection, LibXml2 },
     { &IID_IXMLDOMSchemaCollection2, LibXml2 },
     { &IID_IXMLDOMSelection, LibXml2 },
     { &IID_IXMLDOMText, LibXml2 },
-    { &IID_IXMLElement, LibXml },
-    { &IID_IXMLDocument, LibXml },
+    { &IID_IXMLElement2, LibXml },
+#ifdef __REACTOS__
+    { &IID_IXMLAttribute, LibXml },
+#endif
+    { &IID_IXMLDocument2, LibXml },
     { &IID_IXMLHTTPRequest, LibXml2 },
     { &IID_IXSLProcessor, LibXml2 },
     { &IID_IXSLTemplate, LibXml2 },
@@ -124,7 +126,11 @@ static tid_id_t tid_ids[] = {
     { &IID_IMXReaderControl, LibXml2 },
     { &IID_IMXWriter, LibXml2 },
     { &IID_IVBMXNamespaceManager, LibXml2 },
-    { &IID_IServerXMLHTTPRequest, LibXml2 }
+    { &IID_IServerXMLHTTPRequest, LibXml2 },
+#ifdef __REACTOS__
+    { &IID_IMXNamespacePrefixes, LibXml2 },
+    { &IID_IServerXMLHTTPRequest2, LibXml2 },
+#endif
 };
 
 const IID *get_riid_from_tid(tid_t tid)
@@ -155,6 +161,19 @@ static HRESULT get_typelib(unsigned lib, ITypeLib **tl)
     *tl = typelib[lib];
     return S_OK;
 }
+
+#ifdef __REACTOS__
+HRESULT get_class_typeinfo(const CLSID *clsid, ITypeInfo **typeinfo)
+{
+    ITypeLib *typelib;
+    HRESULT hr;
+
+    if (FAILED(hr = get_typelib(LibXml2, &typelib)))
+        return hr;
+
+    return ITypeLib_GetTypeInfoOfGuid(typelib, clsid, typeinfo);
+}
+#endif
 
 HRESULT get_typeinfo(enum tid_t tid, ITypeInfo **typeinfo)
 {
@@ -266,6 +285,10 @@ static dispex_data_t *preprocess_dispex_data(DispatchEx *This)
     }
 
     data = malloc(sizeof(dispex_data_t));
+#ifdef __REACTOS__
+    if (!data)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     data->func_cnt = 0;
     data->funcs = malloc(size * sizeof(func_info_t));
     list_add_tail(&dispex_data_list, &data->entry);

@@ -221,7 +221,10 @@ END
 
 STRINGTABLE
 BEGIN
-    IDS_NET_CONNECT "Conexiune de rețea"
+    IDS_NET_CONNECT_ETHERNET "Ethernet"
+    IDS_NET_CONNECT_WIFI "Wi-Fi"
+    IDS_NET_CONNECT_BLUETOOTH "Bluetooth Network Connection"
+    IDS_NET_CONNECT_CELLULAR "Cellular"
     IDS_NO_IPADDR_SET "Acest adaptor de rețea solicită cel puțin o adresă IP. Introduceți una."
     IDS_NO_SUBMASK_SET "Ați introdus o adresă fără mască de subrețea. Adăugați o mască de subrețea."
     IDS_TCPFILTERDESC "Filtrarea TCP/IP permite controlul tipului de trafic TCP/IP din rețea ce va ajunge la calculator."
@@ -233,7 +236,7 @@ BEGIN
     IDS_DHCPACTIVE "DHCP activat"
     IDS_AUTOMATIC "Automată"
     IDS_NOITEMSEL "Nu aţi selectat un element. Selectaţi întâi unul."
-    IDS_TCPIP "ReactOS-TCP/IP"
+    IDS_TCPIP "LiberNT-TCP/IP"
     IDS_ADD "Adăugare"
     IDS_MOD "OK"
     IDS_TCP_PORTS "Porturi TCP"

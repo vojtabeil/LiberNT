@@ -268,9 +268,28 @@ done:
 
 static
 BOOL
+IsLocalSystemToken(HANDLE hToken)
+{
+    struct
+    {
+        TOKEN_USER User;
+        BYTE Sid[SECURITY_MAX_SID_SIZE];
+    } Info;
+    DWORD Length;
+
+    if (!GetTokenInformation(hToken, TokenUser, &Info, sizeof(Info), &Length))
+        return FALSE;
+
+    return IsWellKnownSid(Info.User.User.Sid, WinLocalSystemSid);
+}
+
+
+static
+BOOL
 SetUserEnvironment(PWSTR* Environment,
                    HKEY hKey,
-                   LPWSTR lpSubKeyName)
+                   LPWSTR lpSubKeyName,
+                   BOOL bSkipTemp)
 {
     LONG Error;
     HKEY hEnvKey;
@@ -291,7 +310,8 @@ SetUserEnvironment(PWSTR* Environment,
                           &hEnvKey);
     if (Error != ERROR_SUCCESS)
     {
-        DPRINT1("RegOpenKeyExW() failed (Error %ld)\n", Error);
+        if (Error != ERROR_FILE_NOT_FOUND)
+            DPRINT1("RegOpenKeyExW() failed (Error %ld)\n", Error);
         SetLastError((DWORD)Error);
         return FALSE;
     }
@@ -355,6 +375,12 @@ SetUserEnvironment(PWSTR* Environment,
                               &dwValueDataLength);
         if (Error == ERROR_SUCCESS)
         {
+            if (bSkipTemp &&
+                (!_wcsicmp(lpValueName, L"TEMP") || !_wcsicmp(lpValueName, L"TMP")))
+            {
+                continue;
+            }
+
             if (!_wcsicmp(lpValueName, L"PATH"))
             {
                 /* Append 'Path' environment variable */
@@ -413,6 +439,7 @@ SetSystemEnvironment(PWSTR* Environment)
     if (Error != ERROR_SUCCESS)
     {
         DPRINT1("RegOpenKeyExW() failed (Error %ld)\n", Error);
+        SetLastError((DWORD)Error);
         return FALSE;
     }
 
@@ -432,6 +459,7 @@ SetSystemEnvironment(PWSTR* Environment)
     {
         DPRINT1("RegQueryInforKey() failed (Error %ld)\n", Error);
         RegCloseKey(hEnvKey);
+        SetLastError((DWORD)Error);
         return FALSE;
     }
 
@@ -515,6 +543,18 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
     LPWSTR lpDomainName = NULL;
     WCHAR Buffer[MAX_PATH];
     WCHAR szValue[1024];
+    static const struct
+    {
+        PCWSTR ValueName;
+        LPWSTR VariableName;
+    } Wow64Variables[] =
+    {
+        { L"ProgramFilesDir (x86)", L"ProgramFiles(x86)" },
+        { L"CommonFilesDir (x86)", L"CommonProgramFiles(x86)" },
+        { L"ProgramW6432Dir", L"ProgramW6432" },
+        { L"CommonW6432Dir", L"CommonProgramW6432" }
+    };
+    ULONG i;
 
     DPRINT("CreateEnvironmentBlock() called\n");
 
@@ -555,6 +595,7 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
     if (!SetSystemEnvironment(Environment))
     {
         RtlDestroyEnvironment(*Environment);
+        *Environment = NULL;
         return FALSE;
     }
 
@@ -576,6 +617,19 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
                                    L"ALLUSERSPROFILE",
                                    Buffer,
                                    FALSE);
+        SetUserEnvironmentVariable(Environment, L"ProgramData", Buffer, FALSE);
+    }
+
+    lError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                          L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList",
+                          0, KEY_QUERY_VALUE, &hKey);
+    if (lError == ERROR_SUCCESS)
+    {
+        Length = sizeof(Buffer);
+        lError = RegQueryValueExW(hKey, L"Public", NULL, &dwType, (LPBYTE)Buffer, &Length);
+        if (lError == ERROR_SUCCESS && (dwType == REG_SZ || dwType == REG_EXPAND_SZ))
+            SetUserEnvironmentVariable(Environment, L"PUBLIC", Buffer, dwType == REG_EXPAND_SZ);
+        RegCloseKey(hKey);
     }
 
     /* Set 'USERPROFILE' variable to the default users profile */
@@ -625,6 +679,24 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
                                        FALSE);
         }
 
+        for (i = 0; i < ARRAYSIZE(Wow64Variables); i++)
+        {
+            Length = sizeof(szValue);
+            lError = RegQueryValueExW(hKey,
+                                      Wow64Variables[i].ValueName,
+                                      NULL,
+                                      &dwType,
+                                      (LPBYTE)szValue,
+                                      &Length);
+            if (lError == ERROR_SUCCESS)
+            {
+                SetUserEnvironmentVariable(Environment,
+                                           Wow64Variables[i].VariableName,
+                                           szValue,
+                                           FALSE);
+            }
+        }
+
         RegCloseKey(hKey);
     }
 
@@ -635,13 +707,10 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
     if (hToken == NULL)
         return TRUE;
 
+    /* The user's own variables come only with the user's profile loaded (CreateEnvironmentBlock) */
     hKeyUser = GetCurrentUserKey(hToken);
     if (hKeyUser == NULL)
-    {
-        DPRINT1("GetCurrentUserKey() failed\n");
-        RtlDestroyEnvironment(*Environment);
-        return FALSE;
-    }
+        return TRUE;
 
     /* Set 'USERPROFILE' variable */
     Length = ARRAYSIZE(Buffer);
@@ -707,12 +776,14 @@ CreateEnvironmentBlock(OUT LPVOID *lpEnvironment,
     /* Set user environment variables */
     SetUserEnvironment(Environment,
                        hKeyUser,
-                       L"Environment");
+                       L"Environment",
+                       IsLocalSystemToken(hToken));
 
     /* Set user volatile environment variables */
     SetUserEnvironment(Environment,
                        hKeyUser,
-                       L"Volatile Environment");
+                       L"Volatile Environment",
+                       FALSE);
 
     RegCloseKey(hKeyUser);
 

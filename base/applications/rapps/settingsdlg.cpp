@@ -329,13 +329,16 @@ SettingsDlgProc(HWND hDlg, UINT Msg, WPARAM wParam, LPARAM lParam)
                             szSource.GetLength() + 1);
                     }
 
+                    BOOL bRefresh = FALSE;
                     if (SettingsInfo.bSmallIcons != NewSettingsInfo.bSmallIcons)
                     {
                         SendMessageW(hMainWnd, WM_SETTINGCHANGE, SPI_SETICONMETRICS, 0); // Note: WM_SETTINGCHANGE cannot be posted
-                        PostMessageW(hMainWnd, WM_COMMAND, ID_REFRESH, 0);
+                        bRefresh = TRUE;
                     }
                     SettingsInfo = NewSettingsInfo;
                     SaveSettings(GetParent(hDlg), &SettingsInfo);
+                    if (bRefresh)
+                        PostMessageW(hMainWnd, WM_COMMAND, ID_REFRESH, 0);
                     EndDialog(hDlg, LOWORD(wParam));
                 }
                 break;

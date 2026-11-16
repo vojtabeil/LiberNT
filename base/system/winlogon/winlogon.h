@@ -42,6 +42,7 @@
 #include <ndk/rtlfuncs.h>
 #include <ndk/exfuncs.h>
 #include <ndk/kefuncs.h>
+#include <ndk/pofuncs.h>
 #include <strsafe.h>
 
 /* PSEH for SEH Support */
@@ -62,6 +63,8 @@ SetWindowStationUser(
 WINE_DEFAULT_DEBUG_CHANNEL(winlogon);
 
 #include "resource.h"
+
+#define WL_WM_SETUP_DONE (WM_USER + 0x0100)
 
 typedef BOOL (WINAPI * PFWLXNEGOTIATE)  (DWORD, DWORD *);
 typedef BOOL (WINAPI * PFWLXINITIALIZE) (LPWSTR, HANDLE, PVOID, PVOID, PVOID *);
@@ -224,7 +227,6 @@ typedef struct _WLSESSION
     BOOL SuppressStatus;
     BOOL TaskManHotkey;
     BOOL LockWkStaHotkey;
-    BOOL UtilManHotkey;
     HWND SASWindow;
     HWINSTA InteractiveWindowStation;
     PWSTR InteractiveWindowStationName;
@@ -384,6 +386,11 @@ AllowDesktopAccessToUser(
 BOOL
 AllowAccessOnSession(
     _In_ PWLSESSION Session);
+
+BOOL
+UpdateNamedObjectAccess(
+    _In_ HANDLE UserToken,
+    _In_ BOOL Grant);
 
 /* setup.c */
 DWORD

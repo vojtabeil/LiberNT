@@ -23,7 +23,7 @@ static void Test_Buffersizes()
 
     ok_ptr(Buffer->ViewBaseClient, Buffer);
     ok_hex(Buffer->Flags, 0);
-    ok(Buffer->OffsetFree == sizeof(*Buffer) || Buffer->OffsetFree == 0x60, "Expected %u or %u, got %lu\n", sizeof(*Buffer), 0x60, Buffer->OffsetFree);
+    ok(Buffer->OffsetFree == sizeof(*Buffer) || Buffer->OffsetFree == 0x60, "Expected %Iu or %u, got %Iu\n", sizeof(*Buffer), 0x60, (size_t)Buffer->OffsetFree);
     ok_hex(Buffer->CommitSize, 0x1000);
     ok_hex(Buffer->ViewSize, 0x400000);
 
@@ -37,7 +37,7 @@ static void Test_Buffersizes()
 
     ok_ptr(Buffer->ViewBaseClient, Buffer);
     ok_hex(Buffer->Flags, 0);
-    ok(Buffer->OffsetFree == sizeof(*Buffer) || Buffer->OffsetFree == 0x60, "Expected %u or %u, got %lu\n", sizeof(*Buffer), 0x60, Buffer->OffsetFree);
+    ok(Buffer->OffsetFree == sizeof(*Buffer) || Buffer->OffsetFree == 0x60, "Expected %Iu or %u, got %Iu\n", sizeof(*Buffer), 0x60, (size_t)Buffer->OffsetFree);
     ok_hex(Buffer->CommitSize, 0x1000);
     ok_hex(Buffer->ViewSize, 0x1000);
 
@@ -51,7 +51,7 @@ static void Test_Buffersizes()
 
     ok_ptr(Buffer->ViewBaseClient, Buffer);
     ok_hex(Buffer->Flags, 0);
-    ok(Buffer->OffsetFree == sizeof(*Buffer) || Buffer->OffsetFree == 0x60, "Expected %u or %u, got %lu\n", sizeof(*Buffer), 0x60, Buffer->OffsetFree);
+    ok(Buffer->OffsetFree == sizeof(*Buffer) || Buffer->OffsetFree == 0x60, "Expected %Iu or %u, got %Iu\n", sizeof(*Buffer), 0x60, (size_t)Buffer->OffsetFree);
     ok_hex(Buffer->CommitSize, 0x1000);
     ok_hex(Buffer->ViewSize, 0x1000);
 
@@ -65,7 +65,7 @@ static void Test_Buffersizes()
 
     ok_ptr(Buffer->ViewBaseClient, Buffer);
     ok_hex(Buffer->Flags, 0);
-    ok(Buffer->OffsetFree == sizeof(*Buffer) || Buffer->OffsetFree == 0x60, "Expected %u or %u, got %lu\n", sizeof(*Buffer), 0x60, Buffer->OffsetFree);
+    ok(Buffer->OffsetFree == sizeof(*Buffer) || Buffer->OffsetFree == 0x60, "Expected %Iu or %u, got %Iu\n", sizeof(*Buffer), 0x60, (size_t)Buffer->OffsetFree);
     ok_hex(Buffer->CommitSize, 0x1000);
     ok_hex(Buffer->ViewSize, 0x2000);
 
@@ -73,7 +73,7 @@ static void Test_Buffersizes()
     ok_hex(Status, STATUS_SUCCESS);
 
     Buffer = RtlCreateQueryDebugBuffer(0x7fffffff, FALSE);
-    ok(Buffer == NULL, "Got a valid thing?\n");
+    ok((Buffer == NULL) == (sizeof(PVOID) == 4), "Got %p\n", Buffer);
     if (Buffer)
     {
         Status = RtlDestroyQueryDebugBuffer(Buffer);
@@ -97,7 +97,6 @@ static void Test_ProcessModules(void)
     Status = LdrQueryProcessModuleInformation(NULL, 0, &RequiredSize);
     ok_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
 
-    RequiredSize;
     ExpectedModules = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, RequiredSize);
 
     Status = LdrQueryProcessModuleInformation(ExpectedModules, RequiredSize, &RequiredSize);

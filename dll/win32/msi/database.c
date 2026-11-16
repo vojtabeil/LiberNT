@@ -78,6 +78,10 @@ void append_storage_to_db( MSIDATABASE *db, IStorage *stg )
     MSITRANSFORM *t;
 
     t = malloc( sizeof *t );
+#ifdef __REACTOS__
+    if (!t)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     t->stg = stg;
     IStorage_AddRef( stg );
     list_add_head( &db->transforms, &t->entry );
@@ -270,6 +274,9 @@ UINT MSI_OpenDatabaseW(LPCWSTR szDBPath, LPCWSTR szPersist, MSIDATABASE **pdb)
         enum_stream_names( stg );
 
     db->storage = stg;
+#ifdef __REACTOS__
+    IStorage_AddRef( stg );
+#endif
     db->mode = mode;
     if (created)
         db->deletefile = wcsdup( szDBPath );
@@ -278,12 +285,25 @@ UINT MSI_OpenDatabaseW(LPCWSTR szDBPath, LPCWSTR szPersist, MSIDATABASE **pdb)
 
     db->strings = msi_load_string_table( stg, &db->bytes_per_strref );
     if( !db->strings )
+#ifdef __REACTOS__
+    {
+        ret = ERROR_OPEN_FAILED;
         goto end;
+    }
+#else
+        goto end;
+#endif
+
+#ifdef __REACTOS__
+    msi_add_system_strings( db );
+#endif
 
     ret = ERROR_SUCCESS;
 
     msiobj_addref( &db->hdr );
+#ifndef __REACTOS__
     IStorage_AddRef( stg );
+#endif
     *pdb = db;
 
 end:

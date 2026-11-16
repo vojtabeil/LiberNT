@@ -1,7 +1,4 @@
 
-remove_definitions(-D_WIN32_WINNT=0x502)
-add_definitions(-D_WIN32_WINNT=0x600)
-
 add_definitions(
     -D_RPCRT4_
     -DCOM_NO_WINDOWS_H
@@ -17,6 +14,8 @@ set(OLD_IDL_FLAGS ${IDL_FLAGS})
 set(IDL_FLAGS ${IDL_FLAGS} -Oicf)
 add_rpcproxy_files(ndr_types.idl)
 set(IDL_FLAGS ${OLD_IDL_FLAGS})
+
+add_arm64ec_x64_source(RPCRT4_THUNKS_SOURCE thunks.c __WINESRC__)
 
 list(APPEND SOURCE
     cproxy.c
@@ -38,7 +37,7 @@ list(APPEND SOURCE
     rpcrt4_main.c
     rpc_server.c
     rpc_transport.c
-    thunks.c
+    ${RPCRT4_THUNKS_SOURCE}
     unix_func.c
     ${CMAKE_CURRENT_BINARY_DIR}/epm_c.c)
 
@@ -48,7 +47,7 @@ endif()
 
 list(APPEND PCH_SKIP_SOURCE
     ndr_typelib.c
-    thunks.c
+    ${RPCRT4_THUNKS_SOURCE}
     ${CMAKE_CURRENT_BINARY_DIR}/ndr_types_p.c
     ${CMAKE_CURRENT_BINARY_DIR}/proxy.dlldata.c
     ${CMAKE_CURRENT_BINARY_DIR}/rpcrt4_stubs.c)
@@ -67,8 +66,8 @@ endif()
 
 set_module_type(rpcrt4 win32dll)
 target_link_libraries(rpcrt4 wine wine_dll_register uuid ${PSEH_LIB} oldnames)
-add_delay_importlibs(rpcrt4 iphlpapi wininet secur32 user32 ole32 oleaut32)
-add_importlibs(rpcrt4 advapi32 advapi32_vista kernel32_vista ws2_32 msvcrt kernel32 ntdll)
+add_delay_importlibs(rpcrt4 iphlpapi wininet secur32 user32 ole32 oleaut32 ws2_32)
+add_importlibs(rpcrt4 advapi32 advapi32_vista kernel32_vista msvcrt kernel32 ntdll)
 add_dependencies(rpcrt4 ndr_types_header)
 add_pch(rpcrt4 precomp.h "${PCH_SKIP_SOURCE}")
 add_cd_file(TARGET rpcrt4 DESTINATION reactos/system32 FOR all)

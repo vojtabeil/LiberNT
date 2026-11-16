@@ -212,11 +212,7 @@ HRESULT WINAPI CMyDocsFolder::EnumSearches(IEnumExtraSearch ** ppenum)
 
 HRESULT WINAPI CMyDocsFolder::GetDefaultColumn(DWORD dwRes, ULONG *pSort, ULONG *pDisplay)
 {
-    HRESULT hr = EnsureFolder();
-    if (FAILED(hr))
-        return hr;
-
-    return m_pisfInner->GetDefaultColumn(dwRes, pSort, pDisplay);
+    return E_NOTIMPL;
 }
 
 HRESULT WINAPI CMyDocsFolder::GetDefaultColumnState(UINT iColumn, DWORD *pcsFlags)
@@ -287,4 +283,61 @@ HRESULT WINAPI CMyDocsFolder::GetCurFolder(PIDLIST_ABSOLUTE *pidl)
         return E_POINTER;
     *pidl = ILClone(m_pidlInner);
     return S_OK;
+}
+
+HRESULT WINAPI CMyDocsFolder::_QueryInnerFolder(void *pv, REFIID riid, LPVOID *ppv, DWORD_PTR dw)
+{
+    static const IID *const s_InnerIIDs[] =
+    {
+        &IID_IShellIcon,
+        &IID_IPersistFolder3,
+        &IID_IStorage,
+        &IID_IContextMenuCB,
+        &IID_IOleCommandTarget,
+        &IID_IObjectWithSite,
+        &IID_IPersistPropertyBag,
+        &IID_IObjectWithBackReferences,
+        &IID_IRemoteComputer,
+        &IID_IFolderType,
+        &IID_IBackReferencedObject,
+        &IID_IParentAndItem,
+    };
+    CMyDocsFolder *pThis = static_cast<CMyDocsFolder *>(pv);
+
+    *ppv = NULL;
+    for (UINT i = 0; i < _countof(s_InnerIIDs); i++)
+    {
+        if (IsEqualIID(riid, *s_InnerIIDs[i]))
+        {
+            HRESULT hr = pThis->EnsureFolder();
+            if (FAILED(hr))
+                return hr;
+            return pThis->m_pisfInner->QueryInterface(riid, ppv);
+        }
+    }
+    return E_NOINTERFACE;
+}
+
+HRESULT WINAPI CMyDocsFolder::GetOverlayIndex(PCUITEMID_CHILD pidl, int *pIndex)
+{
+    CComPtr<IShellIconOverlay> psio;
+    HRESULT hr = EnsureFolder();
+    if (FAILED(hr))
+        return hr;
+    hr = m_pisfInner->QueryInterface(IID_PPV_ARG(IShellIconOverlay, &psio));
+    if (FAILED(hr))
+        return hr;
+    return psio->GetOverlayIndex(pidl, pIndex);
+}
+
+HRESULT WINAPI CMyDocsFolder::GetOverlayIconIndex(PCUITEMID_CHILD pidl, int *pIconIndex)
+{
+    CComPtr<IShellIconOverlay> psio;
+    HRESULT hr = EnsureFolder();
+    if (FAILED(hr))
+        return hr;
+    hr = m_pisfInner->QueryInterface(IID_PPV_ARG(IShellIconOverlay, &psio));
+    if (FAILED(hr))
+        return hr;
+    return psio->GetOverlayIconIndex(pidl, pIconIndex);
 }

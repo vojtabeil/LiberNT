@@ -21,7 +21,7 @@ typedef struct _INFO
 } INFO, *PINFO;
 
 
-static BOOL
+static DWORD
 InitConnection(PINFO pInfo,
                LPSTR lpAddress)
 {
@@ -32,13 +32,13 @@ InitConnection(PINFO pInfo,
     Ret = WSAStartup(MAKEWORD(2, 2),
                      &wsaData);
     if (Ret != 0)
-        return FALSE;
+        return Ret;
 
     pInfo->Sock = socket(AF_INET,
                          SOCK_DGRAM,
                          0);
     if (pInfo->Sock == INVALID_SOCKET)
-        return FALSE;
+        return WSAGetLastError();
 
     /* Setup server info */
     he = gethostbyname(lpAddress);
@@ -51,15 +51,18 @@ InitConnection(PINFO pInfo,
         pInfo->ntpAddr.sin_addr = *((struct in_addr *)he->h_addr);
     }
     else
-        return FALSE;
+        return WSAGetLastError();
 
-    return TRUE;
+    return ERROR_SUCCESS;
 }
 
 
 static VOID
-DestroyConnection(VOID)
+DestroyConnection(PINFO pInfo)
 {
+    if (pInfo->Sock != INVALID_SOCKET)
+        closesocket(pInfo->Sock);
+
     WSACleanup();
 }
 
@@ -72,7 +75,7 @@ GetTransmitTime(PTIMEPACKET ptp)
 
 
 /* Send some data to wake the server up */
-static BOOL
+static DWORD
 SendData(PINFO pInfo)
 {
     TIMEPACKET tp = { 0, 0 };
@@ -81,7 +84,7 @@ SendData(PINFO pInfo)
     ZeroMemory(&pInfo->SendPacket, sizeof(pInfo->SendPacket));
     pInfo->SendPacket.LiVnMode = 0x1b;        /* 0x1b = 011 011 - version 3 , mode 3 (client) */
     if (!GetTransmitTime(&tp))
-        return FALSE;
+        return ERROR_GEN_FAILURE;
     pInfo->SendPacket.TransmitTimestamp = tp;
 
     Ret = sendto(pInfo->Sock,
@@ -92,19 +95,18 @@ SendData(PINFO pInfo)
                  sizeof(SOCKADDR_IN));
 
     if (Ret == SOCKET_ERROR)
-        return FALSE;
+        return WSAGetLastError();
 
-    return TRUE;
+    return ERROR_SUCCESS;
 }
 
 
-static ULONG
-ReceiveData(PINFO pInfo)
+static DWORD
+ReceiveData(PINFO pInfo, PULONGLONG pullTime)
 {
     TIMEVAL timeVal;
     FD_SET readFDS;
     INT Ret;
-    ULONG ulTime = 0;
 
     /* Monitor socket for incoming connections */
     FD_ZERO(&readFDS);
@@ -116,34 +118,39 @@ ReceiveData(PINFO pInfo)
 
     /* Check for data on the socket for TIMEOUT millisecs */
     Ret = select(0, &readFDS, NULL, NULL, &timeVal);
+    if (Ret == SOCKET_ERROR)
+        return WSAGetLastError();
+    if (Ret == 0)
+        return ERROR_TIMEOUT;
 
-    if ((Ret != SOCKET_ERROR) && (Ret != 0))
-    {
-        Ret = recvfrom(pInfo->Sock,
-                       (char *)&pInfo->RecvPacket,
-                       sizeof(pInfo->RecvPacket),
-                       0,
-                       NULL,
-                       NULL);
+    Ret = recvfrom(pInfo->Sock,
+                   (char *)&pInfo->RecvPacket,
+                   sizeof(pInfo->RecvPacket),
+                   0,
+                   NULL,
+                   NULL);
+    if (Ret == SOCKET_ERROR)
+        return WSAGetLastError();
 
-        if (Ret != SOCKET_ERROR)
-            ulTime = ntohl(pInfo->RecvPacket.TransmitTimestamp.dwInteger);
-    }
+    *pullTime = (ULONGLONG)ntohl(pInfo->RecvPacket.TransmitTimestamp.dwInteger) * 10000000;
+    *pullTime += ((ULONGLONG)ntohl(pInfo->RecvPacket.TransmitTimestamp.dwFractional) * 10000000) >> 32;
 
-    return ulTime;
+    return ERROR_SUCCESS;
 }
 
 
-ULONG
-GetServerTime(LPWSTR lpAddress)
+DWORD
+GetServerTime(LPWSTR lpAddress, PULONGLONG pullTime)
 {
     PINFO pInfo;
     LPSTR lpAddr;
     DWORD dwSize = wcslen(lpAddress) + 1;
-    ULONG ulTime = 0;
+    DWORD dwError = ERROR_NOT_ENOUGH_MEMORY;
+
+    *pullTime = 0;
 
     pInfo = (PINFO)HeapAlloc(GetProcessHeap(),
-                             0,
+                             HEAP_ZERO_MEMORY,
                              sizeof(INFO));
     lpAddr = (LPSTR)HeapAlloc(GetProcessHeap(),
                               0,
@@ -151,6 +158,8 @@ GetServerTime(LPWSTR lpAddress)
 
     if (pInfo && lpAddr)
     {
+        pInfo->Sock = INVALID_SOCKET;
+
         if (WideCharToMultiByte(CP_ACP,
                                 0,
                                 lpAddress,
@@ -160,15 +169,21 @@ GetServerTime(LPWSTR lpAddress)
                                 NULL,
                                 NULL))
         {
-            if (InitConnection(pInfo, lpAddr))
+            dwError = InitConnection(pInfo, lpAddr);
+            if (dwError == ERROR_SUCCESS)
             {
-                if (SendData(pInfo))
+                dwError = SendData(pInfo);
+                if (dwError == ERROR_SUCCESS)
                 {
-                    ulTime = ReceiveData(pInfo);
+                    dwError = ReceiveData(pInfo, pullTime);
                 }
             }
 
-            DestroyConnection();
+            DestroyConnection(pInfo);
+        }
+        else
+        {
+            dwError = GetLastError();
         }
     }
 
@@ -177,5 +192,5 @@ GetServerTime(LPWSTR lpAddress)
     if (lpAddr)
         HeapFree(GetProcessHeap(), 0, lpAddr);
 
-    return ulTime;
+    return dwError;
 }

@@ -64,11 +64,6 @@ static SECURITY_STATUS SEC_ENTRY nego_AcquireCredentialsHandleW(
     ret = ntlm_AcquireCredentialsHandleW( pszPrincipal, ntlmW, fCredentialUse,
                                           pLogonID, pAuthData, pGetKeyFn, pGetKeyArgument,
                                           phCredential, ptsExpiry );
-    if (ret == SEC_E_OK)
-    {
-        NtlmCredentials *cred = (NtlmCredentials *)phCredential->dwLower;
-        cred->no_cached_credentials = (pAuthData == NULL);
-    }
     return ret;
 }
 
@@ -83,6 +78,9 @@ static SECURITY_STATUS SEC_ENTRY nego_AcquireCredentialsHandleA(
     SECURITY_STATUS ret = SEC_E_INSUFFICIENT_MEMORY;
     SEC_WCHAR *user = NULL, *domain = NULL, *passwd = NULL, *package = NULL;
     SEC_WINNT_AUTH_IDENTITY_W *identityW = NULL;
+#ifdef __REACTOS__
+    SEC_WINNT_AUTH_IDENTITY_W ex_view;
+#endif
 
     TRACE("%s, %s, 0x%08x, %p, %p, %p, %p, %p, %p\n",
           debugstr_a(pszPrincipal), debugstr_a(pszPackage), fCredentialUse,
@@ -97,10 +95,17 @@ static SECURITY_STATUS SEC_ENTRY nego_AcquireCredentialsHandleA(
     }
     if (pAuthData)
     {
+#ifdef __REACTOS__
+        SEC_WINNT_AUTH_IDENTITY_A *identity = SECUR32_identityView(pAuthData, &ex_view);
+        int user_len, domain_len, passwd_len;
+
+        if (identity->Flags & SEC_WINNT_AUTH_IDENTITY_ANSI)
+#else
         SEC_WINNT_AUTH_IDENTITY_A *identity = pAuthData;
         int user_len, domain_len, passwd_len;
 
         if (identity->Flags == SEC_WINNT_AUTH_IDENTITY_ANSI)
+#endif
         {
             identityW = HeapAlloc( GetProcessHeap(), 0, sizeof(*identityW) );
             if (!identityW) goto done;
@@ -152,7 +157,12 @@ done:
     HeapFree( GetProcessHeap(), 0, user );
     HeapFree( GetProcessHeap(), 0, domain );
     HeapFree( GetProcessHeap(), 0, passwd );
+#ifdef __REACTOS__
+    if (identityW != (SEC_WINNT_AUTH_IDENTITY_W *)pAuthData && identityW != &ex_view)
+        HeapFree( GetProcessHeap(), 0, identityW );
+#else
     HeapFree( GetProcessHeap(), 0, identityW );
+#endif
     return ret;
 }
 
@@ -293,13 +303,6 @@ static SECURITY_STATUS SEC_ENTRY nego_QueryContextAttributesW(
         sizes->cbBlockSize       = 0;
         return SEC_E_OK;
     }
-    case SECPKG_ATTR_NEGOTIATION_INFO:
-    {
-        SecPkgContext_NegotiationInfoW *info = (SecPkgContext_NegotiationInfoW *)pBuffer;
-        info->PackageInfo      = ntlm_package_infoW;
-        info->NegotiationState = SECPKG_NEGOTIATION_COMPLETE;
-        return SEC_E_OK;
-    }
     default:
         return ntlm_QueryContextAttributesW( phContext, ulAttribute, pBuffer );
     }
@@ -322,13 +325,6 @@ static SECURITY_STATUS SEC_ENTRY nego_QueryContextAttributesA(PCtxtHandle phCont
         sizes->cbMaxSignature    = 16;
         sizes->cbSecurityTrailer = 16;
         sizes->cbBlockSize       = 0;
-        return SEC_E_OK;
-    }
-    case SECPKG_ATTR_NEGOTIATION_INFO:
-    {
-        SecPkgContext_NegotiationInfoA *info = (SecPkgContext_NegotiationInfoA *)pBuffer;
-        info->PackageInfo      = ntlm_package_infoA;
-        info->NegotiationState = SECPKG_NEGOTIATION_COMPLETE;
         return SEC_E_OK;
     }
     default:

@@ -1,7 +1,5 @@
 spec2def(libtirpc.dll libtirpc/libtirpc.spec ADD_IMPORTLIB)
 
-remove_definitions(-D_WIN32_WINNT=0x502)
-add_definitions(-D_WIN32_WINNT=0x600)
 add_definitions(-DUNICODE -D_WIN32 -DPORTMAP -D_CRT_NONSTDC_NO_DEPRECATE=1)
 
 include_directories(${REACTOS_SOURCE_DIR}/dll/3rdparty/libtirpc/tirpc)
@@ -101,8 +99,7 @@ if(MSVC)
         target_compile_options(libtirpc PRIVATE /wd4101 /wd4133 /wd4473 /wd4477)
     endif()
 else()
-    # FIXME: Tons of warnings.
-    target_compile_options(libtirpc PRIVATE "-w")
+    target_compile_options(libtirpc PRIVATE -Wno-unused-variable -Wno-unused-but-set-variable)
 endif()
 
 set_module_type(libtirpc win32dll)
@@ -111,3 +108,7 @@ add_importlibs(libtirpc user32 advapi32 kernel32_vista ws2_32 msvcrt kernel32 nt
 add_delay_importlibs(libtirpc secur32)
 add_pch(libtirpc precomp.h SOURCE)
 add_cd_file(TARGET libtirpc DESTINATION reactos/system32 FOR all)
+
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(libtirpc PRIVATE -Wno-deprecated-non-prototype)
+endif()

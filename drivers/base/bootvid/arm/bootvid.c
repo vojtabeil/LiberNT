@@ -29,6 +29,14 @@
 static PUSHORT VgaArmBase;
 static PHYSICAL_ADDRESS VgaPhysical;
 
+NTSTATUS
+NTAPI
+VidSetVirtualFrameBuffer(
+    _In_opt_ PVOID VirtualFrameBuffer)
+{
+    return VirtualFrameBuffer == NULL ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+}
+
 /* PRIVATE FUNCTIONS *********************************************************/
 
 FORCEINLINE
@@ -269,6 +277,28 @@ ResetDisplay(
     /* Re-initialize the palette and fill the screen black */
     InitializePalette();
     VidSolidColorFill(0, 0, SCREEN_WIDTH - 1, SCREEN_HEIGHT - 1, BV_COLOR_BLACK);
+}
+
+BOOLEAN
+NTAPI
+VidRenderStatusText(
+    _In_ PCSTR String,
+    _Out_writes_bytes_(Width * Height) PUCHAR Coverage,
+    _In_ ULONG Width,
+    _In_ ULONG Height)
+{
+    UNREFERENCED_PARAMETER(String);
+    UNREFERENCED_PARAMETER(Coverage);
+    UNREFERENCED_PARAMETER(Width);
+    UNREFERENCED_PARAMETER(Height);
+    return FALSE;
+}
+
+BOOLEAN
+NTAPI
+VidUseCompactFont(VOID)
+{
+    return FALSE;
 }
 
 VOID

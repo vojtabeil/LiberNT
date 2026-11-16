@@ -8,6 +8,24 @@ else()
     set(IDL_FLAGS -b ${ARCH}-x-y -nostdinc)
 endif()
 
+function(get_included_idls OUT_VAR IDL_FILE)
+    set(DEPS "")
+    get_filename_component(IDL_PATH ${IDL_FILE} ABSOLUTE BASE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+    get_filename_component(IDL_DIR ${IDL_PATH} DIRECTORY)
+    if(EXISTS ${IDL_PATH})
+        file(STRINGS ${IDL_PATH} INCLUDED_IDLS REGEX "^#include \"[^\"]+\\.idl\"")
+        foreach(INCLUDED_IDL ${INCLUDED_IDLS})
+            string(REGEX REPLACE "^#include \"([^\"]+)\".*" "\\1" INCLUDED_IDL "${INCLUDED_IDL}")
+            if(EXISTS "${IDL_DIR}/${INCLUDED_IDL}")
+                list(APPEND DEPS ${IDL_DIR}/${INCLUDED_IDL})
+            elseif(EXISTS "${REACTOS_SOURCE_DIR}/sdk/include/psdk/${INCLUDED_IDL}")
+                list(APPEND DEPS ${REACTOS_SOURCE_DIR}/sdk/include/psdk/${INCLUDED_IDL})
+            endif()
+        endforeach()
+    endif()
+    set(${OUT_VAR} ${DEPS} PARENT_SCOPE)
+endfunction()
+
 function(add_typelib)
     get_includes(INCLUDES)
     get_defines(DEFINES)
@@ -19,12 +37,31 @@ function(add_typelib)
             set(IDL_FLAGS ${IDL_FLAGS} --oldtlb)
         endif()
         get_filename_component(NAME ${FILE} NAME_WE)
+        get_included_idls(EXTRA_DEP ${FILE})
         add_custom_command(
             OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${NAME}.tlb
             COMMAND native-widl ${INCLUDES} ${LIBS} ${DEFINES} ${IDL_FLAGS} -t -o ${CMAKE_CURRENT_BINARY_DIR}/${NAME}.tlb ${CMAKE_CURRENT_SOURCE_DIR}/${FILE}
-            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${FILE} native-widl)
+            DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${FILE} ${EXTRA_DEP} native-widl)
         list(APPEND OBJECTS ${CMAKE_CURRENT_BINARY_DIR}/${NAME}.tlb)
     endforeach()
+endfunction()
+
+function(add_winmd_file OUTPUT IDL)
+    cmake_parse_arguments(_WINMD "" "" "NAMESPACES;DEPENDS" ${ARGN})
+    get_includes(INCLUDES)
+    get_defines(DEFINES)
+    set(NAMESPACE_ARGS "")
+    foreach(NAMESPACE ${_WINMD_NAMESPACES})
+        list(APPEND NAMESPACE_ARGS --winmd-namespace=${NAMESPACE})
+    endforeach()
+    get_filename_component(OUTPUT_DIR ${OUTPUT} DIRECTORY)
+    get_filename_component(OUTPUT_NAME ${OUTPUT} NAME)
+    file(MAKE_DIRECTORY ${OUTPUT_DIR})
+    add_custom_command(
+        OUTPUT ${OUTPUT}
+        COMMAND native-widl ${INCLUDES} ${DEFINES} ${IDL_FLAGS} --winmd ${NAMESPACE_ARGS} -o ${OUTPUT_NAME} ${IDL}
+        DEPENDS ${IDL} ${_WINMD_DEPENDS} native-widl
+        WORKING_DIRECTORY ${OUTPUT_DIR})
 endfunction()
 
 function(add_idl_headers TARGET)
@@ -79,6 +116,26 @@ function(add_rpcproxy_files)
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endfunction()
 
+function(get_idl_includes __idl_file __out)
+    set(__deps)
+    if(NOT IS_ABSOLUTE ${__idl_file})
+        set(__idl_file ${CMAKE_CURRENT_SOURCE_DIR}/${__idl_file})
+    endif()
+    if(EXISTS ${__idl_file})
+        file(STRINGS ${__idl_file} __lines REGEX "^[ \t]*#[ \t]*include[ \t]+[\"<][^\">]+\\.idl[\">]")
+        foreach(__line ${__lines})
+            string(REGEX REPLACE "^[ \t]*#[ \t]*include[ \t]+[\"<]([^\">]+)[\">].*$" "\\1" __include "${__line}")
+            foreach(__dir ${CMAKE_CURRENT_SOURCE_DIR} ${REACTOS_SOURCE_DIR}/sdk/include ${REACTOS_SOURCE_DIR}/sdk/include/psdk ${REACTOS_SOURCE_DIR}/sdk/include/reactos)
+                if(EXISTS ${__dir}/${__include})
+                    list(APPEND __deps ${__dir}/${__include})
+                    break()
+                endif()
+            endforeach()
+        endforeach()
+    endif()
+    set(${__out} ${__deps} PARENT_SCOPE)
+endfunction()
+
 function(add_rpc_files __type)
     get_includes(INCLUDES)
     get_defines(DEFINES)
@@ -96,12 +153,13 @@ function(add_rpc_files __type)
     foreach(FILE ${ARGN})
         get_filename_component(__name ${FILE} NAME_WLE)
         set(__name ${__name}${__suffix})
+        get_idl_includes(${FILE} __idl_includes)
         add_custom_command(
             OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${__name}.c ${CMAKE_CURRENT_BINARY_DIR}/${__name}.h
             # We generate the two files in two passes because WIDL accepts only one custom file name as output
             COMMAND native-widl ${INCLUDES} ${DEFINES} ${IDL_FLAGS} -Oicf ${__additional_flags} ${__server_client} -o ${CMAKE_CURRENT_BINARY_DIR}/${__name}.c -H ${__name}.h ${FILE}
             COMMAND native-widl ${INCLUDES} ${DEFINES} ${IDL_FLAGS} -Oicf ${__additional_flags} -h -o ${CMAKE_CURRENT_BINARY_DIR}/${__name}.h ${FILE}
-            DEPENDS ${FILE} native-widl
+            DEPENDS ${FILE} ${__idl_includes} native-widl
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     endforeach()
 endfunction()
@@ -136,12 +194,13 @@ function(add_rpc_file __type __idl_file)
     endif()
     get_filename_component(__name ${__idl_file} NAME_WE)
     set(__name ${__name}${__suffix})
+    get_idl_includes(${__idl_file} __idl_includes)
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${__name}.c ${CMAKE_CURRENT_BINARY_DIR}/${__name}.h
         # We generate the two files in two passes because WIDL accepts only one custom file name as output
         COMMAND native-widl ${INCLUDES} ${DEFINES} ${IDL_FLAGS} ${__additional_flags} ${__server_client} -o ${CMAKE_CURRENT_BINARY_DIR}/${__name}.c -H ${__name}.h ${__idl_file}
         COMMAND native-widl ${INCLUDES} ${DEFINES} ${IDL_FLAGS} ${__additional_flags} -h -o ${CMAKE_CURRENT_BINARY_DIR}/${__name}.h ${__idl_file}
-        DEPENDS ${__idl_file} native-widl
+        DEPENDS ${__idl_file} ${__idl_includes} native-widl
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 endfunction()
 
@@ -189,12 +248,28 @@ function(add_idl_reg_scripts TARGET TYPE)
         message(FATAL_ERROR "Please pass either winrt, registry or regtypelib as argument to add_idl_reg_scripts")
     endif()
     set(IDL_REGTARGETNAME ${TARGET}${__suffix})
+
+    # Determine the windres PE target for converting .res to .o,
+    # so that the object matches the target architecture even when
+    # the host machine is a different CPU (e.g., ARM64 macOS building
+    # for x86_64).
+    if(ARCH STREQUAL "i386")
+        set(_rc_target_flag "--target=pe-i386")
+    elseif(ARCH STREQUAL "amd64")
+        set(_rc_target_flag "--target=pe-x86-64")
+    elseif(ARCH STREQUAL "arm")
+        set(_rc_target_flag "--target=pe-arm")
+    else()
+        set(_rc_target_flag "--target=${CMAKE_C_COMPILER_TARGET}")
+    endif()
+
     foreach(IDL_FILE ${ARGN})
         get_filename_component(NAME ${IDL_FILE} NAME_WE)
+        get_included_idls(EXTRA_DEP ${IDL_FILE})
         add_custom_command(
             OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${NAME}${__suffix}.res
             COMMAND native-widl ${INCLUDES} ${DEFINES} ${LIBS} ${IDL_FLAGS} -Oicf ${IDL_REGFLAGS} -o ${CMAKE_CURRENT_BINARY_DIR}/${NAME}${__suffix}.res ${IDL_FILE}
-            DEPENDS ${IDL_FILE} native-widl
+            DEPENDS ${IDL_FILE} ${EXTRA_DEP} native-widl
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
         set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/${NAME}${__suffix}.res PROPERTIES
             GENERATED TRUE EXTERNAL_OBJECT TRUE)
@@ -205,7 +280,7 @@ function(add_idl_reg_scripts TARGET TYPE)
             # convert the .res file into a .o file for GCC/Clang using windres
             add_custom_command(
                 OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${NAME}${__suffix}.o
-                COMMAND ${CMAKE_RC_COMPILER} -O coff -i ${CMAKE_CURRENT_BINARY_DIR}/${NAME}${__suffix}.res -o ${CMAKE_CURRENT_BINARY_DIR}/${NAME}${__suffix}.o
+                COMMAND ${CMAKE_RC_COMPILER} ${_rc_target_flag} -O coff -i ${CMAKE_CURRENT_BINARY_DIR}/${NAME}${__suffix}.res -o ${CMAKE_CURRENT_BINARY_DIR}/${NAME}${__suffix}.o
                 DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${NAME}${__suffix}.res
                 WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
             set_source_files_properties(${CMAKE_CURRENT_BINARY_DIR}/${NAME}${__suffix}.o PROPERTIES

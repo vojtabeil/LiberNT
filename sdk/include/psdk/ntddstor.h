@@ -175,6 +175,9 @@ DEFINE_DEVPROPKEY(DEVPKEY_Storage_Gpt_Name,           0x4d1ebee8, 0x803, 0x4774,
 #define IOCTL_STORAGE_READ_CAPACITY \
   CTL_CODE(IOCTL_STORAGE_BASE, 0x0450, METHOD_BUFFERED, FILE_READ_ACCESS)
 
+#define IOCTL_STORAGE_SET_TEMPERATURE_THRESHOLD \
+  CTL_CODE(IOCTL_STORAGE_BASE, 0x0480, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+
 #define IOCTL_STORAGE_QUERY_PROPERTY \
   CTL_CODE(IOCTL_STORAGE_BASE, 0x0500, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
@@ -451,6 +454,11 @@ typedef enum _STORAGE_BUS_TYPE {
   BusTypeMmc,
   BusTypeVirtual,
   BusTypeFileBackedVirtual,
+  BusTypeSpaces,
+  BusTypeNvme,
+  BusTypeSCM,
+  BusTypeUfs,
+  BusTypeNvmeof,
   BusTypeMax,
   BusTypeMaxReserved = 0x7F
 } STORAGE_BUS_TYPE, *PSTORAGE_BUS_TYPE;
@@ -558,6 +566,43 @@ typedef _Struct_size_bytes_(Size) struct _STORAGE_DESCRIPTOR_HEADER {
   ULONG Version;
   ULONG Size;
 } STORAGE_DESCRIPTOR_HEADER, *PSTORAGE_DESCRIPTOR_HEADER;
+
+#define STORAGE_TEMPERATURE_VALUE_NOT_REPORTED 0x8000
+
+typedef struct _STORAGE_TEMPERATURE_INFO {
+  USHORT Index;
+  SHORT Temperature;
+  SHORT OverThreshold;
+  SHORT UnderThreshold;
+  BOOLEAN OverThresholdChangable;
+  BOOLEAN UnderThresholdChangable;
+  BOOLEAN EventGenerated;
+  UCHAR Reserved0;
+  ULONG Reserved1;
+} STORAGE_TEMPERATURE_INFO, *PSTORAGE_TEMPERATURE_INFO;
+
+typedef struct _STORAGE_TEMPERATURE_DATA_DESCRIPTOR {
+  ULONG Version;
+  ULONG Size;
+  SHORT CriticalTemperature;
+  SHORT WarningTemperature;
+  USHORT InfoCount;
+  UCHAR Reserved0[2];
+  ULONG Reserved1[2];
+  STORAGE_TEMPERATURE_INFO TemperatureInfo[ANYSIZE_ARRAY];
+} STORAGE_TEMPERATURE_DATA_DESCRIPTOR, *PSTORAGE_TEMPERATURE_DATA_DESCRIPTOR;
+
+#define STORAGE_TEMPERATURE_THRESHOLD_FLAG_ADAPTER_REQUEST 0x0001
+
+typedef struct _STORAGE_TEMPERATURE_THRESHOLD {
+  ULONG Version;
+  ULONG Size;
+  USHORT Flags;
+  USHORT Index;
+  SHORT Threshold;
+  BOOLEAN OverThreshold;
+  UCHAR Reserved;
+} STORAGE_TEMPERATURE_THRESHOLD, *PSTORAGE_TEMPERATURE_THRESHOLD;
 
 typedef _Struct_size_bytes_(Size) struct _STORAGE_DEVICE_DESCRIPTOR {
   ULONG Version;
@@ -1103,6 +1148,217 @@ typedef struct _STORAGE_IDLE_POWERUP_REASON
 } STORAGE_IDLE_POWERUP_REASON, *PSTORAGE_IDLE_POWERUP_REASON;
 
 #define STORAGE_IDLE_POWERUP_REASON_VERSION_V1 1
+
+#if (NTDDI_VERSION >= NTDDI_WINTHRESHOLD)
+
+#define STORAGE_HW_FIRMWARE_REQUEST_FLAG_CONTROLLER                     0x00000001
+#define STORAGE_HW_FIRMWARE_REQUEST_FLAG_LAST_SEGMENT                   0x00000002
+#define STORAGE_HW_FIRMWARE_REQUEST_FLAG_FIRST_SEGMENT                  0x00000004
+#define STORAGE_HW_FIRMWARE_REQUEST_FLAG_SWITCH_TO_EXISTING_FIRMWARE    0x80000000
+
+typedef struct _STORAGE_HW_FIRMWARE_INFO_QUERY {
+  ULONG Version;
+  ULONG Size;
+  ULONG Flags;
+  ULONG Reserved;
+} STORAGE_HW_FIRMWARE_INFO_QUERY, *PSTORAGE_HW_FIRMWARE_INFO_QUERY;
+
+#define STORAGE_HW_FIRMWARE_INVALID_SLOT              0xFF
+
+#define STORAGE_HW_FIRMWARE_REVISION_LENGTH             16
+
+typedef struct _STORAGE_HW_FIRMWARE_SLOT_INFO {
+  ULONG Version;
+  ULONG Size;
+  UCHAR SlotNumber;
+  UCHAR ReadOnly:1;
+  UCHAR Reserved0:7;
+  UCHAR Reserved1[6];
+  UCHAR Revision[STORAGE_HW_FIRMWARE_REVISION_LENGTH];
+} STORAGE_HW_FIRMWARE_SLOT_INFO, *PSTORAGE_HW_FIRMWARE_SLOT_INFO;
+
+typedef struct _STORAGE_HW_FIRMWARE_INFO {
+  ULONG Version;
+  ULONG Size;
+  UCHAR SupportUpgrade:1;
+  UCHAR Reserved0:7;
+  UCHAR SlotCount;
+  UCHAR ActiveSlot;
+  UCHAR PendingActivateSlot;
+  BOOLEAN FirmwareShared;
+  UCHAR Reserved[3];
+  ULONG ImagePayloadAlignment;
+  ULONG ImagePayloadMaxSize;
+  STORAGE_HW_FIRMWARE_SLOT_INFO Slot[ANYSIZE_ARRAY];
+} STORAGE_HW_FIRMWARE_INFO, *PSTORAGE_HW_FIRMWARE_INFO;
+
+typedef struct _STORAGE_HW_FIRMWARE_DOWNLOAD {
+  ULONG Version;
+  ULONG Size;
+  ULONG Flags;
+  UCHAR Slot;
+  UCHAR Reserved[3];
+  ULONGLONG Offset;
+  ULONGLONG BufferSize;
+  UCHAR ImageBuffer[ANYSIZE_ARRAY];
+} STORAGE_HW_FIRMWARE_DOWNLOAD, *PSTORAGE_HW_FIRMWARE_DOWNLOAD;
+
+typedef struct _STORAGE_HW_FIRMWARE_ACTIVATE {
+  ULONG Version;
+  ULONG Size;
+  ULONG Flags;
+  UCHAR Slot;
+  UCHAR Reserved0[3];
+} STORAGE_HW_FIRMWARE_ACTIVATE, *PSTORAGE_HW_FIRMWARE_ACTIVATE;
+
+#endif /* NTDDI_VERSION >= NTDDI_WINTHRESHOLD */
+
+#define IOCTL_STORAGE_FAILURE_PREDICTION_CONFIG CTL_CODE(IOCTL_STORAGE_BASE, 0x0441, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _STORAGE_FAILURE_PREDICTION_CONFIG {
+    ULONG Version;
+    ULONG Size;
+    BOOLEAN Set;
+    BOOLEAN Enabled;
+    USHORT Reserved;
+} STORAGE_FAILURE_PREDICTION_CONFIG, *PSTORAGE_FAILURE_PREDICTION_CONFIG;
+
+#define STORAGE_FAILURE_PREDICTION_CONFIG_V1 1
+
+typedef enum _STORAGE_PROTOCOL_TYPE {
+    ProtocolTypeUnknown = 0x00,
+    ProtocolTypeScsi,
+    ProtocolTypeAta,
+    ProtocolTypeNvme,
+    ProtocolTypeSd,
+    ProtocolTypeUfs,
+    ProtocolTypeProprietary = 0x7E,
+    ProtocolTypeMaxReserved = 0x7F
+} STORAGE_PROTOCOL_TYPE, *PSTORAGE_PROTOCOL_TYPE;
+
+typedef enum _STORAGE_PROTOCOL_ATA_DATA_TYPE {
+    AtaDataTypeUnknown = 0,
+    AtaDataTypeIdentify,
+    AtaDataTypeLogPage,
+} STORAGE_PROTOCOL_ATA_DATA_TYPE, *PSTORAGE_PROTOCOL_ATA_DATA_TYPE;
+
+typedef struct _STORAGE_PROTOCOL_SPECIFIC_DATA {
+    STORAGE_PROTOCOL_TYPE ProtocolType;
+    ULONG   DataType;
+    ULONG   ProtocolDataRequestValue;
+    ULONG   ProtocolDataRequestSubValue;
+    ULONG   ProtocolDataOffset;
+    ULONG   ProtocolDataLength;
+    ULONG   FixedProtocolReturnData;
+    ULONG   ProtocolDataRequestSubValue2;
+    ULONG   ProtocolDataRequestSubValue3;
+    ULONG   ProtocolDataRequestSubValue4;
+} STORAGE_PROTOCOL_SPECIFIC_DATA, *PSTORAGE_PROTOCOL_SPECIFIC_DATA;
+
+typedef struct _STORAGE_PROTOCOL_DATA_DESCRIPTOR {
+    ULONG   Version;
+    ULONG   Size;
+    STORAGE_PROTOCOL_SPECIFIC_DATA ProtocolSpecificData;
+} STORAGE_PROTOCOL_DATA_DESCRIPTOR, *PSTORAGE_PROTOCOL_DATA_DESCRIPTOR;
+
+#define STORAGE_COMPONENT_ROLE_DATA         0x00000004
+
+typedef enum _STORAGE_DEVICE_FORM_FACTOR {
+    FormFactorUnknown = 0,
+    FormFactor3_5,
+    FormFactor2_5,
+    FormFactor1_8,
+    FormFactor1_8Less,
+    FormFactorEmbedded,
+    FormFactorMemoryCard,
+    FormFactormSata,
+    FormFactorM_2,
+    FormFactorPCIeBoard,
+    FormFactorDimm,
+} STORAGE_DEVICE_FORM_FACTOR, *PSTORAGE_DEVICE_FORM_FACTOR;
+
+typedef enum _STORAGE_COMPONENT_HEALTH_STATUS {
+    HealthStatusUnknown = 0,
+    HealthStatusNormal,
+    HealthStatusThrottled,
+    HealthStatusWarning,
+    HealthStatusDisabled,
+    HealthStatusFailed,
+} STORAGE_COMPONENT_HEALTH_STATUS, *PSTORAGE_COMPONENT_HEALTH_STATUS;
+
+typedef union _STORAGE_SPEC_VERSION {
+    struct {
+        union {
+            struct {
+                UCHAR   SubMinor;
+                UCHAR   Minor;
+            } DUMMYSTRUCTNAME;
+            USHORT  AsUshort;
+        } MinorVersion;
+        USHORT  MajorVersion;
+    } DUMMYSTRUCTNAME;
+    ULONG   AsUlong;
+} STORAGE_SPEC_VERSION, *PSTORAGE_SPEC_VERSION;
+
+typedef struct _STORAGE_PHYSICAL_DEVICE_DATA {
+    ULONG       DeviceId;
+    ULONG       Role;
+    STORAGE_COMPONENT_HEALTH_STATUS HealthStatus;
+    STORAGE_PROTOCOL_TYPE           CommandProtocol;
+    STORAGE_SPEC_VERSION            SpecVersion;
+    STORAGE_DEVICE_FORM_FACTOR      FormFactor;
+    UCHAR       Vendor[8];
+    UCHAR       Model[40];
+    UCHAR       FirmwareRevision[16];
+    ULONGLONG   Capacity;
+    UCHAR       PhysicalLocation[32];
+    ULONG       Reserved[2];
+} STORAGE_PHYSICAL_DEVICE_DATA, *PSTORAGE_PHYSICAL_DEVICE_DATA;
+
+typedef struct _STORAGE_PHYSICAL_ADAPTER_DATA {
+    ULONG       AdapterId;
+    STORAGE_COMPONENT_HEALTH_STATUS HealthStatus;
+    STORAGE_PROTOCOL_TYPE           CommandProtocol;
+    STORAGE_SPEC_VERSION            SpecVersion;
+    UCHAR       Vendor[8];
+    UCHAR       Model[40];
+    UCHAR       FirmwareRevision[16];
+    UCHAR       PhysicalLocation[32];
+    BOOLEAN     ExpanderConnected;
+    UCHAR       Reserved0[3];
+    ULONG       Reserved1[3];
+} STORAGE_PHYSICAL_ADAPTER_DATA, *PSTORAGE_PHYSICAL_ADAPTER_DATA;
+
+typedef struct _STORAGE_PHYSICAL_NODE_DATA {
+    ULONG       NodeId;
+    ULONG       AdapterCount;
+    ULONG       AdapterDataLength;
+    ULONG       AdapterDataOffset;
+    ULONG       DeviceCount;
+    ULONG       DeviceDataLength;
+    ULONG       DeviceDataOffset;
+    ULONG       Reserved[3];
+} STORAGE_PHYSICAL_NODE_DATA, *PSTORAGE_PHYSICAL_NODE_DATA;
+
+typedef struct _STORAGE_PHYSICAL_TOPOLOGY_DESCRIPTOR {
+    ULONG       Version;
+    ULONG       Size;
+    ULONG       NodeCount;
+    ULONG       Reserved;
+    STORAGE_PHYSICAL_NODE_DATA Node[ANYSIZE_ARRAY];
+} STORAGE_PHYSICAL_TOPOLOGY_DESCRIPTOR, *PSTORAGE_PHYSICAL_TOPOLOGY_DESCRIPTOR;
+
+typedef struct _DEVICE_DSM_NVCACHE_CHANGE_PRIORITY_PARAMETERS {
+    ULONG Size;
+    UCHAR TargetPriority;
+    UCHAR Reserved[3];
+} DEVICE_DSM_NVCACHE_CHANGE_PRIORITY_PARAMETERS, *PDEVICE_DSM_NVCACHE_CHANGE_PRIORITY_PARAMETERS;
+
+#define TC_PUBLIC_DEVICEDUMP_CONTENT_GPLOG_MAX  16
+
+#define DEVICE_DSM_PARAMETERS_V1                        1
+
+#define DEVICE_DATA_SET_LBP_STATE_PARAMETERS_VERSION_V1 DEVICE_DSM_PARAMETERS_V1
 
 #ifdef __cplusplus
 }

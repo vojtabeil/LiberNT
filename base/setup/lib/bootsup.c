@@ -11,6 +11,7 @@
 #include "precomp.h"
 
 #include <ntddstor.h> // For STORAGE_DEVICE_NUMBER
+#include <ntddscsi.h>
 
 #include "bldrsup.h"
 #include "devutils.h"
@@ -75,75 +76,12 @@ CreateFreeLoaderReactOSEntries(
 
     /* ReactOS */
     // BootEntry->BootEntryKey = MAKESTRKEY(L"ReactOS");
-    BootEntry->FriendlyName = L"\"ReactOS\"";
+    BootEntry->FriendlyName = L"\"LiberNT\"";
     Options->OsLoadOptions  = L"/FASTDETECT";
     AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS"));
 
-    /* ReactOS_Debug */
-    // BootEntry->BootEntryKey = MAKESTRKEY(L"ReactOS_Debug");
-    BootEntry->FriendlyName = L"\"ReactOS (Debug)\"";
-    Options->OsLoadOptions  = L"/DEBUG /DEBUGPORT=COM1 /BAUDRATE=115200 /SOS";
-    AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS_Debug"));
-
-#ifdef _WINKD_
-    /* ReactOS_VBoxDebug */
-    // BootEntry->BootEntryKey = MAKESTRKEY(L"ReactOS_VBoxDebug");
-    BootEntry->FriendlyName = L"\"ReactOS (VBox Debug)\"";
-    Options->OsLoadOptions  = L"/DEBUG /DEBUGPORT=VBOX /SOS";
-    AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS_VBoxDebug"));
-#endif
-#if DBG
-#ifndef _WINKD_
-    /* ReactOS_KdSerial */
-    // BootEntry->BootEntryKey = MAKESTRKEY(L"ReactOS_KdSerial");
-    BootEntry->FriendlyName = L"\"ReactOS (RosDbg)\"";
-    Options->OsLoadOptions  = L"/DEBUG /DEBUGPORT=COM1 /BAUDRATE=115200 /SOS /KDSERIAL";
-    AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS_KdSerial"));
-#endif
-
-    /* ReactOS_Screen */
-    // BootEntry->BootEntryKey = MAKESTRKEY(L"ReactOS_Screen");
-    BootEntry->FriendlyName = L"\"ReactOS (Screen)\"";
-    Options->OsLoadOptions  = L"/DEBUG /DEBUGPORT=SCREEN /SOS";
-    AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS_Screen"));
-
-    /* ReactOS_LogFile */
-    // BootEntry->BootEntryKey = MAKESTRKEY(L"ReactOS_LogFile");
-    BootEntry->FriendlyName = L"\"ReactOS (Log file)\"";
-    Options->OsLoadOptions  = L"/DEBUG /DEBUGPORT=FILE /SOS";
-    AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS_LogFile"));
-
-    /* ReactOS_Ram */
-    // BootEntry->BootEntryKey = MAKESTRKEY(L"ReactOS_Ram");
-    BootEntry->FriendlyName = L"\"ReactOS (RAM Disk)\"";
-    Options->OsLoadPath     = L"ramdisk(0)\\ReactOS";
-    Options->OsLoadOptions  = L"/DEBUG /DEBUGPORT=COM1 /BAUDRATE=115200 /SOS /RDPATH=reactos.img /RDIMAGEOFFSET=32256";
-    AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS_Ram"));
-
-    /* ReactOS_EMS */
-    // BootEntry->BootEntryKey = MAKESTRKEY(L"ReactOS_EMS");
-    BootEntry->FriendlyName = L"\"ReactOS (Emergency Management Services)\"";
-    Options->OsLoadPath     = ArcPath;
-    Options->OsLoadOptions  = L"/DEBUG /DEBUGPORT=COM1 /BAUDRATE=115200 /SOS /redirect=com2 /redirectbaudrate=115200";
-    AddBootStoreEntry(BootStoreHandle, BootEntry, MAKESTRKEY(L"ReactOS_EMS"));
-#endif
-
-
     /* DefaultOS=ReactOS */
-#if DBG && !defined(_WINKD_)
-    if (IsUnattendedSetup)
-    {
-        BootOptions.NextBootEntryKey = MAKESTRKEY(L"ReactOS_KdSerial");
-    }
-    else
-#endif
-    {
-#if DBG
-        BootOptions.NextBootEntryKey = MAKESTRKEY(L"ReactOS_Debug");
-#else
-        BootOptions.NextBootEntryKey = MAKESTRKEY(L"ReactOS");
-#endif
-    }
+    BootOptions.NextBootEntryKey = MAKESTRKEY(L"ReactOS");
 
 #if DBG
     if (IsUnattendedSetup)
@@ -386,7 +324,7 @@ SkipThisEntry:
         RtlStringCchPrintfW(Data->SectionName, ARRAYSIZE(Data->SectionName),
                             L"ReactOS_%lu", Data->i);
         RtlStringCchPrintfW(Data->OsName, ARRAYSIZE(Data->OsName),
-                            L"\"ReactOS %lu\"", Data->i);
+                            L"\"LiberNT %lu\"", Data->i);
         Data->i++;
     }
     return STATUS_SUCCESS;
@@ -416,7 +354,7 @@ UpdateFreeLoaderIni(
     Data.i = 1;
     Data.ArcPath = ArcPath;
     RtlStringCchCopyW(Data.SectionName, ARRAYSIZE(Data.SectionName), L"ReactOS");
-    RtlStringCchCopyW(Data.OsName, ARRAYSIZE(Data.OsName), L"\"ReactOS\"");
+    RtlStringCchCopyW(Data.OsName, ARRAYSIZE(Data.OsName), L"\"LiberNT\"");
 
     //
     // FIXME: We temporarily use EnumerateBootStoreEntries, until
@@ -428,7 +366,7 @@ UpdateFreeLoaderIni(
     if (!Data.UseExistingEntry)
     {
         // RtlStringCchPrintfW(Data.SectionName, ARRAYSIZE(Data.SectionName), L"ReactOS_%lu", Data.i);
-        // RtlStringCchPrintfW(Data.OsName, ARRAYSIZE(Data.OsName), L"\"ReactOS %lu\"", Data.i);
+        // RtlStringCchPrintfW(Data.OsName, ARRAYSIZE(Data.OsName), L"\"LiberNT %lu\"", Data.i);
 
         BootEntry->Version = FreeLdr;
         BootEntry->BootFilePath = NULL;
@@ -478,7 +416,7 @@ UpdateBootIni(
     // Data.i = 1;
     Data.ArcPath = EntryName;
     // RtlStringCchCopyW(Data.SectionName, ARRAYSIZE(Data.SectionName), L"ReactOS");
-    RtlStringCchCopyW(Data.OsName, ARRAYSIZE(Data.OsName), L"\"ReactOS\"");
+    RtlStringCchCopyW(Data.OsName, ARRAYSIZE(Data.OsName), L"\"LiberNT\"");
 
     //
     // FIXME: We temporarily use EnumerateBootStoreEntries, until
@@ -546,6 +484,21 @@ IsThereAValidBootSector(
     {
         /* Check for the first instruction encoded on three bytes */
         IsValid = (((*(PULONG)BootSector.BootCode) & 0x00FFFFFF) != 0x00000000);
+    }
+    if (IsValid)
+    {
+        PUCHAR Code = (PUCHAR)BootSector.BootCode;
+        ULONG Index;
+
+        IsValid = FALSE;
+        for (Index = 0x60; Index < 0x1FE; Index++)
+        {
+            if (Code[Index] != 0)
+            {
+                IsValid = TRUE;
+                break;
+            }
+        }
     }
 
     /* Free the bootsector and return */
@@ -658,21 +611,21 @@ InstallBootCodeToDisk(
     LockStatus = NtFsControlFile(PartitionHandle, NULL, NULL, NULL, &IoStatusBlock, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0);
     if (!NT_SUCCESS(LockStatus))
     {
-        DPRINT1("Unable to lock the volume before installing boot code. Status 0x%08x. Expect problems.\n", LockStatus);
+        DPRINT1("Unable to lock the volume before installing boot code. Status 0x%08x.\n", LockStatus);
+    }
+
+    Status = NtFsControlFile(PartitionHandle, NULL, NULL, NULL, &IoStatusBlock, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Unable to dismount the volume before installing boot code. Status 0x%08x.\n", Status);
     }
 
     /* Install the bootcode (MBR, VBR) */
     Status = InstallBootCode(SrcPath, PartitionHandle, PartitionHandle);
 
-    /* dismount & Unlock the volume */
+    /* Unlock the volume */
     if (NT_SUCCESS(LockStatus))
     {
-        LockStatus = NtFsControlFile(PartitionHandle, NULL, NULL, NULL, &IoStatusBlock, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
-        if (!NT_SUCCESS(LockStatus))
-        {
-            DPRINT1("Unable to dismount the volume after installing boot code. Status 0x%08x. Expect problems.\n", LockStatus);
-        }
-
         LockStatus = NtFsControlFile(PartitionHandle, NULL, NULL, NULL, &IoStatusBlock, FSCTL_UNLOCK_VOLUME, NULL, 0, NULL, 0);
         if (!NT_SUCCESS(LockStatus))
         {
@@ -891,6 +844,7 @@ InstallBootloaderFiles(
     WCHAR SrcPath[MAX_PATH];
     WCHAR DstPath[MAX_PATH];
 
+    /* FIXME: A preinstalled image has no \loader directory, so Setup started from it cannot write the BIOS boot code. */
     /* Copy FreeLoader to the system partition, always overwriting the older version */
     CombinePaths(SrcPath, ARRAYSIZE(SrcPath), 2, SourceRootPath->Buffer, L"\\loader\\freeldr.sys");
     CombinePaths(DstPath, ARRAYSIZE(DstPath), 2, SystemRootPath->Buffer, L"freeldr.sys");
@@ -918,6 +872,1158 @@ InstallBootloaderFiles(
     return STATUS_SUCCESS;
 }
 
+#define EFI_VARIABLE_BOOT_ATTRIBUTES    0x00000007
+#define EFI_LOAD_OPTION_ACTIVE          0x00000001
+#define EFI_LOAD_OPTION_HEADER_SIZE     6
+#define EFI_DEVICE_PATH_HEADER_SIZE     4
+#define EFI_MEDIA_DEVICE_PATH           0x04
+#define EFI_MEDIA_HARDDRIVE_DP          0x01
+#define EFI_MEDIA_FILEPATH_DP           0x04
+#define EFI_END_DEVICE_PATH_TYPE        0x7F
+#define EFI_END_ENTIRE_DEVICE_PATH      0xFF
+#define EFI_HARDDRIVE_NODE_SIZE         42
+#define EFI_HARDDRIVE_NUMBER_OFFSET     4
+#define EFI_HARDDRIVE_START_OFFSET      8
+#define EFI_HARDDRIVE_SIZE_OFFSET       16
+#define EFI_HARDDRIVE_SIGNATURE_OFFSET  24
+#define EFI_HARDDRIVE_FORMAT_OFFSET     40
+#define EFI_HARDDRIVE_TYPE_OFFSET       41
+#define EFI_PARTITION_FORMAT_MBR        0x01
+#define EFI_PARTITION_FORMAT_GPT        0x02
+#define EFI_SIGNATURE_TYPE_MBR          0x01
+#define EFI_SIGNATURE_TYPE_GUID         0x02
+#define EFI_LOAD_OPTION_MAX             4096
+#define EFI_BOOT_ORDER_MAX              512
+#define EFI_BOOT_OPTION_SEARCH_MAX      0x1000
+#define EFI_BOOT_MANAGER_DESCRIPTION    L"LiberNT Boot Manager"
+#define EFI_BOOT_MANAGER_FILE           L"\\EFI\\LiberNT\\Boot\\bootmgfw.efi"
+#define EFI_WINDOWS_BOOT_MANAGER_FILE   L"\\EFI\\Microsoft\\Boot\\bootmgfw.efi"
+#define EFI_HOST_SETUP_DIRECTORY        L"EFI\\LiberNT\\Setup"
+#define EFI_HOST_SETUP_MANAGER_FILE     L"\\EFI\\LiberNT\\Setup\\bootmgfw.efi"
+#define GPT_HEADER_ENTRIES_LBA_OFFSET   72
+#define GPT_HEADER_ENTRY_COUNT_OFFSET   80
+#define GPT_HEADER_ENTRY_SIZE_OFFSET    84
+#define GPT_ENTRY_PARTITION_ID_OFFSET   16
+#define GPT_ENTRY_MIN_SIZE              128
+#define GPT_ENTRY_MAX_COUNT             1024
+#define MBR_PARTITION_TABLE_OFFSET      446
+#define MBR_PARTITION_ENTRY_SIZE        16
+#define MBR_PARTITION_START_OFFSET      8
+
+static GUID EfiGlobalVariableGuid = {0x8BE4DF61, 0x93CA, 0x11D2, {0xAA, 0x0D, 0x00, 0xE0, 0x98, 0x03, 0x2B, 0x8C}};
+
+static
+BOOLEAN
+AreFilesIdentical(
+    _In_ PCWSTR FirstPath,
+    _In_ PCWSTR SecondPath)
+{
+    HANDLE FirstFile, FirstSection, SecondFile, SecondSection;
+    PVOID FirstBase, SecondBase;
+    ULONG FirstSize, SecondSize;
+    BOOLEAN Identical = FALSE;
+
+    if (!NT_SUCCESS(OpenAndMapFile(NULL, FirstPath, &FirstFile, &FirstSize, &FirstSection, &FirstBase, FALSE)))
+        return FALSE;
+
+    if (NT_SUCCESS(OpenAndMapFile(NULL, SecondPath, &SecondFile, &SecondSize, &SecondSection, &SecondBase, FALSE)))
+    {
+        Identical = (FirstSize == SecondSize) && RtlEqualMemory(FirstBase, SecondBase, FirstSize);
+        UnMapAndCloseFile(SecondFile, SecondSection, SecondBase);
+    }
+
+    UnMapAndCloseFile(FirstFile, FirstSection, FirstBase);
+    return Identical;
+}
+
+static
+VOID
+GetEfiLoaderSourceDir(
+    _In_ PCUNICODE_STRING SourceRootPath,
+    _Out_writes_(Chars) PWSTR SrcDir,
+    _In_ SIZE_T Chars)
+{
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SYSTEM\\Setup");
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"SystemPartition");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE KeyHandle;
+    NTSTATUS Status;
+    ULONG Length;
+    union
+    {
+        KEY_VALUE_PARTIAL_INFORMATION Info;
+        UCHAR Buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + MAX_PATH * sizeof(WCHAR)];
+    } Value;
+
+    CombinePaths(SrcDir, Chars, 2, SourceRootPath->Buffer, L"efi\\boot");
+    if (DoesDirExist(NULL, SrcDir))
+        return;
+
+    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenKey(&KeyHandle, KEY_QUERY_VALUE, &ObjectAttributes)))
+        return;
+
+    Status = NtQueryValueKey(KeyHandle, &ValueName, KeyValuePartialInformation,
+                             &Value, sizeof(Value) - sizeof(WCHAR), &Length);
+    NtClose(KeyHandle);
+    if (!NT_SUCCESS(Status) || Value.Info.Type != REG_SZ || Value.Info.DataLength < sizeof(WCHAR))
+        return;
+
+    ((PWCHAR)Value.Info.Data)[Value.Info.DataLength / sizeof(WCHAR)] = UNICODE_NULL;
+    CombinePaths(SrcDir, Chars, 2, (PCWSTR)Value.Info.Data, L"EFI\\BOOT");
+}
+
+static
+NTSTATUS
+InstallEfiLoaderFiles(
+    _In_ PCUNICODE_STRING SystemRootPath,
+    _In_ PCUNICODE_STRING SourceRootPath,
+    _In_ BOOLEAN KeepForeignFiles,
+    _Out_opt_ PBOOLEAN ForeignFilesKept)
+{
+    NTSTATUS Status;
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    HANDLE DirectoryHandle;
+    BOOLEAN RestartScan = TRUE;
+    WCHAR SrcDir[MAX_PATH];
+    WCHAR DstDir[MAX_PATH];
+    WCHAR SrcPath[MAX_PATH];
+    WCHAR DstPath[MAX_PATH];
+    WCHAR FileName[MAX_PATH];
+    WCHAR OwnManagerPath[MAX_PATH];
+    union
+    {
+        FILE_DIRECTORY_INFORMATION Info;
+        UCHAR Buffer[sizeof(FILE_DIRECTORY_INFORMATION) + MAX_PATH * sizeof(WCHAR)];
+    } Entry;
+
+    if (ForeignFilesKept)
+        *ForeignFilesKept = FALSE;
+
+    GetEfiLoaderSourceDir(SourceRootPath, SrcDir, ARRAYSIZE(SrcDir));
+    CombinePaths(DstDir, ARRAYSIZE(DstDir), 2, SystemRootPath->Buffer, L"EFI\\BOOT");
+    CombinePaths(OwnManagerPath, ARRAYSIZE(OwnManagerPath), 2, SystemRootPath->Buffer, &EFI_BOOT_MANAGER_FILE[1]);
+
+    RtlInitUnicodeString(&Name, SrcDir);
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &Name,
+                               OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               NULL);
+    Status = NtOpenFile(&DirectoryHandle,
+                        FILE_LIST_DIRECTORY | SYNCHRONIZE,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(Status))
+    {
+        if (Status != STATUS_OBJECT_NAME_NOT_FOUND && Status != STATUS_OBJECT_PATH_NOT_FOUND)
+            DPRINT1("NtOpenFile(%S) failed (Status 0x%08lx)\n", SrcDir, Status);
+        return STATUS_SUCCESS;
+    }
+
+    Status = SetupCreateDirectory(DstDir);
+    while (NT_SUCCESS(Status))
+    {
+        Status = NtQueryDirectoryFile(DirectoryHandle,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      &IoStatusBlock,
+                                      &Entry,
+                                      sizeof(Entry),
+                                      FileDirectoryInformation,
+                                      TRUE,
+                                      NULL,
+                                      RestartScan);
+        if (Status == STATUS_NO_MORE_FILES)
+        {
+            Status = STATUS_SUCCESS;
+            break;
+        }
+        if (!NT_SUCCESS(Status))
+            break;
+
+        RestartScan = FALSE;
+        if (Entry.Info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            continue;
+
+        RtlStringCchCopyNW(FileName, ARRAYSIZE(FileName),
+                           Entry.Info.FileName,
+                           Entry.Info.FileNameLength / sizeof(WCHAR));
+        CombinePaths(SrcPath, ARRAYSIZE(SrcPath), 2, SrcDir, FileName);
+        CombinePaths(DstPath, ARRAYSIZE(DstPath), 2, DstDir, FileName);
+
+        if (KeepForeignFiles &&
+            DoesFileExist(NULL, DstPath) &&
+            !AreFilesIdentical(DstPath, OwnManagerPath))
+        {
+            DPRINT1("Keep %S, which belongs to another operating system\n", DstPath);
+            if (ForeignFilesKept)
+                *ForeignFilesKept = TRUE;
+            continue;
+        }
+
+        DPRINT1("Copy: %S ==> %S\n", SrcPath, DstPath);
+        Status = SetupCopyFile(SrcPath, DstPath, FALSE);
+    }
+
+    NtClose(DirectoryHandle);
+    return Status;
+}
+
+#define BCD_DEVICE_ELEMENT_SIZE     0x58
+#define BCD_DEVICE_TYPE_OFFSET      0x10
+#define BCD_DEVICE_SIZE_OFFSET      0x18
+#define BCD_DEVICE_PARTITION_OFFSET 0x20
+#define BCD_DEVICE_STYLE_OFFSET     0x34
+#define BCD_DEVICE_DISK_OFFSET      0x38
+#define BCD_DEVICE_PARTITION        6
+#define BCD_DEVICE_BODY_SIZE        0x48
+#define BCD_PARTITION_STYLE_MBR     1
+#define BCD_BOOTMGR_OBJECT          L"{9dea862c-5cdd-4e70-acc1-f32b344d4795}"
+#define BCD_OSLOADER_OBJECT         L"{354fa6e5-5e45-49af-91bf-1fd2754e470a}"
+#define BCD_APPLICATION_DEVICE      L"11000001"
+#define BCD_OS_DEVICE               L"21000001"
+#define BCD_TEMPLATE_PATH           L"Windows\\System32\\config\\BCD-Template"
+#define BCD_BOOT_MANAGER_PATTERN    L"boot*.efi"
+#define BCD_RELATIVE_PARTITION      L"partition("
+#define BCD_SCSI_ADAPTER            L"scsi("
+#define BCD_SCSI_DISK               L")disk("
+#define BCD_SCSI_RDISK              L")rdisk("
+#define BCD_SCSI_PARTITION          L")partition("
+#define BCD_DISK_PREFIX             L"\\Harddisk"
+#define BCD_PARTITION_PREFIX        L"\\Partition"
+
+static
+BOOLEAN
+ParseArcPathNumber(
+    _Inout_ PCWSTR* Text,
+    _In_ PCWSTR Prefix,
+    _Out_ PULONG Value)
+{
+    SIZE_T Length = wcslen(Prefix);
+    PWSTR End;
+
+    if (_wcsnicmp(*Text, Prefix, Length) != 0)
+        return FALSE;
+
+    *Value = wcstoul(*Text + Length, &End, 10);
+    if (End == *Text + Length)
+        return FALSE;
+
+    *Text = End;
+    return TRUE;
+}
+
+static
+NTSTATUS
+GetScsiArcPathPartition(
+    _In_ PCWSTR ArcPath,
+    _Out_ PULONG DiskNumber,
+    _Out_ PULONG PartitionNumber)
+{
+    SYSTEM_DEVICE_INFORMATION DeviceInformation;
+    IO_STATUS_BLOCK IoStatusBlock;
+    SCSI_ADDRESS Address;
+    WCHAR Path[MAX_PATH];
+    ULONG Port, Bus, Target, Partition, i;
+    HANDLE Handle;
+    NTSTATUS Status;
+
+    if (!ParseArcPathNumber(&ArcPath, BCD_SCSI_ADAPTER, &Port) ||
+        !ParseArcPathNumber(&ArcPath, BCD_SCSI_DISK, &Bus) ||
+        !ParseArcPathNumber(&ArcPath, BCD_SCSI_RDISK, &Target) ||
+        !ParseArcPathNumber(&ArcPath, BCD_SCSI_PARTITION, &Partition))
+    {
+        return STATUS_OBJECT_PATH_SYNTAX_BAD;
+    }
+
+    Status = NtQuerySystemInformation(SystemDeviceInformation,
+                                      &DeviceInformation,
+                                      sizeof(DeviceInformation),
+                                      NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    for (i = 0; i < DeviceInformation.NumberOfDisks; i++)
+    {
+        RtlStringCchPrintfW(Path, ARRAYSIZE(Path), L"\\Device\\Harddisk%lu\\Partition0", i);
+        if (!NT_SUCCESS(pOpenDevice(Path, &Handle)))
+            continue;
+
+        Status = NtDeviceIoControlFile(Handle, NULL, NULL, NULL, &IoStatusBlock,
+                                       IOCTL_SCSI_GET_ADDRESS,
+                                       NULL, 0,
+                                       &Address, sizeof(Address));
+        NtClose(Handle);
+        if (NT_SUCCESS(Status) &&
+            Address.PortNumber == Port &&
+            Address.PathId == Bus &&
+            Address.TargetId == Target)
+        {
+            *DiskNumber = i;
+            *PartitionNumber = Partition;
+            return STATUS_SUCCESS;
+        }
+    }
+
+    return STATUS_OBJECT_PATH_NOT_FOUND;
+}
+
+static
+BOOLEAN
+FindPartitionByTablePosition(
+    _In_ const DRIVE_LAYOUT_INFORMATION_EX* Layout,
+    _In_ ULONG Position,
+    _Out_ PPARTITION_INFORMATION_EX Partition)
+{
+    ULONG Index, Count = 0;
+
+    for (Index = 0; Index < Layout->PartitionCount; Index++)
+    {
+        const PARTITION_INFORMATION_EX* Entry = &Layout->PartitionEntry[Index];
+
+        if (Entry->PartitionStyle == PARTITION_STYLE_MBR &&
+            (Entry->Mbr.PartitionType == PARTITION_ENTRY_UNUSED ||
+             IsContainerPartition(Entry->Mbr.PartitionType)))
+        {
+            continue;
+        }
+
+        if (++Count == Position)
+        {
+            *Partition = *Entry;
+            return TRUE;
+        }
+    }
+
+    return FALSE;
+}
+
+static
+NTSTATUS
+GetBcdPartitionElement(
+    _In_ ULONG DiskNumber,
+    _In_ ULONG PartitionNumber,
+    _In_ BOOLEAN TablePosition,
+    _Out_writes_bytes_(BCD_DEVICE_ELEMENT_SIZE) PUCHAR Element)
+{
+    union
+    {
+        DRIVE_LAYOUT_INFORMATION_EX Layout;
+        UCHAR Buffer[FIELD_OFFSET(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry) + 128 * sizeof(PARTITION_INFORMATION_EX)];
+    } Drive;
+    PARTITION_INFORMATION_EX Partition;
+    IO_STATUS_BLOCK IoStatusBlock;
+    WCHAR Path[MAX_PATH];
+    HANDLE Handle;
+    NTSTATUS Status;
+
+    if (!TablePosition)
+    {
+        RtlStringCchPrintfW(Path, ARRAYSIZE(Path), L"\\Device\\Harddisk%lu\\Partition%lu", DiskNumber, PartitionNumber);
+        Status = pOpenDevice(Path, &Handle);
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        Status = NtDeviceIoControlFile(Handle, NULL, NULL, NULL, &IoStatusBlock,
+                                       IOCTL_DISK_GET_PARTITION_INFO_EX,
+                                       NULL, 0, &Partition, sizeof(Partition));
+        NtClose(Handle);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+
+    RtlStringCchPrintfW(Path, ARRAYSIZE(Path), L"\\Device\\Harddisk%lu\\Partition0", DiskNumber);
+    Status = pOpenDevice(Path, &Handle);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtDeviceIoControlFile(Handle, NULL, NULL, NULL, &IoStatusBlock,
+                                   IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
+                                   NULL, 0, &Drive, sizeof(Drive));
+    NtClose(Handle);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (TablePosition && !FindPartitionByTablePosition(&Drive.Layout, PartitionNumber, &Partition))
+        return STATUS_OBJECT_PATH_NOT_FOUND;
+
+    RtlZeroMemory(Element, BCD_DEVICE_ELEMENT_SIZE);
+    *(PULONG)(Element + BCD_DEVICE_TYPE_OFFSET) = BCD_DEVICE_PARTITION;
+    *(PULONG)(Element + BCD_DEVICE_SIZE_OFFSET) = BCD_DEVICE_BODY_SIZE;
+
+    if (Partition.PartitionStyle == PARTITION_STYLE_GPT)
+    {
+        RtlCopyMemory(Element + BCD_DEVICE_PARTITION_OFFSET, &Partition.Gpt.PartitionId, sizeof(GUID));
+        RtlCopyMemory(Element + BCD_DEVICE_DISK_OFFSET, &Drive.Layout.Gpt.DiskId, sizeof(GUID));
+    }
+    else
+    {
+        *(PULONGLONG)(Element + BCD_DEVICE_PARTITION_OFFSET) = Partition.StartingOffset.QuadPart;
+        *(PULONG)(Element + BCD_DEVICE_STYLE_OFFSET) = BCD_PARTITION_STYLE_MBR;
+        *(PULONG)(Element + BCD_DEVICE_DISK_OFFSET) = Drive.Layout.Mbr.Signature;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+SetBcdElement(
+    _In_ PCWSTR Object,
+    _In_ PCWSTR Element,
+    _In_reads_bytes_(BCD_DEVICE_ELEMENT_SIZE) PUCHAR Data)
+{
+    static UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"Element");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UNICODE_STRING KeyName;
+    WCHAR Path[MAX_PATH];
+    HANDLE Key;
+    NTSTATUS Status;
+
+    RtlStringCchPrintfW(Path, ARRAYSIZE(Path),
+                        L"\\Registry\\Machine\\SetupBcd\\Objects\\%s\\Elements\\%s",
+                        Object, Element);
+    RtlInitUnicodeString(&KeyName, Path);
+    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    Status = NtCreateKey(&Key, KEY_SET_VALUE, &ObjectAttributes, 0, NULL, REG_OPTION_BACKUP_RESTORE, NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtSetValueKey(Key, &ValueName, 0, REG_BINARY, Data, BCD_DEVICE_ELEMENT_SIZE);
+    NtClose(Key);
+    return Status;
+}
+
+static
+NTSTATUS
+GetPartitionDeviceNumber(
+    _In_ PCUNICODE_STRING RootPath,
+    _Out_ PSTORAGE_DEVICE_NUMBER DeviceNumber)
+{
+    UNICODE_STRING RootPartition = *RootPath;
+    IO_STATUS_BLOCK IoStatusBlock;
+    HANDLE Handle;
+    NTSTATUS Status;
+
+    TrimTrailingPathSeparators_UStr(&RootPartition);
+    Status = pOpenDeviceEx_UStr(&RootPartition, &Handle, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtDeviceIoControlFile(Handle, NULL, NULL, NULL, &IoStatusBlock,
+                                   IOCTL_STORAGE_GET_DEVICE_NUMBER,
+                                   NULL, 0, DeviceNumber, sizeof(*DeviceNumber));
+    NtClose(Handle);
+    return Status;
+}
+
+static
+NTSTATUS
+InstallBcdStore(
+    _In_ PCUNICODE_STRING SystemRootPath,
+    _In_ PCWSTR TemplatePath,
+    _In_ PCWSTR BootManagerPath,
+    _In_ PCUNICODE_STRING DestinationArcPath)
+{
+    static UNICODE_STRING MountPoint = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\SetupBcd");
+    OBJECT_ATTRIBUTES KeyAttributes, FileAttributes;
+    UCHAR SystemElement[BCD_DEVICE_ELEMENT_SIZE];
+    UCHAR OsElement[BCD_DEVICE_ELEMENT_SIZE];
+    STORAGE_DEVICE_NUMBER DeviceNumber;
+    UNICODE_STRING FileName;
+    UNICODE_STRING NtPath;
+    WCHAR StorePath[MAX_PATH];
+    WCHAR Path[MAX_PATH];
+    PCWSTR Text;
+    ULONG Disk, Number;
+    BOOLEAN PrivilegeSet[2] = {FALSE, FALSE};
+    NTSTATUS Status;
+
+    Status = GetPartitionDeviceNumber(SystemRootPath, &DeviceNumber);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = GetBcdPartitionElement(DeviceNumber.DeviceNumber, DeviceNumber.PartitionNumber, FALSE, SystemElement);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Text = DestinationArcPath->Buffer;
+    Disk = DeviceNumber.DeviceNumber;
+    Number = DeviceNumber.PartitionNumber;
+
+    if (_wcsnicmp(Text, BCD_RELATIVE_PARTITION, ARRAYSIZE(BCD_RELATIVE_PARTITION) - 1) == 0)
+    {
+        Number = wcstoul(Text + ARRAYSIZE(BCD_RELATIVE_PARTITION) - 1, NULL, 10);
+    }
+    else if (_wcsnicmp(Text, BCD_SCSI_ADAPTER, ARRAYSIZE(BCD_SCSI_ADAPTER) - 1) == 0)
+    {
+        Status = GetScsiArcPathPartition(Text, &Disk, &Number);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
+    else if (*Text != UNICODE_NULL && *Text != OBJ_NAME_PATH_SEPARATOR)
+    {
+        RtlInitEmptyUnicodeString(&NtPath, Path, sizeof(Path));
+        if (!ArcPathToNtPath(&NtPath, Text, NULL))
+            return STATUS_OBJECT_PATH_NOT_FOUND;
+
+        Text = wcsstr(Path, BCD_DISK_PREFIX);
+        if (!Text)
+            return STATUS_OBJECT_PATH_SYNTAX_BAD;
+        Disk = wcstoul(Text + ARRAYSIZE(BCD_DISK_PREFIX) - 1, NULL, 10);
+
+        Text = wcsstr(Text, BCD_PARTITION_PREFIX);
+        if (!Text)
+            return STATUS_OBJECT_PATH_SYNTAX_BAD;
+        Number = wcstoul(Text + ARRAYSIZE(BCD_PARTITION_PREFIX) - 1, NULL, 10);
+    }
+
+    Status = GetBcdPartitionElement(Disk, Number, *DestinationArcPath->Buffer != UNICODE_NULL && *DestinationArcPath->Buffer != OBJ_NAME_PATH_SEPARATOR, OsElement);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    CombinePaths(Path, ARRAYSIZE(Path), 2, SystemRootPath->Buffer, L"EFI\\LiberNT\\Boot");
+    Status = SetupCreateDirectory(Path);
+    if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_COLLISION)
+        return Status;
+
+    CombinePaths(Path, ARRAYSIZE(Path), 2, SystemRootPath->Buffer, L"EFI\\LiberNT\\Boot\\bootmgfw.efi");
+    Status = SetupCopyFile(BootManagerPath, Path, FALSE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    CombinePaths(StorePath, ARRAYSIZE(StorePath), 2, SystemRootPath->Buffer, L"EFI\\LiberNT\\Boot\\BCD");
+    Status = SetupCopyFile(TemplatePath, StorePath, FALSE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    RtlInitUnicodeString(&FileName, StorePath);
+    InitializeObjectAttributes(&KeyAttributes, &MountPoint, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    InitializeObjectAttributes(&FileAttributes, &FileName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    Status = RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, TRUE, FALSE, &PrivilegeSet[0]);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = RtlAdjustPrivilege(SE_BACKUP_PRIVILEGE, TRUE, FALSE, &PrivilegeSet[1]);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtLoadKey(&KeyAttributes, &FileAttributes);
+        if (NT_SUCCESS(Status))
+        {
+            Status = SetBcdElement(BCD_BOOTMGR_OBJECT, BCD_APPLICATION_DEVICE, SystemElement);
+            if (NT_SUCCESS(Status))
+                Status = SetBcdElement(BCD_OSLOADER_OBJECT, BCD_APPLICATION_DEVICE, OsElement);
+            if (NT_SUCCESS(Status))
+                Status = SetBcdElement(BCD_OSLOADER_OBJECT, BCD_OS_DEVICE, OsElement);
+
+            NtUnloadKey(&KeyAttributes);
+        }
+
+        RtlAdjustPrivilege(SE_BACKUP_PRIVILEGE, PrivilegeSet[1], FALSE, &PrivilegeSet[1]);
+    }
+
+    RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, PrivilegeSet[0], FALSE, &PrivilegeSet[0]);
+    return Status;
+}
+
+static
+NTSTATUS
+ReadDiskBytes(
+    _In_ HANDLE Handle,
+    _In_ ULONGLONG Offset,
+    _In_ ULONG Length,
+    _Out_ PVOID* Buffer)
+{
+    IO_STATUS_BLOCK IoStatusBlock;
+    LARGE_INTEGER FileOffset;
+    NTSTATUS Status;
+
+    *Buffer = RtlAllocateHeap(ProcessHeap, 0, Length);
+    if (!*Buffer)
+        return STATUS_NO_MEMORY;
+
+    FileOffset.QuadPart = Offset;
+    Status = NtReadFile(Handle, NULL, NULL, NULL, &IoStatusBlock, *Buffer, Length, &FileOffset, NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeHeap(ProcessHeap, 0, *Buffer);
+        *Buffer = NULL;
+    }
+
+    return Status;
+}
+
+static
+NTSTATUS
+GetFirmwarePartitionNode(
+    _In_ ULONG DiskNumber,
+    _In_ ULONG PartitionNumber,
+    _Out_writes_bytes_(EFI_HARDDRIVE_NODE_SIZE) PUCHAR Node)
+{
+    union
+    {
+        DRIVE_LAYOUT_INFORMATION_EX Layout;
+        UCHAR Buffer[FIELD_OFFSET(DRIVE_LAYOUT_INFORMATION_EX, PartitionEntry) + 128 * sizeof(PARTITION_INFORMATION_EX)];
+    } Drive;
+    PARTITION_INFORMATION_EX Partition;
+    DISK_GEOMETRY Geometry;
+    IO_STATUS_BLOCK IoStatusBlock;
+    WCHAR Path[MAX_PATH];
+    PUCHAR Header = NULL, Entries = NULL;
+    ULONGLONG EntriesLba;
+    ULONG EntryCount, EntrySize, Slot = 0, i;
+    HANDLE Handle;
+    NTSTATUS Status;
+
+    RtlStringCchPrintfW(Path, ARRAYSIZE(Path), L"\\Device\\Harddisk%lu\\Partition%lu", DiskNumber, PartitionNumber);
+    Status = pOpenDevice(Path, &Handle);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtDeviceIoControlFile(Handle, NULL, NULL, NULL, &IoStatusBlock,
+                                   IOCTL_DISK_GET_PARTITION_INFO_EX,
+                                   NULL, 0, &Partition, sizeof(Partition));
+    NtClose(Handle);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    RtlStringCchPrintfW(Path, ARRAYSIZE(Path), L"\\Device\\Harddisk%lu\\Partition0", DiskNumber);
+    Status = pOpenDevice(Path, &Handle);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtDeviceIoControlFile(Handle, NULL, NULL, NULL, &IoStatusBlock,
+                                   IOCTL_DISK_GET_DRIVE_GEOMETRY,
+                                   NULL, 0, &Geometry, sizeof(Geometry));
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtDeviceIoControlFile(Handle, NULL, NULL, NULL, &IoStatusBlock,
+                                       IOCTL_DISK_GET_DRIVE_LAYOUT_EX,
+                                       NULL, 0, &Drive, sizeof(Drive));
+    }
+    if (NT_SUCCESS(Status) && Geometry.BytesPerSector == 0)
+        Status = STATUS_INVALID_DEVICE_STATE;
+    if (NT_SUCCESS(Status))
+        Status = ReadDiskBytes(Handle, Partition.PartitionStyle == PARTITION_STYLE_GPT ? Geometry.BytesPerSector : 0,
+                               Geometry.BytesPerSector, (PVOID*)&Header);
+
+    if (NT_SUCCESS(Status) && Partition.PartitionStyle == PARTITION_STYLE_GPT)
+    {
+        EntriesLba = *(PULONGLONG)(Header + GPT_HEADER_ENTRIES_LBA_OFFSET);
+        EntryCount = *(PULONG)(Header + GPT_HEADER_ENTRY_COUNT_OFFSET);
+        EntrySize = *(PULONG)(Header + GPT_HEADER_ENTRY_SIZE_OFFSET);
+        if (EntrySize < GPT_ENTRY_MIN_SIZE || EntryCount == 0 || EntryCount > GPT_ENTRY_MAX_COUNT)
+            Status = STATUS_DISK_CORRUPT_ERROR;
+        else
+            Status = ReadDiskBytes(Handle, EntriesLba * Geometry.BytesPerSector,
+                                   ALIGN_UP_BY(EntryCount * EntrySize, Geometry.BytesPerSector),
+                                   (PVOID*)&Entries);
+
+        for (i = 0; NT_SUCCESS(Status) && i < EntryCount && Slot == 0; i++)
+        {
+            if (RtlEqualMemory(Entries + i * EntrySize + GPT_ENTRY_PARTITION_ID_OFFSET,
+                               &Partition.Gpt.PartitionId, sizeof(GUID)))
+            {
+                Slot = i + 1;
+            }
+        }
+    }
+    else if (NT_SUCCESS(Status))
+    {
+        for (i = 0; i < 4 && Slot == 0; i++)
+        {
+            if ((ULONGLONG)*(PULONG)(Header + MBR_PARTITION_TABLE_OFFSET + i * MBR_PARTITION_ENTRY_SIZE +
+                                     MBR_PARTITION_START_OFFSET) * Geometry.BytesPerSector ==
+                (ULONGLONG)Partition.StartingOffset.QuadPart)
+            {
+                Slot = i + 1;
+            }
+        }
+    }
+
+    NtClose(Handle);
+    if (Entries)
+        RtlFreeHeap(ProcessHeap, 0, Entries);
+    if (Header)
+        RtlFreeHeap(ProcessHeap, 0, Header);
+
+    if (NT_SUCCESS(Status) && Slot == 0)
+        Status = STATUS_NOT_FOUND;
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    RtlZeroMemory(Node, EFI_HARDDRIVE_NODE_SIZE);
+    Node[0] = EFI_MEDIA_DEVICE_PATH;
+    Node[1] = EFI_MEDIA_HARDDRIVE_DP;
+    *(PUSHORT)(Node + 2) = EFI_HARDDRIVE_NODE_SIZE;
+    *(PULONG)(Node + EFI_HARDDRIVE_NUMBER_OFFSET) = Slot;
+    *(PULONGLONG)(Node + EFI_HARDDRIVE_START_OFFSET) = Partition.StartingOffset.QuadPart / Geometry.BytesPerSector;
+    *(PULONGLONG)(Node + EFI_HARDDRIVE_SIZE_OFFSET) = Partition.PartitionLength.QuadPart / Geometry.BytesPerSector;
+
+    if (Partition.PartitionStyle == PARTITION_STYLE_GPT)
+    {
+        RtlCopyMemory(Node + EFI_HARDDRIVE_SIGNATURE_OFFSET, &Partition.Gpt.PartitionId, sizeof(GUID));
+        Node[EFI_HARDDRIVE_FORMAT_OFFSET] = EFI_PARTITION_FORMAT_GPT;
+        Node[EFI_HARDDRIVE_TYPE_OFFSET] = EFI_SIGNATURE_TYPE_GUID;
+    }
+    else
+    {
+        *(PULONG)(Node + EFI_HARDDRIVE_SIGNATURE_OFFSET) = Drive.Layout.Mbr.Signature;
+        Node[EFI_HARDDRIVE_FORMAT_OFFSET] = EFI_PARTITION_FORMAT_MBR;
+        Node[EFI_HARDDRIVE_TYPE_OFFSET] = EFI_SIGNATURE_TYPE_MBR;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+static
+NTSTATUS
+QueryFirmwareVariable(
+    _In_ PCWSTR Name,
+    _Out_writes_bytes_opt_(*Length) PVOID Value,
+    _Inout_ PULONG Length)
+{
+    UNICODE_STRING VariableName;
+
+    RtlInitUnicodeString(&VariableName, Name);
+    return NtQuerySystemEnvironmentValueEx(&VariableName, &EfiGlobalVariableGuid, Value, Length, NULL);
+}
+
+static
+NTSTATUS
+SetFirmwareVariable(
+    _In_ PCWSTR Name,
+    _In_reads_bytes_(Length) PVOID Value,
+    _In_ ULONG Length)
+{
+    UNICODE_STRING VariableName;
+
+    RtlInitUnicodeString(&VariableName, Name);
+    return NtSetSystemEnvironmentValueEx(&VariableName, &EfiGlobalVariableGuid, Value, Length,
+                                         EFI_VARIABLE_BOOT_ATTRIBUTES);
+}
+
+static
+BOOLEAN
+IsSameLoadOption(
+    _In_reads_bytes_(OptionLength) const UCHAR* Option,
+    _In_ ULONG OptionLength,
+    _In_reads_bytes_(FilePathLength) const UCHAR* FilePath,
+    _In_ USHORT FilePathLength)
+{
+    ULONG Offset = EFI_LOAD_OPTION_HEADER_SIZE;
+
+    if (OptionLength < EFI_LOAD_OPTION_HEADER_SIZE ||
+        *(const USHORT*)(Option + sizeof(ULONG)) != FilePathLength)
+    {
+        return FALSE;
+    }
+
+    while (Offset + sizeof(WCHAR) <= OptionLength && *(const WCHAR*)(Option + Offset) != UNICODE_NULL)
+        Offset += sizeof(WCHAR);
+    Offset += sizeof(WCHAR);
+
+    return Offset + FilePathLength <= OptionLength &&
+           RtlEqualMemory(Option + Offset, FilePath, FilePathLength);
+}
+
+static
+BOOLEAN
+IsLoadOptionForFile(
+    _In_reads_bytes_(OptionLength) const UCHAR* Option,
+    _In_ ULONG OptionLength,
+    _In_ PCWSTR File)
+{
+    ULONG Offset = EFI_LOAD_OPTION_HEADER_SIZE, End, NodeLength, Chars;
+
+    if (OptionLength < EFI_LOAD_OPTION_HEADER_SIZE)
+        return FALSE;
+
+    while (Offset + sizeof(WCHAR) <= OptionLength && *(const WCHAR*)(Option + Offset) != UNICODE_NULL)
+        Offset += sizeof(WCHAR);
+    Offset += sizeof(WCHAR);
+
+    End = Offset + *(const USHORT*)(Option + sizeof(ULONG));
+    if (End > OptionLength)
+        return FALSE;
+
+    while (Offset + EFI_DEVICE_PATH_HEADER_SIZE <= End && Option[Offset] != EFI_END_DEVICE_PATH_TYPE)
+    {
+        NodeLength = *(const USHORT*)(Option + Offset + 2);
+        if (NodeLength < EFI_DEVICE_PATH_HEADER_SIZE || Offset + NodeLength > End)
+            return FALSE;
+
+        if (Option[Offset] == EFI_MEDIA_DEVICE_PATH && Option[Offset + 1] == EFI_MEDIA_FILEPATH_DP)
+        {
+            Chars = (NodeLength - EFI_DEVICE_PATH_HEADER_SIZE) / sizeof(WCHAR);
+            while (Chars && ((const WCHAR*)(Option + Offset + EFI_DEVICE_PATH_HEADER_SIZE))[Chars - 1] == UNICODE_NULL)
+                Chars--;
+            if (Chars == wcslen(File) &&
+                _wcsnicmp((const WCHAR*)(Option + Offset + EFI_DEVICE_PATH_HEADER_SIZE), File, Chars) == 0)
+            {
+                return TRUE;
+            }
+        }
+        Offset += NodeLength;
+    }
+
+    return FALSE;
+}
+
+static
+NTSTATUS
+InstallFirmwareBootEntry(
+    _In_ PCUNICODE_STRING SystemRootPath,
+    _In_ ULONG_PTR Options)
+{
+    BOOLEAN AfterWindows = !!(Options & BOOT_OPTION_AFTER_WINDOWS);
+    STORAGE_DEVICE_NUMBER DeviceNumber;
+    UCHAR Option[EFI_LOAD_OPTION_MAX];
+    UCHAR Existing[EFI_LOAD_OPTION_MAX];
+    USHORT Order[EFI_BOOT_ORDER_MAX / sizeof(USHORT) + 1];
+    PUCHAR FilePath, Node;
+    WCHAR Name[16];
+    ULONG DescriptionSize, FileSize, OptionSize, Length, OrderCount, Number = 0, Position = 0, i, j;
+    USHORT FilePathLength, Next;
+    BOOLEAN Found = FALSE, PrivilegeSet = FALSE;
+    NTSTATUS Status, NextStatus;
+
+    Status = GetPartitionDeviceNumber(SystemRootPath, &DeviceNumber);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    DescriptionSize = sizeof(EFI_BOOT_MANAGER_DESCRIPTION);
+    FileSize = sizeof(EFI_BOOT_MANAGER_FILE);
+    FilePathLength = (USHORT)(EFI_HARDDRIVE_NODE_SIZE + EFI_DEVICE_PATH_HEADER_SIZE + FileSize +
+                              EFI_DEVICE_PATH_HEADER_SIZE);
+    OptionSize = EFI_LOAD_OPTION_HEADER_SIZE + DescriptionSize + FilePathLength;
+
+    RtlZeroMemory(Option, sizeof(Option));
+    *(PULONG)Option = EFI_LOAD_OPTION_ACTIVE;
+    *(PUSHORT)(Option + sizeof(ULONG)) = FilePathLength;
+    RtlCopyMemory(Option + EFI_LOAD_OPTION_HEADER_SIZE, EFI_BOOT_MANAGER_DESCRIPTION, DescriptionSize);
+
+    FilePath = Option + EFI_LOAD_OPTION_HEADER_SIZE + DescriptionSize;
+    Status = GetFirmwarePartitionNode(DeviceNumber.DeviceNumber, DeviceNumber.PartitionNumber, FilePath);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Node = FilePath + EFI_HARDDRIVE_NODE_SIZE;
+    Node[0] = EFI_MEDIA_DEVICE_PATH;
+    Node[1] = EFI_MEDIA_FILEPATH_DP;
+    *(PUSHORT)(Node + 2) = (USHORT)(EFI_DEVICE_PATH_HEADER_SIZE + FileSize);
+    RtlCopyMemory(Node + EFI_DEVICE_PATH_HEADER_SIZE, EFI_BOOT_MANAGER_FILE, FileSize);
+
+    Node += EFI_DEVICE_PATH_HEADER_SIZE + FileSize;
+    Node[0] = EFI_END_DEVICE_PATH_TYPE;
+    Node[1] = EFI_END_ENTIRE_DEVICE_PATH;
+    *(PUSHORT)(Node + 2) = EFI_DEVICE_PATH_HEADER_SIZE;
+
+    Status = RtlAdjustPrivilege(SE_SYSTEM_ENVIRONMENT_PRIVILEGE, TRUE, FALSE, &PrivilegeSet);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Length = EFI_BOOT_ORDER_MAX;
+    Status = QueryFirmwareVariable(L"BootOrder", Order, &Length);
+    if (Status == STATUS_VARIABLE_NOT_FOUND)
+    {
+        Length = 0;
+        Status = STATUS_SUCCESS;
+    }
+    OrderCount = Length / sizeof(USHORT);
+
+    for (i = 0; NT_SUCCESS(Status) && i < OrderCount && !Found; i++)
+    {
+        RtlStringCchPrintfW(Name, ARRAYSIZE(Name), L"Boot%04X", Order[i]);
+        Length = sizeof(Existing);
+        if (NT_SUCCESS(QueryFirmwareVariable(Name, Existing, &Length)) &&
+            IsSameLoadOption(Existing, Length, FilePath, FilePathLength))
+        {
+            Number = Order[i];
+            Found = TRUE;
+        }
+    }
+
+    if (NT_SUCCESS(Status) && !Found)
+    {
+        for (Number = 0; Number < EFI_BOOT_OPTION_SEARCH_MAX; Number++)
+        {
+            RtlStringCchPrintfW(Name, ARRAYSIZE(Name), L"Boot%04X", Number);
+            Length = 0;
+            if (QueryFirmwareVariable(Name, NULL, &Length) == STATUS_VARIABLE_NOT_FOUND)
+                break;
+        }
+
+        if (Number >= EFI_BOOT_OPTION_SEARCH_MAX)
+            Status = STATUS_NO_MORE_ENTRIES;
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        RtlStringCchPrintfW(Name, ARRAYSIZE(Name), L"Boot%04X", Number);
+        Status = SetFirmwareVariable(Name, Option, OptionSize);
+    }
+
+    if (NT_SUCCESS(Status) && !(Found && (Options & BOOT_OPTION_KEEP_ORDER)))
+    {
+        for (i = 0, j = 0; i < OrderCount; i++)
+        {
+            if (Order[i] != Number)
+                Order[j++] = Order[i];
+        }
+        for (i = 0; AfterWindows && i < j; i++)
+        {
+            RtlStringCchPrintfW(Name, ARRAYSIZE(Name), L"Boot%04X", Order[i]);
+            Length = sizeof(Existing);
+            if (NT_SUCCESS(QueryFirmwareVariable(Name, Existing, &Length)) &&
+                IsLoadOptionForFile(Existing, Length, EFI_WINDOWS_BOOT_MANAGER_FILE))
+            {
+                Position = i + 1;
+                break;
+            }
+        }
+        RtlMoveMemory(&Order[Position + 1], &Order[Position], (j - Position) * sizeof(USHORT));
+        Order[Position] = (USHORT)Number;
+        Status = SetFirmwareVariable(L"BootOrder", Order, (j + 1) * sizeof(USHORT));
+    }
+
+    if (NT_SUCCESS(Status) && AfterWindows)
+    {
+        Next = (USHORT)Number;
+        NextStatus = SetFirmwareVariable(L"BootNext", &Next, sizeof(Next));
+        DPRINT1("Boot%04X starts once after Setup: 0x%08lx\n", Next, NextStatus);
+    }
+
+    RtlAdjustPrivilege(SE_SYSTEM_ENVIRONMENT_PRIVILEGE, PrivilegeSet, FALSE, &PrivilegeSet);
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+RemoveHostSetupBoot(
+    _In_ PCUNICODE_STRING SystemRootPath)
+{
+    static const PCWSTR Files[] = { L"bootmgfw.efi", L"winload.efi", L"BCD" };
+    UCHAR Option[EFI_LOAD_OPTION_MAX];
+    USHORT Order[EFI_BOOT_ORDER_MAX / sizeof(USHORT) + 1];
+    FILE_DISPOSITION_INFORMATION Disposition;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    UNICODE_STRING Name;
+    WCHAR Variable[16], Path[MAX_PATH];
+    ULONG Length, OrderCount = 0, Number, i, j;
+    BOOLEAN PrivilegeSet = FALSE, OrderChanged = FALSE;
+    HANDLE Directory;
+    NTSTATUS Status, Result = STATUS_SUCCESS;
+
+    Status = RtlAdjustPrivilege(SE_SYSTEM_ENVIRONMENT_PRIVILEGE, TRUE, FALSE, &PrivilegeSet);
+    if (NT_SUCCESS(Status))
+    {
+        Length = EFI_BOOT_ORDER_MAX;
+        if (NT_SUCCESS(QueryFirmwareVariable(L"BootOrder", Order, &Length)))
+            OrderCount = Length / sizeof(USHORT);
+
+        for (Number = 0; Number < EFI_BOOT_OPTION_SEARCH_MAX; Number++)
+        {
+            RtlStringCchPrintfW(Variable, ARRAYSIZE(Variable), L"Boot%04X", Number);
+            Length = sizeof(Option);
+            if (!NT_SUCCESS(QueryFirmwareVariable(Variable, Option, &Length)) ||
+                !IsLoadOptionForFile(Option, Length, EFI_HOST_SETUP_MANAGER_FILE))
+            {
+                continue;
+            }
+
+            Status = SetFirmwareVariable(Variable, NULL, 0);
+            DPRINT1("Firmware option %S of Setup started on Windows removed: 0x%08lx\n", Variable, Status);
+            if (!NT_SUCCESS(Status) && NT_SUCCESS(Result))
+                Result = Status;
+            for (i = 0, j = 0; i < OrderCount; i++)
+            {
+                if (Order[i] != Number)
+                    Order[j++] = Order[i];
+            }
+            OrderChanged = OrderChanged || j != OrderCount;
+            OrderCount = j;
+        }
+
+        if (OrderChanged)
+        {
+            Status = SetFirmwareVariable(L"BootOrder", Order, OrderCount * sizeof(USHORT));
+            if (!NT_SUCCESS(Status) && NT_SUCCESS(Result))
+                Result = Status;
+        }
+        RtlAdjustPrivilege(SE_SYSTEM_ENVIRONMENT_PRIVILEGE, PrivilegeSet, FALSE, &PrivilegeSet);
+    }
+    else
+    {
+        Result = Status;
+    }
+
+    for (i = 0; i < ARRAYSIZE(Files); i++)
+    {
+        CombinePaths(Path, ARRAYSIZE(Path), 3, SystemRootPath->Buffer, EFI_HOST_SETUP_DIRECTORY, Files[i]);
+        Status = SetupDeleteFile(Path, TRUE);
+        if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND &&
+            Status != STATUS_OBJECT_PATH_NOT_FOUND && NT_SUCCESS(Result))
+        {
+            Result = Status;
+        }
+    }
+
+    CombinePaths(Path, ARRAYSIZE(Path), 2, SystemRootPath->Buffer, EFI_HOST_SETUP_DIRECTORY);
+    RtlInitUnicodeString(&Name, Path);
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&Directory, DELETE | SYNCHRONIZE, &ObjectAttributes, &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT);
+    if (NT_SUCCESS(Status))
+    {
+        Disposition.DeleteFile = TRUE;
+        Status = NtSetInformationFile(Directory, &IoStatusBlock, &Disposition, sizeof(Disposition),
+                                      FileDispositionInformation);
+        NtClose(Directory);
+    }
+    if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND &&
+        Status != STATUS_OBJECT_PATH_NOT_FOUND && NT_SUCCESS(Result))
+    {
+        Result = Status;
+    }
+    return Result;
+}
+
+static
+BOOLEAN
+InstallBcdFromTemplate(
+    _In_ PCUNICODE_STRING SystemRootPath,
+    _In_ PCUNICODE_STRING SourceRootPath,
+    _In_ PCUNICODE_STRING DestinationArcPath,
+    _In_ ULONG_PTR Options,
+    _Out_opt_ PBOOLEAN FirmwareEntry,
+    _Out_ PNTSTATUS Status)
+{
+    static UNICODE_STRING Pattern = RTL_CONSTANT_STRING(BCD_BOOT_MANAGER_PATTERN);
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    UNICODE_STRING Name;
+    WCHAR TemplatePath[MAX_PATH];
+    WCHAR SrcDir[MAX_PATH];
+    WCHAR BootManagerPath[MAX_PATH];
+    WCHAR FileName[MAX_PATH];
+    HANDLE DirectoryHandle;
+    NTSTATUS EntryStatus;
+    union
+    {
+        FILE_DIRECTORY_INFORMATION Info;
+        UCHAR Buffer[sizeof(FILE_DIRECTORY_INFORMATION) + MAX_PATH * sizeof(WCHAR)];
+    } Entry;
+
+    *Status = STATUS_SUCCESS;
+    if (FirmwareEntry)
+        *FirmwareEntry = FALSE;
+
+    CombinePaths(TemplatePath, ARRAYSIZE(TemplatePath), 2, SourceRootPath->Buffer, BCD_TEMPLATE_PATH);
+    if (!DoesFileExist(NULL, TemplatePath))
+        return FALSE;
+
+    GetEfiLoaderSourceDir(SourceRootPath, SrcDir, ARRAYSIZE(SrcDir));
+    RtlInitUnicodeString(&Name, SrcDir);
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    *Status = NtOpenFile(&DirectoryHandle,
+                         FILE_LIST_DIRECTORY | SYNCHRONIZE,
+                         &ObjectAttributes,
+                         &IoStatusBlock,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE,
+                         FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(*Status))
+        return TRUE;
+
+    *Status = NtQueryDirectoryFile(DirectoryHandle, NULL, NULL, NULL, &IoStatusBlock,
+                                   &Entry, sizeof(Entry), FileDirectoryInformation,
+                                   TRUE, &Pattern, TRUE);
+    NtClose(DirectoryHandle);
+    if (!NT_SUCCESS(*Status))
+        return TRUE;
+
+    RtlStringCchCopyNW(FileName, ARRAYSIZE(FileName),
+                       Entry.Info.FileName,
+                       Entry.Info.FileNameLength / sizeof(WCHAR));
+    CombinePaths(BootManagerPath, ARRAYSIZE(BootManagerPath), 2, SrcDir, FileName);
+
+    *Status = InstallBcdStore(SystemRootPath, TemplatePath, BootManagerPath, DestinationArcPath);
+    if (!NT_SUCCESS(*Status))
+    {
+        DPRINT1("Writing the boot configuration data failed (Status %lx)\n", *Status);
+        return TRUE;
+    }
+
+    EntryStatus = InstallFirmwareBootEntry(SystemRootPath, Options);
+    if (!NT_SUCCESS(EntryStatus))
+        DPRINT1("Writing the firmware boot entry failed (Status %lx)\n", EntryStatus);
+    else if (FirmwareEntry)
+        *FirmwareEntry = TRUE;
+    return TRUE;
+}
+
+static
+NTSTATUS
+InstallEfiSystemPartition(
+    _In_ PCUNICODE_STRING SystemRootPath,
+    _In_ PCUNICODE_STRING SourceRootPath,
+    _In_ PCUNICODE_STRING DestinationArcPath,
+    _In_ ULONG_PTR Options)
+{
+    NTSTATUS Status;
+    WCHAR SrcDir[MAX_PATH];
+    WCHAR TemplatePath[MAX_PATH];
+    BOOLEAN FallbackKept, FirmwareEntry;
+
+    GetEfiLoaderSourceDir(SourceRootPath, SrcDir, ARRAYSIZE(SrcDir));
+    if (!DoesDirExist(NULL, SrcDir))
+    {
+        DPRINT1("No EFI loader in %S\n", SrcDir);
+        return STATUS_NOT_FOUND;
+    }
+
+    CombinePaths(TemplatePath, ARRAYSIZE(TemplatePath), 2, SourceRootPath->Buffer, BCD_TEMPLATE_PATH);
+    Status = InstallEfiLoaderFiles(SystemRootPath, SourceRootPath,
+                                   DoesFileExist(NULL, TemplatePath), &FallbackKept);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("InstallEfiLoaderFiles() failed (Status %lx)\n", Status);
+        return Status;
+    }
+
+    if (InstallBcdFromTemplate(SystemRootPath, SourceRootPath, DestinationArcPath, Options,
+                               &FirmwareEntry, &Status))
+    {
+        if (NT_SUCCESS(Status) && FallbackKept && !FirmwareEntry)
+            Status = InstallEfiLoaderFiles(SystemRootPath, SourceRootPath, FALSE, NULL);
+        return Status;
+    }
+
+    if (DoesFileExist_2(SystemRootPath->Buffer, L"freeldr.ini"))
+    {
+        DPRINT1("Update existing 'freeldr.ini' on the EFI system partition\n");
+        Status = UpdateFreeLoaderIni(SystemRootPath->Buffer, DestinationArcPath->Buffer);
+    }
+    else
+    {
+        DPRINT1("Create new 'freeldr.ini' on the EFI system partition\n");
+        Status = CreateFreeLoaderIniForReactOS(SystemRootPath->Buffer, DestinationArcPath->Buffer);
+    }
+    if (!NT_SUCCESS(Status))
+        DPRINT1("Writing 'freeldr.ini' failed (Status %lx)\n", Status);
+    return Status;
+}
+
 static
 NTSTATUS
 InstallFatBootcodeToPartition(
@@ -941,6 +2047,15 @@ InstallFatBootcodeToPartition(
         DPRINT1("InstallBootloaderFiles() failed (Status %lx)\n", Status);
         return Status;
     }
+
+    Status = InstallEfiLoaderFiles(SystemRootPath, SourceRootPath, FALSE, NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("InstallEfiLoaderFiles() failed (Status %lx)\n", Status);
+        return Status;
+    }
+
+    InstallBcdFromTemplate(SystemRootPath, SourceRootPath, DestinationArcPath, 0, NULL, &Status);
 
     /* Prepare for possibly updating 'freeldr.ini' */
     DoesFreeLdrExist = DoesFileExist_2(SystemRootPath->Buffer, L"freeldr.ini");
@@ -1020,7 +2135,7 @@ InstallFatBootcodeToPartition(
         DPRINT1("Update 'boot.ini'\n");
         Status = UpdateBootIni(SystemRootPath->Buffer,
                                L"C:\\bootsect.ros",
-                               L"\"ReactOS\"");
+                               L"\"LiberNT\"");
         if (!NT_SUCCESS(Status))
         {
             DPRINT1("UpdateBootIni() failed (Status %lx)\n", Status);
@@ -1496,6 +2611,9 @@ InstallBootManagerAndBootEntriesWorker(
     BOOLEAN IsBIOS = ((ArchType == ARCH_PcAT) || (ArchType == ARCH_NEC98x86));
     UCHAR InstallType = (Options & 0x03);
 
+    if (DiskStyle == PARTITION_STYLE_GPT || IsUefiFirmware())
+        return InstallEfiSystemPartition(SystemRootPath, SourceRootPath, DestinationArcPath, Options);
+
     // FIXME: We currently only support BIOS-based PCs
     // TODO: Support other platforms
     if (!IsBIOS)
@@ -1570,6 +2688,10 @@ InstallBootManagerAndBootEntriesWorker(
             DPRINT1("InstallBootCodeToDisk(FAT12) failed (Status 0x%08lx)\n", Status);
             return Status;
         }
+    }
+    else
+    {
+        return STATUS_NOT_SUPPORTED;
     }
 
     return Status;
@@ -1749,7 +2871,7 @@ InstallBootManagerAndBootEntries(
             LARGE_INTEGER DiskSize;
             DISK_PARTITION_INFO Partition;
             /* Followed by: DISK_DETECTION_INFO Detection; unused here */
-        } DISK_GEOMETRY_EX_INTERNAL, *PDISK_GEOMETRY_EX_INTERNAL;
+        } DISK_GEOMETRY_EX_INTERNAL;
 
         DISK_GEOMETRY_EX_INTERNAL DiskGeoEx;
         PARTITION_INFORMATION PartitionInfo;
@@ -1786,6 +2908,14 @@ InstallBootManagerAndBootEntries(
             goto Quit;
         }
 
+        if (DiskGeoEx.Partition.PartitionStyle == PARTITION_STYLE_GPT)
+        {
+            DiskNumber = DeviceNumber.DeviceNumber;
+            PartitionStyle = PARTITION_STYLE_GPT;
+            IsSuperFloppy = FALSE;
+            goto InstallBootManager;
+        }
+
         /*
          * Retrieve the volume's partition information.
          * NOTE: Fails for floppy disks.
@@ -1815,6 +2945,7 @@ InstallBootManagerAndBootEntries(
                                            &PartitionInfo);
     }
 
+InstallBootManager:
     Status = InstallBootManagerAndBootEntriesWorker(
                 ArchType, SystemRootPath,
                 DiskNumber, PartitionStyle, IsSuperFloppy, FileSystem,
@@ -1822,93 +2953,6 @@ InstallBootManagerAndBootEntries(
 
 Quit:
     NtClose(DeviceHandle);
-    return Status;
-}
-
-NTSTATUS
-NTAPI
-InstallBootcodeToRemovable(
-    _In_ ARCHITECTURE_TYPE ArchType,
-    _In_ PCUNICODE_STRING RemovableRootPath,
-    _In_ PCUNICODE_STRING SourceRootPath,
-    _In_ PCUNICODE_STRING DestinationArcPath)
-{
-    NTSTATUS Status;
-    FILE_FS_DEVICE_INFORMATION DeviceInfo;
-    PCWSTR FileSystemName;
-    BOOLEAN IsFloppy;
-
-    /* Remove any trailing backslash if needed */
-    UNICODE_STRING RootDrive = *RemovableRootPath;
-    TrimTrailingPathSeparators_UStr(&RootDrive);
-
-    /* Verify that the removable disk is accessible */
-    if (!DoesDirExist(NULL, RemovableRootPath->Buffer))
-        return STATUS_DEVICE_NOT_READY;
-
-    /* Retrieve the device type and characteristics */
-    Status = GetDeviceInfo_UStr(&RootDrive, NULL, &DeviceInfo);
-    if (!NT_SUCCESS(Status))
-    {
-        static const UNICODE_STRING DeviceFloppy = RTL_CONSTANT_STRING(L"\\Device\\Floppy");
-
-        DPRINT1("FileFsDeviceInformation failed (Status 0x%08lx)\n", Status);
-
-        /* Definitively fail if the device is not a floppy */
-        if (!RtlPrefixUnicodeString(&DeviceFloppy, &RootDrive, TRUE))
-            return Status; /* We cannot cope with a failure */
-
-        /* Try to fall back to something "sane" if the device may be a floppy */
-        DeviceInfo.DeviceType = FILE_DEVICE_DISK;
-        DeviceInfo.Characteristics = FILE_REMOVABLE_MEDIA | FILE_FLOPPY_DISKETTE;
-    }
-
-    /* Ignore volumes that are NOT on usual disks */
-    if (DeviceInfo.DeviceType != FILE_DEVICE_DISK /*&&
-        DeviceInfo.DeviceType != FILE_DEVICE_VIRTUAL_DISK*/)
-    {
-        DPRINT1("Invalid volume; device type %lu\n", DeviceInfo.DeviceType);
-        return STATUS_INVALID_DEVICE_REQUEST;
-    }
-
-    /* Fail if the disk is not removable */
-    if (!(DeviceInfo.Characteristics & FILE_REMOVABLE_MEDIA))
-    {
-        DPRINT1("Device is NOT removable!\n");
-        return STATUS_INVALID_DEVICE_REQUEST;
-    }
-
-    /* Check whether this is a floppy or another removable device */
-    IsFloppy = !!(DeviceInfo.Characteristics & FILE_FLOPPY_DISKETTE);
-
-    /* Use FAT32, unless the device is a floppy disk */
-    FileSystemName = (IsFloppy ? L"FAT" : L"FAT32");
-
-    /* Format the removable disk */
-    Status = FormatFileSystem_UStr(&RootDrive,
-                                   FileSystemName,
-                                   (IsFloppy ? FMIFS_FLOPPY : FMIFS_REMOVABLE),
-                                   NULL,
-                                   TRUE,
-                                   0,
-                                   NULL);
-    if (!NT_SUCCESS(Status))
-    {
-        if (Status == STATUS_NOT_SUPPORTED)
-            DPRINT1("%s FS non-existent on this system!\n", FileSystemName);
-        else
-            DPRINT1("FormatFileSystem(%s) failed (Status 0x%08lx)\n", FileSystemName, Status);
-        return Status;
-    }
-
-    /* Copy FreeLoader to the removable disk and save the boot entries */
-    Status = InstallBootManagerAndBootEntries(ArchType,
-                                              RemovableRootPath,
-                                              SourceRootPath,
-                                              DestinationArcPath,
-                                              2 /* Install on removable media */);
-    if (!NT_SUCCESS(Status))
-        DPRINT1("InstallBootManagerAndBootEntries() failed (Status 0x%08lx)\n", Status);
     return Status;
 }
 

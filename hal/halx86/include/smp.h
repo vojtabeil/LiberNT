@@ -10,7 +10,7 @@
 /* This table is filled for each physical processor on system */
 typedef struct _PROCESSOR_IDENTITY
 {
-    UCHAR ProcessorId;
+    ULONG ProcessorId;
     UCHAR LapicId;
     BOOLEAN ProcessorStarted;
     BOOLEAN BSPCheck;
@@ -70,7 +70,7 @@ HalpBroadcastIpiSpecifyVector(
 
 VOID
 NTAPI
-HalRequestIpiSpecifyVector(
+HalpRequestIpiSpecifyVector(
     _In_ KAFFINITY TargetSet,
     _In_ UCHAR Vector);
 
@@ -90,3 +90,18 @@ HalpSendSoftwareInterrupt(
     _In_ KIRQL Irql);
 
 #endif // _M_AMD64
+
+ULONG
+HalpPrepareLowStub(
+    _In_ PKPROCESSOR_STATE ProcessorState,
+    _In_ PVOID HighEntry);
+
+VOID
+HalpQueryLowStubResumeTarget(
+    _Out_ PVOID ResumeTarget);
+
+BOOLEAN
+HalpRestartProcessor(
+    _In_ ULONG NTProcessorNumber,
+    _In_ PKPROCESSOR_STATE ProcessorState,
+    _In_ PVOID Entry);

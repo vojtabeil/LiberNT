@@ -8,6 +8,7 @@
 #include <ks.h>
 #include <ksmedia.h>
 #include <mmsystem.h>
+#include <reactos/libs/sound/wavefmt.h>
 
 #include "mmixer.h"
 
@@ -80,6 +81,8 @@ typedef struct
     ULONG NodeID;
     HANDLE hDevice;
     PVOID ExtraData;
+    ULONG ChannelCount;
+    ULONG MemberFlags;
 }MIXERCONTROL_EXT, *LPMIXERCONTROL_EXT;
 
 typedef struct
@@ -97,11 +100,16 @@ typedef struct
     ULONG dwControlID;
 }MIXERCONTROL_DATA, *LPMIXERCONTROL_DATA;
 
+#define MIXER_VOLUME_CACHED_CHANNELS 32
+
 typedef struct
 {
     MIXERCONTROL_DATA Header;
-    LONG SignedMinimum;
-    LONG SignedMaximum;
+    ULONG CachedMask;
+    LONG CachedValue[MIXER_VOLUME_CACHED_CHANNELS];
+    ULONG CachedLogical[MIXER_VOLUME_CACHED_CHANNELS];
+    ULONG RangeCount;
+    KSPROPERTY_STEPPING_LONG Ranges[ANYSIZE_ARRAY];
 }MIXERVOLUME_DATA, *LPMIXERVOLUME_DATA;
 
 typedef struct
@@ -120,6 +128,9 @@ typedef struct
     LIST_ENTRY Entry;
     ULONG DeviceId;
     ULONG PinId;
+    ULONG ConnectorDeviceId;
+    ULONG ConnectorPinId;
+    WAVEFORMATEXTENSIBLE PreferredFormat;
     union
     {
         WAVEOUTCAPSW OutCaps;
@@ -342,6 +353,15 @@ MMixerInitializeWaveInfo(
     IN ULONG PinCount,
     IN PULONG Pins);
 
+VOID
+MMixerSetWaveConnector(
+    IN PMIXER_LIST MixerList,
+    IN ULONG WaveDeviceId,
+    IN ULONG WavePinId,
+    IN ULONG bWaveIn,
+    IN ULONG ConnectorDeviceId,
+    IN ULONG ConnectorPinId);
+
 MIXER_STATUS
 MMixerAddEvent(
     IN PMIXER_CONTEXT MixerContext,
@@ -530,6 +550,7 @@ MMixerGetConnectedFromLogicalTopologyPins(
     OUT PULONG OutPins);
 
 VOID
-MMixerPrintTopology();
+MMixerPrintTopology(
+    PTOPOLOGY Topology);
 
 #endif /* _MMIXER_PCH_ */

@@ -11,6 +11,7 @@
 #include <hal.h>
 #include "tsc.h"
 #include "apicp.h"
+#include "halstall.h"
 #define NDEBUG
 #include <debug.h>
 
@@ -19,10 +20,138 @@ LARGE_INTEGER HalpCpuClockFrequency = {{INITIAL_STALL_COUNT * 1000000}};
 UCHAR TscCalibrationPhase;
 ULONG64 TscCalibrationArray[NUM_SAMPLES];
 
+#define HALP_PERFORMANCE_FREQUENCY 10000000ULL
 #define RTC_MODE 6 /* Mode 6 is 1024 Hz */
 #define SAMPLE_FREQUENCY ((32768 << 1) >> RTC_MODE)
 
+#define PM_TIMER_FREQUENCY 3579545UL
+#define PM_CALIBRATION_TICKS (PM_TIMER_FREQUENCY / 20) /* 50 ms */
+#define PM_CALIBRATION_MIN_TICKS (PM_TIMER_FREQUENCY / 100) /* 10 ms */
+#define PM_CALIBRATION_MAX_POLLS 1000000UL
+
 /* PRIVATE FUNCTIONS *********************************************************/
+
+static
+ULONG64
+HalpReadOrderedTsc(VOID)
+{
+    int CpuInfo[4];
+
+    /* CPUID also works on pre-SSE2 processors supported by the x86 HAL. */
+#if defined(__GNUC__) || defined(__clang__)
+    __asm__ __volatile__("cpuid"
+                         : "=a" (CpuInfo[0]), "=b" (CpuInfo[1]),
+                           "=c" (CpuInfo[2]), "=d" (CpuInfo[3])
+                         : "a" (0)
+                         : "memory");
+#else
+    {
+        volatile int SerializingValue;
+        __cpuid(CpuInfo, 0);
+        SerializingValue = CpuInfo[0];
+        _ReadWriteBarrier();
+    }
+#endif
+    return __rdtsc();
+}
+
+/* A Hyper-V compatible hypervisor that grants the frequency MSRs reports the
+ * TSC and local APIC timer frequencies directly. Measuring them against its
+ * emulated timers can be off when its virtual clock is catching up. */
+BOOLEAN
+HalpReadHypervisorFrequency(
+    _In_ ULONG Msr,
+    _Out_ PULONG64 Frequency)
+{
+    INT CpuInfo[4];
+
+    *Frequency = 0;
+
+    __cpuid(CpuInfo, 1);
+    if (!(CpuInfo[2] & 0x80000000))
+        return FALSE;
+
+    __cpuid(CpuInfo, 0x40000000);
+    if ((ULONG)CpuInfo[0] < 0x40000003)
+        return FALSE;
+
+    __cpuid(CpuInfo, 0x40000001);
+    if ((ULONG)CpuInfo[0] != HV_CPUID_INTERFACE_HV1)
+        return FALSE;
+
+    __cpuid(CpuInfo, 0x40000003);
+    if (!(CpuInfo[0] & HV_ACCESS_FREQUENCY_MSRS) || !(CpuInfo[3] & HV_FREQUENCY_MSRS_AVAILABLE))
+        return FALSE;
+
+    *Frequency = __readmsr(Msr);
+    return *Frequency != 0;
+}
+
+static
+BOOLEAN
+HalpCalibrateTscWithPmTimer(OUT PULONG64 Frequency)
+{
+    ULONG Port, Mask, Start, Elapsed, Poll, Sample, Attempt;
+    ULONG64 StartTsc, DeltaTsc, Samples[3], Swap;
+
+    if (!HalpGetPmTimer(&Port, &Mask))
+        return FALSE;
+
+    Sample = 0;
+    for (Attempt = 0; Attempt < 9 && Sample < RTL_NUMBER_OF(Samples); ++Attempt)
+    {
+        Start = READ_PORT_ULONG((PULONG)(ULONG_PTR)Port) & Mask;
+        StartTsc = HalpReadOrderedTsc();
+
+        /* Read the counter itself, not the number of delivered interrupts.
+         * A bounded poll also handles absent or stopped firmware timers. */
+        for (Poll = 0; Poll < PM_CALIBRATION_MAX_POLLS; ++Poll)
+        {
+            Elapsed = (READ_PORT_ULONG((PULONG)(ULONG_PTR)Port) - Start) & Mask;
+            if (Elapsed >= PM_CALIBRATION_TICKS)
+                break;
+        }
+        DeltaTsc = HalpReadOrderedTsc() - StartTsc;
+
+        /* Reject backwards/glitching timers and heavily interrupted samples.
+         * The mask above handles either 24-bit or 32-bit counter wraparound. */
+        /* Fast port emulation can exhaust the polling budget before 50 ms.
+         * A shorter, sufficiently long interval is still valid: the divisor
+         * is the measured PM delta, not the requested duration or poll count. */
+        if (Elapsed < PM_CALIBRATION_MIN_TICKS)
+            return FALSE;
+
+        if (Elapsed > PM_TIMER_FREQUENCY / 5 ||
+            !DeltaTsc || DeltaTsc > MAXULONGLONG / PM_TIMER_FREQUENCY)
+        {
+            continue;
+        }
+
+        Samples[Sample] = DeltaTsc * PM_TIMER_FREQUENCY / Elapsed;
+        if (Samples[Sample])
+            ++Sample;
+    }
+
+    if (Sample != RTL_NUMBER_OF(Samples))
+        return FALSE;
+
+    /* Use the median so a single SMI or VM descheduling at an endpoint does
+     * not determine the frequency used by every subsequent QPC call. */
+    for (Sample = 0; Sample < 2; ++Sample)
+    {
+        for (Poll = Sample + 1; Poll < 3; ++Poll)
+        {
+            if (Samples[Poll] < Samples[Sample])
+            {
+                Swap = Samples[Sample];
+                Samples[Sample] = Samples[Poll];
+                Samples[Poll] = Swap;
+            }
+        }
+    }
+    *Frequency = Samples[1];
+    return TRUE;
+}
 
 static
 ULONG64
@@ -57,6 +186,7 @@ HalpInitializeTsc(VOID)
     ULONG_PTR Flags;
     PVOID PreviousHandler;
     UCHAR RegisterA, RegisterB;
+    ULONG64 Frequency;
 
     /* Check if the CPU supports RDTSC */
     if (!(KeGetCurrentPrcb()->FeatureBits & KF_RDTSC))
@@ -64,9 +194,25 @@ HalpInitializeTsc(VOID)
         KeBugCheck(HAL_INITIALIZATION_FAILED);
     }
 
+    if (HalpReadHypervisorFrequency(HV_X64_MSR_TSC_FREQUENCY, &Frequency))
+    {
+        HalpCpuClockFrequency.QuadPart = Frequency;
+        DPRINT1("TSC frequency from the hypervisor: %I64u Hz\n", Frequency);
+        return;
+    }
+
      /* Save flags and disable interrupts */
     Flags = __readeflags();
     _disable();
+
+    if (HalpCalibrateTscWithPmTimer(&Frequency))
+    {
+        HalpCpuClockFrequency.QuadPart = Frequency;
+        __writeeflags(Flags);
+        return;
+    }
+
+    TscCalibrationPhase = 0;
 
     /* Enable the periodic interrupt in the CMOS */
     RegisterB = HalpReadCmos(RTC_REGISTER_B);
@@ -74,17 +220,13 @@ HalpInitializeTsc(VOID)
 
     /* Modify register A to RTC_MODE to get SAMPLE_FREQUENCY */
     RegisterA = HalpReadCmos(RTC_REGISTER_A);
-    RegisterA = (RegisterA & 0xF0) | RTC_MODE;
-    HalpWriteCmos(RTC_REGISTER_A, RegisterA);
+    HalpWriteCmos(RTC_REGISTER_A, (RegisterA & 0xF0) | RTC_MODE);
 
     /* Save old IDT entry */
     PreviousHandler = KeQueryInterruptHandler(APIC_CLOCK_VECTOR);
 
     /* Set the calibration ISR */
     KeRegisterInterruptHandler(APIC_CLOCK_VECTOR, TscCalibrationISR);
-
-    /* Reset TSC value to 0 */
-    __writemsr(MSR_RDTSC, 0);
 
     /* Enable the timer interrupt */
     HalEnableSystemInterrupt(APIC_CLOCK_VECTOR, CLOCK_LEVEL, Latched);
@@ -99,6 +241,7 @@ HalpInitializeTsc(VOID)
 
     /* Disable the periodic interrupt in the CMOS */
     HalpWriteCmos(RTC_REGISTER_B, RegisterB & ~RTC_REG_B_PI);
+    HalpWriteCmos(RTC_REGISTER_A, RegisterA);
 
     /* Disable the timer interrupt */
     HalDisableSystemInterrupt(APIC_CLOCK_VECTOR, CLOCK_LEVEL);
@@ -124,7 +267,8 @@ HalpCalibrateStallExecution(VOID)
 
     HalpInitializeTsc();
 
-    KeGetPcr()->StallScaleFactor = (ULONG)(HalpCpuClockFrequency.QuadPart / 1000000);
+    HalpStallScaleFactor = (ULONG)(HalpCpuClockFrequency.QuadPart / 1000000);
+    KeGetPcr()->StallScaleFactor = HalpStallScaleFactor;
 }
 
 /* PUBLIC FUNCTIONS ***********************************************************/
@@ -135,6 +279,7 @@ KeQueryPerformanceCounter(
     OUT PLARGE_INTEGER PerformanceFrequency OPTIONAL)
 {
     LARGE_INTEGER Result;
+    ULONG64 Tsc, Seconds, Remainder, Frequency;
 
     /* Make sure it's calibrated */
     ASSERT(HalpCpuClockFrequency.QuadPart != 0);
@@ -143,11 +288,15 @@ KeQueryPerformanceCounter(
     if (PerformanceFrequency)
     {
         /* Return tsc frequency */
-        *PerformanceFrequency = HalpCpuClockFrequency;
+        PerformanceFrequency->QuadPart = HALP_PERFORMANCE_FREQUENCY;
     }
 
     /* Return the current value */
-    Result.QuadPart = __rdtsc();
+    Frequency = HalpCpuClockFrequency.QuadPart;
+    Tsc = __rdtsc();
+    Seconds = Tsc / Frequency;
+    Remainder = Tsc % Frequency;
+    Result.QuadPart = Seconds * HALP_PERFORMANCE_FREQUENCY + (Remainder * HALP_PERFORMANCE_FREQUENCY) / Frequency;
     return Result;
 }
 
@@ -161,7 +310,9 @@ KeStallExecutionProcessor(ULONG MicroSeconds)
     StartTime = __rdtsc();
 
     /* Calculate the ending time */
-    EndTime = StartTime + KeGetPcr()->StallScaleFactor * MicroSeconds;
+    EndTime = HalpComputeStallEndTime(StartTime,
+                                      KeGetPcr()->StallScaleFactor,
+                                      MicroSeconds);
 
     /* Loop until time is elapsed */
     while (__rdtsc() < EndTime);

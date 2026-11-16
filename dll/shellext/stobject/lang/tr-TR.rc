@@ -46,9 +46,13 @@ BEGIN
     IDS_VOL_OPEN "&Ses Düzeyi Denetimini Aç"
     IDS_VOL_RUN "SNDVOL32.EXE"
     IDS_VOL_MUTED "Ses Düzeyi (Sessiz)"
+    IDS_VOL_NODEVICE "No Audio Output Device is installed."
 
     //Keyboard-Mouse related strings
     IDS_KEYS_STICKY "Yapışkan Tuşlar"
     IDS_KEYS_MOUSE "Fare Tuşları"
     IDS_KEYS_FILTER "Filtre Tuşları"
+    IDS_BT_DEVICES "Bluetooth Devices"
+    IDS_BT_SHOW "Show Bluetooth &Devices"
+    IDS_BT_SETTINGS "Open &Settings"
 END

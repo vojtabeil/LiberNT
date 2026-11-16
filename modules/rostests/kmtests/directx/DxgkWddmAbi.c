@@ -1,0 +1,449 @@
+/*
+ * PROJECT:     LiberNT kernel-mode tests
+ * LICENSE:     GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later)
+ * PURPOSE:     WDDM tier selector and interrupt-control ABI tests
+ */
+
+#include <kmt_test.h>
+#include <windef.h>
+
+/*
+ * This test consumes the audited WDDM 3.2 declaration ceiling independently
+ * of the OS-wide legacy default used by unrelated kmtests.
+ */
+#undef DXGKDDI_INTERFACE_VERSION
+#define DXGKDDI_INTERFACE_VERSION 0x11007
+#include <dispmprt.h>
+#include "adapter_map_core.h"
+#include "adapter_start_core.h"
+
+typedef struct _DXGK_TEST_RESOURCE_LIST
+{
+    CM_RESOURCE_LIST Resources;
+    CM_PARTIAL_RESOURCE_DESCRIPTOR ExtraDescriptors[2];
+} DXGK_TEST_RESOURCE_LIST;
+
+static VOID
+TestMapMemoryContractCore(VOID)
+{
+    DXGK_TEST_RESOURCE_LIST TestList;
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR Descriptors;
+    PHYSICAL_ADDRESS Address;
+    PVOID AdapterA = (PVOID)(ULONG_PTR)0x1000;
+    PVOID AdapterB = (PVOID)(ULONG_PTR)0x2000;
+    PVOID ProcessA = (PVOID)(ULONG_PTR)0x3000;
+    PVOID ProcessB = (PVOID)(ULONG_PTR)0x4000;
+
+    RtlZeroMemory(&TestList, sizeof(TestList));
+    TestList.Resources.Count = 1;
+    TestList.Resources.List[0].PartialResourceList.Count = 3;
+    Descriptors = &TestList.Resources.List[0].PartialResourceList.PartialDescriptors[0];
+
+    Descriptors[0].Type = CmResourceTypeMemory;
+    Descriptors[0].u.Memory.Start.QuadPart = 0x100000;
+    Descriptors[0].u.Memory.Length = 0x2000;
+
+    Descriptors[1].Type = CmResourceTypePort;
+    Descriptors[1].Flags = CM_RESOURCE_PORT_IO;
+    Descriptors[1].u.Port.Start.QuadPart = 0x3C0;
+    Descriptors[1].u.Port.Length = 0x20;
+
+    Descriptors[2].Type = CmResourceTypeMemoryLarge;
+    Descriptors[2].Flags = CM_RESOURCE_MEMORY_LARGE_40;
+    Descriptors[2].u.Memory40.Start.QuadPart = 0x100000000LL;
+    Descriptors[2].u.Memory40.Length40 = 0x20;
+
+    Address.QuadPart = 0x100000;
+    ok(DxgkAdapterMapRangeAssigned(&TestList.Resources, Address, 0x2000, FALSE), "Exact memory resource was rejected\n");
+    Address.QuadPart = 0x100800;
+    ok(DxgkAdapterMapRangeAssigned(&TestList.Resources, Address, 0x800, FALSE), "Contained memory range was rejected\n");
+    Address.QuadPart = 0x0FFFFF;
+    ok(!DxgkAdapterMapRangeAssigned(&TestList.Resources, Address, 1, FALSE), "Range before resource was accepted\n");
+    Address.QuadPart = 0x101800;
+    ok(!DxgkAdapterMapRangeAssigned(&TestList.Resources, Address, 0x1000, FALSE), "Range escaping resource was accepted\n");
+    Address.QuadPart = 0x100000;
+    ok(!DxgkAdapterMapRangeAssigned(&TestList.Resources, Address, 0x100, TRUE), "Memory resource was accepted as I/O space\n");
+
+    Address.QuadPart = 0x3C0;
+    ok(DxgkAdapterMapRangeAssigned(&TestList.Resources, Address, 0x20, TRUE), "Exact I/O-port resource was rejected\n");
+    ok(!DxgkAdapterMapRangeAssigned(&TestList.Resources, Address, 0x21, TRUE), "I/O-port range escape was accepted\n");
+
+    Address.QuadPart = 0x100000000LL;
+    ok(DxgkAdapterMapRangeAssigned(&TestList.Resources, Address, 0x2000, FALSE), "Large-memory resource was decoded incorrectly\n");
+    Address.QuadPart = -1;
+    ok(!DxgkAdapterMapRangeAssigned(&TestList.Resources, Address, 1, FALSE), "Negative physical address was accepted\n");
+    Address.QuadPart = 0x100000;
+    ok(!DxgkAdapterMapRangeAssigned(NULL, Address, 1, FALSE), "NULL resource list was accepted\n");
+    ok(!DxgkAdapterMapRangeAssigned(&TestList.Resources, Address, 0, FALSE), "Zero-length range was accepted\n");
+
+    ok(DxgkAdapterMapOwnerMatches(AdapterA, NULL, AdapterA, ProcessA), "Kernel mapping rejected its adapter owner\n");
+    ok(!DxgkAdapterMapOwnerMatches(AdapterA, NULL, AdapterB, ProcessA), "Kernel mapping accepted a foreign adapter\n");
+    ok(DxgkAdapterMapOwnerMatches(AdapterA, ProcessA, AdapterA, ProcessA), "User mapping rejected its adapter/process owner\n");
+    ok(!DxgkAdapterMapOwnerMatches(AdapterA, ProcessA, AdapterA, ProcessB), "User mapping accepted a foreign process\n");
+    ok(!DxgkAdapterMapOwnerMatches(AdapterA, ProcessA, AdapterB, ProcessA), "User mapping accepted a foreign adapter\n");
+}
+
+static VOID
+TestAdapterStartRolePolicy(VOID)
+{
+    ok_eq_int(DxgkAdapterStartClassifyRole(TRUE, 1), DxgkAdapterStartDisplayOnly);
+    ok_eq_int(DxgkAdapterStartClassifyRole(FALSE, 1), DxgkAdapterStartFullDisplay);
+    ok_eq_int(DxgkAdapterStartClassifyRole(FALSE, 0), DxgkAdapterStartRenderOnly);
+    ok(!DxgkAdapterStartRoleRequiresScheduler(DxgkAdapterStartDisplayOnly), "DOD unexpectedly requires VidSch\n");
+    ok(DxgkAdapterStartRoleRequiresScheduler(DxgkAdapterStartFullDisplay), "full display adapter does not require VidSch\n");
+    ok(DxgkAdapterStartRoleRequiresScheduler(DxgkAdapterStartRenderOnly), "render-only adapter does not require VidSch\n");
+    ok(DxgkAdapterStartRoleRequiresDisplayPipeline(DxgkAdapterStartDisplayOnly), "DOD lacks a display pipeline\n");
+    ok(DxgkAdapterStartRoleRequiresDisplayPipeline(DxgkAdapterStartFullDisplay), "full display adapter lacks a display pipeline\n");
+    ok(!DxgkAdapterStartRoleRequiresDisplayPipeline(DxgkAdapterStartRenderOnly), "render-only adapter unexpectedly requires a display pipeline\n");
+    ok(DxgkAdapterStartRoleHasValidCounts(DxgkAdapterStartDisplayOnly, 1, 0, 64), "valid DOD counts rejected\n");
+    ok(!DxgkAdapterStartRoleHasValidCounts(DxgkAdapterStartDisplayOnly, 0, 0, 64), "source-less DOD accepted\n");
+    ok(DxgkAdapterStartRoleHasValidCounts(DxgkAdapterStartFullDisplay, 1, 1, 64), "valid full-display counts rejected\n");
+    ok(!DxgkAdapterStartRoleHasValidCounts(DxgkAdapterStartFullDisplay, 1, 0, 64), "scheduler-less full-display adapter accepted\n");
+    ok(DxgkAdapterStartRoleHasValidCounts(DxgkAdapterStartRenderOnly, 0, 1, 64), "valid render-only counts rejected\n");
+    ok(!DxgkAdapterStartRoleHasValidCounts(DxgkAdapterStartRenderOnly, 1, 1, 64), "render-only adapter with a display source accepted\n");
+    ok(!DxgkAdapterStartRoleHasValidCounts(DxgkAdapterStartRenderOnly, 0, 65, 64), "out-of-range GPU node count accepted\n");
+}
+
+static VOID
+TestVsyncControlDdiSelection(VOID)
+{
+    ok_eq_int(DxgkAdapterStartVsyncControlDdi(FALSE, TRUE, TRUE, TRUE), DxgkVsyncControlInterrupt2);
+    ok_eq_int(DxgkAdapterStartVsyncControlDdi(TRUE, TRUE, TRUE, TRUE), DxgkVsyncControlInterrupt3);
+    ok_eq_int(DxgkAdapterStartVsyncControlDdi(TRUE, FALSE, TRUE, TRUE), DxgkVsyncControlInterrupt2);
+    ok_eq_int(DxgkAdapterStartVsyncControlDdi(FALSE, TRUE, FALSE, TRUE), DxgkVsyncControlInterrupt);
+    ok_eq_int(DxgkAdapterStartVsyncControlDdi(FALSE, FALSE, FALSE, TRUE), DxgkVsyncControlInterrupt);
+    ok_eq_int(DxgkAdapterStartVsyncControlDdi(TRUE, FALSE, FALSE, FALSE), DxgkVsyncControlNone);
+    ok_eq_int(DxgkAdapterStartVsyncControlDdi(FALSE, TRUE, FALSE, FALSE), DxgkVsyncControlNone);
+}
+
+static VOID
+TestVsyncControlStatus(VOID)
+{
+    ok_eq_hex(DxgkAdapterStartVsyncControlStatus(STATUS_NOT_IMPLEMENTED), STATUS_SUCCESS);
+    ok_eq_hex(DxgkAdapterStartVsyncControlStatus(STATUS_SUCCESS), STATUS_SUCCESS);
+    ok_eq_hex(DxgkAdapterStartVsyncControlStatus(STATUS_NOT_SUPPORTED), STATUS_NOT_SUPPORTED);
+    ok_eq_hex(DxgkAdapterStartVsyncControlStatus(STATUS_INVALID_PARAMETER), STATUS_INVALID_PARAMETER);
+    ok_eq_hex(DxgkAdapterStartVsyncControlStatus(STATUS_DEVICE_REMOVED), STATUS_DEVICE_REMOVED);
+}
+
+static VOID
+TestNativeFenceStatus(VOID)
+{
+    ok_eq_hex(DxgkAdapterStartNativeFenceStatus(TRUE, FALSE), STATUS_INVALID_PARAMETER);
+    ok_eq_hex(DxgkAdapterStartNativeFenceStatus(TRUE, TRUE), STATUS_SUCCESS);
+    ok_eq_hex(DxgkAdapterStartNativeFenceStatus(FALSE, FALSE), STATUS_SUCCESS);
+    ok_eq_hex(DxgkAdapterStartNativeFenceStatus(FALSE, TRUE), STATUS_SUCCESS);
+}
+
+static VOID
+TestStartCapsValidation(VOID)
+{
+    DXGK_ADAPTER_START_CAPS Caps;
+
+    /* Win11 NVIDIA RTX 4000 driver: WDDM 3.2, MiscCaps 0x71, loads. */
+    RtlZeroMemory(&Caps, sizeof(Caps));
+    Caps.InterfaceVersion = 0x11007;
+    Caps.WddmVersion = 0x3200;
+    Caps.MiscCaps = 0x71;
+    Caps.HasControlInterrupt3 = TRUE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+
+    Caps.MiscCaps = 0x271;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.WddmVersion = 0x2300;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.WddmVersion = 0x3200;
+    Caps.MiscCaps = 0x10;
+    Caps.HasControlInterrupt3 = FALSE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.MiscCaps = 0;
+
+    Caps.WddmVersion = 0x1100;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_REVISION_MISMATCH);
+    Caps.WddmVersion = 0x3300;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_REVISION_MISMATCH);
+    Caps.InterfaceVersion = 0x3000;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.InterfaceVersion = 0x11007;
+    Caps.WddmVersion = 0x1000;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.WddmVersion = 0x3200;
+
+    Caps.MemoryManagementCaps = 1UL << 15;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.MemoryManagementCaps |= 1UL << 4;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.MemoryManagementCaps = (1UL << 16) | (1UL << 4);
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.MemoryManagementCaps = (1UL << 16) | (1UL << 15);
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.MemoryManagementCaps = (1UL << 16) | (1UL << 15) | (1UL << 4);
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.MemoryManagementCaps = 0;
+
+    Caps.SupportPerEngineTdr = TRUE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.HasEngineResetDdis = TRUE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.SupportKernelModeCommandBuffer = TRUE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.HasRenderKm = TRUE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.SupportRuntimePowerManagement = TRUE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.HasRuntimePowerDdis = TRUE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+
+    Caps.SupportMultiPlaneOverlay = TRUE;
+    Caps.SupportDirectFlip = TRUE;
+    Caps.MaxOverlayPlanes = 4;
+    Caps.HasMpoSetAddress = TRUE;
+    Caps.HasMpoCheck = TRUE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.MaxOverlayPlanes = 0;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.MaxOverlayPlanes = 10;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.MaxOverlayPlanes = 11;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.WddmVersion = 0x2100;
+    Caps.MaxOverlayPlanes = 10;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.MaxOverlayPlanes = 9;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.WddmVersion = 0x1300;
+    Caps.MaxOverlayPlanes = 10;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.WddmVersion = 0x3200;
+    Caps.MaxOverlayPlanes = 4;
+    Caps.HasMpoSetAddress = FALSE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.HasMpoSetAddress = TRUE;
+    Caps.HasMpoCheck = FALSE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.HasMpoCheck = TRUE;
+    Caps.SupportDirectFlip = FALSE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.SupportDirectFlip = TRUE;
+    Caps.InterfaceVersion = 0x300A;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.InterfaceVersion = 0x11007;
+
+    Caps.ColorTransformCaps = 0x4;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.HasUpdateActiveVidPnPresentPath = TRUE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.HasSetTargetGamma = TRUE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.ColorTransformCaps = 0x8;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.ColorTransformCaps = 0x14;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.ColorTransformCaps = 0x1C;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.WddmVersion = 0x2200;
+    Caps.ColorTransformCaps = 0x8;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.WddmVersion = 0x3200;
+    Caps.ColorTransformCaps = 0;
+
+    Caps.HasQueryDiagnosticTypesSupport = TRUE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.HasControlDiagnosticReporting = TRUE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.HasQueryDiagnosticTypesSupport = FALSE;
+    Caps.WddmVersion = 0x2300;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.WddmVersion = 0x3200;
+    Caps.HasControlDiagnosticReporting = FALSE;
+
+    /* Win11 NVIDIA laptop GPU: hybrid discrete with outputs and cross-adapter resources. */
+    Caps.HybridDiscrete = TRUE;
+    Caps.NumberOfVideoPresentSources = 4;
+    Caps.NumberOfChildren = 4;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.MemoryManagementCaps = 1UL << 4;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.InterfaceVersion = 0x5004;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.NumberOfVideoPresentSources = 0;
+    Caps.NumberOfChildren = 0;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.InterfaceVersion = 0x3FFF;
+    Caps.MemoryManagementCaps = 0;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.InterfaceVersion = 0x11007;
+    Caps.HybridDiscrete = FALSE;
+
+    Caps.HybridIntegrated = TRUE;
+    Caps.NumberOfChildren = 2;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.MemoryManagementCaps = 1UL << 4;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_SUCCESS);
+    Caps.NumberOfChildren = 0;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+    Caps.NumberOfChildren = 2;
+    Caps.HybridDiscrete = TRUE;
+    ok_eq_hex(DxgkAdapterStartValidateCaps(&Caps), STATUS_INVALID_PARAMETER);
+}
+
+START_TEST(DxgkWddmAbi)
+{
+    TestStartCapsValidation();
+    TestMapMemoryContractCore();
+    TestAdapterStartRolePolicy();
+    TestVsyncControlDdiSelection();
+    TestVsyncControlStatus();
+    TestNativeFenceStatus();
+
+    ok_eq_ulong(DXGKDDI_INTERFACE_VERSION_WDDM2_4, 0x9006);
+    ok_eq_ulong(DXGKDDI_INTERFACE_VERSION_WDDM2_5, 0xA00B);
+    ok_eq_ulong(DXGKDDI_INTERFACE_VERSION_WDDM2_6, 0xB004);
+    ok_eq_ulong(DXGKDDI_INTERFACE_VERSION_WDDM2_7, 0xC004);
+    ok_eq_ulong(DXGKDDI_INTERFACE_VERSION_WDDM2_8, 0xD001);
+    ok_eq_ulong(DXGKDDI_INTERFACE_VERSION_WDDM2_9, 0xE003);
+    ok_eq_ulong(DXGKDDI_INTERFACE_VERSION_WDDM3_0, 0xF003);
+    ok_eq_ulong(DXGKDDI_INTERFACE_VERSION_WDDM3_1, 0x10004);
+    ok_eq_ulong(DXGKDDI_INTERFACE_VERSION_WDDM3_2, 0x11007);
+
+    ok_eq_ulong(DXGKDDI_WDDMv2_4_ENUM, 0x2400);
+    ok_eq_ulong(DXGKDDI_WDDMv2_5_ENUM, 0x2500);
+    ok_eq_ulong(DXGKDDI_WDDMv2_6_ENUM, 0x2600);
+    ok_eq_ulong(DXGKDDI_WDDMv2_7_ENUM, 0x2700);
+    ok_eq_ulong(DXGKDDI_WDDMv2_8_ENUM, 0x2800);
+    ok_eq_ulong(DXGKDDI_WDDMv2_9_ENUM, 0x2900);
+    ok_eq_ulong(DXGKDDI_WDDMv3_0_ENUM, 0x3000);
+    ok_eq_ulong(DXGKDDI_WDDMv3_1_ENUM, 0x3100);
+    ok_eq_ulong(DXGKDDI_WDDMv3_2_ENUM, 0x3200);
+
+    ok_eq_ulong(DxgkServicesAgp, 0);
+    ok_eq_ulong(DxgkServicesDebugReport, 1);
+    ok_eq_ulong(DXGK_DEBUG_REPORT_INTERFACE_VERSION_1, 1);
+    ok_eq_ulong(DXGK_DEBUG_REPORT_MAX_SIZE, 0xF800);
+#ifdef _WIN64
+    ok_eq_ulong(sizeof(DXGK_DEBUG_REPORT_INTERFACE), 0x38);
+    ok_eq_ulong(FIELD_OFFSET(DXGK_DEBUG_REPORT_INTERFACE,
+                             DbgReportCreate),
+                0x20);
+    ok_eq_ulong(FIELD_OFFSET(DXGK_DEBUG_REPORT_INTERFACE,
+                             DbgReportSecondaryData),
+                0x28);
+    ok_eq_ulong(FIELD_OFFSET(DXGK_DEBUG_REPORT_INTERFACE,
+                             DbgReportComplete),
+                0x30);
+#else
+    ok_eq_ulong(sizeof(DXGK_DEBUG_REPORT_INTERFACE), 0x1C);
+    ok_eq_ulong(FIELD_OFFSET(DXGK_DEBUG_REPORT_INTERFACE,
+                             DbgReportCreate),
+                0x10);
+    ok_eq_ulong(FIELD_OFFSET(DXGK_DEBUG_REPORT_INTERFACE,
+                             DbgReportSecondaryData),
+                0x14);
+    ok_eq_ulong(FIELD_OFFSET(DXGK_DEBUG_REPORT_INTERFACE,
+                             DbgReportComplete),
+                0x18);
+#endif
+
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM3_0)
+    {
+        D3DDDI_SYNCHRONIZATIONOBJECT_FLAGS Flags;
+
+        RtlZeroMemory(&Flags, sizeof(Flags));
+        Flags.SignalByKmd = 1;
+        ok_eq_ulong(Flags.Value, 0x00000100);
+    }
+
+    ok_eq_ulong(D3DDDI_DRIVERESCAPETYPE_CPUEVENTUSAGE, 2);
+    ok_eq_ulong(DXGK_DRIVER_FEATURE_KMD_SIGNAL_CPU_EVENT, 3);
+    ok_eq_ulong(DXGK_FEATURE_KMD_SIGNAL_CPU_EVENT, 3);
+
+    ok_eq_ulong(sizeof(D3DDDI_DRIVERESCAPE_CPUEVENTUSAGE), 0x30);
+    ok_eq_ulong(FIELD_OFFSET(D3DDDI_DRIVERESCAPE_CPUEVENTUSAGE,
+                             hKmdCpuEvent),
+                0x8);
+    ok_eq_ulong(FIELD_OFFSET(D3DDDI_DRIVERESCAPE_CPUEVENTUSAGE,
+                             Usage),
+                0x10);
+
+    ok_eq_ulong(sizeof(DXGK_CREATECPUEVENTFLAGS), 0x4);
+    ok_eq_ulong(FIELD_OFFSET(DXGKARG_CREATECPUEVENT, Flags),
+                2 * sizeof(HANDLE));
+#ifdef _WIN64
+    ok_eq_ulong(sizeof(DXGKARG_CREATECPUEVENT), 0x20);
+    ok_eq_ulong(FIELD_OFFSET(DXGKARG_CREATECPUEVENT, hKmdCpuEvent),
+                0x18);
+    ok_eq_ulong(sizeof(DXGKARGCB_SIGNALEVENT), 0x18);
+    ok_eq_ulong(FIELD_OFFSET(DXGKARGCB_SIGNALEVENT, Flags), 0x10);
+#else
+    ok_eq_ulong(sizeof(DXGKARG_CREATECPUEVENT), 0x10);
+    ok_eq_ulong(FIELD_OFFSET(DXGKARG_CREATECPUEVENT, hKmdCpuEvent),
+                0xC);
+    ok_eq_ulong(sizeof(DXGKARGCB_SIGNALEVENT), 0xC);
+    ok_eq_ulong(FIELD_OFFSET(DXGKARGCB_SIGNALEVENT, Flags), 0x8);
+#endif
+#endif
+
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM3_2)
+    /* WDK 26100 defines the WDDM 3.2 selector as 0x11007. */
+#ifdef _WIN64
+    ok_eq_ulong(FIELD_OFFSET(DRIVER_INITIALIZATION_DATA,
+                             DxgkDdiResetDisplayEngine),
+                0x600);
+    ok_eq_ulong(sizeof(DRIVER_INITIALIZATION_DATA), 0x608);
+#else
+    ok_eq_ulong(FIELD_OFFSET(DRIVER_INITIALIZATION_DATA,
+                             DxgkDdiResetDisplayEngine),
+                0x300);
+    ok_eq_ulong(sizeof(DRIVER_INITIALIZATION_DATA), 0x304);
+#endif
+
+    ok_eq_ulong(DXGK_FEATURE_INTERFACE_VERSION_1, 1);
+    ok_eq_ulong(sizeof(DXGKARG_QUERYFEATURESUPPORT), 0xC);
+    ok_eq_ulong(sizeof(DXGKARGCB_ISFEATUREENABLED2_FLAGS), 0x4);
+    ok_eq_ulong(sizeof(DXGKARGCB_ISFEATUREENABLED2), 0xC);
+    ok_eq_ulong(FIELD_OFFSET(DXGKARGCB_ISFEATUREENABLED2, Flags), 0x4);
+    ok_eq_ulong(FIELD_OFFSET(DXGKARGCB_ISFEATUREENABLED2, Result), 0x8);
+
+#ifdef _WIN64
+    ok_eq_ulong(sizeof(DXGK_FEATURE_INTERFACE), 0x30);
+    ok_eq_ulong(sizeof(DXGKDDI_FEATURE_INTERFACE), 0x30);
+    ok_eq_ulong(FIELD_OFFSET(DXGK_FEATURE_INTERFACE,
+                             IsFeatureEnabled),
+                0x20);
+    ok_eq_ulong(FIELD_OFFSET(DXGK_FEATURE_INTERFACE,
+                             QueryFeatureInterface),
+                0x28);
+    ok_eq_ulong(sizeof(DXGKARGCB_QUERYFEATUREINTERFACE), 0x10);
+    ok_eq_ulong(FIELD_OFFSET(DXGKARGCB_QUERYFEATUREINTERFACE,
+                             Interface),
+                0x8);
+#else
+    ok_eq_ulong(sizeof(DXGK_FEATURE_INTERFACE), 0x18);
+    ok_eq_ulong(sizeof(DXGKDDI_FEATURE_INTERFACE), 0x18);
+    ok_eq_ulong(FIELD_OFFSET(DXGK_FEATURE_INTERFACE,
+                             IsFeatureEnabled),
+                0x10);
+    ok_eq_ulong(FIELD_OFFSET(DXGK_FEATURE_INTERFACE,
+                             QueryFeatureInterface),
+                0x14);
+    ok_eq_ulong(sizeof(DXGKARGCB_QUERYFEATUREINTERFACE), 0xC);
+    ok_eq_ulong(FIELD_OFFSET(DXGKARGCB_QUERYFEATUREINTERFACE,
+                             Interface),
+                0x8);
+#endif
+#endif
+
+#if (DXGKDDI_INTERFACE_VERSION >= DXGKDDI_INTERFACE_VERSION_WDDM1_3)
+    ok_eq_ulong(sizeof(DXGKARG_CONTROLINTERRUPT2), 8);
+    ok_eq_ulong(FIELD_OFFSET(DXGKARG_CONTROLINTERRUPT2, InterruptType), 0);
+    ok_eq_ulong(FIELD_OFFSET(DXGKARG_CONTROLINTERRUPT2, InterruptState), 4);
+    ok_eq_ulong(FIELD_OFFSET(DXGKARG_CONTROLINTERRUPT2, CrtcVsyncState), 4);
+    ok_eq_ulong(DXGK_INTERRUPT_ENABLE, 0);
+    ok_eq_ulong(DXGK_INTERRUPT_DISABLE, 1);
+    ok_eq_ulong(DXGK_VSYNC_ENABLE, 0);
+    ok_eq_ulong(DXGK_VSYNC_DISABLE_KEEP_PHASE, 1);
+    ok_eq_ulong(DXGK_VSYNC_DISABLE_NO_PHASE, 2);
+#endif
+}
+
+/* EOF */

@@ -55,6 +55,12 @@
 
 #include <rosdhcp.h>
 
+#include <ndk/iofuncs.h>
+#include <ndk/obfuncs.h>
+#include <netioapi.h>
+#include <tcpioctl.h>
+#include <tcpip_undoc.h>
+
 #define	PERIOD 0x2e
 #define	hyphenchar(c) ((c) == 0x2d)
 #define	bslashchar(c) ((c) == 0x5c)
@@ -101,6 +107,7 @@ int		 res_hnok(const char *dn);
 char		*option_as_string(unsigned int code, unsigned char *data, int len);
 int		 fork_privchld(int, int);
 int              check_arp( struct interface_info *ip, struct client_lease *lp );
+static void      apipa_watch(void *ipp);
 
 #define	ADVANCE(x, n) (x += ROUNDUP((n)->sa_len))
 
@@ -174,6 +181,8 @@ state_reboot(void *ipp)
 	struct interface_info *ip = ipp;
 	ULONG foo = (ULONG) GetTickCount();
 
+	ip->client->discover_cycle = 0;
+
 	/* If we don't remember an active lease, go straight to INIT. */
 	if (!ip->client->active || ip->client->active->is_bootp) {
 		state_init(ip);
@@ -192,8 +201,8 @@ state_reboot(void *ipp)
 	   flags. */
 	make_request(ip, ip->client->active);
 	ip->client->destination = iaddr_broadcast;
-	time(&ip->client->first_sending);
-	ip->client->interval = ip->client->config->initial_interval;
+	ip->client->first_sending = GetMonotonicTime();
+	ip->client->interval = 0;
 
 	/* Zap the medium list... */
 	ip->client->medium = NULL;
@@ -213,14 +222,27 @@ state_init(void *ipp)
 
 	ASSERT_STATE(state, S_INIT);
 
+	while (ip->client->offered_leases) {
+		struct client_lease *next = ip->client->offered_leases->next;
+
+		free_client_lease(ip->client->offered_leases);
+		ip->client->offered_leases = next;
+	}
+
 	/* Make a DHCPDISCOVER packet, and set appropriate per-interface
 	   flags. */
 	make_discover(ip, ip->client->active);
 	ip->client->xid = ip->client->packet.xid;
 	ip->client->destination = iaddr_broadcast;
 	ip->client->state = S_SELECTING;
-	time(&ip->client->first_sending);
-	ip->client->interval = ip->client->config->initial_interval;
+	ip->client->first_sending = GetMonotonicTime();
+	ip->client->interval = 0;
+	add_timeout(ip->client->first_sending + ip->client->config->timeout + 1,
+	    discover_panic, ip);
+
+	if (AdapterFindInfo(ip))
+		AdapterFindInfo(ip)->ApipaWaitStart = 0;
+	add_timeout_ms(GetTickCount64() + 500, apipa_watch, ip);
 
 	/* Add an immediate timeout to cause the first DHCPDISCOVER packet
 	   to go out. */
@@ -262,7 +284,7 @@ state_selecting(void *ipp)
 
 	ASSERT_STATE(state, S_SELECTING);
 
-        time(&cur_time);
+        cur_time = GetMonotonicTime();
 
 	/* Cancel state_selecting and send_discover timeouts, since either
 	   one could have got us here. */
@@ -292,6 +314,7 @@ freeit:
 	/* If we just tossed all the leases we were offered, go back
 	   to square one. */
 	if (!picked) {
+		ip->client->discover_cycle = 0;
 		ip->client->state = S_INIT;
 		state_init(ip);
 		return;
@@ -318,7 +341,8 @@ freeit:
 	ip->client->destination = iaddr_broadcast;
 	ip->client->state = S_REQUESTING;
 	ip->client->first_sending = cur_time;
-	ip->client->interval = ip->client->config->initial_interval;
+	ip->client->interval = 0;
+	ip->client->request_sends = 0;
 
 	/* Make a DHCPREQUEST packet from the lease we picked. */
 	make_request(ip, picked);
@@ -341,7 +365,7 @@ dhcpack(struct packet *packet)
 	struct client_lease *lease;
         time_t cur_time;
 
-        time(&cur_time);
+        cur_time = GetMonotonicTime();
 
 	/* If we're not receptive to an offer right now, or if the offer
 	   has an unrecognizable transaction id, then just drop it. */
@@ -557,34 +581,292 @@ unset_domain(
     RegCloseKey(RegKey2);
 }
 
+static BOOL
+IsAddressApplied(
+    DWORD IfIndex,
+    ULONG Address,
+    ULONG Mask)
+{
+    PMIB_IPADDRTABLE Table;
+    ULONG Size = 0;
+    DWORD i;
+    BOOL Found = FALSE;
+
+    if (GetIpAddrTable(NULL, &Size, FALSE) != ERROR_INSUFFICIENT_BUFFER)
+        return FALSE;
+
+    Table = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (!Table)
+        return FALSE;
+
+    if (GetIpAddrTable(Table, &Size, FALSE) == NO_ERROR)
+    {
+        for (i = 0; i < Table->dwNumEntries && !Found; i++)
+        {
+            Found = Table->table[i].dwIndex == IfIndex &&
+                    Table->table[i].dwAddr == Address &&
+                    Table->table[i].dwMask == Mask;
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, Table);
+    return Found;
+}
+
+
+void
+set_dhcp_router_discovery(PDHCP_ADAPTER Adapter, BOOLEAN Enable)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Device\\Ip");
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
+    IP4_INTERFACE_INFO Info = { 0 };
+    HANDLE File;
+
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenFile(&File, SYNCHRONIZE, &Attributes, &Iosb, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               FILE_SYNCHRONOUS_IO_NONALERT)))
+        return;
+
+    Info.Index = Adapter->IfMib.dwIndex;
+    if (NT_SUCCESS(NtDeviceIoControlFile(File, NULL, NULL, NULL, &Iosb, IOCTL_IP_QUERY_INTERFACE,
+                                         &Info, sizeof(Info), &Info, sizeof(Info))) &&
+        Info.DhcpRouterDiscovery != Enable)
+    {
+        Info.DhcpRouterDiscovery = Enable;
+        NtDeviceIoControlFile(File, NULL, NULL, NULL, &Iosb, IOCTL_IP_SET_INTERFACE,
+                              &Info, sizeof(Info), NULL, 0);
+    }
+    NtClose(File);
+}
+
+static void
+mark_dhcp_address(PDHCP_ADAPTER Adapter, ULONG Address)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Device\\Ip");
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
+    IP4_ADDRESS_INFO Info = { 0 };
+    HANDLE File;
+
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenFile(&File, SYNCHRONIZE, &Attributes, &Iosb, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               FILE_SYNCHRONOUS_IO_NONALERT)))
+        return;
+
+    Info.Index = Adapter->IfMib.dwIndex;
+    Info.Address = Address;
+    Info.Origin = IpPrefixOriginDhcp;
+    NtDeviceIoControlFile(File, NULL, NULL, NULL, &Iosb, IOCTL_IP_SET_ADDRESS,
+                          &Info, sizeof(Info), &Info, sizeof(Info));
+    NtClose(File);
+}
+
+static void
+set_route_lifetime(const MIB_IPFORWARDROW *Route, ULONG Lifetime)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Device\\Ip");
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
+    IP4_ROUTE_INFO Info = { 0 };
+    HANDLE File;
+
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenFile(&File, SYNCHRONIZE, &Attributes, &Iosb, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               FILE_SYNCHRONOUS_IO_NONALERT)))
+        return;
+
+    Info.Index = Route->dwForwardIfIndex;
+    Info.Destination = Route->dwForwardDest;
+    Info.Mask = Route->dwForwardMask;
+    Info.NextHop = Route->dwForwardNextHop;
+    Info.ValidLifetime = Lifetime;
+    NtDeviceIoControlFile(File, NULL, NULL, NULL, &Iosb, IOCTL_IP_SET_ROUTE, &Info, sizeof(Info), NULL, 0);
+    NtClose(File);
+}
+
+static ULONGLONG
+link_local_timeout(PDHCP_ADAPTER Adapter)
+{
+    MIB_IPINTERFACE_ROW Row = { 0 };
+
+    Row.Family = AF_INET;
+    Row.InterfaceIndex = Adapter->IfMib.dwIndex;
+    if (GetIpInterfaceEntry(&Row) != NO_ERROR)
+        return (ULONGLONG)DHCP_PANIC_TIMEOUT * 1000;
+    return Row.LinkLocalAddressTimeout;
+}
+
+static void
+autoconfig_value(const char *Path, BOOL *Enabled)
+{
+    DWORD Value, Size = sizeof(Value), Type;
+    HKEY Key;
+
+    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, Path, 0, KEY_READ, &Key) != ERROR_SUCCESS)
+        return;
+    if (RegQueryValueExA(Key, "IPAutoconfigurationEnabled", NULL, &Type, (LPBYTE)&Value, &Size) == ERROR_SUCCESS &&
+        Type == REG_DWORD)
+        *Enabled = Value != 0;
+    RegCloseKey(Key);
+}
+
+static BOOL
+adapter_autoconfig_enabled(PDHCP_ADAPTER Adapter)
+{
+    CHAR Path[200] = "SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\";
+    BOOL Enabled = TRUE;
+
+    autoconfig_value("SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", &Enabled);
+    if (strlen(Path) + strlen(Adapter->DhclientInfo.name) < sizeof(Path))
+    {
+        strcat(Path, Adapter->DhclientInfo.name);
+        autoconfig_value(Path, &Enabled);
+    }
+    return Enabled;
+}
+
+static BOOL
+adapter_ipv4_address_state(PDHCP_ADAPTER Adapter, ULONG Address, ULONG Exclude, NL_DAD_STATE *State)
+{
+    PMIB_UNICASTIPADDRESS_TABLE Table;
+    BOOL Found = FALSE;
+    ULONG i;
+
+    if (GetUnicastIpAddressTable(AF_INET, &Table) != NO_ERROR)
+        return FALSE;
+    for (i = 0; i < Table->NumEntries && !Found; i++)
+    {
+        ULONG Current = Table->Table[i].Address.Ipv4.sin_addr.s_addr;
+
+        if (Table->Table[i].InterfaceIndex != Adapter->IfMib.dwIndex || (Address && Current != Address) ||
+            (Exclude && Current == Exclude))
+            continue;
+        Found = TRUE;
+        if (State)
+            *State = Table->Table[i].DadState;
+    }
+    FreeMibTable(Table);
+    return Found;
+}
+
+static void
+apipa_check(void *ipp)
+{
+    struct interface_info *ip = ipp;
+    PDHCP_ADAPTER Adapter = AdapterFindInfo(ip);
+    NL_DAD_STATE State;
+
+    if (!Adapter || !Adapter->NteContext || !Adapter->ApipaAddress ||
+        !adapter_ipv4_address_state(Adapter, Adapter->ApipaAddress, 0, &State))
+        return;
+    if (State == IpDadStateTentative)
+    {
+        add_timeout(GetMonotonicTime() + 1, apipa_check, ip);
+        return;
+    }
+    if (State != IpDadStateDuplicate || Adapter->ApipaAttempt >= 9)
+        return;
+
+    DeleteIPAddress(Adapter->NteContext);
+    Adapter->NteContext = 0;
+    Adapter->ApipaAddress = 0;
+    Adapter->ApipaAttempt++;
+    Adapter->ApipaDue = TRUE;
+    state_panic(ip);
+    Adapter->ApipaDue = FALSE;
+}
+
+static void
+apipa_watch(void *ipp)
+{
+    struct interface_info *ip = ipp;
+    PDHCP_ADAPTER Adapter = AdapterFindInfo(ip);
+    ULONGLONG cur_time = GetTickCount64(), next = cur_time + 500, deadline;
+    BOOL Other;
+
+    if (!Adapter || (Adapter->NteContext && !Adapter->ApipaAddress))
+        return;
+
+    Other = adapter_ipv4_address_state(Adapter, 0, Adapter->ApipaAddress, NULL);
+    if (Other && Adapter->ApipaAddress)
+    {
+        DeleteIPAddress(Adapter->NteContext);
+        Adapter->NteContext = 0;
+        Adapter->ApipaAddress = 0;
+    }
+
+    if (Other)
+        Adapter->ApipaWaitStart = 0;
+    else if (!Adapter->ApipaWaitStart)
+        Adapter->ApipaWaitStart = cur_time;
+
+    if (!Adapter->NteContext && Adapter->ApipaWaitStart)
+    {
+        deadline = Adapter->ApipaWaitStart + link_local_timeout(Adapter);
+        if (cur_time >= deadline)
+        {
+            Adapter->ApipaDue = TRUE;
+            state_panic(ip);
+            Adapter->ApipaDue = FALSE;
+        }
+        else if (deadline < next)
+            next = deadline;
+    }
+    add_timeout_ms(next, apipa_watch, ip);
+}
+
+void
+apipa_address_changed(unsigned int Index)
+{
+    PDHCP_ADAPTER Adapter = AdapterFindIndex(Index);
+
+    if (Adapter && (!Adapter->NteContext || Adapter->ApipaAddress))
+        add_timeout_ms(GetTickCount64(), apipa_watch, &Adapter->DhclientInfo);
+}
 
 void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
     CHAR Buffer[200] = "SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces\\";
     CHAR AddressBuffer[32];
     struct in_addr addr;
     HKEY hkey;
+    BOOL HaveMask = new_lease->options[DHO_SUBNET_MASK].len == (int)sizeof(ULONG);
+    ULONG NewAddress = *((ULONG*)new_lease->address.iabuf);
+    ULONG NewMask = HaveMask ? *((ULONG*)new_lease->options[DHO_SUBNET_MASK].data) : 0;
+    BOOL KeepAddress = HaveMask && Adapter->NteContext == NewAddress && Adapter->NteNetmask == NewMask &&
+                       IsAddressApplied(Adapter->IfMib.dwIndex, NewAddress, NewMask);
 
     strcat(Buffer, Adapter->DhclientInfo.name);
     if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, Buffer, 0, KEY_WRITE, &hkey) != ERROR_SUCCESS)
         hkey = NULL;
 
+    Adapter->ApipaAddress = 0;
+    set_dhcp_router_discovery(Adapter, new_lease->options[DHO_ROUTER_DISCOVERY].len == 1 &&
+                                       new_lease->options[DHO_ROUTER_DISCOVERY].data[0]);
 
-    if( Adapter->NteContext )
+    if( Adapter->NteContext && !KeepAddress )
     {
         DeleteIPAddress( Adapter->NteContext );
         Adapter->NteContext = 0;
     }
 
     /* Set up our default router if we got one from the DHCP server */
-    if( new_lease->options[DHO_SUBNET_MASK].len == (int)sizeof(ULONG) ) {
-        DWORD err;
+    if( HaveMask ) {
+        DWORD err = NO_ERROR;
 
-        err = AddIPAddress
-            ( *((ULONG*)new_lease->address.iabuf),
-              *((ULONG*)new_lease->options[DHO_SUBNET_MASK].data),
-              Adapter->IfMib.dwIndex,
-              &Adapter->NteContext,
-              &Adapter->NteInstance );
+        if( !KeepAddress ) {
+            err = AddIPAddress
+                ( NewAddress,
+                  NewMask,
+                  Adapter->IfMib.dwIndex,
+                  &Adapter->NteContext,
+                  &Adapter->NteInstance );
+            if (err == NO_ERROR)
+            {
+                Adapter->NteNetmask = NewMask;
+                mark_dhcp_address(Adapter, NewAddress);
+            }
+        }
         if (hkey && err == NO_ERROR) {
             RegSetValueExA(hkey, "DhcpIPAddress", 0, REG_SZ, (LPBYTE)piaddr(new_lease->address), strlen(piaddr(new_lease->address))+1);
             addr.S_un.S_addr = *((ULONG*)new_lease->options[DHO_SUBNET_MASK].data);
@@ -592,42 +874,54 @@ void setup_adapter( PDHCP_ADAPTER Adapter, struct client_lease *new_lease ) {
             RegSetValueExA(hkey, "DhcpSubnetMask", 0, REG_SZ, (LPBYTE)AddressBuffer, strlen(AddressBuffer)+1);
             RegSetValueExA(hkey, "DhcpServer", 0, REG_SZ, (LPBYTE)piaddr(new_lease->serveraddress), strlen(piaddr(new_lease->serveraddress))+1);
 
+            time_t WallOffset = time(NULL) - GetMonotonicTime();
+            DWORD Obtained = (DWORD)(new_lease->obtained + WallOffset);
+            DWORD Expiry = (DWORD)(new_lease->expiry == TIME_MAX ? TIME_MAX : new_lease->expiry + WallOffset);
+            DWORD Renewal = (DWORD)(new_lease->renewal == TIME_MAX ? TIME_MAX : new_lease->renewal + WallOffset);
+            DWORD Rebind = (DWORD)(new_lease->rebind == TIME_MAX ? TIME_MAX : new_lease->rebind + WallOffset);
+
             RegSetValueExA(hkey, "Lease", 0, REG_DWORD, (LPBYTE)&new_lease->lease, sizeof(DWORD));
-            RegSetValueExA(hkey, "LeaseObtainedTime", 0, REG_DWORD, (LPBYTE)&new_lease->obtained, sizeof(DWORD));
-            RegSetValueExA(hkey, "LeaseTerminatesTime", 0, REG_DWORD, (LPBYTE)&new_lease->expiry, sizeof(DWORD));
-            RegSetValueExA(hkey, "T1", 0, REG_DWORD, (LPBYTE)&new_lease->renewal, sizeof(DWORD));
-            RegSetValueExA(hkey, "T2", 0, REG_DWORD, (LPBYTE)&new_lease->rebind, sizeof(DWORD));
+            RegSetValueExA(hkey, "LeaseObtainedTime", 0, REG_DWORD, (LPBYTE)&Obtained, sizeof(DWORD));
+            RegSetValueExA(hkey, "LeaseTerminatesTime", 0, REG_DWORD, (LPBYTE)&Expiry, sizeof(DWORD));
+            RegSetValueExA(hkey, "T1", 0, REG_DWORD, (LPBYTE)&Renewal, sizeof(DWORD));
+            RegSetValueExA(hkey, "T2", 0, REG_DWORD, (LPBYTE)&Rebind, sizeof(DWORD));
             DWORD dwAddressType = 0;
             RegSetValueExA(hkey, "AddressType", 0, REG_DWORD, (LPBYTE)&dwAddressType, sizeof(DWORD));
         }
 
         if( err != NO_ERROR )
-            warning("AddIPAddress: %d\n", err);
+            warning("AddIPAddress: %lu\n", err);
     }
     else if( new_lease->options[DHO_SUBNET_MASK].len ) {
         warning("Invalid subnet mask option length: %d\n", new_lease->options[DHO_SUBNET_MASK].len);
     }
 
     if( new_lease->options[DHO_ROUTERS].len > (int)0 && new_lease->options[DHO_ROUTERS].len % (int)sizeof(ULONG) == 0 ) {
-        DWORD err;
+        DWORD err = NO_ERROR;
+        ULONG NewRouter = *((ULONG*)new_lease->options[DHO_ROUTERS].data);
 
-        Adapter->RouterMib.dwForwardDest = 0; /* Default route */
-        Adapter->RouterMib.dwForwardMask = 0;
-        Adapter->RouterMib.dwForwardMetric1 = 1;
-        Adapter->RouterMib.dwForwardIfIndex = Adapter->IfMib.dwIndex;
+        if( Adapter->RouterMib.dwForwardNextHop != NewRouter ) {
+            Adapter->RouterMib.dwForwardDest = 0; /* Default route */
+            Adapter->RouterMib.dwForwardMask = 0;
+            Adapter->RouterMib.dwForwardMetric1 = 0;
+            Adapter->RouterMib.dwForwardIfIndex = Adapter->IfMib.dwIndex;
 
-        if( Adapter->RouterMib.dwForwardNextHop ) {
-            /* If we set a default route before, delete it before continuing */
-            DeleteIpForwardEntry( &Adapter->RouterMib );
+            if( Adapter->RouterMib.dwForwardNextHop ) {
+                /* If we set a default route before, delete it before continuing */
+                DeleteIpForwardEntry( &Adapter->RouterMib );
+            }
+
+            Adapter->RouterMib.dwForwardNextHop = NewRouter;
+
+            err = CreateIpForwardEntry( &Adapter->RouterMib );
+
+            if( err != NO_ERROR ) {
+                warning("CreateIpForwardEntry: %lu\n", err);
+                Adapter->RouterMib.dwForwardNextHop = 0;
+            }
+            else if (new_lease->lease != TIME_MAX)
+                set_route_lifetime(&Adapter->RouterMib, (ULONG)new_lease->lease);
         }
-
-        Adapter->RouterMib.dwForwardNextHop =
-            *((ULONG*)new_lease->options[DHO_ROUTERS].data);
-
-        err = CreateIpForwardEntry( &Adapter->RouterMib );
-
-        if( err != NO_ERROR )
-            warning("CreateIpForwardEntry: %d\n", err);
 
         if (hkey && err == NO_ERROR) {
             addr.S_un.S_addr = *((ULONG*)new_lease->options[DHO_ROUTERS].data);
@@ -664,6 +958,8 @@ reset_adapter( PDHCP_ADAPTER Adapter) {
         DeleteIPAddress( Adapter->NteContext );
         Adapter->NteContext = 0;
     }
+    Adapter->ApipaAddress = 0;
+    set_dhcp_router_discovery(Adapter, FALSE);
 
     if (hkey) {
         RegSetValueExA(hkey, "DhcpIPAddress", 0, REG_SZ, (LPBYTE)IpAddress, strlen(IpAddress)+1);
@@ -685,6 +981,7 @@ reset_adapter( PDHCP_ADAPTER Adapter) {
 
     if( Adapter->RouterMib.dwForwardNextHop ) {
         DeleteIpForwardEntry( &Adapter->RouterMib );
+        Adapter->RouterMib.dwForwardNextHop = 0;
     }
 
     if (hkey) {
@@ -703,7 +1000,7 @@ bind_lease(struct interface_info *ip)
     struct client_lease *new_lease = ip->client->new;
     time_t cur_time;
 
-    time(&cur_time);
+    cur_time = GetMonotonicTime();
 
     /* Remember the medium. */
     ip->client->new->medium = ip->client->medium;
@@ -729,13 +1026,17 @@ bind_lease(struct interface_info *ip)
 
     Adapter = AdapterFindInfo( ip );
 
-    if( Adapter )  setup_adapter( Adapter, new_lease );
+    if( Adapter ) {
+        Adapter->ApipaWaitStart = 0;
+        setup_adapter( Adapter, new_lease );
+    }
     else {
         warning("Could not find adapter for info %p\n", ip);
         return;
     }
     set_name_servers( Adapter, new_lease );
     set_domain( Adapter, new_lease );
+    ApiSignalLeaseChange();
 }
 
 void
@@ -760,6 +1061,19 @@ unbind_lease(struct interface_info *ip)
     }
 }
 
+static void
+start_renew_attempt(struct interface_info *ip)
+{
+	ULONG seed = (ULONG)GetTickCount();
+
+	ip->client->state = GetMonotonicTime() < ip->client->active->rebind ?
+	    S_RENEWING : S_REBINDING;
+	ip->client->xid = RtlRandom(&seed);
+	make_request(ip, ip->client->active);
+	ip->client->first_sending = GetMonotonicTime();
+	ip->client->request_sends = 0;
+}
+
 /*
  * state_bound is called when we've successfully bound to a particular
  * lease, but the renewal time on that lease has expired.   We are
@@ -774,9 +1088,6 @@ state_bound(void *ipp)
 	ASSERT_STATE(state, S_BOUND);
 
 	/* T1 has expired. */
-	make_request(ip, ip->client->active);
-	ip->client->xid = ip->client->packet.xid;
-
 	if (ip->client->active->options[DHO_DHCP_SERVER_IDENTIFIER].len == 4) {
 		memcpy(ip->client->destination.iabuf, ip->client->active->
 		    options[DHO_DHCP_SERVER_IDENTIFIER].data, 4);
@@ -784,9 +1095,7 @@ state_bound(void *ipp)
 	} else
 		ip->client->destination = iaddr_broadcast;
 
-	time(&ip->client->first_sending);
-	ip->client->interval = ip->client->config->initial_interval;
-	ip->client->state = S_RENEWING;
+	start_renew_attempt(ip);
 
 	/* Send the first packet immediately. */
 	send_request(ip);
@@ -860,7 +1169,7 @@ dhcpoffer(struct packet *packet)
 	    "DHCPOFFER" : "BOOTREPLY";
         time_t cur_time;
 
-        time(&cur_time);
+        cur_time = GetMonotonicTime();
 
 	/* If we're not receptive to an offer right now, or if the offer
 	   has an unrecognizable transaction id, then just drop it. */
@@ -957,7 +1266,7 @@ dhcpoffer(struct packet *packet)
 	/* If the selecting interval has expired, go immediately to
 	   state_selecting().  Otherwise, time out into
 	   state_selecting at the select interval. */
-	if (stop_selecting <= 0)
+	if (stop_selecting <= cur_time)
 		state_selecting(ip);
 	else {
 		add_timeout(stop_selecting, state_selecting, ip);
@@ -1094,8 +1403,18 @@ dhcpnak(struct packet *packet)
 	/* Stop sending DHCPREQUEST packets... */
 	cancel_timeout(send_request, ip);
 
+	ip->client->discover_cycle = 0;
 	ip->client->state = S_INIT;
 	state_init(ip);
+}
+
+void
+discover_panic(void *ipp)
+{
+	struct interface_info *ip = ipp;
+
+	if (ip->client->state == S_SELECTING)
+		state_panic(ip);
 }
 
 /* Send out a DHCPDISCOVER packet, and set a timeout to send out another
@@ -1108,20 +1427,23 @@ send_discover(void *ipp)
 	struct interface_info *ip = ipp;
 	int interval, increase = 1;
         time_t cur_time;
+	ULONGLONG now;
+	ULONG delay, seed = (ULONG)GetTickCount();
 
         DH_DbgPrint(MID_TRACE,("Doing discover on interface %p\n",ip));
 
-        time(&cur_time);
+        cur_time = GetMonotonicTime();
+
+	if (dhcp_discover_restarts(ip->client->interval)) {
+		ip->client->discover_cycle++;
+		make_discover(ip, ip->client->active);
+		ip->client->xid = ip->client->packet.xid;
+		ip->client->first_sending = cur_time;
+		ip->client->interval = 0;
+	}
 
 	/* Figure out how long it's been since we started transmitting. */
 	interval = cur_time - ip->client->first_sending;
-
-	/* If we're past the panic timeout, call the script and tell it
-	   we haven't found anything for this interface yet. */
-	if (interval > ip->client->config->timeout) {
-		state_panic(ip);
-        ip->client->first_sending = cur_time;
-	}
 
 	/* If we're selecting media, try the whole list before doing
 	   the exponential backoff, but if we've already received an
@@ -1146,40 +1468,12 @@ send_discover(void *ipp)
                 /* XXX Support other media types eventually */
 	}
 
-	/*
-	 * If we're supposed to increase the interval, do so.  If it's
-	 * currently zero (i.e., we haven't sent any packets yet), set
-	 * it to one; otherwise, add to it a random number between zero
-	 * and two times itself.  On average, this means that it will
-	 * double with every transmission.
-	 */
-	if (increase) {
-		if (!ip->client->interval)
-			ip->client->interval =
-			    ip->client->config->initial_interval;
-		else {
-			ip->client->interval += (rand() >> 2) %
-			    (2 * ip->client->interval);
-		}
-
-		/* Don't backoff past cutoff. */
-		if (ip->client->interval >
-		    ip->client->config->backoff_cutoff)
-			ip->client->interval =
-				((ip->client->config->backoff_cutoff / 2)
-				 + ((rand() >> 2) %
-				    ip->client->config->backoff_cutoff));
-	} else if (!ip->client->interval)
+	if (increase || !ip->client->interval)
 		ip->client->interval =
-			ip->client->config->initial_interval;
+		    dhcp_retransmit_interval(ip->client->interval);
+	delay = dhcp_retransmit_delay_ms(ip->client->interval, RtlRandom(&seed));
 
-	/* If the backoff would take us to the panic timeout, just use that
-	   as the interval. */
-	if (cur_time + ip->client->interval >
-	    ip->client->first_sending + ip->client->config->timeout)
-		ip->client->interval =
-			(ip->client->first_sending +
-			 ip->client->config->timeout) - cur_time + 1;
+	now = GetTickCount64();
 
 	/* Record the number of seconds since we started sending. */
 	if (interval < 65536)
@@ -1196,10 +1490,10 @@ send_discover(void *ipp)
 	(void)send_packet(ip, &ip->client->packet, ip->client->packet_length,
 	    inaddr_any, &sockaddr_broadcast, NULL);
 
-        DH_DbgPrint(MID_TRACE,("discover timeout: now %x -> then %x\n",
-                               cur_time, cur_time + ip->client->interval));
+        DH_DbgPrint(MID_TRACE,("discover timeout: now %I64u -> then %I64u\n",
+                               now, now + delay));
 
-	add_timeout(cur_time + ip->client->interval, send_discover, ip);
+	add_timeout_ms(now + delay, send_discover, ip);
 }
 
 /*
@@ -1219,9 +1513,7 @@ state_panic(void *ipp)
     uint16_t address_low;
     int i;
     IPAddr IpAddress;
-    ULONG Buffer[20];
-    ULONG BufferSize;
-    DWORD ret;
+    ULONG attempt;
     HKEY hKey = NULL;
     PDHCP_ADAPTER Adapter = AdapterFindInfo(ip);
     NTSTATUS Status;
@@ -1232,11 +1524,14 @@ state_panic(void *ipp)
 
     note("No DHCPOFFERS received.");
 
-    time(&cur_time);
+    cur_time = GetMonotonicTime();
 
-    strcat(szKeyNameBuffer, Adapter->DhclientInfo.name);
-    if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, szKeyNameBuffer, 0, KEY_WRITE, &hKey) != ERROR_SUCCESS)
-        hKey = NULL;
+    if (Adapter)
+    {
+        strcat(szKeyNameBuffer, Adapter->DhclientInfo.name);
+        if (RegOpenKeyExA(HKEY_LOCAL_MACHINE, szKeyNameBuffer, 0, KEY_WRITE, &hKey) != ERROR_SUCCESS)
+            hKey = NULL;
+    }
 
     if (Adapter && !Adapter->NteContext)
     {
@@ -1254,14 +1549,20 @@ state_panic(void *ipp)
                                   &Adapter->NteContext,
                                   &Adapter->NteInstance);
             if (!NT_SUCCESS(Status))
+            {
                 DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
+            }
+            else
+            {
+                Adapter->NteNetmask = htonl(Adapter->AlternateConfiguration->SubnetMask);
+            }
 
             /* DefaultGateway */
             if (Adapter->AlternateConfiguration->DefaultGateway != 0)
             {
                 Adapter->RouterMib.dwForwardDest = 0; /* Default route */
                 Adapter->RouterMib.dwForwardMask = 0;
-                Adapter->RouterMib.dwForwardMetric1 = 1;
+                Adapter->RouterMib.dwForwardMetric1 = 0;
                 Adapter->RouterMib.dwForwardIfIndex = Adapter->IfMib.dwIndex;
 
                 if (Adapter->RouterMib.dwForwardNextHop)
@@ -1329,7 +1630,8 @@ state_panic(void *ipp)
                 RegSetValueExA(hKey, "AddressType", 0, REG_DWORD, (LPBYTE)&dwAddressType, sizeof(DWORD));
             }
         }
-        else
+        else if (Adapter->ApipaDue && adapter_autoconfig_enabled(Adapter) &&
+                 !adapter_ipv4_address_state(Adapter, 0, 0, NULL))
         {
             /* Generate an automatic private address */
             DH_DbgPrint(MID_TRACE,("DHCPCSVC: An automatic private address will be assigned.\n"));
@@ -1337,63 +1639,57 @@ state_panic(void *ipp)
             /* FIXME: The address generation code sucks */
             srand(0);
 
-            for (;;)
+            for (attempt = 0; attempt <= Adapter->ApipaAttempt; attempt++)
             {
                 address_low = rand();
                 for (i = 0; i < ip->hw_address.hlen; i++)
                     address_low += ip->hw_address.haddr[i];
+            }
 
-                IpAddress = htonl(0xA9FE0000 | address_low);  // 169.254.X.X
+            IpAddress = htonl(0xA9FE0000 | address_low);  // 169.254.X.X
 
-                /* Send an ARP request to check if the IP address is already in use */
-                BufferSize = sizeof(Buffer);
-                ret = SendARP(IpAddress,
-                              IpAddress,
-                              Buffer,
-                              &BufferSize);
-                DH_DbgPrint(MID_TRACE,("DHCPCSVC: SendARP returned %lu\n", ret));
-                if (ret != 0)
-                {
-                    /* The IP address is not in use */
-                    DH_DbgPrint(MID_TRACE,("DHCPCSVC: Using automatic private address\n"));
-                    Status = AddIPAddress(IpAddress,
-                                          htonl(0xFFFF0000), // 255.255.0.0
-                                          Adapter->IfMib.dwIndex,
-                                          &Adapter->NteContext,
-                                          &Adapter->NteInstance);
-                    if (!NT_SUCCESS(Status))
-                        DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
+            DH_DbgPrint(MID_TRACE,("DHCPCSVC: Using automatic private address\n"));
+            Status = AddIPAddress(IpAddress,
+                                  htonl(0xFFFF0000), // 255.255.0.0
+                                  Adapter->IfMib.dwIndex,
+                                  &Adapter->NteContext,
+                                  &Adapter->NteInstance);
+            if (!NT_SUCCESS(Status))
+            {
+                DH_DbgPrint(MID_TRACE,("AddIPAddress: %lx\n", Status));
+            }
+            else
+            {
+                Adapter->NteNetmask = htonl(0xFFFF0000);
+                Adapter->ApipaAddress = IpAddress;
+                add_timeout(cur_time + 1, apipa_check, ip);
+            }
 
-                    if (hKey)
-                    {
-                        addr.S_un.S_addr = IpAddress;
-                        RtlIpv4AddressToStringA(&addr, AddressBuffer);
-                        RegSetValueExA(hKey, "DhcpIPAddress", 0, REG_SZ, (LPBYTE)AddressBuffer, strlen(AddressBuffer) + 1);
-                        RegSetValueExA(hKey, "DhcpSubnetMask", 0, REG_SZ, (LPBYTE)SubnetMask, strlen(SubnetMask) + 1);
-                        RegSetValueExA(hKey, "DhcpServer", 0, REG_SZ, (LPBYTE)Server, strlen(Server) + 1);
-                        RegDeleteValueA(hKey, "DhcpDefaultGateway");
-                        RegDeleteValueA(hKey, "DhcpDomain");
-                        RegDeleteValueA(hKey, "DhcpNameServer");
+            if (hKey)
+            {
+                addr.S_un.S_addr = IpAddress;
+                RtlIpv4AddressToStringA(&addr, AddressBuffer);
+                RegSetValueExA(hKey, "DhcpIPAddress", 0, REG_SZ, (LPBYTE)AddressBuffer, strlen(AddressBuffer) + 1);
+                RegSetValueExA(hKey, "DhcpSubnetMask", 0, REG_SZ, (LPBYTE)SubnetMask, strlen(SubnetMask) + 1);
+                RegSetValueExA(hKey, "DhcpServer", 0, REG_SZ, (LPBYTE)Server, strlen(Server) + 1);
+                RegDeleteValueA(hKey, "DhcpDefaultGateway");
+                RegDeleteValueA(hKey, "DhcpDomain");
+                RegDeleteValueA(hKey, "DhcpNameServer");
 
-                        RegSetValueExA(hKey, "IPAutoconfigurationAddress", 0, REG_SZ, (LPBYTE)AddressBuffer, strlen(AddressBuffer) + 1);
-                        RegSetValueExA(hKey, "IPAutoconfigurationMask", 0, REG_SZ, (LPBYTE)SubnetMask, strlen(SubnetMask) + 1);
+                RegSetValueExA(hKey, "IPAutoconfigurationAddress", 0, REG_SZ, (LPBYTE)AddressBuffer, strlen(AddressBuffer) + 1);
+                RegSetValueExA(hKey, "IPAutoconfigurationMask", 0, REG_SZ, (LPBYTE)SubnetMask, strlen(SubnetMask) + 1);
 
-                        RegSetValueExA(hKey, "Lease", 0, REG_DWORD, (LPBYTE)&lease, sizeof(DWORD));
-                        RegSetValueExA(hKey, "LeaseObtainedTime", 0, REG_DWORD, (LPBYTE)&cur_time, sizeof(DWORD));
-                        RegSetValueExA(hKey, "LeaseTerminatesTime", 0, REG_DWORD, (LPBYTE)&never_time, sizeof(DWORD));
-                        RegSetValueExA(hKey, "T1", 0, REG_DWORD, (LPBYTE)&cur_time, sizeof(DWORD));
-                        RegSetValueExA(hKey, "T2", 0, REG_DWORD, (LPBYTE)&cur_time, sizeof(DWORD));
-                        dwAddressType = 1;
-                        RegSetValueExA(hKey, "AddressType", 0, REG_DWORD, (LPBYTE)&dwAddressType, sizeof(DWORD));
-                    }
-
-                    goto done;
-                }
+                RegSetValueExA(hKey, "Lease", 0, REG_DWORD, (LPBYTE)&lease, sizeof(DWORD));
+                RegSetValueExA(hKey, "LeaseObtainedTime", 0, REG_DWORD, (LPBYTE)&cur_time, sizeof(DWORD));
+                RegSetValueExA(hKey, "LeaseTerminatesTime", 0, REG_DWORD, (LPBYTE)&never_time, sizeof(DWORD));
+                RegSetValueExA(hKey, "T1", 0, REG_DWORD, (LPBYTE)&cur_time, sizeof(DWORD));
+                RegSetValueExA(hKey, "T2", 0, REG_DWORD, (LPBYTE)&cur_time, sizeof(DWORD));
+                dwAddressType = 1;
+                RegSetValueExA(hKey, "AddressType", 0, REG_DWORD, (LPBYTE)&dwAddressType, sizeof(DWORD));
             }
         }
     }
 
-done:
     if (hKey)
         RegCloseKey(hKey);
 }
@@ -1402,12 +1698,14 @@ void
 send_request(void *ipp)
 {
 	struct interface_info *ip = ipp;
-	struct sockaddr_in destination;
+	struct sockaddr_in destination = { 0 };
 	struct in_addr from;
 	int interval;
         time_t cur_time;
+	ULONGLONG now, deadline;
+	ULONG delay, seed = (ULONG)GetTickCount();
 
-        time(&cur_time); 
+        cur_time = GetMonotonicTime();
 
 	/* Figure out how long it's been since we started transmitting. */
 	interval = cur_time - ip->client->first_sending;
@@ -1422,9 +1720,14 @@ send_request(void *ipp)
 	   us a new address, but we could also have successfully
 	   reused our old address.  In the former case, we're hosed
 	   anyway.  This is not a win-prone situation. */
-	if ((ip->client->state == S_REBOOTING ||
-	    ip->client->state == S_REQUESTING) &&
-	    interval > ip->client->config->reboot_timeout) {
+	if ((ip->client->state == S_REBOOTING &&
+	    interval > ip->client->config->reboot_timeout) ||
+	    (ip->client->state == S_REQUESTING &&
+	    ip->client->request_sends == DHCP_REQUEST_SENDS)) {
+		if (ip->client->state == S_REQUESTING)
+			ip->client->discover_cycle++;
+		else
+			ip->client->discover_cycle = 0;
 		ip->client->state = S_INIT;
 		cancel_timeout(send_request, ip);
 		state_init(ip);
@@ -1457,46 +1760,61 @@ send_request(void *ipp)
             {
                 DeleteIPAddress( Adapter->NteContext );
                 Adapter->NteContext = 0;
+                Adapter->ApipaAddress = 0;
+                set_dhcp_router_discovery(Adapter, FALSE);
             }
 
+            /* TODO: Windows 11 first sends DHCPREQUESTs for the expired address and starts DHCPDISCOVER 6 s later */
+            ip->client->discover_cycle = 0;
             ip->client->state = S_INIT;
             state_init(ip);
             return;
 	}
 
-	/* Do the exponential backoff... */
-	if (!ip->client->interval)
-		ip->client->interval = ip->client->config->initial_interval;
-	else
-		ip->client->interval += ((rand() >> 2) %
-		    (2 * ip->client->interval));
+	now = GetTickCount64();
+	if (ip->client->state == S_RENEWING ||
+	    ip->client->state == S_REBINDING) {
+		ULONGLONG rebind = (ULONGLONG)ip->client->active->rebind * 1000;
+		ULONGLONG expiry = (ULONGLONG)ip->client->active->expiry * 1000;
 
-	/* Don't backoff past cutoff. */
-	if (ip->client->interval >
-	    ip->client->config->backoff_cutoff)
+		/* RFC 2131 4.4.5: the next attempt waits half the time left to T2, or to the expiry after T2 */
+		if (ip->client->request_sends == DHCP_RENEW_SENDS) {
+			ip->client->request_sends++;
+			add_timeout_ms(dhcp_renew_next_attempt_ms(now,
+			    now < rebind ? rebind : expiry), send_request, ip);
+			return;
+		}
+		if (ip->client->request_sends > DHCP_RENEW_SENDS) {
+			start_renew_attempt(ip);
+			interval = 0;
+		}
+	}
+
+	if (ip->client->state == S_REBOOTING) {
 		ip->client->interval =
-		    ((ip->client->config->backoff_cutoff / 2) +
-		    ((rand() >> 2) % ip->client->interval));
+		    dhcp_retransmit_interval(ip->client->interval);
+		delay = dhcp_retransmit_delay_ms(ip->client->interval,
+		    RtlRandom(&seed));
+	} else
+		delay = dhcp_request_timeout_ms(ip->client->request_sends,
+		    RtlRandom(&seed));
 
 	/* If the backoff would take us to the expiry time, just set the
 	   timeout to the expiry time. */
-	if (ip->client->state != S_REQUESTING &&
-	    cur_time + ip->client->interval >
-	    ip->client->active->expiry)
-		ip->client->interval =
-		    ip->client->active->expiry - cur_time + 1;
+	if (ip->client->state != S_REQUESTING) {
+		deadline = ((ULONGLONG)ip->client->active->expiry + 1) * 1000;
+		if (now + delay > deadline)
+			delay = (ULONG)(deadline > now ? deadline - now : 0);
+	}
 
-	/* If the lease T2 time has elapsed, or if we're not yet bound,
-	   broadcast the DHCPREQUEST rather than unicasting. */
-	memset(&destination, 0, sizeof(destination));
-	if (ip->client->state == S_REQUESTING ||
-	    ip->client->state == S_REBOOTING ||
-	    cur_time > ip->client->active->rebind)
-		destination.sin_addr.s_addr = INADDR_BROADCAST;
-	else
+	/* Windows 11 broadcasts the last DHCPREQUEST of each RENEWING attempt */
+	if (ip->client->state == S_RENEWING &&
+	    ip->client->request_sends < DHCP_RENEW_UNICAST_SENDS)
 		memcpy(&destination.sin_addr.s_addr,
 		    ip->client->destination.iabuf,
 		    sizeof(destination.sin_addr.s_addr));
+	else
+		destination.sin_addr.s_addr = INADDR_BROADCAST;
 	destination.sin_port = htons(REMOTE_PORT);
 	destination.sin_family = AF_INET;
 //	destination.sin_len = sizeof(destination);
@@ -1524,7 +1842,9 @@ send_request(void *ipp)
 	(void) send_packet(ip, &ip->client->packet, ip->client->packet_length,
 	    from, &destination, NULL);
 
-	add_timeout(cur_time + ip->client->interval, send_request, ip);
+	if (ip->client->state != S_REBOOTING)
+		ip->client->request_sends++;
+	add_timeout_ms(now + delay, send_request, ip);
 }
 
 void
@@ -1545,10 +1865,9 @@ void
 send_release(void *ipp)
 {
 	struct interface_info *ip = ipp;
-	struct sockaddr_in destination;
+	struct sockaddr_in destination = { 0 };
 	struct in_addr from;
 
-	memset(&destination, 0, sizeof(destination));
 	memcpy(&destination.sin_addr.s_addr,
 		   ip->client->destination.iabuf,
 		   sizeof(destination.sin_addr.s_addr));
@@ -1570,13 +1889,11 @@ void
 make_discover(struct interface_info *ip, struct client_lease *lease)
 {
 	unsigned char discover = DHCPDISCOVER;
-	struct tree_cache *options[256];
-	struct tree_cache option_elements[256];
+	struct tree_cache *options[256] = { NULL };
+	struct tree_cache option_elements[256] = { 0 };
 	int i;
 	ULONG foo = (ULONG) GetTickCount();
 
-	memset(option_elements, 0, sizeof(option_elements));
-	memset(options, 0, sizeof(options));
 	memset(&ip->client->packet, 0, sizeof(ip->client->packet));
 
 	/* Set DHCP_MESSAGE_TYPE to DHCPDISCOVER */
@@ -1634,7 +1951,7 @@ make_discover(struct interface_info *ip, struct client_lease *lease)
 	ip->client->packet.hops = 0;
 	ip->client->packet.xid = RtlRandom(&foo);
 	ip->client->packet.secs = 0; /* filled in by send_discover. */
-	ip->client->packet.flags = 0;
+	ip->client->packet.flags = dhcp_discover_broadcast(ip->client->discover_cycle) ? htons(BOOTP_BROADCAST) : 0;
 
 	memset(&(ip->client->packet.ciaddr),
 	    0, sizeof(ip->client->packet.ciaddr));
@@ -1653,11 +1970,10 @@ void
 make_request(struct interface_info *ip, struct client_lease * lease)
 {
 	unsigned char request = DHCPREQUEST;
-	struct tree_cache *options[256];
+	struct tree_cache *options[256] = { NULL };
 	struct tree_cache option_elements[256];
 	int i;
 
-	memset(options, 0, sizeof(options));
 	memset(&ip->client->packet, 0, sizeof(ip->client->packet));
 
 	/* Set DHCP_MESSAGE_TYPE to DHCPREQUEST */
@@ -1738,7 +2054,7 @@ make_request(struct interface_info *ip, struct client_lease * lease)
 	} else {
 		memset(&ip->client->packet.ciaddr, 0,
 		    sizeof(ip->client->packet.ciaddr));
-		ip->client->packet.flags = 0;
+		ip->client->packet.flags = dhcp_discover_broadcast(ip->client->discover_cycle) ? htons(BOOTP_BROADCAST) : 0;
 	}
 
 	memset(&ip->client->packet.yiaddr, 0,
@@ -1754,13 +2070,12 @@ make_request(struct interface_info *ip, struct client_lease * lease)
 void
 make_decline(struct interface_info *ip, struct client_lease *lease)
 {
-	struct tree_cache *options[256], message_type_tree;
+	struct tree_cache *options[256] = { NULL }, message_type_tree;
 	struct tree_cache requested_address_tree;
 	struct tree_cache server_id_tree, client_id_tree;
 	unsigned char decline = DHCPDECLINE;
 	int i;
 
-	memset(options, 0, sizeof(options));
 	memset(&ip->client->packet, 0, sizeof(ip->client->packet));
 
 	/* Set DHCP_MESSAGE_TYPE to DHCPDECLINE */
@@ -1828,12 +2143,11 @@ make_decline(struct interface_info *ip, struct client_lease *lease)
 void
 make_release(struct interface_info *ip, struct client_lease *lease)
 {
-	struct tree_cache *options[256], message_type_tree;
+	struct tree_cache *options[256] = { NULL }, message_type_tree;
 	struct tree_cache server_id_tree, client_id_tree;
 	unsigned char release = DHCPRELEASE;
 	int i;
 
-	memset(options, 0, sizeof(options));
 	memset(&ip->client->packet, 0, sizeof(ip->client->packet));
 
 	/* Set DHCP_MESSAGE_TYPE to DHCPRELEASE */

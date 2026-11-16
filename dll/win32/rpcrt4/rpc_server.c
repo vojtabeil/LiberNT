@@ -202,6 +202,57 @@ static RpcPktHdr *handle_bind_error(RpcConnection *conn, RPC_STATUS error)
                                       reject_reason);
 }
 
+#ifdef __REACTOS__
+#define MGMT_IS_SERVER_LISTENING_OPNUM 2
+
+static const RPC_SYNTAX_IDENTIFIER mgmt_syntax =
+    {{0xafa8bd80, 0x7d8a, 0x11c9, {0xbe, 0xf4, 0x08, 0x00, 0x2b, 0x10, 0x29, 0x89}}, {1, 0}};
+static const RPC_SYNTAX_IDENTIFIER mgmt_transfer_syntax =
+    {{0x8a885d04, 0x1ceb, 0x11c9, {0x9f, 0xe8, 0x08, 0x00, 0x2b, 0x10, 0x48, 0x60}}, {2, 0}};
+
+static BOOL is_mgmt_syntax(const RPC_SYNTAX_IDENTIFIER *syntax)
+{
+  return !memcmp(syntax, &mgmt_syntax, sizeof(*syntax));
+}
+
+static BOOL is_std_listening(void)
+{
+  BOOL listening;
+
+  EnterCriticalSection(&listen_cs);
+  listening = listen_done_event && std_listen;
+  LeaveCriticalSection(&listen_cs);
+  return listening;
+}
+
+static RPC_STATUS process_mgmt_request(RpcConnection *conn, RpcPktRequestHdr *hdr)
+{
+  RpcPktHdr *response;
+  ULONG reply[2];
+  RPC_STATUS status;
+
+  if (hdr->opnum != MGMT_IS_SERVER_LISTENING_OPNUM)
+  {
+    WARN("unsupported management operation %u\n", hdr->opnum);
+    response = RPCRT4_BuildFaultHeader(NDR_LOCAL_DATA_REPRESENTATION, NCA_S_OP_RNG_ERROR);
+    if (!response)
+      return RPC_S_OUT_OF_RESOURCES;
+    status = RPCRT4_Send(conn, response, NULL, 0);
+    free(response);
+    return status;
+  }
+
+  reply[0] = is_std_listening();
+  reply[1] = RPC_S_OK;
+  response = RPCRT4_BuildResponseHeader(NDR_LOCAL_DATA_REPRESENTATION, sizeof(reply));
+  if (!response)
+    return RPC_S_OUT_OF_RESOURCES;
+  status = RPCRT4_Send(conn, response, reply, sizeof(reply));
+  free(response);
+  return status;
+}
+#endif
+
 static RPC_STATUS process_bind_packet_no_send(
     RpcConnection *conn, RpcPktBindHdr *hdr, RPC_MESSAGE *msg,
     unsigned char *auth_data, ULONG auth_length, RpcPktHdr **ack_response,
@@ -246,6 +297,28 @@ static RPC_STATUS process_bind_packet_no_send(
       RpcServerInterface* sif = NULL;
       unsigned int j;
 
+#ifdef __REACTOS__
+      if (is_mgmt_syntax(&ctxt_elem->abstract_syntax))
+      {
+          for (j = 0; j < ctxt_elem->num_syntaxes; j++)
+              if (!memcmp(&ctxt_elem->transfer_syntaxes[j], &mgmt_transfer_syntax, sizeof(mgmt_transfer_syntax)))
+                  break;
+          if (j < ctxt_elem->num_syntaxes)
+          {
+              results[i].result = RESULT_ACCEPT;
+              results[i].reason = REASON_NONE;
+              results[i].transfer_syntax = ctxt_elem->transfer_syntaxes[j];
+              conn->ActiveInterface = ctxt_elem->abstract_syntax;
+          }
+          else
+          {
+              results[i].result = RESULT_PROVIDER_REJECTION;
+              results[i].reason = REASON_TRANSFER_SYNTAXES_NOT_SUPPORTED;
+              memset(&results[i].transfer_syntax, 0, sizeof(results[i].transfer_syntax));
+          }
+          continue;
+      }
+#endif
       for (j = 0; !sif && j < ctxt_elem->num_syntaxes; j++)
       {
           sif = RPCRT4_find_interface(NULL, &ctxt_elem->abstract_syntax,
@@ -381,6 +454,11 @@ static RPC_STATUS process_request_packet(RpcConnection *conn, RpcPktRequestHdr *
     return RPC_S_OK;
   }
 
+#ifdef __REACTOS__
+  if (is_mgmt_syntax(&conn->ActiveInterface))
+    return process_mgmt_request(conn, hdr);
+#endif
+
   if (hdr->common.flags & RPC_FLG_OBJECT_UUID) {
     object_uuid = (UUID*)(hdr + 1);
   } else {
@@ -447,8 +525,17 @@ static RPC_STATUS process_request_packet(RpcConnection *conn, RpcPktRequestHdr *
     RPCRT4_SetThreadCurrentCallHandle(NULL);
 
   /* release any unmarshalled context handles */
+#ifdef __REACTOS__
+  {
+    BOOL locked;
+
+    while ((context_handle = RPCRT4_PopThreadContextHandle(&locked)) != NULL)
+      RpcServerAssoc_ReleaseContextHandle(conn->server_binding->Assoc, context_handle, locked);
+  }
+#else
   while ((context_handle = RPCRT4_PopThreadContextHandle()) != NULL)
     RpcServerAssoc_ReleaseContextHandle(conn->server_binding->Assoc, context_handle, TRUE);
+#endif
 
   if (!exception)
     response = RPCRT4_BuildResponseHeader(msg->DataRepresentation,
@@ -540,6 +627,32 @@ static DWORD CALLBACK RPCRT4_worker_thread(LPVOID the_arg)
   return 0;
 }
 
+#ifdef __REACTOS__
+static PTP_POOL server_pool;
+
+static void CALLBACK RPCRT4_pool_worker(PTP_CALLBACK_INSTANCE instance, void *context)
+{
+  RPCRT4_worker_thread(context);
+}
+
+static BOOL RPCRT4_queue_worker(RpcPacket *packet)
+{
+  TP_CALLBACK_ENVIRON environment;
+  PTP_POOL pool = InterlockedCompareExchangePointer((void **)&server_pool, NULL, NULL);
+
+  if (!pool)
+    return QueueUserWorkItem(RPCRT4_worker_thread, packet, WT_EXECUTELONGFUNCTION);
+
+  memset(&environment, 0, sizeof(environment));
+  environment.Version = 3;
+  environment.Pool = pool;
+  environment.u.s.LongFunction = 1;
+  environment.CallbackPriority = TP_CALLBACK_PRIORITY_NORMAL;
+  environment.Size = sizeof(environment);
+  return TrySubmitThreadpoolCallback(RPCRT4_pool_worker, packet, &environment);
+}
+#endif
+
 static DWORD CALLBACK RPCRT4_io_thread(LPVOID the_arg)
 {
   RpcConnection* conn = the_arg;
@@ -588,7 +701,11 @@ static DWORD CALLBACK RPCRT4_io_thread(LPVOID the_arg)
       packet->msg = msg;
       packet->auth_data = auth_data;
       packet->auth_length = auth_length;
+#ifdef __REACTOS__
+      if (!RPCRT4_queue_worker(packet)) {
+#else
       if (!QueueUserWorkItem(RPCRT4_worker_thread, packet, WT_EXECUTELONGFUNCTION)) {
+#endif
         ERR("couldn't queue work item for worker thread, error was %ld\n", GetLastError());
         free(packet);
         status = RPC_S_OUT_OF_RESOURCES;
@@ -884,6 +1001,10 @@ RPC_STATUS WINAPI RpcServerInqBindings( RPC_BINDING_VECTOR** BindingVector )
   if (count) {
     /* export bindings */
     *BindingVector = malloc(sizeof(RPC_BINDING_VECTOR) + sizeof(RPC_BINDING_HANDLE) * (count - 1));
+#ifdef __REACTOS__
+    if (!*BindingVector)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     (*BindingVector)->Count = count;
     count = 0;
     LIST_FOR_EACH_ENTRY(ps, &protseqs, RpcServerProtseq, entry) {
@@ -1173,6 +1294,10 @@ RPC_STATUS WINAPI RpcServerRegisterIf3( RPC_IF_HANDLE IfSpec, UUID* MgrTypeUuid,
   TRACE(" interpreter info: %p\n", If->InterpreterInfo);
 
   sif = calloc(1, sizeof(RpcServerInterface));
+#ifdef __REACTOS__
+  if (!sif)
+      RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
   sif->If           = If;
   if (MgrTypeUuid) {
     sif->MgrTypeUuid = *MgrTypeUuid;
@@ -1199,6 +1324,64 @@ RPC_STATUS WINAPI RpcServerRegisterIf3( RPC_IF_HANDLE IfSpec, UUID* MgrTypeUuid,
 /***********************************************************************
  *             RpcServerUnregisterIf (RPCRT4.@)
  */
+#ifdef __REACTOS__
+RPC_STATUS WINAPI RpcServerUnregisterIf( RPC_IF_HANDLE IfSpec, UUID* MgrTypeUuid, UINT WaitForCallsToComplete )
+{
+  PRPC_SERVER_INTERFACE If = IfSpec;
+  RpcServerInterface *cif, *cif2;
+  HANDLE *events = NULL;
+  struct list removed = LIST_INIT(removed);
+  unsigned int count = 0, found = 0, i;
+  RPC_STATUS status;
+
+  TRACE("(IfSpec == (RPC_IF_HANDLE)^%p, MgrTypeUuid == %s, WaitForCallsToComplete == %u)\n",
+    IfSpec, debugstr_guid(MgrTypeUuid), WaitForCallsToComplete);
+
+  EnterCriticalSection(&server_cs);
+  LIST_FOR_EACH_ENTRY_SAFE(cif, cif2, &server_interfaces, RpcServerInterface, entry) {
+    if (((!IfSpec && !(cif->Flags & RPC_IF_AUTOLISTEN)) ||
+        (IfSpec && !memcmp(&If->InterfaceId, &cif->If->InterfaceId, sizeof(RPC_SYNTAX_IDENTIFIER)))) &&
+        UuidEqual(MgrTypeUuid, &cif->MgrTypeUuid, &status)) {
+      list_remove(&cif->entry);
+      TRACE("unregistering cif %p\n", cif);
+      found++;
+      if (cif->CurrentCalls) {
+        cif->Delete = TRUE;
+        if (WaitForCallsToComplete) {
+          HANDLE *new_events = realloc(events, (count + 1) * sizeof(*events));
+          if (new_events) {
+            events = new_events;
+            cif->CallsCompletedEvent = events[count++] = CreateEventW(NULL, FALSE, FALSE, NULL);
+          }
+        }
+      }
+      else
+        list_add_tail(&removed, &cif->entry);
+      if (IfSpec) break;
+    }
+  }
+  LeaveCriticalSection(&server_cs);
+
+  if (!found) {
+    ERR("not found for object %s\n", debugstr_guid(MgrTypeUuid));
+    return IfSpec ? RPC_S_UNKNOWN_IF : RPC_S_UNKNOWN_MGR_TYPE;
+  }
+
+  LIST_FOR_EACH_ENTRY_SAFE(cif, cif2, &removed, RpcServerInterface, entry) {
+    list_remove(&cif->entry);
+    free(cif);
+  }
+
+  for (i = 0; i < count; i++) {
+    if (!events[i]) continue;
+    WaitForSingleObject(events[i], INFINITE);
+    CloseHandle(events[i]);
+  }
+  free(events);
+
+  return RPC_S_OK;
+}
+#else
 RPC_STATUS WINAPI RpcServerUnregisterIf( RPC_IF_HANDLE IfSpec, UUID* MgrTypeUuid, UINT WaitForCallsToComplete )
 {
   PRPC_SERVER_INTERFACE If = IfSpec;
@@ -1246,6 +1429,7 @@ RPC_STATUS WINAPI RpcServerUnregisterIf( RPC_IF_HANDLE IfSpec, UUID* MgrTypeUuid
 
   return RPC_S_OK;
 }
+#endif
 
 /***********************************************************************
  *             RpcServerUnregisterIfEx (RPCRT4.@)
@@ -1310,6 +1494,10 @@ RPC_STATUS WINAPI RpcObjectSetType( UUID* ObjUuid, UUID* TypeUuid )
       return RPC_S_ALREADY_REGISTERED;
     /* ... otherwise create a new one and add it in. */
     map = malloc(sizeof(RpcObjTypeMap));
+#ifdef __REACTOS__
+    if (!map)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     map->Object = *ObjUuid;
     map->Type = *TypeUuid;
     map->next = NULL;
@@ -1698,6 +1886,46 @@ RPC_STATUS WINAPI RpcMgmtEpEltInqBegin(RPC_BINDING_HANDLE Binding, ULONG Inquiry
   return RPC_S_INVALID_BINDING;
 }
 
+#ifdef __REACTOS__
+static RPC_STATUS mgmt_is_server_listening(RPC_BINDING_HANDLE Binding)
+{
+  static const RPC_CLIENT_INTERFACE mgmt_client_if =
+  {
+    sizeof(RPC_CLIENT_INTERFACE),
+    {{0xafa8bd80, 0x7d8a, 0x11c9, {0xbe, 0xf4, 0x08, 0x00, 0x2b, 0x10, 0x29, 0x89}}, {1, 0}},
+    {{0x8a885d04, 0x1ceb, 0x11c9, {0x9f, 0xe8, 0x08, 0x00, 0x2b, 0x10, 0x48, 0x60}}, {2, 0}},
+  };
+  RPC_MESSAGE msg;
+  RPC_STATUS status;
+  ULONG reply[2];
+
+  memset(&msg, 0, sizeof(msg));
+  msg.Handle = Binding;
+  msg.RpcInterfaceInformation = (void *)&mgmt_client_if;
+  msg.ProcNum = MGMT_IS_SERVER_LISTENING_OPNUM;
+  status = I_RpcGetBuffer(&msg);
+  if (status != RPC_S_OK)
+    return status;
+
+  status = I_RpcSendReceive(&msg);
+  if (status == RPC_S_OK)
+  {
+    if (msg.BufferLength < sizeof(reply))
+      status = RPC_X_BAD_STUB_DATA;
+    else
+    {
+      memcpy(reply, msg.Buffer, sizeof(reply));
+      if (reply[1] != RPC_S_OK)
+        status = reply[1];
+      else if (!reply[0])
+        status = RPC_S_NOT_LISTENING;
+    }
+  }
+  I_RpcFreeBuffer(&msg);
+  return status;
+}
+#endif
+
 /***********************************************************************
  *             RpcMgmtIsServerListening (RPCRT4.@)
  */
@@ -1710,6 +1938,10 @@ RPC_STATUS WINAPI RpcMgmtIsServerListening(RPC_BINDING_HANDLE Binding)
   if (Binding) {
     RpcBinding *rpc_binding = (RpcBinding*)Binding;
     status = RPCRT4_IsServerListening(rpc_binding->Protseq, rpc_binding->Endpoint);
+#ifdef __REACTOS__
+    if (status == RPC_S_OK)
+      status = mgmt_is_server_listening(Binding);
+#endif
   }else {
     EnterCriticalSection(&listen_cs);
     if (listen_done_event && std_listen) status = RPC_S_OK;
@@ -1733,8 +1965,33 @@ RPC_STATUS WINAPI RpcMgmtSetAuthorizationFn(RPC_MGMT_AUTHORIZATION_FN fn)
  */
 RPC_STATUS WINAPI RpcMgmtSetServerStackSize(ULONG ThreadStackSize)
 {
+#ifdef __REACTOS__
+  TP_POOL_STACK_INFORMATION stack;
+  RPC_STATUS status = RPC_S_OK;
+
+  TRACE("(0x%lx)\n", ThreadStackSize);
+
+  EnterCriticalSection(&server_cs);
+  if (!server_pool)
+    server_pool = CreateThreadpool(NULL);
+  if (!server_pool || !QueryThreadpoolStackInformation(server_pool, &stack))
+  {
+    status = RPC_S_OUT_OF_RESOURCES;
+  }
+  else
+  {
+    stack.StackCommit = ThreadStackSize;
+    if (stack.StackReserve < stack.StackCommit)
+      stack.StackReserve = stack.StackCommit;
+    if (!SetThreadpoolStackInformation(server_pool, &stack))
+      status = RPC_S_OUT_OF_RESOURCES;
+  }
+  LeaveCriticalSection(&server_cs);
+  return status;
+#else
   FIXME("(0x%lx): stub\n", ThreadStackSize);
   return RPC_S_OK;
+#endif
 }
 
 /***********************************************************************

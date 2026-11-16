@@ -29,6 +29,7 @@ extern UNICODE_STRING BaseSrvKernel32DllPath;
 HANDLE BaseSrvHeap = NULL;          // Our own heap.
 HANDLE BaseSrvSharedHeap = NULL;    // Shared heap with CSR. (CsrSrvSharedSectionHeap)
 PBASE_STATIC_SERVER_DATA BaseStaticServerData = NULL;   // Data that we can share amongst processes. Initialized inside BaseSrvSharedHeap.
+PBASE_STATIC_SERVER_DATA32 BaseStaticServerData32 = NULL;
 
 ULONG SessionId = 0;
 ULONG ProtectionMode = 0;
@@ -149,6 +150,60 @@ PCHAR BaseServerApiNameTable[BasepMaxApiNumber - BASESRV_FIRST_API_NUMBER] =
 
 /* FUNCTIONS ******************************************************************/
 
+static VOID
+BasepUnicodeStringTo32(PUNICODE_STRING32 String32, PCUNICODE_STRING String)
+{
+    String32->Length = String->Length;
+    String32->MaximumLength = String->MaximumLength;
+    String32->Buffer = PtrToUlong(String->Buffer);
+}
+
+static VOID
+BasepInitializeStaticServerData32(VOID)
+{
+    PBASE_SYSTEM_BASIC_INFORMATION32 SysInfo32;
+    PSYSTEM_BASIC_INFORMATION SysInfo = &BaseStaticServerData->SysInfo;
+
+    BaseStaticServerData32 = RtlAllocateHeap(BaseSrvSharedHeap, HEAP_ZERO_MEMORY, sizeof(*BaseStaticServerData32));
+    ASSERT(BaseStaticServerData32 != NULL);
+
+    BasepUnicodeStringTo32(&BaseStaticServerData32->WindowsDirectory, &BaseStaticServerData->WindowsDirectory);
+    BasepUnicodeStringTo32(&BaseStaticServerData32->WindowsSystemDirectory, &BaseStaticServerData->WindowsSystemDirectory);
+    BasepUnicodeStringTo32(&BaseStaticServerData32->NamedObjectDirectory, &BaseStaticServerData->NamedObjectDirectory);
+    BaseStaticServerData32->WindowsMajorVersion = BaseStaticServerData->WindowsMajorVersion;
+    BaseStaticServerData32->WindowsMinorVersion = BaseStaticServerData->WindowsMinorVersion;
+    BaseStaticServerData32->BuildNumber = BaseStaticServerData->BuildNumber;
+    BaseStaticServerData32->CSDNumber = BaseStaticServerData->CSDNumber;
+    BaseStaticServerData32->RCNumber = BaseStaticServerData->RCNumber;
+    RtlCopyMemory(BaseStaticServerData32->CSDVersion, BaseStaticServerData->CSDVersion, sizeof(BaseStaticServerData32->CSDVersion));
+
+    SysInfo32 = &BaseStaticServerData32->SysInfo;
+    SysInfo32->Reserved = SysInfo->Reserved;
+    SysInfo32->TimerResolution = SysInfo->TimerResolution;
+    SysInfo32->PageSize = SysInfo->PageSize;
+    SysInfo32->NumberOfPhysicalPages = SysInfo->NumberOfPhysicalPages;
+    SysInfo32->LowestPhysicalPageNumber = SysInfo->LowestPhysicalPageNumber;
+    SysInfo32->HighestPhysicalPageNumber = SysInfo->HighestPhysicalPageNumber;
+    SysInfo32->AllocationGranularity = SysInfo->AllocationGranularity;
+    SysInfo32->MinimumUserModeAddress = PtrToUlong((PVOID)SysInfo->MinimumUserModeAddress);
+    SysInfo32->MaximumUserModeAddress = 0x7ffeffff;
+    SysInfo32->ActiveProcessorsAffinityMask = (ULONG)SysInfo->ActiveProcessorsAffinityMask;
+    SysInfo32->NumberOfProcessors = SysInfo->NumberOfProcessors;
+
+    BaseStaticServerData32->TimeOfDay = BaseStaticServerData->TimeOfDay;
+    BaseStaticServerData32->IniFileMapping = PtrToUlong(BaseStaticServerData->IniFileMapping);
+    BaseStaticServerData32->NlsUserInfo = BaseStaticServerData->NlsUserInfo;
+    BaseStaticServerData32->DefaultSeparateVDM = BaseStaticServerData->DefaultSeparateVDM;
+    BaseStaticServerData32->IsWowTaskReady = BaseStaticServerData->IsWowTaskReady;
+    BasepUnicodeStringTo32(&BaseStaticServerData32->WindowsSys32x86Directory, &BaseStaticServerData->WindowsSys32x86Directory);
+    BaseStaticServerData32->fTermsrvAppInstallMode = BaseStaticServerData->fTermsrvAppInstallMode;
+    BaseStaticServerData32->tziTermsrvClientTimeZone = BaseStaticServerData->tziTermsrvClientTimeZone;
+    BaseStaticServerData32->ktTermsrvClientBias = BaseStaticServerData->ktTermsrvClientBias;
+    BaseStaticServerData32->TermsrvClientTimeZoneId = BaseStaticServerData->TermsrvClientTimeZoneId;
+    BaseStaticServerData32->LUIDDeviceMapsEnabled = BaseStaticServerData->LUIDDeviceMapsEnabled;
+    BaseStaticServerData32->TermsrvClientTimeZoneChangeNum = BaseStaticServerData->TermsrvClientTimeZoneChangeNum;
+}
+
 NTSTATUS
 NTAPI
 BaseSrvInitializeIniFileMappings(IN PBASE_STATIC_SERVER_DATA StaticServerData)
@@ -170,12 +225,73 @@ BaseSrvInitializeIniFileMappings(IN PBASE_STATIC_SERVER_DATA StaticServerData)
     return STATUS_SUCCESS;
 }
 
+static HANDLE BaseSrvAppContainerObjectDirectory;
+
+static VOID
+BaseSrvCreateAppContainerDirectory(IN ULONG SessionId,
+                                   IN PSECURITY_DESCRIPTOR LabeledSd)
+{
+    SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
+    SID_IDENTIFIER_AUTHORITY PackageAuthority = {SECURITY_APP_PACKAGE_AUTHORITY};
+    PSID SystemSid = NULL, WorldSid = NULL, AllPackagesSid = NULL, AllRestrictedSid = NULL;
+    PACL Dacl = NULL, Sacl = NULL;
+    BOOLEAN SaclPresent = FALSE, SaclDefaulted = FALSE;
+    SECURITY_DESCRIPTOR Sd;
+    UNICODE_STRING Name;
+    WCHAR Buffer[64];
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    ULONG AclLength;
+    ACCESS_MASK PackageAccess = DIRECTORY_QUERY | DIRECTORY_TRAVERSE | DIRECTORY_CREATE_OBJECT | DIRECTORY_CREATE_SUBDIRECTORY;
+    NTSTATUS Status;
+
+    Status = RtlAllocateAndInitializeSid(&NtAuthority, 1, SECURITY_LOCAL_SYSTEM_RID, 0, 0, 0, 0, 0, 0, 0, &SystemSid);
+    if (!NT_SUCCESS(Status)) goto Quit;
+    Status = RtlAllocateAndInitializeSid(&WorldAuthority, 1, SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, &WorldSid);
+    if (!NT_SUCCESS(Status)) goto Quit;
+    Status = RtlAllocateAndInitializeSid(&PackageAuthority, 2, SECURITY_APP_PACKAGE_BASE_RID, SECURITY_BUILTIN_PACKAGE_ANY_PACKAGE, 0, 0, 0, 0, 0, 0, &AllPackagesSid);
+    if (!NT_SUCCESS(Status)) goto Quit;
+    Status = RtlAllocateAndInitializeSid(&PackageAuthority, 2, SECURITY_APP_PACKAGE_BASE_RID, SECURITY_BUILTIN_PACKAGE_ANY_RESTRICTED_PACKAGE, 0, 0, 0, 0, 0, 0, &AllRestrictedSid);
+    if (!NT_SUCCESS(Status)) goto Quit;
+
+    AclLength = sizeof(ACL) + 4 * FIELD_OFFSET(ACCESS_ALLOWED_ACE, SidStart) +
+                RtlLengthSid(SystemSid) + RtlLengthSid(WorldSid) +
+                RtlLengthSid(AllPackagesSid) + RtlLengthSid(AllRestrictedSid);
+    Dacl = RtlAllocateHeap(BaseSrvHeap, 0, AclLength);
+    if (!Dacl) goto Quit;
+    Status = RtlCreateAcl(Dacl, AclLength, ACL_REVISION);
+    if (NT_SUCCESS(Status)) Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, DIRECTORY_ALL_ACCESS, SystemSid);
+    if (NT_SUCCESS(Status)) Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, PackageAccess, WorldSid);
+    if (NT_SUCCESS(Status)) Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, PackageAccess, AllPackagesSid);
+    if (NT_SUCCESS(Status)) Status = RtlAddAccessAllowedAce(Dacl, ACL_REVISION, PackageAccess, AllRestrictedSid);
+    if (NT_SUCCESS(Status)) Status = RtlCreateSecurityDescriptor(&Sd, SECURITY_DESCRIPTOR_REVISION);
+    if (NT_SUCCESS(Status)) Status = RtlSetDaclSecurityDescriptor(&Sd, TRUE, Dacl, FALSE);
+    if (NT_SUCCESS(Status)) Status = RtlGetSaclSecurityDescriptor(LabeledSd, &SaclPresent, &Sacl, &SaclDefaulted);
+    if (NT_SUCCESS(Status) && SaclPresent) Status = RtlSetSaclSecurityDescriptor(&Sd, TRUE, Sacl, FALSE);
+    if (!NT_SUCCESS(Status)) goto Quit;
+
+    _swprintf(Buffer, L"\\Sessions\\%lu\\AppContainerNamedObjects", SessionId);
+    RtlInitUnicodeString(&Name, Buffer);
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE, NULL, &Sd);
+    Status = NtCreateDirectoryObject(&BaseSrvAppContainerObjectDirectory, DIRECTORY_ALL_ACCESS, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("BASESRV: AppContainerNamedObjects creation failed 0x%lx\n", Status);
+
+Quit:
+    if (Dacl) RtlFreeHeap(BaseSrvHeap, 0, Dacl);
+    if (AllRestrictedSid) RtlFreeSid(AllRestrictedSid);
+    if (AllPackagesSid) RtlFreeSid(AllPackagesSid);
+    if (WorldSid) RtlFreeSid(WorldSid);
+    if (SystemSid) RtlFreeSid(SystemSid);
+}
+
 NTSTATUS
 NTAPI
 CreateBaseAcls(OUT PACL* Dacl,
                OUT PACL* RestrictedDacl)
 {
-    PSID SystemSid, WorldSid, RestrictedSid;
+    PSID SystemSid, WorldSid, RestrictedSid, AdminsSid, CreatorOwnerSid;
+    SID_IDENTIFIER_AUTHORITY CreatorAuthority = {SECURITY_CREATOR_SID_AUTHORITY};
     SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
     SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
     NTSTATUS Status;
@@ -261,11 +377,37 @@ CreateBaseAcls(OUT PACL* Dacl,
         goto Return;
     }
 
-    /* Allocate one ACL with 3 ACEs each for one SID */
-    AclLength = sizeof(ACL) + 3 * sizeof(ACCESS_ALLOWED_ACE) +
-                    RtlLengthSid(SystemSid) +
+    Status = RtlAllocateAndInitializeSid(&NtAuthority,
+                                         2, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_ADMINS,
+                                         0, 0, 0, 0, 0, 0,
+                                         &AdminsSid);
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeSid(RestrictedSid);
+        RtlFreeSid(WorldSid);
+        RtlFreeSid(SystemSid);
+        goto Return;
+    }
+
+    Status = RtlAllocateAndInitializeSid(&CreatorAuthority,
+                                         1, SECURITY_CREATOR_OWNER_RID,
+                                         0, 0, 0, 0, 0, 0, 0,
+                                         &CreatorOwnerSid);
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeSid(AdminsSid);
+        RtlFreeSid(RestrictedSid);
+        RtlFreeSid(WorldSid);
+        RtlFreeSid(SystemSid);
+        goto Return;
+    }
+
+    AclLength = sizeof(ACL) + 6 * sizeof(ACCESS_ALLOWED_ACE) +
+                    2 * RtlLengthSid(SystemSid) +
                     RtlLengthSid(WorldSid)  +
-                    RtlLengthSid(RestrictedSid);
+                    RtlLengthSid(RestrictedSid) +
+                    RtlLengthSid(AdminsSid) +
+                    RtlLengthSid(CreatorOwnerSid);
     *Dacl = RtlAllocateHeap(BaseSrvHeap, 0, AclLength);
     if (*Dacl == NULL)
     {
@@ -297,8 +439,29 @@ CreateBaseAcls(OUT PACL* Dacl,
     }
 
     /* Give the appropriate rights to each SID */
-    if (NT_SUCCESS(RtlAddAccessAllowedAce(*Dacl, ACL_REVISION2, WorldAccess, WorldSid)) &&
-        NT_SUCCESS(RtlAddAccessAllowedAce(*Dacl, ACL_REVISION2, DIRECTORY_ALL_ACCESS, SystemSid)))
+    if (ObjectSecurityMode != 0)
+    {
+        Status = RtlAddAccessAllowedAce(*Dacl, ACL_REVISION2, DIRECTORY_ALL_ACCESS, SystemSid);
+        if (NT_SUCCESS(Status))
+            Status = RtlAddAccessAllowedAceEx(*Dacl, ACL_REVISION2,
+                                              OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+                                              GENERIC_ALL, SystemSid);
+        if (NT_SUCCESS(Status))
+            Status = RtlAddAccessAllowedAceEx(*Dacl, ACL_REVISION2,
+                                              OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+                                              GENERIC_ALL, CreatorOwnerSid);
+        if (NT_SUCCESS(Status))
+            Status = RtlAddAccessAllowedAce(*Dacl, ACL_REVISION2,
+                                            READ_CONTROL | DIRECTORY_QUERY | DIRECTORY_TRAVERSE |
+                                            DIRECTORY_CREATE_OBJECT | DIRECTORY_CREATE_SUBDIRECTORY,
+                                            AdminsSid);
+        if (NT_SUCCESS(Status))
+            Status = RtlAddAccessAllowedAceEx(*Dacl, ACL_REVISION2, CONTAINER_INHERIT_ACE, WorldAccess, WorldSid);
+        if (NT_SUCCESS(Status))
+            RtlAddAccessAllowedAce(*Dacl, ACL_REVISION2, DIRECTORY_TRAVERSE, RestrictedSid);
+    }
+    else if (NT_SUCCESS(RtlAddAccessAllowedAce(*Dacl, ACL_REVISION2, WorldAccess, WorldSid)) &&
+             NT_SUCCESS(RtlAddAccessAllowedAce(*Dacl, ACL_REVISION2, DIRECTORY_ALL_ACCESS, SystemSid)))
     {
         RtlAddAccessAllowedAce(*Dacl, ACL_REVISION2, DIRECTORY_TRAVERSE, RestrictedSid);
     }
@@ -346,6 +509,8 @@ CreateBaseAcls(OUT PACL* Dacl,
 
     /* The SIDs are captured, can free them now */
 FreeAndReturn:
+    RtlFreeSid(CreatorOwnerSid);
+    RtlFreeSid(AdminsSid);
     RtlFreeSid(RestrictedSid);
     RtlFreeSid(WorldSid);
     RtlFreeSid(SystemSid);
@@ -412,7 +577,7 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
     ASSERT(Success);
 
     /* Create the system directory */
-    wcscat(SystemRootString.Buffer, L"\\System32");
+    wcscat(SystemRootString.Buffer, L"\\system32");
     Success = RtlCreateUnicodeString(&BaseSrvWindowsSystemDirectory,
                                      SystemRootString.Buffer);
     ASSERT(Success);
@@ -425,7 +590,7 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
 
     if (SessionId != 0)
     {
-        _swprintf(BnoBuffer, L"\\Sessions\\%lu\\BaseNamedObjects", SessionId);
+        _swprintf(BnoBuffer, L"\\Sessions\\%ld\\BaseNamedObjects", SessionId);
     }
     else
     {
@@ -550,6 +715,27 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
     Status = RtlSetDaclSecurityDescriptor(BnoSd, TRUE, BnoDacl, FALSE);
     ASSERT(NT_SUCCESS(Status));
 
+    {
+        SID_IDENTIFIER_AUTHORITY LabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+        PSID LowSid = NULL;
+        PACL LabelSacl;
+        ULONG SaclSize;
+
+        Status = RtlAllocateAndInitializeSid(&LabelAuthority, 1, SECURITY_MANDATORY_LOW_RID,
+                                             0, 0, 0, 0, 0, 0, 0, &LowSid);
+        ASSERT(NT_SUCCESS(Status));
+        SaclSize = sizeof(ACL) + sizeof(SYSTEM_MANDATORY_LABEL_ACE) + RtlLengthSid(LowSid);
+        LabelSacl = RtlAllocateHeap(BaseSrvHeap, 0, SaclSize);
+        ASSERT(LabelSacl);
+        Status = RtlCreateAcl(LabelSacl, SaclSize, ACL_REVISION);
+        ASSERT(NT_SUCCESS(Status));
+        Status = RtlAddMandatoryAce(LabelSacl, ACL_REVISION, 0, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+                                    SYSTEM_MANDATORY_LABEL_ACE_TYPE, LowSid);
+        ASSERT(NT_SUCCESS(Status));
+        Status = RtlSetSaclSecurityDescriptor(BnoSd, TRUE, LabelSacl, FALSE);
+        ASSERT(NT_SUCCESS(Status));
+    }
+
     /* Create the BNO directory */
     InitializeObjectAttributes(&ObjectAttributes,
                                &BnoString,
@@ -560,6 +746,16 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
                                      DIRECTORY_ALL_ACCESS,
                                      &ObjectAttributes);
     ASSERT(NT_SUCCESS(Status));
+    if (Status == STATUS_OBJECT_NAME_EXISTS)
+    {
+        Status = NtSetSecurityObject(BaseSrvNamedObjectDirectory,
+                                     DACL_SECURITY_INFORMATION |
+                                     LABEL_SECURITY_INFORMATION,
+                                     BnoSd);
+        ASSERT(NT_SUCCESS(Status));
+    }
+
+    BaseSrvCreateAppContainerDirectory(SessionId, BnoSd);
 
     /* Check if we are session 0 */
     if (SessionId == 0)
@@ -601,7 +797,6 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
 
         /* Make local point back to \Sessions\x\BNO */
         RtlInitUnicodeString(&DirectoryName, L"Local");
-        ASSERT(SessionId == 0);
         InitializeObjectAttributes(&ObjectAttributes,
                                    &DirectoryName,
                                    OBJ_OPENIF | OBJ_PERMANENT | OBJ_CASE_INSENSITIVE,
@@ -652,6 +847,8 @@ BaseInitializeStaticServerData(IN PCSR_SERVER_DLL LoadedServerDll)
 
     /* Finally, set the pointer */
     LoadedServerDll->SharedSection = BaseStaticServerData;
+    BasepInitializeStaticServerData32();
+    LoadedServerDll->SharedSection32 = BaseStaticServerData32;
 }
 
 NTSTATUS

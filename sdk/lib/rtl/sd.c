@@ -9,7 +9,7 @@
 /* INCLUDES *****************************************************************/
 
 #include <rtl.h>
-#include "../../ntoskrnl/include/internal/se.h"
+#include "../../ntos/include/internal/se.h"
 #define NDEBUG
 #include <debug.h>
 
@@ -1058,6 +1058,11 @@ RtlValidSecurityDescriptor(IN PSECURITY_DESCRIPTOR SecurityDescriptor)
     PACL Sacl, Dacl;
     PAGED_CODE_RTL();
 
+    if (SecurityDescriptor == NULL)
+    {
+        return FALSE;
+    }
+
     _SEH2_TRY
     {
         /* Fail on bad revisions */
@@ -1163,7 +1168,7 @@ RtlValidRelativeSecurityDescriptor(IN PSECURITY_DESCRIPTOR SecurityDescriptorInp
     }
 
     /* Is there a DACL? */
-    if ((Sd->Control & SE_DACL_PRESENT) == SE_DACL_PRESENT)
+    if ((Sd->Control & SE_DACL_PRESENT) && Sd->Dacl)
     {
         /* Try to access it */
         if (!RtlpValidateSDOffsetAndSize(Sd->Dacl,
@@ -1181,7 +1186,7 @@ RtlValidRelativeSecurityDescriptor(IN PSECURITY_DESCRIPTOR SecurityDescriptorInp
     }
 
     /* Is there a SACL? */
-    if ((Sd->Control & SE_SACL_PRESENT) == SE_SACL_PRESENT)
+    if ((Sd->Control & SE_SACL_PRESENT) && Sd->Sacl)
     {
         /* Try to access it */
         if (!RtlpValidateSDOffsetAndSize(Sd->Sacl,

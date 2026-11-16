@@ -18,7 +18,7 @@
 RTL_CRITICAL_SECTION CsrNtSessionLock;
 LIST_ENTRY CsrNtSessionList;
 
-const PSB_API_ROUTINE CsrServerSbApiDispatch[SbpMaxApiNumber - SbpCreateSession] =
+PSB_API_ROUTINE CsrServerSbApiDispatch[SbpMaxApiNumber - SbpCreateSession] =
 {
     CsrSbCreateSession,
     CsrSbTerminateSession,
@@ -26,16 +26,13 @@ const PSB_API_ROUTINE CsrServerSbApiDispatch[SbpMaxApiNumber - SbpCreateSession]
     CsrSbCreateProcess
 };
 
-#if DBG
-const PCSTR CsrServerSbApiName[SbpMaxApiNumber - SbpCreateSession + 1] =
+PCHAR CsrServerSbApiName[SbpMaxApiNumber - SbpCreateSession] =
 {
     "SbCreateSession",
     "SbTerminateSession",
     "SbForeignSessionComplete",
-    "SbCreateProcess",
-    "Unknown CSR Sb Api Number"
+    "SbCreateProcess"
 };
-#endif
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
@@ -306,6 +303,7 @@ CsrSbCreateSession(IN PSB_API_MSG ApiMessage)
 
     /* Setup Process Data */
     CsrProcess->ClientId = CreateSession->ProcessInfo.ClientId;
+    CsrProcess->ProcessGroupId = HandleToUlong(CsrProcess->ClientId.UniqueProcess);
     CsrProcess->ProcessHandle = hProcess;
     CsrProcess->NtSession = CsrAllocateNtSession(CreateSession->SessionId);
 
@@ -313,7 +311,9 @@ CsrSbCreateSession(IN PSB_API_MSG ApiMessage)
     CsrSetBackgroundPriority(CsrProcess);
 
     /* Get the first data location */
-    ProcessData = &CsrProcess->ServerData[CSR_SERVER_DLL_MAX];
+    ProcessData = (PVOID)((ULONG_PTR)CsrProcess +
+                          FIELD_OFFSET(CSR_PROCESS, ServerData) +
+                          CSR_SERVER_DLL_MAX * sizeof(PVOID));
 
     /* Loop every DLL */
     for (i = 0; i < CSR_SERVER_DLL_MAX; i++)
@@ -437,81 +437,90 @@ NTAPI
 CsrSbApiHandleConnectionRequest(IN PSB_API_MSG Message)
 {
     NTSTATUS Status;
-    REMOTE_PORT_VIEW RemotePortView;
     HANDLE hPort;
 
-    /* Set the Port View Structure Length */
-    RemotePortView.Length = sizeof(REMOTE_PORT_VIEW);
-
     /* Accept the connection */
-    Status = NtAcceptConnectPort(&hPort,
-                                 NULL,
-                                 &Message->h,
-                                 TRUE,
-                                 NULL,
-                                 &RemotePortView);
+    Status = NtAlpcAcceptConnectPort(&hPort,
+                                     CsrSbApiPort,
+                                     0,
+                                     NULL,
+                                     NULL,
+                                     NULL,
+                                     &Message->h,
+                                     NULL,
+                                     TRUE);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("CSRSS: Sb Accept Connection failed %lx\n", Status);
-        return Status;
-    }
-
-    /* Complete the Connection */
-    Status = NtCompleteConnectPort(hPort);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("CSRSS: Sb Complete Connection failed %lx\n",Status);
     }
 
     /* Return status */
     return Status;
 }
 
-/**
- * @brief
- * The CsrSbApiRequestThread routine handles incoming messages
- * or connection requests on the SM API LPC Port.
+/*++
+ * @name CsrSbApiRequestThread
  *
- * @param[in]   Parameter
- * System-default user-defined parameter. Unused.
+ * The CsrSbApiRequestThread routine handles incoming messages or connection
+ * requests on the SM API LPC Port.
  *
- * @return
- * The thread exit code, if the thread is terminated.
- **/
-ULONG
+ * @param Parameter
+ *        System-default user-defined parameter. Unused.
+ *
+ * @return The thread exit code, if the thread is terminated.
+ *
+ * @remarks Before listening on the port, the routine will first attempt
+ *          to connect to the user subsystem.
+ *
+ *--*/
+VOID
 NTAPI
-CsrSbApiRequestThread(
-    _In_ PVOID Parameter)
+CsrSbApiRequestThread(IN PVOID Parameter)
 {
     NTSTATUS Status;
     SB_API_MSG ReceiveMsg;
     PSB_API_MSG ReplyMsg = NULL;
     PVOID PortContext;
     ULONG MessageType;
+    SIZE_T BufferLength;
+    struct
+    {
+        ALPC_MESSAGE_ATTRIBUTES Header;
+        ALPC_CONTEXT_ATTR Context;
+    } ReceiveAttributes;
 
     /* Start the loop */
     while (TRUE)
     {
         /* Wait for a message to come in */
-        Status = NtReplyWaitReceivePort(CsrSbApiPort,
-                                        &PortContext,
-                                        &ReplyMsg->h,
-                                        &ReceiveMsg.h);
+        ReceiveAttributes.Header.AllocatedAttributes = ALPC_MESSAGE_CONTEXT_ATTRIBUTE;
+        ReceiveAttributes.Header.ValidAttributes = 0;
+        BufferLength = sizeof(ReceiveMsg);
+        Status = NtAlpcSendWaitReceivePort(CsrSbApiPort,
+                                           ReplyMsg ? ALPC_MSGFLG_REPLY_MESSAGE : 0,
+                                           ReplyMsg ? &ReplyMsg->h : NULL,
+                                           NULL,
+                                           &ReceiveMsg.h,
+                                           &BufferLength,
+                                           &ReceiveAttributes.Header,
+                                           NULL);
 
         /* Check if we didn't get success */
         if (Status != STATUS_SUCCESS)
         {
-            /* If we only got a warning, keep going */
-            if (NT_SUCCESS(Status)) continue;
-
             /* We failed big time, so start out fresh */
             ReplyMsg = NULL;
-            DPRINT1("CSRSS: ReceivePort failed - Status == %X\n", Status);
+            if (!NT_SUCCESS(Status)) DPRINT1("CSRSS: ReceivePort failed - Status == %X\n", Status);
             continue;
         }
 
+        PortContext = NULL;
+        if (ReceiveAttributes.Header.ValidAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE)
+            PortContext = ReceiveAttributes.Context.PortContext;
+
         /* Save the message type */
-        MessageType = ReceiveMsg.h.u2.s2.Type;
+        MessageType = ReceiveMsg.h.u2.s2.Type &
+                      ~(LPC_CONTINUATION_REQUIRED | LPC_NO_IMPERSONATE | LPC_KERNELMODE_MESSAGE);
 
         /* Check if this is a connection request */
         if (MessageType == LPC_CONNECTION_REQUEST)
@@ -541,43 +550,38 @@ CsrSbApiRequestThread(
             continue;
         }
 
-        /* This is an actual API message */
-#if DBG
-        DPRINT("CSRSS: %s Session Api Request received from %lx.%lx\n",
-               CsrServerSbApiName[min(ReceiveMsg.ApiNumber, SbpMaxApiNumber)],
-               ReceiveMsg.h.ClientId.UniqueProcess,
-               ReceiveMsg.h.ClientId.UniqueThread);
-#endif
+        /*
+         * It's an API Message, check if it's within limits. If it's not,
+         * the NT Behaviour is to set this to the Maximum API.
+         */
+        if (ReceiveMsg.ApiNumber > SbpMaxApiNumber)
+        {
+            ReceiveMsg.ApiNumber = SbpMaxApiNumber;
+            DPRINT1("CSRSS: %lx is invalid Sb ApiNumber\n", ReceiveMsg.ApiNumber);
+        }
 
         /* Reuse the message */
         ReplyMsg = &ReceiveMsg;
 
-        /* Make sure that the API is supported */
+        /* Make sure that the message is supported */
         if (ReceiveMsg.ApiNumber < SbpMaxApiNumber)
         {
             /* Call the API */
             if (!CsrServerSbApiDispatch[ReceiveMsg.ApiNumber](&ReceiveMsg))
             {
-#if DBG
                 DPRINT1("CSRSS: %s Session Api called and failed\n",
                         CsrServerSbApiName[ReceiveMsg.ApiNumber]);
-#endif
+
                 /* It failed, so return nothing */
                 ReplyMsg = NULL;
             }
         }
         else
         {
-            /* This API number is not supported */
-            DPRINT1("CSRSS: Invalid Sb Api Number %lx\n", ReceiveMsg.ApiNumber);
-            /* The NT behaviour is to reset it to the Maximum API ID */
-            ReceiveMsg.ApiNumber = SbpMaxApiNumber;
+            /* We don't support this API Number */
             ReplyMsg->ReturnValue = STATUS_NOT_IMPLEMENTED;
         }
     }
-
-    UNREACHABLE;
-    return STATUS_UNSUCCESSFUL;
 }
 
 /* EOF */

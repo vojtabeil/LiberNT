@@ -15,6 +15,7 @@ FirstSendHandler(
     _In_ PSTRING MessageHeader,
     _In_ PSTRING MessageData);
 static BOOLEAN InException = FALSE;
+static BOOLEAN ReportInitialState;
 
 /* GLOBALS ********************************************************************/
 DBGKD_GET_VERSION64 KdVersion;
@@ -42,6 +43,7 @@ GetContextSendHandler(
 {
     DBGKD_MANIPULATE_STATE64* State = (DBGKD_MANIPULATE_STATE64*)MessageHeader->Buffer;
     const CONTEXT* Context = (const CONTEXT*)MessageData->Buffer;
+    KDSTATUS Status;
 
     if ((PacketType != PACKET_TYPE_KD_STATE_MANIPULATE)
             || (State->ApiNumber != DbgKdGetContextApi)
@@ -54,6 +56,24 @@ GetContextSendHandler(
     /* Just copy it */
     RtlCopyMemory(&CurrentContext, Context, sizeof(*Context));
     KdpSendPacketHandler = NULL;
+
+    /*
+     * The first KD state change bootstraps KDGDB's version and context data.
+     * Report it once that data is complete so an attached RSP client has an
+     * explicit stopped state. If no client acknowledges the report, continue
+     * the KD exchange internally and leave unattended boot unblocked.
+     */
+    if (ReportInitialState)
+    {
+        ReportInitialState = FALSE;
+        if (!gdb_polled_packet_pending)
+        {
+            Status = gdb_send_exception();
+            if (Status != KdPacketReceived)
+                KdpManipulateStateHandler = ContinueManipulateStateHandler;
+        }
+    }
+
     return TRUE;
 }
 
@@ -96,7 +116,39 @@ SetContextSendHandler(
     {
         /* Should we bugcheck ? */
         KDDBGPRINT("BAD BAD BAD not manipulating state for sending context.\n");
-        return FALSE;
+    }
+
+    KdpSendPacketHandler = NULL;
+    return TRUE;
+}
+
+/*
+ * Same as above, but the GDB packet that triggered the write - 'P' or 'G' -
+ * still owes GDB a reply, which can only be sent once KD has confirmed it.
+ */
+static
+BOOLEAN
+SetContextReplySendHandler(
+    _In_ ULONG PacketType,
+    _In_ PSTRING MessageHeader,
+    _In_ PSTRING MessageData
+)
+{
+    DBGKD_MANIPULATE_STATE64* State = (DBGKD_MANIPULATE_STATE64*)MessageHeader->Buffer;
+
+    if ((PacketType != PACKET_TYPE_KD_STATE_MANIPULATE)
+            || (State->ApiNumber != DbgKdSetContextApi))
+    {
+        KDDBGPRINT("BAD BAD BAD not manipulating state for sending context.\n");
+        send_gdb_packet("E01");
+    }
+    else if (!NT_SUCCESS(State->ReturnStatus))
+    {
+        send_gdb_ntstatus(State->ReturnStatus);
+    }
+    else
+    {
+        send_gdb_packet("OK");
     }
 
     KdpSendPacketHandler = NULL;
@@ -132,10 +184,26 @@ SetContextManipulateHandler(
     return KdPacketReceived;
 }
 
+KDSTATUS
+SetContextManipulateHandlerWithReply(
+    _Out_ DBGKD_MANIPULATE_STATE64* State,
+    _Out_ PSTRING MessageData,
+    _Out_ PULONG MessageLength,
+    _Inout_ PKD_CONTEXT KdContext)
+{
+    KDSTATUS Status;
+
+    Status = SetContextManipulateHandler(State, MessageData, MessageLength, KdContext);
+    KdpSendPacketHandler = SetContextReplySendHandler;
+    return Status;
+}
+
 static
 void
 send_kd_state_change(DBGKD_ANY_WAIT_STATE_CHANGE* StateChange)
 {
+    KDSTATUS Status;
+
     InException = TRUE;
 
     switch (StateChange->NewState)
@@ -157,7 +225,20 @@ send_kd_state_change(DBGKD_ANY_WAIT_STATE_CHANGE* StateChange)
 #else
         gdb_dbg_pid = handle_to_gdb_pid(PsGetThreadProcessId(Thread));
 #endif
-        gdb_send_exception();
+        if (gdb_vctrlc_pending)
+        {
+            gdb_vctrlc_pending = FALSE;
+            send_gdb_packet("OK");
+        }
+        /* A live attach first expects the reply to its queued command. */
+        Status = gdb_polled_packet_pending ? KdPacketReceived : gdb_send_exception();
+        if (Status == KdPacketTimedOut)
+        {
+            KdpSendPacketHandler = NULL;
+            KdpManipulateStateHandler = NULL;
+            InException = FALSE;
+            break;
+        }
         /* Next receive call will ask for the context */
         KdpManipulateStateHandler = GetContextManipulateHandler;
         break;
@@ -218,14 +299,17 @@ ContinueManipulateStateHandler(
 )
 {
     /* Let's go on */
-    State->ApiNumber = DbgKdContinueApi;
+    State->ApiNumber = DbgKdContinueApi2;
     State->ReturnStatus = STATUS_SUCCESS; /* ? */
     State->Processor = CurrentStateChange.Processor;
     State->ProcessorLevel = CurrentStateChange.ProcessorLevel;
     if (MessageData)
         MessageData->Length = 0;
     *MessageLength = 0;
-    State->u.Continue.ContinueStatus = STATUS_SUCCESS;
+    State->u.Continue2.ContinueStatus = STATUS_SUCCESS;
+    gdb_arch_set_continue_control(State, gdb_hardware_breakpoints());
+    State->u.Continue2.ControlSet.CurrentSymbolStart = 1;
+    State->u.Continue2.ControlSet.CurrentSymbolEnd = 1;
 
     /* We definitely are at the end of the send <-> receive loop, if any */
     KdpSendPacketHandler = NULL;
@@ -323,6 +407,7 @@ FirstSendHandler(
     KDDBGPRINT("Pid Tid of the first message: %" PRIxPTR", %" PRIxPTR ".\n", gdb_dbg_pid, gdb_dbg_tid);
 
     /* The next receive call will be asking for the version data */
+    ReportInitialState = TRUE;
     KdpSendPacketHandler = NULL;
     KdpManipulateStateHandler = GetVersionManipulateStateHandler;
     return TRUE;
@@ -358,15 +443,13 @@ KdReceivePacket(
 
     if (PacketType == PACKET_TYPE_KD_POLL_BREAKIN)
     {
-        static BOOLEAN firstTime = TRUE;
+        /*
+         * Only report a break-in when one was really requested. KD decides
+         * whether to stop after loading symbols from the result of this poll,
+         * so claiming one unconditionally would halt every boot waiting for a
+         * debugger that may not be there.
+         */
         KDDBGPRINT("Polling break in.\n");
-        if (firstTime)
-        {
-            /* Force debug break on init */
-            firstTime = FALSE;
-            return KdPacketReceived;
-        }
-
         return KdpPollBreakIn();
     }
 
@@ -374,10 +457,20 @@ KdReceivePacket(
     {
         static BOOLEAN ignore = 0;
         KDDBGPRINT("Debug prompt.\n");
-        /* HACK: Debug prompt asks for break or ignore. First break, then ignore. */
         MessageData->Length = 1;
-        MessageData->Buffer[0] = ignore ? 'i' : 'b';
-        ignore = !ignore;
+        *DataLength = 1;
+        if (KD_DEBUGGER_NOT_PRESENT)
+        {
+            /* There is nobody to handle the breakpoint, so keep booting. */
+            MessageData->Buffer[0] = 'i';
+            ignore = FALSE;
+        }
+        else
+        {
+            /* HACK: Debug prompt asks for break or ignore. First break, then ignore. */
+            MessageData->Buffer[0] = ignore ? 'i' : 'b';
+            ignore = !ignore;
+        }
         return KdPacketReceived;
     }
 

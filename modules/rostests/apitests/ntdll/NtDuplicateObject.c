@@ -9,6 +9,183 @@
 
 #define OBJ_PROTECT_CLOSE 0x01
 
+static DWORD WINAPI
+TestRestrictedThread(PVOID Parameter)
+{
+    const ACCESS_MASK Access = THREAD_QUERY_INFORMATION | THREAD_GET_CONTEXT | THREAD_SUSPEND_RESUME;
+    OBJECT_BASIC_INFORMATION Basic;
+    THREAD_BASIC_INFORMATION ThreadBasic;
+    OBJECT_ATTRIBUTES Attributes;
+    CLIENT_ID ClientId = NtCurrentTeb()->ClientId;
+    HANDLE Handle = NULL;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(Parameter);
+
+    Status = NtQueryObject(NtCurrentThread(), ObjectBasicInformation, &Basic, sizeof(Basic), NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+        ok_hex(Basic.GrantedAccess & Access, Access);
+
+    Status = NtDuplicateObject(NtCurrentProcess(), NtCurrentThread(), NtCurrentProcess(),
+                               &Handle, Access, 0, 0);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtQueryInformationThread(Handle, ThreadBasicInformation, &ThreadBasic, sizeof(ThreadBasic), NULL);
+        ok_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+            ok(ThreadBasic.ClientId.UniqueThread == ClientId.UniqueThread, "Unexpected thread ID %p\n", ThreadBasic.ClientId.UniqueThread);
+        NtClose(Handle);
+    }
+
+    InitializeObjectAttributes(&Attributes, NULL, 0, NULL, NULL);
+    Status = NtOpenThread(&Handle, THREAD_GET_CONTEXT, &Attributes, &ClientId);
+    ok_hex(Status, STATUS_ACCESS_DENIED);
+    if (NT_SUCCESS(Status)) NtClose(Handle);
+    return 0;
+}
+
+static VOID
+TestCurrentThreadAccess(VOID)
+{
+    SECURITY_DESCRIPTOR Descriptor;
+    SECURITY_ATTRIBUTES Attributes;
+    ACL Dacl;
+    BOOLEAN DebugEnabled = FALSE;
+    NTSTATUS Status, PrivilegeStatus;
+    HANDLE Thread;
+    DWORD Wait;
+    UINT Iteration;
+
+    if (LOBYTE(LOWORD(GetVersion())) < 6)
+    {
+        skip("Current-thread pseudo handle access changed in Vista\n");
+        return;
+    }
+
+    Status = RtlCreateSecurityDescriptor(&Descriptor, SECURITY_DESCRIPTOR_REVISION);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Status = RtlCreateAcl(&Dacl, sizeof(Dacl), ACL_REVISION);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    Status = RtlSetDaclSecurityDescriptor(&Descriptor, TRUE, &Dacl, FALSE);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+
+    Attributes.nLength = sizeof(Attributes);
+    Attributes.lpSecurityDescriptor = &Descriptor;
+    Attributes.bInheritHandle = FALSE;
+    PrivilegeStatus = RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, FALSE, FALSE, &DebugEnabled);
+
+    for (Iteration = 0; Iteration < 16; ++Iteration)
+    {
+        Thread = CreateThread(&Attributes, 0, TestRestrictedThread, NULL, 0, NULL);
+        ok(Thread != NULL, "CreateThread failed: %lu\n", GetLastError());
+        if (!Thread) break;
+        Wait = WaitForSingleObject(Thread, 2000);
+        NtClose(Thread);
+        ok(Wait == WAIT_OBJECT_0, "Thread wait returned %lu\n", Wait);
+        if (Wait != WAIT_OBJECT_0) break;
+    }
+
+    if (NT_SUCCESS(PrivilegeStatus))
+        RtlAdjustPrivilege(SE_DEBUG_PRIVILEGE, DebugEnabled, FALSE, &DebugEnabled);
+}
+
+static VOID
+TestPseudoHandleSameAccess(HANDLE Pseudo, ACCESS_MASK Expected)
+{
+    OBJECT_BASIC_INFORMATION Basic;
+    HANDLE Handle = NULL;
+    NTSTATUS Status;
+
+    Status = NtDuplicateObject(NtCurrentProcess(), Pseudo, NtCurrentProcess(),
+                               &Handle, 0, 0, DUPLICATE_SAME_ACCESS);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+
+    Status = NtQueryObject(Handle, ObjectBasicInformation, &Basic, sizeof(Basic), NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+        ok_hex(Basic.GrantedAccess, Expected);
+    NtClose(Handle);
+}
+
+static VOID
+ExpectDuplicate(
+    PCSTR Name,
+    HANDLE Source,
+    ACCESS_MASK Desired,
+    NTSTATUS ExpectedStatus,
+    ACCESS_MASK ExpectedGranted)
+{
+    OBJECT_BASIC_INFORMATION Basic;
+    HANDLE Handle = NULL;
+    NTSTATUS Status;
+
+    Status = NtDuplicateObject(NtCurrentProcess(), Source, NtCurrentProcess(),
+                               &Handle, Desired, 0, 0);
+    ok(Status == ExpectedStatus, "%s: Status = %lx, expected %lx\n",
+       Name, Status, ExpectedStatus);
+    if (!NT_SUCCESS(Status)) return;
+
+    Status = NtQueryObject(Handle, ObjectBasicInformation, &Basic, sizeof(Basic), NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+        ok(Basic.GrantedAccess == ExpectedGranted, "%s: GrantedAccess = %lx, expected %lx\n",
+           Name, Basic.GrantedAccess, ExpectedGranted);
+    NtClose(Handle);
+}
+
+static VOID
+TestDuplicateAccessMask(VOID)
+{
+    HANDLE Mutant, Event, Named, Opened;
+
+    Mutant = CreateMutexW(NULL, TRUE, NULL);
+    ok(Mutant != NULL, "CreateMutexW failed: %lu\n", GetLastError());
+    Event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(Event != NULL, "CreateEventW failed: %lu\n", GetLastError());
+    if (Mutant == NULL || Event == NULL) return;
+
+    ExpectDuplicate("mutant SYNCHRONIZE|EVENT_MODIFY_STATE", Mutant,
+                    SYNCHRONIZE | EVENT_MODIFY_STATE, STATUS_SUCCESS, SYNCHRONIZE);
+    ExpectDuplicate("mutant SYNCHRONIZE|MUTANT_QUERY_STATE", Mutant,
+                    SYNCHRONIZE | MUTANT_QUERY_STATE, STATUS_SUCCESS,
+                    SYNCHRONIZE | MUTANT_QUERY_STATE);
+    ExpectDuplicate("mutant undefined bit", Mutant, 0x8000, STATUS_SUCCESS, 0);
+    ExpectDuplicate("event undefined bit", Event, 0x0004, STATUS_SUCCESS, 0);
+    ExpectDuplicate("event GENERIC_ALL", Event, GENERIC_ALL, STATUS_SUCCESS, EVENT_ALL_ACCESS);
+    ExpectDuplicate("event MAXIMUM_ALLOWED", Event, MAXIMUM_ALLOWED, STATUS_SUCCESS, 0);
+
+    NtClose(Event);
+    NtClose(Mutant);
+
+    Named = CreateEventW(NULL, FALSE, FALSE, L"NtDuplicateObject_AccessMask");
+    ok(Named != NULL, "CreateEventW failed: %lu\n", GetLastError());
+    if (Named == NULL) return;
+
+    SetLastError(0xdeadbeef);
+    Opened = OpenEventW(0x0004, FALSE, L"NtDuplicateObject_AccessMask");
+    ok(Opened == NULL, "OpenEventW succeeded for an undefined access bit\n");
+    ok(GetLastError() == ERROR_ACCESS_DENIED, "GetLastError() = %lu\n", GetLastError());
+    if (Opened != NULL) NtClose(Opened);
+
+    SetLastError(0xdeadbeef);
+    Opened = OpenEventW(EVENT_MODIFY_STATE | 0x8000, FALSE, L"NtDuplicateObject_AccessMask");
+    ok(Opened == NULL, "OpenEventW succeeded for an undefined access bit\n");
+    ok(GetLastError() == ERROR_ACCESS_DENIED, "GetLastError() = %lu\n", GetLastError());
+    if (Opened != NULL) NtClose(Opened);
+
+    Opened = OpenEventW(SYNCHRONIZE, FALSE, L"NtDuplicateObject_AccessMask");
+    ok(Opened != NULL, "OpenEventW failed: %lu\n", GetLastError());
+    if (Opened != NULL) NtClose(Opened);
+
+    NtClose(Named);
+}
+
 START_TEST(NtDuplicateObject)
 {
     NTSTATUS Status;
@@ -27,4 +204,10 @@ START_TEST(NtDuplicateObject)
         "Handle = %p\n", Handle);
     Status = NtClose(Handle);
     ok_hex(Status, STATUS_HANDLE_NOT_CLOSABLE);
+
+    TestPseudoHandleSameAccess(NtCurrentProcess(), PROCESS_ALL_ACCESS);
+    TestPseudoHandleSameAccess(NtCurrentThread(), THREAD_ALL_ACCESS);
+
+    TestCurrentThreadAccess();
+    TestDuplicateAccessMask();
 }

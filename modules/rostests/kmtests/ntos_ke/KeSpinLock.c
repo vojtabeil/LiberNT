@@ -116,11 +116,15 @@ DEFINE_RELEASE(ReleaseExp,            TRUE,  KeReleaseSpinLock(SpinLock, CheckDa
 DEFINE_ACQUIRE(AcquireSynch,          TRUE,  CheckData->Irql = KeAcquireSpinLockRaiseToSynch(SpinLock))
 
 DEFINE_ACQUIRE(AcquireInStackQueued,  TRUE,  KeAcquireInStackQueuedSpinLock(SpinLock, &CheckData->QueueHandle))
+#ifndef _M_ARM64
 DEFINE_ACQUIRE(AcquireInStackSynch,   TRUE,  KeAcquireInStackQueuedSpinLockRaiseToSynch(SpinLock, &CheckData->QueueHandle))
+#endif
 DEFINE_RELEASE(ReleaseInStackQueued,  TRUE,  KeReleaseInStackQueuedSpinLock(&CheckData->QueueHandle))
 
 DEFINE_ACQUIRE(AcquireQueued,         TRUE,  CheckData->Irql = KeAcquireQueuedSpinLock(CheckData->QueueNumber))
+#ifndef _M_ARM64
 DEFINE_ACQUIRE(AcquireQueuedSynch,    TRUE,  CheckData->Irql = KeAcquireQueuedSpinLockRaiseToSynch(CheckData->QueueNumber))
+#endif
 DEFINE_RELEASE(ReleaseQueued,         TRUE,  KeReleaseQueuedSpinLock(CheckData->QueueNumber, CheckData->Irql))
 
 DEFINE_ACQUIRE(AcquireNoRaise,        FALSE, KeAcquireSpinLockAtDpcLevel(SpinLock))
@@ -154,11 +158,13 @@ BOOLEAN TryQueued(PKSPIN_LOCK SpinLock, PCHECK_DATA CheckData) {
     ASSERT(Ret == FALSE || Ret == TRUE);
     return (BOOLEAN)Ret;
 }
+#ifndef _M_ARM64
 BOOLEAN TryQueuedSynch(PKSPIN_LOCK SpinLock, PCHECK_DATA CheckData) {
     BOOLEAN Ret = KeTryToAcquireQueuedSpinLockRaiseToSynch(CheckData->QueueNumber, &CheckData->Irql);
     CheckData->IsAcquired = TRUE;
     return Ret;
 }
+#endif
 BOOLEAN TryNoRaise(PKSPIN_LOCK SpinLock, PCHECK_DATA CheckData) {
     BOOLEAN Ret = pKeTryToAcquireSpinLockAtDpcLevel(SpinLock);
     return Ret;
@@ -168,7 +174,11 @@ BOOLEAN TryNoRaise(PKSPIN_LOCK SpinLock, PCHECK_DATA CheckData) {
 {                                                                                   \
     PKTHREAD Thread = KeGetCurrentThread();                                         \
     (VOID)Thread;                                                                   \
-    if (KmtIsMultiProcessorBuild || KmtIsCheckedBuild)                              \
+    /* NT 5.x i386 UP kernels (incl. checked) don't write to *SpinLock from         \
+     * KeAcquireSpinLock; only Vista+ added that. Treat the NT 5.x checked          \
+     * case the same as UP free for the purposes of these assertions. */            \
+    if (KmtIsMultiProcessorBuild ||                                                 \
+        (KmtIsCheckedBuild && GetNTVersion() >= _WIN32_WINNT_VISTA))                \
     {                                                                               \
         ok_eq_bool(Ret, (Value) == 0);                                              \
         if (SpinLock)                                                               \
@@ -197,7 +207,9 @@ BOOLEAN TryNoRaise(PKSPIN_LOCK SpinLock, PCHECK_DATA CheckData) {
 
 #define CheckSpinLockQueueHandle(SpinLock, CheckData, Value) do                     \
 {                                                                                   \
-    if (KmtIsMultiProcessorBuild || KmtIsCheckedBuild)                              \
+    /* See CheckSpinLockLock; same NT 5.x UP/checked exception. */                  \
+    if (KmtIsMultiProcessorBuild ||                                                 \
+        (KmtIsCheckedBuild && GetNTVersion() >= _WIN32_WINNT_VISTA))                \
     {                                                                               \
         ok_eq_bool(Ret, (Value) == 0);                                              \
         if (SpinLock)                                                               \
@@ -378,10 +390,14 @@ START_TEST(KeSpinLock)
         { CheckLock,        DISPATCH_LEVEL, AcquireNormal,        ReleaseNormal,        NULL,           AcquireInt,            ReleaseInt,            NULL },
         { CheckLock,        SynchIrql,      AcquireSynch,         ReleaseNormal,        NULL,           NULL,                  NULL,                  NULL },
         { CheckQueueHandle, DISPATCH_LEVEL, AcquireInStackQueued, ReleaseInStackQueued, NULL,           AcquireInStackNoRaise, ReleaseInStackNoRaise, NULL },
+#ifndef _M_ARM64
         { CheckQueueHandle, SynchIrql,      AcquireInStackSynch,  ReleaseInStackQueued, NULL,           NULL,                  NULL,                  NULL },
+#endif
         { CheckQueueHandle, DISPATCH_LEVEL, AcquireInStackQueued, ReleaseInStackQueued, NULL,           AcquireInStackForDpc,  ReleaseInStackForDpc,  NULL },
         { CheckQueue,       DISPATCH_LEVEL, AcquireQueued,        ReleaseQueued,        TryQueued,      NULL,                  NULL,                  NULL,       LockQueuePfnLock },
+#ifndef _M_ARM64
         { CheckQueue,       SynchIrql,      AcquireQueuedSynch,   ReleaseQueued,        TryQueuedSynch, NULL,                  NULL,                  NULL,       LockQueuePfnLock },
+#endif
     };
     CHECK_DATA TestDataWin7[] = 
     {
@@ -390,7 +406,9 @@ START_TEST(KeSpinLock)
         { CheckLock,        DISPATCH_LEVEL, AcquireNormal,        ReleaseNormal,        NULL,           AcquireInt,            ReleaseInt,            NULL },
         { CheckLock,        SynchIrql,      AcquireSynch,         ReleaseNormal,        NULL,           NULL,                  NULL,                  NULL },
         { CheckQueueHandle, DISPATCH_LEVEL, AcquireInStackQueued, ReleaseInStackQueued, NULL,           AcquireInStackNoRaise, ReleaseInStackNoRaise, NULL },
+#ifndef _M_ARM64
         { CheckQueueHandle, SynchIrql,      AcquireInStackSynch,  ReleaseInStackQueued, NULL,           NULL,                  NULL,                  NULL },
+#endif
         { CheckQueueHandle, DISPATCH_LEVEL, AcquireInStackQueued, ReleaseInStackQueued, NULL,           AcquireInStackForDpc,  ReleaseInStackForDpc,  NULL },
     };
     CHECK_DATA *TestData;
@@ -410,18 +428,24 @@ START_TEST(KeSpinLock)
     KeInitializeSpinLock(&SpinLock);
     ok_eq_ulongptr(SpinLock, 0);
 
-    /* KeTestSpinLock */
+    /* KeTestSpinLock: only NT 6.1+ recognizes non-1 bit patterns as held; NT 5.x
+     * treats anything other than 1 (the InStackQueuedSpinLock owner) and
+     * possibly the queue-bit pattern as free, so the strict assertions below
+     * only hold on Vista+. */
     if (!skip(pKeTestSpinLock != NULL, "KeTestSpinLock unavailable\n"))
     {
         ok_bool_true(pKeTestSpinLock(&SpinLock), "KeTestSpinLock returned");
         SpinLock = 1;
         ok_bool_false(pKeTestSpinLock(&SpinLock), "KeTestSpinLock returned");
-        SpinLock = 2;
-        ok_bool_false(pKeTestSpinLock(&SpinLock), "KeTestSpinLock returned");
-        SpinLock = (ULONG_PTR)-1;
-        ok_bool_false(pKeTestSpinLock(&SpinLock), "KeTestSpinLock returned");
-        SpinLock = (ULONG_PTR)1 << (sizeof(ULONG_PTR) * CHAR_BIT - 1);
-        ok_bool_false(pKeTestSpinLock(&SpinLock), "KeTestSpinLock returned");
+        if (GetNTVersion() >= _WIN32_WINNT_VISTA)
+        {
+            SpinLock = 2;
+            ok_bool_false(pKeTestSpinLock(&SpinLock), "KeTestSpinLock returned");
+            SpinLock = (ULONG_PTR)-1;
+            ok_bool_false(pKeTestSpinLock(&SpinLock), "KeTestSpinLock returned");
+            SpinLock = (ULONG_PTR)1 << (sizeof(ULONG_PTR) * CHAR_BIT - 1);
+            ok_bool_false(pKeTestSpinLock(&SpinLock), "KeTestSpinLock returned");
+        }
         SpinLock = 0;
         ok_bool_true(pKeTestSpinLock(&SpinLock), "KeTestSpinLock returned");
     }

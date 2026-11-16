@@ -12,6 +12,8 @@
  *   when the struct is exported with the name '_load_config_used'
  */
 
+#include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,7 +21,23 @@
 // host_includes
 #include <typedefs.h>
 #include <pecoff.h>
-#include "../../dll/win32/dbghelp/compat.h"
+
+typedef struct _IMAGE_EXPORT_DIRECTORY
+{
+    DWORD Characteristics;
+    DWORD TimeDateStamp;
+    WORD MajorVersion;
+    WORD MinorVersion;
+    DWORD Name;
+    DWORD Base;
+    DWORD NumberOfFunctions;
+    DWORD NumberOfNames;
+    DWORD AddressOfFunctions;
+    DWORD AddressOfNames;
+    DWORD AddressOfNameOrdinals;
+} IMAGE_EXPORT_DIRECTORY, *PIMAGE_EXPORT_DIRECTORY;
+
+#define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
 static const char* g_ApplicationName;
 static const char* g_Target;
@@ -31,7 +49,8 @@ enum fixup_mode
     MODE_KERNELDRIVER,
     MODE_WDMDRIVER,
     MODE_KERNELDLL,
-    MODE_KERNEL
+    MODE_KERNEL,
+    MODE_CHECKSUM
 };
 
 void *rva_to_ptr(unsigned char *buffer, PIMAGE_NT_HEADERS nt_header, DWORD rva)
@@ -79,6 +98,13 @@ static void fix_checksum(unsigned char *buffer, size_t len, PIMAGE_NT_HEADERS nt
     nt_header->OptionalHeader.CheckSum = checksum;
 }
 
+static PIMAGE_DATA_DIRECTORY image_data_directory(PIMAGE_NT_HEADERS nt_header, unsigned int index)
+{
+    if (nt_header->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+        return &((PIMAGE_NT_HEADERS32)nt_header)->OptionalHeader.DataDirectory[index];
+    return &((PIMAGE_NT_HEADERS64)nt_header)->OptionalHeader.DataDirectory[index];
+}
+
 static int add_loadconfig(unsigned char *buffer, PIMAGE_NT_HEADERS nt_header)
 {
     PIMAGE_DATA_DIRECTORY export_dir;
@@ -87,7 +113,7 @@ static int add_loadconfig(unsigned char *buffer, PIMAGE_NT_HEADERS nt_header)
     PWORD ordinal_ptr;
     DWORD n;
 
-    export_dir = &nt_header->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    export_dir = image_data_directory(nt_header, IMAGE_DIRECTORY_ENTRY_EXPORT);
     if (export_dir->Size == 0)
     {
         error("No export directory\n");
@@ -116,7 +142,7 @@ static int add_loadconfig(unsigned char *buffer, PIMAGE_NT_HEADERS nt_header)
 
             /* Update the DataDirectory pointer / size
                The first entry of the LOAD_CONFIG struct is the size, use that as DataDirectory.Size */
-            load_config_dir = &nt_header->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG];
+            load_config_dir = image_data_directory(nt_header, IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG);
             load_config_dir->VirtualAddress = load_config_rva;
             load_config_dir->Size = *load_config_ptr;
 
@@ -366,6 +392,7 @@ print_usage(void)
            "  --wdmdriver           Fix code, data and resource sections for WDM drivers;\n"
            "  --kerneldll           Fix code, data and resource sections for Kernel-Mode DLLs;\n"
            "  --kernel              Fix code, data and resource sections for kernels;\n"
+           "  --checksum            Compute the PE image checksum;\n"
            "\n"
            "and/or a combination of the following ones:\n"
            "  --section:name[=newname][,[[!]{CDEIKOMPRSUW}][A{1248PTSX}]]\n"
@@ -425,6 +452,12 @@ int main(int argc, char **argv)
             if (mode != MODE_NONE)
                 goto mode_error;
             mode = MODE_KERNEL;
+        }
+        else if (strcmp(&argv[i][2], "checksum") == 0)
+        {
+            if (mode != MODE_NONE)
+                goto mode_error;
+            mode = MODE_CHECKSUM;
         }
         else if (strncmp(&argv[i][2], "section:", 8) == 0)
         {
@@ -499,7 +532,7 @@ int main(int argc, char **argv)
     result = 0;
 
     /* Apply mode fixups */
-    if (mode != MODE_NONE)
+    if (mode != MODE_NONE && mode != MODE_CHECKSUM)
     {
         if (mode == MODE_LOADCONFIG)
             result = add_loadconfig(buffer, nt_header);
@@ -528,10 +561,11 @@ int main(int argc, char **argv)
 
         /*
          * Preserve linker-produced zero checksums unless this is a kernel-mode
-         * image, where the NT loader requires a valid checksum. This fixes
+         * image, where the NT loader requires a valid checksum, or --checksum
+         * was requested. This fixes
          * lld-built drivers, which otherwise keep the reproducible zero value.
          */
-        if (nt_header->OptionalHeader.CheckSum != 0 || is_kernel_image)
+        if (nt_header->OptionalHeader.CheckSum != 0 || is_kernel_image || mode == MODE_CHECKSUM)
             fix_checksum(buffer, len, nt_header);
 
         /* We could optimize by only writing the changed parts, but keep it simple for now */

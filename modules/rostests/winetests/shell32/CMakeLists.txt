@@ -1,11 +1,10 @@
 
-add_definitions(-D__ROS_LONG64__)
 add_definitions(
     -DWINETEST_USE_DBGSTR_LONGLONG
     -Dstrcasecmp=_stricmp
 )
 
-remove_definitions(-DWINVER=0x502 -D_WIN32_IE=0x600 -D_WIN32_WINNT=0x502)
+remove_definitions(-DWINVER=${REACTOS_TARGET_NT} -D_WIN32_WINNT=${REACTOS_TARGET_NT})
 
 list(APPEND SOURCE
     appbar.c
@@ -35,6 +34,7 @@ add_executable(shell32_winetest
     ${SOURCE}
     ${PCH_SKIP_SOURCE}
     rsrc.rc)
+target_compile_definitions(shell32_winetest PRIVATE WINETEST_WAIT_CHILD_PROCESS_INFO)
 
 target_link_libraries(shell32_winetest uuid)
 set_module_type(shell32_winetest win32cui)
@@ -45,8 +45,9 @@ if(MSVC)
 endif()
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(shell32_winetest PRIVATE -Wno-format-overflow)
+    target_compile_options(shell32_winetest PRIVATE -Wno-format-overflow -Wno-maybe-uninitialized)
 endif()
 
 add_pch(shell32_winetest precomp.h "${PCH_SKIP_SOURCE}")
+add_pch_fallback(precomp.h ${SOURCE})
 add_rostests_file(TARGET shell32_winetest)

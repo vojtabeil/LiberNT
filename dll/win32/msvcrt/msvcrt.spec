@@ -1,6 +1,6 @@
 # msvcrt.dll - MS VC++ Run Time Library
 
-@ cdecl -version=0x502 -arch=x86_64 -norelay $I10_OUTPUT(double long long ptr) I10_OUTPUT
+@ cdecl -version=0x502 -arch=win64 -norelay $I10_OUTPUT(double long long ptr) I10_OUTPUT
 @ cdecl -arch=arm ??0__non_rtti_object@@QAA@ABV0@@Z(ptr ptr) __non_rtti_object_copy_ctor
 @ thiscall -arch=i386 ??0__non_rtti_object@@QAE@ABV0@@Z(ptr ptr) __non_rtti_object_copy_ctor
 @ cdecl -arch=win64 ??0__non_rtti_object@@QEAA@AEBV0@@Z(ptr ptr) __non_rtti_object_copy_ctor
@@ -175,7 +175,8 @@
 @ extern _HUGE MSVCRT__HUGE
 @ cdecl _Strftime(ptr long str ptr ptr)
 @ cdecl _XcptFilter(long ptr)
-@ stdcall -arch=!i386 __C_specific_handler(ptr long ptr ptr) ntdll.__C_specific_handler
+@ stdcall -arch=x86_64,arm,arm64 __C_specific_handler(ptr long ptr ptr)
+@ cdecl -arch=riscv64,ppc __C_specific_handler(ptr long ptr ptr) ntdll.__C_specific_handler
 @ cdecl __CppXcptFilter(long ptr)
 # stub -version=0x600+ -arch=i386 __CxxCallUnwindDelDtor
 # stub -arch=i386 __CxxCallUnwindDtor
@@ -184,7 +185,7 @@
 @ cdecl -arch=i386 __CxxExceptionFilter(ptr ptr long ptr)
 @ cdecl -norelay __CxxFrameHandler(ptr ptr ptr ptr)
 @ cdecl -arch=i386 -norelay __CxxFrameHandler2(ptr ptr ptr ptr) __CxxFrameHandler
-@ cdecl -version=0x600+ -arch=x86_64 -norelay __CxxFrameHandler2(ptr ptr ptr ptr) __CxxFrameHandler
+@ cdecl -version=0x600+ -arch=win64 -norelay __CxxFrameHandler2(ptr ptr ptr ptr) __CxxFrameHandler
 @ cdecl -arch=arm -norelay __CxxFrameHandler3(ptr ptr ptr ptr)
 @ cdecl -version=0x600+ -norelay __CxxFrameHandler3(ptr ptr ptr ptr) __CxxFrameHandler
 @ stdcall -arch=i386 __CxxLongjmpUnwind(ptr)
@@ -200,8 +201,8 @@
 @ cdecl ___lc_collate_cp_func()
 @ cdecl ___lc_handle_func()
 @ cdecl ___mb_cur_max_func()
-@ cdecl -arch=i386,x86_64 ___setlc_active_func()
-@ cdecl -arch=i386,x86_64 ___unguarded_readlc_active_add_func()
+@ cdecl ___setlc_active_func()
+@ cdecl ___unguarded_readlc_active_add_func()
 @ extern __argc MSVCRT___argc
 @ extern __argv MSVCRT___argv
 @ extern __badioinfo MSVCRT___badioinfo
@@ -217,14 +218,14 @@
 @ cdecl -version=0x600+ __dstbias() __p__dstbias
 @ cdecl __fpecode()
 @ cdecl __getmainargs(ptr ptr ptr long ptr)
-@ extern -arch=i386,x86_64 __initenv MSVCRT___initenv
+@ extern __initenv MSVCRT___initenv
 @ cdecl __iob_func()
 @ cdecl __isascii(long)
 @ cdecl __iscsym(long)
 @ cdecl __iscsymf(long)
 @ stdcall -arch=arm __jump_unwind(ptr ptr) ntdll.__jump_unwind
-@ extern -arch=i386,x86_64 __lc_codepage MSVCRT___lc_codepage
-@ extern -arch=i386,x86_64 __lc_collate_cp MSVCRT___lc_collate_cp
+@ extern __lc_codepage MSVCRT___lc_codepage
+@ extern __lc_collate_cp MSVCRT___lc_collate_cp
 @ extern __lc_handle MSVCRT___lc_handle
 @ cdecl __lconv_init()
 @ cdecl -version=0x600+ -arch=i386 -norelay __libm_sse2_acos()
@@ -439,7 +440,7 @@
 @ cdecl _fgetchar()
 @ cdecl _fgetwchar()
 @ cdecl _filbuf(ptr)
-@ extern -arch=i386,x86_64 _fileinfo
+@ extern _fileinfo
 @ cdecl _filelength(long)
 @ cdecl -ret64 _filelengthi64(long)
 @ cdecl _fileno(ptr)
@@ -634,7 +635,7 @@
 @ cdecl _ismbstrail(ptr ptr)
 @ cdecl -version=0x600+ _ismbstrail_l(ptr ptr ptr)
 @ cdecl _isnan(double)
-@ cdecl -arch=x86_64 _isnanf(float)
+@ cdecl -arch=win64 _isnanf(float)
 @ cdecl -version=0x600+ _isprint_l(long ptr)
 @ cdecl -version=0x600+ _isspace_l(long ptr)
 @ cdecl -version=0x600+ _isupper_l(long ptr)
@@ -661,6 +662,17 @@
 @ cdecl _kbhit()
 @ cdecl _lfind(ptr ptr ptr long ptr)
 @ cdecl -version=0x600+ _lfind_s(ptr ptr ptr long ptr ptr)
+@ cdecl -arch=i386 -norelay _libm_sse2_acos_precise()
+@ cdecl -arch=i386 -norelay _libm_sse2_asin_precise()
+@ cdecl -arch=i386 -norelay _libm_sse2_atan_precise()
+@ cdecl -arch=i386 -norelay _libm_sse2_cos_precise()
+@ cdecl -arch=i386 -norelay _libm_sse2_exp_precise()
+@ cdecl -arch=i386 -norelay _libm_sse2_log10_precise()
+@ cdecl -arch=i386 -norelay _libm_sse2_log_precise()
+@ cdecl -arch=i386 -norelay _libm_sse2_pow_precise()
+@ cdecl -arch=i386 -norelay _libm_sse2_sin_precise()
+@ cdecl -arch=i386 -norelay _libm_sse2_sqrt_precise()
+@ cdecl -arch=i386 -norelay _libm_sse2_tan_precise()
 @ cdecl _loaddll(str)
 @ cdecl -arch=win64 _local_unwind(ptr ptr)
 @ cdecl -arch=i386 _local_unwind2(ptr long)
@@ -843,7 +855,7 @@
 # stub -version=0x600+ -arch=win32 _msize_debug(ptr long)
 # stub -version=0x600+ -arch=win64 _msize_dbg(ptr long)
 @ cdecl _nextafter(double double) nextafter
-@ cdecl -arch=x86_64 _nextafterf(float float) nextafterf
+@ cdecl -arch=win64 _nextafterf(float float) nextafterf
 @ extern _onexit # Declaring it as extern let us use the symbol from msvcrtex while having the __imp_ symbol defined in the import lib
 @ varargs _open(str long)
 @ cdecl _open_osfhandle(long long)
@@ -883,7 +895,7 @@
 @ cdecl -arch=i386 _safe_fprem()
 @ cdecl -arch=i386 _safe_fprem1()
 @ cdecl _scalb(double long)
-@ cdecl -arch=x86_64 _scalbf(float long)
+@ cdecl -arch=win64 _scalbf(float long)
 @ varargs -version=0x600+ _scanf_l(str ptr)
 @ varargs -version=0x600+ _scanf_s_l(str ptr)
 @ varargs _scprintf(str)
@@ -1091,7 +1103,7 @@
 @ cdecl -version=0x600+ _vswprintf_l(ptr wstr ptr ptr)
 @ cdecl -version=0x600+ _vswprintf_p_l(ptr long wstr ptr ptr)
 @ cdecl -version=0x600+ _vswprintf_s_l(ptr long wstr ptr ptr)
-# stub -version=0x600+ _vwprintf_l(wstr ptr ptr)
+@ cdecl -version=0x600+ _vwprintf_l(wstr ptr ptr)
 # stub -version=0x600+ _vwprintf_p(wstr ptr)
 # stub -version=0x600+ _vwprintf_p_l(wstr ptr ptr)
 # stub -version=0x600+ _vwprintf_s_l(wstr ptr ptr)
@@ -1196,7 +1208,7 @@
 @ cdecl _wperror(wstr)
 @ extern _wpgmptr MSVCRT__wpgmptr
 @ cdecl _wpopen (wstr wstr) _wpopen
-# stub -version=0x600+ _wprintf_l(wstr ptr)
+@ varargs -version=0x600+ _wprintf_l(wstr ptr)
 # stub -version=0x600+ _wprintf_p(wstr)
 # stub -version=0x600+ _wprintf_p_l(wstr ptr)
 # stub -version=0x600+ _wprintf_s_l(wstr ptr)
@@ -1257,9 +1269,9 @@
 @ cdecl -arch=!i386 acosf(float)
 @ cdecl asctime(ptr)
 @ cdecl -version=0x600+ asctime_s(ptr long ptr)
-@ cdecl asin(double)
+@ cdecl asin(double) MSVCRT_asin
 @ cdecl -arch=!i386 asinf(float)
-@ cdecl atan(double)
+@ cdecl atan(double) MSVCRT_atan
 @ cdecl atan2(double double)
 @ cdecl -arch=!i386 atan2f(float float)
 @ cdecl -arch=!i386 atanf(float)
@@ -1286,10 +1298,10 @@
 @ cdecl -arch=win64 difftime(long long) _difftime64
 @ cdecl -ret64 div(long long)
 @ cdecl exit(long)
-@ cdecl exp(double)
+@ cdecl exp(double) MSVCRT_exp
 @ cdecl -arch=!i386 expf(float)
 @ cdecl fabs(double)
-@ cdecl -arch=arm,arm64 fabsf(float)
+@ cdecl -arch=arm,arm64,riscv64,ppc fabsf(float)
 @ cdecl fclose(ptr)
 @ cdecl feof(ptr)
 @ cdecl ferror(ptr)
@@ -1415,7 +1427,7 @@
 @ varargs scanf(str)
 @ varargs -version=0x600+ scanf_s(str)
 @ cdecl setbuf(ptr ptr)
-@ cdecl -arch=arm,x86_64 -norelay setjmp(ptr ptr) _setjmp # FIXME: should be private, but is imported by ARM builds somehow
+@ cdecl -arch=arm,win64 -norelay setjmp(ptr ptr) _setjmp # FIXME: should be private, but is imported by ARM builds somehow
 @ cdecl setlocale(long str)
 @ cdecl setvbuf(ptr str long long)
 @ cdecl signal(long long)
@@ -1425,7 +1437,7 @@
 @ cdecl -arch=!i386 sinhf(float)
 @ varargs sprintf(ptr str)
 @ varargs -version=0x600+ sprintf_s(ptr long str)
-@ cdecl sqrt(double)
+@ cdecl sqrt(double) MSVCRT_sqrt
 @ cdecl -arch=!i386 sqrtf(float)
 @ cdecl srand(long)
 @ varargs sscanf(str str)
@@ -1466,7 +1478,7 @@
 @ varargs -version=0x600+ swscanf_s(wstr wstr)
 @ cdecl system(str)
 @ cdecl tan(double)
-@ cdecl tanh(double)
+@ cdecl tanh(double) MSVCRT_tanh
 @ cdecl -arch=!i386 tanf(float)
 @ cdecl -arch=!i386 tanhf(float)
 @ cdecl -arch=win32 time(ptr) _time32
@@ -1535,3 +1547,4 @@
 @ varargs -version=0x600+ wprintf_s(wstr)
 @ varargs wscanf(wstr)
 @ varargs -version=0x600+ wscanf_s(wstr)
+@ cdecl -arch=ppc -norelay setjmp(ptr) _setjmp

@@ -262,7 +262,7 @@ NetEnumerateComputerNames(
     PNET_COMPUTER_NAME_ARRAY ComputerNameArray = NULL;
     ULONG BufferSize, i;
     PWSTR *NameBuffer = NULL, Ptr;
-    NET_API_STATUS status;
+    NET_API_STATUS status = 0;
 
     TRACE("NetEnumerateComputerNames(%s %lu %lu %p %p)\n",
           debugstr_w(Server), NameType, Reserved, EntryCount, ComputerNames);
@@ -647,7 +647,7 @@ NetUseAdd(
     _In_ LPBYTE Buf,
     _Out_ LPDWORD ParmError)
 {
-    NET_API_STATUS status;
+    NET_API_STATUS status = 0;
 
     TRACE("NetUseAdd(%s %d %p %p)\n", debugstr_w(UncServerName),
           Level, Buf, ParmError);
@@ -676,7 +676,7 @@ NetUseDel(
     _In_ LMSTR UseName,
     _In_ DWORD ForceCond)
 {
-    NET_API_STATUS status;
+    NET_API_STATUS status = 0;
 
     TRACE("NetUseDel(%s %s %d)\n", debugstr_w(UncServerName),
           debugstr_w(UseName), ForceCond);
@@ -712,7 +712,7 @@ NetUseEnum(
     USE_INFO_0_CONTAINER Container0;
     USE_INFO_1_CONTAINER Container1;
     USE_INFO_2_CONTAINER Container2;
-    NET_API_STATUS status;
+    NET_API_STATUS status = 0;
 
     TRACE("NetUseEnum(%s, %d, %p, %d, %p, %p, %p)\n", debugstr_w(UncServerName),
           Level, BufPtr, PreferedMaximumSize, EntriesRead, TotalEntries, ResumeHandle);
@@ -788,7 +788,7 @@ NetUseGetInfo(
     _In_ DWORD Level,
     _Out_ LPBYTE *BufPtr)
 {
-    NET_API_STATUS status;
+    NET_API_STATUS status = 0;
 
     TRACE("NetUseGetInfo(%s, %s, %d, %p)\n", debugstr_w(UncServerName),
           debugstr_w(UseName), Level, BufPtr);
@@ -867,7 +867,7 @@ NetWkstaGetInfo(
     _In_ DWORD level,
     _Out_ LPBYTE *bufptr)
 {
-    NET_API_STATUS status;
+    NET_API_STATUS status = 0;
 
     TRACE("NetWkstaGetInfo(%s, %d, %p)\n",
           debugstr_w(servername), level, bufptr);
@@ -901,7 +901,7 @@ NetWkstaSetInfo(
     _In_ LPBYTE buffer,
     _Out_ LPDWORD parm_err)
 {
-    NET_API_STATUS status;
+    NET_API_STATUS status = 0;
 
     TRACE("NetWkstaSetInfo(%s, %d, %p, %p)\n",
           debugstr_w(servername), level, buffer, parm_err);
@@ -931,7 +931,7 @@ NetWkstaTransportAdd(
     _In_ LPBYTE buf,
     _Out_ LPDWORD parm_err)
 {
-    NET_API_STATUS status;
+    NET_API_STATUS status = 0;
 
     TRACE("NetWkstaTransportAdd(%s, %d, %p, %p)\n", debugstr_w(servername),
           level, buf, parm_err);
@@ -960,7 +960,7 @@ NetWkstaTransportDel(
     _In_ LPWSTR transportname,
     _In_ DWORD ucond)
 {
-    NET_API_STATUS status;
+    NET_API_STATUS status = 0;
 
     TRACE("NetWkstaTransportDel(%s, %s, %d)\n", debugstr_w(servername),
           debugstr_w(transportname), ucond);
@@ -1056,7 +1056,7 @@ NetWkstaUserEnum(
     WKSTA_USER_ENUM_STRUCT UserEnumInfo;
 //    WKSTA_USER_INFO_0_CONTAINER Container0;
 //    WKSTA_USER_INFO_1_CONTAINER Container1;
-    NET_API_STATUS status;
+    NET_API_STATUS status = 0;
 
     TRACE("NetWkstaUserEnum(%s, %d, %p, %d, %p, %p, %p)\n", debugstr_w(servername),
           level, bufptr, prefmaxlen, entriesread, totalentries, resumehandle);
@@ -1128,7 +1128,7 @@ NetWkstaUserGetInfo(
     _In_ DWORD level,
     _Out_ LPBYTE *bufptr)
 {
-    NET_API_STATUS status;
+    NET_API_STATUS status = 0;
 
     TRACE("NetWkstaUserGetInfo(%s, %d, %p)\n",
           debugstr_w(reserved), level, bufptr);
@@ -1150,6 +1150,46 @@ NetWkstaUserGetInfo(
     }
     RpcEndExcept;
 
+    if (status == NERR_Success && *bufptr != NULL)
+    {
+        LPWSTR *Strings = (LPWSTR *)*bufptr;
+        ULONG Count = (level == 1) ? 4 : 1;
+        SIZE_T Size = Count * sizeof(LPWSTR);
+        LPWSTR *Packed = NULL;
+        PWSTR Ptr;
+        ULONG i;
+
+        for (i = 0; i < Count; i++)
+        {
+            if (Strings[i] != NULL)
+                Size += (wcslen(Strings[i]) + 1) * sizeof(WCHAR);
+        }
+
+        status = NetApiBufferAllocate(Size, (PVOID *)&Packed);
+        if (status == NERR_Success)
+        {
+            Ptr = (PWSTR)&Packed[Count];
+            for (i = 0; i < Count; i++)
+            {
+                if (Strings[i] == NULL)
+                {
+                    Packed[i] = NULL;
+                    continue;
+                }
+
+                Packed[i] = Ptr;
+                wcscpy(Ptr, Strings[i]);
+                Ptr += wcslen(Ptr) + 1;
+            }
+        }
+
+        for (i = 0; i < Count; i++)
+            midl_user_free(Strings[i]);
+        midl_user_free(Strings);
+
+        *bufptr = (LPBYTE)Packed;
+    }
+
     return status;
 }
 
@@ -1162,7 +1202,7 @@ NetWkstaUserSetInfo(
     _In_ LPBYTE buf,
     _Out_ LPDWORD parm_err)
 {
-    NET_API_STATUS status;
+    NET_API_STATUS status = 0;
 
     TRACE("NetWkstaSetInfo(%s, %d, %p, %p)\n",
           debugstr_w(reserved), level, buf, parm_err);

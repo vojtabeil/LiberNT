@@ -26,7 +26,11 @@
 #ifdef WIDE_SCANF
 #define _CHAR_ wchar_t
 #define _EOF_ WEOF
+#if defined(__REACTOS__) && defined(_LIBCNT_)
+#define _EOF_RET 0
+#else
 #define _EOF_RET (short)WEOF
+#endif
 #define _ISSPACE_(c) iswspace(c)
 #define _ISDIGIT_(c) iswdigit(c)
 #define _WIDE2SUPPORTED_(c) c /* No conversion needed (wide to wide) */
@@ -130,7 +134,9 @@
 #endif /* CONSOLE */
 
 _FUNCTION_ {
+#if !defined(__REACTOS__) || !defined(_LIBCNT_)
     pthreadlocinfo locinfo;
+#endif
     int rd = 0, consumed = 0;
     int nch;
     if (!*format) return 0;
@@ -153,10 +159,14 @@ _FUNCTION_ {
         return _EOF_RET;
     }
 
+#if !defined(__REACTOS__) || !defined(_LIBCNT_)
     if(!locale)
         locinfo = get_locinfo();
     else
         locinfo = locale->locinfo;
+#else
+    (void)locale;
+#endif
 
     while (*format) {
 	/* a whitespace character in the format string causes scanf to read,
@@ -178,7 +188,9 @@ _FUNCTION_ {
 	    int base;
 	    int h_prefix = 0;
 	    int l_prefix = 0;
+#if !defined(__REACTOS__) || !defined(_LIBCNT_)
 	    int L_prefix = 0;
+#endif
 	    int w_prefix = 0;
 	    int prefix_finished = 0;
 	    int I64_prefix = 0;
@@ -207,7 +219,11 @@ _FUNCTION_ {
                     l_prefix = 1;
                     break;
 		case 'w': w_prefix = 1; break;
-		case 'L': L_prefix = 1; break;
+		case 'L':
+#if !defined(__REACTOS__) || !defined(_LIBCNT_)
+                    L_prefix = 1;
+#endif
+                    break;
 		case 'I':
 		    if (*(format + 1) == '6' &&
 			*(format + 2) == '4') {
@@ -305,6 +321,7 @@ _FUNCTION_ {
 		    }
                 }
                 break;
+#if !defined(__REACTOS__) || !defined(_LIBCNT_)
             case 'e':
             case 'E':
             case 'f':
@@ -440,6 +457,7 @@ _FUNCTION_ {
 #endif /* __REACTOS__ */
                 }
                 break;
+#endif
 		/* According to msdn,
 		 * 's' reads a character string in a call to fscanf
 		 * and 'S' a wide character string and vice versa in a
@@ -544,7 +562,7 @@ _FUNCTION_ {
                     char *str = suppress ? NULL : va_arg(ap, char*);
                     char *pstr = str;
 #ifdef SECURE
-                    unsigned size = suppress ? UINT_MAX : va_arg(ap, unsigned)/sizeof(char);
+                    unsigned size = suppress ? UINT_MAX : va_arg(ap, unsigned);
 #else
                     unsigned size = UINT_MAX;
 #endif
@@ -570,7 +588,7 @@ _FUNCTION_ {
                     wchar_t *str = suppress ? NULL : va_arg(ap, wchar_t*);
                     wchar_t *pstr = str;
 #ifdef SECURE
-                    unsigned size = suppress ? UINT_MAX : va_arg(ap, unsigned)/sizeof(wchar_t);
+                    unsigned size = suppress ? UINT_MAX : va_arg(ap, unsigned);
 #else
                     unsigned size = UINT_MAX;
 #endif
@@ -619,7 +637,7 @@ _FUNCTION_ {
                     ULONG *Mask;
 		    int invert = 0; /* Set if we are NOT to find the chars */
 #ifdef SECURE
-                    unsigned size = suppress ? UINT_MAX : va_arg(ap, unsigned)/sizeof(_CHAR_);
+                    unsigned size = suppress ? UINT_MAX : va_arg(ap, unsigned);
 #else
                     unsigned size = UINT_MAX;
 #endif

@@ -25,7 +25,7 @@
 int __cdecl _tstreamout(FILE *stream, const _TCHAR *format, va_list argptr);
 
 int
-#if defined(USER32_WSPRINTF) && defined(_M_IX86)
+#if defined(USER32_WSPRINTF) && defined(_M_IX86) && defined(USE_VARARGS)
 __stdcall
 #else
 __cdecl
@@ -68,6 +68,9 @@ _sxprintf(
     /* Limit output to count + 1 characters */
     if (count != -1)
         sizeOfBuffer = min(sizeOfBuffer, count + 1);
+#elif defined(_LIBCNT_)
+    if ((format == NULL) || ((buffer == NULL) && (count != 0)))
+        return -1;
 #endif
 
     /* Setup the FILE structure */
@@ -112,11 +115,14 @@ _sxprintf(
     buffer[result] = _T('\0');
 #else
     /* Only zero terminate if there is enough space left */
+#ifdef _USER32_WSPRINTF
+    if (stream._cnt >= sizeof(_TCHAR))
+#else
     if ((stream._cnt >= sizeof(_TCHAR)) && (stream._ptr))
+#endif
         *(_TCHAR*)stream._ptr = _T('\0');
 #endif
 
     return result;
 }
-
 

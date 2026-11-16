@@ -25,35 +25,16 @@ USBSTOR_QueueInitialize(
 
 VOID
 NTAPI
-USBSTOR_CancelIo(
-    IN  PDEVICE_OBJECT DeviceObject,
-    IN  PIRP Irp)
-{
-    PFDO_DEVICE_EXTENSION FDODeviceExtension;
-
-    FDODeviceExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
-    ASSERT_IRQL_EQUAL(DISPATCH_LEVEL);
-    ASSERT(FDODeviceExtension->Common.IsFDO);
-
-    // this IRP isn't in our list here
-    // now release the cancel lock
-    IoReleaseCancelSpinLock(Irp->CancelIrql);
-    Irp->IoStatus.Status = STATUS_CANCELLED;
-
-    USBSTOR_QueueTerminateRequest(DeviceObject, Irp);
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-
-    USBSTOR_QueueNextRequest(DeviceObject);
-}
-
-VOID
-NTAPI
 USBSTOR_Cancel(
     IN  PDEVICE_OBJECT DeviceObject,
     IN  PIRP Irp)
 {
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
+    PPDO_DEVICE_EXTENSION PDODeviceExtension = DeviceObject->DeviceExtension;
 
+    /* IoCancelIrp passes the PDO from the current SCSI stack location. */
+    ASSERT(!PDODeviceExtension->Common.IsFDO);
+    DeviceObject = PDODeviceExtension->LowerDeviceObject;
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
     ASSERT_IRQL_EQUAL(DISPATCH_LEVEL);
     ASSERT(FDODeviceExtension->Common.IsFDO);
@@ -64,8 +45,10 @@ USBSTOR_Cancel(
 
     IoReleaseCancelSpinLock(Irp->CancelIrql);
     Irp->IoStatus.Status = STATUS_CANCELLED;
+    Irp->IoStatus.Information = 0;
+    IoGetCurrentIrpStackLocation(Irp)->Parameters.Scsi.Srb->SrbStatus = SRB_STATUS_ABORTED;
 
-    USBSTOR_QueueTerminateRequest(DeviceObject, Irp);
+    USBSTOR_QueueTerminateRequest(DeviceObject, Irp, FALSE);
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
     USBSTOR_QueueNextRequest(DeviceObject);
@@ -76,95 +59,54 @@ USBSTOR_QueueAddIrp(
     IN PDEVICE_OBJECT DeviceObject,
     IN PIRP Irp)
 {
-    PDRIVER_CANCEL OldDriverCancel;
     KIRQL OldLevel;
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
-    BOOLEAN IrpListFreeze;
-    BOOLEAN SrbProcessing;
+    BOOLEAN Queued;
     PIO_STACK_LOCATION IoStack = IoGetCurrentIrpStackLocation(Irp);
-    PSCSI_REQUEST_BLOCK Request = (PSCSI_REQUEST_BLOCK)IoStack->Parameters.Others.Argument1;
+    PSCSI_REQUEST_BLOCK Request = IoStack->Parameters.Scsi.Srb;
 
-    FDODeviceExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+    FDODeviceExtension = DeviceObject->DeviceExtension;
     ASSERT(FDODeviceExtension->Common.IsFDO);
-
     IoMarkIrpPending(Irp);
 
-    KeAcquireSpinLock(&FDODeviceExtension->IrpListLock, &OldLevel);
-
-    SrbProcessing = FDODeviceExtension->IrpPendingCount != 0;
-
-    if (SrbProcessing)
+    /* Publish queued IRPs and their cancellation routine under both locks. */
+    IoAcquireCancelSpinLock(&OldLevel);
+    if (Irp->Cancel)
     {
-        // add irp to queue
-        InsertTailList(&FDODeviceExtension->IrpListHead, &Irp->Tail.Overlay.ListEntry);
+        IoReleaseCancelSpinLock(OldLevel);
+        Request->SrbStatus = SRB_STATUS_ABORTED;
+        Irp->IoStatus.Status = STATUS_CANCELLED;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return TRUE;
     }
 
-    FDODeviceExtension->IrpPendingCount++;
-    KeClearEvent(&FDODeviceExtension->NoPendingRequests);
-
-    // check if queue is freezed
-    IrpListFreeze = BooleanFlagOn(FDODeviceExtension->Flags, USBSTOR_FDO_FLAGS_IRP_LIST_FREEZE);
-
-    KeReleaseSpinLock(&FDODeviceExtension->IrpListLock, OldLevel);
-
-    // synchronize with cancellations by holding the cancel lock
-    IoAcquireCancelSpinLock(&Irp->CancelIrql);
-
-    if (SrbProcessing)
+    KeAcquireSpinLockAtDpcLevel(&FDODeviceExtension->IrpListLock);
+    Queued = FDODeviceExtension->IrpPendingCount != 0 ||
+             (FDODeviceExtension->Flags & (USBSTOR_FDO_FLAGS_IRP_LIST_FREEZE |
+                                           USBSTOR_FDO_FLAGS_DEVICE_RESETTING |
+                                           USBSTOR_FDO_FLAGS_RESET_REQUIRED)) != 0;
+    if (Queued)
     {
-        ASSERT(FDODeviceExtension->ActiveSrb != NULL);
-
-        OldDriverCancel = IoSetCancelRoutine(Irp, USBSTOR_Cancel);
+        InsertTailList(&FDODeviceExtension->IrpListHead, &Irp->Tail.Overlay.ListEntry);
+        IoSetCancelRoutine(Irp, USBSTOR_Cancel);
     }
     else
     {
         ASSERT(FDODeviceExtension->ActiveSrb == NULL);
-
         FDODeviceExtension->ActiveSrb = Request;
-        OldDriverCancel = IoSetCancelRoutine(Irp, USBSTOR_CancelIo);
+        /* StartIo checks cancellation before submitting the request. Until
+         * then, cancellation must not free the reserved active packet. */
+        IoSetCancelRoutine(Irp, NULL);
     }
 
-    // check if the irp has already been cancelled
-    if (Irp->Cancel && OldDriverCancel == NULL)
-    {
-        // cancel irp
-        Irp->CancelRoutine(DeviceObject, Irp);
-        return FALSE;
-    }
-
-    IoReleaseCancelSpinLock(Irp->CancelIrql);
-
-    // if list is freezed, dont start this packet
-    DPRINT("IrpListFreeze: %lu IrpPendingCount %lu\n", IrpListFreeze, FDODeviceExtension->IrpPendingCount);
-
-    return (IrpListFreeze || SrbProcessing);
-}
-
-PIRP
-USBSTOR_RemoveIrp(
-    IN PDEVICE_OBJECT DeviceObject)
-{
-    KIRQL OldLevel;
-    PFDO_DEVICE_EXTENSION FDODeviceExtension;
-    PLIST_ENTRY Entry;
-    PIRP Irp = NULL;
-
-    FDODeviceExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
-    ASSERT(FDODeviceExtension->Common.IsFDO);
-
-    KeAcquireSpinLock(&FDODeviceExtension->IrpListLock, &OldLevel);
-
-    if (!IsListEmpty(&FDODeviceExtension->IrpListHead))
-    {
-        Entry = RemoveHeadList(&FDODeviceExtension->IrpListHead);
-
-        // get offset to start of irp
-        Irp = (PIRP)CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
-    }
-
-    KeReleaseSpinLock(&FDODeviceExtension->IrpListLock, OldLevel);
-
-    return Irp;
+    FDODeviceExtension->IrpPendingCount++;
+    KeClearEvent(&FDODeviceExtension->NoPendingRequests);
+    KeReleaseSpinLockFromDpcLevel(&FDODeviceExtension->IrpListLock);
+    IoReleaseCancelSpinLock(OldLevel);
+    if (Queued)
+        USBSTOR_QueueNextRequest(DeviceObject);
+    return Queued;
 }
 
 VOID
@@ -185,24 +127,35 @@ USBSTOR_QueueWaitForPendingRequests(
 VOID
 USBSTOR_QueueTerminateRequest(
     IN PDEVICE_OBJECT FDODeviceObject,
-    IN PIRP Irp)
+    IN PIRP Irp,
+    IN BOOLEAN ResetDevice)
 {
     KIRQL OldLevel;
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
     PIO_STACK_LOCATION IoStack = IoGetCurrentIrpStackLocation(Irp);
     PSCSI_REQUEST_BLOCK Request = (PSCSI_REQUEST_BLOCK)IoStack->Parameters.Others.Argument1;
 
+    DPRINT("USBSTOR_QueueTerminateRequest: Irp=%p Srb=%p IoStatus=0x%lx\n",
+           Irp, Request, Irp->IoStatus.Status);
+
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)FDODeviceObject->DeviceExtension;
     ASSERT(FDODeviceExtension->Common.IsFDO);
 
     KeAcquireSpinLock(&FDODeviceExtension->IrpListLock, &OldLevel);
 
+    ASSERT(FDODeviceExtension->IrpPendingCount != 0);
     FDODeviceExtension->IrpPendingCount--;
+    if (ResetDevice)
+        FDODeviceExtension->Flags |= USBSTOR_FDO_FLAGS_DEVICE_RESETTING;
 
     // check if this was our current active SRB
     if (FDODeviceExtension->ActiveSrb == Request)
     {
-        // indicate processing is completed
+        /* Only the active request is submitted to the I/O manager. Release
+         * its empty device queue before publishing ActiveSrb == NULL, so a
+         * concurrent retry cannot get stuck behind the completed packet. */
+        ASSERT(IsListEmpty(&FDODeviceObject->DeviceQueue.DeviceListHead));
+        IoStartNextPacket(FDODeviceObject, FALSE);
         FDODeviceExtension->ActiveSrb = NULL;
     }
 
@@ -217,82 +170,119 @@ USBSTOR_QueueTerminateRequest(
 }
 
 VOID
+USBSTOR_QueueEndReset(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN NTSTATUS Status)
+{
+    PFDO_DEVICE_EXTENSION FDODeviceExtension = DeviceObject->DeviceExtension;
+    LIST_ENTRY FailedIrps;
+    PLIST_ENTRY Entry;
+    PIRP Irp;
+    PSCSI_REQUEST_BLOCK Request;
+    KIRQL OldLevel;
+
+    InitializeListHead(&FailedIrps);
+    IoAcquireCancelSpinLock(&OldLevel);
+    KeAcquireSpinLockAtDpcLevel(&FDODeviceExtension->IrpListLock);
+    ASSERT(FDODeviceExtension->ActiveSrb == NULL);
+    FDODeviceExtension->Flags &= ~USBSTOR_FDO_FLAGS_DEVICE_RESETTING;
+    if (NT_SUCCESS(Status))
+    {
+        FDODeviceExtension->Flags &= ~USBSTOR_FDO_FLAGS_RESET_REQUIRED;
+    }
+    else
+    {
+        /* A failed class reset or clear-stall leaves the BOT transport out
+         * of sync. Complete waiting requests without sending another CBW;
+         * a later request must retry recovery before using the bulk pipes. */
+        FDODeviceExtension->Flags |= USBSTOR_FDO_FLAGS_RESET_REQUIRED;
+        while (!IsListEmpty(&FDODeviceExtension->IrpListHead))
+        {
+            Entry = RemoveHeadList(&FDODeviceExtension->IrpListHead);
+            Irp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+            IoSetCancelRoutine(Irp, NULL);
+            InsertTailList(&FailedIrps, Entry);
+            ASSERT(FDODeviceExtension->IrpPendingCount != 0);
+            FDODeviceExtension->IrpPendingCount--;
+        }
+        if (FDODeviceExtension->IrpPendingCount == 0)
+            KeSetEvent(&FDODeviceExtension->NoPendingRequests, IO_NO_INCREMENT, FALSE);
+    }
+    KeReleaseSpinLockFromDpcLevel(&FDODeviceExtension->IrpListLock);
+    IoReleaseCancelSpinLock(OldLevel);
+
+    while (!IsListEmpty(&FailedIrps))
+    {
+        Entry = RemoveHeadList(&FailedIrps);
+        Irp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+        Request = IoGetCurrentIrpStackLocation(Irp)->Parameters.Scsi.Srb;
+        Request->SrbStatus = SRB_STATUS_INTERNAL_ERROR;
+        Request->InternalStatus = Status;
+        Request->DataTransferLength = 0;
+        Irp->IoStatus.Status = Status;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    }
+    USBSTOR_QueueNextRequest(DeviceObject);
+}
+
+VOID
 USBSTOR_QueueNextRequest(
     IN PDEVICE_OBJECT DeviceObject)
 {
-    PFDO_DEVICE_EXTENSION FDODeviceExtension;
+    PFDO_DEVICE_EXTENSION FDODeviceExtension = DeviceObject->DeviceExtension;
     PIRP Irp;
-    PIO_STACK_LOCATION IoStack;
     PSCSI_REQUEST_BLOCK Request;
+    PLIST_ENTRY Entry;
+    KIRQL OldLevel;
 
-    FDODeviceExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
     ASSERT(FDODeviceExtension->Common.IsFDO);
+    IoAcquireCancelSpinLock(&OldLevel);
+    KeAcquireSpinLockAtDpcLevel(&FDODeviceExtension->IrpListLock);
 
-    // check first if there's already a request pending or the queue is frozen
     if (FDODeviceExtension->ActiveSrb != NULL ||
-        BooleanFlagOn(FDODeviceExtension->Flags, USBSTOR_FDO_FLAGS_IRP_LIST_FREEZE))
+        (FDODeviceExtension->Flags & (USBSTOR_FDO_FLAGS_IRP_LIST_FREEZE |
+                                      USBSTOR_FDO_FLAGS_DEVICE_RESETTING)) != 0 ||
+        IsListEmpty(&FDODeviceExtension->IrpListHead))
     {
-        // no work to do yet
+        KeReleaseSpinLockFromDpcLevel(&FDODeviceExtension->IrpListLock);
+        IoReleaseCancelSpinLock(OldLevel);
         return;
     }
 
-    // remove first irp from list
-    Irp = USBSTOR_RemoveIrp(DeviceObject);
-
-    // is there an irp pending
-    if (!Irp)
+    if (FDODeviceExtension->Flags & USBSTOR_FDO_FLAGS_RESET_REQUIRED)
     {
-        // no work to do
-        IoStartNextPacket(DeviceObject, TRUE);
+        FDODeviceExtension->Flags |= USBSTOR_FDO_FLAGS_DEVICE_RESETTING;
+        KeReleaseSpinLockFromDpcLevel(&FDODeviceExtension->IrpListLock);
+        IoReleaseCancelSpinLock(OldLevel);
+        USBSTOR_QueueResetDevice(FDODeviceExtension);
         return;
     }
 
-    IoStack = IoGetCurrentIrpStackLocation(Irp);
-    Request = (PSCSI_REQUEST_BLOCK)IoStack->Parameters.Others.Argument1;
+    Entry = RemoveHeadList(&FDODeviceExtension->IrpListHead);
+    Irp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+    Request = IoGetCurrentIrpStackLocation(Irp)->Parameters.Scsi.Srb;
     ASSERT(Request);
-
+    IoSetCancelRoutine(Irp, NULL);
     FDODeviceExtension->ActiveSrb = Request;
+    KeReleaseSpinLockFromDpcLevel(&FDODeviceExtension->IrpListLock);
+    IoReleaseCancelSpinLock(OldLevel);
 
-    // start next packet
-    IoStartPacket(DeviceObject, Irp, &Request->QueueSortKey, USBSTOR_CancelIo);
-    IoStartNextPacket(DeviceObject, TRUE);
+    IoStartPacket(DeviceObject, Irp, &Request->QueueSortKey, NULL);
 }
 
 VOID
 USBSTOR_QueueRelease(
     IN PDEVICE_OBJECT DeviceObject)
 {
-    PFDO_DEVICE_EXTENSION FDODeviceExtension;
-    PIRP Irp;
+    PFDO_DEVICE_EXTENSION FDODeviceExtension = DeviceObject->DeviceExtension;
     KIRQL OldLevel;
-    PIO_STACK_LOCATION IoStack;
-    PSCSI_REQUEST_BLOCK Request;
 
-    FDODeviceExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
     ASSERT(FDODeviceExtension->Common.IsFDO);
-
     KeAcquireSpinLock(&FDODeviceExtension->IrpListLock, &OldLevel);
-
-    // clear freezed status
     FDODeviceExtension->Flags &= ~USBSTOR_FDO_FLAGS_IRP_LIST_FREEZE;
-
     KeReleaseSpinLock(&FDODeviceExtension->IrpListLock, OldLevel);
-
-    // grab newest irp
-    Irp = USBSTOR_RemoveIrp(DeviceObject);
-
-    if (!Irp)
-    {
-        return;
-    }
-
-    IoStack = IoGetCurrentIrpStackLocation(Irp);
-    Request = (PSCSI_REQUEST_BLOCK)IoStack->Parameters.Others.Argument1;
-
-    IoStartPacket(DeviceObject,
-                  Irp,
-                  &Request->QueueSortKey,
-                  USBSTOR_CancelIo);
+    USBSTOR_QueueNextRequest(DeviceObject);
 }
 
 VOID
@@ -308,7 +298,7 @@ USBSTOR_StartIo(
     KIRQL OldLevel;
     BOOLEAN ResetInProgress;
 
-    DPRINT("USBSTOR_StartIo\n");
+    DPRINT("USBSTOR_StartIo: DevObj=%p Irp=%p\n", DeviceObject, Irp);
 
     FDODeviceExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
     ASSERT(FDODeviceExtension->Common.IsFDO);
@@ -324,8 +314,9 @@ USBSTOR_StartIo(
 
         Irp->IoStatus.Status = STATUS_CANCELLED;
         Irp->IoStatus.Information = 0;
+        IoGetCurrentIrpStackLocation(Irp)->Parameters.Scsi.Srb->SrbStatus = SRB_STATUS_ABORTED;
 
-        USBSTOR_QueueTerminateRequest(DeviceObject, Irp);
+        USBSTOR_QueueTerminateRequest(DeviceObject, Irp, FALSE);
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         USBSTOR_QueueNextRequest(DeviceObject);
         return;
@@ -333,9 +324,9 @@ USBSTOR_StartIo(
 
     IoReleaseCancelSpinLock(OldLevel);
 
-    KeAcquireSpinLock(&FDODeviceExtension->CommonLock, &OldLevel);
+    KeAcquireSpinLock(&FDODeviceExtension->IrpListLock, &OldLevel);
     ResetInProgress = BooleanFlagOn(FDODeviceExtension->Flags, USBSTOR_FDO_FLAGS_DEVICE_RESETTING);
-    KeReleaseSpinLock(&FDODeviceExtension->CommonLock, OldLevel);
+    KeReleaseSpinLock(&FDODeviceExtension->IrpListLock, OldLevel);
 
     IoStack = IoGetCurrentIrpStackLocation(Irp);
 
@@ -350,7 +341,7 @@ USBSTOR_StartIo(
         Request->DataTransferLength = 0;
         Irp->IoStatus.Information = 0;
         Irp->IoStatus.Status = STATUS_DEVICE_DOES_NOT_EXIST;
-        USBSTOR_QueueTerminateRequest(DeviceObject, Irp);
+        USBSTOR_QueueTerminateRequest(DeviceObject, Irp, FALSE);
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         USBSTOR_QueueNextRequest(DeviceObject);
         return;

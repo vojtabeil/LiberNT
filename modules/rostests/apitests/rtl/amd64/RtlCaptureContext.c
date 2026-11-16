@@ -124,12 +124,12 @@ START_TEST(RtlCaptureContext)
     ok_eq_hex(CapturedContext.FltSave.StatusWord, OriginalContext.FltSave.StatusWord);
     ok_eq_hex(CapturedContext.FltSave.TagWord, OriginalContext.FltSave.TagWord);
     ok_eq_hex(CapturedContext.FltSave.Reserved1, 0x00);
-    ok_eq_hex(CapturedContext.FltSave.MxCsr_Mask, 0x2ffff);
-    ok_eq_hex(CapturedContext.FltSave.ErrorOpcode, 0x0000);
-    ok_eq_hex(CapturedContext.FltSave.ErrorOffset, 0x00000000);
+    ok_eq_hex(CapturedContext.FltSave.MxCsr_Mask, InOutContext.FltSave.MxCsr_Mask);
+    ok_eq_hex(CapturedContext.FltSave.ErrorOpcode, InOutContext.FltSave.ErrorOpcode);
+    ok_eq_hex(CapturedContext.FltSave.ErrorOffset, InOutContext.FltSave.ErrorOffset);
     ok_eq_hex(CapturedContext.FltSave.ErrorSelector, 0x0000);
     ok_eq_hex(CapturedContext.FltSave.Reserved2, 0x0000);
-    ok_eq_hex(CapturedContext.FltSave.DataOffset, 0x00000000);
+    ok_eq_hex(CapturedContext.FltSave.DataOffset, InOutContext.FltSave.DataOffset);
     ok_eq_hex(CapturedContext.FltSave.DataSelector, 0x0000);
     ok_eq_hex(CapturedContext.FltSave.Reserved3, 0x0000);
 
@@ -138,21 +138,21 @@ START_TEST(RtlCaptureContext)
 
     /* Legacy floating point registers are truncated to 10 bytes */
     ok_eq_hex64(CapturedContext.Legacy[0].Low, OriginalContext.Legacy[0].Low);
-    ok_eq_hex64(CapturedContext.Legacy[0].High, OriginalContext.Legacy[0].High & 0xFF);
+    ok_eq_hex64(CapturedContext.Legacy[0].High, InOutContext.Legacy[0].High);
     ok_eq_hex64(CapturedContext.Legacy[1].Low, OriginalContext.Legacy[1].Low);
-    ok_eq_hex64(CapturedContext.Legacy[1].High, OriginalContext.Legacy[1].High & 0xFF);
+    ok_eq_hex64(CapturedContext.Legacy[1].High, InOutContext.Legacy[1].High);
     ok_eq_hex64(CapturedContext.Legacy[2].Low, OriginalContext.Legacy[2].Low);
-    ok_eq_hex64(CapturedContext.Legacy[2].High, OriginalContext.Legacy[2].High & 0xFF);
+    ok_eq_hex64(CapturedContext.Legacy[2].High, InOutContext.Legacy[2].High);
     ok_eq_hex64(CapturedContext.Legacy[3].Low, OriginalContext.Legacy[3].Low);
-    ok_eq_hex64(CapturedContext.Legacy[3].High, OriginalContext.Legacy[3].High & 0xFF);
+    ok_eq_hex64(CapturedContext.Legacy[3].High, InOutContext.Legacy[3].High);
     ok_eq_hex64(CapturedContext.Legacy[4].Low, OriginalContext.Legacy[4].Low);
-    ok_eq_hex64(CapturedContext.Legacy[4].High, OriginalContext.Legacy[4].High & 0xFF);
+    ok_eq_hex64(CapturedContext.Legacy[4].High, InOutContext.Legacy[4].High);
     ok_eq_hex64(CapturedContext.Legacy[5].Low, OriginalContext.Legacy[5].Low);
-    ok_eq_hex64(CapturedContext.Legacy[5].High, OriginalContext.Legacy[5].High & 0xFF);
+    ok_eq_hex64(CapturedContext.Legacy[5].High, InOutContext.Legacy[5].High);
     ok_eq_hex64(CapturedContext.Legacy[6].Low, OriginalContext.Legacy[6].Low);
-    ok_eq_hex64(CapturedContext.Legacy[6].High, OriginalContext.Legacy[6].High & 0xFF);
+    ok_eq_hex64(CapturedContext.Legacy[6].High, InOutContext.Legacy[6].High);
     ok_eq_hex64(CapturedContext.Legacy[7].Low, OriginalContext.Legacy[7].Low);
-    ok_eq_hex64(CapturedContext.Legacy[7].High, OriginalContext.Legacy[7].High & 0xFF);
+    ok_eq_hex64(CapturedContext.Legacy[7].High, InOutContext.Legacy[7].High);
 #else
     if (GetNTVersion() >= _WIN32_WINNT_WIN8)
     {

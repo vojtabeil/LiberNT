@@ -25,7 +25,7 @@
 25 stdcall ILCombine(ptr ptr)
 26 stdcall ILLoadFromStream(ptr ptr)
 27 stdcall ILSaveToStream(ptr ptr)
-28 stdcall SHILCreateFromPath(ptr ptr ptr) SHILCreateFromPathAW
+28 stdcall SHILCreateFromPath(ptr ptr ptr)
 29 stdcall -noname PathIsRoot(ptr) PathIsRootAW
 30 stdcall -noname PathBuildRoot(ptr long) PathBuildRootW
 31 stdcall -noname PathFindExtension(wstr) PathFindExtensionW
@@ -40,11 +40,11 @@
 40 stdcall -noname PathIsRelative(wstr) PathIsRelativeW
 41 stdcall IsLFNDriveA(str)
 42 stdcall IsLFNDriveW(wstr)
-43 stdcall PathIsExe(ptr) PathIsExeAW
+43 stdcall PathIsExe(ptr)
 44 stub -noname Control_RunDLLNoFallback
 45 stdcall -noname PathFileExists(ptr) PathFileExistsAW # FIXME
 46 stdcall -noname PathMatchSpec(wstr wstr) PathMatchSpecW
-47 stdcall PathMakeUniqueName(ptr long ptr ptr ptr) PathMakeUniqueNameAW
+47 stdcall PathMakeUniqueName(ptr long ptr ptr ptr)
 48 stdcall -noname PathSetDlgItemPath(long long wstr) PathSetDlgItemPathW
 49 stdcall PathQualify(ptr) PathQualifyAW
 50 stdcall -noname PathStripToRoot(wstr) PathStripToRootW
@@ -93,7 +93,7 @@
 93 stdcall -noname Win32CreateDirectory(wstr ptr) Win32CreateDirectoryW
 94 stdcall -noname Win32RemoveDirectory(wstr) Win32RemoveDirectoryW
 95 stdcall -noname SHLogILFromFSIL(ptr)
-96 stdcall -noname StrRetToStrN(ptr long ptr ptr) StrRetToStrNAW # FIXME
+96 stdcall -version=0x400-0x603 -noname StrRetToStrN(ptr long ptr ptr) StrRetToStrNAW
 97 stdcall -noname SHWaitForFileToOpen(long long long)
 98 stdcall SHGetRealIDL(ptr ptr ptr)
 99 stdcall -noname SetAppStartingCursor(long long)
@@ -173,8 +173,8 @@
 179 stdcall SHGetNewLinkInfoA(str str ptr long long)
 180 stdcall SHGetNewLinkInfoW(wstr wstr ptr long long)
 181 stdcall -noname RegisterShellHook(long long)
-182 varargs ShellMessageBoxW() ShellMessageBoxWrapW ## This is the no-named 'shlwapi.ShellMessageBoxWrapW' (i.e. 'shlwapi.#388')
-183 varargs ShellMessageBoxA(ptr ptr str str long)
+182 varargs ShellMessageBoxW(long long wstr wstr long) shlwapi.ShellMessageBoxW
+183 varargs ShellMessageBoxA(long long str str long) shlwapi.ShellMessageBoxA
 184 stdcall -noname ArrangeWindows(long long long long long)
 185 stdcall -noname SHHandleDiskFull(ptr long)
 186 stdcall -noname ILGetDisplayNameEx(ptr ptr ptr long)
@@ -196,6 +196,7 @@
 203 stdcall -noname AddCommasW(long wstr)
 204 stdcall -noname ShortSizeFormatW(long ptr)
 205 stdcall -noname Printer_LoadIconsW(wstr ptr ptr)
+206 stdcall -noname -version=0x602+ Shell32Ordinal206(ptr)
 209 stdcall -noname Int64ToString(int64 wstr long long ptr long)
 210 stdcall -noname LargeIntegerToString(ptr wstr long long ptr long)
 211 stdcall -noname Printers_GetPidl(ptr str long long)
@@ -237,7 +238,7 @@
 251 stdcall -noname PathRemoveArgs(wstr) PathRemoveArgsW
 252 stdcall -noname PathIsURL(wstr) shlwapi.PathIsURLW
 253 stub -noname SHIsCurrentProcessConsoleSession
-254 stub -noname DisconnectWindowsDialog
+254 stdcall -noname DisconnectWindowsDialog(ptr)
 256 stdcall SHCreateShellFolderView(ptr ptr)
 257 stdcall -noname SHGetShellFolderViewCB(ptr)
 258 stdcall -noname LinkWindow_RegisterClass()
@@ -271,7 +272,6 @@
 660 stdcall -noname FileIconInit(long)
 680 stdcall IsUserAnAdmin()
 681 stdcall -noname SHGetAppCompatFlags(long) shlwapi.SHGetAppCompatFlags
-682 stdcall -stub -version=0x601+ StgMakeUniqueName(ptr wstr long ptr ptr)
 683 stub -noname SHStgOpenStorageW
 684 stub -noname SHStgOpenStorageA
 685 stdcall SHPropStgCreate(ptr ptr ptr long long long ptr ptr)
@@ -333,10 +333,11 @@
 778 stub -version=0x600+ -noname AssocGetPropListForExt
 781 stub -version=0x600+ -noname SHApplyPropertiesToItem
 786 stub -version=0x600+ -noname SHCreateCategoryEnum
-787 stub -version=0x600+ -noname SHMapIDListToSystemImageListIndexAsync
+787 stdcall -version=0x600+ -noname SHMapIDListToSystemImageListIndexAsync(ptr ptr ptr long ptr ptr ptr ptr)
 788 stub -version=0x600+ -noname SHCreateRelatedItemFromIDList
 789 stub -version=0x600+ -noname SHCreateRelatedItemWithParent
-790 stub -version=0x600+ -noname SHMapIDListToSystemImageListIndex
+790 stdcall -version=0x600+ -noname SHMapIDListToSystemImageListIndex(ptr ptr long ptr)
+792 stdcall -noname -version=0x602+ Shell32Ordinal792(ptr ptr ptr)
 810 stub -version=0x600+ -noname SHGetUserPicturePathEx
 811 stub -version=0x600+ -noname SHGetDefaultUserPicture
 812 stub -version=0x600+ -noname SHUserGetPasswordHint
@@ -367,17 +368,17 @@
 837 stub -version=0x600+ -noname SHCreateScopeItemFromShellItem
 838 stub -version=0x600+ -noname SHCreateScopeItemFromKnownFolder
 839 stub -version=0x600+ -noname CreateSingleVisibleInList
-840 stub -version=0x600+ -noname PathGetPathDisplayName
+840 stdcall -version=0x600+ -noname PathGetPathDisplayName(wstr ptr long)
 841 stub -version=0x600+ -noname SHFilterConditionFromString
 842 stub -version=0x600+ -noname SHFilterConditionToString
 843 stub -version=0x600+ -noname SHGetIdentityItem
 844 stub -version=0x600+ -noname SHCreateNotCondition
 845 stub -version=0x600+ -noname CreateConditionRange
-846 stub -version=0x600+ ILLoadFromStreamEx
+846 stdcall -version=0x600+ ILLoadFromStreamEx(ptr ptr)
 847 stub -version=0x600+ -noname SHCombineMultipleConditionsEx
 848 stub -version=0x600+ -noname SHGetNoAssocIconIndex
 849 stub -version=0x600+ -noname SHCreateConditionFactory
-850 stub -version=0x600+ -noname PathComparePaths
+850 stdcall -version=0x600+ -noname PathComparePaths(wstr wstr)
 852 stub -version=0x600+ -noname SHInitializeControlPanelRegkeys
 854 stub -version=0x600+ -noname IsShellItemInSearchIndex
 856 stub -version=0x600+ -noname CPL_ExecuteTask
@@ -398,22 +399,9 @@
 871 stub -version=0x600+ -noname DUI_Shell32_EndDeferUninitialization
 872 stub -version=0x600+ -noname SHCreateKindFilter
 873 stub -version=0x600+ -noname SHIconIndexFromPIDL
-874 stub -version=0x600+ -noname SHLaunchSearch # Vista:874, Win7:886
-881 stub -noname -version=0x601+ SHEnumClassesOfCategories
-882 stub -noname -version=0x601+ SHWriteClassesOfCategories
-884 stub -noname -version=0x601+ SHDoDragDropWithPreferredEffect
-885 stdcall -noname -version=0x601+ RunInstallUninstallStubs()
+874 stub -version=0x600+ -noname SHLaunchSearch
+885 stdcall -noname -version=0x602+ Shell32Ordinal885(ptr)
 887 stub -noname -version=0x601+ SHExtCoCreateInstanceCheckCategory
-888 stub -noname -version=0x601+ SHLimitInputEndSubclass
-892 stub -noname -version=0x601+ GetSqmableFileName
-893 stub -noname -version=0x601+ SetWindowRelaunchProperties
-894 stub -noname -version=0x601+ MakeDestinationItem
-895 stdcall -noname -version=0x601+ GetAppPathFromLink(ptr wstr long)
-896 stub -noname -version=0x601+ ClearDestinationsForAllApps
-897 stub -noname -version=0x601+ SaveTopViewSettings
-899 stdcall -stub -noname -version=0x601+ SetExplorerServerMode(long)
-900 stub -noname -version=0x601+ GetAppIDRoot
-902 stub -noname -version=0x601+ IsSearchEnabled
 
 # Automatically assigned ordinals:
 @ stdcall OpenAs_RunDLLA(long long str long) # 2k3:101, Vista:125
@@ -424,8 +412,8 @@
 @ stdcall -version=0x600+ SHHelpShortcuts_RunDLLA(long long long long) # 2k3:see below, Vista:139
 @ stdcall -version=0x600+ SHHelpShortcuts_RunDLLW(long long long long) # 2k3:see below, Vista:150
 @ stdcall AppCompat_RunDLLW(ptr ptr wstr long) # 2k3:106, Vista:199
-@ stub -version=0x600+ AssocCreateForClasses # Vista:206
-@ stub -version=0x600+ AssocGetDetailsOfPropKey # Vista:207
+@ stdcall -version=0x600+ AssocCreateForClasses(ptr long ptr ptr) # Vista:206
+@ stdcall -version=0x600+ AssocGetDetailsOfPropKey(ptr ptr ptr ptr ptr) # Vista:207
 @ stdcall -version=0x502 CheckEscapesA(str long) # 2k3:107
 @ stdcall CheckEscapesW(wstr long) # 2k3:108, Vista:208
 @ stdcall CommandLineToArgvW(wstr ptr) # 2k3:109, Vista:226
@@ -468,7 +456,7 @@
 @ stdcall FindExecutableA(str str ptr) # 2k3:226, Vista:292
 @ stdcall FindExecutableW(wstr wstr ptr) # 2k3:227, Vista:293
 @ stdcall FreeIconList(long) # 2k3:228, Vista:294
-@ stub -version=0x600+ InitNetworkAddressControl # Vista:295
+@ stdcall -version=0x600+ InitNetworkAddressControl() # Vista:295
 @ stdcall InternalExtractIconListA(ptr str ptr) # 2k3:229, Vista:296
 @ stdcall InternalExtractIconListW(ptr wstr ptr) # 2k3:238, Vista:297
 @ stdcall Options_RunDLL(ptr ptr str long) # 2k3:255, Vista:298
@@ -482,32 +470,33 @@
 @ stdcall RealShellExecuteExW(ptr wstr wstr wstr wstr ptr wstr ptr long ptr long) # 2k3:267, Vista:306
 @ stdcall RealShellExecuteW(ptr wstr wstr wstr wstr ptr wstr ptr long ptr) # 2k3:268, Vista:307
 @ stdcall RegenerateUserEnvironment(ptr long) # 2k3:269, Vista:308
-@ stub -version=0x600+ SHAddDefaultPropertiesByExt # Vista:309
+@ stdcall -version=0x600+ SHAddDefaultPropertiesByExt(wstr ptr) # Vista:309
 @ stdcall SHAddToRecentDocs(long ptr) # 2k3:270, Vista:310
 @ stdcall SHAppBarMessage(long ptr) # 2k3:271, Vista:311
-@ stub -version=0x600+ SHAssocEnumHandlers # Vista:312
-@ stub -version=0x600+ SHBindToFolderIDListParent # Vista:313
-@ stub -version=0x600+ SHBindToFolderIDListParentEx # Vista:314
+@ stdcall -version=0x600+ SHAssocEnumHandlers(wstr long ptr) # Vista:312
+@ stdcall -version=0x600+ SHAssocEnumHandlersForProtocolByApplication(wstr ptr ptr)
+@ stdcall -version=0x600+ SHBindToFolderIDListParent(ptr ptr ptr ptr ptr) # Vista:313
+@ stdcall -version=0x600+ SHBindToFolderIDListParentEx(ptr ptr ptr ptr ptr ptr) # Vista:314
 @ stdcall -version=0x600+ SHBindToObject(ptr ptr ptr ptr ptr) # Vista:315
 @ stdcall SHBindToParent(ptr ptr ptr ptr) # 2k3:272, Vista:316
 @ stdcall SHBrowseForFolder(ptr) SHBrowseForFolderA # 2k3:273, Vista:317
 @ stdcall SHBrowseForFolderA(ptr) # 2k3:274, Vista:318
 @ stdcall SHBrowseForFolderW(ptr) # 2k3:275, Vista:319
 @ stdcall SHChangeNotify(long long ptr ptr) # 2k3:276, Vista:320
-@ stub -version=0x600+ SHChangeNotifyRegisterThread # Vista:321
+@ stdcall -version=0x600+ SHChangeNotifyRegisterThread(long) # Vista:321
 @ stdcall SHChangeNotifySuspendResume(long ptr long long) # 2k3:277, Vista:322
-@ stub -version=0x600+ SHCreateAssociationRegistration # Vista:323
+@ stdcall -version=0x600+ SHCreateAssociationRegistration(ptr ptr) # Vista:323
 @ stdcall -version=0x600+ SHCreateDataObject(ptr long ptr ptr ptr ptr) # Vista:324
 @ stdcall -version=0x600+ SHCreateDefaultContextMenu(ptr ptr ptr) # Vista:325
 @ stdcall -version=0x600+ SHCreateDefaultExtractIcon(ptr ptr) # Vista:326
-@ stub -version=0x600+ SHCreateDefaultPropertiesOp # Vista:327
+@ stdcall -version=0x600+ SHCreateDefaultPropertiesOp(ptr ptr) # Vista:327
 @ stdcall SHCreateDirectoryExA(long str ptr) # 2k3:278, Vista:328
 @ stdcall SHCreateDirectoryExW(long wstr ptr) # 2k3:279, Vista:329
 @ stdcall -version=0x600+ SHCreateItemFromIDList(ptr ptr ptr) # Vista:330
 @ stdcall -version=0x600+ SHCreateItemFromParsingName(wstr ptr ptr ptr) # Vista:331
 @ stdcall -version=0x600+ SHCreateItemFromRelativeName(ptr wstr ptr ptr ptr) # Vista:332
 @ stdcall -version=0x600+ SHCreateItemInKnownFolder(ptr long wstr ptr ptr) # Vista:333
-@ stdcall -stub -version=0x600+ SHCreateItemWithParent(ptr ptr ptr ptr ptr) # Vista:334
+@ stdcall -version=0x600+ SHCreateItemWithParent(ptr ptr ptr ptr ptr) # Vista:334
 @ stub SHCreateLocalServerRunDll # 2k3:280, Vista:335
 @ stdcall SHCreateProcessAsUserW(ptr) # 2k3:281, Vista:336
 @ stdcall SHCreateQueryCancelAutoPlayMoniker(ptr) # 2k3:282, Vista:337
@@ -518,7 +507,7 @@
 @ stdcall -version=0x600+ SHCreateShellItemArrayFromShellItem(ptr ptr ptr) # Vista:342
 @ stdcall SHEmptyRecycleBinA(long str long) # 2k3:284, Vista:343
 @ stdcall SHEmptyRecycleBinW(long wstr long) # 2k3:285, Vista:344
-@ stub SHEnableServiceObject # 2k3:286, Vista:345
+@ stdcall SHEnableServiceObject(ptr long) # 2k3:286, Vista:345
 @ stdcall SHEnumerateUnreadMailAccountsW(ptr long ptr long) # 2k3:287, Vista:346
 @ stdcall -version=0x600+ SHEvaluateSystemCommandTemplate(wstr ptr ptr ptr) # Vista:347
 @ stdcall SHExtractIconsW(wstr long long long ptr ptr long long) user32.PrivateExtractIconsW # 2k3:288, Vista:348
@@ -533,7 +522,7 @@
 @ stdcall SHGetDiskFreeSpaceA(str ptr ptr ptr) kernel32.GetDiskFreeSpaceExA # 2k3:297, Vista:357
 @ stdcall SHGetDiskFreeSpaceExA(str ptr ptr ptr) kernel32.GetDiskFreeSpaceExA # 2k3:298, Vista:358
 @ stdcall SHGetDiskFreeSpaceExW(wstr ptr ptr ptr) kernel32.GetDiskFreeSpaceExW # 2k3:299, Vista:359
-@ stub -version=0x600+ SHGetDriveMedia # Vista:360
+@ stdcall -version=0x600+ SHGetDriveMedia(wstr ptr) # Vista:360
 @ stdcall SHGetFileInfo(ptr long ptr long long) SHGetFileInfoA # 2k3:300, Vista:361
 @ stdcall SHGetFileInfoA(ptr long ptr long long) # 2k3:301, Vista:362
 @ stdcall SHGetFileInfoW(ptr long ptr long long) # 2k3:302, Vista:363
@@ -541,30 +530,34 @@
 @ stdcall SHGetFolderPathA(long long long long ptr) # 2k3:304, Vista:365
 @ stdcall SHGetFolderPathAndSubDirA(long long long long str ptr) # 2k3:305, Vista:366
 @ stdcall SHGetFolderPathAndSubDirW(long long long long wstr ptr) # 2k3:306, Vista:367
-@ stub -version=0x600+ SHGetFolderPathEx # Vista:368
+@ stdcall -version=0x600+ SHGetFolderPathEx(ptr long ptr ptr long) # Vista:368
 @ stdcall SHGetFolderPathW(long long long long ptr) # 2k3:307, Vista:369
 @ stdcall -version=0x600+ SHGetIDListFromObject(ptr ptr) # Vista:370
+@ stdcall -version=0x600+ SHGetItemFromDataObject(ptr long ptr ptr)
+@ stdcall -version=0x600+ SHGetItemFromObject(ptr ptr ptr)
 @ stdcall SHGetIconOverlayIndexA(str long) # 2k3:308, Vista:371
 @ stdcall SHGetIconOverlayIndexW(wstr long) # 2k3:309, Vista:372
 @ stdcall SHGetInstanceExplorer(long) shcore.GetProcessReference # 2k3:310, Vista:373
-@ stub -version=0x600+ SHGetKnownFolderIDList # Vista:374
-@ stub -version=0x600+ SHGetKnownFolderPath # Vista:375
-@ stub -version=0x600+ SHGetLocalizedName # Vista:376
+@ stdcall -version=0x600+ SHGetKnownFolderIDList(ptr long ptr ptr) # Vista:374
+@ stdcall -version=0x600+ SHGetKnownFolderItem(ptr long long ptr ptr)
+@ stdcall -version=0x600+ SHGetKnownFolderPath(ptr long ptr ptr) # Vista:375
+@ stdcall -version=0x600+ SHGetLocalizedName(wstr ptr long ptr) # Vista:376
 @ stdcall SHGetMalloc(ptr) # 2k3:311, Vista:377
 @ stdcall -version=0x600+ SHGetNameFromIDList(ptr long ptr) # Vista:378
 @ stdcall SHGetNewLinkInfo(str str ptr long long) SHGetNewLinkInfoA # 2k3:312, Vista:379
 @ stdcall SHGetPathFromIDList(ptr ptr) SHGetPathFromIDListA # 2k3:313, Vista:380
 @ stdcall SHGetPathFromIDListA(ptr ptr) # 2k3:314, Vista:381
-@ stub -version=0x600+ SHGetPathFromIDListEx # Vista:382
+@ stdcall -version=0x600+ SHGetPathFromIDListEx(ptr ptr long long) # Vista:382
 @ stdcall SHGetPathFromIDListW(ptr ptr) # 2k3:315, Vista:383
-@ stub -version=0x600+ SHGetPropertyStoreFromIDList # Vista:384
-@ stdcall -version=0x600+ SHGetPropertyStoreFromParsingName(wstr ptr ptr ptr ptr) # Vista:385
+@ stdcall -version=0x601+ SHGetPropertyStoreForWindow(long ptr ptr)
+@ stdcall -version=0x600+ SHGetPropertyStoreFromIDList(ptr long ptr ptr) # Vista:384
+@ stdcall -version=0x600+ SHGetPropertyStoreFromParsingName(wstr ptr long ptr ptr) # Vista:385
 @ stdcall SHGetSettings(ptr long) # 2k3:316, Vista:386
 @ stdcall SHGetSpecialFolderLocation(long long ptr) # 2k3:317, Vista:387
 @ stdcall SHGetSpecialFolderPathA(long ptr long long) # 2k3:318, Vista:388
 @ stdcall SHGetSpecialFolderPathW(long ptr long long) # 2k3:319, Vista:389
-@ stub -version=0x600+ SHGetStockIconInfo # Vista:390
-@ stub -version=0x600+ SHGetTemporaryPropertyForItem # Vista:391
+@ stdcall -version=0x600+ SHGetStockIconInfo(long long ptr) # Vista:390
+@ stdcall -version=0x600+ SHGetTemporaryPropertyForItem(ptr ptr ptr) # Vista:391
 @ stdcall SHGetUnreadMailCountW(ptr wstr ptr ptr ptr long) # 2k3:320, Vista:392
 @ stdcall -version=0x502 SHHelpShortcuts_RunDLL(long long long long) SHHelpShortcuts_RunDLLA # 2k3:321
 @ stdcall -version=0x502 SHHelpShortcuts_RunDLLA(long long long long) # 2k3:322
@@ -582,13 +575,15 @@
 @ stdcall SHQueryRecycleBinA(str ptr) # 2k3:333, Vista:403
 @ stdcall SHQueryRecycleBinW(wstr ptr) # 2k3:334, Vista:404
 @ stdcall -version=0x600+ SHQueryUserNotificationState(ptr) # Vista:405
-@ stub -version=0x600+ SHRemoveLocalizedName # Vista:406
-@ stub -version=0x600+ SHSetDefaultProperties # Vista:407
-@ stub -version=0x600+ SHSetKnownFolderPath # Vista:408
+@ stdcall -version=0x600+ SHRemoveLocalizedName(wstr) # Vista:406
+@ stdcall -version=0x600+ SHSetDefaultProperties(ptr ptr long ptr) # Vista:407
+@ stdcall -version=0x600+ SHSetKnownFolderPath(ptr long ptr wstr)
 @ stdcall SHSetLocalizedName(wstr wstr long) # 2k3:335, Vista:409
-@ stub -version=0x600+ SHSetTemporaryPropertyForItem # Vista:410
+@ stdcall -version=0x600+ SHSetTemporaryPropertyForItem(ptr ptr ptr) # Vista:410
 @ stdcall SHSetUnreadMailCountW (wstr long wstr) # 2k3:336, Vista:411
 @ stdcall SHUpdateRecycleBinIcon() # 2k3:337, Vista:412
+@ stdcall -version=0x601+ SetCurrentProcessExplicitAppUserModelID(wstr) shcore.SetCurrentProcessExplicitAppUserModelID
+@ stdcall -version=0x601+ GetCurrentProcessExplicitAppUserModelID(ptr) shcore.GetCurrentProcessExplicitAppUserModelID
 @ stdcall SheChangeDirA(str) # 2k3:338, Vista:413
 @ stdcall -version=0x502 SheChangeDirExA(str) # 2k3:339
 @ stdcall SheChangeDirExW(wstr) # 2k3:340, Vista:414
@@ -622,6 +617,7 @@
 @ stdcall Shell_NotifyIcon(long ptr) Shell_NotifyIconA # 2k3:366, Vista:430
 @ stdcall Shell_NotifyIconA(long ptr) # 2k3:367, Vista:431
 @ stdcall Shell_NotifyIconW(long ptr) # 2k3:368, Vista:432
+@ stdcall -version=0x601+ Shell_NotifyIconGetRect(ptr ptr)
 @ stdcall StrChrA(str long) shlwapi.StrChrA # 2k3:369, Vista:433
 @ stdcall StrChrIA(str long) shlwapi.StrChrIA # 2k3:370, Vista:434
 @ stdcall StrChrIW(wstr long) shlwapi.StrChrIW # 2k3:371, Vista:435
@@ -652,13 +648,29 @@
 @ stdcall StrStrW(wstr wstr) shlwapi.StrStrW # 2k3:396, Vista:456
 @ stdcall WOWShellExecute(ptr str str str str long ptr) # 2k3:397, Vista:457
 @ stub -version=0x600+ WaitForExplorerRestartW # Vista:458
-
-; Win7+ - These ordinals are higher than any of the ones in win vista
-@ stdcall -stub -version=0x601+ SHAssocEnumHandlersForProtocolByApplication(wstr ptr ptr)
-@ stdcall -stub -version=0x601+ Shell_NotifyIconGetRect(ptr ptr)
-@ stdcall -stub -version=0x601+ SHGetKnownFolderItem(ptr ptr ptr ptr ptr)
-@ stdcall -version=0x601+ SHGetItemFromObject(ptr long ptr)
-@ stdcall -version=0x600+ SHGetItemFromDataObject(ptr long ptr ptr)
-
-@ stdcall -version=0x601+ GetCurrentProcessExplicitAppUserModelID(wstr)
-@ stdcall -version=0x601+ SetCurrentProcessExplicitAppUserModelID(wstr)
+892 stdcall -noname -version=0x602+ Shell32Ordinal892(ptr ptr ptr)
+893 stdcall -noname -version=0x602+ Shell32Ordinal893(ptr ptr ptr ptr ptr ptr)
+894 stdcall -noname -version=0x602+ Shell32Ordinal894(ptr ptr ptr ptr ptr ptr ptr)
+895 stdcall -noname -version=0x602+ Shell32Ordinal895(ptr ptr ptr)
+896 stdcall -noname -version=0x602+ Shell32Ordinal896(ptr)
+899 stdcall -noname -version=0x602+ Shell32Ordinal899(ptr)
+904 stdcall -noname -version=0x602+ Shell32Ordinal904(ptr ptr)
+905 stdcall -noname -version=0x602+ Shell32Ordinal905(ptr ptr)
+906 stdcall -noname -version=0x602+ Shell32Ordinal906()
+@ stdcall ParseFieldA(str long ptr long)
+@ stdcall ParseFieldW(wstr long ptr long)
+@ cdecl PathProcessCommandW(wstr ptr long long)
+@ stdcall StrRetToStrNW(ptr long ptr ptr)
+@ cdecl SHELL32_EnumDefaultVerbList(wstr long ptr long)
+@ stdcall SHELL32_RunControlPanel(wstr ptr)
+@ cdecl SIC_GetIconIndex(wstr long long)
+@ stdcall _InsertMenuItemW(ptr long long long long wstr long)
+@ cdecl IDataObject_Constructor(ptr ptr ptr long long ptr)
+@ cdecl IsDriveFloppyW(wstr)
+@ cdecl SHELL32_GetItemOverlay(ptr ptr ptr ptr long)
+@ cdecl SHELL_SingleFileOperation(ptr long wstr wstr long ptr)
+@ cdecl CFSDropTarget_CreateInstance(ptr ptr ptr)
+@ cdecl SHELL_ShowItemIDListProperties(ptr)
+@ cdecl SHELL32_ShowShellExtensionProperties(ptr ptr)
+@ cdecl SHELL32_ShowFilesystemItemPropertiesDialogAsync(ptr)
+@ cdecl SHELL32_ShowFilesystemItemsPropertiesDialogAsync(ptr ptr)

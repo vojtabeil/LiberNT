@@ -24,7 +24,7 @@ private:
     int m_ImageNormal;
     int m_ImageOpen;
 
-    BOOL m_Loaded;
+    HICON m_hIcon;
 
 public:
     CSnapinCacheEntry(const CAtlString& guidString, const CAtlString& aboutGuidString, const CAtlString& name, HIMAGELIST hImageList);
@@ -36,6 +36,8 @@ public:
     const CAtlString& Provider() const { return m_Provider; }
     const CAtlString& Description() const { return m_Description; }
     const CAtlString& Version() const { return m_Version; }
+
+    HICON Icon() { return m_hIcon; }
 
     int NormalImageIndex() { return m_ImageNormal; }
     int OpenImageIndex() { return m_ImageOpen; }

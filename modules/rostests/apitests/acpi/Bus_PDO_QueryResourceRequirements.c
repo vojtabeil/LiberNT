@@ -14,6 +14,7 @@
 
 /* Kernel definitions (mock) */
 #define PAGED_CODE()
+#define DPRINT(...)  do { if (0) DbgPrint(__VA_ARGS__); } while (0)
 #define DPRINT1(...) do { if (0) DbgPrint(__VA_ARGS__); } while (0)
 
 typedef struct _IRP
@@ -46,6 +47,17 @@ ExFreePoolWithTag(PVOID MemPtr, ULONG Tag)
 }
 
 static
+PVOID
+ExAllocatePoolZero(ULONG PoolType, SIZE_T NumberOfBytes, ULONG Tag)
+{
+    PVOID Mem = ExAllocatePoolWithTag(PoolType, NumberOfBytes, Tag);
+
+    if (Mem)
+        RtlZeroMemory(Mem, NumberOfBytes);
+    return Mem;
+}
+
+static
 SIZE_T
 GetPoolAllocSize(PVOID MemPtr)
 {
@@ -60,7 +72,46 @@ typedef struct _PDO_DEVICE_DATA
 {
     HANDLE AcpiHandle;
     PWCHAR HardwareIDs;
+    ULONG CachedBusNumber;
+    BOOLEAN HasCachedBusNumber;
+    BOOLEAN HasPciRootBusRange;
+    BOOLEAN HasPciRootSegment;
+    ULONG PciRootSegment;
+    ULONG PciRootMinBus;
+    ULONG PciRootMaxBus;
+#define ACPI_PCI_MAX_WINDOWS 8
+    ULONG PciRootIoWindowCount;
+    struct { ULONGLONG Start; ULONGLONG End; } PciRootIoWindows[ACPI_PCI_MAX_WINDOWS];
+    BOOLEAN PciRootLogged;
 } PDO_DEVICE_DATA, *PPDO_DEVICE_DATA;
+
+struct acpi_device_flags
+{
+    unsigned int dynamic_status:1;
+    unsigned int removable:1;
+    unsigned int ejectable:1;
+    unsigned int lockable:1;
+    unsigned int suprise_removal_ok:1;
+    unsigned int power_manageable:1;
+    unsigned int performance_manageable:1;
+    unsigned int wake_capable:1;
+    unsigned int force_power_state:1;
+    unsigned int bus_address:1;
+    unsigned int unique_id:1;
+};
+
+struct acpi_device_pnp
+{
+    char unique_id[9];
+    ULONG bus_address;
+    char *hardware_id;
+};
+
+struct acpi_device
+{
+    struct acpi_device_flags flags;
+    struct acpi_device_pnp pnp;
+};
 
 /* ACPICA functions (mock) */
 static BOOLEAN AcpiCallExpected;
@@ -102,6 +153,13 @@ AcpiGetPossibleResources (
     return AE_OK;
 }
 
+#define END_TAG_LENGTH ((12 + sizeof(ACPI_SIZE) - 1) & ~(sizeof(ACPI_SIZE) - 1))
+#define BuspGetCurrentResources AcpiGetCurrentResources
+#define BuspGetPossibleResources AcpiGetPossibleResources
+#define BuspGpioInterruptCount(DeviceData, Resource) 0
+#define BuspGpioInterruptVector(DeviceData, Resource, ResourceIndex, PinIndex, Gsiv) FALSE
+
+#undef stat
 #include "../../../../drivers/bus/acpi/buspdo.c"
 
 /* ACPI_RESOURCE builder helpers */
@@ -135,6 +193,17 @@ AcpiGetPossibleResources (
     ok((Desc)->u.Port.MaximumAddress.QuadPart == ExpectedMax, "Desc->u.Port.MaximumAddress = 0x%I64x\n", (Desc)->u.Port.MaximumAddress.QuadPart);   \
     } while (0)
 
+#define expect_mem(Desc, ExpectedOption, ExpectedShare, ExpectedLength, ExpectedAlign, ExpectedMin, ExpectedMax)                                         \
+    do {                                                                                                                                                  \
+    ok((Desc)->Option == ExpectedOption, "Desc->Option = %u\n", (Desc)->Option);                                                                          \
+    ok((Desc)->Type == CmResourceTypeMemory, "Desc->Type = %u\n", (Desc)->Type);                                                                          \
+    ok((Desc)->ShareDisposition == ExpectedShare, "Desc->ShareDisposition = %u\n", (Desc)->ShareDisposition);                                             \
+    ok((Desc)->u.Memory.Length == ExpectedLength, "Desc->u.Memory.Length = %lu\n", (Desc)->u.Memory.Length);                                              \
+    ok((Desc)->u.Memory.Alignment == ExpectedAlign, "Desc->u.Memory.Alignment = %lu\n", (Desc)->u.Memory.Alignment);                                      \
+    ok((Desc)->u.Memory.MinimumAddress.QuadPart == ExpectedMin, "Desc->u.Memory.MinimumAddress = 0x%I64x\n", (Desc)->u.Memory.MinimumAddress.QuadPart);   \
+    ok((Desc)->u.Memory.MaximumAddress.QuadPart == ExpectedMax, "Desc->u.Memory.MaximumAddress = 0x%I64x\n", (Desc)->u.Memory.MaximumAddress.QuadPart);   \
+    } while (0)
+
 START_TEST(Bus_PDO_QueryResourceRequirements)
 {
     NTSTATUS Status;
@@ -145,6 +214,8 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
     PIO_RESOURCE_REQUIREMENTS_LIST ReqList;
     PIO_RESOURCE_LIST ReqList2;
 
+    RtlZeroMemory(&DeviceData, sizeof(DeviceData));
+
     /* Invalid AcpiHandle */
     AcpiCallExpected = FALSE;
     Irp.IoStatus.Status = STATUS_WAIT_0 + 17;
@@ -153,7 +224,7 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
     ok(Status == STATUS_WAIT_0 + 17, "Status = 0x%lx\n", Status);
 
     /* PCI Bus device */
-    AcpiCallExpected = FALSE;
+    AcpiCallExpected = TRUE;
     Irp.IoStatus.Status = STATUS_WAIT_0 + 17;
     DeviceData.AcpiHandle = CorrectHandle;
     DeviceData.HardwareIDs = L"PNP0A03\0";
@@ -161,7 +232,7 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
     ok(Status == STATUS_WAIT_0 + 17, "Status = 0x%lx\n", Status);
 
     /* PCI Bus device #2 */
-    AcpiCallExpected = FALSE;
+    AcpiCallExpected = TRUE;
     Irp.IoStatus.Status = STATUS_WAIT_0 + 17;
     DeviceData.AcpiHandle = CorrectHandle;
     DeviceData.HardwareIDs = L"PNP0A08\0";
@@ -190,7 +261,7 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
     Resource->Data.Irq.Interrupts[0] = 7;
     Resource = ACPI_NEXT_RESOURCE(Resource);
     Resource->Type = ACPI_RESOURCE_TYPE_END_TAG;
-    Resource->Length = 0;
+    Resource->Length = END_TAG_LENGTH;
     Resource++;
     PossibleBuffer.Pointer = ResourcesBuffer;
     PossibleBuffer.Length = (ULONG_PTR)Resource - (ULONG_PTR)ResourcesBuffer;
@@ -231,7 +302,7 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
     Resource->Data.Irq.Interrupts[1] = 7;
     Resource = ACPI_NEXT_RESOURCE(Resource);
     Resource->Type = ACPI_RESOURCE_TYPE_END_TAG;
-    Resource->Length = 0;
+    Resource->Length = END_TAG_LENGTH;
     Resource++;
     PossibleBuffer.Pointer = ResourcesBuffer;
     PossibleBuffer.Length = (ULONG_PTR)Resource - (ULONG_PTR)ResourcesBuffer;
@@ -274,7 +345,7 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
     Resource->Data.Io.Maximum = 0x3F8;
     Resource = ACPI_NEXT_RESOURCE(Resource);
     Resource->Type = ACPI_RESOURCE_TYPE_END_TAG;
-    Resource->Length = 0;
+    Resource->Length = END_TAG_LENGTH;
     Resource++;
     PossibleBuffer.Pointer = ResourcesBuffer;
     PossibleBuffer.Length = (ULONG_PTR)Resource - (ULONG_PTR)ResourcesBuffer;
@@ -323,7 +394,7 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
     Resource->Data.Irq.Interrupts[1] = 7;
     Resource = ACPI_NEXT_RESOURCE(Resource);
     Resource->Type = ACPI_RESOURCE_TYPE_END_TAG;
-    Resource->Length = 0;
+    Resource->Length = END_TAG_LENGTH;
     Resource++;
     PossibleBuffer.Pointer = ResourcesBuffer;
     PossibleBuffer.Length = (ULONG_PTR)Resource - (ULONG_PTR)ResourcesBuffer;
@@ -411,7 +482,7 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
 
     Resource = ACPI_NEXT_RESOURCE(Resource);
     Resource->Type = ACPI_RESOURCE_TYPE_END_TAG;
-    Resource->Length = 0;
+    Resource->Length = END_TAG_LENGTH;
     Resource++;
     PossibleBuffer.Pointer = ResourcesBuffer;
     PossibleBuffer.Length = (ULONG_PTR)Resource - (ULONG_PTR)ResourcesBuffer;
@@ -428,7 +499,6 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
     ok(ReqList->InterfaceType == Internal, "InterfaceType = %u\n", ReqList->InterfaceType);
     ok(ReqList->BusNumber == 0, "BusNumber = %lu\n", ReqList->BusNumber);
     ok(ReqList->SlotNumber == 0, "SlotNumber = %lu\n", ReqList->SlotNumber);
-    todo_if(1)
     ok(ReqList->AlternativeLists == 2, "AlternativeLists = %lu\n", ReqList->AlternativeLists);
     ok(ReqList->List[0].Version == 1, "List[0].Version = %u\n", ReqList->List[0].Version);
     ok(ReqList->List[0].Revision == 1, "List[0].Revision = %u\n", ReqList->List[0].Revision);
@@ -453,7 +523,55 @@ START_TEST(Bus_PDO_QueryResourceRequirements)
         expect_irq(&ReqList2->Descriptors[5], IO_RESOURCE_ALTERNATIVE, CmResourceShareDeviceExclusive, 7, 7);
     }
     ok_int(ReqList->ListSize, GetPoolAllocSize(ReqList));
-    todo_if(1)
     ok_int(ReqList->ListSize, (ULONG_PTR)&ReqList2->Descriptors[6] - (ULONG_PTR)ReqList);
+    ExFreePoolWithTag(ReqList, 'RpcA');
+
+    /* Address space descriptors: _MAX is the highest address of the range */
+    AcpiCallExpected = TRUE;
+    Irp.IoStatus.Status = STATUS_WAIT_0 + 17;
+    Irp.IoStatus.Information = 0;
+    DeviceData.AcpiHandle = CorrectHandle;
+    DeviceData.HardwareIDs = L"ACPI0004\0";
+    Resource = ResourcesBuffer;
+    Resource->Type = ACPI_RESOURCE_TYPE_ADDRESS64;
+    Resource->Length = sizeof(*Resource);
+    Resource->Data.Address64.ResourceType = ACPI_MEMORY_RANGE;
+    Resource->Data.Address64.ProducerConsumer = ACPI_CONSUMER;
+    Resource->Data.Address64.Info.Mem.WriteProtect = ACPI_READ_WRITE_MEMORY;
+    Resource->Data.Address64.Info.Mem.Caching = ACPI_NON_CACHEABLE_MEMORY;
+    Resource->Data.Address64.Address.Granularity = 0;
+    Resource->Data.Address64.Address.Minimum = 0x10000000;
+    Resource->Data.Address64.Address.Maximum = 0x3EFEFFFF;
+    Resource->Data.Address64.Address.AddressLength = 0x2EFF0000;
+    Resource->Data.Address64.Address.TranslationOffset = 0;
+    Resource = ACPI_NEXT_RESOURCE(Resource);
+    Resource->Type = ACPI_RESOURCE_TYPE_ADDRESS16;
+    Resource->Length = sizeof(*Resource);
+    Resource->Data.Address16.ResourceType = ACPI_IO_RANGE;
+    Resource->Data.Address16.ProducerConsumer = ACPI_CONSUMER;
+    Resource->Data.Address16.Address.Granularity = 0;
+    Resource->Data.Address16.Address.Minimum = 0x1000;
+    Resource->Data.Address16.Address.Maximum = 0x1FFF;
+    Resource->Data.Address16.Address.AddressLength = 0x1000;
+    Resource->Data.Address16.Address.TranslationOffset = 0;
+    Resource = ACPI_NEXT_RESOURCE(Resource);
+    Resource->Type = ACPI_RESOURCE_TYPE_END_TAG;
+    Resource->Length = END_TAG_LENGTH;
+    Resource++;
+    PossibleBuffer.Pointer = ResourcesBuffer;
+    PossibleBuffer.Length = (ULONG_PTR)Resource - (ULONG_PTR)ResourcesBuffer;
+    Status = Bus_PDO_QueryResourceRequirements(&DeviceData, &Irp);
+    ok(Status == STATUS_SUCCESS, "Status = 0x%lx\n", Status);
+    ReqList = (PVOID)Irp.IoStatus.Information;
+    ok(ReqList != NULL, "ReqList is NULL\n");
+    if (ReqList == NULL)
+    {
+        skip("No ReqList\n");
+        return;
+    }
+    ok(ReqList->AlternativeLists == 1, "AlternativeLists = %lu\n", ReqList->AlternativeLists);
+    ok(ReqList->List[0].Count == 2, "List[0].Count = %lu\n", ReqList->List[0].Count);
+    expect_mem(&ReqList->List[0].Descriptors[0], IO_RESOURCE_PREFERRED, CmResourceShareDeviceExclusive, 0x2EFF0000, 1, 0x10000000, 0x3EFEFFFF);
+    expect_port(&ReqList->List[0].Descriptors[1], IO_RESOURCE_PREFERRED, CmResourceShareDeviceExclusive, 0x1000, 1, 0x1000, 0x1FFF);
     ExFreePoolWithTag(ReqList, 'RpcA');
 }

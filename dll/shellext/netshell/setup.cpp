@@ -221,7 +221,7 @@ NetworkInitPageDlgProc(
     LPNMHDR lpnm;
 
     /* Retrieve pointer to the global setup data */
-    pNetworkSetupData = (PNETWORKSETUPDATA)GetWindowLongPtr(hwndDlg, DWLP_USER);
+    pNetworkSetupData = (PNETWORKSETUPDATA)GetWindowLongPtr(hwndDlg, GWLP_USERDATA);
     if ((pNetworkSetupData != NULL) &&
         (pNetworkSetupData->dwMagic == NETWORK_SETUP_MAGIC))
         pSetupData = pNetworkSetupData->pSetupData;
@@ -231,7 +231,7 @@ NetworkInitPageDlgProc(
         case WM_INITDIALOG:
             /* Save pointer to the global setup data */
             pNetworkSetupData = (PNETWORKSETUPDATA)((LPPROPSHEETPAGE)lParam)->lParam;
-            SetWindowLongPtr(hwndDlg, DWLP_USER, (DWORD_PTR)pNetworkSetupData);
+            SetWindowLongPtr(hwndDlg, GWLP_USERDATA, (DWORD_PTR)pNetworkSetupData);
             pSetupData = pNetworkSetupData->pSetupData;
 
             if (pSetupData->UnattendSetup)
@@ -255,7 +255,8 @@ NetworkInitPageDlgProc(
                     PropSheet_SetWizButtons(GetParent(hwndDlg), 0);
                     TRACE("Starting install thread!\n");
                     pNetworkSetupData->hwndPage = hwndDlg;
-                    CreateThread(NULL, 0, InstallThreadProc, (LPVOID)pNetworkSetupData, 0, NULL);
+                    if (HANDLE hThread = CreateThread(NULL, 0, InstallThreadProc, (LPVOID)pNetworkSetupData, 0, NULL))
+                        CloseHandle(hThread);
                     TRACE("Install thread done!\n");
                     break;
 
@@ -291,11 +292,11 @@ NetworkSettingsPageDlgProc(
     LPARAM lParam)
 {
     PNETWORKSETUPDATA pNetworkSetupData;
-    PSETUPDATA pSetupData;
+    PSETUPDATA pSetupData = NULL;
     LPNMHDR lpnm;
 
     /* Retrieve pointer to the global setup data */
-    pNetworkSetupData = (PNETWORKSETUPDATA)GetWindowLongPtr(hwndDlg, DWLP_USER);
+    pNetworkSetupData = (PNETWORKSETUPDATA)GetWindowLongPtr(hwndDlg, GWLP_USERDATA);
     if ((pNetworkSetupData != NULL) &&
         (pNetworkSetupData->dwMagic == NETWORK_SETUP_MAGIC))
         pSetupData = pNetworkSetupData->pSetupData;
@@ -305,7 +306,7 @@ NetworkSettingsPageDlgProc(
         case WM_INITDIALOG:
             /* Save pointer to the global setup data */
             pNetworkSetupData = (PNETWORKSETUPDATA)((LPPROPSHEETPAGE)lParam)->lParam;
-            SetWindowLongPtr(hwndDlg, DWLP_USER, (DWORD_PTR)pNetworkSetupData);
+            SetWindowLongPtr(hwndDlg, GWLP_USERDATA, (DWORD_PTR)pNetworkSetupData);
             pSetupData = pNetworkSetupData->pSetupData;
 
             /* Set the fonts of both the options to bold */
@@ -377,11 +378,11 @@ NetworkComponentPageDlgProc(
     LPARAM lParam)
 {
     PNETWORKSETUPDATA pNetworkSetupData;
-    PSETUPDATA pSetupData;
+    PSETUPDATA pSetupData = NULL;
     LPNMHDR lpnm;
 
     /* Retrieve pointer to the global setup data */
-    pNetworkSetupData = (PNETWORKSETUPDATA)GetWindowLongPtr(hwndDlg, DWLP_USER);
+    pNetworkSetupData = (PNETWORKSETUPDATA)GetWindowLongPtr(hwndDlg, GWLP_USERDATA);
     if ((pNetworkSetupData != NULL) &&
         (pNetworkSetupData->dwMagic == NETWORK_SETUP_MAGIC))
         pSetupData = pNetworkSetupData->pSetupData;
@@ -391,7 +392,7 @@ NetworkComponentPageDlgProc(
         case WM_INITDIALOG:
             /* Save pointer to the global setup data */
             pNetworkSetupData = (PNETWORKSETUPDATA)((LPPROPSHEETPAGE)lParam)->lParam;
-            SetWindowLongPtr(hwndDlg, DWLP_USER, (DWORD_PTR)pNetworkSetupData);
+            SetWindowLongPtr(hwndDlg, GWLP_USERDATA, (DWORD_PTR)pNetworkSetupData);
             pSetupData = pNetworkSetupData->pSetupData;
 
             SetBoldText(hwndDlg, IDC_NETWORK_DEVICE, pSetupData);
@@ -445,14 +446,14 @@ NetworkDomainPageDlgProc(
     LPARAM lParam)
 {
     PNETWORKSETUPDATA pNetworkSetupData;
-    PSETUPDATA pSetupData;
+    PSETUPDATA pSetupData = NULL;
     WCHAR DomainName[51];
     WCHAR Title[64];
     WCHAR ErrorName[256];
     LPNMHDR lpnm;
 
     /* Retrieve pointer to the global setup data */
-    pNetworkSetupData = (PNETWORKSETUPDATA)GetWindowLongPtr(hwndDlg, DWLP_USER);
+    pNetworkSetupData = (PNETWORKSETUPDATA)GetWindowLongPtr(hwndDlg, GWLP_USERDATA);
     if ((pNetworkSetupData != NULL) &&
         (pNetworkSetupData->dwMagic == NETWORK_SETUP_MAGIC))
         pSetupData = pNetworkSetupData->pSetupData;
@@ -462,7 +463,7 @@ NetworkDomainPageDlgProc(
         case WM_INITDIALOG:
             /* Save pointer to the global setup data */
             pNetworkSetupData = (PNETWORKSETUPDATA)((LPPROPSHEETPAGE)lParam)->lParam;
-            SetWindowLongPtr(hwndDlg, DWLP_USER, (DWORD_PTR)pNetworkSetupData);
+            SetWindowLongPtr(hwndDlg, GWLP_USERDATA, (DWORD_PTR)pNetworkSetupData);
             pSetupData = pNetworkSetupData->pSetupData;
 
             /* Set the workgroup option as the default */
@@ -491,7 +492,7 @@ NetworkDomainPageDlgProc(
                     (pNetworkSetupData->dwMagic == NETWORK_SETUP_MAGIC))
                     HeapFree(GetProcessHeap(), 0, pNetworkSetupData);
 
-                SetWindowLongPtr(hwndDlg, DWLP_USER, (DWORD_PTR)NULL);
+                SetWindowLongPtr(hwndDlg, GWLP_USERDATA, (DWORD_PTR)NULL);
             }
             break;
 
@@ -516,7 +517,7 @@ NetworkDomainPageDlgProc(
                     {
                         if (0 == LoadStringW(netshell_hInstance, IDS_REACTOS_SETUP, Title, sizeof(Title) / sizeof(Title[0])))
                         {
-                            wcscpy(Title, L"ReactOS Setup");
+                            wcscpy(Title, L"LiberNT Setup");
                         }
                         if (0 == LoadStringW(netshell_hInstance, IDS_WZD_DOMAIN_NAME, ErrorName, sizeof(ErrorName) / sizeof(ErrorName[0])))
                         {

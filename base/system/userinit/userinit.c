@@ -86,11 +86,12 @@ IsConsoleShell(VOID)
     LONG rc;
     BOOL ret = FALSE;
 
-    rc = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                       REGSTR_PATH_CURRENT_CONTROL_SET,
-                       0,
-                       KEY_QUERY_VALUE,
-                       &ControlKey);
+    rc = RegOpenKeyEx(
+        HKEY_LOCAL_MACHINE,
+        REGSTR_PATH_CURRENT_CONTROL_SET,
+        0,
+        KEY_QUERY_VALUE,
+        &ControlKey);
     if (rc != ERROR_SUCCESS)
     {
         WARN("RegOpenKeyEx() failed with error %lu\n", rc);
@@ -203,6 +204,14 @@ StartProcess(
         CloseHandle(hToken);
     }
 
+    /* The profile directory may not exist on read-only boot media */
+    if (WorkingDir != NULL)
+    {
+        DWORD Attributes = GetFileAttributesW(WorkingDir);
+        if (Attributes == INVALID_FILE_ATTRIBUTES || !(Attributes & FILE_ATTRIBUTE_DIRECTORY))
+            WorkingDir = NULL;
+    }
+
     if (!CreateProcessW(NULL,
                         ExpandedCmdLine,
                         NULL,
@@ -220,6 +229,31 @@ StartProcess(
 
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
+    return TRUE;
+}
+
+static BOOL
+StartDesktopCompositor(
+    _In_opt_ PVOID pEnvironment)
+{
+    WCHAR DwmPath[MAX_PATH];
+    UINT Length;
+
+    Length = GetSystemDirectoryW(DwmPath, ARRAYSIZE(DwmPath));
+    if (Length == 0 || Length >= ARRAYSIZE(DwmPath) ||
+        FAILED(StringCchCatW(DwmPath, ARRAYSIZE(DwmPath), L"\\dwm.exe")))
+    {
+        WARN("Failed to build the desktop compositor path\n");
+        return FALSE;
+    }
+
+    if (!StartProcess(DwmPath, pEnvironment))
+    {
+        WARN("Failed to start desktop compositor '%s'\n", debugstr_w(DwmPath));
+        return FALSE;
+    }
+
+    TRACE("Started desktop compositor '%s'\n", debugstr_w(DwmPath));
     return TRUE;
 }
 
@@ -386,9 +420,11 @@ SetUserSysColors(VOID)
 {
     HKEY hKey;
     INT i;
+    INT aiElements[ARRAYSIZE(g_RegColorNames)];
+    COLORREF acrColors[ARRAYSIZE(g_RegColorNames)];
+    INT cElements = 0;
     WCHAR szColor[25];
     DWORD Type, Size;
-    COLORREF crColor;
     LONG rc;
 
     rc = RegOpenKeyExW(HKEY_CURRENT_USER, REGSTR_PATH_COLORS,
@@ -406,8 +442,9 @@ SetUserSysColors(VOID)
                               (LPBYTE)szColor, &Size);
         if (rc == ERROR_SUCCESS && Type == REG_SZ)
         {
-            crColor = StrToColorref(szColor);
-            SetSysColors(1, &i, &crColor);
+            aiElements[cElements] = i;
+            acrColors[cElements] = StrToColorref(szColor);
+            cElements++;
         }
         else
         {
@@ -417,6 +454,41 @@ SetUserSysColors(VOID)
     }
 
     RegCloseKey(hKey);
+
+    if (cElements != 0)
+        SetSysColors(cElements, aiElements, acrColors);
+}
+
+static VOID
+ReapplyThemeColors(VOID)
+{
+    typedef HRESULT (WINAPI *PREAPPLYTHEMESYSMETRICS)(VOID);
+    PREAPPLYTHEMESYSMETRICS pReapply;
+    HMODULE hUxTheme;
+    HRESULT hr;
+
+    hUxTheme = LoadLibraryW(L"uxtheme.dll");
+    if (!hUxTheme)
+    {
+        ERR("THEMECOLORS: uxtheme load failed %lu\n", GetLastError());
+        return;
+    }
+
+    pReapply = (PREAPPLYTHEMESYSMETRICS)GetProcAddress(hUxTheme, "ReapplyThemeSysMetrics");
+    if (pReapply)
+    {
+        hr = pReapply();
+        if (FAILED(hr))
+            ERR("ReapplyThemeSysMetrics failed: 0x%lx\n", hr);
+        else
+            TRACE("ReapplyThemeSysMetrics succeeded, WindowText now %06lx\n", GetSysColor(COLOR_WINDOWTEXT));
+    }
+    else
+    {
+        ERR("THEMECOLORS: ReapplyThemeSysMetrics export missing\n");
+    }
+
+    FreeLibrary(hUxTheme);
 }
 
 static VOID
@@ -425,6 +497,8 @@ SetUserWallpaper(VOID)
     HKEY hKey;
     DWORD Type, Size;
     WCHAR szWallpaper[MAX_PATH + 1];
+    WCHAR szExpandedWallpaper[MAX_PATH + 1];
+    DWORD ExpandedLength;
     LONG rc;
 
     rc = RegOpenKeyExW(HKEY_CURRENT_USER, REGSTR_PATH_DESKTOP,
@@ -432,6 +506,7 @@ SetUserWallpaper(VOID)
     if (rc != ERROR_SUCCESS)
     {
         WARN("RegOpenKeyEx() failed with error %lu\n", rc);
+        SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, NULL, SPIF_SENDCHANGE);
         return;
     }
 
@@ -444,13 +519,23 @@ SetUserWallpaper(VOID)
                           &Size);
     RegCloseKey(hKey);
 
-    if (rc == ERROR_SUCCESS && Type == REG_SZ)
+    if (rc == ERROR_SUCCESS && (Type == REG_SZ || Type == REG_EXPAND_SZ))
     {
-        ExpandEnvironmentStringsW(szWallpaper, szWallpaper, ARRAYSIZE(szWallpaper));
-        TRACE("Using wallpaper %s\n", debugstr_w(szWallpaper));
+        ExpandedLength = ExpandEnvironmentStringsW(szWallpaper, szExpandedWallpaper, ARRAYSIZE(szExpandedWallpaper));
+        if (!ExpandedLength)
+        {
+            WARN("ExpandEnvironmentStringsW() failed with error %lu\n", GetLastError());
+            return;
+        }
+        if (ExpandedLength > ARRAYSIZE(szExpandedWallpaper))
+        {
+            WARN("Expanded wallpaper path is too long (%lu characters)\n", ExpandedLength);
+            return;
+        }
+        TRACE("Using wallpaper %s\n", debugstr_w(szExpandedWallpaper));
 
         /* Load and change the wallpaper */
-        SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, szWallpaper, SPIF_SENDCHANGE);
+        SystemParametersInfoW(SPI_SETDESKWALLPAPER, 0, szExpandedWallpaper, SPIF_SENDCHANGE);
     }
     else
     {
@@ -465,7 +550,47 @@ SetUserSettings(VOID)
 {
     UpdatePerUserSystemParameters(1, TRUE);
     SetUserSysColors();
+    ReapplyThemeColors();
     SetUserWallpaper();
+}
+
+static VOID
+SignalUserDesktopReady(VOID)
+{
+    HANDLE ReadyEvent;
+
+    ReadyEvent = OpenEventW(EVENT_MODIFY_STATE, FALSE, REACTOS_USER_DESKTOP_READY_EVENT);
+    if (!ReadyEvent)
+    {
+        DWORD Error = GetLastError();
+
+        if (Error != ERROR_FILE_NOT_FOUND)
+            ERR("Could not open the desktop ready event (error %lu)\n", Error);
+        return;
+    }
+
+    if (!SetEvent(ReadyEvent))
+        ERR("Could not signal that the desktop is ready (error %lu)\n", GetLastError());
+    CloseHandle(ReadyEvent);
+}
+
+static VOID
+ApplyUserPowerScheme(VOID)
+{
+    GUID *Scheme = NULL;
+    DWORD Error;
+
+    Error = PowerGetActiveScheme(NULL, &Scheme);
+    if (Error != ERROR_SUCCESS)
+    {
+        WARN("PowerGetActiveScheme() failed with error %lu\n", Error);
+        return;
+    }
+
+    Error = PowerSetActiveScheme(NULL, Scheme);
+    if (Error != ERROR_SUCCESS)
+        WARN("PowerSetActiveScheme() failed with error %lu\n", Error);
+    LocalFree(Scheme);
 }
 
 typedef DWORD (WINAPI *PCMP_REPORT_LOGON)(DWORD, DWORD);
@@ -492,15 +617,171 @@ NotifyLogon(VOID)
     FreeLibrary(hModule);
 }
 
+/*
+ * Expands the path for the ReactOS Installer "reactos.exe".
+ */
 static BOOL
-StartInstaller(VOID)
+ExpandInstallerPath(
+    IN LPCWSTR lpInstallerName,
+    OUT LPWSTR lpInstallerPath,
+    IN SIZE_T PathSize)
 {
-    extern WCHAR Installer[MAX_PATH]; // In livecd.c
+    SYSTEM_INFO SystemInfo;
+    SIZE_T cchInstallerNameLen;
+    PWSTR ptr;
+    DWORD dwAttribs;
+
+    cchInstallerNameLen = wcslen(lpInstallerName);
+    if (PathSize < cchInstallerNameLen)
+    {
+        /* The buffer is not large enough to contain the installer file name */
+        *lpInstallerPath = UNICODE_NULL;
+        return FALSE;
+    }
+
+    /*
+     * First, try to find the installer using the default drive, under
+     * the directory whose name corresponds to the currently-running
+     * CPU architecture.
+     */
+    GetSystemInfo(&SystemInfo);
+
+    *lpInstallerPath = UNICODE_NULL;
+    /* Alternatively one can use SharedUserData->NtSystemRoot */
+    GetSystemWindowsDirectoryW(lpInstallerPath, PathSize - cchInstallerNameLen - 1);
+    ptr = wcschr(lpInstallerPath, L'\\');
+    if (ptr)
+        *++ptr = UNICODE_NULL;
+    else
+        *lpInstallerPath = UNICODE_NULL;
+
+    /* Append the corresponding CPU architecture */
+    switch (SystemInfo.wProcessorArchitecture)
+    {
+        case PROCESSOR_ARCHITECTURE_INTEL:
+            StringCchCatW(lpInstallerPath, PathSize, L"I386");
+            break;
+
+        case PROCESSOR_ARCHITECTURE_MIPS:
+            StringCchCatW(lpInstallerPath, PathSize, L"MIPS");
+            break;
+
+        case PROCESSOR_ARCHITECTURE_ALPHA:
+            StringCchCatW(lpInstallerPath, PathSize, L"ALPHA");
+            break;
+
+        case PROCESSOR_ARCHITECTURE_PPC:
+            StringCchCatW(lpInstallerPath, PathSize, L"PPC");
+            break;
+
+        case PROCESSOR_ARCHITECTURE_SHX:
+            StringCchCatW(lpInstallerPath, PathSize, L"SHX");
+            break;
+
+        case PROCESSOR_ARCHITECTURE_ARM:
+            StringCchCatW(lpInstallerPath, PathSize, L"ARM");
+            break;
+
+        case PROCESSOR_ARCHITECTURE_IA64:
+            StringCchCatW(lpInstallerPath, PathSize, L"IA64");
+            break;
+
+        case PROCESSOR_ARCHITECTURE_ALPHA64:
+            StringCchCatW(lpInstallerPath, PathSize, L"ALPHA64");
+            break;
+
+        case PROCESSOR_ARCHITECTURE_AMD64:
+            StringCchCatW(lpInstallerPath, PathSize, L"AMD64");
+            break;
+
+        case PROCESSOR_ARCHITECTURE_ARM64:
+            StringCchCatW(lpInstallerPath, PathSize, L"ARM64");
+            break;
+
+        case PROCESSOR_ARCHITECTURE_RISCV64:
+            StringCchCatW(lpInstallerPath, PathSize, L"RISCV64");
+            break;
+
+        // case PROCESSOR_ARCHITECTURE_MSIL: /* .NET CPU-independent code */
+        case PROCESSOR_ARCHITECTURE_UNKNOWN:
+        default:
+            WARN("Unknown processor architecture %lu\n", SystemInfo.wProcessorArchitecture);
+            SystemInfo.wProcessorArchitecture = PROCESSOR_ARCHITECTURE_UNKNOWN;
+            break;
+    }
+
+    if (SystemInfo.wProcessorArchitecture != PROCESSOR_ARCHITECTURE_UNKNOWN)
+        StringCchCatW(lpInstallerPath, PathSize, L"\\");
+    StringCchCatW(lpInstallerPath, PathSize, lpInstallerName);
+
+    dwAttribs = GetFileAttributesW(lpInstallerPath);
+    if ((dwAttribs != INVALID_FILE_ATTRIBUTES) &&
+        !(dwAttribs & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        /* We have found the installer */
+        return TRUE;
+    }
+
+    WARN("Couldn't find the installer '%s', trying alternative.\n", debugstr_w(lpInstallerPath));
+
+    /*
+     * We failed. Try to find the installer from either the current
+     * ReactOS installation directory, or from our current directory.
+     */
+    *lpInstallerPath = UNICODE_NULL;
+    /* Alternatively one can use SharedUserData->NtSystemRoot */
+    if (GetSystemWindowsDirectoryW(lpInstallerPath, PathSize - cchInstallerNameLen - 1))
+        StringCchCatW(lpInstallerPath, PathSize, L"\\");
+    StringCchCatW(lpInstallerPath, PathSize, lpInstallerName);
+
+    dwAttribs = GetFileAttributesW(lpInstallerPath);
+    if ((dwAttribs != INVALID_FILE_ATTRIBUTES) &&
+        !(dwAttribs & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        /* We have found the installer */
+        return TRUE;
+    }
+
+    /* Installer not found */
+    ERR("Couldn't find the installer '%s'\n", debugstr_w(lpInstallerPath));
+    *lpInstallerPath = UNICODE_NULL;
+    return FALSE;
+}
+
+static BOOL
+HasInstallationSource(IN LPCWSTR lpInstallerPath)
+{
+    WCHAR Source[MAX_PATH];
+    PWSTR ptr;
+
+    if (FAILED(StringCchCopyW(Source, ARRAYSIZE(Source), lpInstallerPath)))
+        return FALSE;
+    ptr = wcsrchr(Source, L'\\');
+    if (!ptr)
+        return FALSE;
+    *++ptr = UNICODE_NULL;
+    if (FAILED(StringCchCatW(Source, ARRAYSIZE(Source), L"txtsetup.sif")))
+        return FALSE;
+    return GetFileAttributesW(Source) != INVALID_FILE_ATTRIBUTES;
+}
+
+static BOOL
+StartInstaller(IN LPCWSTR lpInstallerName)
+{
+    WCHAR Installer[MAX_PATH];
     WCHAR szMsg[RC_STRING_MAX_SIZE];
 
-    /* If we have found the ReactOS Installer, start it */
-    if (*Installer && StartProcess(Installer, NULL))
-        return TRUE;
+    if (ExpandInstallerPath(lpInstallerName, Installer, ARRAYSIZE(Installer)))
+    {
+        if (!HasInstallationSource(Installer))
+        {
+            WARN("No installation source next to '%s'\n", debugstr_w(Installer));
+            return FALSE;
+        }
+        /* We have found the installer */
+        if (StartProcess(Installer, NULL))
+            return TRUE;
+    }
 
     /* We failed, display an error message and quit */
     ERR("Failed to start the installer '%s'\n", debugstr_w(Installer));
@@ -509,112 +790,34 @@ StartInstaller(VOID)
     return FALSE;
 }
 
-/* Used to get the shutdown privilege */
-static BOOL
-EnablePrivilege(LPCWSTR lpszPrivilegeName, BOOL bEnablePrivilege)
-{
-    BOOL   Success;
-    HANDLE hToken;
-    TOKEN_PRIVILEGES tp;
-
-    Success = OpenProcessToken(GetCurrentProcess(),
-                               TOKEN_ADJUST_PRIVILEGES,
-                               &hToken);
-    if (!Success) return Success;
-
-    Success = LookupPrivilegeValueW(NULL,
-                                    lpszPrivilegeName,
-                                    &tp.Privileges[0].Luid);
-    if (!Success) goto Quit;
-
-    tp.PrivilegeCount = 1;
-    tp.Privileges[0].Attributes = (bEnablePrivilege ? SE_PRIVILEGE_ENABLED : 0);
-
-    Success = AdjustTokenPrivileges(hToken, FALSE, &tp, 0, NULL, NULL);
-
-Quit:
-    CloseHandle(hToken);
-    return Success;
-}
-
-
 int WINAPI
 wWinMain(IN HINSTANCE hInst,
          IN HINSTANCE hPrevInstance,
          IN LPWSTR lpszCmdLine,
          IN int nCmdShow)
 {
-    BOOL bIsLiveCD, Success = TRUE;
-    STATE State;
+    BOOL bIsLiveCD, Success;
+    PVOID pEnvironment = NULL;
 
     hInstance = hInst;
 
-    bIsLiveCD = IsMiniNT();
-
-Restart:
+    bIsLiveCD = IsLiveCD();
+    ApplyUserPowerScheme();
     SetUserSettings();
 
+    if (bIsLiveCD && !CreateEnvironmentBlock(&pEnvironment, NULL, TRUE))
+        WARN("CreateEnvironmentBlock() failed, fall back to default (error %lu)\n", GetLastError());
+    if (!IsConsoleShell())
+        StartDesktopCompositor(pEnvironment);
+    Success = StartShell(pEnvironment);
+    if (pEnvironment)
+        DestroyEnvironmentBlock(pEnvironment);
+    SignalUserDesktopReady();
+    if (Success)
+        NotifyLogon();
+
     if (bIsLiveCD)
-    {
-        State.NextPage = LOCALEPAGE;
-        State.Run = SHELL;
-    }
-    else
-    {
-        State.NextPage = DONE;
-        State.Run = SHELL;
-    }
-
-    if (State.NextPage != DONE) // && bIsLiveCD
-    {
-        RunLiveCD(&State);
-    }
-
-    switch (State.Run)
-    {
-        case SHELL:
-        {
-            /* In LiveCD mode, create a suitable environment block for the
-             * shell; otherwise, use the current one (built by WinLogon) */
-            PVOID pEnvironment = NULL;
-            if (bIsLiveCD && /* In LiveCD mode we run under the LocalSystem account */
-                !CreateEnvironmentBlock(&pEnvironment, NULL, TRUE))
-            {
-                WARN("CreateEnvironmentBlock() failed, fall back to default (error %lu)\n",
-                     GetLastError());
-            }
-            Success = StartShell(pEnvironment);
-            if (pEnvironment)
-                DestroyEnvironmentBlock(pEnvironment);
-            if (Success)
-                NotifyLogon();
-            break;
-        }
-
-        case INSTALLER:
-            Success = StartInstaller();
-            break;
-
-        case REBOOT:
-        {
-            EnablePrivilege(SE_SHUTDOWN_NAME, TRUE);
-            ExitWindowsEx(EWX_REBOOT, 0);
-            EnablePrivilege(SE_SHUTDOWN_NAME, FALSE);
-            Success = TRUE;
-            break;
-        }
-
-        default:
-            Success = FALSE;
-            break;
-    }
-
-    /*
-     * In LiveCD mode, go back to the main menu if we failed
-     * to either start the shell or the installer.
-     */
-    if (bIsLiveCD && !Success)
-        goto Restart;
+        StartInstaller(L"libernt.exe");
 
     return 0;
 }

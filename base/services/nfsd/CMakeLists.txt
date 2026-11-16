@@ -1,7 +1,3 @@
-remove_definitions(-D_WIN32_WINNT=0x502 -DWINVER=0x502)
-add_definitions(-D_WIN32_WINNT=0x601)
-add_definitions(-DNTDDI_VERSION=0x06010000)
-
 include_directories(
     ${REACTOS_SOURCE_DIR}/dll/3rdparty/libtirpc/tirpc
     ${REACTOS_SOURCE_DIR}/drivers/filesystems/nfs
@@ -51,12 +47,6 @@ add_executable(nfsd ${SOURCE} nfsd.rc)
 if(CMAKE_C_COMPILER_ID STREQUAL "MSVC")
     # Disable warning C4477 (printf format warnings)
     target_compile_options(nfsd PRIVATE /wd4477)
-else()
-    # FIXME: Tons of warnings.
-    target_compile_options(nfsd PRIVATE "-w")
-endif()
-if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    target_compile_options(nfsd PRIVATE -Wno-incompatible-function-pointer-types)
 endif()
 
 target_link_libraries(nfsd ansi_sync_hacks oldnames)
@@ -69,3 +59,7 @@ add_cd_file(TARGET nfsd DESTINATION reactos/system32 FOR all)
 add_cd_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/netconfig" DESTINATION reactos/system32/drivers/etc FOR all)
 add_cd_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/ms-nfs41-idmap.conf" DESTINATION reactos/system32/drivers/etc FOR all)
 add_registry_inf(nfsd_reg.inf)
+
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(nfsd PRIVATE -Wno-unused-but-set-variable)
+endif()

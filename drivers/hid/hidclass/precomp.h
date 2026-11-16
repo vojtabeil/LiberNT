@@ -6,8 +6,11 @@
 #include <hidpddi.h>
 #include <stdio.h>
 #include <hidport.h>
+#include <pseh/pseh2.h>
 
 #define HIDCLASS_TAG 'CdiH'
+
+DEFINE_GUID(GUID_DEVINTERFACE_WINEXINPUT, 0x6c53d5fd, 0x6480, 0x440f, 0xb6, 0x18, 0x47, 0x67, 0x50, 0xc5, 0xe1, 0xa6);
 
 typedef struct
 {
@@ -77,6 +80,24 @@ typedef struct
     //
     PDEVICE_RELATIONS DeviceRelations;
 
+    KSPIN_LOCK ReadLock;
+    LIST_ENTRY OpenFileList;
+    PIRP ReadIrp;
+    PUCHAR ReadBuffer;
+    ULONG ReadBufferLength;
+    ULONG WaitingReads;
+    BOOLEAN ReadActive;
+    BOOLEAN ReadStopped;
+    KEVENT ReadIdleEvent;
+    KDPC ReadDpc;
+    KTIMER PollTimer;
+    ULONG PollInterval;
+
+    KSPIN_LOCK WakeLock;
+    volatile LONG WakeState;
+    PIRP WakeIrp;
+    KEVENT WakeDone;
+
 } HIDCLASS_FDO_EXTENSION, *PHIDCLASS_FDO_EXTENSION;
 
 typedef struct
@@ -101,6 +122,8 @@ typedef struct
     //
     UNICODE_STRING DeviceInterface;
 
+    BOOLEAN IsXInput;
+
     //
     // FDO device object
     //
@@ -111,7 +134,31 @@ typedef struct
     //
     PHIDCLASS_FDO_EXTENSION FDODeviceExtension;
 
+    PIRP WaitWakeIrp;
+
+    BOOLEAN Removed;
+
 } HIDCLASS_PDO_DEVICE_EXTENSION, *PHIDCLASS_PDO_DEVICE_EXTENSION;
+
+#define HIDCLASS_WAKE_IDLE       0
+#define HIDCLASS_WAKE_ARMED      1
+#define HIDCLASS_WAKE_CANCELLING 2
+
+VOID
+HidClassFDO_DisarmWake(
+    IN PHIDCLASS_FDO_EXTENSION FDODeviceExtension);
+
+VOID
+HidClassPDO_CompleteWake(
+    IN PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension,
+    IN NTSTATUS Status);
+
+#define HIDCLASS_DEFAULT_POLL_INTERVAL 5
+#define HIDCLASS_MAX_POLL_INTERVAL 10000
+
+#define HIDCLASS_QUEUED_REPORTS 32
+#define HIDCLASS_MIN_QUEUED_REPORTS 2
+#define HIDCLASS_MAX_QUEUED_REPORTS 512
 
 typedef struct __HIDCLASS_FILEOP_CONTEXT__
 {
@@ -120,61 +167,25 @@ typedef struct __HIDCLASS_FILEOP_CONTEXT__
     //
     PHIDCLASS_PDO_DEVICE_EXTENSION DeviceExtension;
 
-    //
-    // spin lock
-    //
-    KSPIN_LOCK Lock;
+    LIST_ENTRY FdoListEntry;
 
     //
     // read irp pending list
     //
-    LIST_ENTRY ReadPendingIrpListHead;
+    LIST_ENTRY PendingReads;
 
-    //
-    // completed irp list
-    //
-    LIST_ENTRY IrpCompletedListHead;
+    PUCHAR ReportQueue;
+    ULONG ReportSlotLength;
+    ULONG ReportQueueHead;
+    ULONG ReportQueueCount;
+    ULONG ReportQueueCapacity;
 
     //
     // stop in progress indicator
     //
     BOOLEAN StopInProgress;
 
-    //
-    // read complete event
-    //
-    KEVENT IrpReadComplete;
-
 } HIDCLASS_FILEOP_CONTEXT, *PHIDCLASS_FILEOP_CONTEXT;
-
-typedef struct
-{
-    //
-    // original request
-    //
-    PIRP OriginalIrp;
-
-    //
-    // file op
-    //
-    PHIDCLASS_FILEOP_CONTEXT FileOp;
-
-    //
-    // buffer for reading report
-    //
-    PVOID InputReportBuffer;
-
-    //
-    // buffer length
-    //
-    ULONG InputReportBufferLength;
-
-    //
-    // work item
-    //
-    PIO_WORKITEM CompletionWorkItem;
-
-} HIDCLASS_IRP_CONTEXT, *PHIDCLASS_IRP_CONTEXT;
 
 /* fdo.c */
 NTSTATUS
@@ -191,6 +202,27 @@ NTSTATUS
 HidClassFDO_DispatchRequestSynchronous(
     IN PDEVICE_OBJECT DeviceObject,
     IN PIRP Irp);
+
+VOID
+HidClassFDO_InitializeRead(
+    IN PDEVICE_OBJECT FDODeviceObject);
+
+NTSTATUS
+HidClassFDO_StartRead(
+    IN PDEVICE_OBJECT FDODeviceObject);
+
+VOID
+HidClassFDO_StopRead(
+    IN PDEVICE_OBJECT FDODeviceObject,
+    IN BOOLEAN Wait);
+
+VOID
+HidClassPDO_SurpriseRemoval(
+    IN PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension);
+
+VOID
+HidClassFDO_KickRead(
+    IN PDEVICE_OBJECT FDODeviceObject);
 
 /* pdo.c */
 NTSTATUS
@@ -212,10 +244,5 @@ PHIDP_REPORT_IDS
 HidClassPDO_GetReportDescription(
     PHIDP_DEVICE_DESC DeviceDescription,
     ULONG CollectionNumber);
-
-PHIDP_REPORT_IDS
-HidClassPDO_GetReportDescriptionByReportID(
-    PHIDP_DEVICE_DESC DeviceDescription,
-    UCHAR ReportID);
 
 #endif /* _HIDCLASS_PCH_ */

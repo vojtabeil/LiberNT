@@ -6,10 +6,14 @@ set(LWIP_INCLUDE_DIRS
 )
 include(${LWIP_DIR}/src/Filelists.cmake)
 add_dependencies(lwipcore xdk)
+if(ARCH STREQUAL "arm64")
+    target_compile_definitions(lwipcore PRIVATE LWIP_CHKSUM=tcpip_chksum)
+endif()
 add_subdirectory(ip)
 
 add_definitions(
-    -DNDIS40
+    -DNDIS60
+    -DNDIS_LEGACY_DRIVER=1
     -D_NTDRIVER_)
 
 spec2def(tcpip.sys tcpip.spec)
@@ -42,8 +46,17 @@ target_include_directories(tcpip BEFORE
     PRIVATE ${LWIP_INCLUDE_DIRS}
     PRIVATE include)
 
+if(ARCH STREQUAL "arm64" AND MSVC)
+    add_asm_files(tcpip_arm64_asm tcpip/arm64/chksum.S)
+    target_sources(tcpip PRIVATE ${tcpip_arm64_asm})
+elseif(ARCH STREQUAL "arm64")
+    target_sources(tcpip PRIVATE tcpip/arm64/chksum.S)
+else()
+    target_sources(tcpip PRIVATE tcpip/chksum.c)
+endif()
+
 target_link_libraries(tcpip ip ${PSEH_LIB})
 set_module_type(tcpip kernelmodedriver)
-add_importlibs(tcpip ndis ntoskrnl hal)
+add_importlibs(tcpip ndis netio ntoskrnl hal cng)
 add_pch(tcpip include/lwip/precomp.h SOURCE)
 add_cd_file(TARGET tcpip DESTINATION reactos/system32/drivers FOR all)

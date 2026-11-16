@@ -11,12 +11,15 @@ extern LIST_ENTRY AddressFileListHead;
 extern KSPIN_LOCK AddressFileListLock;
 extern LIST_ENTRY ConnectionEndpointListHead;
 extern KSPIN_LOCK ConnectionEndpointListLock;
+extern LONG64 NextWfpEndpointId;
 
 NTSTATUS FileOpenAddress(
   PTDI_REQUEST Request,
   PTA_IP_ADDRESS AddrList,
   USHORT Protocol,
+  BOOLEAN Raw,
   BOOLEAN Shared,
+  BOOLEAN Exclusive,
   PVOID Options);
 
 NTSTATUS FileCloseAddress(
@@ -34,6 +37,9 @@ NTSTATUS FileOpenControlChannel(
 
 NTSTATUS FileCloseControlChannel(
   PTDI_REQUEST Request);
+
+PADDRESS_FILE AddrFindByWfpEndpointId(
+  ULONG64 EndpointId);
 
 VOID LogActiveObjects(VOID);
 

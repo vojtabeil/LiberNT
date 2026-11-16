@@ -51,8 +51,13 @@
 
 #endif
 
+#include <drivers/wfp/wfpshim.h>
 #include <titypes.h>
 #include <ticonsts.h>
+
+#if defined(_M_ARM64) || defined(__aarch64__)
+#include <ndk/arm64/mmtypes.h>
+#endif
 
 /* Macros */
 
@@ -65,7 +70,7 @@
 #define NDIS_BUFFER_TAG FOURCC('n','b','u','f')
 #define NDIS_PACKET_TAG FOURCC('n','p','k','t')
 
-#if defined(i386) || defined(_AMD64_) || defined(_ARM_)
+#if !defined(__BYTE_ORDER__) || (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
 
 /* DWORD network to host byte order conversion for i386 */
 #define DN2H(dw) \
@@ -158,6 +163,7 @@ typedef struct {
 extern PDEVICE_OBJECT TCPDeviceObject;
 extern PDEVICE_OBJECT UDPDeviceObject;
 extern PDEVICE_OBJECT IPDeviceObject;
+extern PDEVICE_OBJECT IP6DeviceObject;
 extern PDEVICE_OBJECT RawIPDeviceObject;
 extern LIST_ENTRY InterfaceListHead;
 extern KSPIN_LOCK InterfaceListLock;
@@ -172,5 +178,7 @@ extern ULONG EntityMax;
 
 extern NTSTATUS TiGetProtocolNumber( PUNICODE_STRING FileName,
 				     PULONG Protocol );
+
+VOID TiSignalChange(VOID);
 
 /* EOF */

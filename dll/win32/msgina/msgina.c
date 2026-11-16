@@ -29,6 +29,7 @@
 #include <winsvc.h>
 #include <userenv.h>
 #include <ndk/sefuncs.h>
+#include <ntsam.h>
 
 HINSTANCE hDllInstance;
 
@@ -174,12 +175,10 @@ GetRegistrySettings(PGINA_CONTEXT pgContext)
     TRACE("bAutoAdminLogon: %s\n", pgContext->bAutoAdminLogon ? "TRUE" : "FALSE");
 
     // TODO: What to do also depends whether we are on Terminal Services.
+    pgContext->bDisableCAD = TRUE;
     rc = ReadRegDwordValue(hKey, L"DisableCAD", &dwDisableCAD);
     if (rc == ERROR_SUCCESS)
-    {
-        if (dwDisableCAD != 0)
-            pgContext->bDisableCAD = TRUE;
-    }
+        pgContext->bDisableCAD = (dwDisableCAD != 0);
     TRACE("bDisableCAD: %s\n", pgContext->bDisableCAD ? "TRUE" : "FALSE");
 
     // NOTE: The default value is always read from the registry (Workstation: TRUE; Server: FALSE).
@@ -227,6 +226,31 @@ GetRegistrySettings(PGINA_CONTEXT pgContext)
         RegCloseKey(hKey);
 
     return TRUE;
+}
+
+static
+BOOL
+IsSetupPending(VOID)
+{
+    DWORD dwSetupType = 0;
+    HKEY hKey;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\Setup", 0, KEY_QUERY_VALUE, &hKey) != ERROR_SUCCESS)
+        return FALSE;
+    if (ReadRegDwordValue(hKey, L"SetupType", &dwSetupType) != ERROR_SUCCESS)
+        dwSetupType = 0;
+    RegCloseKey(hKey);
+    return dwSetupType != 0;
+}
+
+static
+VOID
+RefreshRegistrySettings(PGINA_CONTEXT pgContext)
+{
+    if (!pgContext->bRefreshSettings)
+        return;
+    pgContext->bRefreshSettings = FALSE;
+    GetRegistrySettings(pgContext);
 }
 
 typedef DWORD (WINAPI *pThemeWait)(DWORD dwTimeout);
@@ -282,6 +306,7 @@ WlxInitialize(
         LocalFree(pgContext);
         return FALSE;
     }
+    pgContext->bRefreshSettings = IsSetupPending();
 
     /* Return the context to winlogon */
     *pWlxContext = (PVOID)pgContext;
@@ -320,7 +345,6 @@ WlxScreenSaverNotify(
     PVOID pWlxContext,
     BOOL  *pSecure)
 {
-#if 0
     PGINA_CONTEXT pgContext = (PGINA_CONTEXT)pWlxContext;
     WCHAR szBuffer[2];
     HKEY hKeyCurrentUser, hKey;
@@ -330,7 +354,13 @@ WlxScreenSaverNotify(
 
     TRACE("(%p %p)\n", pWlxContext, pSecure);
 
-    *pSecure = TRUE;
+    *pSecure = FALSE;
+
+    if (pgContext->UserToken == NULL)
+    {
+        *pSecure = FALSE;
+        return FALSE;
+    }
 
     /*
      * Policy setting:
@@ -386,9 +416,6 @@ WlxScreenSaverNotify(
     RevertToSelf();
 
     TRACE("*pSecure: %ld\n", *pSecure);
-#endif
-
-    *pSecure = FALSE;
 
     return TRUE;
 }
@@ -408,6 +435,7 @@ WlxStartApplication(
     PROCESS_INFORMATION ProcessInformation;
     WCHAR CurrentDirectory[MAX_PATH];
     HANDLE hAppToken;
+    PWSTR CommandLine;
     UINT len;
     BOOL ret;
 
@@ -418,10 +446,16 @@ WlxStartApplication(
         return FALSE;
     }
 
+    CommandLine = HeapAlloc(GetProcessHeap(), 0, (wcslen(pszCmdLine) + 1) * sizeof(WCHAR));
+    if (!CommandLine)
+        return FALSE;
+    wcscpy(CommandLine, pszCmdLine);
+
     ret = DuplicateTokenEx(pgContext->UserToken, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenPrimary, &hAppToken);
     if (!ret)
     {
         ERR("DuplicateTokenEx() failed with error %lu\n", GetLastError());
+        HeapFree(GetProcessHeap(), 0, CommandLine);
         return FALSE;
     }
 
@@ -437,12 +471,14 @@ WlxStartApplication(
     if (len == 0 || len > MAX_PATH)
     {
         ERR("GetWindowsDirectoryW() failed\n");
+        HeapFree(GetProcessHeap(), 0, CommandLine);
+        CloseHandle(hAppToken);
         return FALSE;
     }
     ret = CreateProcessAsUserW(
         hAppToken,
-        pszCmdLine,
         NULL,
+        CommandLine,
         NULL,
         NULL,
         FALSE,
@@ -451,11 +487,12 @@ WlxStartApplication(
         CurrentDirectory,
         &StartupInfo,
         &ProcessInformation);
+    if (!ret)
+        ERR("CreateProcessAsUserW() failed with error %lu\n", GetLastError());
     CloseHandle(ProcessInformation.hProcess);
     CloseHandle(ProcessInformation.hThread);
     CloseHandle(hAppToken);
-    if (!ret)
-        ERR("CreateProcessAsUserW() failed with error %lu\n", GetLastError());
+    HeapFree(GetProcessHeap(), 0, CommandLine);
     return ret;
 }
 
@@ -517,8 +554,31 @@ WlxActivateUserShell(
         return FALSE;
     }
 
-    /* Start the Userinit application */
-    ret = WlxStartApplication(pWlxContext, pszDesktopName, pEnvironment, pszExpUserInitApp);
+    /* Userinit is a comma-separated command list. */
+    {
+        PWSTR Command = pszExpUserInitApp;
+        PWSTR Next;
+
+        ret = FALSE;
+        while (Command != NULL)
+        {
+            Next = wcschr(Command, L',');
+            if (Next != NULL)
+                *Next++ = UNICODE_NULL;
+
+            if (*Command != UNICODE_NULL &&
+                WlxStartApplication(pWlxContext,
+                                    pszDesktopName,
+                                    pEnvironment,
+                                    Command))
+            {
+                ret = TRUE;
+            }
+
+            Command = Next;
+        }
+    }
+
     if (!ret)
         return ret;
 
@@ -635,42 +695,34 @@ WlxRemoveStatusMessage(
 }
 
 
+static
 BOOL
-DoAdminUnlock(
-    IN PGINA_CONTEXT pgContext,
-    IN PWSTR UserName,
-    IN PWSTR Domain,
-    IN PWSTR Password)
+IsSameTokenUser(
+    IN HANDLE Token1,
+    IN HANDLE Token2)
 {
-    HANDLE hToken = NULL;
+    UCHAR Buffer1[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    UCHAR Buffer2[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    ULONG Size;
+
+    if (!NT_SUCCESS(NtQueryInformationToken(Token1, TokenUser, Buffer1, sizeof(Buffer1), &Size)) ||
+        !NT_SUCCESS(NtQueryInformationToken(Token2, TokenUser, Buffer2, sizeof(Buffer2), &Size)))
+        return FALSE;
+
+    return RtlEqualSid(((PTOKEN_USER)Buffer1)->User.Sid, ((PTOKEN_USER)Buffer2)->User.Sid);
+}
+
+
+static
+BOOL
+IsAdminToken(
+    IN HANDLE hToken)
+{
     PTOKEN_GROUPS Groups = NULL;
     BOOL bIsAdmin = FALSE;
     ULONG Size;
     ULONG i;
     NTSTATUS Status;
-    NTSTATUS SubStatus = STATUS_SUCCESS;
-
-    TRACE("(%S %S %S)\n", UserName, Domain, Password);
-
-    Status = ConnectToLsa(pgContext);
-    if (!NT_SUCCESS(Status))
-    {
-        WARN("ConnectToLsa() failed\n");
-        return FALSE;
-    }
-
-    Status = MyLogonUser(pgContext->LsaHandle,
-                         pgContext->AuthenticationPackage,
-                         UserName,
-                         Domain,
-                         Password,
-                         &pgContext->UserToken,
-                         &SubStatus);
-    if (!NT_SUCCESS(Status))
-    {
-        WARN("MyLogonUser() failed\n");
-        return FALSE;
-    }
 
     Status = NtQueryInformationToken(hToken,
                                      TokenGroups,
@@ -715,10 +767,208 @@ done:
     if (Groups != NULL)
         HeapFree(GetProcessHeap(), 0, Groups);
 
-    if (hToken != NULL)
-        CloseHandle(hToken);
-
     return bIsAdmin;
+}
+
+
+NTSTATUS
+DoUnlock(
+    IN PGINA_CONTEXT pgContext,
+    IN PWSTR UserName,
+    IN PWSTR Domain,
+    IN PWSTR Password,
+    OUT PNTSTATUS SubStatus,
+    OUT PINT Action)
+{
+    HANDLE hToken = NULL;
+    NTSTATUS Status;
+
+    TRACE("(%S %S)\n", UserName, Domain);
+
+    *Action = WLX_SAS_ACTION_NONE;
+    *SubStatus = STATUS_SUCCESS;
+
+    Status = ConnectToLsa(pgContext);
+    if (!NT_SUCCESS(Status))
+    {
+        WARN("ConnectToLsa() failed\n");
+        return Status;
+    }
+
+    Status = MyLogonUser(pgContext->LsaHandle,
+                         pgContext->AuthenticationPackage,
+                         UserName,
+                         Domain,
+                         Password,
+                         Unlock,
+                         &hToken,
+                         SubStatus);
+    if (!NT_SUCCESS(Status))
+    {
+        WARN("MyLogonUser() failed (Status 0x%08lx)\n", Status);
+        return Status;
+    }
+
+    if ((pgContext->UserToken != NULL && IsSameTokenUser(hToken, pgContext->UserToken)) ||
+        IsAdminToken(hToken))
+        *Action = WLX_SAS_ACTION_UNLOCK_WKSTA;
+
+    CloseHandle(hToken);
+
+    return STATUS_SUCCESS;
+}
+
+
+static
+NTSTATUS
+QueryLocalUserInformation(
+    IN PCWSTR UserName,
+    IN USER_INFORMATION_CLASS InformationClass,
+    OUT PVOID *Buffer)
+{
+    WCHAR ComputerName[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD Length = _countof(ComputerName);
+    UNICODE_STRING DomainName;
+    UNICODE_STRING Name;
+    SAM_HANDLE ServerHandle = NULL;
+    SAM_HANDLE DomainHandle = NULL;
+    SAM_HANDLE UserHandle = NULL;
+    PSID DomainSid = NULL;
+    PULONG RelativeIds = NULL;
+    PSID_NAME_USE Use = NULL;
+    NTSTATUS Status;
+
+    *Buffer = NULL;
+
+    if (!GetComputerNameW(ComputerName, &Length))
+        return STATUS_UNSUCCESSFUL;
+
+    RtlInitUnicodeString(&DomainName, ComputerName);
+    RtlInitUnicodeString(&Name, UserName);
+
+    Status = SamConnect(NULL,
+                        &ServerHandle,
+                        SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
+                        NULL);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    Status = SamLookupDomainInSamServer(ServerHandle,
+                                        &DomainName,
+                                        &DomainSid);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    Status = SamOpenDomain(ServerHandle,
+                           DOMAIN_LOOKUP,
+                           DomainSid,
+                           &DomainHandle);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    Status = SamLookupNamesInDomain(DomainHandle,
+                                    1,
+                                    &Name,
+                                    &RelativeIds,
+                                    &Use);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    if (Use[0] != SidTypeUser)
+    {
+        Status = STATUS_NO_SUCH_USER;
+        goto done;
+    }
+
+    Status = SamOpenUser(DomainHandle,
+                         USER_READ_GENERAL | USER_READ_ACCOUNT,
+                         RelativeIds[0],
+                         &UserHandle);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    Status = SamQueryInformationUser(UserHandle,
+                                     InformationClass,
+                                     Buffer);
+
+done:
+    if (UserHandle != NULL)
+        SamCloseHandle(UserHandle);
+
+    if (DomainHandle != NULL)
+        SamCloseHandle(DomainHandle);
+
+    if (ServerHandle != NULL)
+        SamCloseHandle(ServerHandle);
+
+    if (DomainSid != NULL)
+        SamFreeMemory(DomainSid);
+
+    if (RelativeIds != NULL)
+        SamFreeMemory(RelativeIds);
+
+    if (Use != NULL)
+        SamFreeMemory(Use);
+
+    return Status;
+}
+
+
+BOOL
+GetUserPasswordHint(
+    IN PCWSTR UserName,
+    OUT PWSTR Hint,
+    IN SIZE_T HintLength)
+{
+    PUSER_EXTENDED_INFORMATION Info = NULL;
+    BOOL Result = FALSE;
+
+    Hint[0] = UNICODE_NULL;
+
+    if (!NT_SUCCESS(QueryLocalUserInformation(UserName,
+                                              UserExtendedInformation,
+                                              (PVOID *)&Info)))
+        return FALSE;
+
+    if ((Info->ExtendedWhichFields & USER_EXTENDED_FIELD_PASSWORD_HINT) &&
+        (Info->PasswordHint.Length != 0) &&
+        (Info->PasswordHint.Buffer != NULL))
+    {
+        Result = SUCCEEDED(StringCchCopyNW(Hint,
+                                           HintLength,
+                                           Info->PasswordHint.Buffer,
+                                           Info->PasswordHint.Length / sizeof(WCHAR)));
+    }
+
+    if (Info->PasswordHint.Buffer != NULL)
+        SamFreeMemory(Info->PasswordHint.Buffer);
+
+    if (Info->UserTile.Data != NULL)
+        SamFreeMemory(Info->UserTile.Data);
+
+    SamFreeMemory(Info);
+
+    return Result;
+}
+
+
+BOOL
+IsUserPasswordBlank(
+    IN PCWSTR UserName)
+{
+    PUSER_LOGON_UI_INFORMATION Info = NULL;
+    BOOL Result;
+
+    if (!NT_SUCCESS(QueryLocalUserInformation(UserName,
+                                              UserLogonUIInformation,
+                                              (PVOID *)&Info)))
+        return FALSE;
+
+    Result = Info->PasswordIsBlank;
+
+    SamFreeMemory(Info);
+
+    return Result;
 }
 
 
@@ -744,6 +994,7 @@ DoLoginTasks(
                          UserName,
                          Domain,
                          Password,
+                         Interactive,
                          &pgContext->UserToken,
                          SubStatus);
     if (!NT_SUCCESS(Status))
@@ -915,6 +1166,8 @@ WlxDisplaySASNotice(
 
     TRACE("WlxDisplaySASNotice(%p)\n", pWlxContext);
 
+    RefreshRegistrySettings(pgContext);
+
     if (GetSystemMetrics(SM_REMOTESESSION))
     {
         /* User is remotely logged on. Don't display a notice */
@@ -933,12 +1186,6 @@ WlxDisplaySASNotice(
         }
 
         pgContext->bAutoAdminLogon = FALSE;
-    }
-
-    if (pgContext->bDisableCAD)
-    {
-        pgContext->pWlxFuncs->WlxSasNotify(pgContext->hWlx, WLX_SAS_TYPE_CTRL_ALT_DEL);
-        return;
     }
 
     pGinaUI->DisplaySASNotice(pgContext);
@@ -964,6 +1211,8 @@ WlxLoggedOutSAS(
     INT res;
 
     TRACE("WlxLoggedOutSAS()\n");
+
+    RefreshRegistrySettings(pgContext);
 
     UNREFERENCED_PARAMETER(dwSasType);
     UNREFERENCED_PARAMETER(pLogonSid);
@@ -1011,13 +1260,20 @@ WlxDisplayLockedNotice(PVOID pWlxContext)
 
     TRACE("WlxDisplayLockedNotice()\n");
 
-    if (pgContext->bDisableCAD)
-    {
-        pgContext->pWlxFuncs->WlxSasNotify(pgContext->hWlx, WLX_SAS_TYPE_CTRL_ALT_DEL);
-        return;
-    }
-
     pGinaUI->DisplayLockedNotice(pgContext);
+}
+
+
+/*
+ * @implemented
+ */
+BOOL WINAPI
+WlxIsLockOk(
+    PVOID pWlxContext)
+{
+    TRACE("WlxIsLockOk()\n");
+    UNREFERENCED_PARAMETER(pWlxContext);
+    return TRUE;
 }
 
 
@@ -1081,13 +1337,24 @@ WlxShutdown(
 
     TRACE("WlxShutdown(%p %lx)\n", pWlxContext, ShutdownType);
 
+    if (pgContext->hStatusWindow)
+    {
+        PostThreadMessageW(GetWindowThreadProcessId(pgContext->hStatusWindow, NULL),
+                           WM_HIDESTATUSCURSOR,
+                           0,
+                           0);
+    }
+
     /* Close the LSA handle */
     pgContext->AuthenticationPackage = 0;
+    if (pgContext->LsaHandle == NULL)
+        return;
     Status = LsaDeregisterLogonProcess(pgContext->LsaHandle);
     if (!NT_SUCCESS(Status))
     {
         ERR("LsaDeregisterLogonProcess failed (Status 0x%08lx)\n", Status);
     }
+    pgContext->LsaHandle = NULL;
 }
 
 

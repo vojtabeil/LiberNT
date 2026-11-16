@@ -196,7 +196,22 @@
 
 #define __HRESULT_FROM_WIN32(x)   ((HRESULT)(x) > 0 ? ((HRESULT) (((x) & 0x0000FFFF) | (FACILITY_WIN32 << 16) | 0x80000000)) : (HRESULT)(x) )
 #ifdef __REACTOS__
+#if defined(RC_INVOKED) || defined(__midl)
 #define HRESULT_FROM_WIN32(x) __HRESULT_FROM_WIN32(x)
+#elif defined(__cplusplus)
+constexpr inline long HRESULT_FROM_WIN32(unsigned long x)
+{
+    return (long)x > 0 ? (long)((x & 0x0000FFFF) | (FACILITY_WIN32 << 16) | 0x80000000) : (long)x;
+}
+#elif defined(__GNUC__)
+static __inline long __ros_hresult_from_win32(unsigned long x)
+{
+    return (long)x > 0 ? (long)((x & 0x0000FFFF) | (FACILITY_WIN32 << 16) | 0x80000000) : (long)x;
+}
+#define HRESULT_FROM_WIN32(x) __builtin_choose_expr(__builtin_constant_p(x), __HRESULT_FROM_WIN32(x), __ros_hresult_from_win32(x))
+#else
+#define HRESULT_FROM_WIN32(x) __HRESULT_FROM_WIN32(x)
+#endif
 #endif
 #ifndef __REACTOS__
 #ifndef _HRESULT_DEFINED
@@ -3435,6 +3450,7 @@ static inline HRESULT HRESULT_FROM_WIN32(unsigned int x)
 #undef NOERROR  /* arpa/nameser_compat.h defines this */
 
 #define E_NOT_SUFFICIENT_BUFFER                            HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER)
+#define E_NOT_SET                                          HRESULT_FROM_WIN32(ERROR_NOT_FOUND)
 #define E_NOT_VALID_STATE                                  HRESULT_FROM_WIN32(ERROR_INVALID_STATE)
 
 #ifdef RC_INVOKED

@@ -61,7 +61,7 @@ CheckForLiveCD(VOID)
     DWORD dwSize;
     DWORD dwError;
 
-    DPRINT1("CheckSetup()\n");
+    DPRINT("CheckSetup()\n");
 
     /* Open the Setup key */
     dwError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
@@ -105,7 +105,7 @@ CheckForLiveCD(VOID)
     /* Check for the '-mini' option */
     if (wcsstr(CommandLine, L" -mini") != NULL)
     {
-        DPRINT1("Running on LiveCD\n");
+        DPRINT("Running on LiveCD\n");
         ScmLiveSetup = TRUE;
     }
 
@@ -127,7 +127,7 @@ CheckForLiveCD(VOID)
 
     if (dwSetupInProgress == 1)
     {
-        DPRINT1("ReactOS Setup currently in progress!\n");
+        DPRINT("LiberNT Setup currently in progress!\n");
         ScmSetupInProgress = TRUE;
     }
 
@@ -182,7 +182,7 @@ ScmLogEvent(DWORD dwEventId,
                                 L"Service Control Manager");
     if (hLog == NULL)
     {
-        DPRINT1("ScmLogEvent: RegisterEventSourceW failed %lu\n", GetLastError());
+        DPRINT("ScmLogEvent: RegisterEventSourceW failed %lu\n", GetLastError());
         return;
     }
 
@@ -226,11 +226,11 @@ ScmWaitForLsa(VOID)
 BOOL WINAPI
 ShutdownHandlerRoutine(DWORD dwCtrlType)
 {
-    DPRINT1("ShutdownHandlerRoutine() called\n");
+    DPRINT("ShutdownHandlerRoutine() called\n");
 
     if (dwCtrlType & (CTRL_SHUTDOWN_EVENT | CTRL_LOGOFF_EVENT))
     {
-        DPRINT1("Shutdown event received\n");
+        DPRINT("Shutdown event received\n");
         ScmShutdown = TRUE;
 
         ScmAutoShutdownServices();
@@ -301,6 +301,8 @@ wWinMain(HINSTANCE hInstance,
     ScmInitNamedPipeCriticalSection();
     bCanDeleteNamedPipeCriticalSection = TRUE;
 
+    ScmInitServiceNotify();
+
 //    ScmInitThreadManager();
 
     ScmInitializeSecurity();
@@ -361,11 +363,15 @@ wWinMain(HINSTANCE hInstance,
      */
     SetProcessShutdownParameters(480, SHUTDOWN_NORETRY);
 
+    ScmLoadSystemProfile();
+
     /* Start auto-start services */
     ScmAutoStartServices();
 
     /* Signal auto-start complete event */
     SetEvent(hScmAutoStartCompleteEvent);
+
+    ScmStartTriggers();
 
     /* FIXME: more to do ? */
 
@@ -379,6 +385,7 @@ wWinMain(HINSTANCE hInstance,
 
     /* Wait until the shutdown event gets signaled */
     WaitForSingleObject(hScmShutdownEvent, INFINITE);
+    ExitThread(0);
 
 done:
     ScmShutdownSecurity();

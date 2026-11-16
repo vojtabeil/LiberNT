@@ -9,11 +9,16 @@
 #include <ndk/kefuncs.h> // For KeFindConfiguration*Entry()
 #include <ndk/ldrtypes.h>
 #include "winldr.h"
+#include "hiber.h"
 #include "ntldropts.h"
 #include "registry.h"
 #include <internal/cmboot.h>
 
 #include <drivers/bootvid/framebuf.h> // For CM_FRAMEBUF_DEVICE_DATA
+
+#if defined(_M_ARM64)
+#include <arch/arm64/arm64.h>          // For the ARM64 loader MMU hooks
+#endif
 
 #include <debug.h>
 DBG_DEFAULT_CHANNEL(WINDOWS);
@@ -28,12 +33,12 @@ extern BOOLEAN WinLdrTerminalConnected;
 extern VOID WinLdrSetupEms(_In_ PCSTR BootOptions);
 
 PLOADER_SYSTEM_BLOCK WinLdrSystemBlock;
-/**/PCWSTR BootFileSystem = NULL;/**/
+PCWSTR BootFileSystem = NULL;
 
 BOOLEAN VirtualBias = FALSE;
-BOOLEAN SosEnabled = FALSE;
-BOOLEAN SafeBoot = FALSE;
 BOOLEAN BootLogo = FALSE;
+
+extern ULONG InitSafeBootMode;
 #ifdef _M_IX86
 BOOLEAN PaeModeOn = FALSE;
 #endif
@@ -56,24 +61,96 @@ NtLdrOutputLoadMsg(
     _In_ PCSTR FileName,
     _In_opt_ PCSTR Description)
 {
-    if (SosEnabled)
-    {
-        printf("  %s\n", FileName);
-        TRACE("Loading: %s\n", FileName);
-    }
-    else
-    {
-        /* Inform the user we load a file */
-        CHAR ProgressString[256];
+    CHAR ProgressString[256];
 
-        RtlStringCbPrintfA(ProgressString, sizeof(ProgressString),
-                           "Loading %s...",
-                           (Description ? Description : FileName));
-        // UiSetProgressBarText(ProgressString);
-        // UiIndicateProgress();
-        UiDrawStatusText(ProgressString);
-    }
+    /* Inform the user we load a file */
+    RtlStringCbPrintfA(ProgressString, sizeof(ProgressString),
+                       "Loading %s...",
+                       (Description ? Description : FileName));
+    UiDrawStatusText(ProgressString);
 }
+
+#ifdef UEFIBOOT
+static BOOLEAN
+WinLdrQuerySystemDpi(_In_z_ PCWSTR KeyPath, _Out_ PULONG Dpi)
+{
+    HKEY FontKey;
+    ULONG Value;
+    ULONG Type = REG_NONE;
+    ULONG DataSize = sizeof(Value);
+
+    if (RegOpenKey(CurrentControlSetKey, KeyPath, &FontKey) != ERROR_SUCCESS)
+        return FALSE;
+
+    if (RegQueryValue(FontKey,
+                      L"LogPixels",
+                      &Type,
+                      (PUCHAR)&Value,
+                      &DataSize) != ERROR_SUCCESS ||
+        Type != REG_DWORD ||
+        DataSize != sizeof(Value) ||
+        Value < LOADER_PARAMETER_FRAMEBUFFER_DPI_MIN ||
+        Value > LOADER_PARAMETER_FRAMEBUFFER_DPI_MAX)
+    {
+        RegCloseKey(FontKey);
+        return FALSE;
+    }
+
+    RegCloseKey(FontKey);
+    *Dpi = Value;
+    return TRUE;
+}
+
+static ULONG
+WinLdrGetSystemDpi(VOID)
+{
+    WCHAR ProfilePath[80];
+    HKEY ConfigKey;
+    ULONG Profile = 0;
+    ULONG Dpi = LOADER_PARAMETER_FRAMEBUFFER_DPI_DEFAULT;
+    ULONG Type = REG_NONE;
+    ULONG DataSize = sizeof(Profile);
+
+    if (!CurrentControlSetKey)
+        return Dpi;
+
+    if (WinLdrQuerySystemDpi(L"Hardware Profiles\\Current\\Software\\Fonts", &Dpi))
+    {
+        return Dpi;
+    }
+
+    /*
+     * The live Configuration Manager exposes "Current" as a registry link.
+     * FreeLdr walks the hive directly and cannot resolve such links, so fall
+     * back to the numbered profile stored by IDConfigDB.
+     */
+    if (RegOpenKey(CurrentControlSetKey, L"Control\\IDConfigDB", &ConfigKey) == ERROR_SUCCESS)
+    {
+        if (RegQueryValue(ConfigKey,
+                          L"CurrentConfig",
+                          &Type,
+                          (PUCHAR)&Profile,
+                          &DataSize) != ERROR_SUCCESS ||
+            Type != REG_DWORD ||
+            DataSize != sizeof(Profile))
+        {
+            Profile = 0;
+        }
+        RegCloseKey(ConfigKey);
+    }
+
+    if (NT_SUCCESS(RtlStringCbPrintfW(
+            ProfilePath,
+            sizeof(ProfilePath),
+            L"Hardware Profiles\\%04lu\\Software\\Fonts",
+            Profile)))
+    {
+        WinLdrQuerySystemDpi(ProfilePath, &Dpi);
+    }
+
+    return Dpi;
+}
+#endif
 
 // Init "phase 0"
 VOID
@@ -83,6 +160,10 @@ AllocateAndInitLPB(
 {
     PLOADER_PARAMETER_BLOCK LoaderBlock;
     PLOADER_PARAMETER_EXTENSION Extension;
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    TIMEINFO *TimeInfo;
+    TIME_FIELDS TimeFields = {0};
+#endif
 
     /* Allocate and zero-init the Loader Parameter Block */
     WinLdrSystemBlock = MmAllocateMemoryWithType(sizeof(LOADER_SYSTEM_BLOCK),
@@ -102,14 +183,35 @@ AllocateAndInitLPB(
     Extension = &WinLdrSystemBlock->Extension;
     LoaderBlock->Extension = Extension;
     Extension->Size = sizeof(LOADER_PARAMETER_EXTENSION);
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    /* Win7+ moved version info to the LOADER_PARAMETER_BLOCK itself */
+    LoaderBlock->OsMajorVersion = (VersionToBoot & 0xFF00) >> 8;
+    LoaderBlock->OsMinorVersion = (VersionToBoot & 0xFF);
+#else
     Extension->MajorVersion = (VersionToBoot & 0xFF00) >> 8;
     Extension->MinorVersion = (VersionToBoot & 0xFF);
+#endif
 
 #ifdef UEFIBOOT
     Extension->BootViaEFI = 1;
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     LoaderBlock->FirmwareInformation.FirmwareTypeEfi = 1;
 #endif
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+    /* Preserve the firmware clock before the kernel takes over the platform. */
+    TimeInfo = ArcGetTime();
+    if (TimeInfo != NULL)
+    {
+        TimeFields.Year = TimeInfo->Year;
+        TimeFields.Month = TimeInfo->Month;
+        TimeFields.Day = TimeInfo->Day;
+        TimeFields.Hour = TimeInfo->Hour;
+        TimeFields.Minute = TimeInfo->Minute;
+        TimeFields.Second = TimeInfo->Second;
+        RtlTimeFieldsToTime(&TimeFields, &Extension->SystemTime);
+    }
 #endif
 
     /* Init three critical lists, used right away */
@@ -171,6 +273,7 @@ WinLdrInitializePhase1(
 // SetupBlock->ArcSetupDeviceName must be the path to the setup **SOURCE**,
 // and not the setup boot path. Indeed they may differ!!
 //
+#if (NTDDI_VERSION < NTDDI_WIN7)
     if (LoaderBlock->SetupLdrBlock)
     {
         PSETUP_LOADER_BLOCK SetupBlock = LoaderBlock->SetupLdrBlock;
@@ -182,6 +285,9 @@ WinLdrInitializePhase1(
         /* Convert the setup block pointer */
         LoaderBlock->SetupLdrBlock = PaToVa(LoaderBlock->SetupLdrBlock);
     }
+#else
+    /* TODO: Win7+ removed SetupLdrBlock from LOADER_PARAMETER_BLOCK */
+#endif
 
     /* Fill the firmware system loader / "HAL" partition ARC device path */
     LoaderBlock->ArcHalDeviceName = WinLdrSystemBlock->ArcHalDeviceName;
@@ -265,9 +371,74 @@ WinLdrInitializePhase1(
         // FIXME: Extension->AcpiTableSize;
     }
 
+#ifdef UEFIBOOT
+    /* Hand the firmware SMBIOS 2.x or 3.x entry point to the kernel (WMI raw
+     * SMBIOS provider); the pointer is the identity-mapped physical EPS. */
+    Extension->SMBiosEPSHeader = UefiGetSmbiosEpsPointer();
+
+    /*
+     * Hand off the active UEFI framebuffer so ntoskrnl can keep using the
+     * firmware-owned display for the GOP boot animation path.
+     */
+    {
+        extern ULONG_PTR VramAddress;
+        extern ULONG VramSize;
+        extern PCM_FRAMEBUF_DEVICE_DATA FrameBufferData;
+
+        if (FrameBufferData != NULL &&
+            VramAddress != 0 &&
+            VramSize != 0 &&
+            FrameBufferData->ScreenWidth != 0 &&
+            FrameBufferData->ScreenHeight != 0 &&
+            FrameBufferData->PixelsPerScanLine != 0 &&
+            FrameBufferData->BitsPerPixel != 0)
+        {
+            Extension->GopFramebuffer.FrameBufferBase.QuadPart =
+                (ULONGLONG)(VramAddress + FrameBufferData->FrameBufferOffset);
+            Extension->GopFramebuffer.FrameBufferSize = VramSize;
+            Extension->GopFramebuffer.HorizontalResolution = FrameBufferData->ScreenWidth;
+            Extension->GopFramebuffer.VerticalResolution = FrameBufferData->ScreenHeight;
+            Extension->GopFramebuffer.PixelsPerScanLine = FrameBufferData->PixelsPerScanLine;
+            Extension->GopFramebuffer.PixelFormat = FrameBufferData->BitsPerPixel;
+            Extension->GopFramebuffer.RedMask = FrameBufferData->PixelMasks.RedMask;
+            Extension->GopFramebuffer.GreenMask = FrameBufferData->PixelMasks.GreenMask;
+            Extension->GopFramebuffer.BlueMask = FrameBufferData->PixelMasks.BlueMask;
+            Extension->GopFramebuffer.Reserved = FrameBufferData->PixelMasks.ReservedMask;
+            Extension->GopFramebuffer.Dpi = WinLdrGetSystemDpi();
+            FrameBufferData->Dpi = Extension->GopFramebuffer.Dpi;
+
+            Extension->GopFramebufferTransform.Size =
+                sizeof(Extension->GopFramebufferTransform);
+            Extension->GopFramebufferTransform.Version =
+                LOADER_PARAMETER_FRAMEBUFFER_TRANSFORM_VERSION;
+            Extension->GopFramebufferTransform.Flags =
+                FrameBufferData->TransformFlags;
+            Extension->GopFramebufferTransform.Rotation =
+                FrameBufferData->Rotation;
+            Extension->GopFramebufferTransform.LogicalWidth =
+                FrameBufferData->LogicalWidth;
+            Extension->GopFramebufferTransform.LogicalHeight =
+                FrameBufferData->LogicalHeight;
+
+            TRACE("Passing UEFI framebuffer to kernel:\n");
+            TRACE("  BaseAddress: 0x%llx\n", Extension->GopFramebuffer.FrameBufferBase.QuadPart);
+            TRACE("  Size: 0x%x\n", Extension->GopFramebuffer.FrameBufferSize);
+            TRACE("  Resolution: %lux%lu\n",
+                  Extension->GopFramebuffer.HorizontalResolution,
+                  Extension->GopFramebuffer.VerticalResolution);
+            TRACE("  PixelsPerScanLine: %lu\n", Extension->GopFramebuffer.PixelsPerScanLine);
+            TRACE("  BitsPerPixel: %lu\n", Extension->GopFramebuffer.PixelFormat);
+            TRACE("  LogicalDpi: %lu\n", Extension->GopFramebuffer.Dpi);
+        }
+    }
+#endif
+
     if (OperatingSystemVersion >= _WIN32_WINNT_VISTA)
     {
+#if (OSVER(NTDDI_VERSION) == NTDDI_LONGHORN)
+        /* Vista-only flag: not present at Win7+ */
         Extension->BootViaWinload = 1;
+#endif
         Extension->LoaderPerformanceData = PaToVa(&WinLdrSystemBlock->LoaderPerformanceData);
 
         InitializeListHead(&Extension->BootApplicationPersistentData);
@@ -313,6 +484,8 @@ WinLdrLoadDeviceDriver(PLIST_ENTRY LoadOrderListHead,
 
     // Separate the path to file name and directory path
     RtlStringCbPrintfA(DriverPath, sizeof(DriverPath), "%wZ", FilePath);
+    if (_strnicmp(DriverPath, "\\SystemRoot\\", 12) == 0)
+        RtlMoveMemory(DriverPath, DriverPath + 12, strlen(DriverPath + 12) + 1);
     DriverNamePos = strrchr(DriverPath, '\\');
     if (DriverNamePos != NULL)
     {
@@ -340,7 +513,7 @@ WinLdrLoadDeviceDriver(PLIST_ENTRY LoadOrderListHead,
     }
 
     // It's not loaded, we have to load it
-    RtlStringCbPrintfA(FullPath, sizeof(FullPath), "%s%wZ", BootPath, FilePath);
+    RtlStringCbPrintfA(FullPath, sizeof(FullPath), "%s%s%s", BootPath, DriverPath, DllName);
 
     NtLdrOutputLoadMsg(FullPath, NULL);
     Success = PeLdrLoadImage(FullPath, LoaderBootDriver, &DriverBase);
@@ -571,6 +744,54 @@ LoadModule(
     return BaseAddress;
 }
 
+static const PCSTR WinLdrNetworkDebugExtensions[] =
+{
+    "kd_02_10ec.dll",
+    "kd_02_1af4.dll",
+    "kd_02_8086.dll",
+    "kd_8003_1055.dll",
+    "kd_8003_1de4.dll",
+    "kd_fdt_spacemit_k1x-emac.dll",
+    "kd_usbnet.dll"
+};
+
+static
+PCSTR
+WinLdrGetDebugPortOption(
+    _In_ PCSTR BootOptions,
+    _Out_ PULONG OptionLength)
+{
+    PCSTR NextOptions = BootOptions, Option, First = NULL, Name;
+    ULONG Length, FirstLength = 0, NameLength;
+
+    while ((Option = NtLdrGetNextOption(&NextOptions, &Length)))
+    {
+        if (Length <= 10 || _strnicmp(Option, "DEBUGPORT=", 10) != 0)
+            continue;
+
+        if (!First)
+        {
+            First = Option;
+            FirstLength = Length;
+        }
+
+        Name = Option + 10;
+        NameLength = min((ULONG)strcspn(Name, " \t:"), Length - 10);
+        if ((NameLength >= 3 && _strnicmp(Name, "COM", 3) == 0) ||
+            (NameLength == 6 && _strnicmp(Name, "SCREEN", 6) == 0) ||
+            (NameLength == 4 && _strnicmp(Name, "FILE", 4) == 0))
+        {
+            continue;
+        }
+
+        *OptionLength = Length;
+        return Option;
+    }
+
+    *OptionLength = FirstLength;
+    return First;
+}
+
 #ifdef _M_IX86
 static
 BOOLEAN
@@ -602,7 +823,7 @@ WinLdrIsPaeSupported(
         PaeDisabled = TRUE;
     }
 
-    if (SafeBoot)
+    if (InitSafeBootMode != 0)
         PaeDisabled = TRUE;
 
     TRACE("PaeEnabled %X, PaeDisabled %X\n", PaeEnabled, PaeDisabled);
@@ -722,8 +943,7 @@ NtLdrDetectBootVid(
             }
 
             /* Check whether the resource describes framebuffer information */
-            if (DeviceSpecific &&
-                (DeviceSpecific->u.DeviceSpecificData.DataSize >= sizeof(CM_FRAMEBUF_DEVICE_DATA)))
+            if (DeviceSpecific && (DeviceSpecific->u.DeviceSpecificData.DataSize >= CM_FRAMEBUF_DEVICE_DATA_V3_SIZE))
             {
                 /* It does, use the Linear FrameBuffer Boot Video Driver instead */
                 RtlStringCbCopyA(BootVidName, BootVidNameSize, "lfbbvid.dll");
@@ -773,9 +993,23 @@ LoadWindowsCore(IN USHORT OperatingSystemVersion,
         (NtLdrGetOption(BootOptions, "SAFEBOOT") ||
          NtLdrGetOption(BootOptions, "SAFEBOOT:")))
     {
-        /* We found the SAFEBOOT option. */
-        FIXME("LoadWindowsCore: SAFEBOOT - TRUE (not implemented)\n");
-        SafeBoot = TRUE;
+        /* Parse the SAFEBOOT mode for PAE/DEP decisions.
+         * Boot driver filtering is done by the kernel, not the bootloader. */
+        PCSTR Value = NtLdrGetOptionEx(BootOptions, "SAFEBOOT:", NULL);
+        if (Value)
+        {
+            Value += 9;
+            if (_strnicmp(Value, "MINIMAL", 7) == 0)
+                InitSafeBootMode = 1;
+            else if (_strnicmp(Value, "NETWORK", 7) == 0)
+                InitSafeBootMode = 2;
+            else if (_strnicmp(Value, "DSREPAIR", 8) == 0)
+                InitSafeBootMode = 3;
+        }
+        else
+        {
+            InitSafeBootMode = 1;
+        }
     }
 
     if ((OperatingSystemVersion > _WIN32_WINNT_WIN2K) &&
@@ -787,8 +1021,11 @@ LoadWindowsCore(IN USHORT OperatingSystemVersion,
     }
 
     /* Check the (NO)EXECUTE options */
-    if ((OperatingSystemVersion > _WIN32_WINNT_WIN2K) &&
-        !LoaderBlock->SetupLdrBlock)
+    if ((OperatingSystemVersion > _WIN32_WINNT_WIN2K)
+#if (NTDDI_VERSION < NTDDI_WIN7)
+        && !LoaderBlock->SetupLdrBlock
+#endif
+        )
     {
         /* Disable NX by default on x86, otherwise enable it */
 #ifdef _M_IX86
@@ -818,7 +1055,7 @@ LoadWindowsCore(IN USHORT OperatingSystemVersion,
 
 #ifdef _M_IX86
         /* Disable DEP in SafeBoot mode for x86 only */
-        if (SafeBoot)
+        if (InitSafeBootMode != 0)
             NoExecuteEnabled = FALSE;
 #endif
     }
@@ -925,7 +1162,7 @@ LoadWindowsCore(IN USHORT OperatingSystemVersion,
         BOOLEAN IsCustomKdDll = FALSE;
 
         /* Check whether there is a DEBUGPORT option */
-        Option = NtLdrGetOptionEx(BootOptions, "DEBUGPORT=", &OptionLength);
+        Option = WinLdrGetDebugPortOption(BootOptions, &OptionLength);
         if (Option && (OptionLength > 10))
         {
             /* Move to the debug port name */
@@ -992,6 +1229,28 @@ LoadWindowsCore(IN USHORT OperatingSystemVersion,
                 /* Ignore the failure; we will fail later when scanning the
                  * kernel import tables, if it really needs the KD DLL. */
                 ERR("LoadModule('%s') failed\n", KdDllName);
+            }
+        }
+
+        if (KdDllBase && _stricmp(KdDllName, "kdnet.dll") == 0)
+        {
+            PLDR_DATA_TABLE_ENTRY ExtensionDTE;
+            CHAR ExtensionPath[MAX_PATH];
+            ULONG ExtensionId;
+            ULONG i;
+
+            for (i = 0; i < RTL_NUMBER_OF(WinLdrNetworkDebugExtensions); i++)
+            {
+                RtlStringCbCopyA(ExtensionPath, sizeof(ExtensionPath), DirPath);
+                RtlStringCbCatA(ExtensionPath, sizeof(ExtensionPath), WinLdrNetworkDebugExtensions[i]);
+                if (ArcOpen(ExtensionPath, OpenReadOnly, &ExtensionId) != ESUCCESS)
+                    continue;
+
+                ArcClose(ExtensionId);
+                LoadModule(&LoaderBlock->LoadOrderListHead,
+                           DirPath, WinLdrNetworkDebugExtensions[i],
+                           WinLdrNetworkDebugExtensions[i], LoaderSystemCode,
+                           &ExtensionDTE, 40);
             }
         }
     }
@@ -1187,6 +1446,7 @@ LoadAndBootWindows(
     PCSTR FileName;
     ULONG FileNameLength;
     BOOLEAN Success;
+    BOOLEAN RamDiskInitialized = FALSE;
     USHORT OperatingSystemVersion;
     PLOADER_PARAMETER_BLOCK LoaderBlock;
     CHAR BootPath[MAX_PATH];
@@ -1205,7 +1465,7 @@ LoadAndBootWindows(
     if (_stricmp(ArgValue, "Windows") == 0 ||
         _stricmp(ArgValue, "Windows2003") == 0)
     {
-        OperatingSystemVersion = _WIN32_WINNT_WS03;
+        OperatingSystemVersion = _WIN32_WINNT;
     }
     else if (_stricmp(ArgValue, "WindowsNT40") == 0)
     {
@@ -1261,12 +1521,29 @@ LoadAndBootWindows(
         /* Append the remaining path */
         RtlStringCbCatA(BootPath, sizeof(BootPath), FilePath);
     }
+    else if (_strnicmp(BootPath, "partition(", 10) == 0)
+    {
+        PSTR PartitionSpec;
+
+        RtlStringCbCopyA(FilePath, sizeof(FilePath), BootPath);
+        RtlStringCbCopyA(BootPath, sizeof(BootPath), SystemPartition);
+
+        PartitionSpec = strstr(BootPath, "partition(");
+        if (PartitionSpec)
+            *PartitionSpec = ANSI_NULL;
+
+        RtlStringCbCatA(BootPath, sizeof(BootPath), FilePath);
+    }
 
     /* Append a path separator if needed */
     if (!*BootPath || BootPath[strlen(BootPath) - 1] != '\\')
         RtlStringCbCatA(BootPath, sizeof(BootPath), "\\");
 
     TRACE("BootPath: '%s'\n", BootPath);
+
+#if !defined(UEFIBOOT) && !defined(OFWBOOT)
+    WinLdrResumeFromHibernation(BootPath);
+#endif
 
     /* Retrieve the boot options */
     *BootOptions = ANSI_NULL;
@@ -1315,25 +1592,98 @@ LoadAndBootWindows(
     NtLdrNormalizeOptions(BootOptions);
     TRACE("BootOptions(2): '%s'\n", BootOptions);
 
-    /* Check if a RAM disk file was given */
+#if defined(UEFIBOOT) && defined(FREELDR_HTTP_BOOT)
+    /* HTTP boot: download the ISO and initialize it as the boot ramdisk. */
+    ArgValue = GetArgumentValue(Argc, Argv, "HttpBootUrl");
+    if (ArgValue && *ArgValue)
+    {
+        BOOLEAN Cancelled;
+        PCSTR StaticIp = GetArgumentValue(Argc, Argv, "HttpBootIp");
+
+        if (!UefiHttpBootDownload(ArgValue, StaticIp, &Cancelled))
+        {
+            PCSTR RamDiskPathEnd = strrchr(BootPath, ')');
+
+            if (Cancelled)
+                return ENOEXEC;
+
+            if (_strnicmp(BootPath, "ramdisk(", 8) == 0 && RamDiskPathEnd)
+            {
+                ERR("HTTP boot unavailable, falling back to local boot from '%s'\n", SystemPartition);
+                UiDrawStatusText("HTTP boot unavailable - booting from local media");
+                RtlStringCbCopyA(FilePath, sizeof(FilePath), RamDiskPathEnd + 1);
+                RtlStringCbCopyA(BootPath, sizeof(BootPath), SystemPartition);
+                RtlStringCbCatA(BootPath, sizeof(BootPath), FilePath);
+                TRACE("BootPath after HTTP boot fallback: '%s'\n", BootPath);
+            }
+            else
+            {
+                UiMessageBox("Failed to download ISO from network.");
+                return ENOEXEC;
+            }
+        }
+        else
+        {
+            Status = RamDiskInitialize(FALSE, BootOptions, NULL);
+            if (Status != ESUCCESS)
+            {
+                UiMessageBox("Failed to initialize ramdisk from downloaded ISO.");
+                return Status;
+            }
+
+            RamDiskInitialized = TRUE;
+            UiDrawProgressBarCenter("Loading NT...");
+        }
+    }
+#endif
+
+    ArgValue = strchr(BootPath, ')');
+    if (StartupSkipsRamDisk() && ArgValue && _strnicmp(BootPath, "ramdisk(", 8) == 0)
+    {
+        RtlStringCbCopyA(FilePath, sizeof(FilePath), ArgValue + 1);
+        RtlStringCbCopyA(BootPath, sizeof(BootPath), SystemPartition);
+        RtlStringCbCatA(BootPath, sizeof(BootPath), FilePath);
+        TRACE("BootPath without RAM disk: '%s'\n", BootPath);
+    }
+
+    /* Check if a RAM disk is needed: either an explicit RDPATH= file,
+     * a writable ramdisk size request (RDRAMSIZE=), or the boot path
+     * itself targets the ramdisk device. */
     FileName = NtLdrGetOptionEx(BootOptions, "RDPATH=", &FileNameLength);
-    if (FileName && (FileNameLength >= 7))
+    if (!RamDiskInitialized &&
+        ((FileName && (FileNameLength >= 7)) ||
+         NtLdrGetOption(BootOptions, "RDRAMSIZE=") ||
+         _strnicmp(BootPath, "ramdisk(", 8) == 0))
     {
         /* Load the RAM disk */
         Status = RamDiskInitialize(FALSE, BootOptions, SystemPartition);
-        if (Status != ESUCCESS)
+        ArgValue = strchr(BootPath, ')');
+        if (Status == ENOMEM && !(FileName && (FileNameLength > 7)) &&
+            ArgValue && _strnicmp(BootPath, "ramdisk(", 8) == 0)
         {
-            FileName += 7; FileNameLength -= 7;
-            UiMessageBox("Failed to load RAM disk file '%.*s'",
-                         FileNameLength, FileName);
+            ERR("The RAM disk does not fit in memory, booting from '%s'\n", SystemPartition);
+            UiDrawStatusText("Not enough memory for the RAM disk - booting from local media");
+            RtlStringCbCopyA(FilePath, sizeof(FilePath), ArgValue + 1);
+            RtlStringCbCopyA(BootPath, sizeof(BootPath), SystemPartition);
+            RtlStringCbCatA(BootPath, sizeof(BootPath), FilePath);
+            TRACE("BootPath without RAM disk: '%s'\n", BootPath);
+        }
+        else if (Status != ESUCCESS)
+        {
+            if (FileName && (FileNameLength > 7))
+            {
+                FileName += 7; FileNameLength -= 7;
+                UiMessageBox("Failed to load RAM disk file '%.*s'.\n%s",
+                             FileNameLength, FileName, RamDiskGetFailureText());
+            }
+            else
+            {
+                UiMessageBox("Failed to load the RAM disk from '%s'.\n%s",
+                             SystemPartition, RamDiskGetFailureText());
+            }
             return Status;
         }
     }
-
-    /* Handle the SOS option */
-    SosEnabled = !!NtLdrGetOption(BootOptions, "SOS");
-    if (SosEnabled)
-        UiResetForSOS();
 
     /* Allocate and minimally-initialize the Loader Parameter Block */
     AllocateAndInitLPB(OperatingSystemVersion, &LoaderBlock);
@@ -1349,8 +1699,14 @@ LoadAndBootWindows(
     /* Fixup the version number using data from the registry */
     if (OperatingSystemVersion == 0)
         OperatingSystemVersion = WinLdrDetectVersion();
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    /* Win7+ stores version in the LOADER_PARAMETER_BLOCK itself */
+    LoaderBlock->OsMajorVersion = (OperatingSystemVersion & 0xFF00) >> 8;
+    LoaderBlock->OsMinorVersion = (OperatingSystemVersion & 0xFF);
+#else
     LoaderBlock->Extension->MajorVersion = (OperatingSystemVersion & 0xFF00) >> 8;
     LoaderBlock->Extension->MinorVersion = (OperatingSystemVersion & 0xFF);
+#endif
 
     /* Load NLS data, OEM font, and prepare boot drivers list */
     Success = WinLdrScanSystemHive(LoaderBlock, BootPath);
@@ -1384,6 +1740,7 @@ LoadAndBootWindowsCommon(
     BOOLEAN Success;
     PLDR_DATA_TABLE_ENTRY KernelDTE;
     KERNEL_ENTRY_POINT KiSystemStartup;
+    PFN_NUMBER FinalLoaderPagesSpanned;
 
     TRACE("LoadAndBootWindowsCommon()\n");
 
@@ -1443,69 +1800,112 @@ LoadAndBootWindowsCommon(
 
     UiUpdateProgressBar(100, NULL);
 
+    /* Black out the screen for kernel handoff, keeping only the BGRT logo */
+    UiDrawBackdrop(UiGetScreenHeight());
+
     /* Save entry-point pointer and Loader block VAs */
     KiSystemStartup = (KERNEL_ENTRY_POINT)KernelDTE->EntryPoint;
     LoaderBlockVA = PaToVa(LoaderBlock);
 
-    /* "Stop all motors", change videomode */
-    MachPrepareForReactOS();
-
-    /* Show the "debug mode" notice if needed */
-    /* Match KdInitSystem() conditions */
-    if (!NtLdrGetOption(BootOptions, "CRASHDEBUG") &&
-        !NtLdrGetOption(BootOptions, "NODEBUG") &&
-        !!NtLdrGetOption(BootOptions, "DEBUG"))
-    {
-        /* Check whether there is a DEBUGPORT option */
-        PCSTR DebugPort;
-        ULONG DebugPortLength = 0;
-        DebugPort = NtLdrGetOptionEx(BootOptions, "DEBUGPORT=", &DebugPortLength);
-        if (DebugPort != NULL && DebugPortLength > 10)
-        {
-            /* Move to the debug port name */
-            DebugPort += 10; DebugPortLength -= 10;
-        }
-        else
-        {
-            /* Default to COM */
-            DebugPort = "COM"; DebugPortLength = 3;
-        }
-
-        /* It is booting in debug mode, show the banner */
-        TuiPrintf("You need to connect a debugger on port %.*s\n"
-                  "For more information, visit https://reactos.org/wiki/Debugging.\n",
-                  DebugPortLength, DebugPort);
-    }
-
     /* Debugging... */
     //DumpMemoryAllocMap();
+
+#if defined(_M_ARM64)
+    /*
+     * ARM64 needs the final loader allocations and memory descriptor list
+     * before ExitBootServices so the handoff TTBRs can cover loader data.
+     */
+    WinLdrSetupMachineDependent(LoaderBlock);
+    WinLdrSetupMemoryLayout(LoaderBlock);
+    Arm64PreparePageTables();
+
+    /* Exit firmware services after the final loader layout is mapped. */
+    MachPrepareForReactOS();
+#elif defined(_M_RISCV64)
+    /* RISC-V firmware hands the OS loader an S-mode, bare-address-space
+     * context. Build and validate the complete Sv39 handoff before the
+     * irreversible ExitBootServices call. */
+    WinLdrSetupMachineDependent(LoaderBlock);
+    if (!RiscvLoaderSetupSucceeded() ||
+        !WinLdrSetupMemoryLayout(LoaderBlock) ||
+        !RiscvFinalizePageTables(LoaderBlock))
+    {
+        UiMessageBox("RISC-V kernel address-space preparation failed.");
+        return ENOEXEC;
+    }
+
+    MachPrepareForReactOS();
+#elif defined(_M_PPC)
+    /* Open Firmware keeps the MMU until PpcJumpToKernel; build the kernel
+     * tables, HTAB and BAT values while firmware services still work. */
+    WinLdrSetupMachineDependent(LoaderBlock);
+    if (!PpcLoaderSetupSucceeded() ||
+        !WinLdrSetupMemoryLayout(LoaderBlock) ||
+        !PpcFinalizePageTables(LoaderBlock))
+    {
+        UiMessageBox("PowerPC kernel address-space preparation failed.");
+        return ENOEXEC;
+    }
+
+    MachPrepareForReactOS();
+#else
+    /* "Stop all motors", change videomode */
+    MachPrepareForReactOS();
 
     /* Do the machine specific initialization */
     WinLdrSetupMachineDependent(LoaderBlock);
 
     /* Map pages and create memory descriptors */
     WinLdrSetupMemoryLayout(LoaderBlock);
+#endif
+
+    FinalLoaderPagesSpanned = MmGetLoaderPagesSpanned();
 
     /* Set processor context */
     WinLdrSetProcessorContext(OperatingSystemVersion);
 
+#if (NTDDI_VERSION < NTDDI_WIN8)
     /* Save final value of LoaderPagesSpanned */
-    LoaderBlock->Extension->LoaderPagesSpanned = MmGetLoaderPagesSpanned();
+    WinLdrSystemBlock->Extension.LoaderPagesSpanned = FinalLoaderPagesSpanned;
+#else
+    UNREFERENCED_PARAMETER(FinalLoaderPagesSpanned);
+#endif
 
     TRACE("Hello from paged mode, KiSystemStartup %p, LoaderBlockVA %p!\n",
           KiSystemStartup, LoaderBlockVA);
 
-    /* Zero KI_USER_SHARED_DATA page */
-    RtlZeroMemory((PVOID)KI_USER_SHARED_DATA, MM_PAGE_SIZE);
+#if !defined(_M_PPC)
+    /* Zero KI_USER_SHARED_DATA page (PowerPC: PpcFinalizePageTables) */
+    {
+        PVOID UserSharedData = (PVOID)KI_USER_SHARED_DATA;
+        RtlZeroMemory(UserSharedData, MM_PAGE_SIZE);
+    }
+#endif
 
+#if defined(_M_IX86) || defined(_M_AMD64) || defined(_M_ARM)
     WinLdrpDumpMemoryDescriptors(LoaderBlockVA);
     WinLdrpDumpBootDriver(LoaderBlockVA);
 #ifndef _M_AMD64
     WinLdrpDumpArcDisks(LoaderBlockVA);
 #endif
+#endif
 
+#if defined(_M_ARM64)
+    Arm64JumpToKernel((ULONGLONG)(ULONG_PTR)KiSystemStartup,
+                      (ULONGLONG)(ULONG_PTR)LoaderBlockVA,
+                      (ULONGLONG)LoaderBlock->KernelStack);
+#elif defined(_M_RISCV64)
+    RiscvJumpToKernel((ULONG_PTR)KiSystemStartup,
+                      (ULONG_PTR)LoaderBlockVA,
+                      LoaderBlock->KernelStack);
+#elif defined(_M_PPC)
+    PpcJumpToKernel((ULONG_PTR)KiSystemStartup,
+                    (ULONG_PTR)LoaderBlockVA,
+                    LoaderBlock->KernelStack);
+#else
     /* Pass control */
     (*KiSystemStartup)(LoaderBlockVA);
+#endif
 
     UNREACHABLE; // return ESUCCESS;
 }

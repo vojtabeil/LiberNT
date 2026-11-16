@@ -96,6 +96,13 @@ static inline BOOL set_security_flag(HttpProtocol *This, DWORD flags)
     return res;
 }
 
+#ifdef __REACTOS__
+#define _SECURITY_FLAG_CERT_REV_FAILED    0x00800000
+#define _SECURITY_FLAG_CERT_INVALID_CA    0x01000000
+#define _SECURITY_FLAG_CERT_INVALID_CN    0x02000000
+#define _SECURITY_FLAG_CERT_INVALID_DATE  0x04000000
+#endif
+
 static inline HRESULT internet_error_to_hres(DWORD error)
 {
     switch(error)
@@ -114,6 +121,10 @@ static inline HRESULT internet_error_to_hres(DWORD error)
     case ERROR_INTERNET_HTTPS_TO_HTTP_ON_REDIR:
     case ERROR_HTTP_REDIRECT_NEEDS_CONFIRMATION:
         return INET_E_REDIRECT_FAILED;
+#ifdef __REACTOS__
+    case ERROR_INTERNET_NAME_NOT_RESOLVED:
+        return HRESULT_FROM_WIN32(error);
+#endif
     default:
         return INET_E_DOWNLOAD_FAILURE;
     }
@@ -131,6 +142,23 @@ static HRESULT handle_http_error(HttpProtocol *This, DWORD error)
     HRESULT hres;
 
     TRACE("(%p %lu)\n", This, error);
+
+#ifdef __REACTOS__
+    if(error == ERROR_INTERNET_SEC_CERT_ERRORS) {
+        DWORD flags, size = sizeof(flags);
+
+        if(InternetQueryOptionW(This->base.request, INTERNET_OPTION_SECURITY_FLAGS, &flags, &size)) {
+            if(flags & _SECURITY_FLAG_CERT_INVALID_CN)
+                error = ERROR_INTERNET_SEC_CERT_CN_INVALID;
+            else if(flags & _SECURITY_FLAG_CERT_INVALID_DATE)
+                error = ERROR_INTERNET_SEC_CERT_DATE_INVALID;
+            else if(flags & _SECURITY_FLAG_CERT_INVALID_CA)
+                error = ERROR_INTERNET_INVALID_CA;
+            else if(flags & _SECURITY_FLAG_CERT_REV_FAILED)
+                error = ERROR_INTERNET_SEC_CERT_REV_FAILED;
+        }
+    }
+#endif
 
     switch(error) {
     case ERROR_INTERNET_SEC_CERT_DATE_INVALID:
@@ -495,6 +523,7 @@ static BOOL is_redirect_response(DWORD status_code)
     case HTTP_STATUS_MOVED:
     case HTTP_STATUS_REDIRECT_KEEP_VERB:
     case HTTP_STATUS_REDIRECT_METHOD:
+    case HTTP_STATUS_PERMANENT_REDIRECT:
         return TRUE;
     }
     return FALSE;

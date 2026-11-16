@@ -24,10 +24,6 @@
 
 #include "wine/debug.h"
 
-#ifdef __REACTOS__
-#include <wingdi.h>
-#endif
-
 WINE_DEFAULT_DEBUG_CHANNEL(atl);
 
 #define ATLVer1Size FIELD_OFFSET(_ATL_MODULEW, dwAtlBuildVer)
@@ -298,6 +294,10 @@ HRESULT WINAPI AtlModuleAddTermFunc(_ATL_MODULE *pM, _ATL_TERMFUNC *pFunc, DWORD
 
     if (_ATL_VER > _ATL_VER_30 || pM->cbSize > ATLVer1Size) {
         termfunc_elem = malloc(sizeof(*termfunc_elem));
+#ifdef __REACTOS__
+        if (!termfunc_elem)
+            RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
         termfunc_elem->pFunc = pFunc;
         termfunc_elem->dw = dw;
         termfunc_elem->pNext = pM->m_pTermFuncs;
@@ -535,6 +535,9 @@ HRESULT WINAPI AtlComModuleRegisterClassObjects(_ATL_COM_MODULE *module, DWORD c
     _ATL_OBJMAP_ENTRY **iter;
     IUnknown *unk;
     HRESULT hres;
+#ifdef __REACTOS__
+    HRESULT ret = S_FALSE;
+#endif
 
     TRACE("(%p %lx %lx)\n", module, context, flags);
 
@@ -553,9 +556,16 @@ HRESULT WINAPI AtlComModuleRegisterClassObjects(_ATL_COM_MODULE *module, DWORD c
         IUnknown_Release(unk);
         if(FAILED(hres))
             return hres;
+#ifdef __REACTOS__
+        ret = hres;
+#endif
     }
 
+#ifdef __REACTOS__
+   return ret;
+#else
    return S_OK;
+#endif
 }
 #else
 HRESULT WINAPI AtlComModuleRegisterClassObjects(_ATL_COM_MODULE *module, DWORD context, DWORD flags)
@@ -563,6 +573,9 @@ HRESULT WINAPI AtlComModuleRegisterClassObjects(_ATL_COM_MODULE *module, DWORD c
     _ATL_OBJMAP_ENTRY_EX **iter;
     IUnknown *unk;
     HRESULT hres;
+#ifdef __REACTOS__
+    HRESULT ret = S_FALSE;
+#endif
 
     TRACE("(%p %lx %lx)\n", module, context, flags);
 
@@ -581,9 +594,16 @@ HRESULT WINAPI AtlComModuleRegisterClassObjects(_ATL_COM_MODULE *module, DWORD c
         IUnknown_Release(unk);
         if(FAILED(hres))
             return hres;
+#ifdef __REACTOS__
+        ret = hres;
+#endif
     }
 
+#ifdef __REACTOS__
+   return ret;
+#else
    return S_OK;
+#endif
 }
 #endif
 

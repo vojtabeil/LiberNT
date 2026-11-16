@@ -82,7 +82,7 @@ HRESULT STDMETHODCALLTYPE CShellDispatch::NameSpace(VARIANT vDir, Folder **ppsdf
     if (!SUCCEEDED(hr))
         return S_FALSE;
 
-    return CFolder::CreateInstance(idlist, this, IID_PPV_ARG(Folder, ppsdf));
+    return CFolder::CreateInstance(idlist, NULL, IID_PPV_ARG(Folder, ppsdf));
 }
 
 static BOOL is_optional_argument(const VARIANT *arg)
@@ -531,6 +531,18 @@ HRESULT STDMETHODCALLTYPE CShellDispatch::ToggleDesktop()
 {
     TRACE("(%p)\n", this);
     return PostTrayCommand(TRAYCMD_TOGGLE_DESKTOP);
+}
+
+HRESULT STDMETHODCALLTYPE CShellDispatch::WindowSwitcher()
+{
+    FIXME("(%p)\n", this);
+    return E_NOTIMPL;
+}
+
+HRESULT STDMETHODCALLTYPE CShellDispatch::SearchCommand()
+{
+    TRACE("(%p)\n", this);
+    return PostTrayCommand(TRAYCMD_SEARCH_FILES);
 }
 
 HRESULT STDMETHODCALLTYPE CShellDispatch::ExplorerPolicy(BSTR policy, VARIANT *value)

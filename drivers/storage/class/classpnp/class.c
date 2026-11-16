@@ -29,6 +29,9 @@ Revision History:
 #include <process.h>
 #include <devpkey.h>
 #include <ntiologc.h>
+#ifdef __REACTOS__
+#include <reactos/drivers/dumpstor.h>
+#endif
 
 
 #ifdef DEBUG_USE_WPP
@@ -112,6 +115,28 @@ volatile ULONG TokenOperationListIdentifier = (ULONG)-1;
 //
 LIST_ENTRY IdlePowerFDOList = {0};
 KGUARDED_MUTEX IdlePowerFDOListMutex;
+
+/* Device nodes can be started or removed concurrently on different PnP branches. */
+static KSPIN_LOCK ClasspAllFdosListLock = 0;
+
+/* Keep the raised-IRQL section out of the pageable start/remove routines. */
+static DECLSPEC_NOINLINE VOID
+ClasspUpdateAllFdosList(PLIST_ENTRY Entry, BOOLEAN Insert)
+{
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&ClasspAllFdosListLock, &OldIrql);
+    if (Insert) {
+        InsertTailList(&AllFdosList, Entry);
+    } else {
+        /* Failed initialization may never have linked this device. */
+        if (Entry->Flink && Entry->Blink) {
+            RemoveEntryList(Entry);
+        }
+        InitializeListHead(Entry);
+    }
+    KeReleaseSpinLock(&ClasspAllFdosListLock, OldIrql);
+}
 
 //
 // Handle used to register for power setting notifications.
@@ -1986,9 +2011,9 @@ NTSTATUS ClassPnpStartDevice(IN PDEVICE_OBJECT DeviceObject)
 
             /*
              *  Anchor the FDO in our static list.
-             *  Pnp is synchronized, so we shouldn't need any synchronization here.
+             *  Other device nodes may be starting in parallel.
              */
-            InsertTailList(&AllFdosList, &fdoExtension->PrivateFdoData->AllFdosListEntry);
+            ClasspUpdateAllFdosList(&fdoExtension->PrivateFdoData->AllFdosListEntry, TRUE);
 
             //
             // NOTE: the old interface allowed the class driver to allocate
@@ -3800,6 +3825,11 @@ ClassIoComplete(
     //
     // Check SRB status for success of completing request.
     //
+
+    if ((SRB_STATUS(srb->SrbStatus) == SRB_STATUS_SUCCESS) && (fdoData != NULL)) {
+        fdoData->LastReadyMediaChangeCount = fdoExtension->MediaChangeCount;
+        fdoData->LastReadyTime = KeQueryInterruptTime();
+    }
 
     if (SRB_STATUS(srb->SrbStatus) != SRB_STATUS_SUCCESS) {
         LONGLONG retryInterval;
@@ -6099,7 +6129,7 @@ __ClassInterpretSenseInfo_ProcessingInvalidSenseBuffer:
                         logErrorInternal = FALSE;
                         logError = FALSE;
                     } else if (cdbOpcode == SCSIOP_MODE_SENSE10) {
-                        USHORT allocationLength;
+                        USHORT allocationLength = 0;
                         REVERSE_BYTES_SHORT(&(cdb->MODE_SENSE10.AllocationLength), &allocationLength);
                         if (SrbGetDataTransferLength(Srb) <= allocationLength) {
                             *Status = STATUS_SUCCESS;
@@ -6107,7 +6137,7 @@ __ClassInterpretSenseInfo_ProcessingInvalidSenseBuffer:
                             logError = FALSE;
                         }
                     } else if (ClasspIsReceiveTokenInformation(cdb)) {
-                        ULONG allocationLength;
+                        ULONG allocationLength = 0;
                         REVERSE_BYTES(&(cdb->RECEIVE_TOKEN_INFORMATION.AllocationLength), &allocationLength);
                         if (SrbGetDataTransferLength(Srb) <= allocationLength) {
                             *Status = STATUS_SUCCESS;
@@ -7582,6 +7612,13 @@ ClassDeviceControl(
             break;
         }
 
+#ifdef __REACTOS__
+        case IOCTL_REACTOS_STORAGE_GET_DUMP_INTERFACE:
+            IoCopyCurrentIrpStackLocationToNext(Irp);
+            ClassReleaseRemoveLock(DeviceObject, Irp);
+            return IoCallDriver(commonExtension->LowerDeviceObject, Irp);
+#endif
+
         default:
             status = STATUS_PENDING;
             break;
@@ -7889,6 +7926,33 @@ ClassDeviceControl(
 
                 fdoExtension = DeviceObject->DeviceExtension;
 
+            }
+
+            //
+            // A device that answered a request a moment ago still holds its
+            // media, so answer from that instead of asking it again: a file
+            // system pings this on every create, and on removable media the
+            // Test Unit Ready below is a full round trip to the device.
+            //
+
+            if ((irpStack->Parameters.DeviceIoControl.OutputBufferLength == 0) &&
+                (fdoExtension->PrivateFdoData != NULL) &&
+                (fdoExtension->PrivateFdoData->LastReadyTime != 0) &&
+                (fdoExtension->PrivateFdoData->LastReadyMediaChangeCount ==
+                 fdoExtension->MediaChangeCount) &&
+                ((KeQueryInterruptTime() - fdoExtension->PrivateFdoData->LastReadyTime) <
+                 CLASS_RECENTLY_READY_INTERVAL)) {
+
+                Irp->IoStatus.Status = STATUS_SUCCESS;
+                Irp->IoStatus.Information = 0;
+
+                FREE_POOL(srb);
+
+                ClassReleaseRemoveLock(DeviceObject, Irp);
+                ClassCompleteRequest(DeviceObject, Irp, IO_NO_INCREMENT);
+
+                status = STATUS_SUCCESS;
+                goto SetStatusAndReturn;
             }
 
             if (irpStack->Parameters.DeviceIoControl.OutputBufferLength) {
@@ -8503,6 +8567,12 @@ ClassDeviceControl(
                 case StorageDeviceSeekPenaltyProperty: {
 
                     status = ClasspDeviceSeekPenaltyProperty(DeviceObject, Irp, srb);
+                    break;
+                }
+
+                case StorageDeviceTemperatureProperty: {
+
+                    status = ClasspDeviceTemperatureProperty(DeviceObject, Irp, srb);
                     break;
                 }
 
@@ -10336,7 +10406,8 @@ ClassRemoveDevice(
      *  then delete it now.
      */
     if (commonExtension->MountedDeviceInterfaceName.Buffer){
-        (VOID)IoSetDeviceInterfaceState(&commonExtension->MountedDeviceInterfaceName, FALSE);
+        if (!NT_SUCCESS(IoSetDeviceInterfaceState(&commonExtension->MountedDeviceInterfaceName, FALSE)))
+            TracePrint((TRACE_LEVEL_WARNING, TRACE_FLAG_PNP, "IoSetDeviceInterfaceState(%wZ) failed\n", &commonExtension->MountedDeviceInterfaceName));
         RtlFreeUnicodeString(&commonExtension->MountedDeviceInterfaceName);
         RtlInitUnicodeString(&commonExtension->MountedDeviceInterfaceName, NULL);
     }
@@ -10526,14 +10597,7 @@ ClassRemoveDevice(
                     // else we will access invalid memory.
                     //
                     PLIST_ENTRY allFdosListEntry = &fdoExtension->PrivateFdoData->AllFdosListEntry;
-                    if (allFdosListEntry->Flink && allFdosListEntry->Blink) {
-                        //
-                        //  Remove the FDO from the static list.
-                        //  Pnp is synchronized so this shouldn't need any synchronization.
-                        //
-                        RemoveEntryList(allFdosListEntry);
-                    }
-                    InitializeListHead(allFdosListEntry);
+                    ClasspUpdateAllFdosList(allFdosListEntry, FALSE);
 
                     DestroyAllTransferPackets(DeviceObject);
 
@@ -10738,7 +10802,7 @@ ClassUpdateInformationInRegistry(
     _In_ ULONG            InquiryDataLength
     )
 {
-    NTSTATUS          status;
+    NTSTATUS          status = STATUS_UNSUCCESSFUL;
     SCSI_ADDRESS      scsiAddress = {0};
     OBJECT_ATTRIBUTES objectAttributes = {0};
     STRING            string;
@@ -16549,4 +16613,3 @@ Return Value:
 
     return status;
 }
-

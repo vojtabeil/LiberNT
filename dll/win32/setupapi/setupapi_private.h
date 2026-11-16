@@ -1,6 +1,6 @@
 /*
  * Copyright 2001 Andreas Mohr
- * Copyright 2005-2006 Hervé Poussineau
+ * Copyright 2005-2006 HervÃ© Poussineau
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -20,9 +20,12 @@
 #ifndef __SETUPAPI_PRIVATE_H
 #define __SETUPAPI_PRIVATE_H
 
+#include <stdbool.h>
 #include <wchar.h>
 
+#ifndef WIN32_NO_STATUS
 #define WIN32_NO_STATUS
+#endif
 #define _INC_WINDOWS
 #define COM_NO_WINDOWS_H
 
@@ -55,6 +58,12 @@
 WINE_DEFAULT_DEBUG_CHANNEL(setupapi);
 
 #ifdef __REACTOS__
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
+#endif
+#endif
+
+#ifdef __REACTOS__
 #undef __WINESRC__
 #endif
 
@@ -64,6 +73,21 @@ WINE_DEFAULT_DEBUG_CHANNEL(setupapi);
 #define SETUP_CLASS_IMAGE_LIST_MAGIC 0xd00ff058
 
 #define CMP_MAGIC  0x01234567
+
+typedef PVOID HSTRING_TABLE;
+
+DWORD WINAPI pSetupStringTableAddString(HSTRING_TABLE, LPWSTR, DWORD);
+DWORD WINAPI pSetupStringTableAddStringEx(HSTRING_TABLE, LPWSTR, DWORD, LPVOID, DWORD);
+VOID WINAPI pSetupStringTableDestroy(HSTRING_TABLE);
+HSTRING_TABLE WINAPI pSetupStringTableDuplicate(HSTRING_TABLE);
+BOOL WINAPI pSetupStringTableGetExtraData(HSTRING_TABLE, DWORD, LPVOID, DWORD);
+HSTRING_TABLE WINAPI pSetupStringTableInitialize(VOID);
+HSTRING_TABLE WINAPI pSetupStringTableInitializeEx(DWORD, DWORD);
+DWORD WINAPI pSetupStringTableLookUpString(HSTRING_TABLE, LPWSTR, DWORD);
+DWORD WINAPI pSetupStringTableLookUpStringEx(HSTRING_TABLE, LPWSTR, DWORD, LPVOID, DWORD);
+BOOL WINAPI pSetupStringTableSetExtraData(HSTRING_TABLE, DWORD, LPVOID, DWORD);
+LPWSTR WINAPI pSetupStringTableStringFromId(HSTRING_TABLE, DWORD);
+BOOL WINAPI pSetupStringTableStringFromIdEx(HSTRING_TABLE, DWORD, LPWSTR, LPDWORD);
 
 struct DeviceInterface /* Element of DeviceInfo.InterfaceListHead */
 {
@@ -116,13 +140,17 @@ struct DriverInfoElement /* Element of DeviceInfoSet.DriverListHead and DeviceIn
     SP_DRVINFO_DETAIL_DATA_W Details;
     GUID ClassGuid;
     LPWSTR MatchingId;
+    LPWSTR InfIds;
     struct InfFileDetails *InfFileDetails;
 };
 
 struct ClassInstallParams
 {
+    DI_FUNCTION InstallFunction;
     PSP_PROPCHANGE_PARAMS PropChangeParams;
     PSP_ADDPROPERTYPAGE_DATA AddPropertyPageData;
+    PSP_DETECTDEVICE_PARAMS DetectDeviceParams;
+    PSP_REMOVEDEVICE_PARAMS RemoveDeviceParams;
 };
 
 struct DeviceInfo /* Element of DeviceInfoSet.ListHead */
@@ -168,6 +196,8 @@ struct DeviceInfo /* Element of DeviceInfoSet.ListHead */
     PCWSTR DeviceDescription;
     GUID ClassGuid;
     DWORD CreationFlags;
+    BOOL Phantom;
+    BOOL InstallersCalled;
 
     /* If CreationFlags contains DICD_INHERIT_CLASSDRVS, this list is invalid */
     /* If the driver is not searched/detected, this list is empty */
@@ -246,6 +276,9 @@ struct FileLog /* HSPFILELOG */
 };
 
 extern HINSTANCE hInstance;
+#ifdef __REACTOS__
+#define SETUPAPI_hInstance hInstance
+#endif
 extern OSVERSIONINFOEXW OsVersionInfo;
 
 /*
@@ -278,6 +311,7 @@ inline static WCHAR *strdupAtoW( const char *str )
 
 struct inf_file;
 extern const WCHAR *DIRID_get_string( int dirid );
+extern HINF PARSER_clone_inf( HINF hinf ) DECLSPEC_HIDDEN;
 extern const WCHAR *PARSER_get_inf_filename( HINF hinf ) DECLSPEC_HIDDEN;
 extern WCHAR *PARSER_get_src_root( HINF hinf ) DECLSPEC_HIDDEN;
 extern WCHAR *PARSER_get_dest_dir( INFCONTEXT *context ) DECLSPEC_HIDDEN;
@@ -302,6 +336,10 @@ DWORD
 GetErrorCodeFromCrCode(const IN CONFIGRET cr);
 
 BOOL
+SETUPAPI_IsTargetOSVersionCompatible(
+    IN PCWSTR TargetOSVersion);
+
+BOOL
 CreateDeviceInfo(
     IN struct DeviceInfoSet *list,
     IN LPCWSTR InstancePath,
@@ -313,7 +351,8 @@ SETUP_CreateDevicesList(
     IN OUT struct DeviceInfoSet *list,
     IN PCWSTR MachineName OPTIONAL,
     IN CONST GUID *Class OPTIONAL,
-    IN PCWSTR Enumerator OPTIONAL);
+    IN PCWSTR Enumerator OPTIONAL,
+    IN BOOL OnlyPresent);
 
 HKEY SETUPDI_CreateDevKey(HKEY RootKey, struct DeviceInfo *devInfo, REGSAM samDesired);
 HKEY SETUPDI_CreateDrvKey(HKEY RootKey, struct DeviceInfo *devInfo, UUID *ClassGuid, REGSAM samDesired);
@@ -327,10 +366,70 @@ CreateInfFileDetails(
     IN LPCWSTR FullInfFileName);
 
 VOID
+ReferenceInfFile(struct InfFileDetails* infFile);
+
+VOID
 DereferenceInfFile(struct InfFileDetails* infFile);
 
 BOOL
 DestroyDriverInfoElement(struct DriverInfoElement* driverInfo);
+
+BOOL
+SETUPAPI_StageDriverPackage(
+    IN PCWSTR SourceInfFileName);
+
+BOOL
+SETUPAPI_FindDriverStoreInf(
+    IN PCWSTR FileName,
+    OUT PWSTR StoreInfFileName);
+
+PCWSTR
+SETUPAPI_GetInfSourceDirectory(
+    IN const struct InfFileDetails *InfFileDetails,
+    OUT PWSTR Buffer);
+
+BOOL
+SETUPAPI_DeleteDriverStorePackage(
+    IN PCWSTR PublishedInfFileName);
+
+BOOL
+SETUPAPI_GetOriginalInfName(
+    IN PCWSTR PublishedInfFileName,
+    OUT PWSTR OriginalName,
+    IN DWORD OriginalNameSize);
+
+BOOL
+SETUPAPI_GetDriverPackageId(
+    IN PCWSTR InfFileName,
+    IN PCWSTR InfBaseName,
+    OUT PWSTR PackageId,
+    IN DWORD PackageIdSize);
+
+VOID
+SETUPAPI_RecordPublishedDriverPackage(
+    IN PCWSTR PublishedInfFileName,
+    IN PCWSTR SourceInfFileName);
+
+VOID
+SETUPAPI_RecordInstalledDriverPackage(
+    IN const struct InfFileDetails *InfFileDetails);
+
+BOOL
+SETUPAPI_RecordDriverDatabasePackage(
+    IN PCWSTR InfFileName,
+    IN PCWSTR PublishedName,
+    IN PCWSTR InfName,
+    IN PCWSTR OemPath OPTIONAL);
+
+VOID
+SETUPAPI_DeleteDriverDatabasePackage(
+    IN PCWSTR PublishedName);
+
+VOID
+SETUPAPI_InstallFilters(
+    IN HINF hInf,
+    IN PCWSTR FiltersSection,
+    IN HKEY InstanceKey);
 
 /* install.c */
 
@@ -338,6 +437,19 @@ BOOL
 GetStringField( PINFCONTEXT context, DWORD index, PWSTR *value);
 
 /* interface.c */
+
+BOOL
+CreateDeviceInterface(
+    IN struct DeviceInfo* deviceInfo,
+    IN LPCWSTR SymbolicLink,
+    IN LPCGUID pInterfaceGuid,
+    OUT struct DeviceInterface **pDeviceInterface);
+
+LPWSTR
+CreateSymbolicLink(
+    IN LPGUID InterfaceGuid,
+    IN LPCWSTR ReferenceString,
+    IN struct DeviceInfo *devInfo);
 
 BOOL
 DestroyDeviceInterface(
@@ -351,11 +463,19 @@ SETUP_CreateInterfaceList(
     PCWSTR DeviceInstanceW /* OPTIONAL */,
     BOOL OnlyPresentInterfaces);
 
+LONG
+SETUP_CreateAllInterfaceLists(
+    struct DeviceInfoSet *list,
+    PCWSTR MachineName,
+    PCWSTR DeviceInstanceW,
+    BOOL OnlyPresentInterfaces);
+
 /* misc.c */
 
 DWORD
 GetFunctionPointer(
     IN PWSTR InstallerName,
+    IN PCSTR DefaultFunctionName OPTIONAL,
     OUT HMODULE* ModulePointer,
     OUT PVOID* FunctionPointer);
 
@@ -370,11 +490,14 @@ pSetupStringFromGuid(LPGUID lpGUID, PWSTR pString, DWORD dwStringLen);
 
 DWORD WINAPI CaptureAndConvertAnsiArg(LPCSTR pSrc, LPWSTR *pDst);
 
+bool array_reserve(void **elements, size_t *capacity, size_t count, size_t size);
+
 VOID WINAPI MyFree(LPVOID lpMem);
 LPVOID WINAPI MyMalloc(DWORD dwSize);
 LPVOID WINAPI MyRealloc(LPVOID lpSrc, DWORD dwSize);
 LPWSTR WINAPI DuplicateString(LPCWSTR lpSrc);
 BOOL WINAPI IsUserAdmin(VOID);
+BOOL SourceListNoBrowse(VOID);
 LPWSTR WINAPI MultiByteToUnicode(LPCSTR lpMultiByteStr, UINT uCodePage);
 LPSTR WINAPI UnicodeToMultiByte(LPCWSTR lpUnicodeStr, UINT uCodePage);
 
@@ -382,5 +505,15 @@ LPSTR WINAPI UnicodeToMultiByte(LPCWSTR lpUnicodeStr, UINT uCodePage);
 
 typedef BOOL (*FIND_CALLBACK)(LPCWSTR SectionName, PVOID Context);
 BOOL EnumerateSectionsStartingWith(HINF hInf, LPCWSTR pStr, FIND_CALLBACK Callback, PVOID Context);
+BOOL SETUPAPI_GetRawStringField(PINFCONTEXT context, DWORD index, PWSTR buffer, DWORD size);
+
+BOOL SETUPAPI_RecordRelativeRegistry(HINF hinf, PCWSTR section, HKEY key_root);
+
+BOOL SETUPAPI_InstallFromInfSectionWithIncludes(HWND owner, HINF hinf, PCWSTR section, UINT flags,
+                                                HKEY key_root, PCWSTR src_root, UINT copy_flags,
+                                                PSP_FILE_CALLBACK_W callback, PVOID context,
+                                                HDEVINFO devinfo, PSP_DEVINFO_DATA devinfo_data);
+
+BOOL SETUPAPI_InstallHardwareSection(HINF hinf, PCWSTR section, HKEY hardware_key, HKEY device_key);
 
 #endif /* __SETUPAPI_PRIVATE_H */

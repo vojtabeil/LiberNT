@@ -20,9 +20,17 @@
 #pragma once
 
 extern char __ImageBase;
-#ifdef __GNUC__
-/* .text/.data/.rdata, .edata and .bss */
-#define FREELDR_SECTION_COUNT 3
+#ifdef __clang__
+#ifdef _M_IX86
+/* x86 has no .pdata unwind section: .text, .rdata, .buildid, .data, .reloc. */
+#define FREELDR_SECTION_COUNT 5
+#else
+/* .text, .rdata, .buildid, .data, .pdata and .reloc */
+#define FREELDR_SECTION_COUNT 6
+#endif
+#elif defined(__GNUC__)
+  /* .text/.data/.rdata, .edata and .bss */
+  #define FREELDR_SECTION_COUNT 3
 #else
 #ifdef _M_AMD64
 /* .text, .rdata/.edata, .pdata and .data/.bss */
@@ -63,10 +71,41 @@ typedef struct _FREELDR_MEMORY_DESCRIPTOR
 #define MM_PAGE_SIZE    4096
 #define MM_PAGE_MASK    0xFFF
 #define MM_PAGE_SHIFT    12
-//HACK: ReactOS AMD64 can't handle the full memory range yet CORE-20265
-//#define MM_MAX_PAGE        0xFFFFFFFFF /* 36 bits for the PFN */
-#define MM_MAX_PAGE        0x1FFFFF
-#define MM_MAX_PAGE_LOADER 0x3FFFF /* on x64 freeldr only maps 1 GB */
+#define MM_MAX_PAGE        0xFFFFFFFFF /* 36 bits for the PFN */
+#define MM_MAX_PAGE_LOADER 0xFFFFF /* on x64 freeldr maps 4 GB */
+#ifdef UEFIBOOT
+#define MM_MAX_PAGE_LOADER_MAPPED MM_MAX_PAGE
+#endif
+
+#define MM_SIZE_TO_PAGES(a)  \
+    ( ((a) >> MM_PAGE_SHIFT) + ((a) & MM_PAGE_MASK ? 1 : 0) )
+
+#endif
+
+#if defined(_M_ARM64) || defined(_ARM64_) || defined(__aarch64__) || defined(__arm64__)
+
+#define MM_PAGE_SIZE    4096
+#define MM_PAGE_MASK    0xFFF
+#define MM_PAGE_SHIFT    12
+#define MM_MAX_PAGE                0xFFFFFFFFFULL /* 36-bit PFN span */
+#define MM_MAX_PAGE_LOADER         0x200000       /* 8 GB allocation range */
+#define MM_MAX_PAGE_LOADER_MAPPED  0x200000       /* 8 GB mapped range */
+
+#define MM_SIZE_TO_PAGES(a)  \
+    ( ((a) >> MM_PAGE_SHIFT) + ((a) & MM_PAGE_MASK ? 1 : 0) )
+
+#endif
+
+#if defined(_M_RISCV64) || defined(_RISCV64_)
+
+#define MM_PAGE_SIZE    4096
+#define MM_PAGE_MASK    0xFFF
+#define MM_PAGE_SHIFT   12
+/* The kernel's KSEG0 and direct-map windows cover physical addresses below
+ * 64 GiB. FreeLdr allocations stay below 8 GiB. */
+#define MM_MAX_PAGE                0x1000000
+#define MM_MAX_PAGE_LOADER         0x200000
+#define MM_MAX_PAGE_LOADER_MAPPED  0x200000
 
 #define MM_SIZE_TO_PAGES(a)  \
     ( ((a) >> MM_PAGE_SHIFT) + ((a) & MM_PAGE_MASK ? 1 : 0) )
@@ -77,13 +116,13 @@ typedef struct _FREELDR_MEMORY_DESCRIPTOR
 #define HEAP_PAGES    0x400
 #define STACK_PAGES    0x00
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 typedef struct
 {
     TYPE_OF_MEMORY    PageAllocated;                    // Type of allocated memory (LoaderFree if this memory is free)
     PFN_NUMBER            PageAllocationLength;            // Number of pages allocated (or zero if this isn't the first page in the chain)
 } PAGE_LOOKUP_TABLE_ITEM, *PPAGE_LOOKUP_TABLE_ITEM;
-#include <poppack.h>
+#pragma pack(pop)
 
 //
 // Define this to 1 if you want the entire contents
@@ -97,9 +136,7 @@ extern PFN_NUMBER TotalPagesInLookupTable;
 extern PFN_NUMBER FreePagesInLookupTable;
 extern PFN_NUMBER LastFreePageHint;
 
-#if DBG
 PCSTR MmGetSystemMemoryMapTypeString(TYPE_OF_MEMORY Type);
-#endif
 
 PFN_NUMBER MmGetPageNumberFromAddress(PVOID Address);    // Returns the page number that contains a linear address
 PFN_NUMBER MmGetAddressablePageCountIncludingHoles(VOID);    // Returns the count of addressable pages from address zero including any memory holes and reserved memory regions
@@ -110,6 +147,7 @@ VOID MmAllocatePagesInLookupTable(PVOID PageLookupTable, PFN_NUMBER StartPage, P
 PFN_NUMBER MmCountFreePagesInLookupTable(PVOID PageLookupTable, PFN_NUMBER TotalPageCount);    // Returns the number of free pages in the lookup table
 PFN_NUMBER MmFindAvailablePages(PVOID PageLookupTable, PFN_NUMBER TotalPageCount, PFN_NUMBER PagesNeeded, BOOLEAN FromEnd);    // Returns the page number of the first available page range from the beginning or end of memory
 PFN_NUMBER MmFindAvailablePagesBeforePage(PVOID PageLookupTable, PFN_NUMBER TotalPageCount, PFN_NUMBER PagesNeeded, PFN_NUMBER LastPage);    // Returns the page number of the first available page range before the specified page
+PFN_NUMBER MmFindLargestFreeRunBeforePage(PVOID PageLookupTable, PFN_NUMBER TotalPageCount, PFN_NUMBER LastPage);    // Returns the length in pages of the largest contiguous free run below the specified page
 VOID MmUpdateLastFreePageHint(PVOID PageLookupTable, PFN_NUMBER TotalPageCount);    // Sets the LastFreePageHint to the last usable page of memory
 BOOLEAN MmAreMemoryPagesAvailable(PVOID PageLookupTable, PFN_NUMBER TotalPageCount, PVOID PageAddress, PFN_NUMBER PageCount);    // Returns TRUE if the specified pages of memory are available, otherwise FALSE
 VOID MmSetMemoryType(PVOID MemoryAddress, SIZE_T MemorySize, TYPE_OF_MEMORY NewType); // Use with EXTREME caution!
@@ -123,6 +161,7 @@ VOID    MmInitializeHeap(PVOID PageLookupTable);
 PVOID    MmAllocateMemory(SIZE_T MemorySize);
 PVOID    MmAllocateMemoryWithType(SIZE_T MemorySize, TYPE_OF_MEMORY MemoryType);
 VOID    MmFreeMemory(PVOID MemoryPointer);
+VOID    MmFreeMemoryEx(PVOID MemoryPointer, SIZE_T MemorySize);
 PVOID    MmAllocateMemoryAtAddress(SIZE_T MemorySize, PVOID DesiredAddress, TYPE_OF_MEMORY MemoryType);
 PVOID    MmAllocateHighestMemoryBelowAddress(SIZE_T MemorySize, PVOID DesiredAddress, TYPE_OF_MEMORY MemoryType);
 

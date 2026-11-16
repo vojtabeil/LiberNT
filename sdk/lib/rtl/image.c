@@ -179,7 +179,7 @@ RtlpImageNtHeaderEx(
         /* Make sure the image size is at least big enough for the DOS header */
         if (Size < sizeof(IMAGE_DOS_HEADER))
         {
-            DPRINT1("Size too small\n");
+            DPRINT("Size too small\n");
             return STATUS_INVALID_IMAGE_FORMAT;
         }
     }
@@ -189,7 +189,7 @@ RtlpImageNtHeaderEx(
     if (DosHeader->e_magic != IMAGE_DOS_SIGNATURE)
     {
         /* Not a valid COFF */
-        DPRINT1("Invalid image DOS signature!\n");
+        DPRINT("Invalid image DOS signature!\n");
         return STATUS_INVALID_IMAGE_FORMAT;
     }
 
@@ -278,12 +278,10 @@ RtlImageDirectoryEntryToData(
     PIMAGE_NT_HEADERS NtHeader;
     ULONG Va;
 
-    /* Magic flag for non-mapped images. */
+    /* Resource module handles use bit 0 for data files and bit 1 for images. */
     if ((ULONG_PTR)BaseAddress & 1)
-    {
-        BaseAddress = (PVOID)((ULONG_PTR)BaseAddress & ~1);
         MappedAsImage = FALSE;
-    }
+    BaseAddress = (PVOID)((ULONG_PTR)BaseAddress & ~(ULONG_PTR)3);
 
     NtHeader = RtlImageNtHeader(BaseAddress);
     if (NtHeader == NULL)
@@ -387,6 +385,16 @@ RtlImageRvaToVa(
                    (ULONG_PTR)SWAPD(Section->VirtualAddress));
 }
 
+PVOID
+NTAPI
+RtlAddressInSectionTable(
+    _In_ PIMAGE_NT_HEADERS NtHeader,
+    _In_ PVOID BaseAddress,
+    _In_ ULONG Rva)
+{
+    return RtlImageRvaToVa(NtHeader, BaseAddress, Rva, NULL);
+}
+
 PIMAGE_BASE_RELOCATION
 NTAPI
 LdrProcessRelocationBlockLongLong(
@@ -443,6 +451,15 @@ LdrProcessRelocationBlockLongLong(
             break;
 
         case IMAGE_REL_BASED_HIGHADJ:
+            /* The next slot holds the signed low half of the original value.
+             * Recompute the adjusted high half with the carry out of it. */
+            if (i + 1 >= Count)
+                return (PIMAGE_BASE_RELOCATION)NULL;
+            TypeOffset++;
+            i++;
+            *ShortPtr = HIWORD((LONG)((ULONG)SWAPW(*ShortPtr) << 16) + (SHORT)SWAPW(*TypeOffset) + (LONG)(Delta & 0xFFFFFFFF) + 0x8000);
+            break;
+
         case IMAGE_REL_BASED_MIPS_JMPADDR:
         default:
             DPRINT1("Unknown/unsupported fixup type %hu.\n", Type);
@@ -480,10 +497,11 @@ LdrRelocateImageWithBias(
     _In_ ULONG Invalid)
 {
     PIMAGE_NT_HEADERS NtHeaders;
-    PIMAGE_DATA_DIRECTORY RelocationDDir;
     PIMAGE_BASE_RELOCATION RelocationDir, RelocationEnd;
     ULONG Count;
+    ULONG RelocationSize;
     ULONG_PTR Address;
+    ULONGLONG PreferredBase;
     PUSHORT TypeOffset;
     LONGLONG Delta;
 
@@ -499,16 +517,27 @@ LdrRelocateImageWithBias(
         return Conflict;
     }
 
-    RelocationDDir = &NtHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC];
+    RelocationDir = RtlImageDirectoryEntryToData(BaseAddress,
+                                                 TRUE,
+                                                 IMAGE_DIRECTORY_ENTRY_BASERELOC,
+                                                 &RelocationSize);
 
-    if (SWAPD(RelocationDDir->VirtualAddress) == 0 || SWAPD(RelocationDDir->Size) == 0)
+    if (RelocationDir == NULL || RelocationSize == 0)
     {
         return Success;
     }
 
-    Delta = (ULONG_PTR)BaseAddress - SWAPD(NtHeaders->OptionalHeader.ImageBase) + AdditionalBias;
-    RelocationDir = (PIMAGE_BASE_RELOCATION)((ULONG_PTR)BaseAddress + SWAPD(RelocationDDir->VirtualAddress));
-    RelocationEnd = (PIMAGE_BASE_RELOCATION)((ULONG_PTR)RelocationDir + SWAPD(RelocationDDir->Size));
+    if (SWAPW(NtHeaders->OptionalHeader.Magic) == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+    {
+        PreferredBase = SWAPQ(((PIMAGE_NT_HEADERS64)NtHeaders)->OptionalHeader.ImageBase);
+    }
+    else
+    {
+        PreferredBase = SWAPD(((PIMAGE_NT_HEADERS32)NtHeaders)->OptionalHeader.ImageBase);
+    }
+
+    Delta = (ULONG_PTR)BaseAddress - PreferredBase + AdditionalBias;
+    RelocationEnd = (PIMAGE_BASE_RELOCATION)((ULONG_PTR)RelocationDir + RelocationSize);
 
     while (RelocationDir < RelocationEnd &&
             SWAPW(RelocationDir->SizeOfBlock) > 0)

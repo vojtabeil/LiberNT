@@ -105,7 +105,8 @@ __asm__(
      */                                                                             \
 __seh2$$begin_try__:                                                                \
     {                                                                               \
-        __label__ __seh2$$leave_scope__;
+        __label__ __seh2$$leave_scope__;                                            \
+        __asm__ __volatile__ goto ("" : : : : __seh2$$leave_scope__);
 
 #define _SEH2_EXCEPT(...)                                                                       \
 __seh2$$leave_scope__: __MINGW_ATTRIB_UNUSED;                                                   \
@@ -116,7 +117,7 @@ __seh2$$end_try__:(void)0;                                                      
     if (0)                                                                                      \
     {                                                                                           \
         __label__ __seh2$$leave_scope__;                                                        \
-        long __MINGW_ATTRIB_UNUSED __seh2$$exception_code__;                                    \
+        volatile long __MINGW_ATTRIB_UNUSED __seh2$$exception_code__;                                    \
         /* Add our handlers to the list */                                                      \
         if (0)                                                                                  \
         {                                                                                       \
@@ -213,12 +214,14 @@ __seh2$$begin_except__: __MINGW_ATTRIB_UNUSED;                                  
 #define _SEH2_YIELD(__stmt) __stmt
 #define _SEH2_VOLATILE volatile
 
+#ifndef __cplusplus
 #undef __try // undef from GCC's stl
 #define __try _SEH2_TRY
 #define __except _SEH2_EXCEPT
 #define __finally _SEH2_FINALLY
 #define __endtry _SEH2_END
 #define __leave goto __seh2$$leave_scope__
+#endif
 #define _exception_info() ((struct _EXCEPTION_POINTERS*)__seh2$$exception_ptr__)
 #define _exception_code() __seh2$$exception_code__
 #define _abnormal_termination() __seh2$$abnormal_termination__

@@ -36,12 +36,12 @@ extern "C" {
 #endif /* defined(__cplusplus) */
 
 /* Except for specific structs, this header is byte packed */
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 #include <shtypes.h>
 #include <shobjidl.h>
 
-#include <pshpack8.h>
+#pragma pack(push, 8)
 
 typedef struct
 {
@@ -81,7 +81,10 @@ typedef struct
     DWORD         cchLogo;
 } SHFOLDERCUSTOMSETTINGSW, *LPSHFOLDERCUSTOMSETTINGSW;
 
-#include <poppack.h>
+typedef SHFOLDERCUSTOMSETTINGSW SHFOLDERCUSTOMSETTINGS;
+typedef LPSHFOLDERCUSTOMSETTINGSW LPSHFOLDERCUSTOMSETTINGS;
+
+#pragma pack(pop)
 
 #define FCS_READ       0x00000001
 #define FCS_FORCEWRITE 0x00000002
@@ -108,7 +111,12 @@ typedef enum
     KF_FLAG_ALIAS_ONLY                  = 0x80000000
 } KNOWN_FOLDER_FLAG;
 
-typedef int GPFIDL_FLAGS;
+typedef enum tagGPFIDL_FLAGS
+{
+    GPFIDL_DEFAULT    = 0x0000,
+    GPFIDL_ALTNAME    = 0x0001,
+    GPFIDL_UNCPRINTER = 0x0002,
+} GPFIDL_FLAGS;
 
 typedef struct _SFVM_PROPPAGE_DATA
 {
@@ -125,6 +133,15 @@ SHAddFromPropSheetExtArray(
   LPARAM);
 
 LPVOID       WINAPI SHAlloc(SIZE_T) __WINE_ALLOC_SIZE(1);
+
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+HRESULT WINAPI SHBindToObject(_In_opt_ IShellFolder *, _In_ PCUIDLIST_RELATIVE, _In_opt_ IBindCtx *, _In_ REFIID, _Outptr_ void **);
+HRESULT WINAPI SHGetKnownFolderIDList(_In_ REFKNOWNFOLDERID, _In_ DWORD, _In_opt_ HANDLE, _Outptr_ PIDLIST_ABSOLUTE *);
+HRESULT WINAPI SHGetKnownFolderPath(_In_ REFKNOWNFOLDERID, _In_ DWORD, _In_opt_ HANDLE, _Outptr_ PWSTR *);
+#endif
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+HRESULT WINAPI SHGetKnownFolderItem(_In_ REFKNOWNFOLDERID, _In_ KNOWN_FOLDER_FLAG, _In_opt_ HANDLE, _In_ REFIID, _Outptr_ void **);
+#endif
 
 HRESULT
 WINAPI
@@ -242,6 +259,15 @@ SHGetPathFromIDListW(
   _Out_writes_(MAX_PATH) LPWSTR);
 
 #define SHGetPathFromIDList WINELIB_NAME_AW(SHGetPathFromIDList)
+
+_Success_(return != 0)
+BOOL
+WINAPI
+SHGetPathFromIDListEx(
+  _In_ PCIDLIST_ABSOLUTE pidl,
+  _Out_writes_(cchPath) PWSTR pszPath,
+  _In_ DWORD cchPath,
+  _In_ GPFIDL_FLAGS uOpts);
 
 INT          WINAPI SHHandleUpdateImage(_In_ PCIDLIST_ABSOLUTE);
 
@@ -362,6 +388,9 @@ SHOpenFolderAndSelectItems(
   _In_ UINT cidl,
   _In_reads_opt_(cidl) PCUITEMID_CHILD_ARRAY,
   _In_ DWORD);
+
+#define OFASI_EDIT          0x0001
+#define OFASI_OPENDESKTOP   0x0002
 
 #define PCS_FATAL           0x80000000
 #define PCS_REPLACEDCHAR    0x00000001
@@ -705,54 +734,6 @@ DECLARE_INTERFACE_(IQueryInfo,IUnknown)
 #define QIF_CACHED           0x00000001
 #define QIF_DONTEXPANDFOLDER 0x00000002
 
-/* IInputObject interface */
-#define INTERFACE IInputObject
-DECLARE_INTERFACE_(IInputObject,IUnknown)
-{
-    /*** IUnknown methods ***/
-    STDMETHOD_(HRESULT,QueryInterface)(THIS_ REFIID riid, void** ppvObject) PURE;
-    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
-    STDMETHOD_(ULONG,Release)(THIS) PURE;
-    /*** IInputObject methods ***/
-    STDMETHOD(UIActivateIO)(THIS_ BOOL bActivating, LPMSG lpMsg) PURE;
-    STDMETHOD(HasFocusIO)(THIS) PURE;
-    STDMETHOD(TranslateAcceleratorIO)(THIS_ LPMSG lpMsg) PURE;
-};
-#undef INTERFACE
-
-#if !defined(__cplusplus) || defined(CINTERFACE)
-/*** IUnknown methods ***/
-#define IInputObject_QueryInterface(p,a,b)       (p)->lpVtbl->QueryInterface(p,a,b)
-#define IInputObject_AddRef(p)                   (p)->lpVtbl->AddRef(p)
-#define IInputObject_Release(p)                  (p)->lpVtbl->Release(p)
-/*** IInputObject methods ***/
-#define IInputObject_UIActivateIO(p,a,b)         (p)->lpVtbl->UIActivateIO(p,a,b)
-#define IInputObject_HasFocusIO(p)               (p)->lpVtbl->HasFocusIO(p)
-#define IInputObject_TranslateAcceleratorIO(p,a) (p)->lpVtbl->TranslateAcceleratorIO(p,a)
-#endif
-
-/* IInputObjectSite interface */
-#define INTERFACE IInputObjectSite
-DECLARE_INTERFACE_(IInputObjectSite,IUnknown)
-{
-    /*** IUnknown methods ***/
-    STDMETHOD_(HRESULT,QueryInterface) (THIS_ REFIID riid, void** ppvObject) PURE;
-    STDMETHOD_(ULONG,AddRef) (THIS) PURE;
-    STDMETHOD_(ULONG,Release) (THIS) PURE;
-    /*** IInputObjectSite methods ***/
-    STDMETHOD(OnFocusChangeIS)(THIS_ LPUNKNOWN lpUnknown, BOOL bFocus) PURE;
-};
-#undef INTERFACE
-
-#if !defined(__cplusplus) || defined(CINTERFACE)
-/*** IUnknown methods ***/
-#define IInputObjectSite_QueryInterface(p,a,b)  (p)->lpVtbl->QueryInterface(p,a,b)
-#define IInputObjectSite_AddRef(p)              (p)->lpVtbl->AddRef(p)
-#define IInputObjectSite_Release(p)             (p)->lpVtbl->Release(p)
-/*** IInputObject methods ***/
-#define IInputObjectSite_OnFocusChangeIS(p,a,b) (p)->lpVtbl->OnFocusChangeIS(p,a,b)
-#endif
-
 /* IObjMgr interface */
 #define INTERFACE IObjMgr
 DECLARE_INTERFACE_(IObjMgr,IUnknown)
@@ -887,7 +868,7 @@ DECLARE_INTERFACE_(IShellFolderViewCB,IUnknown)
  * IShellFolderView interface
  */
 
-#include <pshpack8.h>
+#pragma pack(push, 8)
 
 typedef struct _ITEMSPACING
 {
@@ -897,7 +878,7 @@ typedef struct _ITEMSPACING
     int cyLarge;
 } ITEMSPACING;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 #define INTERFACE IShellFolderView
 DEFINE_GUID(IID_IShellFolderView,0x37a378c0,0xf82d,0x11ce,0xae,0x65,0x08,0x00,0x2b,0x2e,0x12,0x62);
@@ -1184,12 +1165,85 @@ DECLARE_INTERFACE_(IActiveDesktop, IUnknown)
 
 #endif
 
+#define SSM_CLEAR   0x0000
+#define SSM_SET     0x0001
+#define SSM_REFRESH 0x0002
+#define SSM_UPDATE  0x0004
+
+#define SCHEME_DISPLAY  0x0001
+#define SCHEME_EDIT     0x0002
+#define SCHEME_LOCAL    0x0004
+#define SCHEME_GLOBAL   0x0008
+#define SCHEME_REFRESH  0x0010
+#define SCHEME_UPDATE   0x0020
+#define SCHEME_DONOTUSE 0x0040
+#define SCHEME_CREATE   0x0080
+
+#define INTERFACE IActiveDesktopP
+DECLARE_INTERFACE_(IActiveDesktopP, IUnknown)
+{
+    STDMETHOD(QueryInterface) (THIS_ _In_ REFIID riid, _Outptr_ void **ppv) PURE;
+    STDMETHOD_(ULONG,AddRef)  (THIS) PURE;
+    STDMETHOD_(ULONG,Release) (THIS) PURE;
+
+    STDMETHOD(SetSafeMode)(THIS_ DWORD dwFlags) PURE;
+    STDMETHOD(EnsureUpdateHTML)(THIS) PURE;
+    STDMETHOD(SetScheme)(THIS_ _In_ PCWSTR pwszSchemeName, DWORD dwFlags) PURE;
+    STDMETHOD(GetScheme)(THIS_ _Out_writes_(*pdwcchBuffer) PWSTR pwszSchemeName, _Inout_ DWORD *pdwcchBuffer, DWORD dwFlags) PURE;
+};
+#undef INTERFACE
+
+typedef IActiveDesktopP *LPACTIVEDESKTOPP;
+
+#define GADOF_DIRTY 0x00000001
+
+#define INTERFACE IADesktopP2
+DECLARE_INTERFACE_(IADesktopP2, IUnknown)
+{
+    STDMETHOD(QueryInterface) (THIS_ _In_ REFIID riid, _Outptr_ void **ppv) PURE;
+    STDMETHOD_(ULONG,AddRef)  (THIS) PURE;
+    STDMETHOD_(ULONG,Release) (THIS) PURE;
+
+    STDMETHOD(ReReadWallpaper)(THIS) PURE;
+    STDMETHOD(GetADObjectFlags)(THIS_ _Out_ DWORD *pdwFlags, DWORD dwMask) PURE;
+    STDMETHOD(UpdateAllDesktopSubscriptions)(THIS) PURE;
+    STDMETHOD(MakeDynamicChanges)(THIS_ _In_ IOleObject *pOleObj) PURE;
+};
+#undef INTERFACE
+
+typedef IADesktopP2 *LPADESKTOPP2;
+
 /****************************************************************************
 * SHAddToRecentDocs API
 */
 #define SHARD_PIDL      0x00000001L
 #define SHARD_PATHA     0x00000002L
 #define SHARD_PATHW     0x00000003L
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+#define SHARD_APPIDINFO       0x00000004L
+#define SHARD_APPIDINFOIDLIST 0x00000005L
+#define SHARD_LINK            0x00000006L
+#define SHARD_APPIDINFOLINK   0x00000007L
+#define SHARD_SHELLITEM       0x00000008L
+
+typedef struct SHARDAPPIDINFO
+{
+    IShellItem *psi;
+    PCWSTR pszAppID;
+} SHARDAPPIDINFO;
+
+typedef struct SHARDAPPIDINFOIDLIST
+{
+    PCIDLIST_ABSOLUTE pidl;
+    PCWSTR pszAppID;
+} SHARDAPPIDINFOIDLIST;
+
+typedef struct SHARDAPPIDINFOLINK
+{
+    IShellLinkW *psl;
+    PCWSTR pszAppID;
+} SHARDAPPIDINFOLINK;
+#endif
 #define SHARD_PATH WINELIB_NAME_AW(SHARD_PATH)
 
 void WINAPI SHAddToRecentDocs(UINT, _In_opt_ LPCVOID);
@@ -1199,7 +1253,7 @@ void WINAPI SHAddToRecentDocs(UINT, _In_opt_ LPCVOID);
  */
 typedef INT (CALLBACK *BFFCALLBACK)(HWND,UINT,LPARAM,LPARAM);
 
-#include <pshpack8.h>
+#pragma pack(push, 8)
 
 typedef struct tagBROWSEINFOA {
     HWND                hwndOwner;
@@ -1227,7 +1281,7 @@ typedef struct tagBROWSEINFOW {
 #define PBROWSEINFO  WINELIB_NAME_AW(PBROWSEINFO)
 #define LPBROWSEINFO WINELIB_NAME_AW(LPBROWSEINFO)
 
-#include <poppack.h>
+#pragma pack(pop)
 
 /* Browsing for directory. */
 #define BIF_RETURNONLYFSDIRS   0x0001
@@ -1285,7 +1339,7 @@ typedef HRESULT
   WPARAM wParam,
   LPARAM lParam);
 
-#include <pshpack8.h>
+#pragma pack(push, 8)
 
 typedef struct _CSFV
 {
@@ -1298,7 +1352,7 @@ typedef struct _CSFV
   FOLDERVIEWMODE       fvm;
 } CSFV, *LPCSFV;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 HRESULT
 WINAPI
@@ -1366,7 +1420,7 @@ SHCreateShellFolderViewEx(
 #define SFVM_GET_WEBVIEW_THEME        86 /* undocumented */
 #define SFVM_GETDEFERREDVIEWSETTINGS  92 /* undocumented */
 
-#include <pshpack8.h>
+#pragma pack(push, 8)
 
 typedef struct _SFV_CREATE
 {
@@ -1376,7 +1430,7 @@ typedef struct _SFV_CREATE
     IShellFolderViewCB *psfvcb;
 } SFV_CREATE;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 HRESULT
 WINAPI
@@ -1385,7 +1439,7 @@ SHCreateShellFolderView(
   _Outptr_ IShellView **ppsv);
 
 /* Types and definitions for the SFM_* parameters */
-#include <pshpack8.h>
+#pragma pack(push, 8)
 
 #define QCMINFO_PLACE_BEFORE          0
 #define QCMINFO_PLACE_AFTER           1
@@ -1424,7 +1478,7 @@ typedef struct _TBINFO
     UINT uFlags;
 } TBINFO, *LPTBINFO;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 /****************************************************************************
 *	SHShellFolderView_Message API
@@ -1490,14 +1544,14 @@ SHShellFolderView_Message(
 #define SHDID_COMPUTER_AUDIO        19
 #define SHDID_COMPUTER_SHAREDDOCS   20
 
-#include <pshpack8.h>
+#pragma pack(push, 8)
 
 typedef struct _SHDESCRIPTIONID
 {   DWORD   dwDescriptionId;
     CLSID   clsid;
 } SHDESCRIPTIONID, *LPSHDESCRIPTIONID;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 HRESULT
 WINAPI
@@ -1970,9 +2024,7 @@ typedef enum {
     SLDF_FORCE_NO_LINKINFO = 0x00000100,
     SLDF_HAS_EXP_SZ = 0x00000200,
     SLDF_RUN_IN_SEPARATE = 0x00000400,
-#if (NTDDI_VERSION < NTDDI_LONGHORN)
     SLDF_HAS_LOGO3ID = 0x00000800,
-#endif
     SLDF_HAS_DARWINID = 0x00001000,
     SLDF_RUNAS_USER = 0x00002000,
     SLDF_HAS_EXP_ICON_SZ = 0x00004000,
@@ -2101,6 +2153,14 @@ SHChangeNotifyRegister(
   _In_ SHChangeNotifyEntry *pshcne);
 
 BOOL WINAPI SHChangeNotifyDeregister(ULONG ulID);
+
+typedef enum
+{
+    SCNRT_ENABLE = 0,
+    SCNRT_DISABLE = 1
+} SCNRT_STATUS;
+
+VOID WINAPI SHChangeNotifyRegisterThread(_In_ SCNRT_STATUS status);
 
 HANDLE
 WINAPI
@@ -2403,14 +2463,14 @@ typedef struct {
     WORD cLength;
     WORD nVersion;
     BOOL fFullPathTitle:1;
-    BOOL fSaveLocalView:1;
+    UINT fSaveLocalView:1;
     BOOL fNotShell:1;
-    BOOL fSimpleDefault:1;
+    UINT fSimpleDefault:1;
     BOOL fDontShowDescBar:1;
     BOOL fNewWindowMode:1;
     BOOL fShowCompColor:1;
     BOOL fDontPrettyNames:1;
-    BOOL fAdminsCreateCommonGroups:1;
+    UINT fAdminsCreateCommonGroups:1;
     UINT fUnusedFlags:7;
     UINT :15; /* Required for proper binary layout with gcc */
     UINT fMenuEnumFilter;
@@ -2533,13 +2593,15 @@ BOOL         WINAPI ILIsParent(_In_ PCIDLIST_ABSOLUTE, _In_ PCIDLIST_ABSOLUTE, B
 HRESULT      WINAPI ILLoadFromStream(_In_ LPSTREAM, _Inout_ PIDLIST_RELATIVE*);
 BOOL         WINAPI ILRemoveLastID(_Inout_opt_ PUIDLIST_RELATIVE);
 HRESULT      WINAPI ILSaveToStream(_In_ LPSTREAM, _In_ PCUIDLIST_RELATIVE);
+HRESULT      WINAPI ILLoadFromStreamEx(_In_ LPSTREAM, _Outptr_ PIDLIST_RELATIVE*);
+HRESULT      WINAPI AssocGetDetailsOfPropKey(_In_ IShellFolder*, _In_ PCUITEMID_CHILD, _In_ const PROPERTYKEY*, _Out_ VARIANT*, _Out_opt_ BOOL*);
 
 static inline BOOL ILIsEmpty(_In_opt_ PCUIDLIST_RELATIVE pidl)
 {
     return !(pidl && pidl->mkid.cb);
 }
 
-#include <poppack.h>
+#pragma pack(pop)
 
 
 /* menu merging */
@@ -2719,34 +2781,41 @@ SHOpenWithDialog(
   _In_opt_ HWND hwndParent,
   _In_ const OPENASINFO *poainfo);
 
-#define INTERFACE   IShellIconOverlayIdentifier
-
-DECLARE_INTERFACE_(IShellIconOverlayIdentifier, IUnknown)
+/*****************************************************************************
+ * IShellIconOverlay interface
+ */
+#define INTERFACE IShellIconOverlay
+DECLARE_INTERFACE_(IShellIconOverlay, IUnknown)
 {
-    STDMETHOD(QueryInterface) (THIS_ REFIID riid, void **ppv) PURE;
-    STDMETHOD_(ULONG,AddRef) (THIS)  PURE;
-    STDMETHOD_(ULONG,Release) (THIS) PURE;
-
-    STDMETHOD (IsMemberOf)(THIS_ _In_ LPCWSTR pwszPath, DWORD dwAttrib) PURE;
-    STDMETHOD (GetOverlayInfo)(THIS_ _Out_writes_(cchMax) LPWSTR pwszIconFile, int cchMax, _Out_ int * pIndex, _Out_ DWORD * pdwFlags) PURE;
-    STDMETHOD (GetPriority)(THIS_ _Out_ int * pIPriority) PURE;
+    /*** IUnknown methods ***/
+    STDMETHOD(QueryInterface)(THIS_ REFIID riid, void** ppvObject) PURE;
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+    /*** IShellIconOverlay methods ***/
+    STDMETHOD(GetOverlayIndex)(THIS_ PCUITEMID_CHILD pidl, int *pIndex) PURE;
+    STDMETHOD(GetOverlayIconIndex)(THIS_ PCUITEMID_CHILD pidl, int *pIconIndex) PURE;
 };
+#undef INTERFACE
 
 #if !defined(__cplusplus) || defined(CINTERFACE)
-/*** IUnknown methods ***/
-#define IShellIconOverlayIdentifier_QueryInterface(p,a,b)         (p)->lpVtbl->QueryInterface(p,a,b)
-#define IShellIconOverlayIdentifier_AddRef(p)                     (p)->lpVtbl->AddRef(p)
-#define IShellIconOverlayIdentifier_Release(p)                    (p)->lpVtbl->Release(p)
-/*** IShellIconOverlayIdentifier methods ***/
-#define IShellIconOverlayIdentifier_IsMemberOf(p,a,b)             (p)->lpVtbl->IsMemberOf(p,a,b)
-#define IShellIconOverlayIdentifier_GetOverlayInfo(p,a,b,c,d)     (p)->lpVtbl->GetOverlayInfo(p,a,b,c,d)
-#define IShellIconOverlayIdentifier_GetPriority(p,a)              (p)->lpVtbl->GetPriority(p,a)
+#define IShellIconOverlay_QueryInterface(p,a,b)     (p)->lpVtbl->QueryInterface(p,a,b)
+#define IShellIconOverlay_AddRef(p)                 (p)->lpVtbl->AddRef(p)
+#define IShellIconOverlay_Release(p)                (p)->lpVtbl->Release(p)
+#define IShellIconOverlay_GetOverlayIndex(p,a,b)    (p)->lpVtbl->GetOverlayIndex(p,a,b)
+#define IShellIconOverlay_GetOverlayIconIndex(p,a,b) (p)->lpVtbl->GetOverlayIconIndex(p,a,b)
 #endif
 
-#define ISIOI_ICONFILE  0x00000001
-#define ISIOI_ICONINDEX 0x00000002
+#define OI_DEFAULT 0x00000000
+#define OI_ASYNC 0xFFFFEEEE
 
-#undef INTERFACE
+#define IDO_SHGIOI_SHARE    0x0FFFFFFF
+#define IDO_SHGIOI_LINK     0x0FFFFFFE
+#define IDO_SHGIOI_SLOWFILE 0x0FFFFFFFD
+#define IDO_SHGIOI_DEFAULT  0x0FFFFFFFC
+
+int WINAPI SHGetIconOverlayIndexA(LPCSTR pszIconPath, int iIconIndex);
+int WINAPI SHGetIconOverlayIndexW(LPCWSTR pszIconPath, int iIconIndex);
+#define SHGetIconOverlayIndex WINELIB_NAME_AW(SHGetIconOverlayIndex)
 
 /****************************************************************************
  * Travel log
@@ -2805,7 +2874,7 @@ typedef void (CALLBACK *PFNASYNCICONTASKBALLBACK)(LPCITEMIDLIST pidl, LPVOID pvD
 #define ISFB_STATE_QLINKSMODE 0x00000020
 #define ISFB_STATE_NOSHOWTEXT 0x00000004
 
-#include <pshpack8.h>
+#pragma pack(push, 8)
 
 typedef struct {
     DWORD       dwMask;
@@ -2820,7 +2889,7 @@ typedef struct {
     PIDLIST_ABSOLUTE pidl;
 } BANDINFOSFB, *PBANDINFOSFB;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 #undef INTERFACE
 #define INTERFACE IShellFolderBand

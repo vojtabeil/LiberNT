@@ -27,13 +27,12 @@
 #define COMDLG32_Atom   MAKEINTATOM(0xa000)     /* MS uses this one to identify props */
 
 extern HINSTANCE COMDLG32_hInstance;
-#ifdef __REACTOS__
-extern CRITICAL_SECTION COMDLG32_OpenFileLock DECLSPEC_HIDDEN;
-#endif
 extern HANDLE COMDLG32_hActCtx;
+#ifdef __REACTOS__
+extern CRITICAL_SECTION COMDLG32_OpenFileLock;
+#endif
 
 void	COMDLG32_SetCommDlgExtendedError(DWORD err);
-LPVOID	COMDLG32_AllocMem(int size) __WINE_ALLOC_SIZE(1);
 
 /* Find/Replace local definitions */
 
@@ -178,14 +177,8 @@ HRESULT FileSaveDialog_Constructor(IUnknown *pUnkOuter, REFIID riid, void **ppv)
 
 /* Shared helper functions */
 void COMDLG32_GetCanonicalPath(PCIDLIST_ABSOLUTE pidlAbsCurrent, LPWSTR lpstrFile, LPWSTR lpstrPathAndFile);
-#ifdef __REACTOS__
-struct FileOpenDlgInfos;
-int FILEDLG95_ValidatePathAction(struct FileOpenDlgInfos *fodInfos, LPWSTR lpstrPathAndFile, IShellFolder **ppsf,
-                                 HWND hwnd, DWORD flags, BOOL isSaveDlg, int defAction);
-#else
 int FILEDLG95_ValidatePathAction(LPWSTR lpstrPathAndFile, IShellFolder **ppsf,
                                  HWND hwnd, DWORD flags, BOOL isSaveDlg, int defAction);
-#endif
 int COMDLG32_SplitFileNames(LPWSTR lpstrEdit, UINT nStrLen, LPWSTR *lpstrFileList, UINT *sizeUsed);
 void FILEDLG95_OnOpenMessage(HWND hwnd, int idCaption, int idText);
 

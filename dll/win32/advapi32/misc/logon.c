@@ -9,6 +9,108 @@
 #include <advapi32.h>
 WINE_DEFAULT_DEBUG_CHANNEL(advapi);
 
+BOOL
+WINAPI
+CreateProcessInternalW(
+    _In_opt_ HANDLE hUserToken,
+    _In_opt_ LPCWSTR lpApplicationName,
+    _Inout_opt_ LPWSTR lpCommandLine,
+    _In_opt_ LPSECURITY_ATTRIBUTES lpProcessAttributes,
+    _In_opt_ LPSECURITY_ATTRIBUTES lpThreadAttributes,
+    _In_ BOOL bInheritHandles,
+    _In_ DWORD dwCreationFlags,
+    _In_opt_ LPVOID lpEnvironment,
+    _In_opt_ LPCWSTR lpCurrentDirectory,
+    _In_ LPSTARTUPINFOW lpStartupInfo,
+    _Out_ LPPROCESS_INFORMATION lpProcessInformation,
+    _Out_opt_ PHANDLE hNewToken);
+
+BOOL
+WINAPI
+CreateProcessInternalA(
+    _In_opt_ HANDLE hUserToken,
+    _In_opt_ LPCSTR lpApplicationName,
+    _Inout_opt_ LPSTR lpCommandLine,
+    _In_opt_ LPSECURITY_ATTRIBUTES lpProcessAttributes,
+    _In_opt_ LPSECURITY_ATTRIBUTES lpThreadAttributes,
+    _In_ BOOL bInheritHandles,
+    _In_ DWORD dwCreationFlags,
+    _In_opt_ LPVOID lpEnvironment,
+    _In_opt_ LPCSTR lpCurrentDirectory,
+    _In_ LPSTARTUPINFOA lpStartupInfo,
+    _Out_ LPPROCESS_INFORMATION lpProcessInformation,
+    _Out_opt_ PHANDLE hNewToken);
+
+typedef struct _TOKEN_ASSIGNMENT_STATE
+{
+    HANDLE OriginalToken;
+    BOOLEAN ImpersonatedSelf;
+    BOOLEAN HavePrivilege;
+    BOOLEAN PrivilegeSet;
+} TOKEN_ASSIGNMENT_STATE, *PTOKEN_ASSIGNMENT_STATE;
+
+static
+VOID
+BeginTokenAssignment(
+    _Out_ PTOKEN_ASSIGNMENT_STATE State)
+{
+    HANDLE NullToken = NULL;
+    NTSTATUS Status;
+
+    State->OriginalToken = NULL;
+    State->ImpersonatedSelf = FALSE;
+    State->PrivilegeSet = FALSE;
+
+    Status = NtOpenThreadToken(NtCurrentThread(),
+                               TOKEN_QUERY | TOKEN_IMPERSONATE,
+                               TRUE,
+                               &State->OriginalToken);
+    if (NT_SUCCESS(Status))
+    {
+        NtSetInformationThread(NtCurrentThread(),
+                               ThreadImpersonationToken,
+                               &NullToken,
+                               sizeof(NullToken));
+    }
+    else
+    {
+        State->OriginalToken = NULL;
+    }
+
+    if (NT_SUCCESS(RtlImpersonateSelf(SecurityImpersonation)))
+        State->ImpersonatedSelf = TRUE;
+
+    State->HavePrivilege = NT_SUCCESS(RtlAdjustPrivilege(SE_ASSIGNPRIMARYTOKEN_PRIVILEGE,
+                                                         TRUE,
+                                                         TRUE,
+                                                         &State->PrivilegeSet));
+}
+
+static
+VOID
+EndTokenAssignment(
+    _In_ PTOKEN_ASSIGNMENT_STATE State)
+{
+    if (State->HavePrivilege)
+    {
+        RtlAdjustPrivilege(SE_ASSIGNPRIMARYTOKEN_PRIVILEGE,
+                           State->PrivilegeSet,
+                           TRUE,
+                           &State->PrivilegeSet);
+    }
+
+    if (State->ImpersonatedSelf || State->OriginalToken)
+    {
+        NtSetInformationThread(NtCurrentThread(),
+                               ThreadImpersonationToken,
+                               &State->OriginalToken,
+                               sizeof(State->OriginalToken));
+    }
+
+    if (State->OriginalToken)
+        NtClose(State->OriginalToken);
+}
+
 /* GLOBALS *****************************************************************/
 
 static const CHAR AdvapiTokenSourceName[] = "Advapi  ";
@@ -132,11 +234,13 @@ CreateDefaultProcessSecurityCommon(
 {
     NTSTATUS Status;
     BOOL Success;
-    PACL Dacl;
+    PACL Dacl = NULL;
+    PACL AllocatedDacl = NULL;
     PTOKEN_OWNER OwnerOfToken;
-    PTOKEN_PRIMARY_GROUP PrimaryGroupOfToken;
+    PTOKEN_PRIMARY_GROUP PrimaryGroupOfToken = NULL;
+    PTOKEN_DEFAULT_DACL DefaultDaclOfToken = NULL;
     SECURITY_DESCRIPTOR AbsoluteSd;
-    ULONG DaclSize, TokenOwnerSize, PrimaryGroupSize, RelativeSDSize = 0;
+    ULONG DaclSize, TokenOwnerSize, PrimaryGroupSize, DefaultDaclSize, RelativeSDSize = 0;
     PSID OwnerSid = NULL, SystemSid = NULL, PrimaryGroupSid = NULL;
     PSECURITY_DESCRIPTOR RelativeSD = NULL;
     static SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
@@ -234,50 +338,84 @@ CreateDefaultProcessSecurityCommon(
     OwnerSid = OwnerOfToken->Owner;
     PrimaryGroupSid = PrimaryGroupOfToken->PrimaryGroup;
 
-    /* Set up the DACL size */
-    DaclSize = sizeof(ACL) +
-               sizeof(ACCESS_ALLOWED_ACE) + GetLengthSid(OwnerSid) +
-               sizeof(ACCESS_ALLOWED_ACE) + GetLengthSid(SystemSid);
+    Status = NtQueryInformationToken(TokenHandle,
+                                     TokenDefaultDacl,
+                                     NULL,
+                                     0,
+                                     &DefaultDaclSize);
+    if (Status != STATUS_BUFFER_TOO_SMALL)
+    {
+        ERR("CreateDefaultProcessSecurityCommon(): Failed to query default DACL size (Status 0x%08lx)\n", Status);
+        Success = FALSE;
+        goto Quit;
+    }
 
-    /* Allocate buffer for the DACL */
-    Dacl = RtlAllocateHeap(RtlGetProcessHeap(),
-                           HEAP_ZERO_MEMORY,
-                           DaclSize);
+    DefaultDaclOfToken = RtlAllocateHeap(RtlGetProcessHeap(),
+                                         HEAP_ZERO_MEMORY,
+                                         DefaultDaclSize);
+    if (DefaultDaclOfToken == NULL)
+    {
+        ERR("CreateDefaultProcessSecurityCommon(): Failed to allocate default DACL buffer\n");
+        Success = FALSE;
+        goto Quit;
+    }
+
+    Status = NtQueryInformationToken(TokenHandle,
+                                     TokenDefaultDacl,
+                                     DefaultDaclOfToken,
+                                     DefaultDaclSize,
+                                     &DefaultDaclSize);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("CreateDefaultProcessSecurityCommon(): Failed to query default DACL (Status 0x%08lx)\n", Status);
+        Success = FALSE;
+        goto Quit;
+    }
+
+    Dacl = DefaultDaclOfToken->DefaultDacl;
     if (Dacl == NULL)
     {
-        ERR("CreateDefaultProcessSecurityCommon(): Failed to allocate buffer for DACL\n");
-        Success = FALSE;
-        goto Quit;
-    }
+        DaclSize = sizeof(ACL) +
+                   sizeof(ACCESS_ALLOWED_ACE) + GetLengthSid(OwnerSid) +
+                   sizeof(ACCESS_ALLOWED_ACE) + GetLengthSid(SystemSid);
 
-    /* Initialize the DACL */
-    if (!InitializeAcl(Dacl, DaclSize, ACL_REVISION))
-    {
-        ERR("CreateDefaultProcessSecurityCommon(): Failed to initialize DACL (error %lu)\n", GetLastError());
-        Success = FALSE;
-        goto Quit;
-    }
+        AllocatedDacl = RtlAllocateHeap(RtlGetProcessHeap(),
+                                       HEAP_ZERO_MEMORY,
+                                       DaclSize);
+        if (AllocatedDacl == NULL)
+        {
+            ERR("CreateDefaultProcessSecurityCommon(): Failed to allocate buffer for DACL\n");
+            Success = FALSE;
+            goto Quit;
+        }
+        Dacl = AllocatedDacl;
 
-    /* Give full powers to the owner */
-    if (!AddAccessAllowedAce(Dacl,
-                             ACL_REVISION,
-                             GENERIC_ALL,
-                             OwnerSid))
-    {
-        ERR("CreateDefaultProcessSecurityCommon(): Failed to set up ACE for owner (error %lu)\n", GetLastError());
-        Success = FALSE;
-        goto Quit;
-    }
+        if (!InitializeAcl(Dacl, DaclSize, ACL_REVISION))
+        {
+            ERR("CreateDefaultProcessSecurityCommon(): Failed to initialize DACL (error %lu)\n", GetLastError());
+            Success = FALSE;
+            goto Quit;
+        }
 
-    /* Give full powers to SYSTEM as well */
-    if (!AddAccessAllowedAce(Dacl,
-                             ACL_REVISION,
-                             GENERIC_ALL,
-                             SystemSid))
-    {
-        ERR("CreateDefaultProcessSecurityCommon(): Failed to set up ACE for SYSTEM (error %lu)\n", GetLastError());
-        Success = FALSE;
-        goto Quit;
+        if (!AddAccessAllowedAce(Dacl,
+                                 ACL_REVISION,
+                                 GENERIC_ALL,
+                                 OwnerSid))
+        {
+            ERR("CreateDefaultProcessSecurityCommon(): Failed to set up ACE for owner (error %lu)\n", GetLastError());
+            Success = FALSE;
+            goto Quit;
+        }
+
+        if (!AddAccessAllowedAce(Dacl,
+                                 ACL_REVISION,
+                                 GENERIC_ALL,
+                                 SystemSid))
+        {
+            ERR("CreateDefaultProcessSecurityCommon(): Failed to set up ACE for SYSTEM (error %lu)\n", GetLastError());
+            Success = FALSE;
+            goto Quit;
+        }
     }
 
     /* Initialize the descriptor in absolute format */
@@ -358,11 +496,14 @@ Quit:
     if (PrimaryGroupOfToken != NULL)
         RtlFreeHeap(RtlGetProcessHeap(), 0, PrimaryGroupOfToken);
 
+    if (DefaultDaclOfToken != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, DefaultDaclOfToken);
+
     if (SystemSid != NULL)
         FreeSid(SystemSid);
 
-    if (Dacl != NULL)
-        RtlFreeHeap(RtlGetProcessHeap(), 0, Dacl);
+    if (AllocatedDacl != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, AllocatedDacl);
 
     return Success;
 }
@@ -638,6 +779,7 @@ static
 BOOL
 CreateProcessAsUserCommon(
     _In_opt_ HANDLE hToken,
+    _In_ BOOL TokenAssigned,
     _In_ DWORD dwCreationFlags,
     _In_opt_ LPSECURITY_ATTRIBUTES lpProcessAttributes,
     _In_opt_ LPSECURITY_ATTRIBUTES lpThreadAttributes,
@@ -646,8 +788,8 @@ CreateProcessAsUserCommon(
     NTSTATUS Status = STATUS_SUCCESS, StatusOnExit;
     BOOL Success;
     TOKEN_TYPE Type;
+    SECURITY_IMPERSONATION_LEVEL ImpersonationLevel;
     ULONG ReturnLength;
-    OBJECT_ATTRIBUTES ObjectAttributes;
     PSECURITY_DESCRIPTOR DefaultSd = NULL, ProcessSd, ThreadSd;
     HANDLE hTokenDup = NULL;
     HANDLE OriginalImpersonationToken = NULL;
@@ -655,9 +797,23 @@ CreateProcessAsUserCommon(
 
     if (hToken != NULL)
     {
+        Status = NtDuplicateObject(NtCurrentProcess(),
+                                   hToken,
+                                   NtCurrentProcess(),
+                                   &hTokenDup,
+                                   0,
+                                   0,
+                                   DUPLICATE_SAME_ACCESS);
+        if (!NT_SUCCESS(Status))
+        {
+            ERR("NtDuplicateObject() failed, Status 0x%08x\n", Status);
+            Success = FALSE;
+            goto Quit;
+        }
+
         /* Check whether the user-provided token is a primary token */
         // GetTokenInformation();
-        Status = NtQueryInformationToken(hToken,
+        Status = NtQueryInformationToken(hTokenDup,
                                          TokenType,
                                          &Type,
                                          sizeof(Type),
@@ -669,12 +825,20 @@ CreateProcessAsUserCommon(
             goto Quit;
         }
 
-        if (Type != TokenPrimary)
+        if (Type == TokenImpersonation)
         {
-            ERR("Wrong token type for token 0x%p, expected TokenPrimary, got %ld\n", hToken, Type);
-            Status = STATUS_BAD_TOKEN_TYPE;
-            Success = FALSE;
-            goto Quit;
+            Status = NtQueryInformationToken(hTokenDup,
+                                             TokenImpersonationLevel,
+                                             &ImpersonationLevel,
+                                             sizeof(ImpersonationLevel),
+                                             &ReturnLength);
+            if (NT_SUCCESS(Status) && ImpersonationLevel < SecurityImpersonation)
+                Status = STATUS_BAD_IMPERSONATION_LEVEL;
+            if (!NT_SUCCESS(Status))
+            {
+                Success = FALSE;
+                goto Quit;
+            }
         }
 
         /*
@@ -722,32 +886,9 @@ CreateProcessAsUserCommon(
          * Create a security descriptor that will be common for the
          * newly created process on behalf of the context user.
          */
-        if (!CreateDefaultProcessSecurityCommon(hToken, &DefaultSd))
+        if (!CreateDefaultProcessSecurityCommon(hTokenDup, &DefaultSd))
         {
             ERR("Failed to create common security descriptor for the token for new process\n");
-            Success = FALSE;
-            goto Quit;
-        }
-
-        /*
-         * Duplicate the token for this new process. This token
-         * object will get a default security descriptor that we
-         * have created ourselves in ADVAPI32.
-         */
-        InitializeObjectAttributes(&ObjectAttributes,
-                                   NULL,
-                                   0,
-                                   NULL,
-                                   DefaultSd);
-        Status = NtDuplicateToken(hToken,
-                                  0,
-                                  &ObjectAttributes,
-                                  FALSE,
-                                  TokenPrimary,
-                                  &hTokenDup);
-        if (!NT_SUCCESS(Status))
-        {
-            ERR("NtDuplicateToken() failed, Status 0x%08x\n", Status);
             Success = FALSE;
             goto Quit;
         }
@@ -758,56 +899,57 @@ CreateProcessAsUserCommon(
          * impersonating the security context of the
          * calling process (impersonate as self).
          */
-        Status = InsertTokenToProcessCommon(TRUE,
-                                            lpProcessInformation->hProcess,
-                                            lpProcessInformation->hThread,
-                                            hTokenDup);
-        if (!NT_SUCCESS(Status))
+        Status = STATUS_SUCCESS;
+        if (!TokenAssigned)
         {
-            /*
-             * OK, we failed. Our second (and last try) is to not
-             * impersonate as self but instead we will try by setting
-             * the original impersonation (thread) token and set the
-             * primary token to the process through this way. This is
-             * what we call -- the "rinse and repeat" approach.
-             */
-            Status = NtSetInformationThread(NtCurrentThread(),
-                                            ThreadImpersonationToken,
-                                            &OriginalImpersonationToken,
-                                            sizeof(OriginalImpersonationToken));
-            if (!NT_SUCCESS(Status))
-            {
-                ERR("Failed to restore impersonation token for setting process token, Status 0x%08lx\n", Status);
-                NtClose(hTokenDup);
-                Success = FALSE;
-                goto Quit;
-            }
-
-            /* Retry again */
-            Status = InsertTokenToProcessCommon(FALSE,
+            Status = InsertTokenToProcessCommon(TRUE,
                                                 lpProcessInformation->hProcess,
                                                 lpProcessInformation->hThread,
                                                 hTokenDup);
             if (!NT_SUCCESS(Status))
             {
-                /* Even the second try failed, bail out... */
-                ERR("Failed to insert the primary token into process, Status 0x%08lx\n", Status);
-                NtClose(hTokenDup);
-                Success = FALSE;
-                goto Quit;
-            }
+                /*
+                 * OK, we failed. Our second (and last try) is to not
+                 * impersonate as self but instead we will try by setting
+                 * the original impersonation (thread) token and set the
+                 * primary token to the process through this way. This is
+                 * what we call -- the "rinse and repeat" approach.
+                 */
+                Status = NtSetInformationThread(NtCurrentThread(),
+                                                ThreadImpersonationToken,
+                                                &OriginalImpersonationToken,
+                                                sizeof(OriginalImpersonationToken));
+                if (!NT_SUCCESS(Status))
+                {
+                    ERR("Failed to restore impersonation token for setting process token, Status 0x%08lx\n", Status);
+                    Success = FALSE;
+                    goto Quit;
+                }
 
-            /* All good, now stop impersonation */
-            Status = NtSetInformationThread(NtCurrentThread(),
-                                            ThreadImpersonationToken,
-                                            &NullToken,
-                                            sizeof(NullToken));
-            if (!NT_SUCCESS(Status))
-            {
-                ERR("Failed to unset impersonationg token after setting process token, Status 0x%08lx\n", Status);
-                NtClose(hTokenDup);
-                Success = FALSE;
-                goto Quit;
+                /* Retry again */
+                Status = InsertTokenToProcessCommon(FALSE,
+                                                    lpProcessInformation->hProcess,
+                                                    lpProcessInformation->hThread,
+                                                    hTokenDup);
+                if (!NT_SUCCESS(Status))
+                {
+                    /* Even the second try failed, bail out... */
+                    ERR("Failed to insert the primary token into process, Status 0x%08lx\n", Status);
+                    Success = FALSE;
+                    goto Quit;
+                }
+
+                /* All good, now stop impersonation */
+                Status = NtSetInformationThread(NtCurrentThread(),
+                                                ThreadImpersonationToken,
+                                                &NullToken,
+                                                sizeof(NullToken));
+                if (!NT_SUCCESS(Status))
+                {
+                    ERR("Failed to unset impersonationg token after setting process token, Status 0x%08lx\n", Status);
+                    Success = FALSE;
+                    goto Quit;
+                }
             }
         }
 
@@ -860,13 +1002,13 @@ CreateProcessAsUserCommon(
                                          ThreadSd))
         {
             ERR("Failed to set new security information for process and thread\n");
-            NtClose(hTokenDup);
             Success = FALSE;
             goto Quit;
         }
 
         /* Close the duplicated token */
         NtClose(hTokenDup);
+        hTokenDup = NULL;
         Success = TRUE;
     }
 
@@ -879,6 +1021,8 @@ CreateProcessAsUserCommon(
     Success = TRUE;
 
 Quit:
+    if (hTokenDup != NULL) NtClose(hTokenDup);
+
     /*
      * If we successfully opened the thread token before
      * and stopped the impersonation then we have to assign
@@ -953,6 +1097,37 @@ CreateProcessAsUserA(
         debugstr_a(lpCommandLine), lpProcessAttributes, lpThreadAttributes, bInheritHandles,
         dwCreationFlags, lpEnvironment, debugstr_a(lpCurrentDirectory), lpStartupInfo, lpProcessInformation);
 
+    if (hToken)
+    {
+        TOKEN_ASSIGNMENT_STATE State;
+        HANDLE NewToken = NULL;
+        DWORD LastError;
+        BOOL Created;
+
+        BeginTokenAssignment(&State);
+        Created = CreateProcessInternalA(hToken,
+                                         lpApplicationName,
+                                         lpCommandLine,
+                                         lpProcessAttributes,
+                                         lpThreadAttributes,
+                                         bInheritHandles,
+                                         dwCreationFlags | CREATE_SUSPENDED,
+                                         lpEnvironment,
+                                         lpCurrentDirectory,
+                                         lpStartupInfo,
+                                         lpProcessInformation,
+                                         &NewToken);
+        LastError = GetLastError();
+        EndTokenAssignment(&State);
+        if (NewToken) NtClose(NewToken);
+        if (!Created)
+        {
+            ERR("CreateProcessInternalA failed, last error: %d\n", LastError);
+            SetLastError(LastError);
+            return FALSE;
+        }
+    }
+    else
     /* Create the process with a suspended main thread */
     if (!CreateProcessA(lpApplicationName,
                         lpCommandLine,
@@ -971,6 +1146,7 @@ CreateProcessAsUserA(
 
     /* Call the helper function */
     return CreateProcessAsUserCommon(hToken,
+                                     hToken != NULL,
                                      dwCreationFlags,
                                      lpProcessAttributes,
                                      lpThreadAttributes,
@@ -1001,6 +1177,37 @@ CreateProcessAsUserW(
         debugstr_w(lpCommandLine), lpProcessAttributes, lpThreadAttributes, bInheritHandles,
         dwCreationFlags, lpEnvironment, debugstr_w(lpCurrentDirectory), lpStartupInfo, lpProcessInformation);
 
+    if (hToken)
+    {
+        TOKEN_ASSIGNMENT_STATE State;
+        HANDLE NewToken = NULL;
+        DWORD LastError;
+        BOOL Created;
+
+        BeginTokenAssignment(&State);
+        Created = CreateProcessInternalW(hToken,
+                                         lpApplicationName,
+                                         lpCommandLine,
+                                         lpProcessAttributes,
+                                         lpThreadAttributes,
+                                         bInheritHandles,
+                                         dwCreationFlags | CREATE_SUSPENDED,
+                                         lpEnvironment,
+                                         lpCurrentDirectory,
+                                         lpStartupInfo,
+                                         lpProcessInformation,
+                                         &NewToken);
+        LastError = GetLastError();
+        EndTokenAssignment(&State);
+        if (NewToken) NtClose(NewToken);
+        if (!Created)
+        {
+            ERR("CreateProcessInternalW failed, last error: %d\n", LastError);
+            SetLastError(LastError);
+            return FALSE;
+        }
+    }
+    else
     /* Create the process with a suspended main thread */
     if (!CreateProcessW(lpApplicationName,
                         lpCommandLine,
@@ -1019,6 +1226,7 @@ CreateProcessAsUserW(
 
     /* Call the helper function */
     return CreateProcessAsUserCommon(hToken,
+                                     hToken != NULL,
                                      dwCreationFlags,
                                      lpProcessAttributes,
                                      lpThreadAttributes,
@@ -1032,9 +1240,9 @@ CreateProcessAsUserW(
 BOOL
 WINAPI
 LogonUserA(
-    _In_ LPSTR lpszUsername,
-    _In_opt_ LPSTR lpszDomain,
-    _In_opt_ LPSTR lpszPassword,
+    _In_ LPCSTR lpszUsername,
+    _In_opt_ LPCSTR lpszDomain,
+    _In_opt_ LPCSTR lpszPassword,
     _In_ DWORD dwLogonType,
     _In_ DWORD dwLogonProvider,
     _Out_opt_ PHANDLE phToken)
@@ -1058,9 +1266,9 @@ LogonUserA(
 BOOL
 WINAPI
 LogonUserExA(
-    _In_ LPSTR lpszUsername,
-    _In_opt_ LPSTR lpszDomain,
-    _In_opt_ LPSTR lpszPassword,
+    _In_ LPCSTR lpszUsername,
+    _In_opt_ LPCSTR lpszDomain,
+    _In_opt_ LPCSTR lpszPassword,
     _In_ DWORD dwLogonType,
     _In_ DWORD dwLogonProvider,
     _Out_opt_ PHANDLE phToken,
@@ -1129,9 +1337,9 @@ UsernameDone:
 BOOL
 WINAPI
 LogonUserW(
-    _In_ LPWSTR lpszUsername,
-    _In_opt_ LPWSTR lpszDomain,
-    _In_opt_ LPWSTR lpszPassword,
+    _In_ LPCWSTR lpszUsername,
+    _In_opt_ LPCWSTR lpszDomain,
+    _In_opt_ LPCWSTR lpszPassword,
     _In_ DWORD dwLogonType,
     _In_ DWORD dwLogonProvider,
     _Out_opt_ PHANDLE phToken)
@@ -1155,9 +1363,9 @@ LogonUserW(
 BOOL
 WINAPI
 LogonUserExW(
-    _In_ LPWSTR lpszUsername,
-    _In_opt_ LPWSTR lpszDomain,
-    _In_opt_ LPWSTR lpszPassword,
+    _In_ LPCWSTR lpszUsername,
+    _In_opt_ LPCWSTR lpszDomain,
+    _In_opt_ LPCWSTR lpszPassword,
     _In_ DWORD dwLogonType,
     _In_ DWORD dwLogonProvider,
     _Out_opt_ PHANDLE phToken,
@@ -1179,6 +1387,7 @@ LogonUserExW(
     ULONG_PTR Ptr;
     TOKEN_SOURCE TokenSource;
     PTOKEN_GROUPS TokenGroups = NULL;
+    PSID_AND_ATTRIBUTES Groups;
     PMSV1_0_INTERACTIVE_PROFILE ProfileBuffer = NULL;
     ULONG ProfileBufferLength = 0;
     LUID Luid = {0, 0};
@@ -1338,12 +1547,13 @@ LogonUserExW(
     }
 
     TokenGroups->GroupCount = 2;
-    TokenGroups->Groups[0].Sid = LogonSid;
-    TokenGroups->Groups[0].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED |
-                                        SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_LOGON_ID;
-    TokenGroups->Groups[1].Sid = LocalSid;
-    TokenGroups->Groups[1].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED |
-                                        SE_GROUP_ENABLED_BY_DEFAULT;
+    Groups = TokenGroups->Groups;
+    Groups[0].Sid = LogonSid;
+    Groups[0].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED |
+                           SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_LOGON_ID;
+    Groups[1].Sid = LocalSid;
+    Groups[1].Attributes = SE_GROUP_MANDATORY | SE_GROUP_ENABLED |
+                           SE_GROUP_ENABLED_BY_DEFAULT;
 
     /* Set the token source */
     RtlCopyMemory(TokenSource.SourceName,

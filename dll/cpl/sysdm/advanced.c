@@ -12,10 +12,7 @@
 #define NTOS_MODE_USER
 #include <ndk/pstypes.h> /* For SharedUserData */
 
-static TCHAR BugLink[] = _T("http://jira.reactos.org/");
 static TCHAR ReportAsWorkstationKey[] = _T("SYSTEM\\CurrentControlSet\\Control\\ReactOS\\Settings\\Version");
-
-
 static VOID
 OnOK(HWND hwndDlg)
 {
@@ -162,15 +159,6 @@ AdvancedPageProc(HWND hwndDlg,
                               MAKEINTRESOURCE(IDD_ENVIRONMENT_VARIABLES),
                               hwndDlg,
                               EnvironmentDlgProc);
-                    break;
-
-                case IDC_ERRORREPORT:
-                    ShellExecute(NULL,
-                                 _T("open"),
-                                 BugLink,
-                                 NULL,
-                                 NULL,
-                                 SW_SHOWNORMAL);
                     break;
             }
         }

@@ -35,7 +35,6 @@ USBSTOR_GetEndpointStatus(
     UsbBuildGetStatusRequest(Urb, URB_FUNCTION_GET_STATUS_FROM_ENDPOINT, bEndpointAddress & 0x0F, Value, NULL, NULL);
 
     // send the request
-    DPRINT1("Sending Request DeviceObject %p, Urb %p\n", DeviceObject, Urb);
     Status = USBSTOR_SyncUrbRequest(DeviceObject, Urb);
 
     FreeItem(Urb);
@@ -63,7 +62,6 @@ USBSTOR_ResetPipeWithHandle(
     Urb->UrbPipeRequest.PipeHandle = PipeHandle;
 
     // send the request
-    DPRINT1("Sending Request DeviceObject %p, Urb %p\n", DeviceObject, Urb);
     Status = USBSTOR_SyncUrbRequest(DeviceObject, Urb);
 
     FreeItem(Urb);
@@ -76,13 +74,38 @@ USBSTOR_ResetPipeWorkItemRoutine(
     IN PDEVICE_OBJECT FdoDevice,
     IN PVOID Ctx)
 {
-    NTSTATUS Status;
     PFDO_DEVICE_EXTENSION FDODeviceExtension = (PFDO_DEVICE_EXTENSION)Ctx;
     PIRP_CONTEXT Context = &FDODeviceExtension->CurrentIrpContext;
+    NTSTATUS Status;
 
     // clear stall on the corresponding pipe
     Status = USBSTOR_ResetPipeWithHandle(FDODeviceExtension->LowerDeviceObject, Context->Urb.UrbBulkOrInterruptTransfer.PipeHandle);
-    DPRINT1("USBSTOR_ResetPipeWithHandle Status %x\n", Status);
+    if (!NT_SUCCESS(Status))
+    {
+        PIRP Irp = Context->Irp;
+        PIO_STACK_LOCATION IoStack = IoGetCurrentIrpStackLocation(Irp);
+        PSCSI_REQUEST_BLOCK Request = FDODeviceExtension->ActiveSrb;
+
+        /* Do not issue a CSW while the pipe is still halted or its host and
+         * device protocol state differ. Restore the original SRB if this
+         * was auto-sense, then restart through full BOT reset recovery. */
+        IoStack->Parameters.Scsi.Srb = Request;
+        Irp->IoStatus.Information = 0;
+        if (USBSTOR_IsRequestTimedOut(FDODeviceExtension, Irp))
+        {
+            Request->SrbStatus = SRB_STATUS_TIMEOUT;
+            Irp->IoStatus.Status = STATUS_IO_TIMEOUT;
+        }
+        else
+        {
+            Request->SrbStatus = SRB_STATUS_BUS_RESET;
+            Irp->IoStatus.Status = STATUS_IO_DEVICE_ERROR;
+        }
+
+        if (USBSTOR_FinishRequest(FDODeviceExtension, Irp, TRUE))
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return;
+    }
 
     // now resend the csw as the stall got cleared
     USBSTOR_SendCSWRequest(FDODeviceExtension, Context->Irp);
@@ -97,11 +120,16 @@ USBSTOR_ResetDeviceWorkItemRoutine(
     PFDO_DEVICE_EXTENSION FDODeviceExtension;
     UINT32 ix;
     NTSTATUS Status;
-    KIRQL OldIrql;
+    BOOLEAN SingleInterface;
 
     DPRINT("USBSTOR_ResetDeviceWorkItemRoutine\n");
 
     FDODeviceExtension = FdoDevice->DeviceExtension;
+    SingleInterface = (FDODeviceExtension->ConfigurationDescriptor &&
+                       FDODeviceExtension->ConfigurationDescriptor->bNumInterfaces == 1);
+
+    if (SingleInterface && InterlockedExchange(&FDODeviceExtension->BotResetPending, 0))
+        goto PortReset;
 
     for (ix = 0; ix < 3; ++ix)
     {
@@ -123,11 +151,27 @@ USBSTOR_ResetDeviceWorkItemRoutine(
         }
     }
 
-    KeAcquireSpinLock(&FDODeviceExtension->CommonLock, &OldIrql);
-    FDODeviceExtension->Flags &= ~USBSTOR_FDO_FLAGS_DEVICE_RESETTING;
-    KeReleaseSpinLock(&FDODeviceExtension->CommonLock, OldIrql);
+    if (NT_SUCCESS(Status) || !SingleInterface)
+    {
+        if (NT_SUCCESS(Status) && SingleInterface)
+            InterlockedExchange(&FDODeviceExtension->BotResetPending, 1);
+        goto Exit;
+    }
 
-    USBSTOR_QueueNextRequest(FdoDevice);
+PortReset:
+    /* A device may acknowledge a BOT reset without recovering an aborted
+     * data phase. Reset the port while the request queue is frozen; the hub
+     * restores the configuration and retains our pipe handles. Limit this
+     * to devices owned entirely by USBSTOR so other interfaces keep running. */
+    Status = USBSTOR_SyncInternalRequest(FDODeviceExtension->LowerDeviceObject,
+                                        IOCTL_INTERNAL_USB_RESET_PORT,
+                                        NULL);
+    /* A failed port reset may leave the device unaddressed. Preserve
+     * the failure so the queue retries full recovery on the next request;
+     * a class request cannot use the old address or configuration. */
+
+Exit:
+    USBSTOR_QueueEndReset(FdoDevice, Status);
 }
 
 VOID
@@ -148,13 +192,7 @@ NTAPI
 USBSTOR_QueueResetDevice(
     IN PFDO_DEVICE_EXTENSION FDODeviceExtension)
 {
-    KIRQL OldIrql;
-
     DPRINT("USBSTOR_QueueResetDevice\n");
-
-    KeAcquireSpinLock(&FDODeviceExtension->CommonLock, &OldIrql);
-    FDODeviceExtension->Flags |= USBSTOR_FDO_FLAGS_DEVICE_RESETTING;
-    KeReleaseSpinLock(&FDODeviceExtension->CommonLock, OldIrql);
 
     IoQueueWorkItem(FDODeviceExtension->ResetDeviceWorkItem,
                     USBSTOR_ResetDeviceWorkItemRoutine,
@@ -162,100 +200,198 @@ USBSTOR_QueueResetDevice(
                     NULL);
 }
 
+static
+VOID
+USBSTOR_FinalizeRequest(
+    IN PFDO_DEVICE_EXTENSION FDODeviceExtension,
+    IN PIRP Irp,
+    IN BOOLEAN ResetDevice,
+    IN BOOLEAN CompleteIrp)
+{
+    PDEVICE_OBJECT FdoDevice = FDODeviceExtension->FunctionalDeviceObject;
+
+    USBSTOR_QueueTerminateRequest(FdoDevice, Irp, ResetDevice);
+
+    if (ResetDevice)
+        USBSTOR_QueueResetDevice(FDODeviceExtension);
+    else
+        USBSTOR_QueueNextRequest(FdoDevice);
+
+    if (CompleteIrp)
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
+static
 VOID
 NTAPI
-USBSTOR_TimerWorkerRoutine(
-    IN PVOID Context)
+USBSTOR_RequestTimeoutDpc(
+    IN PKDPC Dpc,
+    IN PVOID DeferredContext,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2)
 {
-    PFDO_DEVICE_EXTENSION FDODeviceExtension;
-    NTSTATUS Status;
-    PERRORHANDLER_WORKITEM_DATA WorkItemData = (PERRORHANDLER_WORKITEM_DATA)Context;
+    PFDO_DEVICE_EXTENSION FDODeviceExtension = DeferredContext;
+    PIRP Irp;
+    PIRP DeferredIrp = NULL;
+    BOOLEAN DeferredReset = FALSE;
+    BOOLEAN Cancelled;
+    LARGE_INTEGER RetryTime;
+    KIRQL OldIrql;
 
-    FDODeviceExtension = (PFDO_DEVICE_EXTENSION)WorkItemData->DeviceObject->DeviceExtension;
-    ASSERT(FDODeviceExtension->Common.IsFDO);
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
 
-    // first perform a mass storage reset step 1 in 5.3.4 USB Mass Storage Bulk Only Specification
-    Status = USBSTOR_ResetDevice(FDODeviceExtension->LowerDeviceObject, FDODeviceExtension);
-    if (NT_SUCCESS(Status))
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+
+    KeAcquireSpinLock(&FDODeviceExtension->RequestTimerLock, &OldIrql);
+    Irp = FDODeviceExtension->RequestTimerIrp;
+    if (!Irp)
     {
-        // step 2 reset bulk in pipe section 5.3.4
-        Status = USBSTOR_ResetPipeWithHandle(FDODeviceExtension->LowerDeviceObject, FDODeviceExtension->InterfaceInformation->Pipes[FDODeviceExtension->BulkInPipeIndex].PipeHandle);
-        if (NT_SUCCESS(Status))
-        {
-            // finally reset bulk out pipe
-            Status = USBSTOR_ResetPipeWithHandle(FDODeviceExtension->LowerDeviceObject, FDODeviceExtension->InterfaceInformation->Pipes[FDODeviceExtension->BulkOutPipeIndex].PipeHandle);
-        }
+        KeReleaseSpinLock(&FDODeviceExtension->RequestTimerLock, OldIrql);
+        return;
     }
-    DPRINT1("Status %x\n", Status);
 
-    // clear timer srb
-    FDODeviceExtension->LastTimerActiveSrb = NULL;
+    FDODeviceExtension->RequestTimerDpcRunning = TRUE;
+    if (!FDODeviceExtension->RequestTimedOut)
+    {
+        FDODeviceExtension->RequestTimedOut = TRUE;
+        DPRINT1("USBSTOR: request %p timed out after %lu seconds\n",
+                Irp,
+                FDODeviceExtension->RequestTimeoutValue);
+    }
+    KeReleaseSpinLock(&FDODeviceExtension->RequestTimerLock, OldIrql);
 
-    // re-schedule request
-    //USBSTOR_HandleExecuteSCSI(WorkItemData->Context->PDODeviceExtension->Self, WorkItemData->Context->Irp, Context->RetryCount + 1);
+    /* The lower USB stack owns the current cancel routine.  Cancellation
+     * retires DMA before the normal BOT error path resets the device. */
+    Cancelled = IoCancelIrp(Irp);
 
-    // do not retry for the same packet again
-    FDODeviceExtension->TimerWorkQueueEnabled = FALSE;
+    KeAcquireSpinLock(&FDODeviceExtension->RequestTimerLock, &OldIrql);
+    FDODeviceExtension->RequestTimerDpcRunning = FALSE;
 
-    ExFreePoolWithTag(WorkItemData, USB_STOR_TAG);
+    if (FDODeviceExtension->DeferredCompletionIrp)
+    {
+        DeferredIrp = FDODeviceExtension->DeferredCompletionIrp;
+        DeferredReset = FDODeviceExtension->DeferredCompletionReset;
+        FDODeviceExtension->DeferredCompletionIrp = NULL;
+        FDODeviceExtension->RequestTimedOut = FALSE;
+        FDODeviceExtension->RequestTimeoutValue = 0;
+    }
+    else if (!Cancelled && FDODeviceExtension->RequestTimerIrp == Irp)
+    {
+        /* A completion routine may be between BOT phases with no lower cancel
+         * routine installed.  Retry after it either submits the next phase or
+         * finishes the request. */
+        RetryTime.QuadPart = -10LL * 10000;
+        KeSetTimer(&FDODeviceExtension->RequestTimer,
+                   RetryTime,
+                   &FDODeviceExtension->RequestTimerDpc);
+    }
+
+    KeReleaseSpinLock(&FDODeviceExtension->RequestTimerLock, OldIrql);
+
+    if (DeferredIrp)
+        USBSTOR_FinalizeRequest(FDODeviceExtension, DeferredIrp, DeferredReset, TRUE);
 }
 
 VOID
-NTAPI
-USBSTOR_TimerRoutine(
-    PDEVICE_OBJECT DeviceObject,
-     PVOID Context)
+USBSTOR_InitializeRequestTimer(
+    IN PFDO_DEVICE_EXTENSION FDODeviceExtension)
 {
-    PFDO_DEVICE_EXTENSION FDODeviceExtension;
-    BOOLEAN ResetDevice = FALSE;
-    PERRORHANDLER_WORKITEM_DATA WorkItemData;
+    KeInitializeSpinLock(&FDODeviceExtension->RequestTimerLock);
+    KeInitializeTimer(&FDODeviceExtension->RequestTimer);
+    KeInitializeDpc(&FDODeviceExtension->RequestTimerDpc,
+                    USBSTOR_RequestTimeoutDpc,
+                    FDODeviceExtension);
+}
 
-    FDODeviceExtension = (PFDO_DEVICE_EXTENSION)Context;
-    DPRINT1("[USBSTOR] TimerRoutine entered\n");
-    // DPRINT1("[USBSTOR] ActiveSrb %p ResetInProgress %x LastTimerActiveSrb %p\n", FDODeviceExtension->ActiveSrb, FDODeviceExtension->ResetInProgress, FDODeviceExtension->LastTimerActiveSrb);
+VOID
+USBSTOR_StartRequestTimer(
+    IN PFDO_DEVICE_EXTENSION FDODeviceExtension,
+    IN PIRP Irp,
+    IN ULONG TimeOutValue)
+{
+    LARGE_INTEGER DueTime;
+    KIRQL OldIrql;
 
-    KeAcquireSpinLockAtDpcLevel(&FDODeviceExtension->IrpListLock);
+    KeAcquireSpinLock(&FDODeviceExtension->RequestTimerLock, &OldIrql);
+    ASSERT(FDODeviceExtension->RequestTimerIrp == NULL);
+    ASSERT(FDODeviceExtension->DeferredCompletionIrp == NULL);
 
-    // is there an active srb and no global reset is in progress
-    if (FDODeviceExtension->ActiveSrb && /* FDODeviceExtension->ResetInProgress == FALSE && */ FDODeviceExtension->TimerWorkQueueEnabled)
+    if (FDODeviceExtension->RequestTimerIrp != NULL)
     {
-        if (FDODeviceExtension->LastTimerActiveSrb != NULL && FDODeviceExtension->LastTimerActiveSrb == FDODeviceExtension->ActiveSrb)
+        KeReleaseSpinLock(&FDODeviceExtension->RequestTimerLock, OldIrql);
+        return;
+    }
+
+    FDODeviceExtension->RequestTimerIrp = Irp;
+    FDODeviceExtension->RequestTimedOut = FALSE;
+    FDODeviceExtension->RequestTimeoutValue = TimeOutValue;
+
+    if (TimeOutValue != 0)
+    {
+        DueTime.QuadPart = -(LONGLONG)TimeOutValue * 1000 * 1000 * 10;
+        KeSetCoalescableTimer(&FDODeviceExtension->RequestTimer,
+                             DueTime,
+                             0,
+                             500,
+                             &FDODeviceExtension->RequestTimerDpc);
+    }
+
+    KeReleaseSpinLock(&FDODeviceExtension->RequestTimerLock, OldIrql);
+}
+
+BOOLEAN
+USBSTOR_IsRequestTimedOut(
+    IN PFDO_DEVICE_EXTENSION FDODeviceExtension,
+    IN PIRP Irp)
+{
+    BOOLEAN TimedOut;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&FDODeviceExtension->RequestTimerLock, &OldIrql);
+    TimedOut = (FDODeviceExtension->RequestTimerIrp == Irp &&
+                FDODeviceExtension->RequestTimedOut);
+    KeReleaseSpinLock(&FDODeviceExtension->RequestTimerLock, OldIrql);
+
+    return TimedOut;
+}
+
+BOOLEAN
+USBSTOR_FinishRequest(
+    IN PFDO_DEVICE_EXTENSION FDODeviceExtension,
+    IN PIRP Irp,
+    IN BOOLEAN ResetDevice)
+{
+    BOOLEAN Deferred = FALSE;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&FDODeviceExtension->RequestTimerLock, &OldIrql);
+
+    if (FDODeviceExtension->RequestTimerIrp == Irp)
+    {
+        KeCancelTimer(&FDODeviceExtension->RequestTimer);
+        KeRemoveQueueDpc(&FDODeviceExtension->RequestTimerDpc);
+        FDODeviceExtension->RequestTimerIrp = NULL;
+
+        if (FDODeviceExtension->RequestTimerDpcRunning)
         {
-            // check if empty
-            DPRINT1("[USBSTOR] ActiveSrb %p hang detected\n", FDODeviceExtension->ActiveSrb);
-            ResetDevice = TRUE;
+            ASSERT(FDODeviceExtension->DeferredCompletionIrp == NULL);
+            FDODeviceExtension->DeferredCompletionIrp = Irp;
+            FDODeviceExtension->DeferredCompletionReset = ResetDevice;
+            Deferred = TRUE;
         }
         else
         {
-            // update pointer
-            FDODeviceExtension->LastTimerActiveSrb = FDODeviceExtension->ActiveSrb;
+            FDODeviceExtension->RequestTimedOut = FALSE;
+            FDODeviceExtension->RequestTimeoutValue = 0;
         }
     }
-    else
-    {
-        // reset srb
-        FDODeviceExtension->LastTimerActiveSrb = NULL;
-    }
 
-    KeReleaseSpinLockFromDpcLevel(&FDODeviceExtension->IrpListLock);
+    KeReleaseSpinLock(&FDODeviceExtension->RequestTimerLock, OldIrql);
 
+    if (!Deferred)
+        USBSTOR_FinalizeRequest(FDODeviceExtension, Irp, ResetDevice, FALSE);
 
-    if (ResetDevice && FDODeviceExtension->TimerWorkQueueEnabled && FDODeviceExtension->SrbErrorHandlingActive == FALSE)
-    {
-        WorkItemData = ExAllocatePoolWithTag(NonPagedPool,
-                                             sizeof(ERRORHANDLER_WORKITEM_DATA),
-                                             USB_STOR_TAG);
-        if (WorkItemData)
-        {
-           // Initialize and queue the work item to handle the error
-           ExInitializeWorkItem(&WorkItemData->WorkQueueItem,
-                                 USBSTOR_TimerWorkerRoutine,
-                                 WorkItemData);
-
-           WorkItemData->DeviceObject = FDODeviceExtension->FunctionalDeviceObject;
-
-           DPRINT1("[USBSTOR] Queing Timer WorkItem\n");
-           ExQueueWorkItem(&WorkItemData->WorkQueueItem, DelayedWorkQueue);
-        }
-     }
+    return !Deferred;
 }

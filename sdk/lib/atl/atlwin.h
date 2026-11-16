@@ -225,6 +225,92 @@ struct thunkCode
 };
 #pragma pack(pop)
 
+#elif defined(_M_ARM64) || defined(_ARM64_) || defined(__aarch64__)
+
+#pragma pack(push,4)
+struct thunkCode
+{
+    DWORD m_ldr_x0;
+    DWORD m_ldr_x16;
+    DWORD m_br_x16;
+    DWORD m_pad;
+    ULONG64 m_this;
+    ULONG64 m_proc;
+
+    void
+    Init(WNDPROC proc, void *pThis)
+    {
+        m_ldr_x0 = 0x58000080;
+        m_ldr_x16 = 0x580000B0;
+        m_br_x16 = 0xD61F0200;
+        m_pad = 0xD503201F;
+        m_this = (ULONG64)pThis;
+        m_proc = (ULONG64)proc;
+        FlushInstructionCache(GetCurrentProcess(), this, sizeof(thunkCode));
+    }
+};
+#pragma pack(pop)
+
+#elif defined(_M_RISCV64)
+
+#pragma pack(push,4)
+struct thunkCode
+{
+    DWORD m_auipc_t0;
+    DWORD m_ld_a0;
+    DWORD m_ld_t1;
+    DWORD m_jr_t1;
+    ULONG64 m_this;
+    ULONG64 m_proc;
+
+    void
+    Init(WNDPROC proc, void *pThis)
+    {
+        m_auipc_t0 = 0x00000297; /* auipc t0, 0 */
+        m_ld_a0 = 0x0102B503;    /* ld a0, 16(t0) */
+        m_ld_t1 = 0x0182B303;    /* ld t1, 24(t0) */
+        m_jr_t1 = 0x00030067;    /* jalr zero, 0(t1) */
+        m_this = (ULONG64)pThis;
+        m_proc = (ULONG64)proc;
+        FlushInstructionCache(GetCurrentProcess(), this, sizeof(thunkCode));
+    }
+};
+static_assert(sizeof(thunkCode) == 32, "RISC-V ATL thunk layout changed");
+#pragma pack(pop)
+
+#elif defined(_M_PPC)
+
+/* A Windows NT PowerPC WNDPROC is a {code, TOC} function descriptor. The
+ * thunk is its own descriptor: its TOC word is the thunk address, so the
+ * callee sees the thunk in r2 and loads its data from there. */
+#pragma pack(push,4)
+struct thunkCode
+{
+    DWORD m_entry;      /* descriptor: code address (m_code) */
+    DWORD m_toc;        /* descriptor: TOC = this thunk */
+    DWORD m_code[6];
+    DWORD m_this;
+    DWORD m_proc;       /* target WNDPROC descriptor */
+
+    void
+    Init(WNDPROC proc, void *pThis)
+    {
+        m_entry = PtrToUlong(&m_code[0]);
+        m_toc = PtrToUlong(this);
+        m_code[0] = 0x80620020; /* lwz   r3, 32(r2)   (m_this) */
+        m_code[1] = 0x81620024; /* lwz   r11, 36(r2)  (m_proc) */
+        m_code[2] = 0x800B0000; /* lwz   r0, 0(r11) */
+        m_code[3] = 0x804B0004; /* lwz   r2, 4(r11) */
+        m_code[4] = 0x7C0903A6; /* mtctr r0 */
+        m_code[5] = 0x4E800420; /* bctr */
+        m_this = PtrToUlong(pThis);
+        m_proc = PtrToUlong(proc);
+        FlushInstructionCache(GetCurrentProcess(), this, sizeof(thunkCode));
+    }
+};
+static_assert(sizeof(thunkCode) == 40, "PowerPC ATL thunk layout changed");
+#pragma pack(pop)
+
 #else
 #error ARCH not supported
 #endif
@@ -1897,7 +1983,7 @@ typedef CContainedWindowT<CWindow> CContainedWindow;
 
 #define BEGIN_MSG_MAP(theClass)     \
 public:                             \
-    BOOL ProcessWindowMessage(HWND GCCU(hWnd), UINT GCCU(uMsg), WPARAM GCCU(wParam), LPARAM GCCU(lParam), LRESULT &GCCU(lResult), DWORD dwMsgMapID = 0) \
+    BOOL ProcessWindowMessage(HWND GCCU(hWnd), UINT GCCU(uMsg), WPARAM GCCU(wParam), LPARAM GCCU(lParam), LRESULT &GCCU(lResult), DWORD dwMsgMapID = 0) override \
     {                               \
         BOOL GCCU(bHandled) = TRUE; \
         Unused(hWnd);               \

@@ -1,21 +1,21 @@
-
-remove_definitions(-D_WIN32_WINNT=0x502)
-add_definitions(-D_WIN32_WINNT=0x600)
-
 spec2def(msctf.dll msctf.spec ADD_IMPORTLIB)
 
 list(APPEND SOURCE
     precomp.h
     categorymgr.cpp
     compartmentmgr.cpp
+    composition.cpp
     context.cpp
     displayattributemgr.cpp
     documentmgr.cpp
     inputprocessor.cpp
+    langbaritemmgr.cpp
     langbarmgr.cpp
     mlng.cpp
     msctf.cpp
+    property.cpp
     range.cpp
+    textstore.cpp
     threadmgr.cpp
     utils.cpp
     ${CMAKE_CURRENT_BINARY_DIR}/msctf_stubs.c)

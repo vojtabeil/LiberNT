@@ -894,6 +894,9 @@ static inline IEnumSTATSTGImpl *impl_from_IEnumSTATSTG(IEnumSTATSTG *iface)
 
 static void IEnumSTATSTGImpl_Destroy(IEnumSTATSTGImpl* This)
 {
+#ifdef __REACTOS__
+  InterlockedDecrement(&This->parentStorage->enumRef);
+#endif
   IStorage_Release(&This->parentStorage->IStorage_iface);
   HeapFree(GetProcessHeap(), 0, This);
 }
@@ -1202,6 +1205,9 @@ static IEnumSTATSTGImpl* IEnumSTATSTGImpl_Construct(
      */
     newEnumeration->parentStorage = parentStorage;
     IStorage_AddRef(&newEnumeration->parentStorage->IStorage_iface);
+#ifdef __REACTOS__
+    InterlockedIncrement(&newEnumeration->parentStorage->enumRef);
+#endif
 
     newEnumeration->storageDirEntry = storageDirEntry;
   }
@@ -1282,7 +1288,11 @@ static ULONG WINAPI StorageBaseImpl_AddRef(
 
   TRACE("%p, refcount %lu.\n", iface, ref);
 
+#ifdef __REACTOS__
+  return ref - This->enumRef;
+#else
   return ref;
+#endif
 }
 
 /************************************************************************
@@ -1310,9 +1320,16 @@ static ULONG WINAPI StorageBaseImpl_Release(
      * using virtual functions to implement the destructor.
      */
     StorageBaseImpl_Destroy(This);
+#ifdef __REACTOS__
+    return 0;
+#endif
   }
 
+#ifdef __REACTOS__
+  return ref - This->enumRef;
+#else
   return ref;
+#endif
 }
 
 static HRESULT StorageBaseImpl_CopyStorageEntryTo(StorageBaseImpl *This,
@@ -1815,7 +1832,9 @@ static HRESULT WINAPI StorageBaseImpl_Stat(
       grfStatFlag);
 
     pstatstg->grfMode = This->openFlags;
+#ifndef __REACTOS__
     pstatstg->grfStateBits = This->stateBits;
+#endif
   }
 
 end:
@@ -2363,16 +2382,73 @@ static HRESULT WINAPI StorageBaseImpl_CopyTo(
 /*************************************************************************
  * MoveElementTo (IStorage)
  */
-static HRESULT WINAPI StorageBaseImpl_MoveElementTo(
-  IStorage*     iface,
-  const OLECHAR *pwcsName,   /* [string][in] */
-  IStorage      *pstgDest,   /* [unique][in] */
-  const OLECHAR *pwcsNewName,/* [string][in] */
-  DWORD           grfFlags)    /* [in] */
+static HRESULT WINAPI StorageBaseImpl_MoveElementTo(IStorage *iface,
+        const OLECHAR *name, IStorage *dest, const OLECHAR *new_name, DWORD mode)
 {
-  FIXME("%p, %s, %p, %s, %#lx: stub\n", iface, debugstr_w(pwcsName), pstgDest,
-      debugstr_w(pwcsNewName), grfFlags);
-  return E_NOTIMPL;
+    IStream *src, *dst;
+    HRESULT hr;
+    DWORD create_mode;
+
+    TRACE("%p, %s, %p, %s, %#lx\n", iface, debugstr_w(name), dest, debugstr_w(new_name), mode);
+
+    if (mode != STGMOVE_COPY && mode != STGMOVE_MOVE)
+        return STG_E_INVALIDFLAG;
+
+    if (!name || !new_name)
+        return STG_E_INVALIDNAME;
+
+    if (!dest)
+        return STG_E_INVALIDPOINTER;
+
+    if (iface == dest) /* FIXME */
+        return STG_E_ACCESSDENIED;
+
+    create_mode = STGM_WRITE | STGM_SHARE_EXCLUSIVE;
+    create_mode |= (mode == STGMOVE_MOVE) ? STGM_FAILIFTHERE : STGM_CREATE;
+
+    hr = IStorage_OpenStream(iface, name, NULL, STGM_READ | STGM_SHARE_EXCLUSIVE, 0, &src);
+    if (hr == S_OK)
+    {
+        STATSTG stat;
+
+        hr = IStream_Stat(src, &stat, STATFLAG_NONAME);
+        if (hr != S_OK)
+        {
+            IStream_Release(src);
+            return hr;
+        }
+
+        hr = IStorage_CreateStream(dest, new_name, create_mode, 0, 0, &dst);
+        if (hr == S_OK)
+        {
+            hr = IStream_CopyTo(src, dst, stat.cbSize, NULL, NULL);
+            IStream_Release(dst);
+        }
+
+        IStream_Release(src);
+    }
+    else if (hr == STG_E_FILENOTFOUND)
+    {
+        IStorage *src_stg, *dst_stg;
+
+        hr = IStorage_OpenStorage(iface, name, NULL, STGM_READ | STGM_SHARE_EXCLUSIVE, NULL, 0, &src_stg);
+        if (hr == S_OK)
+        {
+            hr = IStorage_CreateStorage(dest, new_name, create_mode, 0, 0, &dst_stg);
+            if (hr == S_OK)
+            {
+                hr = IStorage_CopyTo(src_stg, 0, NULL, NULL, dst_stg);
+                IStorage_Release(dst_stg);
+            }
+
+            IStorage_Release(src_stg);
+        }
+    }
+
+    if (hr == S_OK && mode == STGMOVE_MOVE)
+        hr = IStorage_DestroyElement(iface, name);
+
+    return hr;
 }
 
 /*************************************************************************
@@ -2687,12 +2763,26 @@ static HRESULT WINAPI StorageBaseImpl_SetStateBits(
   DWORD         grfMask)     /* [in] */
 {
   StorageBaseImpl *This = impl_from_IStorage(iface);
+#ifdef __REACTOS__
+  DirEntry data;
+  HRESULT hr;
+#endif
 
   if (This->reverted)
     return STG_E_REVERTED;
 
+#ifdef __REACTOS__
+  hr = StorageBaseImpl_ReadDirEntry(This, This->storageDirEntry, &data);
+  if (SUCCEEDED(hr))
+  {
+    data.stateBits = (data.stateBits & ~grfMask) | (grfStateBits & grfMask);
+    hr = StorageBaseImpl_WriteDirEntry(This, This->storageDirEntry, &data);
+  }
+  return hr;
+#else
   This->stateBits = (This->stateBits & ~grfMask) | (grfStateBits & grfMask);
   return S_OK;
+#endif
 }
 
 /******************************************************************************
@@ -2895,7 +2985,7 @@ static HRESULT StorageImpl_LoadFileHeader(
   offset.LowPart = 0;
   hr = StorageImpl_ReadAt(This, offset, headerBigBlock, HEADER_SIZE, &bytes_read);
   if (SUCCEEDED(hr) && bytes_read != HEADER_SIZE)
-    hr = STG_E_FILENOTFOUND;
+    hr = STG_E_FILEALREADYEXISTS;
 
   /*
    * Extract the information from the header.
@@ -3235,6 +3325,13 @@ static void UpdateRawDirEntry(BYTE *buffer, const DirEntry *newData)
       OFFSET_PS_GUID,
       &newData->clsid);
 
+#ifdef __REACTOS__
+  StorageUtl_WriteDWord(
+    buffer,
+      OFFSET_PS_STATEBITS,
+      newData->stateBits);
+#endif
+
   StorageUtl_WriteDWord(
     buffer,
       OFFSET_PS_CTIMELOW,
@@ -3433,6 +3530,13 @@ static HRESULT StorageImpl_ReadDirEntry(
       currentEntry,
       OFFSET_PS_GUID,
       &buffer->clsid);
+
+#ifdef __REACTOS__
+    StorageUtl_ReadDWord(
+      currentEntry,
+      OFFSET_PS_STATEBITS,
+      &buffer->stateBits);
+#endif
 
     StorageUtl_ReadDWord(
       currentEntry,
@@ -5835,7 +5939,11 @@ static void TransactedSnapshotImpl_DestroyTemporaryCopy(
 }
 
 /* Make a copy of our edited tree that we can use in the parent. */
+#ifdef __REACTOS__
+static HRESULT TransactedSnapshotImpl_CopyTree(TransactedSnapshotImpl* This, BOOL overwrite)
+#else
 static HRESULT TransactedSnapshotImpl_CopyTree(TransactedSnapshotImpl* This)
+#endif
 {
   DirRef cursor;
   TransactedDirEntry *entry;
@@ -5863,6 +5971,48 @@ static HRESULT TransactedSnapshotImpl_CopyTree(TransactedSnapshotImpl* This)
          !TransactedSnapshotImpl_MadeCopy(This, entry->data.rightChild) &&
          !TransactedSnapshotImpl_MadeCopy(This, entry->data.dirRootEntry)))
       entry->newTransactedParentEntry = entry->transactedParentEntry;
+#ifdef __REACTOS__
+    else if (overwrite && entry->transactedParentEntry != DIRENTRY_NULL)
+    {
+      DirEntry newData;
+      ULARGE_INTEGER size;
+      ULONG startingBlock;
+
+      entry->newTransactedParentEntry = entry->transactedParentEntry;
+
+      hr = StorageBaseImpl_ReadDirEntry(This->transactedParent,
+        entry->transactedParentEntry, &newData);
+
+      if (SUCCEEDED(hr))
+      {
+        size = newData.size;
+        startingBlock = newData.startingBlock;
+
+        memcpy(&newData, &entry->data, sizeof(DirEntry));
+
+        newData.size = size;
+        newData.startingBlock = startingBlock;
+
+        if (newData.leftChild != DIRENTRY_NULL)
+          newData.leftChild = This->entries[newData.leftChild].newTransactedParentEntry;
+
+        if (newData.rightChild != DIRENTRY_NULL)
+          newData.rightChild = This->entries[newData.rightChild].newTransactedParentEntry;
+
+        if (newData.dirRootEntry != DIRENTRY_NULL)
+          newData.dirRootEntry = This->entries[newData.dirRootEntry].newTransactedParentEntry;
+
+        hr = StorageBaseImpl_WriteDirEntry(This->transactedParent,
+          entry->transactedParentEntry, &newData);
+      }
+
+      if (FAILED(hr))
+      {
+        TransactedSnapshotImpl_DestroyTemporaryCopy(This, cursor);
+        return hr;
+      }
+    }
+#endif
     else
     {
       DirEntry newData;
@@ -5972,7 +6122,21 @@ static HRESULT WINAPI TransactedSnapshotImpl_Commit(
     if (!root_entry->read)
       goto end;
 
+#ifdef __REACTOS__
+    if (grfCommitFlags & STGC_OVERWRITE)
+    {
+      for (i=0; i<This->entries_size; i++)
+      {
+        if (This->entries[i].inuse && This->entries[i].deleted)
+          StorageBaseImpl_StreamSetSize(This->transactedParent,
+            This->entries[i].transactedParentEntry, zero);
+      }
+    }
+
+    hr = TransactedSnapshotImpl_CopyTree(This, (grfCommitFlags & STGC_OVERWRITE) != 0);
+#else
     hr = TransactedSnapshotImpl_CopyTree(This);
+#endif
     if (FAILED(hr)) goto end;
 
     if (root_entry->data.dirRootEntry == DIRENTRY_NULL)
@@ -5991,6 +6155,9 @@ static HRESULT WINAPI TransactedSnapshotImpl_Commit(
     {
       data.dirRootEntry = dir_root_ref;
       data.clsid = root_entry->data.clsid;
+#ifdef __REACTOS__
+      data.stateBits = root_entry->data.stateBits;
+#endif
       data.ctime = root_entry->data.ctime;
       data.mtime = root_entry->data.mtime;
 
@@ -6034,6 +6201,12 @@ static HRESULT WINAPI TransactedSnapshotImpl_Commit(
             entry->dirty = FALSE;
             entry->transactedParentEntry = entry->newTransactedParentEntry;
           }
+#ifdef __REACTOS__
+          else if ((grfCommitFlags & STGC_OVERWRITE) && entry->read && entry->dirty)
+          {
+            entry->dirty = FALSE;
+          }
+#endif
         }
       }
     }
@@ -6670,6 +6843,23 @@ static HRESULT WINAPI TransactedSharedImpl_Commit(
     if (SUCCEEDED(hr))
       hr = StorageBaseImpl_ReadDirEntry(&This->scratch->base, This->scratch->base.storageDirEntry, &src_data);
 
+#ifdef __REACTOS__
+    if (SUCCEEDED(hr) && (grfCommitFlags & STGC_OVERWRITE))
+    {
+      hr = StorageBaseImpl_ReadDirEntry(This->transactedParent, This->transactedParent->storageDirEntry, &dst_data);
+
+      if (SUCCEEDED(hr))
+      {
+        prev_storage_ref = dst_data.dirRootEntry;
+        dst_data.dirRootEntry = DIRENTRY_NULL;
+        hr = StorageBaseImpl_WriteDirEntry(This->transactedParent, This->transactedParent->storageDirEntry, &dst_data);
+      }
+
+      if (SUCCEEDED(hr))
+        hr = StorageBaseImpl_DeleteStorageTree(This->transactedParent, prev_storage_ref, TRUE);
+    }
+
+#endif
     /* FIXME: If we're current, we should be able to copy only the changes in scratch. */
     if (SUCCEEDED(hr))
       hr = StorageBaseImpl_DupStorageTree(This->transactedParent, &new_storage_ref, &This->scratch->base, src_data.dirRootEntry);
@@ -6685,6 +6875,9 @@ static HRESULT WINAPI TransactedSharedImpl_Commit(
       prev_storage_ref = dst_data.dirRootEntry;
       dst_data.dirRootEntry = new_storage_ref;
       dst_data.clsid = src_data.clsid;
+#ifdef __REACTOS__
+      dst_data.stateBits = src_data.stateBits;
+#endif
       dst_data.ctime = src_data.ctime;
       dst_data.mtime = src_data.mtime;
       hr = StorageBaseImpl_WriteDirEntry(This->transactedParent, This->transactedParent->storageDirEntry, &dst_data);
@@ -7019,15 +7212,25 @@ void StorageUtl_CopyDirEntryToSTATSTG(
   }
 
   destination->cbSize            = source->size;
+#ifdef __REACTOS__
+  destination->mtime             = source->mtime;
+  destination->ctime             = source->ctime;
+  destination->atime             = source->mtime;
+#else
 /*
   currentReturnStruct->mtime     = {0}; TODO
   currentReturnStruct->ctime     = {0};
   currentReturnStruct->atime     = {0};
 */
+#endif
   destination->grfMode           = 0;
   destination->grfLocksSupported = 0;
   destination->clsid             = source->clsid;
+#ifdef __REACTOS__
+  destination->grfStateBits      = source->stateBits;
+#else
   destination->grfStateBits      = 0;
+#endif
   destination->reserved          = 0;
 }
 
@@ -8485,7 +8688,12 @@ static HRESULT create_storagefile(
   }
 
   /* in direct mode, can only use SHARE_EXCLUSIVE */
+#ifdef __REACTOS__
+  if (!(grfMode & STGM_TRANSACTED) && (STGM_SHARE_MODE(grfMode) != STGM_SHARE_EXCLUSIVE) &&
+      !((grfMode & STGM_DIRECT_SWMR) && STGM_SHARE_MODE(grfMode) == STGM_SHARE_DENY_WRITE))
+#else
   if (!(grfMode & STGM_TRANSACTED) && (STGM_SHARE_MODE(grfMode) != STGM_SHARE_EXCLUSIVE))
+#endif
     goto end;
 
   /* but in transacted mode, any share mode is valid */
@@ -9177,8 +9385,116 @@ static HRESULT STREAM_ReadString( IStream *stm, LPWSTR *string )
 }
 
 
+#ifdef __REACTOS__
+static HRESULT STREAM_WriteClipFormat( IStream *stm, CLIPFORMAT cf )
+{
+    DWORD data[2];
+    char name[256];
+    int len;
+
+    if (!cf)
+    {
+        data[0] = 0;
+        return IStream_Write( stm, data, sizeof(DWORD), NULL );
+    }
+    if (cf < 0xc000)
+    {
+        data[0] = 0xffffffff;
+        data[1] = cf;
+        return IStream_Write( stm, data, sizeof(data), NULL );
+    }
+    len = GetClipboardFormatNameA( cf, name, sizeof(name) );
+    data[0] = len + 1;
+    name[len] = 0;
+    if (FAILED(IStream_Write( stm, data, sizeof(DWORD), NULL )))
+        return E_FAIL;
+    return IStream_Write( stm, name, len + 1, NULL );
+}
+
+static HRESULT STREAM_ReadClipFormat( IStream *stm, CLIPFORMAT *cf )
+{
+    DWORD marker, count = 0;
+    HRESULT r;
+    char *name;
+
+    r = IStream_Read( stm, &marker, sizeof(marker), &count );
+    if (FAILED(r) || count != sizeof(marker))
+        return FAILED(r) ? r : E_FAIL;
+    if (!marker)
+    {
+        *cf = 0;
+        return S_OK;
+    }
+    if (marker == 0xffffffff || marker == 0xfffffffe)
+    {
+        DWORD id;
+        r = IStream_Read( stm, &id, sizeof(id), &count );
+        if (FAILED(r) || count != sizeof(id))
+            return FAILED(r) ? r : E_FAIL;
+        *cf = id;
+        return S_OK;
+    }
+    if (!(name = CoTaskMemAlloc( marker + 1 )))
+        return E_OUTOFMEMORY;
+    r = IStream_Read( stm, name, marker, &count );
+    if (FAILED(r) || count != marker)
+    {
+        CoTaskMemFree( name );
+        return FAILED(r) ? r : E_FAIL;
+    }
+    name[marker] = 0;
+    *cf = RegisterClipboardFormatA( name );
+    CoTaskMemFree( name );
+    return S_OK;
+}
+
+static HRESULT STORAGE_ReadCompObjStrings( LPSTORAGE pstg, LPWSTR *user_type, LPWSTR *progid )
+{
+    unsigned char header[12];
+    IStream *stm;
+    CLIPFORMAT cf;
+    DWORD count;
+    CLSID clsid;
+    HRESULT r;
+
+    *user_type = NULL;
+    *progid = NULL;
+    r = IStorage_OpenStream( pstg, L"\1CompObj", NULL, STGM_READ | STGM_SHARE_EXCLUSIVE, 0, &stm );
+    if (FAILED(r))
+        return r;
+    r = IStream_Read( stm, header, sizeof(header), &count );
+    if (SUCCEEDED(r) && count == sizeof(header))
+        r = ReadClassStm( stm, &clsid );
+    else
+        r = E_FAIL;
+    if (SUCCEEDED(r))
+        r = STREAM_ReadString( stm, user_type );
+    if (SUCCEEDED(r))
+        r = STREAM_ReadClipFormat( stm, &cf );
+    if (SUCCEEDED(r))
+        r = STREAM_ReadString( stm, progid );
+    IStream_Release( stm );
+    if (*user_type && !**user_type)
+    {
+        CoTaskMemFree( *user_type );
+        *user_type = NULL;
+    }
+    if (*progid && !**progid)
+    {
+        CoTaskMemFree( *progid );
+        *progid = NULL;
+    }
+    return r;
+}
+#endif
+
+#ifdef __REACTOS__
+static HRESULT STORAGE_WriteCompObj( LPSTORAGE pstg, CLSID *clsid,
+    LPCWSTR lpszUserType, CLIPFORMAT cf, LPCWSTR szProgIDName )
+#else
 static HRESULT STORAGE_WriteCompObj( LPSTORAGE pstg, CLSID *clsid,
     LPCWSTR lpszUserType, LPCWSTR szClipName, LPCWSTR szProgIDName )
+#endif
 {
     IStream *pstm;
     HRESULT r = S_OK;
@@ -9190,13 +9506,23 @@ static HRESULT STORAGE_WriteCompObj( LPSTORAGE pstg, CLSID *clsid,
        { 0xF4, 0x39, 0xB2, 0x71, 0x00, 0x00, 0x00, 0x00,
          0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 
+#ifdef __REACTOS__
+    TRACE("%p %s %s %x %s\n", pstg, debugstr_guid(clsid),
+           debugstr_w(lpszUserType), cf, debugstr_w(szProgIDName));
+#else
     TRACE("%p %s %s %s %s\n", pstg, debugstr_guid(clsid),
            debugstr_w(lpszUserType), debugstr_w(szClipName),
            debugstr_w(szProgIDName));
+#endif
 
     /*  Create a CompObj stream */
+#ifdef __REACTOS__
+    r = IStorage_CreateStream(pstg, L"\1CompObj",
+        STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE, 0, 0, &pstm );
+#else
     r = IStorage_CreateStream(pstg, L"\1CompObj",
         STGM_CREATE | STGM_WRITE  | STGM_SHARE_EXCLUSIVE, 0, 0, &pstm );
+#endif
     if( FAILED (r) )
         return r;
 
@@ -9208,8 +9534,13 @@ static HRESULT STORAGE_WriteCompObj( LPSTORAGE pstg, CLSID *clsid,
 
     if( SUCCEEDED( r ) )
         r = STREAM_WriteString( pstm, lpszUserType );
+#ifdef __REACTOS__
+    if( SUCCEEDED( r ) )
+        r = STREAM_WriteClipFormat( pstm, cf );
+#else
     if( SUCCEEDED( r ) )
         r = STREAM_WriteString( pstm, szClipName );
+#endif
     if( SUCCEEDED( r ) )
         r = STREAM_WriteString( pstm, szProgIDName );
     if( SUCCEEDED( r ) )
@@ -9223,6 +9554,38 @@ static HRESULT STORAGE_WriteCompObj( LPSTORAGE pstg, CLSID *clsid,
 /***********************************************************************
  *               WriteFmtUserTypeStg (OLE32.@)
  */
+#ifdef __REACTOS__
+HRESULT WINAPI WriteFmtUserTypeStg(
+	  LPSTORAGE pstg, CLIPFORMAT cf, LPOLESTR lpszUserType)
+{
+    LPWSTR old_user_type = NULL, old_progid = NULL, progid = NULL;
+    STATSTG stat;
+    CLSID clsid;
+    HRESULT r;
+
+    TRACE("(%p,%x,%s)\n",pstg,cf,debugstr_w(lpszUserType));
+
+    STORAGE_ReadCompObjStrings( pstg, &old_user_type, &old_progid );
+
+    r = IStorage_Stat(pstg, &stat, STATFLAG_NONAME);
+    if(SUCCEEDED(r))
+        clsid = stat.clsid;
+    else
+        clsid = CLSID_NULL;
+
+    if (FAILED(ProgIDFromCLSID(&clsid, &progid)))
+        progid = NULL;
+
+    r = STORAGE_WriteCompObj( pstg, &clsid, lpszUserType ? lpszUserType : old_user_type,
+            cf, progid ? progid : old_progid );
+
+    CoTaskMemFree(progid);
+    CoTaskMemFree(old_progid);
+    CoTaskMemFree(old_user_type);
+
+    return r;
+}
+#else
 HRESULT WINAPI WriteFmtUserTypeStg(
 	  LPSTORAGE pstg, CLIPFORMAT cf, LPOLESTR lpszUserType)
 {
@@ -9261,6 +9624,7 @@ HRESULT WINAPI WriteFmtUserTypeStg(
 
     return r;
 }
+#endif
 
 
 /******************************************************************************
@@ -9275,6 +9639,9 @@ HRESULT WINAPI ReadFmtUserTypeStg (LPSTORAGE pstg, CLIPFORMAT* pcf, LPOLESTR* lp
     DWORD count;
     LPWSTR szProgIDName = NULL, szCLSIDName = NULL, szOleTypeName = NULL;
     CLSID clsid;
+#ifdef __REACTOS__
+    CLIPFORMAT cf = 0;
+#endif
 
     TRACE("(%p,%p,%p)\n", pstg, pcf, lplpszUserType);
 
@@ -9297,7 +9664,11 @@ HRESULT WINAPI ReadFmtUserTypeStg (LPSTORAGE pstg, CLIPFORMAT* pcf, LPOLESTR* lp
     if( FAILED( r ) )
         goto end;
 
+#ifdef __REACTOS__
+    r = STREAM_ReadClipFormat( stm, &cf );
+#else
     r = STREAM_ReadString( stm, &szOleTypeName );
+#endif
     if( FAILED( r ) )
         goto end;
 
@@ -9310,8 +9681,13 @@ HRESULT WINAPI ReadFmtUserTypeStg (LPSTORAGE pstg, CLIPFORMAT* pcf, LPOLESTR* lp
         goto end;
 
     /* ok, success... now we just need to store what we found */
+#ifdef __REACTOS__
+    if( pcf )
+        *pcf = cf;
+#else
     if( pcf )
         *pcf = RegisterClipboardFormatW( szOleTypeName );
+#endif
 
     if( lplpszUserType )
     {

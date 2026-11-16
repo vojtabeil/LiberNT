@@ -80,6 +80,7 @@ BEGIN
     IDS_DECOMPRESSERROR "Metodo compressione %d non supportato. Vuoi continuare?"
     IDS_UNKNOWNERROR "Errore Sconosciuto 0x%08x."
     IDS_CANTDELETEFILE "Failed to delete the file(s)."
+    IDS_DRAGEXTRACT "&Extract..."
 
     IDS_WIZ_TITLE "Estrazione Guidata"
     IDS_WIZ_DEST_TITLE "Seleziona una Destinazione"
@@ -95,5 +96,7 @@ BEGIN
 
     IDS_MENUITEM "Estrai &Tutto..."
     IDS_HELPTEXT "Estrae i contenuti della cartella"
+    IDS_MENUITEM_HERE "Estrai &qui"
+    IDS_HELPTEXT_HERE "Estrae i contenuti in questa cartella"
     IDS_FRIENDLYNAME "Cartella Compressa"
 END

@@ -101,6 +101,7 @@ InsertAudioDevice(
     {
         /* copy device name */
         RtlAppendUnicodeStringToString(&DeviceEntry->DeviceName, DeviceName);
+        DPRINT("SYSAUDIO: opened audio interface %wZ\n", DeviceName);
     }
     else
     {
@@ -110,10 +111,14 @@ InsertAudioDevice(
 
         /* open device */
         Status = OpenDevice(&DeviceEntry->DeviceName, &DeviceEntry->Handle, &DeviceEntry->FileObject);
+        DPRINT("SYSAUDIO: prefixed open %wZ status %x\n",
+                &DeviceEntry->DeviceName,
+                Status);
     }
 
     if (!NT_SUCCESS(Status))
     {
+        DPRINT1("SYSAUDIO: failed to open audio interface %wZ: %x\n", DeviceName, Status);
         goto cleanup;
     }
 
@@ -140,6 +145,68 @@ cleanup:
 }
 
 
+static
+BOOLEAN
+IsAudioDeviceName(
+    IN PUNICODE_STRING EntryName,
+    IN PUNICODE_STRING DeviceName)
+{
+    UNICODE_STRING Name = *EntryName;
+    UNICODE_STRING Prefix = RTL_CONSTANT_STRING(L"\\??\\");
+
+    if (RtlEqualUnicodeString(&Name, DeviceName, TRUE))
+        return TRUE;
+    if (Name.Length <= Prefix.Length)
+        return FALSE;
+    Name.Length = Prefix.Length;
+    if (!RtlEqualUnicodeString(&Name, &Prefix, TRUE))
+        return FALSE;
+    Name.Buffer += Prefix.Length / sizeof(WCHAR);
+    Name.Length = EntryName->Length - Prefix.Length;
+    Name.MaximumLength = Name.Length;
+    return RtlEqualUnicodeString(&Name, DeviceName, TRUE);
+}
+
+static
+VOID
+RemoveAudioDevice(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN PUNICODE_STRING DeviceName)
+{
+    PSYSAUDIODEVEXT DeviceExtension = (PSYSAUDIODEVEXT)DeviceObject->DeviceExtension;
+    PKSAUDIO_DEVICE_ENTRY DeviceEntry = NULL;
+    PFILE_OBJECT FileObject;
+    PLIST_ENTRY Entry;
+    HANDLE Handle;
+    KIRQL OldIrql;
+
+    KeAcquireSpinLock(&DeviceExtension->Lock, &OldIrql);
+    for (Entry = DeviceExtension->KsAudioDeviceList.Flink; Entry != &DeviceExtension->KsAudioDeviceList; Entry = Entry->Flink)
+    {
+        PKSAUDIO_DEVICE_ENTRY Current = CONTAINING_RECORD(Entry, KSAUDIO_DEVICE_ENTRY, Entry);
+
+        if (IsAudioDeviceName(&Current->DeviceName, DeviceName))
+        {
+            DeviceEntry = Current;
+            RemoveEntryList(&DeviceEntry->Entry);
+            InsertTailList(&DeviceExtension->RemovedKsAudioDeviceList, &DeviceEntry->Entry);
+            InterlockedDecrement((PLONG)&DeviceExtension->NumberOfKsAudioDevices);
+            break;
+        }
+    }
+    KeReleaseSpinLock(&DeviceExtension->Lock, OldIrql);
+
+    if (!DeviceEntry)
+        return;
+
+    FileObject = InterlockedExchangePointer((PVOID*)&DeviceEntry->FileObject, NULL);
+    Handle = InterlockedExchangePointer(&DeviceEntry->Handle, NULL);
+    if (FileObject)
+        ObDereferenceObject(FileObject);
+    if (Handle)
+        ZwClose(Handle);
+}
+
 NTSTATUS
 NTAPI
 DeviceInterfaceChangeCallback(
@@ -155,13 +222,16 @@ DeviceInterfaceChangeCallback(
     if (IsEqualGUIDAligned(&Event->Event,
                            &GUID_DEVICE_INTERFACE_ARRIVAL))
     {
+        DPRINT("SYSAUDIO: interface arrival %wZ\n", Event->SymbolicLinkName);
         Status = InsertAudioDevice(DeviceObject, Event->SymbolicLinkName);
+        if (!NT_SUCCESS(Status))
+            DPRINT1("SYSAUDIO: failed to insert audio interface %wZ: %x\n", Event->SymbolicLinkName, Status);
         return Status;
     }
     else
     {
-        DPRINT("Remove interface to audio device!\n");
-        UNIMPLEMENTED;
+        if (IsEqualGUIDAligned(&Event->Event, &GUID_DEVICE_INTERFACE_REMOVAL))
+            RemoveAudioDevice(DeviceObject, Event->SymbolicLinkName);
         return STATUS_SUCCESS;
     }
 
@@ -220,7 +290,8 @@ SysAudioRegisterDeviceInterfaces(
     Status = IoRegisterDeviceInterface(DeviceObject, &KSCATEGORY_PREFERRED_MIDIOUT_DEVICE, NULL, &SymbolicLink);
     if (NT_SUCCESS(Status))
     {
-        IoSetDeviceInterfaceState(&SymbolicLink, TRUE);
+        if (!NT_SUCCESS(IoSetDeviceInterfaceState(&SymbolicLink, TRUE)))
+            DPRINT1("IoSetDeviceInterfaceState(%wZ) failed\n", &SymbolicLink);
         RtlFreeUnicodeString(&SymbolicLink);
     }
     else
@@ -232,7 +303,8 @@ SysAudioRegisterDeviceInterfaces(
     Status = IoRegisterDeviceInterface(DeviceObject, &KSCATEGORY_PREFERRED_WAVEIN_DEVICE, NULL, &SymbolicLink);
     if (NT_SUCCESS(Status))
     {
-        IoSetDeviceInterfaceState(&SymbolicLink, TRUE);
+        if (!NT_SUCCESS(IoSetDeviceInterfaceState(&SymbolicLink, TRUE)))
+            DPRINT1("IoSetDeviceInterfaceState(%wZ) failed\n", &SymbolicLink);
         RtlFreeUnicodeString(&SymbolicLink);
     }
     else
@@ -244,7 +316,8 @@ SysAudioRegisterDeviceInterfaces(
     Status = IoRegisterDeviceInterface(DeviceObject, &KSCATEGORY_PREFERRED_WAVEOUT_DEVICE, NULL, &SymbolicLink);
     if (NT_SUCCESS(Status))
     {
-        IoSetDeviceInterfaceState(&SymbolicLink, TRUE);
+        if (!NT_SUCCESS(IoSetDeviceInterfaceState(&SymbolicLink, TRUE)))
+            DPRINT1("IoSetDeviceInterfaceState(%wZ) failed\n", &SymbolicLink);
         RtlFreeUnicodeString(&SymbolicLink);
     }
     else
@@ -255,7 +328,8 @@ SysAudioRegisterDeviceInterfaces(
     Status = IoRegisterDeviceInterface(DeviceObject, &KSCATEGORY_SYSAUDIO, NULL, &SymbolicLink);
     if (NT_SUCCESS(Status))
     {
-        IoSetDeviceInterfaceState(&SymbolicLink, TRUE);
+        if (!NT_SUCCESS(IoSetDeviceInterfaceState(&SymbolicLink, TRUE)))
+            DPRINT1("IoSetDeviceInterfaceState(%wZ) failed\n", &SymbolicLink);
         RtlFreeUnicodeString(&SymbolicLink);
     }
     else

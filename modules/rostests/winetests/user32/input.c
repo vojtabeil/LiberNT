@@ -268,8 +268,8 @@ done:
     {
     case MSG_TEST_WIN:
         todo_wine_if( expected->todo || expected->todo_value )
-        ok_(file, line)( !ret, "got MSG_TEST_WIN hwnd %p, msg %s, wparam %#Ix, lparam %#Ix\n", received->message.hwnd,
-                         debugstr_wm(received->message.msg), received->message.wparam, received->message.lparam );
+        ok_(file, line)( !ret, "got MSG_TEST_WIN hwnd %p, msg %s, wparam %#Ix, lparam %#llx\n", received->message.hwnd,
+                         debugstr_wm(received->message.msg), received->message.wparam, (unsigned long long)received->message.lparam );
         return ret;
     case LL_HOOK_KEYBD:
         todo_wine_if( expected->todo || expected->todo_value )
@@ -296,8 +296,8 @@ done:
     {
     case MSG_TEST_WIN:
         todo_wine_if( expected->todo || expected->todo_value )
-        ok_(file, line)( !ret, "MSG_TEST_WIN hwnd %p, %s, wparam %#Ix, lparam %#Ix\n", expected->message.hwnd,
-                         debugstr_wm(expected->message.msg), expected->message.wparam, expected->message.lparam );
+        ok_(file, line)( !ret, "MSG_TEST_WIN hwnd %p, %s, wparam %#Ix, lparam %#llx\n", expected->message.hwnd,
+                         debugstr_wm(expected->message.msg), expected->message.wparam, (unsigned long long)expected->message.lparam );
         break;
     case LL_HOOK_KEYBD:
         todo_wine_if( expected->todo || expected->todo_value )
@@ -668,8 +668,8 @@ if(0) /* For some reason not stable on Wine */
 }
 
         if (winetest_debug > 1)
-            trace("Hook:   w=%Ix vk:%8lx sc:%8lx fl:%8lx %Ix\n", wparam,
-                  hook_info->vkCode, hook_info->scanCode, hook_info->flags, hook_info->dwExtraInfo);
+            trace("Hook:   w=%Ix vk:%8lx sc:%8lx fl:%8lx %llx\n", wparam,
+                  hook_info->vkCode, hook_info->scanCode, hook_info->flags, (unsigned long long)hook_info->dwExtraInfo);
     }
     return CallNextHookEx( 0, code, wparam, lparam );
 }
@@ -1174,6 +1174,20 @@ static void test_SendInput_keyboard_messages( WORD vkey, WORD scan, WCHAR wch, W
         {0},
     };
 
+#ifdef __REACTOS__
+    struct send_input_keyboard_test rshift_scan[] =
+    {
+        {.scan = 0x36, .flags = KEYEVENTF_SCANCODE, .expect_state = {[VK_SHIFT] = 0x80, [VK_RSHIFT] = 0x80},
+         .expect = {KEY_HOOK_(WM_KEYDOWN, 0x36, VK_RSHIFT, LLKHF_EXTENDED), KEY_MSG(WM_KEYDOWN, 0x36, VK_SHIFT), {0}}},
+        {.scan = scan, .flags = KEYEVENTF_SCANCODE, .expect_state = {[VK_SHIFT] = 0x80, [VK_RSHIFT] = 0x80, /*[vkey] = 0x80*/},
+         .expect = {KEY_HOOK(WM_KEYDOWN, scan, vkey), KEY_MSG(WM_KEYDOWN, scan, vkey), WIN_MSG(WM_CHAR, wch_shift, MAKELONG(1, scan)), {0}}},
+        {.scan = scan, .flags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP, .expect_state = {[VK_SHIFT] = 0x80, [VK_RSHIFT] = 0x80},
+         .expect = {KEY_HOOK(WM_KEYUP, scan, vkey), KEY_MSG(WM_KEYUP, scan, vkey), {0}}},
+        {.scan = 0x36, .flags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP,
+         .expect = {KEY_HOOK_(WM_KEYUP, 0x36, VK_RSHIFT, LLKHF_EXTENDED), KEY_MSG(WM_KEYUP, 0x36, VK_SHIFT), {0}}},
+        {0},
+    };
+#else
     struct send_input_keyboard_test rshift_scan[] =
     {
         {.scan = 0x36, .flags = KEYEVENTF_SCANCODE, .expect_state = {[VK_SHIFT] = 0x80, [VK_LSHIFT] = 0x80},
@@ -1186,6 +1200,7 @@ static void test_SendInput_keyboard_messages( WORD vkey, WORD scan, WCHAR wch, W
          .expect = {KEY_HOOK(WM_KEYUP, 0x36, VK_RSHIFT), KEY_MSG(WM_KEYUP, 0x36, VK_SHIFT), {0}}},
         {0},
     };
+#endif
 
     struct send_input_keyboard_test rctrl_scan[] =
     {
@@ -1412,7 +1427,7 @@ static void test_SendInput_keyboard_messages( WORD vkey, WORD scan, WCHAR wch, W
 
     /* test received messages */
     old_proc = SetWindowLongPtrW( hwnd, GWLP_WNDPROC, (LONG_PTR)append_message_wndproc );
-    ok_ne( 0, old_proc, LONG_PTR, "%#Ix" );
+    ok_ne( 0, old_proc, unsigned long long, "%#llx" );
 
     winetest_push_context( "receive" );
     check_send_input_keyboard_test( lmenu_vkey, FALSE );
@@ -1579,7 +1594,7 @@ static void test_SendInput_raw_key_messages( WORD vkey, WORD wch, HKL hkl )
         {
             /* test received messages */
             LONG_PTR old_proc = SetWindowLongPtrW( hwnd, GWLP_WNDPROC, (LONG_PTR)append_message_wndproc );
-            ok_ne( 0, old_proc, LONG_PTR, "%#Ix" );
+            ok_ne( 0, old_proc, unsigned long long, "%#llx" );
         }
 
         rid.dwFlags = 0;
@@ -1794,7 +1809,14 @@ static void test_GetMouseMovePointsEx( char **argv )
     SetCursorPos( 30, 30 );
     SetCursorPos( in.x, in.y );
     SetCursorPos( 150, 150 );
+#ifdef __REACTOS__
+    {
+        DWORD tick = GetTickCount();
+        do Sleep( 3 ); while (GetTickCount() == tick);
+    }
+#else
     Sleep( 3 );
+#endif
     SetCursorPos( in.x, in.y );
 
     retval = pGetMouseMovePointsEx( sizeof(MOUSEMOVEPOINT), &in, out, BUFLIM, GMMP_USE_DISPLAY_POINTS );
@@ -1818,7 +1840,7 @@ static void test_GetMouseMovePointsEx( char **argv )
     in.y = point.y;
     retval = pGetMouseMovePointsEx( sizeof(MOUSEMOVEPOINT), &in, out, BUFLIM, GMMP_USE_DISPLAY_POINTS );
     ok( retval == 64, "expected to get 64 mouse move points but got %d\n", retval );
-    ok( out[0].dwExtraInfo == 0xcafecafe, "wrong extra info, got 0x%Ix expected 0xcafecafe\n", out[0].dwExtraInfo );
+    ok( out[0].dwExtraInfo == 0xcafecafe, "wrong extra info, got 0x%llx expected 0xcafecafe\n", (unsigned long long)out[0].dwExtraInfo );
 
     input.type = INPUT_MOUSE;
     memset( &input, 0, sizeof(input) );
@@ -1834,7 +1856,7 @@ static void test_GetMouseMovePointsEx( char **argv )
     in.y = point.y;
     retval = pGetMouseMovePointsEx( sizeof(MOUSEMOVEPOINT), &in, out, BUFLIM, GMMP_USE_DISPLAY_POINTS );
     ok( retval == 64, "expected to get 64 mouse move points but got %d\n", retval );
-    ok( out[0].dwExtraInfo == 0xdeadbeef, "wrong extra info, got 0x%Ix expected 0xdeadbeef\n", out[0].dwExtraInfo );
+    ok( out[0].dwExtraInfo == 0xdeadbeef, "wrong extra info, got 0x%llx expected 0xdeadbeef\n", (unsigned long long)out[0].dwExtraInfo );
 
     retval = pGetMouseMovePointsEx( sizeof(MOUSEMOVEPOINT), &in, out, BUFLIM, GMMP_USE_HIGH_RESOLUTION_POINTS );
     todo_wine ok( retval == 64, "expected to get 64 high resolution mouse move points but got %d\n", retval );
@@ -1852,15 +1874,6 @@ static void test_GetMouseMovePointsEx_process(void)
     POINT point;
     HDESK desk0, desk1;
     HWINSTA winstation0, winstation1;
-
-#ifdef __REACTOS__
-    if (is_reactos())
-    {
-        ok(FALSE, "Broken on ReactOS\n");
-        skip("Skipping test_GetMouseMovePointsEx_process due to CORE-20552\n");
-        return;
-    }
-#endif
 
     memset( out, 0, sizeof(out) );
     memset( out2, 0, sizeof(out2) );
@@ -2552,9 +2565,13 @@ static void test_GetRawInputBuffer(void)
     t3 = GetMessageTime();
     pos2 = GetMessagePos();
     extra_info2 = GetMessageExtraInfo();
-    ok( extra_info2 == extra_info1, "got %#Ix, %#Ix.\n", extra_info1, extra_info2 );
+    ok( extra_info2 == extra_info1, "got %#llx, %#llx.\n", (unsigned long long)extra_info1, (unsigned long long)extra_info2 );
     GetCursorPos( &pt );
+#ifdef __REACTOS__
+    ok( t3 == t1, "got %lu, %lu.\n", t1, t3 );
+#else
     ok( t3 > t1, "got %lu, %lu.\n", t1, t3 );
+#endif
     ok( t3 < t2, "got %lu, %lu.\n", t2, t3 );
     ok( pos1 == pos2, "got pos1 (%ld, %ld), pos2 (%ld, %ld), pt (%ld %ld).\n",
         pos1 & 0xffff, pos1 >> 16, pos2 & 0xffff, pos2 >> 16, pt.x, pt.y );
@@ -2614,8 +2631,12 @@ static void test_GetRawInputBuffer(void)
     pos2 = GetMessagePos();
     extra_info2 = GetMessageExtraInfo();
     GetCursorPos(&pt);
-    ok( extra_info2 == extra_info1, "got %#Ix, %#Ix.\n", extra_info1, extra_info2 );
+    ok( extra_info2 == extra_info1, "got %#llx, %#llx.\n", (unsigned long long)extra_info1, (unsigned long long)extra_info2 );
+#ifdef __REACTOS__
+    ok( t3 == t1, "got %lu, %lu.\n", t1, t3 );
+#else
     ok( t3 > t1, "got %lu, %lu.\n", t1, t3 );
+#endif
     ok( t3 < t2, "got %lu, %lu.\n", t2, t3 );
     ok( pos1 == pos2, "got pos1 (%ld, %ld), pos2 (%ld, %ld), pt (%ld %ld).\n",
         pos1 & 0xffff, pos1 >> 16, pos2 & 0xffff, pos2 >> 16, pt.x, pt.y );
@@ -3202,16 +3223,16 @@ static void test_DefRawInputProc(void)
 
     SetLastError(0xdeadbeef);
     ret = DefRawInputProc(NULL, 0, sizeof(RAWINPUTHEADER));
-    ok(!ret, "got %Id\n", ret);
+    ok(!ret, "got %lld\n", (long long)ret);
     ok(GetLastError() == 0xdeadbeef, "got %ld\n", GetLastError());
     ret = DefRawInputProc(LongToPtr(0xcafe), 0xbeef, sizeof(RAWINPUTHEADER));
-    ok(!ret, "got %Id\n", ret);
+    ok(!ret, "got %lld\n", (long long)ret);
     ok(GetLastError() == 0xdeadbeef, "got %ld\n", GetLastError());
     ret = DefRawInputProc(NULL, 0, sizeof(RAWINPUTHEADER) - 1);
-    ok(ret == -1, "got %Id\n", ret);
+    ok(ret == -1, "got %lld\n", (long long)ret);
     ok(GetLastError() == 0xdeadbeef, "got %ld\n", GetLastError());
     ret = DefRawInputProc(NULL, 0, sizeof(RAWINPUTHEADER) + 1);
-    ok(ret == -1, "got %Id\n", ret);
+    ok(ret == -1, "got %lld\n", (long long)ret);
     ok(GetLastError() == 0xdeadbeef, "got %ld\n", GetLastError());
 }
 
@@ -3726,7 +3747,7 @@ static LRESULT CALLBACK test_ActivateKeyboardLayout_window_proc( HWND hwnd, UINT
         ok( layout == expect_hkl, "got layout %p\n", layout );
         ok( wparam == info.ciCharset || broken(wparam == 0 && (HIWORD(layout) & 0x8000)),
             "got wparam %#Ix\n", wparam );
-        ok( lparam == (LPARAM)expect_hkl, "got lparam %#Ix\n", lparam );
+        ok( lparam == (LPARAM)expect_hkl, "got lparam %#llx\n", (unsigned long long)lparam );
         change_hkl = (HKL)lparam;
     }
 
@@ -3971,7 +3992,7 @@ static DWORD WINAPI create_transparent_window_thread(void *arg)
     ok_ne( NULL, params->hwnd, HWND, "%p" );
     wait_messages( 100, FALSE );
     old_proc = SetWindowLongPtrW( params->hwnd, GWLP_WNDPROC, (LONG_PTR)httransparent_wndproc );
-    ok_ne( 0, old_proc, LONG_PTR, "%#Ix" );
+    ok_ne( 0, old_proc, unsigned long long, "%#llx" );
 
     ok_ret( 1, SetEvent( params->start_event ) );
     wait_for_event( params->end_event, 5000 );
@@ -4112,7 +4133,11 @@ static void test_SendInput_mouse_messages(void)
     };
     struct user_call button_up_hwnd_todo[] =
     {
+#ifdef __REACTOS__
+        MS_HOOK(WM_LBUTTONUP, 50, 50, .broken = TRUE),
+#else
         MS_HOOK(WM_LBUTTONUP, 50, 50),
+#endif
         WIN_MSG(WM_LBUTTONUP, (HWND)-1/*hwnd*/, 0, MAKELONG(50, 50), .todo = TRUE),
         {0/* placeholder for Wine spurious messages */},
         {0},
@@ -4228,7 +4253,7 @@ static void test_SendInput_mouse_messages(void)
     /* basic button messages */
 
     old_proc = SetWindowLongPtrW( hwnd, GWLP_WNDPROC, (LONG_PTR)append_message_wndproc );
-    ok_ne( 0, old_proc, LONG_PTR, "%#Ix" );
+    ok_ne( 0, old_proc, unsigned long long, "%#llx" );
 
     ok_ret( 1, SetCursorPos( 50, 50 ) );
     wait_messages( 100, FALSE );
@@ -4257,7 +4282,7 @@ static void test_SendInput_mouse_messages(void)
     current_sequence_len = 0;
 
     old_other_proc = SetWindowLongPtrW( other, GWLP_WNDPROC, (LONG_PTR)append_message_wndproc );
-    ok_ne( 0, old_other_proc, LONG_PTR, "%#Ix" );
+    ok_ne( 0, old_other_proc, unsigned long long, "%#llx" );
 
     mouse_event( MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0 );
     wait_messages( 5, FALSE );
@@ -4280,7 +4305,7 @@ static void test_SendInput_mouse_messages(void)
     current_sequence_len = 0;
 
     old_other_proc = SetWindowLongPtrW( other, GWLP_WNDPROC, (LONG_PTR)append_message_wndproc );
-    ok_ne( 0, old_other_proc, LONG_PTR, "%#Ix" );
+    ok_ne( 0, old_other_proc, unsigned long long, "%#llx" );
 
     mouse_event( MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0 );
     wait_messages( 5, FALSE );
@@ -4303,7 +4328,7 @@ static void test_SendInput_mouse_messages(void)
     current_sequence_len = 0;
 
     old_other_proc = SetWindowLongPtrW( other, GWLP_WNDPROC, (LONG_PTR)httransparent_wndproc );
-    ok_ne( 0, old_other_proc, LONG_PTR, "%#Ix" );
+    ok_ne( 0, old_other_proc, unsigned long long, "%#llx" );
 
     mouse_event( MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0 );
     wait_messages( 5, FALSE );
@@ -4326,7 +4351,7 @@ static void test_SendInput_mouse_messages(void)
     current_sequence_len = 0;
 
     old_other_proc = SetWindowLongPtrW( other, GWLP_WNDPROC, (LONG_PTR)httransparent_wndproc );
-    ok_ne( 0, old_other_proc, LONG_PTR, "%#Ix" );
+    ok_ne( 0, old_other_proc, unsigned long long, "%#llx" );
 
     mouse_event( MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0 );
     wait_messages( 5, FALSE );
@@ -4398,7 +4423,7 @@ static void test_SendInput_mouse_messages(void)
     current_sequence_len = 0;
 
     old_other_proc = SetWindowLongPtrW( other, GWLP_WNDPROC, (LONG_PTR)append_message_wndproc );
-    ok_ne( 0, old_other_proc, LONG_PTR, "%#Ix" );
+    ok_ne( 0, old_other_proc, unsigned long long, "%#llx" );
 
     SetCapture( hwnd );
 
@@ -4425,7 +4450,7 @@ static void test_SendInput_mouse_messages(void)
     current_sequence_len = 0;
 
     old_other_proc = SetWindowLongPtrW( other, GWLP_WNDPROC, (LONG_PTR)append_message_wndproc );
-    ok_ne( 0, old_other_proc, LONG_PTR, "%#Ix" );
+    ok_ne( 0, old_other_proc, unsigned long long, "%#llx" );
 
     SetCapture( hwnd );
 
@@ -4457,7 +4482,7 @@ static void test_SendInput_mouse_messages(void)
         other = CreateWindowW( L"static", NULL, WS_VISIBLE | WS_POPUP, 0, 0, 100, 100, NULL, NULL, NULL, NULL );
         ok_ne( NULL, other, HWND, "%p" );
         old_other_proc = SetWindowLongPtrW( other, GWLP_WNDPROC, (LONG_PTR)mouse_layered_wndproc );
-        ok_ne( 0, old_other_proc, LONG_PTR, "%#Ix" );
+        ok_ne( 0, old_other_proc, unsigned long long, "%#llx" );
         wait_messages( 100, FALSE );
 
         ok_ret( ERROR, GetWindowRgnBox( other, &region ) );
@@ -4524,7 +4549,7 @@ static void test_SendInput_mouse_messages(void)
     current_sequence_len = 0;
 
     old_other_proc = SetWindowLongPtrW( other, GWLP_WNDPROC, (LONG_PTR)append_message_wndproc );
-    ok_ne( 0, old_other_proc, LONG_PTR, "%#Ix" );
+    ok_ne( 0, old_other_proc, unsigned long long, "%#llx" );
 
     hregion = CreateRectRgn( 0, 0, 10, 10 );
     ok_ne( NULL, hregion, HRGN, "%p" );
@@ -6219,20 +6244,26 @@ static void test_keyboard_layout(void)
     /* Test that the high word of the keyboard layout in CJK locale is the same as the low word,
      * even when IME is on */
     lang_id = PRIMARYLANGID(GetUserDefaultLCID());
-    if (lang_id == LANG_CHINESE || lang_id == LANG_JAPANESE || lang_id == LANG_KOREAN)
+    switch (lang_id)
     {
-        hkl = GetKeyboardLayout(0);
-        ok(HIWORD(hkl) == LOWORD(hkl), "Got unexpected hkl %p.\n", hkl);
-
-        if (lang_id == LANG_CHINESE)
-            layout_name = "00000804";
-        else if (lang_id == LANG_JAPANESE)
-            layout_name = "00000411";
-        else if (lang_id == LANG_KOREAN)
-            layout_name = "00000412";
-        hkl = LoadKeyboardLayoutA(layout_name, 0);
-        ok(HIWORD(hkl) == LOWORD(hkl), "Got unexpected hkl %p.\n", hkl);
+    case LANG_CHINESE:
+        layout_name = "00000804";
+        break;
+    case LANG_JAPANESE:
+        layout_name = "00000411";
+        break;
+    case LANG_KOREAN:
+        layout_name = "00000412";
+        break;
+    default:
+        return;
     }
+
+    hkl = GetKeyboardLayout(0);
+    ok(HIWORD(hkl) == LOWORD(hkl), "Got unexpected hkl %p.\n", hkl);
+
+    hkl = LoadKeyboardLayoutA(layout_name, 0);
+    ok(HIWORD(hkl) == LOWORD(hkl), "Got unexpected hkl %p.\n", hkl);
 }
 
 START_TEST(input)

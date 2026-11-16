@@ -183,7 +183,7 @@ extern "C" {
 #if (WINVER >= 0x0600)
 #define LOCALE_NAME_USER_DEFAULT    NULL
 #define LOCALE_NAME_INVARIANT      L""
-#define LOCALE_NAME_SYSTEM_DEFAULT      L"!sys-default-locale"
+#define LOCALE_NAME_SYSTEM_DEFAULT      L"!x-sys-default-locale"
 #endif
 
 #define LOCALE_IDEFAULTUNIXCODEPAGE   0x1030 /* Wine extension */
@@ -922,6 +922,15 @@ GetGeoInfoW(
   _In_ int cchData,
   _In_ LANGID LangId);
 
+WINBASEAPI
+int
+WINAPI
+GetGeoInfoEx(
+  _In_ PWSTR location,
+  _In_ GEOTYPE geoType,
+  _Out_writes_opt_(geoDataCount) PWSTR geoData,
+  _In_ int geoDataCount);
+
 int
 WINAPI
 GetLocaleInfoA(
@@ -1010,6 +1019,7 @@ LCID WINAPI GetThreadLocale(void);
 int WINAPI GetTimeFormatA(LCID,DWORD,const SYSTEMTIME*,LPCSTR,LPSTR,int);
 int WINAPI GetTimeFormatW(LCID,DWORD,const SYSTEMTIME*,LPCWSTR,LPWSTR,int);
 int WINAPI GetTimeFormatEx(LPCWSTR,DWORD,const SYSTEMTIME*,LPCWSTR,LPWSTR,int);
+WINBASEAPI INT WINAPI GetUserDefaultGeoName(LPWSTR,int);
 LANGID WINAPI GetUserDefaultLangID(void);
 
 WINBASEAPI
@@ -1023,6 +1033,30 @@ LCID WINAPI GetUserDefaultLCID(void);
 GEOID WINAPI GetUserGeoID(_In_ GEOCLASS);
 
 #if (WINVER >= 0x0600)
+
+WINBASEAPI
+int
+WINAPI
+GetDurationFormat(
+  _In_ LCID Locale,
+  _In_ DWORD dwFlags,
+  _In_opt_ CONST SYSTEMTIME *lpDuration,
+  _In_ ULONGLONG ullDuration,
+  _In_opt_ LPCWSTR lpFormat,
+  _Out_writes_opt_(cchDuration) LPWSTR lpDurationStr,
+  _In_ int cchDuration);
+
+WINBASEAPI
+int
+WINAPI
+GetDurationFormatEx(
+  _In_opt_ LPCWSTR lpLocaleName,
+  _In_ DWORD dwFlags,
+  _In_opt_ CONST SYSTEMTIME *lpDuration,
+  _In_ ULONGLONG ullDuration,
+  _In_opt_ LPCWSTR lpFormat,
+  _Out_writes_opt_(cchDuration) LPWSTR lpDurationStr,
+  _In_ int cchDuration);
 
 int
 WINAPI
@@ -1105,6 +1139,7 @@ LANGID WINAPI SetThreadUILanguage(_In_ LANGID);
 BOOL WINAPI SetUserDefaultLCID(LCID);
 BOOL WINAPI SetUserDefaultUILanguage(LANGID);
 BOOL WINAPI SetUserGeoID(_In_ GEOID);
+WINBASEAPI BOOL WINAPI SetUserGeoName(PWSTR);
 int WINAPI WideCharToMultiByte(UINT,DWORD,LPCWSTR,int,LPSTR,int,LPCSTR,LPBOOL);
 #if (WINVER >= 0x0500)
 BOOL WINAPI EnumCalendarInfoExA(_In_ CALINFO_ENUMPROCEXA, _In_ LCID, _In_ CALID, _In_ CALTYPE);

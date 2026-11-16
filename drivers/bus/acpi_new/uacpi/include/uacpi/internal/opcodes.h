@@ -152,12 +152,6 @@ enum uacpi_parse_op {
     // Ensure the type of item is decode_ops[pc + 1]
     UACPI_PARSE_OP_TYPECHECK,
 
-    /*
-     * Ensure the type of item is one of decode_ops[pc + 1] items at
-     * decode_ops[pc + 2]...decode_ops[pc + N]
-     */
-    UACPI_PARSE_OP_TYPECHECK_ONE_OF,
-
     // Install the namespace node specified in items[decode_ops[pc + 1]]
     UACPI_PARSE_OP_INSTALL_NAMESPACE_NODE,
 
@@ -180,6 +174,16 @@ enum uacpi_parse_op {
      * at items[decode_ops[pc + 1]]
      */
     UACPI_PARSE_OP_STORE_TO_TARGET_INDIRECT,
+
+    /*
+     * Error if reached. Should be used for opcodes that are supposed to be
+     * converted at op parse time, e.g. invoking a method or referring to
+     * a named object.
+     */
+    UACPI_PARSE_OP_UNREACHABLE,
+
+    // Invalid opcode, should never be encountered in the stream
+    UACPI_PARSE_OP_BAD_OPCODE,
 
     // Decrement the current AML instruction pointer
     UACPI_PARSE_OP_AML_PC_DECREMENT,
@@ -269,6 +273,15 @@ enum uacpi_parse_op {
 };
 const uacpi_char *uacpi_parse_op_to_string(enum uacpi_parse_op op);
 
+/*
+ * A few notes about op properties:
+ * Technically the spec says that RefOfOp is considered a SuperName, but NT
+ * disagrees about this. For example Store(..., RefOf) fails with
+ * "Invalid SuperName". MethodInvocation could also technically be considered
+ * a SuperName, but NT doesn't allow that either: Store(..., MethodInvocation)
+ * fails with "Invalid Target Method, expected a DataObject" error.
+ */
+
 enum uacpi_op_property {
     UACPI_OP_PROPERTY_TERM_ARG = 1,
     UACPI_OP_PROPERTY_SUPERNAME = 2,
@@ -278,15 +291,8 @@ enum uacpi_op_property {
     // The ops to execute are pointed to by indirect_decode_ops
     UACPI_OP_PROPERTY_OUT_OF_LINE = 16,
 
-    // An opcode that's not part of the AML ISA, error out if encountered
-    UACPI_OP_PROPERTY_INVALID = 64,
-
-    /*
-     * An opcode that's not part of the AML ISA _and_ has been repurposed by
-     * uACPI for some internal operation.
-     * NOTE: all opcodes with this property must be prefixed with InternalOp
-     */
-    UACPI_OP_PROPERTY_INTERNAL = 128,
+    // Error if encountered in the AML byte strem
+    UACPI_OP_PROPERTY_RESERVED = 128,
 };
 
 struct uacpi_op_spec {
@@ -301,17 +307,15 @@ struct uacpi_op_spec {
 
 const struct uacpi_op_spec *uacpi_get_op_spec(uacpi_aml_op);
 
-#define UACPI_INVALID_OPCODE(code)                       \
-    UACPI_OP(                                            \
-        Invalid_##code, code, UACPI_OP_PROPERTY_INVALID, \
-        { UACPI_PARSE_OP_END, }                          \
-    )
+#define UACPI_INTERNAL_OP(code) \
+    UACPI_OP(Internal_##code, code, { UACPI_PARSE_OP_UNREACHABLE })
+
+#define UACPI_BAD_OPCODE(code) \
+    UACPI_OP(Reserved_##code, code, { UACPI_PARSE_OP_BAD_OPCODE })
 
 #define UACPI_METHOD_CALL_OPCODE(nargs)                        \
     UACPI_OP(                                                  \
         InternalOpMethodCall##nargs##Args, 0xF7 + nargs,       \
-        UACPI_OP_PROPERTY_TERM_ARG |                           \
-        UACPI_OP_PROPERTY_INTERNAL,                            \
         {                                                      \
             UACPI_PARSE_OP_LOAD_INLINE_IMM, 1, nargs,          \
             UACPI_PARSE_OP_IF_NOT_NULL, 1, 6,                  \
@@ -322,7 +326,9 @@ const struct uacpi_op_spec *uacpi_get_op_spec(uacpi_aml_op);
             UACPI_PARSE_OP_OBJECT_ALLOC,                       \
             UACPI_PARSE_OP_DISPATCH_METHOD_CALL,               \
             UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,            \
-        }                                                      \
+        },                                                     \
+        UACPI_OP_PROPERTY_TERM_ARG |                           \
+        UACPI_OP_PROPERTY_RESERVED                             \
     )
 
 /*
@@ -343,30 +349,30 @@ const struct uacpi_op_spec *uacpi_get_op_spec(uacpi_aml_op);
  * DualNamePath := DualNamePrefix NameSeg NameSeg
  * MultiNamePath := MultiNamePrefix SegCount NameSeg(SegCount)
  */
-#define UACPI_UNRESOLVED_NAME_STRING_OP(character, code)  \
-    UACPI_OP(                                             \
-        UnresolvedNameString_##character, code,           \
-        UACPI_OP_PROPERTY_SIMPLE_NAME |                   \
-        UACPI_OP_PROPERTY_SUPERNAME |                     \
-        UACPI_OP_PROPERTY_TERM_ARG,                       \
-        {                                                 \
-            UACPI_PARSE_OP_AML_PC_DECREMENT,              \
-            UACPI_PARSE_OP_EXISTING_NAMESTRING_OR_NULL,   \
-            UACPI_PARSE_OP_CONVERT_NAMESTRING,            \
-        }                                                 \
+#define UACPI_UNRESOLVED_NAME_STRING_OP(character, code)        \
+    UACPI_OP(                                                   \
+        UACPI_InternalOpUnresolvedNameString_##character, code, \
+        {                                                       \
+            UACPI_PARSE_OP_AML_PC_DECREMENT,                    \
+            UACPI_PARSE_OP_EXISTING_NAMESTRING_OR_NULL,         \
+            UACPI_PARSE_OP_CONVERT_NAMESTRING,                  \
+        },                                                      \
+        UACPI_OP_PROPERTY_SIMPLE_NAME |                         \
+        UACPI_OP_PROPERTY_SUPERNAME |                           \
+        UACPI_OP_PROPERTY_TERM_ARG                              \
     )
 
 #define UACPI_BUILD_LOCAL_OR_ARG_OP(prefix, base, offset) \
 UACPI_OP(                                                 \
     prefix##offset##Op, base + offset,                    \
-    UACPI_OP_PROPERTY_SUPERNAME |                         \
-    UACPI_OP_PROPERTY_TERM_ARG |                          \
-    UACPI_OP_PROPERTY_SIMPLE_NAME,                        \
     {                                                     \
         UACPI_PARSE_OP_EMPTY_OBJECT_ALLOC,                \
         UACPI_PARSE_OP_INVOKE_HANDLER,                    \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,           \
-    }                                                     \
+    },                                                    \
+    UACPI_OP_PROPERTY_SUPERNAME |                         \
+    UACPI_OP_PROPERTY_TERM_ARG |                          \
+    UACPI_OP_PROPERTY_SIMPLE_NAME                         \
 )                                                         \
 
 #define UACPI_LOCALX_OP(idx) UACPI_BUILD_LOCAL_OR_ARG_OP(Local, 0x60, idx)
@@ -375,7 +381,6 @@ UACPI_OP(                                                 \
 #define UACPI_BUILD_PACKAGE_OP(name, code, jmp_off, ...)           \
 UACPI_OP(                                                          \
     name##Op, code,                                                \
-    UACPI_OP_PROPERTY_TERM_ARG,                                    \
     {                                                              \
         UACPI_PARSE_OP_TRACKED_PKGLEN,                             \
         ##__VA_ARGS__,                                             \
@@ -386,13 +391,13 @@ UACPI_OP(                                                          \
         UACPI_PARSE_OP_OBJECT_ALLOC_TYPED, UACPI_OBJECT_PACKAGE,   \
         UACPI_PARSE_OP_INVOKE_HANDLER,                             \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                    \
-    }                                                              \
+    },                                                             \
+    UACPI_OP_PROPERTY_TERM_ARG                                     \
 )
 
 #define UACPI_BUILD_BINARY_MATH_OP(prefix, code)                 \
 UACPI_OP(                                                        \
     prefix##Op, code,                                            \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_OPERAND,                                  \
         UACPI_PARSE_OP_OPERAND,                                  \
@@ -402,13 +407,13 @@ UACPI_OP(                                                        \
         UACPI_PARSE_OP_TRUNCATE_NUMBER,                          \
         UACPI_PARSE_OP_STORE_TO_TARGET, 2,                       \
         UACPI_PARSE_OP_OBJECT_COPY_TO_PREV,                      \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )
 
 #define UACPI_BUILD_UNARY_MATH_OP(type, code)                    \
 UACPI_OP(                                                        \
     type##Op, code,                                              \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_OPERAND,                                  \
         UACPI_PARSE_OP_TARGET,                                   \
@@ -416,12 +421,13 @@ UACPI_OP(                                                        \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_STORE_TO_TARGET, 1,                       \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )
 
 #define UACPI_DO_BUILD_BUFFER_FIELD_OP(type, code, node_idx, ...)     \
 UACPI_OP(                                                             \
-    type##FieldOp, code, 0,                                           \
+    type##FieldOp, code,                                              \
     {                                                                 \
         UACPI_PARSE_OP_TERM_ARG_UNWRAP_INTERNAL,                      \
         UACPI_PARSE_OP_TYPECHECK, UACPI_OBJECT_BUFFER,                \
@@ -441,30 +447,29 @@ UACPI_OP(                                                             \
 #define UACPI_INTEGER_LITERAL_OP(type, code, bytes)              \
 UACPI_OP(                                                        \
     type##Prefix, code,                                          \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_LOAD_IMM_AS_OBJECT, bytes,                \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 
 #define UACPI_BUILD_BINARY_LOGIC_OP(type, code)                  \
 UACPI_OP(                                                        \
     type##Op, code,                                              \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_COMPUTATIONAL_DATA,                       \
         UACPI_PARSE_OP_COMPUTATIONAL_DATA,                       \
         UACPI_PARSE_OP_OBJECT_ALLOC_TYPED, UACPI_OBJECT_INTEGER, \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )
 
 #define UACPI_BUILD_TO_OP(kind, code, dst_type)      \
 UACPI_OP(                                            \
     To##kind##Op, code,                              \
-    UACPI_OP_PROPERTY_TERM_ARG,                      \
     {                                                \
         UACPI_PARSE_OP_COMPUTATIONAL_DATA,           \
         UACPI_PARSE_OP_TARGET,                       \
@@ -472,13 +477,13 @@ UACPI_OP(                                            \
         UACPI_PARSE_OP_INVOKE_HANDLER,               \
         UACPI_PARSE_OP_STORE_TO_TARGET, 1,           \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,      \
-    }                                                \
+    },                                               \
+    UACPI_OP_PROPERTY_TERM_ARG                       \
 )
 
 #define UACPI_BUILD_INC_DEC_OP(prefix, code)                     \
 UACPI_OP(                                                        \
     prefix##Op, code,                                            \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_SUPERNAME,                                \
         UACPI_PARSE_OP_OBJECT_ALLOC_TYPED, UACPI_OBJECT_INTEGER, \
@@ -486,35 +491,36 @@ UACPI_OP(                                                        \
         UACPI_PARSE_OP_TRUNCATE_NUMBER,                          \
         UACPI_PARSE_OP_STORE_TO_TARGET, 0,                       \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 
 #define UACPI_ENUMERATE_OPCODES                                  \
 UACPI_OP(                                                        \
     ZeroOp, 0x00,                                                \
-    UACPI_OP_PROPERTY_TARGET |                                   \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_LOAD_INLINE_IMM_AS_OBJECT,                \
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,          \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TARGET |                                   \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_OP(                                                        \
     OneOp, 0x01,                                                 \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_LOAD_INLINE_IMM_AS_OBJECT,                \
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,          \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
-UACPI_INVALID_OPCODE(0x02)                                       \
-UACPI_INVALID_OPCODE(0x03)                                       \
-UACPI_INVALID_OPCODE(0x04)                                       \
-UACPI_INVALID_OPCODE(0x05)                                       \
+UACPI_BAD_OPCODE(0x02)                                           \
+UACPI_BAD_OPCODE(0x03)                                           \
+UACPI_BAD_OPCODE(0x04)                                           \
+UACPI_BAD_OPCODE(0x05)                                           \
 UACPI_OP(                                                        \
-    AliasOp, 0x06, 0,                                            \
+    AliasOp, 0x06,                                               \
     {                                                            \
         UACPI_PARSE_OP_EXISTING_NAMESTRING_OR_NULL_IF_LOAD,      \
         UACPI_PARSE_OP_CREATE_NAMESTRING_OR_NULL_IF_LOAD,        \
@@ -524,9 +530,9 @@ UACPI_OP(                                                        \
         UACPI_PARSE_OP_INSTALL_NAMESPACE_NODE, 1,                \
     }                                                            \
 )                                                                \
-UACPI_INVALID_OPCODE(0x07)                                       \
+UACPI_BAD_OPCODE(0x07)                                           \
 UACPI_OP(                                                        \
-    NameOp, 0x08, 0,                                             \
+    NameOp, 0x08,                                                \
     {                                                            \
         UACPI_PARSE_OP_CREATE_NAMESTRING_OR_NULL_IF_LOAD,        \
         UACPI_PARSE_OP_TERM_ARG_UNWRAP_INTERNAL,                 \
@@ -536,23 +542,23 @@ UACPI_OP(                                                        \
         UACPI_PARSE_OP_INSTALL_NAMESPACE_NODE, 0,                \
     }                                                            \
 )                                                                \
-UACPI_INVALID_OPCODE(0x09)                                       \
+UACPI_BAD_OPCODE(0x09)                                           \
 UACPI_INTEGER_LITERAL_OP(Byte, 0x0A, 1)                          \
 UACPI_INTEGER_LITERAL_OP(Word, 0x0B, 2)                          \
 UACPI_INTEGER_LITERAL_OP(DWord, 0x0C, 4)                         \
 UACPI_OP(                                                        \
     StringPrefix, 0x0D,                                          \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_OBJECT_ALLOC_TYPED, UACPI_OBJECT_STRING,  \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_INTEGER_LITERAL_OP(QWord, 0x0E, 8)                         \
-UACPI_INVALID_OPCODE(0x0F)                                       \
+UACPI_BAD_OPCODE(0x0F)                                           \
 UACPI_OP(                                                        \
-    ScopeOp, 0x10, 0,                                            \
+    ScopeOp, 0x10,                                               \
     {                                                            \
         UACPI_PARSE_OP_TRACKED_PKGLEN,                           \
         UACPI_PARSE_OP_EXISTING_NAMESTRING_OR_NULL_IF_LOAD,      \
@@ -562,7 +568,6 @@ UACPI_OP(                                                        \
 )                                                                \
 UACPI_OP(                                                        \
     BufferOp, 0x11,                                              \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_TRACKED_PKGLEN,                           \
         UACPI_PARSE_OP_OPERAND,                                  \
@@ -570,7 +575,8 @@ UACPI_OP(                                                        \
         UACPI_PARSE_OP_OBJECT_ALLOC_TYPED, UACPI_OBJECT_BUFFER,  \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_BUILD_PACKAGE_OP(                                          \
     Package, 0x12, 3,                                            \
@@ -581,7 +587,7 @@ UACPI_BUILD_PACKAGE_OP(                                          \
     UACPI_PARSE_OP_OPERAND                                       \
 )                                                                \
 UACPI_OP(                                                        \
-    MethodOp, 0x14, 0,                                           \
+    MethodOp, 0x14,                                              \
     {                                                            \
         UACPI_PARSE_OP_TRACKED_PKGLEN,                           \
         UACPI_PARSE_OP_CREATE_NAMESTRING_OR_NULL_IF_LOAD,        \
@@ -594,56 +600,56 @@ UACPI_OP(                                                        \
     }                                                            \
 )                                                                \
 UACPI_OP(                                                        \
-    ExternalOp, 0x15, 0,                                         \
+    ExternalOp, 0x15,                                            \
     {                                                            \
         UACPI_PARSE_OP_EXISTING_NAMESTRING_OR_NULL,              \
         UACPI_PARSE_OP_LOAD_IMM, 1,                              \
         UACPI_PARSE_OP_LOAD_IMM, 1,                              \
     }                                                            \
 )                                                                \
-UACPI_INVALID_OPCODE(0x16)                                       \
-UACPI_INVALID_OPCODE(0x17)                                       \
-UACPI_INVALID_OPCODE(0x18)                                       \
-UACPI_INVALID_OPCODE(0x19)                                       \
-UACPI_INVALID_OPCODE(0x1A)                                       \
-UACPI_INVALID_OPCODE(0x1B)                                       \
-UACPI_INVALID_OPCODE(0x1C)                                       \
-UACPI_INVALID_OPCODE(0x1D)                                       \
-UACPI_INVALID_OPCODE(0x1E)                                       \
-UACPI_INVALID_OPCODE(0x1F)                                       \
-UACPI_INVALID_OPCODE(0x20)                                       \
-UACPI_INVALID_OPCODE(0x21)                                       \
-UACPI_INVALID_OPCODE(0x22)                                       \
-UACPI_INVALID_OPCODE(0x23)                                       \
-UACPI_INVALID_OPCODE(0x24)                                       \
-UACPI_INVALID_OPCODE(0x25)                                       \
-UACPI_INVALID_OPCODE(0x26)                                       \
-UACPI_INVALID_OPCODE(0x27)                                       \
-UACPI_INVALID_OPCODE(0x28)                                       \
-UACPI_INVALID_OPCODE(0x29)                                       \
-UACPI_INVALID_OPCODE(0x2A)                                       \
-UACPI_INVALID_OPCODE(0x2B)                                       \
-UACPI_INVALID_OPCODE(0x2C)                                       \
-UACPI_INVALID_OPCODE(0x2D)                                       \
+UACPI_BAD_OPCODE(0x16)                                           \
+UACPI_BAD_OPCODE(0x17)                                           \
+UACPI_BAD_OPCODE(0x18)                                           \
+UACPI_BAD_OPCODE(0x19)                                           \
+UACPI_BAD_OPCODE(0x1A)                                           \
+UACPI_BAD_OPCODE(0x1B)                                           \
+UACPI_BAD_OPCODE(0x1C)                                           \
+UACPI_BAD_OPCODE(0x1D)                                           \
+UACPI_BAD_OPCODE(0x1E)                                           \
+UACPI_BAD_OPCODE(0x1F)                                           \
+UACPI_BAD_OPCODE(0x20)                                           \
+UACPI_BAD_OPCODE(0x21)                                           \
+UACPI_BAD_OPCODE(0x22)                                           \
+UACPI_BAD_OPCODE(0x23)                                           \
+UACPI_BAD_OPCODE(0x24)                                           \
+UACPI_BAD_OPCODE(0x25)                                           \
+UACPI_BAD_OPCODE(0x26)                                           \
+UACPI_BAD_OPCODE(0x27)                                           \
+UACPI_BAD_OPCODE(0x28)                                           \
+UACPI_BAD_OPCODE(0x29)                                           \
+UACPI_BAD_OPCODE(0x2A)                                           \
+UACPI_BAD_OPCODE(0x2B)                                           \
+UACPI_BAD_OPCODE(0x2C)                                           \
+UACPI_BAD_OPCODE(0x2D)                                           \
 UACPI_UNRESOLVED_NAME_STRING_OP(DualNamePrefix, 0x2E)            \
 UACPI_UNRESOLVED_NAME_STRING_OP(MultiNamePrefix, 0x2F)           \
-UACPI_INVALID_OPCODE(0x30)                                       \
-UACPI_INVALID_OPCODE(0x31)                                       \
-UACPI_INVALID_OPCODE(0x32)                                       \
-UACPI_INVALID_OPCODE(0x33)                                       \
-UACPI_INVALID_OPCODE(0x34)                                       \
-UACPI_INVALID_OPCODE(0x35)                                       \
-UACPI_INVALID_OPCODE(0x36)                                       \
-UACPI_INVALID_OPCODE(0x37)                                       \
-UACPI_INVALID_OPCODE(0x38)                                       \
-UACPI_INVALID_OPCODE(0x39)                                       \
-UACPI_INVALID_OPCODE(0x3A)                                       \
-UACPI_INVALID_OPCODE(0x3B)                                       \
-UACPI_INVALID_OPCODE(0x3C)                                       \
-UACPI_INVALID_OPCODE(0x3D)                                       \
-UACPI_INVALID_OPCODE(0x3E)                                       \
-UACPI_INVALID_OPCODE(0x3F)                                       \
-UACPI_INVALID_OPCODE(0x40)                                       \
+UACPI_INTERNAL_OP(0x30)                                          \
+UACPI_INTERNAL_OP(0x31)                                          \
+UACPI_INTERNAL_OP(0x32)                                          \
+UACPI_INTERNAL_OP(0x33)                                          \
+UACPI_INTERNAL_OP(0x34)                                          \
+UACPI_INTERNAL_OP(0x35)                                          \
+UACPI_INTERNAL_OP(0x36)                                          \
+UACPI_INTERNAL_OP(0x37)                                          \
+UACPI_INTERNAL_OP(0x38)                                          \
+UACPI_INTERNAL_OP(0x39)                                          \
+UACPI_BAD_OPCODE(0x3A)                                           \
+UACPI_BAD_OPCODE(0x3B)                                           \
+UACPI_BAD_OPCODE(0x3C)                                           \
+UACPI_BAD_OPCODE(0x3D)                                           \
+UACPI_BAD_OPCODE(0x3E)                                           \
+UACPI_BAD_OPCODE(0x3F)                                           \
+UACPI_BAD_OPCODE(0x40)                                           \
 UACPI_UNRESOLVED_NAME_STRING_OP(A, 0x41)                         \
 UACPI_UNRESOLVED_NAME_STRING_OP(B, 0x42)                         \
 UACPI_UNRESOLVED_NAME_STRING_OP(C, 0x43)                         \
@@ -670,9 +676,9 @@ UACPI_UNRESOLVED_NAME_STRING_OP(W, 0x57)                         \
 UACPI_UNRESOLVED_NAME_STRING_OP(X, 0x58)                         \
 UACPI_UNRESOLVED_NAME_STRING_OP(Y, 0x59)                         \
 UACPI_UNRESOLVED_NAME_STRING_OP(Z, 0x5A)                         \
-UACPI_INVALID_OPCODE(0x5B)                                       \
+UACPI_INTERNAL_OP(0x5B)                                          \
 UACPI_UNRESOLVED_NAME_STRING_OP(RootChar, 0x5C)                  \
-UACPI_INVALID_OPCODE(0x5D)                                       \
+UACPI_BAD_OPCODE(0x5D)                                           \
 UACPI_UNRESOLVED_NAME_STRING_OP(ParentPrefixChar, 0x5E)          \
 UACPI_UNRESOLVED_NAME_STRING_OP(Underscore, 0x5F)                \
 UACPI_LOCALX_OP(0)                                               \
@@ -690,32 +696,31 @@ UACPI_ARGX_OP(3)                                                 \
 UACPI_ARGX_OP(4)                                                 \
 UACPI_ARGX_OP(5)                                                 \
 UACPI_ARGX_OP(6)                                                 \
-UACPI_INVALID_OPCODE(0x6F)                                       \
+UACPI_BAD_OPCODE(0x6F)                                           \
 UACPI_OP(                                                        \
     StoreOp, 0x70,                                               \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_TERM_ARG,                                 \
         UACPI_PARSE_OP_SUPERNAME,                                \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_ITEM_POP,                                 \
         UACPI_PARSE_OP_OBJECT_COPY_TO_PREV,                      \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_OP(                                                        \
     RefOfOp, 0x71,                                               \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_SUPERNAME,                                \
         UACPI_PARSE_OP_OBJECT_ALLOC,                             \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_BUILD_BINARY_MATH_OP(Add, 0x72)                            \
 UACPI_OP(                                                        \
     ConcatOp, 0x73,                                              \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_COMPUTATIONAL_DATA,                       \
         UACPI_PARSE_OP_COMPUTATIONAL_DATA,                       \
@@ -724,7 +729,8 @@ UACPI_OP(                                                        \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_STORE_TO_TARGET, 2,                       \
         UACPI_PARSE_OP_OBJECT_COPY_TO_PREV,                      \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_BUILD_BINARY_MATH_OP(Subtract, 0x74)                       \
 UACPI_BUILD_INC_DEC_OP(Increment, 0x75)                          \
@@ -732,7 +738,6 @@ UACPI_BUILD_INC_DEC_OP(Decrement, 0x76)                          \
 UACPI_BUILD_BINARY_MATH_OP(Multiply, 0x77)                       \
 UACPI_OP(                                                        \
     DivideOp, 0x78,                                              \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_OPERAND,                                  \
         UACPI_PARSE_OP_OPERAND,                                  \
@@ -744,7 +749,8 @@ UACPI_OP(                                                        \
         UACPI_PARSE_OP_STORE_TO_TARGET, 3,                       \
         UACPI_PARSE_OP_OBJECT_COPY_TO_PREV,                      \
         UACPI_PARSE_OP_STORE_TO_TARGET_INDIRECT, 2, 4,           \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_BUILD_BINARY_MATH_OP(ShiftLeft, 0x79)                      \
 UACPI_BUILD_BINARY_MATH_OP(ShiftRight, 0x7A)                     \
@@ -758,19 +764,16 @@ UACPI_BUILD_UNARY_MATH_OP(FindSetLeftBit, 0x81)                  \
 UACPI_BUILD_UNARY_MATH_OP(FindSetRightBit, 0x82)                 \
 UACPI_OP(                                                        \
     DerefOfOp, 0x83,                                             \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_TERM_ARG_UNWRAP_INTERNAL,                 \
-        UACPI_PARSE_OP_TYPECHECK_ONE_OF, 2,                      \
-            UACPI_OBJECT_REFERENCE, UACPI_OBJECT_BUFFER_INDEX,   \
         UACPI_PARSE_OP_OBJECT_ALLOC,                             \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_OP(                                                        \
     ConcatResOp, 0x84,                                           \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_TERM_ARG_UNWRAP_INTERNAL,                 \
         UACPI_PARSE_OP_TYPECHECK, UACPI_OBJECT_BUFFER,           \
@@ -781,11 +784,12 @@ UACPI_OP(                                                        \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_STORE_TO_TARGET, 2,                       \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_BUILD_BINARY_MATH_OP(Mod, 0x85)                            \
 UACPI_OP(                                                        \
-    NotifyOp, 0x86, 0,                                           \
+    NotifyOp, 0x86,                                              \
     {                                                            \
     /* This is technically wrong according to spec but I was */  \
     /* unable to find any examples of anything else after    */  \
@@ -800,19 +804,16 @@ UACPI_OP(                                                        \
 )                                                                \
 UACPI_OP(                                                        \
     SizeOfOp, 0x87,                                              \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_SUPERNAME,                                \
         UACPI_PARSE_OP_OBJECT_ALLOC_TYPED, UACPI_OBJECT_INTEGER, \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_OP(                                                        \
     IndexOp, 0x88,                                               \
-    UACPI_OP_PROPERTY_TERM_ARG |                                 \
-    UACPI_OP_PROPERTY_SUPERNAME |                                \
-    UACPI_OP_PROPERTY_SIMPLE_NAME,                               \
     {                                                            \
         UACPI_PARSE_OP_TERM_ARG_UNWRAP_INTERNAL,                 \
         UACPI_PARSE_OP_OPERAND,                                  \
@@ -821,11 +822,13 @@ UACPI_OP(                                                        \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_STORE_TO_TARGET, 2,                       \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG |                                 \
+    UACPI_OP_PROPERTY_SUPERNAME |                                \
+    UACPI_OP_PROPERTY_SIMPLE_NAME                                \
 )                                                                \
 UACPI_OP(                                                        \
     MatchOp, 0x89,                                               \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_TERM_ARG_UNWRAP_INTERNAL,                 \
         UACPI_PARSE_OP_TYPECHECK, UACPI_OBJECT_PACKAGE,          \
@@ -837,7 +840,8 @@ UACPI_OP(                                                        \
         UACPI_PARSE_OP_OBJECT_ALLOC_TYPED, UACPI_OBJECT_INTEGER, \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_BUILD_BUFFER_FIELD_OP(DWord, 0x8A)                         \
 UACPI_BUILD_BUFFER_FIELD_OP(Word, 0x8B)                          \
@@ -845,26 +849,26 @@ UACPI_BUILD_BUFFER_FIELD_OP(Byte, 0x8C)                          \
 UACPI_BUILD_BUFFER_FIELD_OP(Bit, 0x8D)                           \
 UACPI_OP(                                                        \
     ObjectTypeOp, 0x8E,                                          \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_TERM_ARG_OR_NAMED_OBJECT,                 \
         UACPI_PARSE_OP_OBJECT_ALLOC_TYPED, UACPI_OBJECT_INTEGER, \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_BUILD_BUFFER_FIELD_OP(QWord, 0x8F)                         \
 UACPI_BUILD_BINARY_LOGIC_OP(Land, 0x90)                          \
 UACPI_BUILD_BINARY_LOGIC_OP(Lor, 0x91)                           \
 UACPI_OP(                                                        \
     LnotOp, 0x92,                                                \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_OPERAND,                                  \
         UACPI_PARSE_OP_OBJECT_ALLOC,                             \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_BUILD_BINARY_LOGIC_OP(LEqual, 0x93)                        \
 UACPI_BUILD_BINARY_LOGIC_OP(LGreater, 0x94)                      \
@@ -873,11 +877,10 @@ UACPI_BUILD_TO_OP(Buffer, 0x96, UACPI_OBJECT_BUFFER)             \
 UACPI_BUILD_TO_OP(DecimalString, 0x97, UACPI_OBJECT_STRING)      \
 UACPI_BUILD_TO_OP(HexString, 0x98, UACPI_OBJECT_STRING)          \
 UACPI_BUILD_TO_OP(Integer, 0x99, UACPI_OBJECT_INTEGER)           \
-UACPI_INVALID_OPCODE(0x9A)                                       \
-UACPI_INVALID_OPCODE(0x9B)                                       \
+UACPI_BAD_OPCODE(0x9A)                                           \
+UACPI_BAD_OPCODE(0x9B)                                           \
 UACPI_OP(                                                        \
     ToStringOp, 0x9C,                                            \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_TERM_ARG_UNWRAP_INTERNAL,                 \
         UACPI_PARSE_OP_TYPECHECK, UACPI_OBJECT_BUFFER,           \
@@ -887,21 +890,21 @@ UACPI_OP(                                                        \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_STORE_TO_TARGET, 2,                       \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_OP(                                                        \
     CopyObjectOp, 0x9D,                                          \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_TERM_ARG,                                 \
         UACPI_PARSE_OP_OBJECT_COPY_TO_PREV,                      \
         UACPI_PARSE_OP_SIMPLE_NAME,                              \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_OP(                                                        \
     MidOp, 0x9E,                                                 \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_TERM_ARG_UNWRAP_INTERNAL,                 \
         UACPI_PARSE_OP_OPERAND,                                  \
@@ -911,16 +914,17 @@ UACPI_OP(                                                        \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_STORE_TO_TARGET, 3,                       \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )                                                                \
 UACPI_OP(                                                        \
-    ContinueOp, 0x9F, 0,                                         \
+    ContinueOp, 0x9F,                                            \
     {                                                            \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
     }                                                            \
 )                                                                \
 UACPI_OP(                                                        \
-    IfOp, 0xA0, 0,                                               \
+    IfOp, 0xA0,                                                  \
     {                                                            \
         UACPI_PARSE_OP_TRACKED_PKGLEN,                           \
         UACPI_PARSE_OP_OPERAND,                                  \
@@ -934,7 +938,7 @@ UACPI_OP(                                                        \
     }                                                            \
 )                                                                \
 UACPI_OP(                                                        \
-   ElseOp, 0xA1, 0,                                              \
+   ElseOp, 0xA1,                                                 \
    {                                                             \
        UACPI_PARSE_OP_IF_SWITCHED_FROM, 0xA0, 0x00, 10,          \
            UACPI_PARSE_OP_IF_LAST_NULL, 3,                       \
@@ -950,7 +954,7 @@ UACPI_OP(                                                        \
    }                                                             \
 )                                                                \
 UACPI_OP(                                                        \
-    WhileOp, 0xA2, 0,                                            \
+    WhileOp, 0xA2,                                               \
     {                                                            \
         UACPI_PARSE_OP_TRACKED_PKGLEN,                           \
         UACPI_PARSE_OP_OPERAND,                                  \
@@ -960,138 +964,138 @@ UACPI_OP(                                                        \
     }                                                            \
 )                                                                \
 UACPI_OP(                                                        \
-    NoopOp, 0xA3, 0,                                             \
+    NoopOp, 0xA3,                                                \
     {                                                            \
         UACPI_PARSE_OP_END,                                      \
     }                                                            \
 )                                                                \
 UACPI_OP(                                                        \
-    ReturnOp, 0xA4, 0,                                           \
+    ReturnOp, 0xA4,                                              \
     {                                                            \
         UACPI_PARSE_OP_TERM_ARG_UNWRAP_INTERNAL,                 \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
     }                                                            \
 )                                                                \
 UACPI_OP(                                                        \
-    BreakOp, 0xA5, 0,                                            \
+    BreakOp, 0xA5,                                               \
     {                                                            \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
     }                                                            \
 )                                                                \
-UACPI_INVALID_OPCODE(0xA6)                                       \
-UACPI_INVALID_OPCODE(0xA7)                                       \
-UACPI_INVALID_OPCODE(0xA8)                                       \
-UACPI_INVALID_OPCODE(0xA9)                                       \
-UACPI_INVALID_OPCODE(0xAA)                                       \
-UACPI_INVALID_OPCODE(0xAB)                                       \
-UACPI_INVALID_OPCODE(0xAC)                                       \
-UACPI_INVALID_OPCODE(0xAD)                                       \
-UACPI_INVALID_OPCODE(0xAE)                                       \
-UACPI_INVALID_OPCODE(0xAF)                                       \
-UACPI_INVALID_OPCODE(0xB0)                                       \
-UACPI_INVALID_OPCODE(0xB1)                                       \
-UACPI_INVALID_OPCODE(0xB2)                                       \
-UACPI_INVALID_OPCODE(0xB3)                                       \
-UACPI_INVALID_OPCODE(0xB4)                                       \
-UACPI_INVALID_OPCODE(0xB5)                                       \
-UACPI_INVALID_OPCODE(0xB6)                                       \
-UACPI_INVALID_OPCODE(0xB7)                                       \
-UACPI_INVALID_OPCODE(0xB8)                                       \
-UACPI_INVALID_OPCODE(0xB9)                                       \
-UACPI_INVALID_OPCODE(0xBA)                                       \
-UACPI_INVALID_OPCODE(0xBB)                                       \
-UACPI_INVALID_OPCODE(0xBC)                                       \
-UACPI_INVALID_OPCODE(0xBD)                                       \
-UACPI_INVALID_OPCODE(0xBE)                                       \
-UACPI_INVALID_OPCODE(0xBF)                                       \
-UACPI_INVALID_OPCODE(0xC0)                                       \
-UACPI_INVALID_OPCODE(0xC1)                                       \
-UACPI_INVALID_OPCODE(0xC2)                                       \
-UACPI_INVALID_OPCODE(0xC3)                                       \
-UACPI_INVALID_OPCODE(0xC4)                                       \
-UACPI_INVALID_OPCODE(0xC5)                                       \
-UACPI_INVALID_OPCODE(0xC6)                                       \
-UACPI_INVALID_OPCODE(0xC7)                                       \
-UACPI_INVALID_OPCODE(0xC8)                                       \
-UACPI_INVALID_OPCODE(0xC9)                                       \
-UACPI_INVALID_OPCODE(0xCA)                                       \
-UACPI_INVALID_OPCODE(0xCB)                                       \
+UACPI_BAD_OPCODE(0xA6)                                           \
+UACPI_BAD_OPCODE(0xA7)                                           \
+UACPI_BAD_OPCODE(0xA8)                                           \
+UACPI_BAD_OPCODE(0xA9)                                           \
+UACPI_BAD_OPCODE(0xAA)                                           \
+UACPI_BAD_OPCODE(0xAB)                                           \
+UACPI_BAD_OPCODE(0xAC)                                           \
+UACPI_BAD_OPCODE(0xAD)                                           \
+UACPI_BAD_OPCODE(0xAE)                                           \
+UACPI_BAD_OPCODE(0xAF)                                           \
+UACPI_BAD_OPCODE(0xB0)                                           \
+UACPI_BAD_OPCODE(0xB1)                                           \
+UACPI_BAD_OPCODE(0xB2)                                           \
+UACPI_BAD_OPCODE(0xB3)                                           \
+UACPI_BAD_OPCODE(0xB4)                                           \
+UACPI_BAD_OPCODE(0xB5)                                           \
+UACPI_BAD_OPCODE(0xB6)                                           \
+UACPI_BAD_OPCODE(0xB7)                                           \
+UACPI_BAD_OPCODE(0xB8)                                           \
+UACPI_BAD_OPCODE(0xB9)                                           \
+UACPI_BAD_OPCODE(0xBA)                                           \
+UACPI_BAD_OPCODE(0xBB)                                           \
+UACPI_BAD_OPCODE(0xBC)                                           \
+UACPI_BAD_OPCODE(0xBD)                                           \
+UACPI_BAD_OPCODE(0xBE)                                           \
+UACPI_BAD_OPCODE(0xBF)                                           \
+UACPI_BAD_OPCODE(0xC0)                                           \
+UACPI_BAD_OPCODE(0xC1)                                           \
+UACPI_BAD_OPCODE(0xC2)                                           \
+UACPI_BAD_OPCODE(0xC3)                                           \
+UACPI_BAD_OPCODE(0xC4)                                           \
+UACPI_BAD_OPCODE(0xC5)                                           \
+UACPI_BAD_OPCODE(0xC6)                                           \
+UACPI_BAD_OPCODE(0xC7)                                           \
+UACPI_BAD_OPCODE(0xC8)                                           \
+UACPI_BAD_OPCODE(0xC9)                                           \
+UACPI_BAD_OPCODE(0xCA)                                           \
+UACPI_BAD_OPCODE(0xCB)                                           \
 UACPI_OP(                                                        \
-    BreakPointOp, 0xCC, 0,                                       \
+    BreakPointOp, 0xCC,                                          \
     {                                                            \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
     }                                                            \
 )                                                                \
-UACPI_INVALID_OPCODE(0xCD)                                       \
-UACPI_INVALID_OPCODE(0xCE)                                       \
-UACPI_INVALID_OPCODE(0xCF)                                       \
-UACPI_INVALID_OPCODE(0xD0)                                       \
-UACPI_INVALID_OPCODE(0xD1)                                       \
-UACPI_INVALID_OPCODE(0xD2)                                       \
-UACPI_INVALID_OPCODE(0xD3)                                       \
-UACPI_INVALID_OPCODE(0xD4)                                       \
-UACPI_INVALID_OPCODE(0xD5)                                       \
-UACPI_INVALID_OPCODE(0xD6)                                       \
-UACPI_INVALID_OPCODE(0xD7)                                       \
-UACPI_INVALID_OPCODE(0xD8)                                       \
-UACPI_INVALID_OPCODE(0xD9)                                       \
-UACPI_INVALID_OPCODE(0xDA)                                       \
-UACPI_INVALID_OPCODE(0xDB)                                       \
-UACPI_INVALID_OPCODE(0xDC)                                       \
-UACPI_INVALID_OPCODE(0xDD)                                       \
-UACPI_INVALID_OPCODE(0xDE)                                       \
-UACPI_INVALID_OPCODE(0xDF)                                       \
-UACPI_INVALID_OPCODE(0xE0)                                       \
-UACPI_INVALID_OPCODE(0xE1)                                       \
-UACPI_INVALID_OPCODE(0xE2)                                       \
-UACPI_INVALID_OPCODE(0xE3)                                       \
-UACPI_INVALID_OPCODE(0xE4)                                       \
-UACPI_INVALID_OPCODE(0xE5)                                       \
-UACPI_INVALID_OPCODE(0xE6)                                       \
-UACPI_INVALID_OPCODE(0xE7)                                       \
-UACPI_INVALID_OPCODE(0xE8)                                       \
-UACPI_INVALID_OPCODE(0xE9)                                       \
-UACPI_INVALID_OPCODE(0xEA)                                       \
-UACPI_INVALID_OPCODE(0xEB)                                       \
-UACPI_INVALID_OPCODE(0xEC)                                       \
-UACPI_INVALID_OPCODE(0xED)                                       \
-UACPI_INVALID_OPCODE(0xEE)                                       \
-UACPI_INVALID_OPCODE(0xEF)                                       \
-UACPI_INVALID_OPCODE(0xF0)                                       \
-UACPI_INVALID_OPCODE(0xF1)                                       \
-UACPI_INVALID_OPCODE(0xF2)                                       \
-UACPI_INVALID_OPCODE(0xF3)                                       \
+UACPI_BAD_OPCODE(0xCD)                                           \
+UACPI_BAD_OPCODE(0xCE)                                           \
+UACPI_BAD_OPCODE(0xCF)                                           \
+UACPI_BAD_OPCODE(0xD0)                                           \
+UACPI_BAD_OPCODE(0xD1)                                           \
+UACPI_BAD_OPCODE(0xD2)                                           \
+UACPI_BAD_OPCODE(0xD3)                                           \
+UACPI_BAD_OPCODE(0xD4)                                           \
+UACPI_BAD_OPCODE(0xD5)                                           \
+UACPI_BAD_OPCODE(0xD6)                                           \
+UACPI_BAD_OPCODE(0xD7)                                           \
+UACPI_BAD_OPCODE(0xD8)                                           \
+UACPI_BAD_OPCODE(0xD9)                                           \
+UACPI_BAD_OPCODE(0xDA)                                           \
+UACPI_BAD_OPCODE(0xDB)                                           \
+UACPI_BAD_OPCODE(0xDC)                                           \
+UACPI_BAD_OPCODE(0xDD)                                           \
+UACPI_BAD_OPCODE(0xDE)                                           \
+UACPI_BAD_OPCODE(0xDF)                                           \
+UACPI_BAD_OPCODE(0xE0)                                           \
+UACPI_BAD_OPCODE(0xE1)                                           \
+UACPI_BAD_OPCODE(0xE2)                                           \
+UACPI_BAD_OPCODE(0xE3)                                           \
+UACPI_BAD_OPCODE(0xE4)                                           \
+UACPI_BAD_OPCODE(0xE5)                                           \
+UACPI_BAD_OPCODE(0xE6)                                           \
+UACPI_BAD_OPCODE(0xE7)                                           \
+UACPI_BAD_OPCODE(0xE8)                                           \
+UACPI_BAD_OPCODE(0xE9)                                           \
+UACPI_BAD_OPCODE(0xEA)                                           \
+UACPI_BAD_OPCODE(0xEB)                                           \
+UACPI_BAD_OPCODE(0xEC)                                           \
+UACPI_BAD_OPCODE(0xED)                                           \
+UACPI_BAD_OPCODE(0xEE)                                           \
+UACPI_BAD_OPCODE(0xEF)                                           \
+UACPI_BAD_OPCODE(0xF0)                                           \
+UACPI_BAD_OPCODE(0xF1)                                           \
+UACPI_BAD_OPCODE(0xF2)                                           \
+UACPI_BAD_OPCODE(0xF3)                                           \
 UACPI_OP(                                                        \
     InternalOpReadFieldAsBuffer, 0xF4,                           \
-    UACPI_OP_PROPERTY_TERM_ARG |                                 \
-    UACPI_OP_PROPERTY_INTERNAL,                                  \
     {                                                            \
         UACPI_PARSE_OP_OBJECT_ALLOC_TYPED, UACPI_OBJECT_BUFFER,  \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG |                                 \
+    UACPI_OP_PROPERTY_RESERVED                                   \
 )                                                                \
 UACPI_OP(                                                        \
     InternalOpReadFieldAsInteger, 0xF5,                          \
-    UACPI_OP_PROPERTY_TERM_ARG |                                 \
-    UACPI_OP_PROPERTY_INTERNAL,                                  \
     {                                                            \
         UACPI_PARSE_OP_OBJECT_ALLOC_TYPED, UACPI_OBJECT_INTEGER, \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG |                                 \
+    UACPI_OP_PROPERTY_RESERVED                                   \
 )                                                                \
 UACPI_OP(                                                        \
     InternalOpNamedObject, 0xF6,                                 \
-    UACPI_OP_PROPERTY_SIMPLE_NAME |                              \
-    UACPI_OP_PROPERTY_SUPERNAME |                                \
-    UACPI_OP_PROPERTY_TERM_ARG |                                 \
-    UACPI_OP_PROPERTY_INTERNAL,                                  \
     {                                                            \
         UACPI_PARSE_OP_EMPTY_OBJECT_ALLOC,                       \
         UACPI_PARSE_OP_INVOKE_HANDLER,                           \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_SIMPLE_NAME |                              \
+    UACPI_OP_PROPERTY_SUPERNAME |                                \
+    UACPI_OP_PROPERTY_TERM_ARG |                                 \
+    UACPI_OP_PROPERTY_RESERVED                                   \
 )                                                                \
 UACPI_METHOD_CALL_OPCODE(0)                                      \
 UACPI_METHOD_CALL_OPCODE(1)                                      \
@@ -1103,13 +1107,13 @@ UACPI_METHOD_CALL_OPCODE(6)                                      \
 UACPI_METHOD_CALL_OPCODE(7)                                      \
 UACPI_OP(                                                        \
     OnesOp, 0xFF,                                                \
-    UACPI_OP_PROPERTY_TERM_ARG,                                  \
     {                                                            \
         UACPI_PARSE_OP_LOAD_INLINE_IMM_AS_OBJECT,                \
         0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,          \
         UACPI_PARSE_OP_TRUNCATE_NUMBER,                          \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,                  \
-    }                                                            \
+    },                                                           \
+    UACPI_OP_PROPERTY_TERM_ARG                                   \
 )
 
 extern uacpi_u8 uacpi_field_op_decode_ops[];
@@ -1120,7 +1124,7 @@ extern uacpi_u8 uacpi_load_table_op_decode_ops[];
 
 #define UACPI_BUILD_NAMED_SCOPE_OBJECT_OP(name, code, type, ...) \
 UACPI_OP(                                                        \
-    name##Op, UACPI_EXT_OP(code), 0,                             \
+    name##Op, UACPI_EXT_OP(code),                                \
     {                                                            \
         UACPI_PARSE_OP_TRACKED_PKGLEN,                           \
         UACPI_PARSE_OP_CREATE_NAMESTRING_OR_NULL_IF_LOAD,        \
@@ -1135,7 +1139,6 @@ UACPI_OP(                                                        \
 #define UACPI_BUILD_TO_FROM_BCD(type, code)     \
 UACPI_OP(                                       \
     type##BCDOp, UACPI_EXT_OP(code),            \
-    UACPI_OP_PROPERTY_TERM_ARG,                 \
     {                                           \
         UACPI_PARSE_OP_OPERAND,                 \
         UACPI_PARSE_OP_TARGET,                  \
@@ -1144,18 +1147,19 @@ UACPI_OP(                                       \
         UACPI_PARSE_OP_INVOKE_HANDLER,          \
         UACPI_PARSE_OP_STORE_TO_TARGET, 1,      \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV, \
-    }                                           \
+    },                                          \
+    UACPI_OP_PROPERTY_TERM_ARG                  \
 )
 
 #define UACPI_ENUMERATE_EXT_OPCODES                         \
 UACPI_OP(                                                   \
-    InvalidExtOp, 0, UACPI_OP_PROPERTY_INVALID,             \
+    ReservedExtOp, UACPI_EXT_OP(0x00),                      \
     {                                                       \
-        UACPI_PARSE_OP_END,                                 \
+        UACPI_PARSE_OP_BAD_OPCODE,                          \
     }                                                       \
 )                                                           \
 UACPI_OP(                                                   \
-    MutexOp, UACPI_EXT_OP(0x01), 0,                         \
+    MutexOp, UACPI_EXT_OP(0x01),                            \
     {                                                       \
         UACPI_PARSE_OP_CREATE_NAMESTRING_OR_NULL_IF_LOAD,   \
         UACPI_PARSE_OP_LOAD_IMM, 1,                         \
@@ -1167,7 +1171,7 @@ UACPI_OP(                                                   \
     }                                                       \
 )                                                           \
 UACPI_OP(                                                   \
-    EventOp, UACPI_EXT_OP(0x02), 0,                         \
+    EventOp, UACPI_EXT_OP(0x02),                            \
     {                                                       \
         UACPI_PARSE_OP_CREATE_NAMESTRING_OR_NULL_IF_LOAD,   \
         UACPI_PARSE_OP_SKIP_WITH_WARN_IF_NULL, 0,           \
@@ -1179,7 +1183,6 @@ UACPI_OP(                                                   \
 )                                                           \
 UACPI_OP(                                                   \
     CondRefOfOp, UACPI_EXT_OP(0x12),                        \
-    UACPI_OP_PROPERTY_TERM_ARG,                             \
     {                                                       \
         UACPI_PARSE_OP_SUPERNAME_OR_UNRESOLVED,             \
         UACPI_PARSE_OP_TARGET,                              \
@@ -1192,7 +1195,8 @@ UACPI_OP(                                                   \
         UACPI_PARSE_OP_STORE_TO_TARGET, 1,                  \
         UACPI_PARSE_OP_LOAD_TRUE_OBJECT,                    \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,             \
-    }                                                       \
+    },                                                      \
+    UACPI_OP_PROPERTY_TERM_ARG                              \
 )                                                           \
 UACPI_DO_BUILD_BUFFER_FIELD_OP(                             \
     Create, UACPI_EXT_OP(0x13), 3,                          \
@@ -1211,14 +1215,14 @@ UACPI_OUT_OF_LINE_OP(                                       \
     UACPI_OP_PROPERTY_OUT_OF_LINE                           \
 )                                                           \
 UACPI_OP(                                                   \
-    StallOp, UACPI_EXT_OP(0x21), 0,                         \
+    StallOp, UACPI_EXT_OP(0x21),                            \
     {                                                       \
         UACPI_PARSE_OP_OPERAND,                             \
         UACPI_PARSE_OP_INVOKE_HANDLER,                      \
     }                                                       \
 )                                                           \
 UACPI_OP(                                                   \
-    SleepOp, UACPI_EXT_OP(0x22), 0,                         \
+    SleepOp, UACPI_EXT_OP(0x22),                            \
     {                                                       \
         UACPI_PARSE_OP_OPERAND,                             \
         UACPI_PARSE_OP_INVOKE_HANDLER,                      \
@@ -1226,17 +1230,17 @@ UACPI_OP(                                                   \
 )                                                           \
 UACPI_OP(                                                   \
     AcquireOp, UACPI_EXT_OP(0x23),                          \
-    UACPI_OP_PROPERTY_TERM_ARG,                             \
     {                                                       \
         UACPI_PARSE_OP_SUPERNAME,                           \
         UACPI_PARSE_OP_LOAD_IMM, 2,                         \
         UACPI_PARSE_OP_LOAD_TRUE_OBJECT,                    \
         UACPI_PARSE_OP_INVOKE_HANDLER,                      \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,             \
-    }                                                       \
+    },                                                      \
+    UACPI_OP_PROPERTY_TERM_ARG                              \
 )                                                           \
 UACPI_OP(                                                   \
-    SignalOp, UACPI_EXT_OP(0x24), 0,                        \
+    SignalOp, UACPI_EXT_OP(0x24),                           \
     {                                                       \
         UACPI_PARSE_OP_SUPERNAME,                           \
         UACPI_PARSE_OP_INVOKE_HANDLER,                      \
@@ -1244,24 +1248,24 @@ UACPI_OP(                                                   \
 )                                                           \
 UACPI_OP(                                                   \
     WaitOp, UACPI_EXT_OP(0x25),                             \
-    UACPI_OP_PROPERTY_TERM_ARG,                             \
     {                                                       \
         UACPI_PARSE_OP_SUPERNAME,                           \
         UACPI_PARSE_OP_OPERAND,                             \
         UACPI_PARSE_OP_LOAD_TRUE_OBJECT,                    \
         UACPI_PARSE_OP_INVOKE_HANDLER,                      \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,             \
-    }                                                       \
+    },                                                      \
+    UACPI_OP_PROPERTY_TERM_ARG                              \
 )                                                           \
 UACPI_OP(                                                   \
-    ResetOp, UACPI_EXT_OP(0x26), 0,                         \
+    ResetOp, UACPI_EXT_OP(0x26),                            \
     {                                                       \
         UACPI_PARSE_OP_SUPERNAME,                           \
         UACPI_PARSE_OP_INVOKE_HANDLER,                      \
     }                                                       \
 )                                                           \
 UACPI_OP(                                                   \
-    ReleaseOp, UACPI_EXT_OP(0x27), 0,                       \
+    ReleaseOp, UACPI_EXT_OP(0x27),                          \
     {                                                       \
         UACPI_PARSE_OP_SUPERNAME,                           \
         UACPI_PARSE_OP_INVOKE_HANDLER,                      \
@@ -1270,7 +1274,7 @@ UACPI_OP(                                                   \
 UACPI_BUILD_TO_FROM_BCD(From, 0x28)                         \
 UACPI_BUILD_TO_FROM_BCD(To, 0x29)                           \
 UACPI_OP(                                                   \
-    UnloadOp, UACPI_EXT_OP(0x2A), 0,                        \
+    UnloadOp, UACPI_EXT_OP(0x2A),                           \
     {                                                       \
         UACPI_PARSE_OP_SUPERNAME,                           \
         UACPI_PARSE_OP_INVOKE_HANDLER,                      \
@@ -1278,26 +1282,26 @@ UACPI_OP(                                                   \
 )                                                           \
 UACPI_OP(                                                   \
     RevisionOp, UACPI_EXT_OP(0x30),                         \
-    UACPI_OP_PROPERTY_TERM_ARG,                             \
     {                                                       \
         UACPI_PARSE_OP_LOAD_INLINE_IMM_AS_OBJECT,           \
         0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,     \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,             \
-    }                                                       \
+    },                                                      \
+    UACPI_OP_PROPERTY_TERM_ARG                              \
 )                                                           \
 UACPI_OP(                                                   \
     DebugOp, UACPI_EXT_OP(0x31),                            \
-    UACPI_OP_PROPERTY_TERM_ARG |                            \
-    UACPI_OP_PROPERTY_SUPERNAME |                           \
-    UACPI_OP_PROPERTY_TARGET,                               \
     {                                                       \
         UACPI_PARSE_OP_OBJECT_ALLOC_TYPED,                  \
         UACPI_OBJECT_DEBUG,                                 \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,             \
-    }                                                       \
+    },                                                      \
+    UACPI_OP_PROPERTY_TERM_ARG |                            \
+    UACPI_OP_PROPERTY_SUPERNAME |                           \
+    UACPI_OP_PROPERTY_TARGET                                \
 )                                                           \
 UACPI_OP(                                                   \
-    FatalOp, UACPI_EXT_OP(0x32), 0,                         \
+    FatalOp, UACPI_EXT_OP(0x32),                            \
     {                                                       \
         UACPI_PARSE_OP_LOAD_IMM, 1,                         \
         UACPI_PARSE_OP_LOAD_IMM, 4,                         \
@@ -1307,16 +1311,16 @@ UACPI_OP(                                                   \
 )                                                           \
 UACPI_OP(                                                   \
     TimerOp, UACPI_EXT_OP(0x33),                            \
-    UACPI_OP_PROPERTY_TERM_ARG,                             \
     {                                                       \
         UACPI_PARSE_OP_OBJECT_ALLOC_TYPED,                  \
             UACPI_OBJECT_INTEGER,                           \
         UACPI_PARSE_OP_INVOKE_HANDLER,                      \
         UACPI_PARSE_OP_OBJECT_TRANSFER_TO_PREV,             \
-    }                                                       \
+    },                                                      \
+    UACPI_OP_PROPERTY_TERM_ARG                              \
 )                                                           \
 UACPI_OP(                                                   \
-    OpRegionOp, UACPI_EXT_OP(0x80), 0,                      \
+    OpRegionOp, UACPI_EXT_OP(0x80),                         \
     {                                                       \
         UACPI_PARSE_OP_CREATE_NAMESTRING_OR_NULL_IF_LOAD,   \
         UACPI_PARSE_OP_LOAD_IMM, 1,                         \
@@ -1362,7 +1366,7 @@ UACPI_OUT_OF_LINE_OP(                                       \
     UACPI_OP_PROPERTY_OUT_OF_LINE                           \
 )                                                           \
 UACPI_OP(                                                   \
-    DataRegionOp, UACPI_EXT_OP(0x88), 0,                    \
+    DataRegionOp, UACPI_EXT_OP(0x88),                       \
     {                                                       \
         UACPI_PARSE_OP_CREATE_NAMESTRING_OR_NULL_IF_LOAD,   \
         UACPI_PARSE_OP_STRING,                              \

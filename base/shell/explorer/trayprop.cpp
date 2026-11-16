@@ -37,7 +37,9 @@ static void SetBitmap(HWND hwnd, HBITMAP* hbmp, UINT uImageId)
     {
         BITMAP bm;
         GetObject(*hbmp, sizeof(bm), &bm);
-        ::SetWindowPos(hwnd, NULL, 0, 0, bm.bmWidth + 2, bm.bmHeight + 2,
+        ::SetWindowPos(hwnd, NULL, 0, 0,
+                       bm.bmWidth + ShellScaleForDpi(2),
+                       bm.bmHeight + ShellScaleForDpi(2),
                        SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOZORDER);
         SendMessage(hwnd, STM_SETIMAGE, IMAGE_BITMAP, (LPARAM)*hbmp);
     }
@@ -56,7 +58,7 @@ private:
         BOOL bHide = IsDlgButtonChecked(IDC_TASKBARPROP_HIDE);
         BOOL bGroup = IsDlgButtonChecked(IDC_TASKBARPROP_GROUP);
         BOOL bShowQL = IsDlgButtonChecked(IDC_TASKBARPROP_SHOWQL);
-        UINT uImageId;
+        UINT uImageId = IDB_TASKBARPROP_NOLOCK_NOGROUP_NOQL;
 
         HWND hwndTaskbarBitmap = GetDlgItem(IDC_TASKBARPROP_TASKBARBITMAP);
 

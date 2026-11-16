@@ -11,7 +11,6 @@
 #include <ndk/rtlfuncs.h>
 #include <pseh/pseh2.h>
 #include <strsafe.h>
-#include <versionhelpers.h>
 
 #define INVALID_PTR_OFF(x)  ((PVOID)(ULONG_PTR)(0xdeadbeefdeadbeefULL + x))
 #define INVALID_PTR         INVALID_PTR_OFF(0)
@@ -48,16 +47,6 @@ TESTS_CHARPREV TestCharPrev[] =
     {testBoth, L"C:\\ReactOS", L"", 0, -1, 0, FALSE, FALSE},
     {testBoth, L"C:\\ReactOS\\", L"C:\\ReactOS", 0, -1, 0, FALSE, FALSE},
     {testBoth, L"C:\\ReactOS\\", L"ReactOS", 0, -1, 0, FALSE, FALSE},
-};
-
-TESTS_CHARPREV TestCharPrev_XP[] =
-{
-    /* XP/2003 treat diacritics as normal characters */
-    {testOffs, L"test a\x030a", NULL, 7, 6, 6, TRUE, TRUE},
-    {testOffs, L"test a\x0301\x0302\x0303\x0304", NULL, 10, 9, 9, TRUE, TRUE},
-    {testOffs, L"test a\x0301\x0302\x0303\x0304", NULL, 9, 8, 8, TRUE, TRUE},
-    {testOffs, L"test a\x0301\x0302\x0303\x0304", NULL, 8, 7, 7, TRUE, TRUE},
-    {testOffs, L"test a\x0301\x0302\x0303\x0304", NULL, 7, 6, 6, TRUE, TRUE},
 };
 
 TESTS_CHARPREV TestCharPrev_Vista[] =
@@ -130,21 +119,6 @@ ST_TESTS_CHARPREV TestStaticCharPrev[] =
       szSpecial,  szSpecial + 17,  szSpecial + 16},
     {wszSpecial, wszSpecial + 18, wszSpecial + 17,
       szSpecial,  szSpecial + 18,  szSpecial + 17},
-};
-
-ST_TESTS_CHARPREV TestStaticCharPrev_XP[] =
-{
-    /* XP/2003 treat diacritics as normal characters */
-    {wszMagic1, wszMagic1 + 7,  wszMagic1 + 6,
-     NULL, NULL, NULL},
-    {wszMagic2, wszMagic2 + 10, wszMagic2 + 9,
-     NULL, NULL, NULL},
-    {wszMagic2, wszMagic2 + 9,  wszMagic2 + 8,
-     NULL, NULL, NULL},
-    {wszMagic2, wszMagic2 + 8,  wszMagic2 + 7,
-     NULL, NULL, NULL},
-    {wszMagic2, wszMagic2 + 7,  wszMagic2 + 6,
-     NULL, NULL, NULL},
 };
 
 ST_TESTS_CHARPREV TestStaticCharPrev_Vista[] =
@@ -227,21 +201,6 @@ ST_TESTS_CHARNEXT TestStaticCharNext[] =
       szSpecial + 15,  szSpecial + 16},
     {wszSpecial + 16, wszSpecial + 17,
       szSpecial + 16,  szSpecial + 17},
-};
-
-ST_TESTS_CHARNEXT TestStaticCharNext_XP[] =
-{
-    /* XP/2003 treat diacritics as normal characters */
-    {wszMagic1 + 5, wszMagic1 + 6,
-     NULL, NULL},
-    {wszMagic2 + 5, wszMagic2 + 6,
-     NULL, NULL},
-    {wszMagic2 + 6, wszMagic2 + 7,
-     NULL, NULL},
-    {wszMagic2 + 7, wszMagic2 + 8,
-     NULL, NULL},
-    {wszMagic2 + 8, wszMagic2 + 9,
-     NULL, NULL},
 };
 
 ST_TESTS_CHARNEXT TestStaticCharNext_Vista[] =
@@ -415,7 +374,7 @@ static LPSTR AllocStringA(LPWSTR lpszStr, SIZE_T len)
     {
         HeapFree(GetProcessHeap(), 0, str);
         str = NULL;
-        trace("WideCharToMultiByte returned %lu (error %ld)\n", mbs, GetLastError());
+        trace("WideCharToMultiByte returned %Iu (error %ld)\n", mbs, GetLastError());
         goto Skip;
     }
 
@@ -426,7 +385,7 @@ Skip:
 
 static void testCharPrevW(const TESTS_CHARPREV *pEntry, SIZE_T len, UINT i)
 {
-    LPWSTR wszStart, wszCurrent;
+    LPWSTR wszStart, wszCurrent = NULL;
     LPWSTR pchW;
     INT iRealOffset;
     BOOL b;
@@ -443,12 +402,14 @@ static void testCharPrevW(const TESTS_CHARPREV *pEntry, SIZE_T len, UINT i)
         wszCurrent = wszStart + pEntry->iOffset;
     else
     {
-        wszCurrent = AllocStringW(pEntry->lpszCurrent, wcslen(pEntry->lpszCurrent));
+        wszCurrent = AllocStringW(pEntry->lpszCurrent, wcslen(pEntry->lpszCurrent) + 1);
         if (!wszCurrent && pEntry->lpszCurrent)
         {
             skip("[%u] AllocStringW for wszCurrent failed\n", i);
             goto Cleanup;
         }
+        MoveMemory(wszCurrent + 1, wszCurrent, (wcslen(pEntry->lpszCurrent) + 1) * sizeof(WCHAR));
+        *wszCurrent++ = L' ';
     }
     pchW = CharPrevW(wszStart, wszCurrent);
     if (wszCurrent - wszStart >= 0)
@@ -462,7 +423,7 @@ static void testCharPrevW(const TESTS_CHARPREV *pEntry, SIZE_T len, UINT i)
             ok(b, "[%u] CharPrevW: pchW (0x%p) is expected to be within wszStart (0x%p)\n", i, pchW, wszStart);
         else
             ok(!b, "[%u] CharPrevW: pchW (0x%p) is expected to be outside wszStart (0x%p)\n", i, pchW, wszStart);
-        ok(pchW == wszStart + iRealOffset, "[%u] CharPrevW: pchW is 0x%p (offset %d)\n", i, pchW, pchW - wszStart);
+        ok(pchW == wszStart + iRealOffset, "[%u] CharPrevW: pchW is 0x%p (offset %Id)\n", i, pchW, pchW - wszStart);
     }
     else
     {
@@ -471,19 +432,21 @@ static void testCharPrevW(const TESTS_CHARPREV *pEntry, SIZE_T len, UINT i)
             ok(b, "[%u] CharPrevW: pchW (0x%p) is expected to be within wszCurrent (0x%p)\n", i, pchW, wszCurrent);
         else
             ok(!b, "[%u] CharPrevW: pchW (0x%p) is expected to be outside wszCurrent (0x%p)\n", i, pchW, wszCurrent);
-        ok(pchW == wszCurrent + iRealOffset, "[%u] CharPrevW: pchW is 0x%p (offset %d)\n", i, pchW, pchW - wszCurrent);
+        ok(pchW == wszCurrent + iRealOffset, "[%u] CharPrevW: pchW is 0x%p (offset %Id)\n", i, pchW, pchW - wszCurrent);
     }
 
 Cleanup:
-    if (pEntry->testType != testBoth)
+    if (pEntry->testType != testBoth || !wszCurrent)
         wszCurrent = NULL;
+    else
+        wszCurrent--;
     HeapFree(GetProcessHeap(), 0, wszStart);
     HeapFree(GetProcessHeap(), 0, wszCurrent);
 }
 
 static void testCharPrevA(const TESTS_CHARPREV *pEntry, SIZE_T len, UINT i)
 {
-    LPSTR szStart, szCurrent;
+    LPSTR szStart, szCurrent = NULL;
     LPSTR pchA, pchEx;
     INT iRealOffset;
     BOOL b;
@@ -520,7 +483,7 @@ static void testCharPrevA(const TESTS_CHARPREV *pEntry, SIZE_T len, UINT i)
             ok(b, "[%u] CharPrevA: pchA (0x%p) is expected to be within szStart (0x%p)\n", i, pchA, szStart);
         else
             ok(!b, "[%u] CharPrevA: pchA (0x%p) is expected to be outside szStart (0x%p)\n", i, pchA, szStart);
-        ok(pchA == szStart + iRealOffset, "[%u] CharPrevA: pchA is 0x%p (offset %d)\n", i, pchA, pchA - szStart);
+        ok(pchA == szStart + iRealOffset, "[%u] CharPrevA: pchA is 0x%p (offset %Id)\n", i, pchA, pchA - szStart);
     }
     else
     {
@@ -529,7 +492,7 @@ static void testCharPrevA(const TESTS_CHARPREV *pEntry, SIZE_T len, UINT i)
             ok(b, "[%u] CharPrevA: pchA (0x%p) is expected to be within szCurrent (0x%p)\n", i, pchA, szCurrent);
         else
             ok(!b, "[%u] CharPrevA: pchA (0x%p) is expected to be outside szCurrent (0x%p)\n", i, pchA, szCurrent);
-        ok(pchA == szCurrent + iRealOffset, "[%u] CharPrevA: pchA is 0x%p (offset %d)\n", i, pchA, pchA - szCurrent);
+        ok(pchA == szCurrent + iRealOffset, "[%u] CharPrevA: pchA is 0x%p (offset %Id)\n", i, pchA, pchA - szCurrent);
     }
     ok(pchA == pchEx, "[%u] CharPrevExA: pchA (0x%p) is not equal to pchEx (0x%p)\n", i, pchA, pchEx);
 
@@ -615,19 +578,9 @@ static void testCharPrev(void)
         testDynCharPrev(&TestCharPrev[i], i);
     }
 
-    if (!IsWindowsVistaOrGreater())
+    for (i = 0; i < _countof(TestCharPrev_Vista); i++)
     {
-        for (i = 0; i < _countof(TestCharPrev_XP); i++)
-        {
-            testDynCharPrev(&TestCharPrev_XP[i], i);
-        }
-    }
-    else
-    {
-        for (i = 0; i < _countof(TestCharPrev_Vista); i++)
-        {
-            testDynCharPrev(&TestCharPrev_Vista[i], i);
-        }
+        testDynCharPrev(&TestCharPrev_Vista[i], i);
     }
 
     /* Perform static tests */
@@ -636,19 +589,9 @@ static void testCharPrev(void)
         testStatCharPrev(&TestStaticCharPrev[i], i);
     }
 
-    if (!IsWindowsVistaOrGreater())
+    for (i = 0; i < _countof(TestStaticCharPrev_Vista); i++)
     {
-        for (i = 0; i < _countof(TestStaticCharPrev_XP); i++)
-        {
-            testStatCharPrev(&TestStaticCharPrev_XP[i], i);
-        }
-    }
-    else
-    {
-        for (i = 0; i < _countof(TestStaticCharPrev_Vista); i++)
-        {
-            testStatCharPrev(&TestStaticCharPrev_Vista[i], i);
-        }
+        testStatCharPrev(&TestStaticCharPrev_Vista[i], i);
     }
 
     for (i = 0; i < _countof(TestStaticCodePageCharPrev); i++)
@@ -728,19 +671,9 @@ static void testCharNext(void)
         testStatCharNext(&TestStaticCharNext[i], i);
     }
 
-    if (!IsWindowsVistaOrGreater())
+    for (i = 0; i < _countof(TestStaticCharNext_Vista); i++)
     {
-        for (i = 0; i < _countof(TestStaticCharNext_XP); i++)
-        {
-            testStatCharNext(&TestStaticCharNext_XP[i], i);
-        }
-    }
-    else
-    {
-        for (i = 0; i < _countof(TestStaticCharNext_Vista); i++)
-        {
-            testStatCharNext(&TestStaticCharNext_Vista[i], i);
-        }
+        testStatCharNext(&TestStaticCharNext_Vista[i], i);
     }
 
     for (i = 0; i < _countof(TestStaticCodePageCharNext); i++)

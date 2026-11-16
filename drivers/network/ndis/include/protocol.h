@@ -27,7 +27,35 @@ typedef struct _ADAPTER_BINDING {
     KSPIN_LOCK        Lock;                     /* Protecting spin lock */
     PPROTOCOL_BINDING ProtocolBinding;          /* Protocol that opened adapter */
     PLOGICAL_ADAPTER  Adapter;                  /* Adapter opened by protocol */
+    EX_RUNDOWN_REF    RundownRef;               /* Pending send/request/transfer ownership */
+    volatile LONG     Closing;                  /* Blocks new asynchronous operations */
 } ADAPTER_BINDING, *PADAPTER_BINDING;
+
+static __inline BOOLEAN
+NdisReferenceAdapterBinding(
+    PADAPTER_BINDING AdapterBinding)
+{
+    if (InterlockedCompareExchange(&AdapterBinding->Closing, FALSE, FALSE) != FALSE)
+        return FALSE;
+
+    if (!ExAcquireRundownProtection(&AdapterBinding->RundownRef))
+        return FALSE;
+
+    if (InterlockedCompareExchange(&AdapterBinding->Closing, FALSE, FALSE) != FALSE)
+    {
+        ExReleaseRundownProtection(&AdapterBinding->RundownRef);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static __inline VOID
+NdisDereferenceAdapterBinding(
+    PADAPTER_BINDING AdapterBinding)
+{
+    ExReleaseRundownProtection(&AdapterBinding->RundownRef);
+}
 
 typedef struct _NDIS_REQUEST_MAC_BLOCK {
     PVOID Unknown1;
@@ -37,6 +65,15 @@ typedef struct _NDIS_REQUEST_MAC_BLOCK {
 } NDIS_REQUEST_MAC_BLOCK, *PNDIS_REQUEST_MAC_BLOCK;
 
 #define GET_ADAPTER_BINDING(Handle)((PADAPTER_BINDING)Handle)
+
+typedef struct _NDIS_UNBIND_CONTEXT {
+    KEVENT      Event;
+    NDIS_STATUS Status;
+} NDIS_UNBIND_CONTEXT, *PNDIS_UNBIND_CONTEXT;
+
+PLOGICAL_ADAPTER
+Ndis6AdapterFromBindingHandle(
+    NDIS_HANDLE NdisBindingHandle);
 
 
 extern LIST_ENTRY ProtocolListHead;
@@ -72,5 +109,13 @@ proSendPacketToMiniport(PLOGICAL_ADAPTER Adapter, PNDIS_PACKET Packet);
 VOID
 NTAPI
 ndisBindMiniportsToProtocol(OUT PNDIS_STATUS Status, IN PPROTOCOL_BINDING Protocol);
+
+VOID
+NTAPI
+ndisUnbindProtocolsFromAdapter(IN PLOGICAL_ADAPTER Adapter);
+
+VOID
+NTAPI
+ndisQueueProtocolBinding(VOID);
 
 /* EOF */

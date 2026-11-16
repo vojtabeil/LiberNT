@@ -4,6 +4,7 @@
  * FILE:        tcpip/dispatch.h
  * PURPOSE:     TDI dispatch routines
  * PROGRAMMERS: Casper S. Hornstrup (chorns@users.sourceforge.net)
+ *              Ahmed ARIF (arif.ing@outlook.com)
  * REVISIONS:
  *   CSH 01/08-2000 Created
  * TODO:        Validate device object in all dispatch routines
@@ -13,6 +14,7 @@
 
 #include <datagram.h>
 #include <pseh/pseh2.h>
+#include <tcpip_undoc.h>
 
 typedef struct _QUERY_HW_WORK_ITEM {
     PIO_WORKITEM WorkItem;
@@ -36,6 +38,20 @@ NTSTATUS IRPFinish( PIRP Irp, NTSTATUS Status ) {
     }
 
     return Status;
+}
+
+static
+VOID
+DispFinishCancelledQueuedIrp(
+    PCONNECTION_ENDPOINT Connection,
+    PIRP Irp,
+    NTSTATUS Status)
+{
+    if (Status == STATUS_PENDING && Irp->Cancel && TCPRemoveIRP(Connection, Irp))
+    {
+        Irp->IoStatus.Information = 0;
+        IRPFinish(Irp, STATUS_CANCELLED);
+    }
 }
 
 NTSTATUS DispPrepareIrpForCancel(
@@ -129,61 +145,80 @@ VOID NTAPI DispCancelRequest(
     PTRANSPORT_CONTEXT TranContext;
     PFILE_OBJECT FileObject;
     UCHAR MinorFunction;
-    PCONNECTION_ENDPOINT Connection;
-    BOOLEAN DequeuedIrp = TRUE;
-
-    IoReleaseCancelSpinLock(Irp->CancelIrql);
+    PVOID ContextType;
+    PCONNECTION_ENDPOINT Connection = NULL;
+    PADDRESS_FILE AddressFile = NULL;
+    BOOLEAN DequeuedIrp = FALSE;
 
     TI_DbgPrint(DEBUG_IRP, ("Called.\n"));
 
     IrpSp         = IoGetCurrentIrpStackLocation(Irp);
     FileObject    = IrpSp->FileObject;
     TranContext   = (PTRANSPORT_CONTEXT)FileObject->FsContext;
+    ContextType   = FileObject->FsContext2;
     MinorFunction = IrpSp->MinorFunction;
 
-    TI_DbgPrint(DEBUG_IRP, ("IRP at (0x%X)  MinorFunction (0x%X)  IrpSp (0x%X).\n", Irp, MinorFunction, IrpSp));
+    if (TranContext)
+    {
+        switch (MinorFunction)
+        {
+            case TDI_SEND:
+            case TDI_RECEIVE:
+            case TDI_CONNECT:
+            case TDI_DISCONNECT:
+                Connection = (PCONNECTION_ENDPOINT)TranContext->Handle.ConnectionContext;
+                if (Connection) ReferenceObject(Connection);
+                break;
 
-    Irp->IoStatus.Status = STATUS_CANCELLED;
-    Irp->IoStatus.Information = 0;
+            case TDI_SEND_DATAGRAM:
+            case TDI_RECEIVE_DATAGRAM:
+                AddressFile = (PADDRESS_FILE)TranContext->Handle.AddressHandle;
+                if (AddressFile) ReferenceObject(AddressFile);
+                break;
+        }
+    }
 
 #if DBG
     if (!Irp->Cancel)
         TI_DbgPrint(MIN_TRACE, ("Irp->Cancel is FALSE, should be TRUE.\n"));
 #endif
 
+    /* IRP stack locations are no longer stable once completion acquires this lock. */
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+
+    TI_DbgPrint(DEBUG_IRP, ("IRP at (0x%X)  MinorFunction (0x%X)  IrpSp (0x%X).\n", Irp, MinorFunction, IrpSp));
+
     /* Try canceling the request */
     switch(MinorFunction) {
     case TDI_SEND:
     case TDI_RECEIVE:
-	DequeuedIrp = TCPRemoveIRP( TranContext->Handle.ConnectionContext, Irp );
+        if (Connection) DequeuedIrp = TCPRemoveIRP(Connection, Irp);
         break;
 
     case TDI_SEND_DATAGRAM:
-        if (FileObject->FsContext2 != (PVOID)TDI_TRANSPORT_ADDRESS_FILE) {
+        if (ContextType != (PVOID)TDI_TRANSPORT_ADDRESS_FILE) {
             TI_DbgPrint(MIN_TRACE, ("TDI_SEND_DATAGRAM, but no address file.\n"));
             break;
         }
 
-        DequeuedIrp = DGRemoveIRP(TranContext->Handle.AddressHandle, Irp);
+        if (AddressFile) DequeuedIrp = DGRemoveIRP(AddressFile, Irp);
         break;
 
     case TDI_RECEIVE_DATAGRAM:
-        if (FileObject->FsContext2 != (PVOID)TDI_TRANSPORT_ADDRESS_FILE) {
+        if (ContextType != (PVOID)TDI_TRANSPORT_ADDRESS_FILE) {
             TI_DbgPrint(MIN_TRACE, ("TDI_RECEIVE_DATAGRAM, but no address file.\n"));
             break;
         }
 
-        DequeuedIrp = DGRemoveIRP(TranContext->Handle.AddressHandle, Irp);
+        if (AddressFile) DequeuedIrp = DGRemoveIRP(AddressFile, Irp);
         break;
 
     case TDI_CONNECT:
-        DequeuedIrp = TCPRemoveIRP(TranContext->Handle.ConnectionContext, Irp);
+        if (Connection) DequeuedIrp = TCPRemoveIRP(Connection, Irp);
         break;
 
     case TDI_DISCONNECT:
-        Connection = (PCONNECTION_ENDPOINT)TranContext->Handle.ConnectionContext;
-
-        DequeuedIrp = TCPRemoveIRP(TranContext->Handle.ConnectionContext, Irp);
+        if (Connection) DequeuedIrp = TCPRemoveIRP(Connection, Irp);
         if (DequeuedIrp)
         {
             if (KeCancelTimer(&Connection->DisconnectTimer))
@@ -201,6 +236,9 @@ VOID NTAPI DispCancelRequest(
 
     if (DequeuedIrp)
        IRPFinish(Irp, STATUS_CANCELLED);
+
+    if (AddressFile) DereferenceObject(AddressFile);
+    if (Connection) DereferenceObject(Connection);
 
     TI_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 }
@@ -220,32 +258,59 @@ VOID NTAPI DispCancelListenRequest(
     PTRANSPORT_CONTEXT TranContext;
     PFILE_OBJECT FileObject;
     PCONNECTION_ENDPOINT Connection;
-
-    IoReleaseCancelSpinLock(Irp->CancelIrql);
+    PCONNECTION_ENDPOINT Listener = NULL;
+    PADDRESS_FILE AddressFile = NULL;
+    BOOLEAN DequeuedIrp = FALSE;
 
     TI_DbgPrint(DEBUG_IRP, ("Called.\n"));
 
     IrpSp         = IoGetCurrentIrpStackLocation(Irp);
     FileObject    = IrpSp->FileObject;
     TranContext   = (PTRANSPORT_CONTEXT)FileObject->FsContext;
-    ASSERT( TDI_LISTEN == IrpSp->MinorFunction);
-
-    TI_DbgPrint(DEBUG_IRP, ("IRP at (0x%X).\n", Irp));
+    ASSERT(TDI_LISTEN == IrpSp->MinorFunction);
+    Connection    = TranContext ? (PCONNECTION_ENDPOINT)TranContext->Handle.ConnectionContext : NULL;
+    if (Connection) ReferenceObject(Connection);
 
 #if DBG
     if (!Irp->Cancel)
         TI_DbgPrint(MIN_TRACE, ("Irp->Cancel is FALSE, should be TRUE.\n"));
 #endif
 
-    /* Try canceling the request */
-    Connection = (PCONNECTION_ENDPOINT)TranContext->Handle.ConnectionContext;
+    /* Capture the endpoint before completion can advance or release the IRP stack. */
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
 
-    if (TCPAbortListenForSocket(Connection->AddressFile->Listener,
-                                Connection))
+    TI_DbgPrint(DEBUG_IRP, ("IRP at (0x%X).\n", Irp));
+
+    if (Connection)
+    {
+        LockObject(Connection);
+        AddressFile = Connection->AddressFile;
+        if (AddressFile) ReferenceObject(AddressFile);
+        UnlockObject(Connection);
+    }
+
+    if (AddressFile)
+    {
+        LockObject(AddressFile);
+        Listener = AddressFile->Listener;
+        if (Listener) ReferenceObject(Listener);
+        UnlockObject(AddressFile);
+        DereferenceObject(AddressFile);
+    }
+
+    if (Listener)
+    {
+        DequeuedIrp = TCPAbortListenForSocket(Listener, Connection);
+        DereferenceObject(Listener);
+    }
+
+    if (DequeuedIrp)
     {
         Irp->IoStatus.Information = 0;
         IRPFinish(Irp, STATUS_CANCELLED);
     }
+
+    if (Connection) DereferenceObject(Connection);
 
     TI_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 }
@@ -361,7 +426,15 @@ NTSTATUS DispTdiAssociateAddress(
   /* Add connection endpoint to the address file */
   ReferenceObject(Connection);
   if (AddrFile->Connection == NULL)
+  {
       AddrFile->Connection = Connection;
+
+      if (AddrFile->PendingKeepAliveSet)
+          TCPSetKeepAlive(Connection, AddrFile->PendingKeepAlive);
+
+      if (AddrFile->PendingNoDelaySet)
+          TCPSetNoDelay(Connection, AddrFile->PendingNoDelay);
+  }
   else
   {
       LastConnection = AddrFile->Connection;
@@ -558,16 +631,18 @@ NTSTATUS DispTdiListen(
  */
 {
   PCONNECTION_ENDPOINT Connection;
+  PCONNECTION_ENDPOINT Listener = NULL;
+  PCONNECTION_ENDPOINT DrainListener = NULL;
   PTDI_REQUEST_KERNEL Parameters;
   PTRANSPORT_CONTEXT TranContext;
   PIO_STACK_LOCATION IrpSp;
   NTSTATUS Status = STATUS_SUCCESS;
+  BOOLEAN NewListener = FALSE;
+  BOOLEAN CloseListener = FALSE;
 
   TI_DbgPrint(DEBUG_IRP, ("Called.\n"));
 
   IrpSp = IoGetCurrentIrpStackLocation(Irp);
-
-  IoMarkIrpPending(Irp);
 
   /* Get associated connection endpoint file object. Quit if none exists */
 
@@ -589,11 +664,6 @@ NTSTATUS DispTdiListen(
 
   Parameters = (PTDI_REQUEST_KERNEL)&IrpSp->Parameters;
 
-  Status = DispPrepareIrpForCancel
-      (TranContext->Handle.ConnectionContext,
-       Irp,
-       (PDRIVER_CANCEL)DispCancelListenRequest);
-
   LockObject(Connection);
 
   if (Connection->AddressFile == NULL)
@@ -611,7 +681,7 @@ NTSTATUS DispTdiListen(
    * when a new connection arrives. */
   /* The important thing to note here is that the irp we'll complete belongs
    * to the socket to be accepted onto, not the listener */
-  if( NT_SUCCESS(Status) && !Connection->AddressFile->Listener ) {
+  if( !Connection->AddressFile->Listener ) {
       Connection->AddressFile->Listener =
 	  TCPAllocateConnectionEndpoint( NULL );
 
@@ -622,33 +692,65 @@ NTSTATUS DispTdiListen(
           ReferenceObject(Connection->AddressFile);
 	  Connection->AddressFile->Listener->AddressFile =
 	      Connection->AddressFile;
-
-	  Status = TCPSocket( Connection->AddressFile->Listener,
-			      Connection->AddressFile->Family,
-			      SOCK_STREAM,
-			      Connection->AddressFile->Protocol );
-      }
-
-      if( NT_SUCCESS(Status) ) {
-	  ReferenceObject(Connection->AddressFile->Listener);
-	  Status = TCPListen( Connection->AddressFile->Listener, 1024 );
-	  /* BACKLOG */
+	  NewListener = TRUE;
       }
   }
 
   if( NT_SUCCESS(Status) ) {
-      Status = TCPAccept
-	  ( (PTDI_REQUEST)Parameters,
-	    Connection->AddressFile->Listener,
-	    Connection,
-	    DispDataRequestComplete,
-	    Irp );
+      Listener = Connection->AddressFile->Listener;
+      ReferenceObject(Listener);
   }
 
   UnlockObject(Connection->AddressFile);
+
+  if( NewListener ) {
+      Status = TCPSocket( Listener,
+			  Connection->AddressFile->Family,
+			  SOCK_STREAM,
+			  Connection->AddressFile->Protocol );
+
+      if( NT_SUCCESS(Status) ) {
+	  ReferenceObject(Listener);
+	  Status = TCPListen( Listener, 1024 );
+	  /* BACKLOG */
+	  CloseListener = !NT_SUCCESS(Status);
+      }
+  }
+
+  if( !NT_SUCCESS(Status) ) {
+      UnlockObject(Connection);
+      if( CloseListener )
+	  TCPClose( Listener );
+      if( Listener )
+	  DereferenceObject(Listener);
+      goto done;
+  }
+
+  IoMarkIrpPending(Irp);
+
+  Status = DispPrepareIrpForCancel
+      (TranContext->Handle.ConnectionContext,
+       Irp,
+       (PDRIVER_CANCEL)DispCancelListenRequest);
+
+  if( NT_SUCCESS(Status) ) {
+      Status = TCPAccept
+	  ( (PTDI_REQUEST)Parameters,
+	    Listener,
+	    Connection,
+	    DispDataRequestComplete,
+	    Irp,
+	    &DrainListener );
+  }
+
   UnlockObject(Connection);
 
-done:
+  if (Listener)
+      DereferenceObject(Listener);
+
+  if (DrainListener)
+      TCPDrainPendingAccept(DrainListener);
+
   if (Status != STATUS_PENDING) {
       DispDataRequestComplete(Irp, Status, 0);
   }
@@ -656,6 +758,13 @@ done:
   TI_DbgPrint(MID_TRACE,("Leaving %x\n", Status));
 
   return STATUS_PENDING;
+
+done:
+  DispDataRequestComplete(Irp, Status, 0);
+
+  TI_DbgPrint(MID_TRACE,("Leaving %x\n", Status));
+
+  return Status;
 }
 
 
@@ -688,12 +797,53 @@ NTSTATUS DispTdiQueryInformation(
 
   switch (Parameters->QueryType)
   {
+    case TDI_QUERY_PROVIDER_INFO:
+      {
+        PTDI_PROVIDER_INFO ProviderInfo;
+
+        if (DeviceObject == IPDeviceObject)
+          return STATUS_NOT_IMPLEMENTED;
+
+        if (MmGetMdlByteCount(Irp->MdlAddress) < sizeof(*ProviderInfo)) {
+          TI_DbgPrint(MID_TRACE, ("MDL buffer too small.\n"));
+          return STATUS_BUFFER_TOO_SMALL;
+        }
+
+        ProviderInfo = (PTDI_PROVIDER_INFO)MmGetSystemAddressForMdl(Irp->MdlAddress);
+        RtlZeroMemory(ProviderInfo, sizeof(*ProviderInfo));
+
+        ProviderInfo->Version = 2;
+        ProviderInfo->MaxSendSize = 0x3FFFFFFF;
+        ProviderInfo->MaxConnectionUserData = 0;
+        ProviderInfo->MaxDatagramSize = DeviceObject == UDPDeviceObject ? 65507 : 65515;
+        ProviderInfo->ServiceFlags = TDI_SERVICE_CONNECTION_MODE |
+                                     TDI_SERVICE_ORDERLY_RELEASE |
+                                     TDI_SERVICE_CONNECTIONLESS_MODE |
+                                     TDI_SERVICE_ERROR_FREE_DELIVERY |
+                                     TDI_SERVICE_BROADCAST_SUPPORTED |
+                                     TDI_SERVICE_DELAYED_ACCEPTANCE |
+                                     TDI_SERVICE_EXPEDITED_DATA |
+                                     TDI_SERVICE_NO_ZERO_LENGTH |
+                                     TDI_SERVICE_DGRAM_CONNECTION |
+                                     TDI_SERVICE_FORCE_ACCESS_CHECK |
+                                     TDI_SERVICE_DIRECT_ACCEPT |
+                                     TDI_SERVICE_ADDRESS_SECURITY;
+        if (DeviceObject == TCPDeviceObject)
+          ProviderInfo->ServiceFlags |= TDI_SERVICE_NO_PUSH;
+        ProviderInfo->MinimumLookaheadData = 1;
+        ProviderInfo->MaximumLookaheadData = 65535;
+        ProviderInfo->NumberOfResources = 0;
+
+        return STATUS_SUCCESS;
+      }
+
     case TDI_QUERY_ADDRESS_INFO:
       {
         PTDI_ADDRESS_INFO AddressInfo;
         PADDRESS_FILE AddrFile;
         PTA_IP_ADDRESS Address;
         PCONNECTION_ENDPOINT Endpoint = NULL;
+        IP_ADDRESS LocalAddress;
 
 
         if (MmGetMdlByteCount(Irp->MdlAddress) <
@@ -716,35 +866,41 @@ NTSTATUS DispTdiQueryInformation(
                 return STATUS_INVALID_PARAMETER;
             }
 
-			Address->TAAddressCount = 1;
-			Address->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
-			Address->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
-			Address->Address[0].Address[0].sin_port = AddrFile->Port;
-			Address->Address[0].Address[0].in_addr = AddrFile->Address.Address.IPv4Address;
-			RtlZeroMemory(
-				&Address->Address[0].Address[0].sin_zero,
-				sizeof(Address->Address[0].Address[0].sin_zero));
-			return STATUS_SUCCESS;
+            LocalAddress = AddrFile->Address;
+            if (AddrFile->Family == TDI_ADDRESS_TYPE_IP6)
+                TCPMapToDualStack(&LocalAddress);
+            return AddrBuildTransportAddress(&LocalAddress, AddrFile->Port,
+                                             (PTRANSPORT_ADDRESS)Address,
+                                             MmGetMdlByteCount(Irp->MdlAddress) -
+                                             FIELD_OFFSET(TDI_ADDRESS_INFO, Address));
 
           case TDI_CONNECTION_FILE:
             Endpoint =
 				(PCONNECTION_ENDPOINT)TranContext->Handle.ConnectionContext;
             if (Endpoint == NULL || Endpoint->AddressFile == NULL)
             {
-                TI_DbgPrint(MIN_TRACE, ("FIXME: No connection endpoint file object.\n"));
-                ASSERT(Endpoint != NULL && Endpoint->AddressFile != NULL);
+                TI_DbgPrint(MIN_TRACE, ("No connection endpoint file object.\n"));
                 return STATUS_INVALID_PARAMETER;
             }
 
-            Address->TAAddressCount = 1;
-            Address->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
-            Address->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
-            Address->Address[0].Address[0].sin_port = Endpoint->AddressFile->Port;
-            Address->Address[0].Address[0].in_addr = Endpoint->AddressFile->Address.Address.IPv4Address;
-			RtlZeroMemory(
-				&Address->Address[0].Address[0].sin_zero,
-				sizeof(Address->Address[0].Address[0].sin_zero));
-            return STATUS_SUCCESS;
+            if (NT_SUCCESS(TCPGetSockAddress(Endpoint,
+                                             (PTRANSPORT_ADDRESS)Address,
+                                             MmGetMdlByteCount(Irp->MdlAddress) -
+                                             FIELD_OFFSET(TDI_ADDRESS_INFO, Address),
+                                             FALSE)) &&
+                Address->Address[0].Address[0].sin_port)
+            {
+                return STATUS_SUCCESS;
+            }
+
+            LocalAddress = Endpoint->AddressFile->Address;
+            if (Endpoint->AddressFile->Family == TDI_ADDRESS_TYPE_IP6)
+                TCPMapToDualStack(&LocalAddress);
+            return AddrBuildTransportAddress(&LocalAddress,
+                                             Endpoint->AddressFile->Port,
+                                             (PTRANSPORT_ADDRESS)Address,
+                                             MmGetMdlByteCount(Irp->MdlAddress) -
+                                             FIELD_OFFSET(TDI_ADDRESS_INFO, Address));
 
           default:
             TI_DbgPrint(MIN_TRACE, ("Invalid transport context\n"));
@@ -854,6 +1010,7 @@ NTSTATUS DispTdiReceive(
 	  ReceiveInfo->ReceiveFlags,
 	  DispDataRequestComplete,
 	  Irp);
+      DispFinishCancelledQueuedIrp(TranContext->Handle.ConnectionContext, Irp, Status);
     }
 
 done:
@@ -1002,6 +1159,7 @@ NTSTATUS DispTdiSend(
 	    SendInfo->SendFlags,
 	    DispDataRequestComplete,
 	    Irp);
+	DispFinishCancelledQueuedIrp(TranContext->Handle.ConnectionContext, Irp, Status);
     }
 
 done:
@@ -1057,14 +1215,15 @@ NTSTATUS DispTdiSendDatagram(
         (PDRIVER_CANCEL)DispCancelRequest);
 
     if (NT_SUCCESS(Status)) {
-	PVOID DataBuffer;
-	UINT BufferSize;
+	PVOID DataBuffer = NULL;
+	UINT BufferSize = 0;
 
 	TI_DbgPrint(MID_TRACE,("About to query buffer %x\n", Irp->MdlAddress));
 
-	NdisQueryBuffer( (PNDIS_BUFFER)Irp->MdlAddress,
-			 &DataBuffer,
-			 &BufferSize );
+	if (Irp->MdlAddress)
+	    NdisQueryBuffer( (PNDIS_BUFFER)Irp->MdlAddress,
+			     &DataBuffer,
+			     &BufferSize );
 
         /* FIXME: DgramInfo->SendDatagramInformation->RemoteAddress
            must be of type PTDI_ADDRESS_IP */
@@ -1289,25 +1448,73 @@ VOID DispTdiQueryInformationExComplete(
  *     Context   = Pointer to the IRP for the request
  *     Status    = TDI status of the request
  *     ByteCount = Number of bytes returned in output buffer
+ *
+ * dev-nt6-1: this dispatch path uses kernel-pool buffers and copies
+ * to/from user space via SEH at completion time, instead of relying on
+ * MmProbeAndLockPages which is broken in ReactOS for valid user
+ * buffers. The dispatch saves user pointers in QueryContext->User*Buffer
+ * and we copy back here.
  */
 {
     PTI_QUERY_CONTEXT QueryContext;
 
     QueryContext = (PTI_QUERY_CONTEXT)Context;
-    if (NT_SUCCESS(Status)) {
-        CopyBufferToBufferChain(
-            QueryContext->InputMdl,
-            FIELD_OFFSET(TCP_REQUEST_QUERY_INFORMATION_EX, Context),
-            (PCHAR)&QueryContext->QueryInfo.Context,
-            CONTEXT_SIZE);
+
+    if (NT_SUCCESS(Status))
+    {
+        /* Write the resolved Context block back into the user input
+         * buffer at offset FIELD_OFFSET(TCP_REQUEST_QUERY_INFORMATION_EX, Context). */
+        if (QueryContext->UserInputBuffer)
+        {
+            _SEH2_TRY {
+                RtlCopyMemory(
+                    (PUCHAR)QueryContext->UserInputBuffer +
+                        QueryContext->UserContextOffset,
+                    &QueryContext->QueryInfo.Context,
+                    CONTEXT_SIZE);
+            } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+                /* User buffer went away — keep going. */
+            } _SEH2_END;
+        }
+        else if (QueryContext->InputMdl)
+        {
+            /* Legacy path: writeback via MDL (only used if the dispatch
+             * didn't take the kernel-buffer path). */
+            CopyBufferToBufferChain(
+                QueryContext->InputMdl,
+                FIELD_OFFSET(TCP_REQUEST_QUERY_INFORMATION_EX, Context),
+                (PCHAR)&QueryContext->QueryInfo.Context,
+                CONTEXT_SIZE);
+        }
+
+        /* Copy the kernel output buffer back to the user output buffer. */
+        if (QueryContext->KernelOutputBuffer && QueryContext->UserOutputBuffer)
+        {
+            ULONG CopyLen = (ByteCount < QueryContext->UserOutputLength)
+                ? ByteCount
+                : QueryContext->UserOutputLength;
+            _SEH2_TRY {
+                RtlCopyMemory(QueryContext->UserOutputBuffer,
+                              QueryContext->KernelOutputBuffer,
+                              CopyLen);
+            } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+                /* User buffer went away — keep going. */
+            } _SEH2_END;
+        }
     }
 
-    MmUnlockPages(QueryContext->InputMdl);
-    IoFreeMdl(QueryContext->InputMdl);
-    if( QueryContext->OutputMdl ) {
-	MmUnlockPages(QueryContext->OutputMdl);
-	IoFreeMdl(QueryContext->OutputMdl);
-    }
+    /* Free MDLs (built via MmBuildMdlForNonPagedPool, no MmUnlockPages
+     * needed because we never locked). */
+    if (QueryContext->InputMdl)
+        IoFreeMdl(QueryContext->InputMdl);
+    if (QueryContext->OutputMdl)
+        IoFreeMdl(QueryContext->OutputMdl);
+
+    /* Free kernel-pool copy buffers. */
+    if (QueryContext->KernelInputBuffer)
+        ExFreePoolWithTag(QueryContext->KernelInputBuffer, QUERY_CONTEXT_TAG);
+    if (QueryContext->KernelOutputBuffer)
+        ExFreePoolWithTag(QueryContext->KernelOutputBuffer, QUERY_CONTEXT_TAG);
 
     QueryContext->Irp->IoStatus.Information = ByteCount;
     QueryContext->Irp->IoStatus.Status      = Status;
@@ -1315,6 +1522,37 @@ VOID DispTdiQueryInformationExComplete(
     ExFreePoolWithTag(QueryContext, QUERY_CONTEXT_TAG);
 }
 
+
+static NTSTATUS DispTdiCopyQueryRequest(
+    PTI_QUERY_CONTEXT QueryContext,
+    PVOID InputBuffer,
+    ULONG RequestLength,
+    ULONG ContextOffset)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    _SEH2_TRY {
+        RtlCopyMemory(QueryContext->KernelInputBuffer, InputBuffer, RequestLength);
+    } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+        Status = _SEH2_GetExceptionCode();
+    } _SEH2_END;
+
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    RtlCopyMemory(&QueryContext->QueryInfo.ID,
+                  QueryContext->KernelInputBuffer,
+                  sizeof(TDIObjectID));
+    RtlCopyMemory(QueryContext->QueryInfo.Context,
+                  (PUCHAR)QueryContext->KernelInputBuffer + ContextOffset,
+                  CONTEXT_SIZE);
+    RtlCopyMemory(QueryContext->KernelInputBuffer,
+                  &QueryContext->QueryInfo,
+                  sizeof(TCP_REQUEST_QUERY_INFORMATION_EX));
+    QueryContext->UserContextOffset = ContextOffset;
+
+    return Status;
+}
 
 NTSTATUS DispTdiQueryInformationEx(
     PIRP Irp,
@@ -1336,13 +1574,13 @@ NTSTATUS DispTdiQueryInformationEx(
     UINT Size;
     UINT InputBufferLength;
     UINT OutputBufferLength;
+    ULONG RequestLength;
+    ULONG ContextOffset;
     BOOLEAN InputMdlLocked  = FALSE;
     BOOLEAN OutputMdlLocked = FALSE;
     PMDL InputMdl           = NULL;
     PMDL OutputMdl          = NULL;
     NTSTATUS Status         = STATUS_SUCCESS;
-
-    TI_DbgPrint(DEBUG_IRP, ("Called.\n"));
 
     TranContext = (PTRANSPORT_CONTEXT)IrpSp->FileObject->FsContext;
 
@@ -1360,15 +1598,24 @@ NTSTATUS DispTdiQueryInformationEx(
         break;
 
     default:
-        TI_DbgPrint(MIN_TRACE, ("Invalid transport context\n"));
         return STATUS_INVALID_PARAMETER;
     }
 
     InputBufferLength  = IrpSp->Parameters.DeviceIoControl.InputBufferLength;
     OutputBufferLength = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
 
+    RequestLength = sizeof(TCP_REQUEST_QUERY_INFORMATION_EX);
+    ContextOffset = FIELD_OFFSET(TCP_REQUEST_QUERY_INFORMATION_EX, Context);
+#ifdef _WIN64
+    if (IoIs32bitProcess(Irp))
+    {
+        RequestLength = sizeof(TCP_REQUEST_QUERY_INFORMATION_EX32);
+        ContextOffset = FIELD_OFFSET(TCP_REQUEST_QUERY_INFORMATION_EX32, Context);
+    }
+#endif
+
     /* Validate parameters */
-    if ((InputBufferLength == sizeof(TCP_REQUEST_QUERY_INFORMATION_EX)) &&
+    if ((InputBufferLength == RequestLength) &&
         (OutputBufferLength != 0)) {
 
         InputBuffer = (PTCP_REQUEST_QUERY_INFORMATION_EX)
@@ -1377,33 +1624,55 @@ NTSTATUS DispTdiQueryInformationEx(
 
         QueryContext = ExAllocatePoolWithTag(NonPagedPool, sizeof(TI_QUERY_CONTEXT), QUERY_CONTEXT_TAG);
         if (QueryContext) {
-	    _SEH2_TRY {
-                InputMdl = IoAllocateMdl(InputBuffer,
-                    sizeof(TCP_REQUEST_QUERY_INFORMATION_EX),
-                    FALSE, TRUE, NULL);
+            RtlZeroMemory(QueryContext, sizeof(*QueryContext));
 
-                OutputMdl = IoAllocateMdl(OutputBuffer,
-                    OutputBufferLength, FALSE, TRUE, NULL);
+            /* Allocate kernel-pool buffers and SEH-copy the input from
+             * user space. Bypass MmProbeAndLockPages entirely since
+             * ReactOS's implementation faults on valid user pointers. */
+            QueryContext->KernelInputBuffer = ExAllocatePoolWithTag(
+                NonPagedPool,
+                sizeof(TCP_REQUEST_QUERY_INFORMATION_EX),
+                QUERY_CONTEXT_TAG);
+            QueryContext->KernelOutputBuffer = ExAllocatePoolWithTag(
+                NonPagedPool, OutputBufferLength, QUERY_CONTEXT_TAG);
 
-                if (InputMdl && OutputMdl) {
+            if (!QueryContext->KernelInputBuffer || !QueryContext->KernelOutputBuffer)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                goto fetch_cleanup;
+            }
 
-                    MmProbeAndLockPages(InputMdl, Irp->RequestorMode,
-                        IoModifyAccess);
+            Status = DispTdiCopyQueryRequest(QueryContext, InputBuffer, RequestLength, ContextOffset);
+            if (!NT_SUCCESS(Status))
+                goto fetch_cleanup;
 
-                    InputMdlLocked = TRUE;
+            /* Build MDLs that wrap the KERNEL-pool buffers. These are
+             * always valid in any process context, so the legacy
+             * CopyBufferToBufferChain calls in InfoTdi* work without
+             * touching user memory. */
+            InputMdl = IoAllocateMdl(QueryContext->KernelInputBuffer,
+                sizeof(TCP_REQUEST_QUERY_INFORMATION_EX), FALSE, FALSE, NULL);
+            OutputMdl = IoAllocateMdl(QueryContext->KernelOutputBuffer,
+                OutputBufferLength, FALSE, FALSE, NULL);
 
-                    MmProbeAndLockPages(OutputMdl, Irp->RequestorMode,
-                        IoWriteAccess);
+            if (!InputMdl || !OutputMdl)
+            {
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                goto fetch_cleanup;
+            }
 
-                    OutputMdlLocked = TRUE;
+            MmBuildMdlForNonPagedPool(InputMdl);
+            MmBuildMdlForNonPagedPool(OutputMdl);
+            InputMdlLocked = TRUE;    /* not locked, but treated as such for cleanup */
+            OutputMdlLocked = TRUE;
 
-                    RtlCopyMemory(&QueryContext->QueryInfo,
-                        InputBuffer, sizeof(TCP_REQUEST_QUERY_INFORMATION_EX));
-                } else
-                    Status = STATUS_INSUFFICIENT_RESOURCES;
-            } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
-                Status = _SEH2_GetExceptionCode();
-            } _SEH2_END;
+            /* Save the original user pointers so completion can copy back. */
+            QueryContext->UserInputBuffer  = InputBuffer;
+            QueryContext->UserOutputBuffer = OutputBuffer;
+            QueryContext->UserOutputLength = OutputBufferLength;
+
+        fetch_cleanup:
+            ;
 
             if (NT_SUCCESS(Status)) {
                 Size = MmGetMdlByteCount(OutputMdl);
@@ -1441,56 +1710,6 @@ NTSTATUS DispTdiQueryInformationEx(
             ExFreePoolWithTag(QueryContext, QUERY_CONTEXT_TAG);
         } else
             Status = STATUS_INSUFFICIENT_RESOURCES;
-    } else if( InputBufferLength ==
-	       sizeof(TCP_REQUEST_QUERY_INFORMATION_EX) ) {
-	/* Handle the case where the user is probing the buffer for length */
-	TI_DbgPrint(MAX_TRACE, ("InputBufferLength %d OutputBufferLength %d\n",
-				InputBufferLength, OutputBufferLength));
-        InputBuffer = (PTCP_REQUEST_QUERY_INFORMATION_EX)
-            IrpSp->Parameters.DeviceIoControl.Type3InputBuffer;
-
-	Size = 0;
-
-        QueryContext = ExAllocatePoolWithTag(NonPagedPool, sizeof(TI_QUERY_CONTEXT), QUERY_CONTEXT_TAG);
-        if (!QueryContext) return STATUS_INSUFFICIENT_RESOURCES;
-
-	_SEH2_TRY {
-	    InputMdl = IoAllocateMdl(InputBuffer,
-				     sizeof(TCP_REQUEST_QUERY_INFORMATION_EX),
-				     FALSE, TRUE, NULL);
-
-	    MmProbeAndLockPages(InputMdl, Irp->RequestorMode,
-				IoModifyAccess);
-
-	    InputMdlLocked = TRUE;
-	    Status = STATUS_SUCCESS;
-	} _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
-	    TI_DbgPrint(MAX_TRACE, ("Failed to acquire client buffer\n"));
-	    Status = _SEH2_GetExceptionCode();
-	} _SEH2_END;
-
-	if( !NT_SUCCESS(Status) || !InputMdl ) {
-	    if( InputMdl ) IoFreeMdl( InputMdl );
-	    ExFreePoolWithTag(QueryContext, QUERY_CONTEXT_TAG);
-	    return Status;
-	}
-
-	RtlCopyMemory(&QueryContext->QueryInfo,
-		      InputBuffer, sizeof(TCP_REQUEST_QUERY_INFORMATION_EX));
-
-	QueryContext->Irp       = Irp;
-	QueryContext->InputMdl  = InputMdl;
-	QueryContext->OutputMdl = NULL;
-
-	Request.RequestNotifyObject = DispTdiQueryInformationExComplete;
-	Request.RequestContext      = QueryContext;
-	Status = InfoTdiQueryInformationEx(&Request,
-					   &QueryContext->QueryInfo.ID,
-					   NULL,
-					   &Size,
-					   &QueryContext->QueryInfo.Context);
-	DispTdiQueryInformationExComplete(QueryContext, Status, Size);
-	TI_DbgPrint(MAX_TRACE, ("Leaving. Status = (0x%X)\n", Status));
     } else Status = STATUS_INVALID_PARAMETER;
 
     TI_DbgPrint(MIN_TRACE, ("Leaving. Status = (0x%X)\n", Status));
@@ -1521,6 +1740,12 @@ NTSTATUS DispTdiSetInformationEx(
     TranContext = (PTRANSPORT_CONTEXT)IrpSp->FileObject->FsContext;
     Info        = (PTCP_REQUEST_SET_INFORMATION_EX)Irp->AssociatedIrp.SystemBuffer;
 
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer) ||
+        Info->BufferSize > IrpSp->Parameters.DeviceIoControl.InputBufferLength - FIELD_OFFSET(TCP_REQUEST_SET_INFORMATION_EX, Buffer))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
     switch ((ULONG_PTR)IrpSp->FileObject->FsContext2) {
     case TDI_TRANSPORT_ADDRESS_FILE:
         Request.Handle.AddressHandle = TranContext->Handle.AddressHandle;
@@ -1546,86 +1771,134 @@ NTSTATUS DispTdiSetInformationEx(
     Request.RequestNotifyObject = NULL;
     Request.RequestContext      = NULL;
 
+    if ((ULONG_PTR)IrpSp->FileObject->FsContext2 == TDI_TRANSPORT_ADDRESS_FILE &&
+        Info->ID.toi_class == INFO_CLASS_PROTOCOL)
+    {
+        if (Info->ID.toi_type == INFO_TYPE_ADDRESS_OBJECT)
+            return SetAddressFileInfo(&Info->ID, Request.Handle.AddressHandle, &Info->Buffer, Info->BufferSize);
+
+        if (Info->ID.toi_type == INFO_TYPE_CONNECTION)
+            return SetConnectionInfo(&Info->ID, Request.Handle.AddressHandle, &Info->Buffer, Info->BufferSize);
+    }
+
+    if (Irp->RequestorMode == UserMode &&
+        (ULONG_PTR)IrpSp->FileObject->FsContext2 != TDI_CONTROL_CHANNEL_FILE)
+    {
+        return STATUS_ACCESS_DENIED;
+    }
+
     Status = InfoTdiSetInformationEx(&Request, &Info->ID,
             &Info->Buffer, Info->BufferSize);
 
     return Status;
 }
 
-/* TODO: Support multiple addresses per interface.
- * For now just set the nte context to the interface index.
- *
- * Later on, create an NTE context and NTE instance
- */
-
 NTSTATUS DispTdiSetIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
-    NTSTATUS Status = STATUS_DEVICE_DOES_NOT_EXIST;
+    NTSTATUS Status = STATUS_OBJECT_NAME_NOT_FOUND;
+    KIRQL OldIrql;
     PIP_SET_ADDRESS IpAddrChange =
         (PIP_SET_ADDRESS)Irp->AssociatedIrp.SystemBuffer;
+    PIP_INTERFACE TargetIF = NULL;
+    ULONG Context, Instance;
     IF_LIST_ITER(IF);
+
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(IP_SET_ADDRESS) ||
+        IrpSp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(IP_SET_ADDRESS)) {
+        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+        return STATUS_INVALID_PARAMETER;
+    }
 
     TI_DbgPrint(MID_TRACE,("Setting IP Address for adapter %d\n",
 			   IpAddrChange->NteIndex));
-
+    TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
     ForEachInterface(IF) {
 	TI_DbgPrint(MID_TRACE,("Looking at adapter %d\n", IF->Index));
 
-        if( IF->Unicast.Address.IPv4Address == IpAddrChange->Address ) {
-            Status = STATUS_DUPLICATE_OBJECTID;
-            break;
-        }
         if( IF->Index == IpAddrChange->NteIndex ) {
-            IPRemoveInterfaceRoute( IF );
-
-            IF->Unicast.Type = IP_ADDRESS_V4;
-            IF->Unicast.Address.IPv4Address = IpAddrChange->Address;
-
-            IF->Netmask.Type = IP_ADDRESS_V4;
-            IF->Netmask.Address.IPv4Address = IpAddrChange->Netmask;
-
-            IF->Broadcast.Type = IP_ADDRESS_V4;
-	    IF->Broadcast.Address.IPv4Address =
-		IF->Unicast.Address.IPv4Address |
-		~IF->Netmask.Address.IPv4Address;
-
-            TI_DbgPrint(MID_TRACE,("New Unicast Address: %x\n",
-                                   IF->Unicast.Address.IPv4Address));
-            TI_DbgPrint(MID_TRACE,("New Netmask        : %x\n",
-                                   IF->Netmask.Address.IPv4Address));
-
-            IPAddInterfaceRoute( IF );
-
-            IpAddrChange->Address = IF->Index;
-            Status = STATUS_SUCCESS;
-            Irp->IoStatus.Information = IF->Index;
+            if (IPReferenceInterface(IF))
+                TargetIF = IF;
             break;
         }
     } EndFor(IF);
+    TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
+
+    if (TargetIF) {
+        Status = IPAddInterfaceAddress(TargetIF,
+                                       IpAddrChange->Address,
+                                       IpAddrChange->Netmask,
+                                       &Context,
+                                       &Instance);
+        if (NT_SUCCESS(Status)) {
+            IpAddrChange->NteIndex = Context;
+            IpAddrChange->Address = Instance;
+            Irp->IoStatus.Information = sizeof(IP_SET_ADDRESS);
+        }
+        IPDereferenceInterface(TargetIF);
+    }
 
     Irp->IoStatus.Status = Status;
     return Status;
 }
 
 NTSTATUS DispTdiDeleteIPAddress( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
-    NTSTATUS Status = STATUS_UNSUCCESSFUL;
-    PUSHORT NteIndex = Irp->AssociatedIrp.SystemBuffer;
+    NTSTATUS Status;
+
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(ULONG))
+        Status = STATUS_INVALID_PARAMETER;
+    else
+        Status = IPDeleteInterfaceAddress(*(PULONG)Irp->AssociatedIrp.SystemBuffer);
+
+    Irp->IoStatus.Status = Status;
+    return Status;
+}
+
+NTSTATUS DispTdiGetBestSource( PIRP Irp, PIO_STACK_LOCATION IrpSp ) {
+    PIP_BEST_SOURCE Request = Irp->AssociatedIrp.SystemBuffer;
+    PNEIGHBOR_CACHE_ENTRY NCE = NULL;
+    PIP_INTERFACE Interface = NULL;
+    IP_ADDRESS Destination, Source;
+    NTSTATUS Status;
+    KIRQL OldIrql;
     IF_LIST_ITER(IF);
 
-    ForEachInterface(IF) {
-        if( IF->Index == *NteIndex ) {
-            IPRemoveInterfaceRoute( IF );
-            IF->Unicast.Type = IP_ADDRESS_V4;
-            IF->Unicast.Address.IPv4Address = 0;
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(IP_BEST_SOURCE) ||
+        IrpSp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(IP_BEST_SOURCE)) {
+        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+        return STATUS_INVALID_PARAMETER;
+    }
 
-            IF->Netmask.Type = IP_ADDRESS_V4;
-            IF->Netmask.Address.IPv4Address = 0;
+    AddrInitIPv4(&Destination, Request->Destination);
 
-            IF->Broadcast.Type = IP_ADDRESS_V4;
-            IF->Broadcast.Address.IPv4Address = 0;
+    if (Request->InterfaceIndex) {
+        TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
+        ForEachInterface(IF) {
+            if (IF->Index == Request->InterfaceIndex) {
+                if (IPReferenceInterface(IF))
+                    Interface = IF;
+                break;
+            }
+        } EndFor(IF);
+        TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
 
-            Status = STATUS_SUCCESS;
+        if (Interface) {
+            NCE = RouteGetRouteOnInterface(&Destination, Interface);
+            IPDereferenceInterface(Interface);
         }
-    } EndFor(IF);
+    } else {
+        NCE = RouteGetRouteToDestination(&Destination);
+    }
+
+    if (NCE) {
+        GetInterfaceSourceAddress(NCE->Interface, &Destination, &NCE->Address, &Source);
+        Request->InterfaceIndex = NCE->Interface->Index;
+        Request->Source = Source.Address.IPv4Address;
+        Request->NextHop = NCE->Address.Address.IPv4Address;
+        NBDereferenceNeighbor(NCE);
+        Irp->IoStatus.Information = sizeof(IP_BEST_SOURCE);
+        Status = STATUS_SUCCESS;
+    } else {
+        Status = STATUS_NETWORK_UNREACHABLE;
+    }
 
     Irp->IoStatus.Status = Status;
     return Status;
@@ -1640,17 +1913,25 @@ WaitForHwAddress ( PDEVICE_OBJECT DeviceObject, PVOID Context) {
     PIRP Irp;
     PNEIGHBOR_CACHE_ENTRY NCE = NULL;
     NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    ULONG Requests = 1;
 
     IoFreeWorkItem(WorkItem->WorkItem);
     Irp = WorkItem->Irp;
     AddrInitIPv4(&Remote, WorkItem->RemoteIP);
     KeQuerySystemTime(&Now);
-    while (Now.QuadPart - WorkItem->StartTime.QuadPart < 10000 * 1000 && !Irp->Cancel) {
+    while (Now.QuadPart - WorkItem->StartTime.QuadPart < 3 * 10000 * 1000 && !Irp->Cancel) {
         NCE = NBLocateNeighbor(&Remote, WorkItem->Interface);
         if (NCE && !(NCE->State & NUD_INCOMPLETE)) {
             break;
         }
 
+        if ((Now.QuadPart - WorkItem->StartTime.QuadPart) / (10000 * 1000) >= Requests) {
+            ARPTransmit(&Remote, NULL, WorkItem->Interface);
+            Requests++;
+        }
+
+        if (NCE)
+            NBDereferenceNeighbor(NCE);
         NCE = NULL;
         Wait.QuadPart = -10000;
         KeDelayExecutionThread(KernelMode, FALSE, &Wait);
@@ -1668,8 +1949,10 @@ WaitForHwAddress ( PDEVICE_OBJECT DeviceObject, PVOID Context) {
             Irp->IoStatus.Information = NCE->LinkAddressLength;
             Status = STATUS_SUCCESS;
         }
+        NBDereferenceNeighbor(NCE);
     }
 
+    IPDereferenceInterface(WorkItem->Interface);
     ExFreePoolWithTag(WorkItem, QUERY_CONTEXT_TAG);
     if (Irp->Flags & IRP_SYNCHRONOUS_API) {
         Irp->IoStatus.Status = Status;
@@ -1686,6 +1969,9 @@ NTSTATUS DispTdiQueryIpHwAddress( PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STA
     PIP_INTERFACE Interface;
     PQUERY_HW_WORK_ITEM WorkItem;
 
+    NCE = NULL;
+    Interface = NULL;
+    WorkItem = NULL;
     Irp->IoStatus.Information = 0;
 
     if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < 2 * sizeof(ULONG) ||
@@ -1727,6 +2013,14 @@ NTSTATUS DispTdiQueryIpHwAddress( PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STA
         }
 
         Interface = NCE->Interface;
+        if (!IPReferenceInterface(Interface)) {
+            NBDereferenceNeighbor(NCE);
+            NCE = NULL;
+            Status = STATUS_NETWORK_UNREACHABLE;
+            goto Exit;
+        }
+        NBDereferenceNeighbor(NCE);
+        NCE = NULL;
     }
     else {
         Interface = AddrLocateInterface(&Local);
@@ -1761,6 +2055,8 @@ NTSTATUS DispTdiQueryIpHwAddress( PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STA
     NCE = NBLocateNeighbor(&Remote, Interface);
     if (NCE != NULL) {
         if (NCE->LinkAddressLength > IrpSp->Parameters.DeviceIoControl.OutputBufferLength) {
+            NBDereferenceNeighbor(NCE);
+            NCE = NULL;
             IoFreeWorkItem(WorkItem->WorkItem);
             ExFreePoolWithTag(WorkItem, QUERY_CONTEXT_TAG);
             Status = STATUS_INVALID_BUFFER_SIZE;
@@ -1770,6 +2066,8 @@ NTSTATUS DispTdiQueryIpHwAddress( PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STA
         if (!(NCE->State & NUD_INCOMPLETE)) {
             PVOID LinkAddress = ExAllocatePoolWithTag(PagedPool, NCE->LinkAddressLength, QUERY_CONTEXT_TAG);
             if (LinkAddress == NULL) {
+                NBDereferenceNeighbor(NCE);
+                NCE = NULL;
                 IoFreeWorkItem(WorkItem->WorkItem);
                 ExFreePoolWithTag(WorkItem, QUERY_CONTEXT_TAG);
                 Status = STATUS_INSUFFICIENT_RESOURCES;
@@ -1779,6 +2077,8 @@ NTSTATUS DispTdiQueryIpHwAddress( PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STA
             NBUpdateNeighbor(NCE, LinkAddress, NUD_INCOMPLETE);
             ExFreePoolWithTag(LinkAddress, QUERY_CONTEXT_TAG);
         }
+        NBDereferenceNeighbor(NCE);
+        NCE = NULL;
     }
 
     if (!ARPTransmit(&Remote, NULL, Interface)) {
@@ -1787,6 +2087,8 @@ NTSTATUS DispTdiQueryIpHwAddress( PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STA
         Status = STATUS_UNSUCCESSFUL;
         goto Exit;
     }
+
+    Interface = NULL;
 
     if (Irp->Flags & IRP_SYNCHRONOUS_API) {
         WaitForHwAddress(DeviceObject, WorkItem);
@@ -1798,6 +2100,10 @@ NTSTATUS DispTdiQueryIpHwAddress( PDEVICE_OBJECT DeviceObject, PIRP Irp, PIO_STA
     }
 
 Exit:
+    if (NCE)
+        NBDereferenceNeighbor(NCE);
+    if (Interface)
+        IPDereferenceInterface(Interface);
     return Status;
 }
 

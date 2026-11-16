@@ -2,7 +2,7 @@
  * Setupapi install routines
  *
  * Copyright 2002 Alexandre Julliard for CodeWeavers
- *           2005-2006 Hervé Poussineau (hpoussin@reactos.org)
+ *           2005-2006 Hervï¿½ Poussineau (hpoussin@reactos.org)
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
@@ -67,7 +67,9 @@ struct files_callback_info
 struct registry_callback_info
 {
     HKEY default_root;
+    HKEY device_key;
     BOOL delete;
+    BOOL relative_only;
 };
 
 /* info passed to callback functions dealing with registering dlls */
@@ -158,12 +160,25 @@ static WCHAR *get_field_string( INFCONTEXT *context, DWORD index, WCHAR *buffer,
 static BOOL copy_files_callback( HINF hinf, PCWSTR field, void *arg )
 {
     struct files_callback_info *info = arg;
+    WCHAR *source = NULL;
+    const WCHAR *root = info->src_root;
+    BOOL ret;
+
+    if (!root)
+    {
+        if (!(source = PARSER_get_src_root( hinf ))) return FALSE;
+        root = source;
+    }
 
     if (field[0] == '@')  /* special case: copy single file */
-        SetupQueueDefaultCopyW( info->queue, info->layout ? info->layout : hinf, info->src_root, NULL, field+1, info->copy_flags );
+        ret = SetupQueueDefaultCopyW( info->queue, info->layout ? info->layout : hinf, root, field+1, field+1, info->copy_flags );
     else
-        SetupQueueCopySectionW( info->queue, info->src_root, info->layout ? info->layout : hinf, hinf, field, info->copy_flags );
-    return TRUE;
+    {
+        ret = SetupQueueCopySectionW( info->queue, root, info->layout ? info->layout : hinf, hinf, field, info->copy_flags );
+        if (!ret && GetLastError() == ERROR_SECTION_NOT_FOUND) ret = TRUE;
+    }
+    HeapFree( GetProcessHeap(), 0, source );
+    return ret;
 }
 
 
@@ -220,20 +235,43 @@ static HKEY get_root_key( const WCHAR *name, HKEY def_root )
  *
  * Append a multisz string to a multisz registry value.
  */
-static void append_multi_sz_value( HKEY hkey, const WCHAR *value, const WCHAR *strings,
+static BOOL append_multi_sz_value( HKEY hkey, const WCHAR *value, const WCHAR *strings,
                                    DWORD str_size )
 {
     DWORD size, type, total;
     WCHAR *buffer, *p;
+    LONG ret;
 
-    if (RegQueryValueExW( hkey, value, NULL, &type, NULL, &size )) return;
-    if (type != REG_MULTI_SZ) return;
+    if ((ret = RegQueryValueExW( hkey, value, NULL, &type, NULL, &size )))
+    {
+        if (ret != ERROR_FILE_NOT_FOUND)
+        {
+            SetLastError( ret );
+            return FALSE;
+        }
 
-    size = size + str_size * sizeof(WCHAR) ;
-    if (!(buffer = HeapAlloc( GetProcessHeap(), 0, size))) return;
-    if (RegQueryValueExW( hkey, value, NULL, NULL, (BYTE *)buffer, &size )) goto done;
+        if ((ret = RegSetValueExW( hkey, value, 0, REG_MULTI_SZ, (BYTE *)strings, str_size * sizeof(WCHAR) )))
+        {
+            SetLastError( ret );
+            return FALSE;
+        }
 
-    /* compare each string against all the existing ones */
+        return TRUE;
+    }
+
+    if (type != REG_MULTI_SZ)
+    {
+        SetLastError( ERROR_INVALID_DATA );
+        return FALSE;
+    }
+
+    if (!(buffer = HeapAlloc( GetProcessHeap(), 0, size + str_size * sizeof(WCHAR) ))) return FALSE;
+    if (RegQueryValueExW( hkey, value, NULL, NULL, (BYTE *)buffer, &size ))
+    {
+        HeapFree( GetProcessHeap(), 0, buffer );
+        return FALSE;
+    }
+
     total = size;
     while (*strings)
     {
@@ -242,7 +280,7 @@ static void append_multi_sz_value( HKEY hkey, const WCHAR *value, const WCHAR *s
         for (p = buffer; *p; p += strlenW(p) + 1)
             if (!strcmpiW( p, strings )) break;
 
-        if (!*p)  /* not found, need to append it */
+        if (!*p)
         {
             memcpy( p, strings, len * sizeof(WCHAR) );
             p[len] = 0;
@@ -251,12 +289,10 @@ static void append_multi_sz_value( HKEY hkey, const WCHAR *value, const WCHAR *s
         strings += len;
     }
     if (total != size)
-    {
-        TRACE( "setting value %s to %s\n", debugstr_w(value), debugstr_w(buffer) );
-        RegSetValueExW( hkey, value, 0, REG_MULTI_SZ, (BYTE *)buffer, total + sizeof(WCHAR) );
-    }
- done:
+        RegSetValueExW( hkey, value, 0, REG_MULTI_SZ, (BYTE *)buffer, total );
+
     HeapFree( GetProcessHeap(), 0, buffer );
+    return TRUE;
 }
 
 
@@ -324,7 +360,11 @@ static BOOL do_reg_operation( HKEY hkey, const WCHAR *value, INFCONTEXT *context
             }
             else RegDeleteValueW( hkey, value );
         }
-        else NtDeleteKey( hkey );
+        else
+        {
+            RegDeleteTreeW( hkey, NULL );
+            NtDeleteKey( hkey );
+        }
         return TRUE;
     }
 
@@ -365,7 +405,11 @@ static BOOL do_reg_operation( HKEY hkey, const WCHAR *value, INFCONTEXT *context
             if (flags & FLG_ADDREG_APPEND)
             {
                 if (!str) return TRUE;
-                append_multi_sz_value( hkey, value, str, size );
+                if (!append_multi_sz_value( hkey, value, str, size ))
+                {
+                    HeapFree( GetProcessHeap(), 0, str );
+                    return FALSE;
+                }
                 HeapFree( GetProcessHeap(), 0, str );
                 return TRUE;
             }
@@ -426,8 +470,9 @@ static BOOL registry_callback( HINF hinf, PCWSTR field, void *arg )
     INFCONTEXT context, security_context;
     PSECURITY_DESCRIPTOR sd = NULL;
     SECURITY_ATTRIBUTES security_attributes = { 0, };
-    HKEY root_key, hkey;
+    HKEY root_key, hkey, target_key;
     DWORD required;
+    BOOL device_value;
 
     BOOL ok = SetupFindFirstLineW( hinf, field, NULL, &context );
     if (!ok)
@@ -474,10 +519,13 @@ static BOOL registry_callback( HINF hinf, PCWSTR field, void *arg )
             continue;
         if (!(root_key = get_root_key( buffer, info->default_root )))
             continue;
+        if (info->relative_only && root_key != info->default_root)
+            continue;
 
         /* get key */
         if (!SetupGetStringFieldW( &context, 2, buffer, sizeof(buffer)/sizeof(WCHAR), NULL ))
             *buffer = 0;
+        device_value = info->device_key && root_key == info->default_root && !*buffer;
 
         /* get flags */
         if (!SetupGetIntField( &context, 4, &flags )) flags = 0;
@@ -497,7 +545,7 @@ static BOOL registry_callback( HINF hinf, PCWSTR field, void *arg )
             if (RegOpenKeyW( root_key, buffer, &hkey )) continue;  /* ignore if it doesn't exist */
         }
         else if (RegCreateKeyExW( root_key, buffer, 0, NULL, 0, MAXIMUM_ALLOWED,
-            sd ? &security_attributes : NULL, &hkey, NULL ))
+            (sd && !info->relative_only) ? &security_attributes : NULL, &hkey, NULL ))
         {
             ERR( "could not create key %p %s\n", root_key, debugstr_w(buffer) );
             continue;
@@ -508,8 +556,13 @@ static BOOL registry_callback( HINF hinf, PCWSTR field, void *arg )
         if (!SetupGetStringFieldW( &context, 3, buffer, sizeof(buffer)/sizeof(WCHAR), NULL ))
             *buffer = 0;
 
+        target_key = hkey;
+        if (device_value && !(flags & (FLG_ADDREG_KEYONLY | FLG_ADDREG_KEYONLY_COMMON)) &&
+            (!strcmpiW( buffer, REGSTR_VAL_UPPERFILTERS ) || !strcmpiW( buffer, REGSTR_VAL_LOWERFILTERS )))
+            target_key = info->device_key;
+
         /* and now do it */
-        if (!do_reg_operation( hkey, buffer, &context, flags ))
+        if (!do_reg_operation( target_key, buffer, &context, flags ))
         {
             if (hkey != root_key) RegCloseKey( hkey );
             if (sd) LocalFree( sd );
@@ -658,6 +711,188 @@ done:
 }
 
 
+static BOOL is_wow64_dll( const WCHAR *path )
+{
+    IMAGE_DOS_HEADER dos;
+    struct
+    {
+        DWORD Signature;
+        IMAGE_FILE_HEADER FileHeader;
+        WORD Magic;
+    } nt;
+    HANDLE file;
+    DWORD read;
+    BOOL ret = FALSE;
+
+    if (sizeof(void *) != 8)
+        return FALSE;
+
+    file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, 0, NULL );
+    if (file == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    if (ReadFile( file, &dos, sizeof(dos), &read, NULL ) && read == sizeof(dos) &&
+        dos.e_magic == IMAGE_DOS_SIGNATURE && dos.e_lfanew > 0 &&
+        SetFilePointer( file, dos.e_lfanew, NULL, FILE_BEGIN ) == (DWORD)dos.e_lfanew &&
+        ReadFile( file, &nt, sizeof(nt), &read, NULL ) && read == sizeof(nt) &&
+        nt.Signature == IMAGE_NT_SIGNATURE)
+    {
+        ret = (nt.FileHeader.Characteristics & IMAGE_FILE_DLL) && nt.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC;
+    }
+
+    CloseHandle( file );
+    return ret;
+}
+
+static void run_wow64_regsvr32( BOOL unregister, const WCHAR *path, INT flags, INT timeout,
+                                const WCHAR *args, SP_REGISTER_CONTROL_STATUSW *status )
+{
+    WCHAR system[MAX_PATH];
+    STARTUPINFOW startup;
+    PROCESS_INFORMATION process;
+    WCHAR *cmd_line;
+    DWORD exit_code;
+    UINT len;
+    BOOL ok;
+
+    len = GetSystemWow64DirectoryW( system, ARRAY_SIZE(system) );
+    if (!len || len >= ARRAY_SIZE(system))
+    {
+        status->FailureCode = SPREG_LOADLIBRARY;
+        status->Win32Error = len ? ERROR_BUFFER_OVERFLOW : GetLastError();
+        return;
+    }
+
+    /* FIXME: regsvr32 passes an empty DllInstall command line where the in-process path passes NULL */
+    if (!args) args = L"";
+    cmd_line = HeapAlloc( GetProcessHeap(), 0, (len + strlenW(path) + strlenW(args) + 40) * sizeof(WCHAR) );
+    if (!cmd_line)
+    {
+        status->FailureCode = SPREG_UNKNOWN;
+        status->Win32Error = ERROR_NOT_ENOUGH_MEMORY;
+        return;
+    }
+
+    sprintfW( cmd_line, L"\"%s\\regsvr32.exe\" /s", system );
+    if (unregister) strcatW( cmd_line, L" /u" );
+    if (flags & FLG_REGSVR_DLLINSTALL)
+    {
+        if (!(flags & FLG_REGSVR_DLLREGISTER)) strcatW( cmd_line, L" /n" );
+        strcatW( cmd_line, L" /i:\"" );
+        strcatW( cmd_line, args );
+        strcatW( cmd_line, L"\"" );
+    }
+    strcatW( cmd_line, L" \"" );
+    strcatW( cmd_line, path );
+    strcatW( cmd_line, L"\"" );
+
+    memset( &startup, 0, sizeof(startup) );
+    startup.cb = sizeof(startup);
+    TRACE( "executing %s\n", debugstr_w(cmd_line) );
+    ok = CreateProcessW( NULL, cmd_line, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &startup, &process );
+    HeapFree( GetProcessHeap(), 0, cmd_line );
+    if (!ok)
+    {
+        status->FailureCode = SPREG_LOADLIBRARY;
+        status->Win32Error = GetLastError();
+        return;
+    }
+    CloseHandle( process.hThread );
+
+    if (WaitForSingleObject( process.hProcess, timeout * 1000 ) == WAIT_TIMEOUT)
+    {
+        TerminateProcess( process.hProcess, 1 );
+        status->FailureCode = SPREG_TIMEOUT;
+        status->Win32Error = ERROR_TIMEOUT;
+    }
+    else if (!GetExitCodeProcess( process.hProcess, &exit_code ))
+    {
+        status->FailureCode = SPREG_UNKNOWN;
+        status->Win32Error = GetLastError();
+    }
+    else
+    {
+        /* FIXME: the regsvr32 exit code carries no loader error or HRESULT, so generic values are reported */
+        switch (exit_code)
+        {
+        case 0:
+            break;
+        case 3:
+            status->FailureCode = SPREG_LOADLIBRARY;
+            status->Win32Error = ERROR_MOD_NOT_FOUND;
+            break;
+        case 4:
+            status->FailureCode = SPREG_GETPROCADDR;
+            status->Win32Error = ERROR_PROC_NOT_FOUND;
+            break;
+        case 5:
+            status->FailureCode = SPREG_REGSVR;
+            status->Win32Error = E_FAIL;
+            break;
+        default:
+            status->FailureCode = SPREG_UNKNOWN;
+            status->Win32Error = exit_code;
+            break;
+        }
+    }
+    CloseHandle( process.hProcess );
+}
+
+static BOOL do_register_wow64_dll( const struct register_dll_info *info, const WCHAR *path,
+                                   INT flags, INT timeout, const WCHAR *args )
+{
+    SP_REGISTER_CONTROL_STATUSW status;
+
+    status.cbSize = sizeof(status);
+    status.FileName = path;
+    status.FailureCode = SPREG_SUCCESS;
+    status.Win32Error = ERROR_SUCCESS;
+
+    if (info->callback)
+    {
+        switch (info->callback( info->callback_context, SPFILENOTIFY_STARTREGISTRATION,
+                                (UINT_PTR)&status, !info->unregister ))
+        {
+        case FILEOP_ABORT:
+            SetLastError( ERROR_OPERATION_ABORTED );
+            return FALSE;
+        case FILEOP_SKIP:
+            return TRUE;
+        default:
+            break;
+        }
+    }
+
+    if (flags & (FLG_REGSVR_DLLREGISTER | FLG_REGSVR_DLLINSTALL))
+        run_wow64_regsvr32( info->unregister, path, flags, timeout, args, &status );
+
+    if (info->callback) info->callback( info->callback_context, SPFILENOTIFY_ENDREGISTRATION,
+                                        (UINT_PTR)&status, !info->unregister );
+    return TRUE;
+}
+
+static HMODULE register_dlls_com_enter( HRESULT *hr )
+{
+    HMODULE ole32 = LoadLibraryW( L"ole32.dll" );
+    COINITIALIZE pCoInitialize;
+
+    *hr = E_FAIL;
+    if (ole32 && (pCoInitialize = (COINITIALIZE)GetProcAddress( ole32, "CoInitialize" )))
+        *hr = pCoInitialize( NULL );
+    return ole32;
+}
+
+static void register_dlls_com_leave( HMODULE ole32, HRESULT hr )
+{
+    COUNINITIALIZE pCoUninitialize;
+
+    if (!ole32)
+        return;
+    if (SUCCEEDED(hr) && (pCoUninitialize = (COUNINITIALIZE)GetProcAddress( ole32, "CoUninitialize" )))
+        pCoUninitialize();
+    FreeLibrary( ole32 );
+}
+
 /***********************************************************************
  *            register_dlls_callback
  *
@@ -705,7 +940,11 @@ static BOOL register_dlls_callback( HINF hinf, PCWSTR field, void *arg )
         if (SetupGetStringFieldW( &context, 6, buffer, sizeof(buffer)/sizeof(WCHAR), NULL ))
             args = buffer;
 
-        ret = do_register_dll( info, path, flags, timeout, args );
+        /* TODO: launch 32-bit executables listed in RegisterDlls from a 64-bit process */
+        if (is_wow64_dll( path ))
+            ret = do_register_wow64_dll( info, path, flags, timeout, args );
+        else
+            ret = do_register_dll( info, path, flags, timeout, args );
 
     done:
         HeapFree( GetProcessHeap(), 0, path );
@@ -937,6 +1176,27 @@ profile_items_callback(
             goto cleanup;
     }
 
+    if (LinkAttributes & FLG_PROFITEM_GROUP)
+    {
+        WCHAR GroupPath[MAX_PATH];
+        int Result;
+
+        if (LinkAttributes & FLG_PROFITEM_CSIDL)
+            CSIDL = LinkFolder;
+        else if (LinkAttributes & FLG_PROFITEM_CURRENTUSER)
+            CSIDL = CSIDL_PROGRAMS;
+        if (!SHGetSpecialFolderPathW(NULL, GroupPath, CSIDL, TRUE))
+            goto cleanup;
+        if (wcslen(GroupPath) + 1 + wcslen(LinkName) >= MAX_PATH)
+            goto cleanup;
+        if (GroupPath[wcslen(GroupPath) - 1] != '\\')
+            wcscat(GroupPath, BackSlash);
+        wcscat(GroupPath, LinkName);
+        Result = SHCreateDirectoryExW(NULL, GroupPath, NULL);
+        ret = Result == ERROR_SUCCESS || Result == ERROR_ALREADY_EXISTS;
+        goto cleanup;
+    }
+
     /* Read 'CmdLine' entry */
     if (!SetupFindFirstLineW(hInf, SectionName, CmdLine, &Context))
         goto cleanup;
@@ -1109,7 +1369,12 @@ profile_items_callback(
                             wcscat(FullLinkName, BackSlash);
                         if (LinkSubDir)
                         {
+                            int Result;
+
                             wcscat(FullLinkName, LinkSubDir);
+                            Result = SHCreateDirectoryExW(NULL, FullLinkName, NULL);
+                            if (Result != ERROR_SUCCESS && Result != ERROR_ALREADY_EXISTS)
+                                hr = HRESULT_FROM_WIN32(Result);
                             if (FullLinkName[wcslen(FullLinkName) - 1] != '\\')
                                 wcscat(FullLinkName, BackSlash);
                         }
@@ -1118,7 +1383,8 @@ profile_items_callback(
                             wcscat(FullLinkName, LinkName);
                             wcscat(FullLinkName, DotLnk);
                         }
-                        hr = IPersistFile_Save(ppf, FullLinkName, TRUE);
+                        if (SUCCEEDED(hr))
+                            hr = IPersistFile_Save(ppf, FullLinkName, TRUE);
                     }
                     else
                         hr = HRESULT_FROM_WIN32(GetLastError());
@@ -1249,7 +1515,9 @@ BOOL WINAPI SetupInstallFilesFromInfSectionW( HINF hinf, HINF hlayout, HSPFILEQ 
     info.src_root   = src_root;
     info.copy_flags = flags;
     info.layout     = hlayout;
-    return iterate_section_fields( hinf, section, CopyFiles, copy_files_callback, &info );
+    return iterate_section_fields( hinf, section, CopyFiles, copy_files_callback, &info ) &&
+           iterate_section_fields( hinf, section, DelFiles, delete_files_callback, &info ) &&
+           iterate_section_fields( hinf, section, RenFiles, rename_files_callback, &info );
 }
 
 
@@ -1311,11 +1579,11 @@ static BOOL needs_callback( HINF hinf, PCWSTR field, void *arg )
     switch (info->type)
     {
         case 0:
-            return SetupInstallFromInfSectionW(info->owner, *(HINF*)hinf, field, info->flags,
+            return SetupInstallFromInfSectionW(info->owner, hinf, field, info->flags,
                info->key_root, info->src_root, info->copy_flags, info->callback,
                info->context, info->devinfo, info->devinfo_data);
         case 1:
-            return SetupInstallServicesFromInfSectionExW(*(HINF*)hinf, field, info->flags,
+            return SetupInstallServicesFromInfSectionExW(hinf, field, info->flags,
                 info->devinfo, info->devinfo_data, info->reserved1, info->reserved2);
         default:
             ERR("Unknown info type %u\n", info->type);
@@ -1324,17 +1592,65 @@ static BOOL needs_callback( HINF hinf, PCWSTR field, void *arg )
 }
 
 
-/***********************************************************************
- *            SetupInstallFromInfSectionW   (SETUPAPI.@)
- */
-BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section, UINT flags,
-                                         HKEY key_root, PCWSTR src_root, UINT copy_flags,
-                                         PSP_FILE_CALLBACK_W callback, PVOID context,
-                                         HDEVINFO devinfo, PSP_DEVINFO_DATA devinfo_data )
+static BOOL record_needs_callback( HINF hinf, PCWSTR field, void *arg )
+{
+    struct registry_callback_info *info = arg;
+
+    return iterate_section_fields( hinf, field, AddReg, registry_callback, info );
+}
+
+
+BOOL SETUPAPI_RecordRelativeRegistry( HINF hinf, PCWSTR section, HKEY key_root )
+{
+    struct registry_callback_info info;
+
+    iterate_section_fields( hinf, section, Include, include_callback, NULL );
+    info.default_root = key_root;
+    info.device_key = NULL;
+    info.delete = FALSE;
+    info.relative_only = TRUE;
+    return iterate_section_fields( hinf, section, Needs, record_needs_callback, &info ) &&
+           iterate_section_fields( hinf, section, AddReg, registry_callback, &info );
+}
+
+
+static BOOL hardware_registry_callback( HINF hinf, PCWSTR field, void *arg )
+{
+    struct registry_callback_info *info = arg;
+
+    info->delete = TRUE;
+    if (!iterate_section_fields( hinf, field, DelReg, registry_callback, info ))
+        return FALSE;
+    info->delete = FALSE;
+    return iterate_section_fields( hinf, field, AddReg, registry_callback, info );
+}
+
+
+BOOL SETUPAPI_InstallHardwareSection( HINF hinf, PCWSTR section, HKEY hardware_key, HKEY device_key )
+{
+    struct registry_callback_info info;
+
+    info.default_root = hardware_key;
+    info.device_key = device_key;
+    info.relative_only = FALSE;
+
+    iterate_section_fields( hinf, section, Include, include_callback, NULL );
+    iterate_section_fields( hinf, section, Needs, hardware_registry_callback, &info );
+    if (!hardware_registry_callback( hinf, section, &info ))
+        return FALSE;
+
+    SetLastError( ERROR_SUCCESS );
+    return TRUE;
+}
+
+
+BOOL SETUPAPI_InstallFromInfSectionWithIncludes( HWND owner, HINF hinf, PCWSTR section, UINT flags,
+                                                 HKEY key_root, PCWSTR src_root, UINT copy_flags,
+                                                 PSP_FILE_CALLBACK_W callback, PVOID context,
+                                                 HDEVINFO devinfo, PSP_DEVINFO_DATA devinfo_data )
 {
     struct needs_callback_info needs_info;
 
-    /* Parse 'Include' and 'Needs' directives */
     iterate_section_fields( hinf, section, Include, include_callback, NULL);
     needs_info.type = 0;
     needs_info.owner = owner;
@@ -1348,6 +1664,19 @@ BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section, 
     needs_info.devinfo_data = devinfo_data;
     iterate_section_fields( hinf, section, Needs, needs_callback, &needs_info);
 
+    return SetupInstallFromInfSectionW( owner, hinf, section, flags, key_root, src_root, copy_flags,
+                                        callback, context, devinfo, devinfo_data );
+}
+
+
+/***********************************************************************
+ *            SetupInstallFromInfSectionW   (SETUPAPI.@)
+ */
+BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section, UINT flags,
+                                         HKEY key_root, PCWSTR src_root, UINT copy_flags,
+                                         PSP_FILE_CALLBACK_W callback, PVOID context,
+                                         HDEVINFO devinfo, PSP_DEVINFO_DATA devinfo_data )
+{
     if (flags & SPINST_FILES)
     {
         SP_DEVINSTALL_PARAMS_W install_params;
@@ -1395,6 +1724,9 @@ BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section, 
     if (flags & SPINST_REGSVR)
     {
         struct register_dll_info info;
+        HMODULE ole32;
+        HRESULT hr;
+        BOOL registered;
 
         info.unregister = FALSE;
         if (flags & SPINST_REGISTERCALLBACKAWARE)
@@ -1404,7 +1736,10 @@ BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section, 
         }
         else info.callback = NULL;
 
-        if (!iterate_section_fields( hinf, section, RegisterDlls, register_dlls_callback, &info ))
+        ole32 = register_dlls_com_enter( &hr );
+        registered = iterate_section_fields( hinf, section, RegisterDlls, register_dlls_callback, &info );
+        register_dlls_com_leave( ole32, hr );
+        if (!registered)
             return FALSE;
 
 #ifdef __WINESRC__
@@ -1415,6 +1750,9 @@ BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section, 
     if (flags & SPINST_UNREGSVR)
     {
         struct register_dll_info info;
+        HMODULE ole32;
+        HRESULT hr;
+        BOOL registered;
 
         info.unregister = TRUE;
         if (flags & SPINST_REGISTERCALLBACKAWARE)
@@ -1424,7 +1762,10 @@ BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section, 
         }
         else info.callback = NULL;
 
-        if (!iterate_section_fields( hinf, section, UnregisterDlls, register_dlls_callback, &info ))
+        ole32 = register_dlls_com_enter( &hr );
+        registered = iterate_section_fields( hinf, section, UnregisterDlls, register_dlls_callback, &info );
+        register_dlls_com_leave( ole32, hr );
+        if (!registered)
             return FALSE;
     }
     if (flags & SPINST_REGISTRY)
@@ -1432,6 +1773,8 @@ BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section, 
         struct registry_callback_info info;
 
         info.default_root = key_root;
+        info.device_key = NULL;
+        info.relative_only = FALSE;
         info.delete = TRUE;
         if (!iterate_section_fields( hinf, section, DelReg, registry_callback, &info ))
             return FALSE;
@@ -1455,6 +1798,7 @@ BOOL WINAPI SetupInstallFromInfSectionW( HWND owner, HINF hinf, PCWSTR section, 
             return FALSE;
     }
 
+    SetLastError(ERROR_SUCCESS);
     return TRUE;
 }
 
@@ -1490,10 +1834,9 @@ void WINAPI InstallHinfSectionW( HWND hwnd, HINSTANCE handle, LPCWSTR cmdline, I
     path = s;
 
     if (mode & 0x80)
-    {
-        FIXME("default path of the installation not changed\n");
         mode &= ~0x80;
-    }
+    else
+        FIXME("system-provided INF source path not supported, using the INF directory\n");
 
     hinf = SetupOpenInfFileW( path, NULL, INF_STYLE_WIN4, NULL );
     if (hinf == INVALID_HANDLE_VALUE)
@@ -1517,7 +1860,7 @@ void WINAPI InstallHinfSectionW( HWND hwnd, HINSTANCE handle, LPCWSTR cmdline, I
 
     /* Copy files and add registry entries */
     callback_context = SetupInitDefaultQueueCallback( hwnd );
-    ret = SetupInstallFromInfSectionW( hwnd, hinf, section, SPINST_ALL, NULL, NULL,
+    ret = SETUPAPI_InstallFromInfSectionWithIncludes( hwnd, hinf, section, SPINST_ALL, NULL, NULL,
                                        SP_COPY_NEWER | SP_COPY_IN_USE_NEEDS_REBOOT,
                                        SetupDefaultQueueCallbackW, callback_context,
                                        NULL, NULL );
@@ -1711,6 +2054,39 @@ static BOOL GetLineText( HINF hinf, PCWSTR section_name, PCWSTR key_name, PWSTR 
 }
 
 
+/* Read every field of a line as a double-NUL terminated multi-string */
+static BOOL GetMultiSzLine( HINF hinf, PCWSTR section_name, PCWSTR key_name, PWSTR *value)
+{
+    INFCONTEXT context;
+    DWORD required;
+    PWSTR buf = NULL;
+
+    *value = NULL;
+
+    if (! SetupFindFirstLineW( hinf, section_name, key_name, &context ) )
+        return FALSE;
+
+    if (! SetupGetMultiSzFieldW( &context, 1, NULL, 0, &required ) )
+        return FALSE;
+
+    buf = HeapAlloc( GetProcessHeap(), 0, required * sizeof(WCHAR) );
+    if ( ! buf )
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
+    if (! SetupGetMultiSzFieldW( &context, 1, buf, required, NULL ) )
+    {
+        HeapFree( GetProcessHeap(), 0, buf );
+        return FALSE;
+    }
+
+    *value = buf;
+    return TRUE;
+}
+
+
 static BOOL GetIntField( HINF hinf, PCWSTR section_name, PCWSTR key_name, INT *value)
 {
     LPWSTR buffer, end;
@@ -1770,46 +2146,38 @@ BOOL GetStringField( PINFCONTEXT context, DWORD index, PWSTR *value)
     return ret;
 }
 
-static VOID FixupServiceBinaryPath(
+static BOOL FixupServiceBinaryPath(
     IN DWORD ServiceType,
     IN OUT LPWSTR *ServiceBinary)
 {
     LPWSTR Buffer;
-    WCHAR ReactOSDir[MAX_PATH];
-    DWORD RosDirLength, ServiceLength, Win32Length;
+    LPCWSTR Prefix;
+    WCHAR WindowsDirectory[MAX_PATH];
+    DWORD DirectoryLength, ServiceLength, PrefixLength;
 
-    GetWindowsDirectoryW(ReactOSDir, MAX_PATH);
-    RosDirLength = strlenW(ReactOSDir);
+    DirectoryLength = GetWindowsDirectoryW(WindowsDirectory, ARRAYSIZE(WindowsDirectory));
+    if (!DirectoryLength || DirectoryLength >= ARRAYSIZE(WindowsDirectory))
+        return FALSE;
     ServiceLength = strlenW(*ServiceBinary);
+    if (ServiceLength <= DirectoryLength || (*ServiceBinary)[DirectoryLength] != L'\\' || wcsnicmp(*ServiceBinary, WindowsDirectory, DirectoryLength))
+        return TRUE;
 
-    /* Check and fix two things:
-       1. Get rid of C:\ReactOS and use relative
-          path instead.
-       2. Add %SystemRoot% for Win32 services */
-
-    if (ServiceLength < RosDirLength)
-        return;
-
-    if (!wcsnicmp(*ServiceBinary, ReactOSDir, RosDirLength))
+    /* Drivers also read ImagePath to locate companion firmware. Preserve
+     * an absolute NT path for them, as native SetupAPI does. A bare
+     * System32 path only works when the service loader resolves it. */
+    Prefix = (ServiceType & SERVICE_WIN32) ? L"%SystemRoot%" : L"\\SystemRoot";
+    PrefixLength = strlenW(Prefix);
+    Buffer = MyMalloc((PrefixLength + ServiceLength - DirectoryLength + 1) * sizeof(WCHAR));
+    if (!Buffer)
     {
-        /* Yes, the first part is the C:\ReactOS\, just skip it */
-        MoveMemory(*ServiceBinary, *ServiceBinary + RosDirLength + 1,
-            (ServiceLength - RosDirLength) * sizeof(WCHAR));
-
-        /* Handle Win32-services differently */
-        if (ServiceType & SERVICE_WIN32)
-        {
-            Win32Length = (ServiceLength - RosDirLength) * sizeof(WCHAR)
-                        - sizeof(L'\\') + sizeof(L"%SystemRoot%\\");
-            Buffer = MyMalloc(Win32Length);
-
-            wcscpy(Buffer, L"%SystemRoot%\\");
-            wcscat(Buffer, *ServiceBinary);
-            MyFree(*ServiceBinary);
-
-            *ServiceBinary = Buffer;
-        }
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
     }
+    memcpy(Buffer, Prefix, PrefixLength * sizeof(WCHAR));
+    memcpy(Buffer + PrefixLength, *ServiceBinary + DirectoryLength, (ServiceLength - DirectoryLength + 1) * sizeof(WCHAR));
+    MyFree(*ServiceBinary);
+    *ServiceBinary = Buffer;
+    return TRUE;
 }
 
 static BOOL InstallOneService(
@@ -1869,14 +2237,16 @@ static BOOL InstallOneService(
     }
 
     /* Adjust binary path according to the service type */
-    FixupServiceBinaryPath(ServiceType, &ServiceBinary);
+    if (!FixupServiceBinaryPath(ServiceType, &ServiceBinary))
+        goto cleanup;
 
     /* Don't check return value, as these fields are optional and
      * GetLineText initialize output parameter even on failure */
     GetLineText(hInf, ServiceSection, LoadOrderGroupKey, &LoadOrderGroup);
     GetLineText(hInf, ServiceSection, DisplayNameKey, &DisplayName);
     GetLineText(hInf, ServiceSection, DescriptionKey, &Description);
-    GetLineText(hInf, ServiceSection, DependenciesKey, &Dependencies);
+    /* CreateServiceW and ChangeServiceConfigW take a multi-string, one entry per field */
+    GetMultiSzLine(hInf, ServiceSection, DependenciesKey, &Dependencies);
     GetLineText(hInf, ServiceSection, StartNameKey, &StartName);
 
     /* If there is no group, we must not request a tag */
@@ -1886,7 +2256,7 @@ static BOOL InstallOneService(
     hService = OpenServiceW(
         hSCManager,
         ServiceName,
-        DELETE | SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG | WRITE_DAC);
+        DELETE | SERVICE_QUERY_CONFIG | SERVICE_CHANGE_CONFIG | WRITE_DAC | SERVICE_START);
     if (hService == NULL && GetLastError() != ERROR_SERVICE_DOES_NOT_EXIST)
         goto cleanup;
 
@@ -1904,7 +2274,7 @@ static BOOL InstallOneService(
             hSCManager,
             ServiceName,
             DisplayName,
-            WRITE_DAC,
+            WRITE_DAC | SERVICE_START,
             ServiceType,
             StartType,
             ErrorControl,
@@ -2086,6 +2456,9 @@ static BOOL InstallOneService(
         NULL);
     RegCloseKey(hServiceKey);
 
+    if (ret && (ServiceFlags & SPSVCINST_STARTSERVICE))
+        StartServiceW(hService, 0, NULL);
+
 cleanup:
     if (hSCManager != NULL)
         CloseServiceHandle(hSCManager);
@@ -2228,6 +2601,14 @@ SetupInstallServicesFromInfSectionExW(
                 ServiceFlags = 0;
             }
 
+            if ((!ServiceName || !*ServiceName) && (ServiceFlags & SPSVCINST_ASSOCSERVICE))
+            {
+                HeapFree(GetProcessHeap(), 0, ServiceName);
+                ServiceName = NULL;
+                ret = SetupFindNextMatchLineW(&ContextService, AddService, &ContextService);
+                continue;
+            }
+
             if (!GetStringField(&ContextService, 3, &ServiceSection))
                 goto done;
 
@@ -2314,7 +2695,16 @@ BOOL WINAPI SetupCopyOEMInfA(
             DestinationInfFileNameComponent ? &DestinationInfFileNameComponentW : NULL);
         if (!ret)
         {
+            DWORD LastError = GetLastError();
+
             if (RequiredSize) *RequiredSize = size;
+            if (LastError == ERROR_FILE_EXISTS && DestinationInfFileNameSize != 0 &&
+                !WideCharToMultiByte(CP_ACP, 0, DestinationInfFileNameW, -1,
+                                     DestinationInfFileName, DestinationInfFileNameSize, NULL, NULL))
+            {
+                DestinationInfFileName[0] = '\0';
+            }
+            SetLastError(LastError);
             goto cleanup;
         }
 
@@ -2415,12 +2805,16 @@ BOOL WINAPI SetupCopyOEMInfW(
         LPWSTR pFullFileName = NULL;
         LPWSTR pFileName; /* Pointer into pFullFileName buffer */
         HANDLE hSourceFile = INVALID_HANDLE_VALUE;
+        BOOL HasSourcePath = strchrW(SourceInfFileName, '\\') || strchrW(SourceInfFileName, '/');
+
+        if (!HasSourcePath && GetFileAttributesW(SourceInfFileName) != INVALID_FILE_ATTRIBUTES)
+            HasSourcePath = TRUE;
 
         if (OEMSourceMediaType == SPOST_PATH || OEMSourceMediaType == SPOST_URL)
             FIXME("OEMSourceMediaType 0x%lx ignored\n", OEMSourceMediaType);
 
         /* Check if source file exists, and open it */
-        if (strchrW(SourceInfFileName, '\\' ) || strchrW(SourceInfFileName, '/' ))
+        if (HasSourcePath)
         {
             WCHAR *path;
 
@@ -2515,12 +2909,14 @@ BOOL WINAPI SetupCopyOEMInfW(
                     {
                         if (GetFileSizeEx(hDestFile, &DestFileSize)
                          && DestFileSize.QuadPart == SourceFileSize.QuadPart
+                         && SetFilePointer(hSourceFile, 0, NULL, FILE_BEGIN) != INVALID_SET_FILE_POINTER
                          && !compare_files(hSourceFile, hDestFile))
                         {
                             TRACE("%s already exists as %s\n",
                                 debugstr_w(SourceInfFileName), debugstr_w(pFileName));
                             AlreadyExists = TRUE;
                         }
+                        CloseHandle(hDestFile);
                     }
                 } while (!AlreadyExists && FindNextFileW(hSearch, &FindFileData));
             }
@@ -2536,7 +2932,7 @@ BOOL WINAPI SetupCopyOEMInfW(
         }
         else if (AlreadyExists && (CopyStyle & SP_COPY_NOOVERWRITE))
         {
-            DWORD Size = strlenW(pFileName) + 1;
+            DWORD Size = strlenW(pFullFileName) + 1;
 
             if (RequiredSize)
                 *RequiredSize = Size;
@@ -2547,8 +2943,45 @@ BOOL WINAPI SetupCopyOEMInfW(
             else
             {
                 SetLastError(ERROR_FILE_EXISTS);
-                strcpyW(DestinationInfFileName, pFileName);
+                strcpyW(DestinationInfFileName, pFullFileName);
+                if (DestinationInfFileNameComponent)
+                    *DestinationInfFileNameComponent = &DestinationInfFileName[pFileName - pFullFileName];
             }
+            if (HasSourcePath)
+            {
+                DWORD LastError = GetLastError();
+
+                SETUPAPI_StageDriverPackage(SourceInfFileName);
+                SetLastError(LastError);
+            }
+            goto cleanup;
+        }
+        else if (AlreadyExists)
+        {
+            len = strlenW(pFullFileName) + 1;
+            if (RequiredSize)
+                *RequiredSize = len;
+            if (DestinationInfFileName)
+            {
+                if (DestinationInfFileNameSize < len)
+                {
+                    SetLastError(ERROR_INSUFFICIENT_BUFFER);
+                    goto cleanup;
+                }
+                strcpyW(DestinationInfFileName, pFullFileName);
+                if (DestinationInfFileNameComponent)
+                    *DestinationInfFileNameComponent = &DestinationInfFileName[pFileName - pFullFileName];
+            }
+
+            if (HasSourcePath && !SETUPAPI_StageDriverPackage(SourceInfFileName))
+                goto cleanup;
+
+            SETUPAPI_RecordPublishedDriverPackage(pFullFileName, SourceInfFileName);
+
+            if ((CopyStyle & SP_COPY_DELETESOURCE) && !DeleteFileW(SourceInfFileName))
+                goto cleanup;
+
+            ret = TRUE;
             goto cleanup;
         }
 
@@ -2590,6 +3023,17 @@ BOOL WINAPI SetupCopyOEMInfW(
             TRACE("CopyFileW() failed with error 0x%lx\n", GetLastError());
             goto cleanup;
         }
+
+        if (HasSourcePath && !SETUPAPI_StageDriverPackage(SourceInfFileName))
+        {
+            DWORD LastError = GetLastError();
+
+            DeleteFileW(pFullFileName);
+            SetLastError(LastError);
+            goto cleanup;
+        }
+
+        SETUPAPI_RecordPublishedDriverPackage(pFullFileName, SourceInfFileName);
 
         len = strlenW(pFullFileName) + 1;
         if (RequiredSize)

@@ -6,6 +6,7 @@
  */
 
 #pragma once
+#define _PROCESSTHREADSAPI_H_
 
 #ifdef __cplusplus
 extern "C" {
@@ -100,6 +101,30 @@ FlushProcessWriteBuffers(
     VOID);
 
 WINBASEAPI
+BOOL
+WINAPI
+QueryFullProcessImageNameA(
+    _In_ HANDLE hProcess,
+    _In_ DWORD dwFlags,
+    _Out_writes_to_(*lpdwSize, *lpdwSize) LPSTR lpExeName,
+    _Inout_ PDWORD lpdwSize);
+
+WINBASEAPI
+BOOL
+WINAPI
+QueryFullProcessImageNameW(
+    _In_ HANDLE hProcess,
+    _In_ DWORD dwFlags,
+    _Out_writes_to_(*lpdwSize, *lpdwSize) LPWSTR lpExeName,
+    _Inout_ PDWORD lpdwSize);
+
+#ifdef UNICODE
+#define QueryFullProcessImageName QueryFullProcessImageNameW
+#else
+#define QueryFullProcessImageName QueryFullProcessImageNameA
+#endif
+
+WINBASEAPI
 _Success_(return != FALSE)
 BOOL
 WINAPI
@@ -174,10 +199,19 @@ typedef enum _PROCESS_INFORMATION_CLASS
     ProcessInformationClassMax
 } PROCESS_INFORMATION_CLASS;
 
-#define PROCESS_MACHINE_ATTRIBUTE_KERNEL_ENABLED 0x00000001
-#define PROCESS_MACHINE_ATTRIBUTE_USER_ENABLED   0x00000002
-#define PROCESS_MACHINE_ATTRIBUTE_NATIVE_OS        0x00000004
-#define PROCESS_MACHINE_ATTRIBUTE_WOW64_CONTAINER  0x00000008
+typedef enum _MACHINE_ATTRIBUTES
+{
+    UserEnabled = 0x00000001,
+    KernelEnabled = 0x00000002,
+    Wow64Container = 0x00000004
+} MACHINE_ATTRIBUTES;
+
+typedef struct _PROCESS_MACHINE_INFORMATION
+{
+    USHORT ProcessMachine;
+    USHORT Res0;
+    MACHINE_ATTRIBUTES MachineAttributes;
+} PROCESS_MACHINE_INFORMATION;
 
 typedef enum _THREAD_INFORMATION_CLASS
 {
@@ -187,6 +221,149 @@ typedef enum _THREAD_INFORMATION_CLASS
     ThreadPowerThrottling,
     ThreadInformationClassMax
 } THREAD_INFORMATION_CLASS;
+
+#if (_WIN32_WINNT >= 0x0602) || defined(__REACTOS__)
+
+#define MEMORY_PRIORITY_LOWEST       0
+#define MEMORY_PRIORITY_VERY_LOW     1
+#define MEMORY_PRIORITY_LOW          2
+#define MEMORY_PRIORITY_MEDIUM       3
+#define MEMORY_PRIORITY_BELOW_NORMAL 4
+#define MEMORY_PRIORITY_NORMAL       5
+
+typedef struct _MEMORY_PRIORITY_INFORMATION
+{
+    ULONG MemoryPriority;
+} MEMORY_PRIORITY_INFORMATION, *PMEMORY_PRIORITY_INFORMATION;
+
+WINBASEAPI
+BOOL
+WINAPI
+GetProcessInformation(
+    _In_ HANDLE hProcess,
+    _In_ PROCESS_INFORMATION_CLASS ProcessInformationClass,
+    _Out_writes_bytes_(ProcessInformationSize) PVOID ProcessInformation,
+    _In_ DWORD ProcessInformationSize);
+
+WINBASEAPI
+BOOL
+WINAPI
+SetProcessInformation(
+    _In_ HANDLE hProcess,
+    _In_ PROCESS_INFORMATION_CLASS ProcessInformationClass,
+    _In_reads_bytes_(ProcessInformationSize) PVOID ProcessInformation,
+    _In_ DWORD ProcessInformationSize);
+
+WINBASEAPI
+BOOL
+WINAPI
+GetThreadInformation(
+    _In_ HANDLE hThread,
+    _In_ THREAD_INFORMATION_CLASS ThreadInformationClass,
+    _Out_writes_bytes_(ThreadInformationSize) PVOID ThreadInformation,
+    _In_ DWORD ThreadInformationSize);
+
+WINBASEAPI
+BOOL
+WINAPI
+SetThreadInformation(
+    _In_ HANDLE hThread,
+    _In_ THREAD_INFORMATION_CLASS ThreadInformationClass,
+    _In_reads_bytes_(ThreadInformationSize) PVOID ThreadInformation,
+    _In_ DWORD ThreadInformationSize);
+
+#endif // (_WIN32_WINNT >= 0x0602) || defined(__REACTOS__)
+
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN10_RS3) || defined(__REACTOS__)
+
+#define THREAD_POWER_THROTTLING_CURRENT_VERSION 1
+#define PROCESS_POWER_THROTTLING_CURRENT_VERSION 1
+#define PROCESS_POWER_THROTTLING_EXECUTION_SPEED 0x1
+#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+#define PROCESS_POWER_THROTTLING_VALID_FLAGS 0x5
+
+#ifndef _PROCESS_POWER_THROTTLING_STATE_DEFINED
+#define _PROCESS_POWER_THROTTLING_STATE_DEFINED
+typedef struct _PROCESS_POWER_THROTTLING_STATE
+{
+    ULONG Version;
+    ULONG ControlMask;
+    ULONG StateMask;
+} PROCESS_POWER_THROTTLING_STATE;
+#endif
+
+#define THREAD_POWER_THROTTLING_EXECUTION_SPEED 0x1
+#define THREAD_POWER_THROTTLING_VALID_FLAGS THREAD_POWER_THROTTLING_EXECUTION_SPEED
+
+#ifndef _THREAD_POWER_THROTTLING_STATE_DEFINED
+#define _THREAD_POWER_THROTTLING_STATE_DEFINED
+typedef struct _THREAD_POWER_THROTTLING_STATE
+{
+    ULONG Version;
+    ULONG ControlMask;
+    ULONG StateMask;
+} THREAD_POWER_THROTTLING_STATE;
+#endif
+
+#endif // (_WIN32_WINNT >= _WIN32_WINNT_WIN10_RS3) || defined(__REACTOS__)
+
+#if (_WIN32_WINNT >= 0x0600) || defined(__REACTOS__)
+
+#define PROCESS_AFFINITY_ENABLE_AUTO_UPDATE 0x00000001UL
+
+WINBASEAPI
+BOOL
+WINAPI
+SetProcessAffinityUpdateMode(
+    _In_ HANDLE hProcess,
+    _In_ DWORD dwFlags);
+
+WINBASEAPI
+BOOL
+WINAPI
+QueryProcessAffinityUpdateMode(
+    _In_ HANDLE hProcess,
+    _Out_opt_ LPDWORD lpdwFlags);
+
+#endif // (_WIN32_WINNT >= 0x0600) || defined(__REACTOS__)
+
+#if (_WIN32_WINNT >= 0x0A00) || defined(__REACTOS__)
+
+_Success_(return != FALSE)
+BOOL
+WINAPI
+GetProcessDefaultCpuSets(
+    _In_ HANDLE Process,
+    _Out_writes_to_opt_(CpuSetIdCount, *RequiredIdCount) PULONG CpuSetIds,
+    _In_ ULONG CpuSetIdCount,
+    _Always_(_Out_) PULONG RequiredIdCount);
+
+_Success_(return != FALSE)
+BOOL
+WINAPI
+SetProcessDefaultCpuSets(
+    _In_ HANDLE Process,
+    _In_reads_opt_(CpuSetIdCount) const ULONG *CpuSetIds,
+    _In_ ULONG CpuSetIdCount);
+
+_Success_(return != FALSE)
+BOOL
+WINAPI
+GetThreadSelectedCpuSets(
+    _In_ HANDLE Thread,
+    _Out_writes_to_opt_(CpuSetIdCount, *RequiredIdCount) PULONG CpuSetIds,
+    _In_ ULONG CpuSetIdCount,
+    _Always_(_Out_) PULONG RequiredIdCount);
+
+_Success_(return != FALSE)
+BOOL
+WINAPI
+SetThreadSelectedCpuSets(
+    _In_ HANDLE Thread,
+    _In_reads_(CpuSetIdCount) const ULONG *CpuSetIds,
+    _In_ ULONG CpuSetIdCount);
+
+#endif // (_WIN32_WINNT >= 0x0A00) || defined(__REACTOS__)
 
 #ifdef __cplusplus
 } // extern "C"

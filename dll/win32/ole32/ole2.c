@@ -50,6 +50,9 @@
 WINE_DEFAULT_DEBUG_CHANNEL(ole);
 WINE_DECLARE_DEBUG_CHANNEL(accel);
 
+/* Combase exports */
+BOOL WINAPI InternalIsProcessInitialized(void);
+
 /******************************************************************************
  * These are static/global variables and internal data structures that the
  * OLE module uses to maintain its state.
@@ -554,9 +557,9 @@ HRESULT WINAPI RegisterDragDrop(HWND hwnd, LPDROPTARGET pDropTarget)
 
   TRACE("(%p,%p)\n", hwnd, pDropTarget);
 
-  if (!COM_CurrentApt())
+  if (!COM_CurrentInfo()->ole_inits)
   {
-    ERR("COM not initialized\n");
+    ERR("OleInitialize not called\n");
     return E_OUTOFMEMORY;
   }
 
@@ -567,6 +570,12 @@ HRESULT WINAPI RegisterDragDrop(HWND hwnd, LPDROPTARGET pDropTarget)
   {
     ERR("invalid hwnd %p\n", hwnd);
     return DRAGDROP_E_INVALIDHWND;
+  }
+
+  if (!InternalIsProcessInitialized())
+  {
+    ERR("COM not initialized\n");
+    return CO_E_NOTINITIALIZED;
   }
 
   /* block register for other processes windows */
@@ -743,6 +752,7 @@ HRESULT WINAPI DoDragDrop (
   TrackerWindowInfo trackerInfo;
   HWND            hwndTrackWindow;
   MSG             msg;
+  HCURSOR         cursor;
 
   TRACE("%p, %p, %#lx, %p.\n", pDataObject, pDropSource, dwOKEffect, pdwEffect);
 
@@ -779,6 +789,9 @@ HRESULT WINAPI DoDragDrop (
     SetCapture(hwndTrackWindow);
 
     msg.message = 0;
+
+    /* save cursor */
+    cursor = GetCursor();
 
     /*
      * Pump messages. All mouse input should go to the capture window.
@@ -825,6 +838,9 @@ HRESULT WINAPI DoDragDrop (
      * Destroy the temporary window.
      */
     DestroyWindow(hwndTrackWindow);
+
+    /* restore cursor */
+    SetCursor(cursor);
 
     return trackerInfo.returnValue;
   }
@@ -1912,9 +1928,15 @@ HRESULT WINAPI OleSetMenuDescriptor(
     }
     else  /* Want to uninstall dispatching code */
     {
+#ifdef __REACTOS__
+        if ( OLEMenu_IsHookInstalled( GetCurrentThreadId() ) &&
+             !OLEMenu_UnInstallHooks( GetCurrentThreadId() ) )
+            return E_FAIL;
+#else
         /* Uninstall the hooks */
         if ( !OLEMenu_UnInstallHooks( GetCurrentThreadId() ) )
             return E_FAIL;
+#endif
 
         /* Remove the menu descriptor property from the frame window */
         RemovePropW( hwndFrame, prop_olemenuW );
@@ -2998,6 +3020,25 @@ HRESULT WINAPI OleCreateFromDataEx(IDataObject *data, REFIID iid, DWORD flags,
           data, debugstr_guid(iid), flags, renderopt, num_cache_fmts, adv_flags, cache_fmts,
           sink, conns, client_site, stg, obj);
 
+#ifdef __REACTOS__
+    {
+        IEnumFORMATETC *enum_fmt;
+        FORMATETC fmt;
+        BOOL found = FALSE;
+
+        if (FAILED(IDataObject_EnumFormatEtc(data, DATADIR_GET, &enum_fmt)))
+            return DV_E_FORMATETC;
+        while (IEnumFORMATETC_Next(enum_fmt, 1, &fmt, NULL) == S_OK)
+        {
+            if (fmt.cfFormat == embedded_object_clipboard_format || fmt.cfFormat == embed_source_clipboard_format)
+                found = TRUE;
+            CoTaskMemFree(fmt.ptd);
+        }
+        IEnumFORMATETC_Release(enum_fmt);
+        if (!found)
+            return DV_E_FORMATETC;
+    }
+#endif
     hr = get_storage(data, stg, &src_cf, TRUE);
     if(FAILED(hr)) return hr;
 

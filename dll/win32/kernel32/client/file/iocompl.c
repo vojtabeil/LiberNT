@@ -13,6 +13,12 @@
 #define NDEBUG
 #include <debug.h>
 
+C_ASSERT(sizeof(OVERLAPPED_ENTRY) == sizeof(FILE_IO_COMPLETION_INFORMATION));
+C_ASSERT(FIELD_OFFSET(OVERLAPPED_ENTRY, lpCompletionKey) == FIELD_OFFSET(FILE_IO_COMPLETION_INFORMATION, KeyContext));
+C_ASSERT(FIELD_OFFSET(OVERLAPPED_ENTRY, lpOverlapped) == FIELD_OFFSET(FILE_IO_COMPLETION_INFORMATION, ApcContext));
+C_ASSERT(FIELD_OFFSET(OVERLAPPED_ENTRY, Internal) == FIELD_OFFSET(FILE_IO_COMPLETION_INFORMATION, IoStatusBlock));
+C_ASSERT(FIELD_OFFSET(OVERLAPPED_ENTRY, dwNumberOfBytesTransferred) == FIELD_OFFSET(FILE_IO_COMPLETION_INFORMATION, IoStatusBlock) + FIELD_OFFSET(IO_STATUS_BLOCK, Information));
+
 /*
  * SetFileCompletionNotificationModes is not entirely Vista-exclusive,
  * it was actually added to Windows 2003 in SP2. Headers restrict it from
@@ -48,6 +54,36 @@ SetFileCompletionNotificationModes(IN HANDLE FileHandle,
                                   &FileInformation,
                                   sizeof(FileInformation),
                                   FileIoCompletionNotificationInformation);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetFileIoOverlappedRange(IN HANDLE FileHandle,
+                         IN PUCHAR OverlappedRangeStart,
+                         IN ULONG Length)
+{
+    FILE_IOSTATUSBLOCK_RANGE_INFORMATION FileInformation;
+    IO_STATUS_BLOCK IoStatusBlock;
+    NTSTATUS Status;
+
+    FileInformation.IoStatusBlockRange = OverlappedRangeStart;
+    FileInformation.Length = Length;
+
+    Status = NtSetInformationFile(FileHandle,
+                                  &IoStatusBlock,
+                                  &FileInformation,
+                                  sizeof(FileInformation),
+                                  FileIoStatusBlockRangeInformation);
     if (!NT_SUCCESS(Status))
     {
         BaseSetLastNTError(Status);
@@ -147,7 +183,9 @@ GetQueuedCompletionStatus(IN HANDLE CompletionHandle,
                                   (PVOID*)lpOverlapped,
                                   &IoStatus,
                                   TimePtr);
-    if (!(NT_SUCCESS(Status)) || (Status == STATUS_TIMEOUT))
+    if (!(NT_SUCCESS(Status)) ||
+        (Status == STATUS_TIMEOUT) ||
+        (Status == STATUS_ABANDONED))
     {
         /* Clear out the overlapped output */
         *lpOverlapped = NULL;
@@ -157,6 +195,10 @@ GetQueuedCompletionStatus(IN HANDLE CompletionHandle,
         {
             /* Timeout error is set directly since there's no conversion */
             SetLastError(WAIT_TIMEOUT);
+        }
+        else if (Status == STATUS_ABANDONED)
+        {
+            SetLastError(ERROR_ABANDONED_WAIT_0);
         }
         else
         {
@@ -182,6 +224,39 @@ GetQueuedCompletionStatus(IN HANDLE CompletionHandle,
 
     /* Return success */
     return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+GetQueuedCompletionStatusEx(IN HANDLE CompletionHandle,
+                            OUT LPOVERLAPPED_ENTRY lpCompletionPortEntries,
+                            IN ULONG ulCount,
+                            OUT PULONG ulNumEntriesRemoved,
+                            IN DWORD dwMilliseconds,
+                            IN BOOL fAlertable)
+{
+    NTSTATUS Status;
+    LARGE_INTEGER Time;
+    PLARGE_INTEGER TimePtr;
+
+    TimePtr = BaseFormatTimeOut(&Time, dwMilliseconds);
+    Status = NtRemoveIoCompletionEx(CompletionHandle, (PFILE_IO_COMPLETION_INFORMATION)lpCompletionPortEntries, ulCount, ulNumEntriesRemoved, TimePtr, fAlertable);
+    if (Status == STATUS_SUCCESS)
+        return TRUE;
+
+    if (Status == STATUS_TIMEOUT)
+        SetLastError(WAIT_TIMEOUT);
+    else if (Status == STATUS_USER_APC)
+        SetLastError(WAIT_IO_COMPLETION);
+    else if (Status == STATUS_ABANDONED)
+        SetLastError(ERROR_ABANDONED_WAIT_0);
+    else
+        BaseSetLastNTError(Status);
+
+    return FALSE;
 }
 
 /*
@@ -257,16 +332,8 @@ GetOverlappedResult(IN HANDLE hFile,
     /* Return bytes transferred */
     *lpNumberOfBytesTransferred = lpOverlapped->InternalHigh;
 
-    /* Check for failure during I/O */
-    if (!NT_SUCCESS(lpOverlapped->Internal))
-    {
-        /* Set the error and fail */
-        BaseSetLastNTError(lpOverlapped->Internal);
-        return FALSE;
-    }
-
-    /* All done */
-    return TRUE;
+    BaseSetLastNTError(lpOverlapped->Internal);
+    return NT_SUCCESS(lpOverlapped->Internal);
 }
 
 /*

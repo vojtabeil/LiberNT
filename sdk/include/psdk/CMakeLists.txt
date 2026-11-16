@@ -9,6 +9,7 @@ list(APPEND SOURCE
     activaut.idl
     activdbg.idl
     activscp.idl
+    asyncinfo.idl
     asptlb.idl
 #   asynot.idl
 #   asysta.idl
@@ -22,9 +23,11 @@ list(APPEND SOURCE
     bits2_0.idl
     bits2_5.idl
     bits3_0.idl
+    bits5_0.idl
 #   cmdbas.idl
 #   cmdtxt.idl
     comcat.idl
+    comsvcs.idl
     commoncontrols.idl
     control.idl
     cor.idl
@@ -41,35 +44,65 @@ list(APPEND SOURCE
     devenum.idl
     devicetopology.idl
     dimm.idl
+    directmanipulation.idl
+    dispatcherqueue.idl
     dispex.idl
     docobj.idl
     docobjectservice.idl
     downloadmgr.idl
     drmexternals.idl
-    dxgiformat.idl
+    dragdropinterop.idl
+    d2d1.idl
+    d2d1_1.idl
+    d2d1_2.idl
+    d2d1_3.idl
+    d2d1effectauthor.idl
+    d2d1effects.idl
+    d2d1effects_1.idl
+    d2d1effects_2.idl
+    dwrite.idl
+    dwrite_1.idl
+    dwrite_2.idl
+    dwrite_3.idl
+    dvdif.idl
+#   dxgiformat.idl (dxgiformat.h is a checked-in shared header consumed directly)
 #   dyngraph.idl
     emptyvc.idl
     endpointvolume.idl
+    evr.idl
+    evr9.idl
+    eventtoken.idl
     exdisp.idl
+    filter.idl
     fusion.idl
+    gameinput.idl
     hlink.idl
+    holographicspaceinterop.idl
     hstring.idl
     htiface.idl
     htiframe.idl
     httprequest.idl
+    icodecapi.idl
+    inputpaneinterop.idl
     iads.idl
     icftypes.idl
     ieautomation.idl
+    imapi.idl
     imnact.idl
     imnxport.idl
     indexsrv.idl
     inputscope.idl
     inseng.idl
     inspectable.idl
+    ivectorchangedeventargs.idl
     mediaobj.idl
     metahost.idl
+    mfd3d12.idl
     mfidl.idl
+    mfmediaengine.idl
     mfobjects.idl
+    mfplay.idl
+    mfreadwrite.idl
     mftransform.idl
     mimeinfo.idl
     mimeole.idl
@@ -78,6 +111,7 @@ list(APPEND SOURCE
     mmdeviceapi.idl
     msaatext.idl
     mscoree.idl
+    msopc.idl
     msctf.idl
     msdadc.idl
     mshtmhst.idl
@@ -89,7 +123,9 @@ list(APPEND SOURCE
     msxml6.idl
     natupnp.idl
     netcon.idl
+    netlistmgr.idl
     netfw.idl
+    notificationactivationcallback.idl
     oaidl.idl
     objectarray.idl
     objidl.idl
@@ -105,28 +141,40 @@ list(APPEND SOURCE
     perhist.idl
     propidl.idl
     propsys.idl
+    portabledeviceapi.idl
+    portabledevicetypes.idl
     pstore.idl
     restrictederrorinfo.idl
     richole.idl
+    robuffer.idl
+    rometadataapi.idl
     roparameterizediid.idl
+    rtworkq.idl
 #   row.idl
 #   rowchg.idl
 #   rstbas.idl
 #   rstinf.idl
 #   rstloc.idl
-    rtworkq.idl
+    sapi.idl
+    sapiddk.idl
     sensevts.idl
+    sensorsapi.idl
     servprov.idl
 #   sesprp.idl
     shdeprecated.idl
+    shimgdata.idl
     shldisp.idl
     shobjidl.idl
     shtypes.idl
+    spatialaudioclient.idl
+    systemmediatransportcontrolsinterop.idl
 #   stdole2.idl
     strmif.idl
+    structuredquery.idl
     structuredquerycondition.idl
     taskschd.idl
     textstor.idl
+    thumbcache.idl
     tlogstg.idl
     tom.idl
     transact.idl
@@ -138,6 +186,7 @@ list(APPEND SOURCE
     unknwn.idl
     urlhist.idl
     urlmon.idl
+    uiviewsettingsinterop.idl
     vmr9.idl
 #   vmrender.idl
     vsbackup.idl
@@ -146,8 +195,104 @@ list(APPEND SOURCE
     wbemcli.idl
     wbemdisp.idl
     wbemprov.idl
+    weakreference.idl
     wia_lh.idl
     wia_xp.idl
+    windows.applicationmodel.activation.idl
+    windows.applicationmodel.background.idl
+    windows.applicationmodel.core.idl
+    windows.applicationmodel.datatransfer.dragdrop.core.idl
+    windows.applicationmodel.datatransfer.dragdrop.idl
+    windows.applicationmodel.datatransfer.idl
+    windows.applicationmodel.idl
+    windows.applicationmodel.store.preview.installcontrol.idl
+    windows.data.json.idl
+    windows.data.xml.dom.idl
+    windows.devices.bluetooth.advertisement.idl
+    windows.devices.bluetooth.genericattributeprofile.idl
+    windows.devices.bluetooth.idl
+    windows.devices.bluetooth.rfcomm.idl
+    windows.devices.enumeration.idl
+    windows.devices.geolocation.idl
+    windows.devices.haptics.idl
+    windows.devices.input.idl
+    windows.devices.power.idl
+    windows.devices.radios.idl
+    windows.devices.usb.idl
+    windows.foundation.collections.idl
+    windows.foundation.idl
+    windows.foundation.metadata.idl
+    windows.foundation.numerics.idl
+    windows.gaming.input.custom.idl
+    windows.gaming.input.forcefeedback.idl
+    windows.gaming.input.idl
+    windows.gaming.ui.idl
+    windows.globalization.idl
+    windows.graphics.capture.idl
+    windows.graphics.capture.interop.idl
+    windows.graphics.directx.direct3d11.idl
+    windows.graphics.directx.direct3d11.interop.idl
+    windows.graphics.directx.idl
+    windows.graphics.display.idl
+    windows.graphics.effects.idl
+    windows.graphics.holographic.idl
+    windows.graphics.idl
+    windows.graphics.imaging.idl
+    windows.management.deployment.idl
+    windows.media.capture.idl
+    windows.media.closedcaptioning.idl
+    windows.media.core.idl
+    windows.media.devices.idl
+    windows.media.effects.idl
+    windows.media.faceanalysis.idl
+    windows.media.idl
+    windows.media.mediaproperties.idl
+    windows.media.playback.idl
+    windows.media.render.idl
+    windows.media.speechrecognition.idl
+    windows.media.speechsynthesis.idl
+    windows.media.transcoding.idl
+    windows.networking.connectivity.idl
+    windows.networking.idl
+    windows.networking.sockets.idl
+    windows.perception.idl
+    windows.perception.spatial.idl
+    windows.perception.spatial.surfaces.idl
+    windows.security.authentication.onlineid.idl
+    windows.security.authorization.appcapabilityaccess.idl
+    windows.security.credentials.idl
+    windows.security.credentials.ui.idl
+    windows.security.cryptography.core.idl
+    windows.security.cryptography.idl
+    windows.security.enterprisedata.idl
+    windows.security.exchangeactivesyncprovisioning.idl
+    windows.security.isolation.idl
+    windows.storage.fileproperties.idl
+    windows.storage.idl
+    windows.storage.search.idl
+    windows.storage.streams.idl
+    windows.system.idl
+    windows.system.power.idl
+    windows.system.profile.idl
+    windows.system.profile.systemmanufacturers.idl
+    windows.system.threading.idl
+    windows.system.userprofile.idl
+    windows.ui.composition.idl
+    windows.ui.composition.interop.idl
+    windows.ui.core.idl
+    windows.ui.idl
+    windows.ui.input.idl
+    windows.ui.notifications.idl
+    windows.ui.text.core.idl
+    windows.ui.text.idl
+    windows.ui.viewmanagement.core.idl
+    windows.ui.shell.idl
+    windows.ui.viewmanagement.idl
+    windows.ui.windowmanagement.idl
+    windows.ui.xaml.hosting.desktopwindowxamlsource.idl
+    windows.ui.xaml.idl
+    windows.ui.xaml.interop.idl
+    windowscontracts.idl
     wincodec.idl
     wincodecsdk.idl
     winsxs.idl
@@ -155,8 +300,15 @@ list(APPEND SOURCE
     wmiutils.idl
     wmsbuffer.idl
     wmsdkidl.idl
+    wmsecure.idl
+    wsdbase.idl
+    wsddisco.idl
+    wsdxml.idl
     wtypes.idl
     wuapi.idl
+    xapo.idl
+    xaudio2.idl
+    xaudio2fx.idl
     xmldom.idl
     xmldso.idl
     ctfutb.idl
@@ -164,12 +316,52 @@ list(APPEND SOURCE
 
 add_idl_headers(psdk ${SOURCE})
 add_dependencies(psdk xdk)
+
+set(WINMD_SOURCE ${SOURCE})
+list(FILTER WINMD_SOURCE INCLUDE REGEX "^windows\\..*\\.idl$")
+list(FILTER WINMD_SOURCE EXCLUDE REGEX "\\.interop\\.idl$|^windows\\.ui\\.xaml\\.hosting\\.desktopwindowxamlsource\\.idl$|^windows\\.applicationmodel\\.store\\.preview\\.installcontrol\\.idl$")
+list(TRANSFORM WINMD_SOURCE PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/)
+set_property(GLOBAL PROPERTY WINMD_SOURCES ${WINMD_SOURCE})
 add_typelib(stdole2.idl)
 add_custom_target(stdole2 DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/stdole2.tlb)
 
-add_idl_headers(d3d_idl_headers d3dcommon.idl)
+add_idl_headers(d3d_idl_headers
+    dcommon.idl
+    d3dcommon.idl
+    d3d9on12.idl
+    d3d10.idl
+    d3d10_1.idl
+    d3d10effect.idl
+    d3d10sdklayers.idl
+    d3d10shader.idl
+    d3d11.idl
+    d3d11_1.idl
+    d3d11_2.idl
+    d3d11_3.idl
+    d3d11_4.idl
+    d3d11on12.idl
+    d3d11sdklayers.idl
+    d3d12.idl
+    d3d12sdklayers.idl
+    d3d12shader.idl
+    d3d12video.idl
+    dcomp.idl
+    dcompanimation.idl
+    dcomptypes.idl
+    dxgi.idl
+    dxgi1_2.idl
+    dxgi1_3.idl
+    dxgi1_4.idl
+    dxgi1_5.idl
+    dxgi1_6.idl
+#   dxgicommon.idl (dxgicommon.h is a checked-in shared header consumed directly)
+    dxgidebug.idl
+    dxva2api.idl
+    dxvahd.idl
+    dxgitype.idl)
+add_dependencies(psdk d3d_idl_headers)
 
-add_iid_library(adsiid iads.idl transact.idl)
+add_iid_library(adsiid iads.idl)
 add_iid_library(mmc_uuids mmc.idl)
 add_iid_library(wuguid wuapi.idl)
 add_iid_library(xml_uuids msxml2.idl)

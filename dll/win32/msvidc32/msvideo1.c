@@ -306,15 +306,15 @@ CRAM_DecompressQuery( Msvideo1Context *info, LPBITMAPINFO in, LPBITMAPINFO out )
 
     TRACE("in->planes  = %d\n", in->bmiHeader.biPlanes );
     TRACE("in->bpp     = %d\n", in->bmiHeader.biBitCount );
-    TRACE("in->height  = %d\n", in->bmiHeader.biHeight );
-    TRACE("in->width   = %d\n", in->bmiHeader.biWidth );
-    TRACE("in->compr   = 0x%x\n", in->bmiHeader.biCompression );
+    TRACE("in->height  = %ld\n", in->bmiHeader.biHeight );
+    TRACE("in->width   = %ld\n", in->bmiHeader.biWidth );
+    TRACE("in->compr   = 0x%lx\n", in->bmiHeader.biCompression );
 
     if( ( in->bmiHeader.biCompression != CRAM_MAGIC ) &&
         ( in->bmiHeader.biCompression != MSVC_MAGIC ) &&
         ( in->bmiHeader.biCompression != WHAM_MAGIC ) )
     {
-        TRACE("can't do 0x%x compression\n", in->bmiHeader.biCompression);
+        TRACE("can't do 0x%lx compression\n", in->bmiHeader.biCompression);
         return ICERR_BADFORMAT;
     }
 
@@ -330,8 +330,8 @@ CRAM_DecompressQuery( Msvideo1Context *info, LPBITMAPINFO in, LPBITMAPINFO out )
     {
         TRACE("out->planes = %d\n", out->bmiHeader.biPlanes );
         TRACE("out->bpp    = %d\n", out->bmiHeader.biBitCount );
-        TRACE("out->height = %d\n", out->bmiHeader.biHeight );
-        TRACE("out->width  = %d\n", out->bmiHeader.biWidth );
+        TRACE("out->height = %ld\n", out->bmiHeader.biHeight );
+        TRACE("out->width  = %ld\n", out->bmiHeader.biWidth );
 
         if ((in->bmiHeader.biBitCount != out->bmiHeader.biBitCount) &&
             (in->bmiHeader.biBitCount != 16 || out->bmiHeader.biBitCount != 24))
@@ -340,9 +340,16 @@ CRAM_DecompressQuery( Msvideo1Context *info, LPBITMAPINFO in, LPBITMAPINFO out )
             return ICERR_BADFORMAT;
         }
 
+#ifdef __REACTOS__
+        if(( in->bmiHeader.biPlanes != out->bmiHeader.biPlanes ) ||
+          ( in->bmiHeader.biHeight != out->bmiHeader.biHeight &&
+            in->bmiHeader.biHeight != -out->bmiHeader.biHeight ) ||
+          ( in->bmiHeader.biWidth != out->bmiHeader.biWidth ))
+#else
         if(( in->bmiHeader.biPlanes != out->bmiHeader.biPlanes ) ||
           ( in->bmiHeader.biHeight != out->bmiHeader.biHeight ) ||
           ( in->bmiHeader.biWidth != out->bmiHeader.biWidth ))
+#endif
         {
             TRACE("incompatible output requested\n");
             return ICERR_BADFORMAT;
@@ -421,10 +428,17 @@ static void convert_depth(char *input, int depth_in, char *output, BITMAPINFOHEA
             0xc5, 0xce, 0xd6, 0xde, 0xe6, 0xef, 0xf7, 0xff,
         };
 
+#ifdef __REACTOS__
+        for (y = 0; y < abs(out_hdr->biHeight); y++)
+        {
+            WORD *src_row = (WORD *)(input + y * stride_in);
+            char *out_row = output + (out_hdr->biHeight < 0 ? abs(out_hdr->biHeight) - 1 - y : y) * stride_out;
+#else
         for (y = 0; y < out_hdr->biHeight; y++)
         {
             WORD *src_row = (WORD *)(input + y * stride_in);
             char *out_row = output + y * stride_out;
+#endif
 
             for (x = 0; x < out_hdr->biWidth; x++)
             {
@@ -444,7 +458,7 @@ static LRESULT CRAM_Decompress( Msvideo1Context *info, ICDECOMPRESS *icd, DWORD 
     LONG width, height, stride, sz;
     void *output;
 
-    TRACE("ICM_DECOMPRESS %p %p %d\n", info, icd, size);
+    TRACE("ICM_DECOMPRESS %p %p %ld\n", info, icd, size);
 
     if( (info==NULL) || (info->dwMagic!=CRAM_MAGIC) )
         return ICERR_BADPARAM;
@@ -457,6 +471,34 @@ static LRESULT CRAM_Decompress( Msvideo1Context *info, ICDECOMPRESS *icd, DWORD 
 
     output = icd->lpOutput;
 
+#ifdef __REACTOS__
+    if (icd->lpbiOutput->biBitCount != info->depth)
+    {
+        output = HeapAlloc(GetProcessHeap(), 0, get_stride(width, info->depth) * abs(height));
+        if (!output) return ICERR_MEMORY;
+    }
+
+    if (info->depth == 8)
+    {
+        stride = get_stride(width, 8);
+        if (icd->lpbiOutput->biBitCount == info->depth && icd->lpbiOutput->biHeight < 0)
+            msvideo1_decode_8bit( width, height, icd->lpInput, sz,
+                                  (unsigned char *)output + (height - 1) * stride, -stride );
+        else
+            msvideo1_decode_8bit( width, height, icd->lpInput, sz,
+                                  output, stride );
+    }
+    else
+    {
+        stride = get_stride(width, 16) / 2;
+        if (icd->lpbiOutput->biBitCount == info->depth && icd->lpbiOutput->biHeight < 0)
+            msvideo1_decode_16bit( width, height, icd->lpInput, sz,
+                                   (unsigned short *)output + (height - 1) * stride, -stride );
+        else
+            msvideo1_decode_16bit( width, height, icd->lpInput, sz,
+                                   output, stride );
+    }
+#else
     if (icd->lpbiOutput->biBitCount != info->depth)
     {
         output = HeapAlloc(GetProcessHeap(), 0, icd->lpbiOutput->biWidth * icd->lpbiOutput->biHeight * info->depth / 8);
@@ -475,6 +517,7 @@ static LRESULT CRAM_Decompress( Msvideo1Context *info, ICDECOMPRESS *icd, DWORD 
         msvideo1_decode_16bit( width, height, icd->lpInput, sz,
                                output, stride );
     }
+#endif
 
     if (icd->lpbiOutput->biBitCount != info->depth)
     {
@@ -490,7 +533,7 @@ static LRESULT CRAM_DecompressEx( Msvideo1Context *info, ICDECOMPRESSEX *icd, DW
     LONG width, height, stride, sz;
     void *output;
 
-    TRACE("ICM_DECOMPRESSEX %p %p %d\n", info, icd, size);
+    TRACE("ICM_DECOMPRESSEX %p %p %ld\n", info, icd, size);
 
     if( (info==NULL) || (info->dwMagic!=CRAM_MAGIC) )
         return ICERR_BADPARAM;
@@ -503,6 +546,34 @@ static LRESULT CRAM_DecompressEx( Msvideo1Context *info, ICDECOMPRESSEX *icd, DW
 
     output = icd->lpDst;
 
+#ifdef __REACTOS__
+    if (icd->lpbiDst->biBitCount != info->depth)
+    {
+        output = HeapAlloc(GetProcessHeap(), 0, get_stride(width, info->depth) * abs(height));
+        if (!output) return ICERR_MEMORY;
+    }
+
+    if (info->depth == 8)
+    {
+        stride = get_stride(width, 8);
+        if (icd->lpbiDst->biBitCount == info->depth && icd->lpbiDst->biHeight < 0)
+            msvideo1_decode_8bit( width, height, icd->lpSrc, sz,
+                                  (unsigned char *)output + (height - 1) * stride, -stride );
+        else
+            msvideo1_decode_8bit( width, height, icd->lpSrc, sz,
+                                  output, stride );
+    }
+    else
+    {
+        stride = get_stride(width, 16) / 2;
+        if (icd->lpbiDst->biBitCount == info->depth && icd->lpbiDst->biHeight < 0)
+            msvideo1_decode_16bit( width, height, icd->lpSrc, sz,
+                                   (unsigned short *)output + (height - 1) * stride, -stride );
+        else
+            msvideo1_decode_16bit( width, height, icd->lpSrc, sz,
+                                   output, stride );
+    }
+#else
     if (icd->lpbiDst->biBitCount != info->depth)
     {
         output = HeapAlloc(GetProcessHeap(), 0, icd->lpbiDst->biWidth * icd->lpbiDst->biHeight * info->depth / 8);
@@ -521,6 +592,7 @@ static LRESULT CRAM_DecompressEx( Msvideo1Context *info, ICDECOMPRESSEX *icd, DW
         msvideo1_decode_16bit( width, height, icd->lpSrc, sz,
                                output, stride );
     }
+#endif
 
     if (icd->lpbiDst->biBitCount != info->depth)
     {
@@ -563,7 +635,7 @@ LRESULT WINAPI CRAM_DriverProc( DWORD_PTR dwDriverId, HDRVR hdrvr, UINT msg,
     Msvideo1Context *info = (Msvideo1Context *) dwDriverId;
     LRESULT r = ICERR_UNSUPPORTED;
 
-    TRACE("%ld %p %04x %08lx %08lx\n", dwDriverId, hdrvr, msg, lParam1, lParam2);
+    TRACE("%Id %p %04x %08Ix %08Ix\n", dwDriverId, hdrvr, msg, lParam1, lParam2);
 
     switch( msg )
     {
@@ -657,7 +729,7 @@ LRESULT WINAPI CRAM_DriverProc( DWORD_PTR dwDriverId, HDRVR hdrvr, UINT msg,
         break;
 
     default:
-        FIXME("Unknown message: %04x %ld %ld\n", msg, lParam1, lParam2);
+        FIXME("Unknown message: %04x %Id %Id\n", msg, lParam1, lParam2);
     }
 
     return r;
@@ -668,7 +740,7 @@ LRESULT WINAPI CRAM_DriverProc( DWORD_PTR dwDriverId, HDRVR hdrvr, UINT msg,
  */
 BOOL WINAPI DllMain(HINSTANCE hModule, DWORD dwReason, LPVOID lpReserved)
 {
-    TRACE("(%p,%d,%p)\n", hModule, dwReason, lpReserved);
+    TRACE("(%p,%ld,%p)\n", hModule, dwReason, lpReserved);
 
     switch (dwReason)
     {

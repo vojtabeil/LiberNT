@@ -49,7 +49,7 @@
 #define InterlockedBitTestAndReset64NoFence __NF_(_interlockedbittestandreset64)
 #endif /* _WIN64 */
 
-#if defined(_M_AMD64) || defined(_M_IX86)
+#if _VCRT_X86_INTRINSICS
 FORCEINLINE
 long
 _InlineInterlockedAdd(
@@ -174,9 +174,7 @@ _InlineInterlockedAdd(
 /* No release here */
 #define InterlockedExchangeNoFence __NF_(_InterlockedExchange)
 
-#if (_MSC_VER >= 1600)
 #define InterlockedExchange8 _InterlockedExchange8
-#endif // (_MSC_VER >= 1600)
 
 #define InterlockedExchange16 _InterlockedExchange16
 /* No release here */
@@ -266,7 +264,7 @@ _InlineInterlockedAdd(
 #define InterlockedOrAcquire64 _InterlockedOr64_acq
 #define InterlockedOrRelease64 _InterlockedOr64_rel
 #define InterlockedOrNoFence64 _InterlockedOr64_nf
-#elif defined(_M_IA64) || defined(_M_AMD64)
+#elif defined(_M_IA64) || _VCRT_AMD64_INTRINSICS
 #define InterlockedOr64Acquire __ACQ_(_InterlockedOr64)
 #define InterlockedOr64Release __REL_(_InterlockedOr64)
 #define InterlockedOr64NoFence __NF_(_InterlockedOr64)
@@ -308,7 +306,7 @@ _InlineInterlockedAdd(
 #define InterlockedXorAcquire64 _InterlockedXor64_acq
 #define InterlockedXorRelease64 _InterlockedXor64_rel
 #define InterlockedXorNoFence64 _InterlockedXor64_nf
-#elif defined(_M_IA64) || defined(_M_AMD64)
+#elif defined(_M_IA64) || _VCRT_AMD64_INTRINSICS
 #define InterlockedXor64Acquire __ACQ_(_InterlockedXor64)
 #define InterlockedXor64Release __REL_(_InterlockedXor64)
 #define InterlockedXor64NoFence __NF_(_InterlockedXor64)
@@ -477,7 +475,7 @@ _InterlockedCompareExchangePointer(
 
 #endif /* _M_IX86 */
 
-#ifdef _M_AMD64
+#if _VCRT_AMD64_INTRINSICS
 
 FORCEINLINE
 LONG64
@@ -489,7 +487,7 @@ _InterlockedAdd64(
     return _InterlockedExchangeAdd64(Target, Value) + Value;
 }
 
-#endif /* _M_AMD64 */
+#endif /* _VCRT_AMD64_INTRINSICS */
 
 #ifdef _M_IA64
 
@@ -566,4 +564,3 @@ _InterlockedBitTestAndComplement64(
 }
 
 #endif /* M_IA64 */
-

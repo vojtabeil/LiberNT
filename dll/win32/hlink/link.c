@@ -25,6 +25,10 @@
 
 #include "wine/debug.h"
 
+#ifdef __REACTOS__
+static const IID IID_IHlinkHistory = {0x79eac9c8, 0xbaf9, 0x11ce, {0x8c, 0x82, 0x00, 0xaa, 0x00, 0x4b, 0xa9, 0x0b}};
+#endif
+
 WINE_DEFAULT_DEBUG_CHANNEL(hlink);
 
 #define HLINK_SAVE_MAGIC    0x00000002
@@ -81,9 +85,24 @@ static HRESULT __GetMoniker(HlinkImpl* This, IMoniker** moniker,
 {
     HRESULT hres;
 
+#ifdef __REACTOS__
+    *moniker = NULL;
+
+#endif
     if (ref_type == HLINKGETREF_DEFAULT)
         ref_type = HLINKGETREF_RELATIVE;
 
+#ifdef __REACTOS__
+    if (ref_type != HLINKGETREF_ABSOLUTE && ref_type != HLINKGETREF_RELATIVE)
+    {
+        DWORD mktype = MKSYS_NONE;
+
+        if (!This->Moniker || IMoniker_IsSystemMoniker(This->Moniker, &mktype) != S_OK ||
+                mktype != MKSYS_URLMONIKER)
+            return E_FAIL;
+    }
+
+#endif
     if (This->Moniker)
     {
         DWORD mktype = MKSYS_NONE;
@@ -125,6 +144,66 @@ static HRESULT __GetMoniker(HlinkImpl* This, IMoniker** moniker,
     return S_OK;
 }
 
+#ifdef __REACTOS__
+static IMoniker *get_first_moniker(IMoniker *moniker)
+{
+    IEnumMoniker *enum_mk = NULL;
+    IMoniker *first = NULL;
+
+    if (IMoniker_Enum(moniker, TRUE, &enum_mk) == S_OK && enum_mk)
+    {
+        if (IEnumMoniker_Next(enum_mk, 1, &first, NULL) != S_OK)
+            first = NULL;
+        IEnumMoniker_Release(enum_mk);
+    }
+
+    return first;
+}
+
+static void check_moniker_reference(IMoniker *moniker)
+{
+    IMoniker *reduced = NULL, *first;
+    DWORD mksys = MKSYS_NONE;
+    IBindCtx *bind_ctx;
+
+    if (SUCCEEDED(CreateBindCtx(0, &bind_ctx)))
+    {
+        if (SUCCEEDED(IMoniker_Reduce(moniker, bind_ctx, MKRREDUCE_ALL, NULL, &reduced)) && reduced)
+            IMoniker_Release(reduced);
+        IBindCtx_Release(bind_ctx);
+    }
+
+    first = get_first_moniker(moniker);
+    IMoniker_IsSystemMoniker(first ? first : moniker, &mksys);
+    if (first)
+        IMoniker_Release(first);
+}
+
+static HRESULT get_moniker_display_name(IMoniker *moniker, LPWSTR *name)
+{
+    IBindCtx *bind_ctx;
+    HRESULT hres;
+
+    *name = NULL;
+    hres = CreateBindCtx(0, &bind_ctx);
+    if (FAILED(hres)) return hres;
+
+    hres = IMoniker_GetDisplayName(moniker, bind_ctx, NULL, name);
+    IBindCtx_Release(bind_ctx);
+    return hres;
+}
+
+static HRESULT set_hlink_string(LPWSTR *dest, LPCWSTR source)
+{
+    LPWSTR copy = source ? wcsdup(source) : NULL;
+
+    if (source && !copy) return E_OUTOFMEMORY;
+    free(*dest);
+    *dest = copy;
+    return S_OK;
+}
+
+#endif
 static HRESULT WINAPI IHlink_fnQueryInterface(IHlink* iface, REFIID riid,
         LPVOID *ppvObj)
 {
@@ -187,12 +266,19 @@ static HRESULT WINAPI IHlink_fnSetHlinkSite( IHlink* iface,
 
     TRACE("(%p)->(%p %li)\n", This, pihlSite, dwSiteData);
 
+#ifdef __REACTOS__
+    if (pihlSite)
+        IHlinkSite_AddRef(pihlSite);
+
+#endif
     if (This->Site)
         IHlinkSite_Release(This->Site);
 
     This->Site = pihlSite;
+#ifndef __REACTOS__
     if (This->Site)
         IHlinkSite_AddRef(This->Site);
+#endif
 
     This->SiteData = dwSiteData;
 
@@ -230,26 +316,52 @@ static HRESULT WINAPI IHlink_fnSetMonikerReference( IHlink* iface,
         return rfHLSETF;
 
     if(rfHLSETF & HLINKSETF_TARGET){
+#ifdef __REACTOS__
+        if (pmkTarget)
+            IMoniker_AddRef(pmkTarget);
+
+#endif
         if (This->Moniker)
             IMoniker_Release(This->Moniker);
 
         This->Moniker = pmkTarget;
+#ifdef __REACTOS__
+        This->absolute = FALSE;
+#endif
         if (This->Moniker)
         {
+#ifndef __REACTOS__
             IBindCtx *pbc;
+#endif
             LPOLESTR display_name;
+#ifdef __REACTOS__
+            HRESULT hres;
+
+            check_moniker_reference(This->Moniker);
+            hres = get_moniker_display_name(This->Moniker, &display_name);
+            if (SUCCEEDED(hres))
+            {
+                This->absolute = display_name && wcschr(display_name, ':');
+                CoTaskMemFree(display_name);
+            }
+#else
             IMoniker_AddRef(This->Moniker);
             CreateBindCtx( 0, &pbc);
             IMoniker_GetDisplayName(This->Moniker, pbc, NULL, &display_name);
             IBindCtx_Release(pbc);
             This->absolute = display_name && wcschr(display_name, ':');
             CoTaskMemFree(display_name);
+#endif
         }
     }
 
     if(rfHLSETF & HLINKSETF_LOCATION){
+#ifdef __REACTOS__
+        return set_hlink_string(&This->Location, pwzLocation);
+#else
         free(This->Location);
         This->Location = wcsdup( pwzLocation );
+#endif
     }
 
     return S_OK;
@@ -269,6 +381,9 @@ static HRESULT WINAPI IHlink_fnSetStringReference(IHlink* iface,
 
     if (grfHLSETF & HLINKSETF_TARGET)
     {
+#ifdef __REACTOS__
+        This->absolute = FALSE;
+#endif
         if (This->Moniker)
         {
             IMoniker_Release(This->Moniker);
@@ -283,7 +398,11 @@ static HRESULT WINAPI IHlink_fnSetStringReference(IHlink* iface,
 
             r = CreateBindCtx(0, &pbc);
             if (FAILED(r))
+#ifdef __REACTOS__
+                return r;
+#else
                 return E_OUTOFMEMORY;
+#endif
 
             r = MkParseDisplayName(pbc, pwzTarget, &eaten, &pMon);
             IBindCtx_Release(pbc);
@@ -303,17 +422,28 @@ static HRESULT WINAPI IHlink_fnSetStringReference(IHlink* iface,
                 }
             }
 
+#ifdef __REACTOS__
+            r = IHlink_SetMonikerReference(iface, HLINKSETF_TARGET, pMon, NULL);
+#else
             IHlink_SetMonikerReference(iface, HLINKSETF_TARGET, pMon, NULL);
+#endif
             IMoniker_Release(pMon);
+#ifdef __REACTOS__
+            if (FAILED(r)) return r;
+#endif
         }
     }
 
     if (grfHLSETF & HLINKSETF_LOCATION)
     {
+#ifdef __REACTOS__
+        return set_hlink_string(&This->Location, pwzLocation && *pwzLocation ? pwzLocation : NULL);
+#else
         free(This->Location);
         This->Location = NULL;
         if (pwzLocation && *pwzLocation)
             This->Location = wcsdup( pwzLocation );
+#endif
     }
 
     return S_OK;
@@ -339,7 +469,22 @@ static HRESULT WINAPI IHlink_fnGetMonikerReference(IHlink* iface,
     }
 
     if (ppwzLocation)
+#ifdef __REACTOS__
+    {
+        HRESULT hres = IHlink_GetStringReference(iface, dwWhichRef, NULL, ppwzLocation);
+        if (FAILED(hres))
+        {
+            if (ppimkTarget && *ppimkTarget)
+            {
+                IMoniker_Release(*ppimkTarget);
+                *ppimkTarget = NULL;
+            }
+            return hres;
+        }
+    }
+#else
         IHlink_GetStringReference(iface, dwWhichRef, NULL, ppwzLocation);
+#endif
 
     return S_OK;
 }
@@ -351,6 +496,11 @@ static HRESULT WINAPI IHlink_fnGetStringReference (IHlink* iface,
 
     TRACE("(%p) -> (%li %p %p)\n", This, dwWhichRef, ppwzTarget, ppwzLocation);
 
+#ifdef __REACTOS__
+    if (ppwzTarget) *ppwzTarget = NULL;
+    if (ppwzLocation) *ppwzLocation = NULL;
+
+#endif
     if(dwWhichRef != -1 && dwWhichRef & ~(HLINKGETREF_DEFAULT | HLINKGETREF_ABSOLUTE | HLINKGETREF_RELATIVE))
     {
         if(ppwzTarget)
@@ -372,18 +522,44 @@ static HRESULT WINAPI IHlink_fnGetStringReference (IHlink* iface,
         }
         if (mon)
         {
+#ifdef __REACTOS__
+            IMoniker *first;
+
+            hres = get_moniker_display_name(mon, ppwzTarget);
+            if ((first = get_first_moniker(mon)))
+                IMoniker_Release(first);
+#else
             IBindCtx *pbc;
 
             CreateBindCtx( 0, &pbc);
             IMoniker_GetDisplayName(mon, pbc, NULL, ppwzTarget);
             IBindCtx_Release(pbc);
+#endif
             IMoniker_Release(mon);
+#ifdef __REACTOS__
+            if (FAILED(hres)) return hres;
+#endif
         }
         else
             *ppwzTarget = NULL;
     }
     if (ppwzLocation)
+#ifdef __REACTOS__
+    {
+#endif
         *ppwzLocation = hlink_co_strdupW( This->Location );
+#ifdef __REACTOS__
+        if (This->Location && !*ppwzLocation)
+        {
+            if (ppwzTarget)
+            {
+                CoTaskMemFree(*ppwzTarget);
+                *ppwzTarget = NULL;
+            }
+            return E_OUTOFMEMORY;
+        }
+    }
+#endif
 
     TRACE("(Target: %s Location: %s)\n",
             (ppwzTarget)?debugstr_w(*ppwzTarget):"<NULL>",
@@ -399,10 +575,14 @@ static HRESULT WINAPI IHlink_fnSetFriendlyName (IHlink *iface,
 
     TRACE("(%p) -> (%s)\n", This, debugstr_w(pwzFriendlyName));
 
+#ifdef __REACTOS__
+    return set_hlink_string(&This->FriendlyName, pwzFriendlyName);
+#else
     free(This->FriendlyName);
     This->FriendlyName = wcsdup( pwzFriendlyName );
 
     return S_OK;
+#endif
 }
 
 static HRESULT WINAPI IHlink_fnGetFriendlyName (IHlink* iface,
@@ -415,7 +595,14 @@ static HRESULT WINAPI IHlink_fnGetFriendlyName (IHlink* iface,
     /* FIXME: Only using explicitly set and cached friendly names */
 
     if (This->FriendlyName)
+#ifdef __REACTOS__
+    {
+#endif
         *ppwzFriendlyName = hlink_co_strdupW( This->FriendlyName );
+#ifdef __REACTOS__
+        if (!*ppwzFriendlyName) return E_OUTOFMEMORY;
+    }
+#endif
     else
     {
         IMoniker *moniker;
@@ -427,12 +614,19 @@ static HRESULT WINAPI IHlink_fnGetFriendlyName (IHlink* iface,
         }
         if (moniker)
         {
+#ifdef __REACTOS__
+            hres = get_moniker_display_name(moniker, ppwzFriendlyName);
+#else
             IBindCtx *bcxt;
             CreateBindCtx(0, &bcxt);
 
             IMoniker_GetDisplayName(moniker, bcxt, NULL, ppwzFriendlyName);
             IBindCtx_Release(bcxt);
+#endif
             IMoniker_Release(moniker);
+#ifdef __REACTOS__
+            if (FAILED(hres)) return hres;
+#endif
         }
         else
             *ppwzFriendlyName = NULL;
@@ -447,10 +641,14 @@ static HRESULT WINAPI IHlink_fnSetTargetFrameName(IHlink* iface,
     HlinkImpl  *This = impl_from_IHlink(iface);
     TRACE("(%p)->(%s)\n", This, debugstr_w(pwzTargetFramename));
 
+#ifdef __REACTOS__
+    return set_hlink_string(&This->TargetFrameName, pwzTargetFramename);
+#else
     free(This->TargetFrameName);
     This->TargetFrameName = wcsdup( pwzTargetFramename );
 
     return S_OK;
+#endif
 }
 
 static HRESULT WINAPI IHlink_fnGetTargetFrameName(IHlink* iface,
@@ -478,6 +676,140 @@ static HRESULT WINAPI IHlink_fnGetMiscStatus(IHlink* iface, DWORD* pdwStatus)
     return E_NOTIMPL;
 }
 
+#ifdef __REACTOS__
+static HRESULT navigate_target(HlinkImpl *This, IHlinkTarget *target, IHlinkBrowseContext *browse_ctx, DWORD flags, BOOL bound)
+{
+    IHlinkBrowseContext *current = NULL;
+    IUnknown *history;
+    WCHAR *name = NULL;
+    HRESULT hr;
+
+    if (bound)
+    {
+        if (SUCCEEDED(IHlinkTarget_GetBrowseContext(target, &current)) && current)
+            IHlinkBrowseContext_Release(current);
+        IHlinkTarget_SetBrowseContext(target, browse_ctx);
+        if (SUCCEEDED(IHlinkBrowseContext_QueryInterface(browse_ctx, &IID_IHlinkHistory, (void **)&history)))
+            IUnknown_Release(history);
+    }
+
+    hr = IHlinkTarget_Navigate(target, flags, This->Location);
+
+    if (IHlinkTarget_GetFriendlyName(target, This->Location, &name) == S_OK)
+        CoTaskMemFree(name);
+
+    return hr;
+}
+
+static HRESULT WINAPI IHlink_fnNavigate(IHlink *iface, DWORD flags, IBindCtx *user_bind_ctx,
+        IBindStatusCallback *bind_callback, IHlinkBrowseContext *browse_ctx)
+{
+    HlinkImpl *This = impl_from_IHlink(iface);
+    IMoniker *mon = NULL, *reduced;
+    HRESULT r;
+
+    TRACE("hlink %p, flags %#lx, user_bind_ctx %p, bind_callback %p, browse_ctx %p.\n",
+            This, flags, user_bind_ctx, bind_callback, browse_ctx);
+
+    if (This->async_bind_ctx)
+        return E_UNEXPECTED;
+
+    r = __GetMoniker(This, &mon, HLINKGETREF_ABSOLUTE);
+    TRACE("Moniker %p\n", mon);
+
+    if (SUCCEEDED(r))
+    {
+        IBindCtx *bind_ctx = NULL;
+        IHlinkTarget *target;
+        IUnknown *unk = NULL;
+
+        if (browse_ctx)
+        {
+            r = IHlinkBrowseContext_GetObject(browse_ctx, mon, TRUE, &unk);
+            if (r == S_OK)
+            {
+                r = IUnknown_QueryInterface(unk, &IID_IHlinkTarget, (void **)&target);
+                IUnknown_Release(unk);
+                if (r == S_OK)
+                {
+                    r = navigate_target(This, target, browse_ctx, flags, FALSE);
+                    IHlinkTarget_Release(target);
+                }
+            }
+            else
+            {
+                CreateBindCtx(0, &bind_ctx);
+                RegisterBindStatusCallback(bind_ctx, &This->IBindStatusCallback_iface, NULL, 0);
+                This->bind_callback = bind_callback;
+                if (bind_callback)
+                {
+                    BINDINFO bind_info = {sizeof(bind_info)};
+                    DWORD bind_flags = 0;
+
+                    if (SUCCEEDED(IBindStatusCallback_GetBindInfo(bind_callback, &bind_flags, &bind_info)))
+                        ReleaseBindInfo(&bind_info);
+                }
+                if (SUCCEEDED(IMoniker_Reduce(mon, bind_ctx, MKRREDUCE_ALL, NULL, &reduced)) && reduced)
+                {
+                    IMoniker_Release(mon);
+                    mon = reduced;
+                }
+                r = IMoniker_BindToObject(mon, bind_ctx, NULL, &IID_IUnknown, (void**)&unk);
+                if (r == MK_S_ASYNCHRONOUS)
+                {
+                    This->async_bind_ctx = bind_ctx;
+                    This->async_flags = flags;
+                    if (bind_callback)
+                        IBindStatusCallback_AddRef(bind_callback);
+                    IHlinkBrowseContext_AddRef(This->async_browse_ctx = browse_ctx);
+                    IMoniker_Release(mon);
+                    return r;
+                }
+                if (r == S_OK)
+                {
+                    if (bind_callback)
+                    {
+                        IBindStatusCallback_OnStartBinding(bind_callback, 0, NULL);
+                        IBindStatusCallback_OnObjectAvailable(bind_callback, &IID_IUnknown, unk);
+                    }
+                    r = IUnknown_QueryInterface(unk, &IID_IHlinkTarget, (void **)&target);
+                    IUnknown_Release(unk);
+                    if (r == S_OK)
+                    {
+                        r = navigate_target(This, target, browse_ctx, flags, TRUE);
+                        IHlinkTarget_Release(target);
+                    }
+                }
+                if (bind_callback)
+                    IBindStatusCallback_OnStopBinding(bind_callback, r, NULL);
+                This->bind_callback = NULL;
+
+                RevokeBindStatusCallback(bind_ctx, &This->IBindStatusCallback_iface);
+                IBindCtx_Release(bind_ctx);
+            }
+        }
+        else
+        {
+            LPWSTR target = NULL;
+
+            r = IHlink_GetStringReference(iface, HLINKGETREF_DEFAULT, &target, NULL);
+            if (SUCCEEDED(r) && target)
+            {
+                ShellExecuteW(NULL, L"open", target, NULL, NULL, SW_SHOW);
+                CoTaskMemFree(target);
+                r = DRAGDROP_S_DROP;
+            }
+        }
+        IMoniker_Release(mon);
+    }
+
+    if (This->Site)
+        IHlinkSite_OnNavigationComplete(This->Site, This->SiteData, 0, r, NULL);
+
+    TRACE("Finished Navigation\n");
+    return r;
+}
+#else
 static HRESULT WINAPI IHlink_fnNavigate(IHlink *iface, DWORD flags, IBindCtx *user_bind_ctx,
         IBindStatusCallback *bind_callback, IHlinkBrowseContext *browse_ctx)
 {
@@ -556,6 +888,8 @@ static HRESULT WINAPI IHlink_fnNavigate(IHlink *iface, DWORD flags, IBindCtx *us
     TRACE("Finished Navigation\n");
     return r;
 }
+
+#endif
 
 static HRESULT WINAPI IHlink_fnSetAdditionalParams(IHlink* iface,
         LPCWSTR pwzAdditionalParams)
@@ -1099,8 +1433,12 @@ static HRESULT WINAPI bind_callback_OnObjectAvailable(IBindStatusCallback *iface
         if (FAILED(hr))
             return hr;
 
+#ifdef __REACTOS__
+        hr = navigate_target(hlink, target, hlink->async_browse_ctx, hlink->async_flags, TRUE);
+#else
         IHlinkTarget_SetBrowseContext(target, hlink->async_browse_ctx);
         hr = IHlinkTarget_Navigate(target, hlink->async_flags, hlink->Location);
+#endif
         IHlinkTarget_Release(target);
 
         if (hlink->Site)

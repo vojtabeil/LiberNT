@@ -28,6 +28,114 @@ WORD ExtensionSize = sizeof(L".dll") - sizeof(WCHAR);
 //    );
 
 
+// Strip the minor version: api-ms-win-core-file-l1-2-1 -> api-ms-win-core-file-l1-2
+static
+BOOLEAN
+ApiSetContractName(
+    _In_ PCUNICODE_STRING Name,
+    _Out_ PUNICODE_STRING Contract)
+{
+    USHORT Length = Name->Length / sizeof(WCHAR);
+    USHORT Index = Length;
+
+    while (Index > 0 && Name->Buffer[Index - 1] >= L'0' && Name->Buffer[Index - 1] <= L'9')
+        Index--;
+    if (Index == Length || Index < 2 || Name->Buffer[Index - 1] != L'-')
+        return FALSE;
+
+    Contract->Buffer = Name->Buffer;
+    Contract->Length = (USHORT)((Index - 1) * sizeof(WCHAR));
+    Contract->MaximumLength = Contract->Length;
+    return TRUE;
+}
+
+static
+ULONG
+ApiSetMinorVersion(
+    _In_ PCUNICODE_STRING Name,
+    _In_ PCUNICODE_STRING Contract)
+{
+    USHORT Index = Contract->Length / sizeof(WCHAR) + 1;
+    ULONG Minor = 0;
+
+    while (Index < Name->Length / sizeof(WCHAR))
+        Minor = Minor * 10 + (Name->Buffer[Index++] - L'0');
+    return Minor;
+}
+
+static
+VOID
+ApiSetScanContracts(
+    _In_ const ROS_APISET *Table,
+    _In_ LONG Count,
+    _In_ DWORD ApisetVersion,
+    _In_ PCUNICODE_STRING Contract,
+    _Inout_ PCUNICODE_STRING *Target,
+    _Inout_ PULONG TargetMinor)
+{
+    UNICODE_STRING Candidate;
+    ULONG CandidateMinor;
+    LONG Index;
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        if (!(Table[Index].dwOsVersions & ApisetVersion) ||
+            !ApiSetContractName(&Table[Index].Name, &Candidate) ||
+            !RtlEqualUnicodeString(Contract, &Candidate, TRUE))
+        {
+            continue;
+        }
+        CandidateMinor = ApiSetMinorVersion(&Table[Index].Name, &Candidate);
+        if (*Target == NULL || CandidateMinor > *TargetMinor)
+        {
+            *Target = &Table[Index].Target;
+            *TargetMinor = CandidateMinor;
+        }
+    }
+}
+
+NTSTATUS
+ApiSetQuerySchemaPresence(
+    _In_ DWORD ApisetVersion,
+    _In_ PCUNICODE_STRING ApiToQuery,
+    _Out_ PBOOLEAN InSchema,
+    _Out_ PBOOLEAN Present)
+{
+    USHORT Length = ApiToQuery->Length / sizeof(WCHAR);
+    PCUNICODE_STRING Target = NULL;
+    UNICODE_STRING Contract;
+    ULONG Minor, TargetMinor = 0;
+    ULONGLONG Prefix;
+    USHORT Char;
+
+    for (Char = 0; Char < Length; Char++)
+    {
+        if (ApiToQuery->Buffer[Char] == L'.')
+            return STATUS_INVALID_PARAMETER;
+    }
+    if (ApiToQuery->Length <= PrefixSize)
+        return STATUS_INVALID_PARAMETER;
+    Prefix = ((ULONGLONG *)ApiToQuery->Buffer)[0] & 0xFFFFFFDFFFDFFFDF;
+    if (Prefix != API_ && Prefix != EXT_)
+        return STATUS_INVALID_PARAMETER;
+
+    *InSchema = FALSE;
+    *Present = FALSE;
+    if (!ApiSetContractName(ApiToQuery, &Contract))
+        return STATUS_SUCCESS;
+    Minor = ApiSetMinorVersion(ApiToQuery, &Contract);
+
+    ApiSetScanContracts(g_Apisets, g_ApisetsCount, ApisetVersion, &Contract, &Target, &TargetMinor);
+    ApiSetScanContracts(g_ApisetsNoHost, g_ApisetsNoHostCount, ApisetVersion, &Contract, &Target, &TargetMinor);
+
+    if (Target != NULL && Minor <= TargetMinor)
+    {
+        *InSchema = TRUE;
+        *Present = (Target->Length != 0);
+    }
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS
 ApiSetResolveToHost(
     _In_ DWORD ApisetVersion,
@@ -75,8 +183,9 @@ ApiSetResolveToHost(
                 // Return a static string (does not have to be freed)
                 *Resolved = TRUE;
                 *Output = g_Apisets[Index].Target;
+                return STATUS_SUCCESS;
             }
-            return STATUS_SUCCESS;
+            break;
         }
         else if (result < 0)
         {
@@ -87,6 +196,29 @@ ApiSetResolveToHost(
             LBnd = Index + 1;
         }
     }
+
+    // Windows 10 resolves a contract whatever minor version is requested,
+    // and its schema lists each contract only once.
+    if (ApisetVersion & APISET_WIN10)
+    {
+        UNICODE_STRING Contract, Candidate;
+
+        if (ApiSetContractName(&Tmp, &Contract))
+        {
+            for (LONG Index = 0; Index < g_ApisetsCount; Index++)
+            {
+                if ((g_Apisets[Index].dwOsVersions & ApisetVersion) &&
+                    ApiSetContractName(&g_Apisets[Index].Name, &Candidate) &&
+                    RtlEqualUnicodeString(&Contract, &Candidate, TRUE))
+                {
+                    *Resolved = TRUE;
+                    *Output = g_Apisets[Index].Target;
+                    return STATUS_SUCCESS;
+                }
+            }
+        }
+    }
+
     *Resolved = FALSE;
     return STATUS_SUCCESS;
 }

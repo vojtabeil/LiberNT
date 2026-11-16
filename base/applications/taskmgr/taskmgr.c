@@ -91,6 +91,28 @@ BOOL EnableDialogTheme(HWND hwnd)
     }
 }
 
+static HHOOK hMsgFilterHook;
+
+static LRESULT CALLBACK
+MsgFilterProc(int nCode, WPARAM wParam, LPARAM lParam)
+{
+    LPMSG pMsg = (LPMSG)lParam;
+    INT nCount;
+
+    if (nCode == MSGF_DIALOGBOX && pMsg->message == WM_KEYDOWN && pMsg->wParam == VK_TAB &&
+        (GetKeyState(VK_CONTROL) & 0x8000) && hMainWnd && hTabWnd &&
+        (pMsg->hwnd == hMainWnd || IsChild(hMainWnd, pMsg->hwnd)) &&
+        !(SendMessageW(pMsg->hwnd, WM_GETDLGCODE, pMsg->wParam, (LPARAM)pMsg) & DLGC_WANTMESSAGE) &&
+        (nCount = TabCtrl_GetItemCount(hTabWnd)) > 0)
+    {
+        INT nIndex = TabCtrl_GetCurSel(hTabWnd) + ((GetKeyState(VK_SHIFT) & 0x8000) ? nCount - 1 : 1);
+        TabCtrl_SetCurFocus(hTabWnd, nIndex % nCount);
+        return TRUE;
+    }
+
+    return CallNextHookEx(hMsgFilterHook, nCode, wParam, lParam);
+}
+
 int APIENTRY wWinMain(HINSTANCE hInstance,
                       HINSTANCE hPrevInstance,
                       LPWSTR    lpCmdLine,
@@ -157,6 +179,12 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
     /* Load our settings from the registry */
     LoadSettings();
 
+    if (lpCmdLine && wcsstr(lpCmdLine, L"/perf"))
+    {
+        TaskManagerSettings.ActiveTabPage = 2;
+        TaskManagerSettings.CPUHistory_OneGraphPerCPU = TRUE;
+    }
+
     /* Initialize perf data */
     if (!PerfDataInitialize())
         return -1;
@@ -167,7 +195,10 @@ int APIENTRY wWinMain(HINSTANCE hInstance,
      */
     SetProcessShutdownParameters(1, SHUTDOWN_NORETRY);
 
+    hMsgFilterHook = SetWindowsHookExW(WH_MSGFILTER, MsgFilterProc, NULL, GetCurrentThreadId());
     DialogBoxW(hInst, (LPCWSTR)IDD_TASKMGR_DIALOG, NULL, TaskManagerWndProc);
+    if (hMsgFilterHook)
+        UnhookWindowsHookEx(hMsgFilterHook);
 
     /* Save our settings to the registry */
     SaveSettings();
@@ -492,6 +523,19 @@ void FillSolidRect(HDC hDC, LPCRECT lpRect, COLORREF clr)
 {
     SetBkColor(hDC, clr);
     ExtTextOutW(hDC, 0, 0, ETO_OPAQUE, lpRect, NULL, 0, NULL);
+}
+
+int TaskManager_GetDpi(void)
+{
+    HDC hDC = GetDC(NULL);
+    int nDpi = 96;
+
+    if (hDC)
+    {
+        nDpi = GetDeviceCaps(hDC, LOGPIXELSX);
+        ReleaseDC(NULL, hDC);
+    }
+    return nDpi ? nDpi : 96;
 }
 
 static void SetUpdateSpeed(HWND hWnd)
@@ -1109,13 +1153,18 @@ LPWSTR GetLastErrorText(LPWSTR lpszBuf, DWORD dwSize)
 DWORD EndLocalThread(HANDLE *hThread, DWORD dwThread)
 {
     DWORD dwExitCodeThread = 0;
+    DWORD Wait;
 
     if (*hThread != NULL) {
-        PostThreadMessage(dwThread,WM_QUIT,0,0);
+        PostThreadMessage(dwThread, WM_QUIT, 0, 0);
         for (;;) {
             MSG msg;
 
-            if (WAIT_OBJECT_0 == WaitForSingleObject(*hThread, 500))
+            Wait = MsgWaitForMultipleObjects(1, hThread, FALSE, INFINITE,
+                                             QS_ALLINPUT);
+            if (Wait == WAIT_OBJECT_0)
+                break;
+            if (Wait != WAIT_OBJECT_0 + 1)
                 break;
             while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
                 TranslateMessage(&msg);
@@ -1128,4 +1177,3 @@ DWORD EndLocalThread(HANDLE *hThread, DWORD dwThread)
     }
     return dwExitCodeThread;
 }
-

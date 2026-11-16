@@ -64,23 +64,13 @@ Author:
 #define SE_MANAGE_VOLUME_PRIVILEGE        (28L)
 #define SE_IMPERSONATE_PRIVILEGE          (29L)
 #define SE_CREATE_GLOBAL_PRIVILEGE        (30L)
-#define SE_MAX_WELL_KNOWN_PRIVILEGE       (SE_CREATE_GLOBAL_PRIVILEGE)
-
-typedef struct _TOKEN_MANDATORY_POLICY {
-  ULONG Policy;
-} TOKEN_MANDATORY_POLICY, *PTOKEN_MANDATORY_POLICY;
-
-typedef struct _TOKEN_ACCESS_INFORMATION
-{
-    struct _SID_AND_ATTRIBUTES_HASH *SidHash;
-    struct _SID_AND_ATTRIBUTES_HASH *RestrictedSidHash;
-    struct _TOKEN_PRIVILEGES *Privileges;
-    LUID AuthenticationId;
-    TOKEN_TYPE TokenType;
-    SECURITY_IMPERSONATION_LEVEL ImpersonationLevel;
-    TOKEN_MANDATORY_POLICY MandatoryPolicy;
-    ULONG Flags;
-} TOKEN_ACCESS_INFORMATION, *PTOKEN_ACCESS_INFORMATION;
+#define SE_TRUSTED_CREDMAN_ACCESS_PRIVILEGE (31L)
+#define SE_RELABEL_PRIVILEGE              (32L)
+#define SE_INC_WORKING_SET_PRIVILEGE      (33L)
+#define SE_TIME_ZONE_PRIVILEGE            (34L)
+#define SE_CREATE_SYMBOLIC_LINK_PRIVILEGE (35L)
+#define SE_DELEGATE_SESSION_USER_IMPERSONATE_PRIVILEGE (36L)
+#define SE_MAX_WELL_KNOWN_PRIVILEGE       (SE_DELEGATE_SESSION_USER_IMPERSONATE_PRIVILEGE)
 
 #else
 
@@ -244,6 +234,11 @@ typedef struct _TOKEN
     PSECURITY_TOKEN_AUDIT_DATA AuditData;             /* 0x94 */
     PSEP_LOGON_SESSION_REFERENCES LogonSession;       /* 0x98 */
     LUID OriginatingLogonSession;                     /* 0x9C */
+    ULONG IntegrityLevelIndex;
+    ULONG MandatoryPolicy;
+    LUID ProcUnique;
+    PVOID LowBoxInfo;
+    UNICODE_STRING BnoIsolationPrefix;
 #if DBG
     UCHAR ImageFileName[16];                          /* 0xA4 */
     HANDLE ProcessCid;                                /* 0xB4 */

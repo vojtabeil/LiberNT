@@ -1,11 +1,13 @@
 
 list(APPEND LIBCNTPR_STRING_SOURCE
+    string/string_s.c
     string/_splitpath.c
     string/_stricmp_nt.c
     string/_strlwr_nt.c
     string/_strnicmp_nt.c
     string/_strupr_nt.c
     string/_wsplitpath.c
+    string/_wsplitpath_s.c
     string/atoi.c
     string/atoi64.c
     string/atol.c
@@ -22,6 +24,7 @@ list(APPEND LIBCNTPR_STRING_SOURCE
     string/strset.c
     string/strspn.c
     string/strstr.c
+    string/strtok_s.c
     string/strtoi64.c
     string/strtol.c
     string/strtoul.c
@@ -63,6 +66,53 @@ if(ARCH STREQUAL "i386")
         string/i386/wcsnlen_asm.s
         string/i386/wcsrchr_asm.s
     )
+elseif(ARCH STREQUAL "arm64")
+    list(APPEND LIBCNTPR_STRING_ASM_SOURCE
+        string/arm64/strchr.S
+        string/arm64/strcmp.S
+        string/arm64/strlen.S
+        string/arm64/strncmp.S
+        string/arm64/strnlen.S
+        string/arm64/strrchr.S
+        string/arm64/wcschr.S
+        string/arm64/wcsnlen.S
+    )
+    list(APPEND LIBCNTPR_STRING_SOURCE
+        string/arm64/strcopy.c
+        string/strcpy.c
+        string/wcscmp.c
+        string/wcsncmp.c
+    )
+elseif(ARCH STREQUAL "riscv64")
+    list(APPEND LIBCNTPR_STRING_SOURCE
+        string/riscv64/rvbase.c
+        string/strcat.c
+        string/strncat.c
+        string/strncmp.c
+        string/strncpy.c
+        string/wcscat.c
+        string/wcscpy.c
+        string/wcsncat.c
+        string/wcsncpy.c
+    )
+    set_source_files_properties(string/riscv64/rvbase.c PROPERTIES COMPILE_OPTIONS "-fno-builtin")
+elseif(ARCH STREQUAL "amd64")
+    list(APPEND LIBCNTPR_STRING_SOURCE
+        string/amd64/sse2.c
+        string/strcat.c
+        string/strcmp.c
+        string/strcpy.c
+        string/strncat.c
+        string/strncmp.c
+        string/strncpy.c
+        string/wcscat.c
+        string/wcscpy.c
+        string/wcsncat.c
+        string/wcsncpy.c
+    )
+    if(NOT MSVC)
+        set_source_files_properties(string/amd64/sse2.c PROPERTIES COMPILE_OPTIONS "-fno-builtin")
+    endif()
 else()
     list(APPEND LIBCNTPR_STRING_SOURCE
         string/strcat.c

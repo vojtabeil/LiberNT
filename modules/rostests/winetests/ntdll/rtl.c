@@ -45,6 +45,25 @@ RtlCompareMemoryUlong(
     _In_ SIZE_T Length,
     _In_ ULONG Pattern
 );
+#ifdef __REACTOS__
+
+typedef struct _GENERATE_NAME_CONTEXT
+{
+    USHORT Checksum;
+    BOOLEAN ChecksumInserted;
+    UCHAR NameLength;
+    WCHAR NameBuffer[8];
+    ULONG ExtensionLength;
+    WCHAR ExtensionBuffer[4];
+    ULONG LastIndexValue;
+} GENERATE_NAME_CONTEXT, *PGENERATE_NAME_CONTEXT;
+
+C_ASSERT(sizeof(GENERATE_NAME_CONTEXT) == 36);
+C_ASSERT(FIELD_OFFSET(GENERATE_NAME_CONTEXT, NameBuffer) == 4);
+C_ASSERT(FIELD_OFFSET(GENERATE_NAME_CONTEXT, ExtensionLength) == 20);
+C_ASSERT(FIELD_OFFSET(GENERATE_NAME_CONTEXT, ExtensionBuffer) == 24);
+C_ASSERT(FIELD_OFFSET(GENERATE_NAME_CONTEXT, LastIndexValue) == 32);
+#endif
 #endif
 #include "wine/test.h"
 #include "wine/asm.h"
@@ -122,6 +141,7 @@ static NTSTATUS  (WINAPI *pLdrEnumerateLoadedModules)(void *, void *, void *);
 static NTSTATUS  (WINAPI *pLdrRegisterDllNotification)(ULONG, PLDR_DLL_NOTIFICATION_FUNCTION, void *, void **);
 static NTSTATUS  (WINAPI *pLdrUnregisterDllNotification)(void *);
 static VOID      (WINAPI *pRtlGetDeviceFamilyInfoEnum)(ULONGLONG *,DWORD *,DWORD *);
+static NTSTATUS  (WINAPI *pRtlDeriveCapabilitySidsFromName)(UNICODE_STRING *, PSID, PSID);
 static void      (WINAPI *pRtlRbInsertNodeEx)(RTL_RB_TREE *, RTL_BALANCED_NODE *, BOOLEAN, RTL_BALANCED_NODE *);
 static void      (WINAPI *pRtlRbRemoveNode)(RTL_RB_TREE *, RTL_BALANCED_NODE *);
 static DWORD     (WINAPI *pRtlConvertDeviceFamilyInfoToString)(DWORD *, DWORD *, WCHAR *, WCHAR *);
@@ -132,6 +152,10 @@ static NTSTATUS  (WINAPI *pRtlRetrieveNtUserPfn)( const UINT64 **client_procsA,
                                                   const UINT64 **client_procsW,
                                                   const UINT64 **client_workers );
 static NTSTATUS  (WINAPI *pRtlResetNtUserPfn)(void);
+#ifdef __REACTOS__
+static NTSTATUS  (WINAPI *pRtlGenerate8dot3Name)(const UNICODE_STRING *, BOOLEAN,
+                                              GENERATE_NAME_CONTEXT *, UNICODE_STRING *);
+#endif
 
 static HMODULE hkernel32 = 0;
 static BOOL      (WINAPI *pIsWow64Process)(HANDLE, PBOOL);
@@ -176,12 +200,16 @@ static void InitFunctionPtrs(void)
         pLdrRegisterDllNotification = (void *)GetProcAddress(hntdll, "LdrRegisterDllNotification");
         pLdrUnregisterDllNotification = (void *)GetProcAddress(hntdll, "LdrUnregisterDllNotification");
         pRtlGetDeviceFamilyInfoEnum = (void *)GetProcAddress(hntdll, "RtlGetDeviceFamilyInfoEnum");
+        pRtlDeriveCapabilitySidsFromName = (void *)GetProcAddress(hntdll, "RtlDeriveCapabilitySidsFromName");
         pRtlRbInsertNodeEx = (void *)GetProcAddress(hntdll, "RtlRbInsertNodeEx");
         pRtlRbRemoveNode = (void *)GetProcAddress(hntdll, "RtlRbRemoveNode");
         pRtlConvertDeviceFamilyInfoToString = (void *)GetProcAddress(hntdll, "RtlConvertDeviceFamilyInfoToString");
         pRtlInitializeNtUserPfn = (void *)GetProcAddress(hntdll, "RtlInitializeNtUserPfn");
         pRtlRetrieveNtUserPfn = (void *)GetProcAddress(hntdll, "RtlRetrieveNtUserPfn");
         pRtlResetNtUserPfn = (void *)GetProcAddress(hntdll, "RtlResetNtUserPfn");
+#ifdef __REACTOS__
+        pRtlGenerate8dot3Name = (void *)GetProcAddress(hntdll, "RtlGenerate8dot3Name");
+#endif
     }
     hkernel32 = LoadLibraryA("kernel32.dll");
     ok(hkernel32 != 0, "LoadLibrary failed\n");
@@ -351,6 +379,11 @@ static void test_RtlFillMemory(void)
 static void test_RtlFillMemoryUlong(void)
 {
   ULONG val = ('x' << 24) | ('x' << 16) | ('x' << 8) | 'x';
+#ifdef __REACTOS__
+  static const ULONG patterns[] = {0, 0x01234567, 0xffffffff};
+  ULONG expected[ARRAY_SIZE(dest_aligned_block)];
+  unsigned int pattern, count, i;
+#endif
   if (!pRtlFillMemoryUlong)
   {
     win_skip("RtlFillMemoryUlong is not available\n");
@@ -361,15 +394,34 @@ static void test_RtlFillMemoryUlong(void)
    * didn't write past the end (the remainder of the string should match)
    */
   LFILL(0); CMP("This is a test!");
+#ifndef __REACTOS__
   LFILL(1); CMP("This is a test!");
   LFILL(2); CMP("This is a test!");
   LFILL(3); CMP("This is a test!");
+#endif
   LFILL(4); CMP("xxxx is a test!");
+#ifndef __REACTOS__
   LFILL(5); CMP("xxxx is a test!");
   LFILL(6); CMP("xxxx is a test!");
   LFILL(7); CMP("xxxx is a test!");
+#endif
   LFILL(8); CMP("xxxxxxxxa test!");
+#ifdef __REACTOS__
+  LFILL(12); CMP("xxxxxxxxxxxxst!");
+
+  for (pattern = 0; pattern < ARRAY_SIZE(patterns); ++pattern)
+    for (count = 0; count <= ARRAY_SIZE(dest_aligned_block) - 2; ++count)
+    {
+      memset(dest_aligned_block, 0xcc, sizeof(dest_aligned_block));
+      memcpy(expected, dest_aligned_block, sizeof(expected));
+      for (i = 0; i < count; ++i) expected[i + 1] = patterns[pattern];
+      pRtlFillMemoryUlong(dest_aligned_block + 1, count * sizeof(ULONG), patterns[pattern]);
+      ok(!memcmp(dest_aligned_block, expected, sizeof(expected)),
+         "Fill %#lx, %u ULONGs changed the pattern or guard words\n", patterns[pattern], count);
+    }
+#else
   LFILL(9); CMP("xxxxxxxxa test!");
+#endif
 }
 
 #define ZERO(len) memset(dest,0,sizeof(dest_aligned_block)); strcpy(dest, src); pRtlZeroMemory(dest,len)
@@ -462,7 +514,7 @@ static void test_RtlUniform(void)
     ULONG result;
 
 #ifdef __REACTOS__
-    if (!is_reactos() && (_winver < _WIN32_WINNT_VISTA))
+    if (!is_reactos() && (GetNTVersion() < _WIN32_WINNT_VISTA))
     {
         skip("Skipping tests for RtlUniform, because it's broken on Windows 2003\n");
         return;
@@ -3605,6 +3657,10 @@ static LONG CALLBACK test_heap_destroy_except_handler( EXCEPTION_POINTERS *eptrs
         eptrs->ContextRecord->Pc += 4;
         test_heap_destroy_break = TRUE;
         return (LONG)EXCEPTION_CONTINUE_EXECUTION;
+#elif defined(__REACTOS__) && defined(__riscv) && (__riscv_xlen == 64)
+        eptrs->ContextRecord->Pc += ((*(USHORT *)eptrs->ContextRecord->Pc & 3) == 3) ? 4 : 2;
+        test_heap_destroy_break = TRUE;
+        return (LONG)EXCEPTION_CONTINUE_EXECUTION;
 #endif
     }
 
@@ -3814,6 +3870,41 @@ static void test_RtlValidSecurityDescriptor(void)
     free(sd);
 }
 
+#ifdef __REACTOS__
+static void test_RtlValidRelativeSecurityDescriptor(void)
+{
+    struct
+    {
+        SECURITY_DESCRIPTOR_RELATIVE sd;
+        ACL acl;
+    } descriptor = {0};
+    SECURITY_INFORMATION required = DACL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION;
+    BOOLEAN ret;
+
+    descriptor.sd.Revision = SECURITY_DESCRIPTOR_REVISION;
+    descriptor.sd.Control = SE_SELF_RELATIVE | SE_DACL_PRESENT | SE_SACL_PRESENT;
+    ret = RtlValidRelativeSecurityDescriptor(&descriptor.sd, sizeof(descriptor.sd), required);
+    ok(ret, "NULL ACLs were rejected: %u\n", ret);
+    ret = RtlValidRelativeSecurityDescriptor(&descriptor.sd, sizeof(descriptor.sd) - 1, required);
+    ok(!ret, "Truncated descriptor was accepted\n");
+
+    descriptor.acl.AclRevision = ACL_REVISION;
+    descriptor.acl.AclSize = sizeof(descriptor.acl);
+    descriptor.sd.Dacl = sizeof(descriptor.sd);
+    ret = RtlValidRelativeSecurityDescriptor(&descriptor.sd, sizeof(descriptor), required);
+    ok(ret, "Empty DACL with NULL SACL was rejected\n");
+    ret = RtlValidRelativeSecurityDescriptor(&descriptor.sd, sizeof(descriptor.sd), required);
+    ok(!ret, "Out-of-bounds DACL was accepted\n");
+
+    descriptor.sd.Dacl = 0;
+    descriptor.sd.Sacl = sizeof(descriptor.sd);
+    ret = RtlValidRelativeSecurityDescriptor(&descriptor.sd, sizeof(descriptor), required);
+    ok(ret, "NULL DACL with empty SACL was rejected\n");
+    ret = RtlValidRelativeSecurityDescriptor(&descriptor.sd, sizeof(descriptor.sd), required);
+    ok(!ret, "Out-of-bounds SACL was accepted\n");
+}
+
+#endif
 static void test_RtlFindExportedRoutineByName(void)
 {
     void *proc;
@@ -4052,6 +4143,66 @@ static void test_RtlConvertDeviceFamilyInfoToString(void)
     ok(!wcscmp(device_form, L"Unknown"), "Got unexpected %s.\n", wine_dbgstr_w(device_form));
 }
 
+static void test_RtlDeriveCapabilitySidsFromName(void)
+{
+    static const SID_IDENTIFIER_AUTHORITY app_authority = { SECURITY_APP_PACKAGE_AUTHORITY };
+    static SID_IDENTIFIER_AUTHORITY nt_authority = { SECURITY_NT_AUTHORITY };
+    struct
+    {
+        const WCHAR *name;
+        DWORD hash[8];
+    }
+    tests[] =
+    {
+        { NULL,    { 0x42c4b0e3, 0x141cfc98, 0xc8f4fb9a, 0x24b96f99, 0xe441ae27, 0x4c939b64, 0x1b9995a4, 0x55b85278, }},
+        { L"__AB", { 0xddd798eb, 0x367bd9d0, 0x1c9e610a, 0x0c43dc7e, 0xe91d8625, 0x395e7cf8, 0xe6e7c3d2, 0x2661e620 }},
+        { L"__ab", { 0xddd798eb, 0x367bd9d0, 0x1c9e610a, 0x0c43dc7e, 0xe91d8625, 0x395e7cf8, 0xe6e7c3d2, 0x2661e620 }},
+        { L"0123456789012345678901234567890123456789",
+                   { 0x3c45e3e6, 0xa598e751, 0x2eb11e4c, 0x04e073fd, 0xb7c331a3, 0x07b1214d, 0xd8dee260, 0xa0966ecf }},
+    };
+    UNICODE_STRING cap_name;
+    SID *group_sid, *sid;
+    unsigned int i, size;
+    NTSTATUS status;
+
+    if (!pRtlDeriveCapabilitySidsFromName)
+    {
+        win_skip( "RtlDeriveCapabilitySidsFromName is not available.\n" );
+        return;
+    }
+
+    size = RtlLengthRequiredSid( 10 );
+    sid = malloc( size );
+    group_sid = malloc( size );
+
+    for (i = 0; i < ARRAY_SIZE(tests); ++i)
+    {
+        winetest_push_context( "%s", debugstr_w(tests[i].name) );
+        memset( sid, 0, size );
+        memset( group_sid, 0, size );
+        RtlInitUnicodeString( &cap_name, tests[i].name );
+        status = pRtlDeriveCapabilitySidsFromName( &cap_name, group_sid, sid );
+        ok( !status, "got %#lx.\n", status );
+
+        ok( sid->Revision == SID_REVISION, "got %u.\n", sid->Revision );
+        ok( !memcmp( &sid->IdentifierAuthority, &app_authority, sizeof(app_authority) ), "mismatch.\n" );
+        ok( sid->SubAuthorityCount == 10, "got %u.\n", sid->SubAuthorityCount );
+        ok( sid->SubAuthority[0] == SECURITY_BATCH_RID, "got %lu.\n", sid->SubAuthority[0] );
+        ok( *GetSidSubAuthority( sid, 1 ) == SECURITY_CAPABILITY_APP_RID, "got %lu.\n", *GetSidSubAuthority( sid, 1 ) );
+        ok( !memcmp( sid->SubAuthority + 2, tests[i].hash, sizeof(tests[i].hash) ), "mismatch.\n" );
+
+        ok( group_sid->Revision == SID_REVISION, "got %u.\n", group_sid->Revision );
+        ok( !memcmp( &group_sid->IdentifierAuthority, &nt_authority, sizeof(nt_authority) ), "mismatch.\n" );
+        ok( group_sid->SubAuthorityCount == 9, "got %u.\n", group_sid->SubAuthorityCount );
+        ok( group_sid->SubAuthority[0] == SECURITY_BUILTIN_DOMAIN_RID, "got %lu.\n", group_sid->SubAuthority[0] );
+        ok( !memcmp( group_sid->SubAuthority + 1, tests[i].hash, sizeof(tests[i].hash) ), "mismatch.\n" );
+        winetest_pop_context();
+    }
+
+    free( sid );
+    free( group_sid );
+}
+
 static void test_user_procs(void)
 {
     UINT64 ptrs[32], dummy[32] = { 0 };
@@ -4116,9 +4267,137 @@ static void test_user_procs(void)
     ok( !memcmp( ptrs, ptr_A, size_A ), "pointers changed by init\n" );
 }
 
+#ifdef __REACTOS__
+static BOOL valid_short_name(const UNICODE_STRING *name)
+{
+    unsigned int i, length, dot;
+
+    if (!name->Length || name->Length > 12 * sizeof(WCHAR) || name->Length % sizeof(WCHAR))
+        return FALSE;
+    length = name->Length / sizeof(WCHAR);
+    dot = length;
+    for (i = 0; i < length; ++i)
+    {
+        WCHAR ch = name->Buffer[i];
+
+        if (ch <= ' ' || ch > 0x7e || (ch >= 'a' && ch <= 'z'))
+            return FALSE;
+        if (ch == '.')
+        {
+            if (dot != length) return FALSE;
+            dot = i;
+        }
+        else if (ch == '"' || ch == '*' || ch == '+' || ch == ',' || ch == '/' ||
+                 ch == ':' || ch == ';' || ch == '<' || ch == '=' || ch == '>' ||
+                 ch == '?' || ch == '[' || ch == '\\' || ch == ']' || ch == '|')
+        {
+            return FALSE;
+        }
+    }
+    return dot > 0 && dot <= 8 &&
+           (dot == length || (length > dot + 1 && length - dot - 1 <= 3));
+}
+
+static void test_RtlGenerate8dot3Name(void)
+{
+    static const struct
+    {
+        const WCHAR *name;
+        const WCHAR *extension;
+    } names[] =
+    {
+        {L".a", L""},
+        {L"..a", L""},
+        {L".aaa", L""},
+        {L"long file name.txt", L".TXT"},
+        {L"a+b,c;d.txt", L".TXT"},
+        {L"a.b.c", L".C"},
+        {L".a.b", L".B"}
+    };
+    struct
+    {
+        WCHAR before;
+        WCHAR name[12];
+        WCHAR after;
+    } buffer;
+    GENERATE_NAME_CONTEXT context;
+    UNICODE_STRING name, short_name;
+    WCHAR previous[64][12];
+    USHORT lengths[64];
+    NTSTATUS status = STATUS_SUCCESS;
+    unsigned int i, j, k, attempts;
+    BOOL valid = TRUE, bounded = TRUE, unique = TRUE, extension;
+
+    if (!pRtlGenerate8dot3Name)
+    {
+        win_skip("RtlGenerate8dot3Name is unavailable\n");
+        return;
+    }
+    short_name.Buffer = buffer.name;
+    short_name.MaximumLength = sizeof(buffer.name);
+    for (i = 0; i < ARRAY_SIZE(names); ++i)
+    {
+        winetest_push_context("%s", wine_dbgstr_w(names[i].name));
+        memset(&context, 0, sizeof(context));
+        name.Buffer = (WCHAR *)names[i].name;
+        name.Length = name.MaximumLength = lstrlenW(names[i].name) * sizeof(WCHAR);
+        valid = bounded = unique = extension = TRUE;
+        for (j = 0; j < ARRAY_SIZE(previous); ++j)
+        {
+            buffer.before = buffer.after = 0xabab;
+            short_name.Length = 0;
+            status = pRtlGenerate8dot3Name(&name, FALSE, &context, &short_name);
+            bounded = buffer.before == 0xabab && buffer.after == 0xabab;
+            if (status != STATUS_SUCCESS || !bounded) break;
+            valid = valid_short_name(&short_name);
+            if (!bounded || !valid) break;
+            for (k = 0; k < short_name.Length / sizeof(WCHAR); ++k)
+                if (buffer.name[k] == '.') break;
+            if (short_name.Length - k * sizeof(WCHAR) != lstrlenW(names[i].extension) * sizeof(WCHAR) ||
+                memcmp(buffer.name + k, names[i].extension, short_name.Length - k * sizeof(WCHAR)))
+                extension = FALSE;
+            for (k = 0; k < j; ++k)
+                if (lengths[k] == short_name.Length &&
+                    !memcmp(previous[k], buffer.name, short_name.Length)) unique = FALSE;
+            memcpy(previous[j], buffer.name, short_name.Length);
+            lengths[j] = short_name.Length;
+        }
+        ok(status == STATUS_SUCCESS, "generation returned %#lx after %u calls\n", status, j);
+        ok(bounded, "generation wrote outside the 12-character buffer at %u\n", j);
+        ok(valid, "generation produced an invalid short name at %u\n", j);
+        ok(unique, "collision retries repeated a short name\n");
+        ok(extension, "leading periods changed the file extension\n");
+        winetest_pop_context();
+    }
+
+    memset(&context, 0, sizeof(context));
+    name.Buffer = (WCHAR *)L"long file name.txt";
+    name.Length = name.MaximumLength = lstrlenW(name.Buffer) * sizeof(WCHAR);
+    valid = bounded = TRUE;
+    for (attempts = 0; attempts < 1000005; ++attempts)
+    {
+        buffer.before = buffer.after = 0xabab;
+        short_name.Length = 0;
+        status = pRtlGenerate8dot3Name(&name, FALSE, &context, &short_name);
+        bounded = buffer.before == 0xabab && buffer.after == 0xabab;
+        if (status != STATUS_SUCCESS || !bounded) break;
+        valid = valid_short_name(&short_name);
+        if (!bounded || !valid) break;
+    }
+    ok(bounded, "retry exhaustion wrote outside the buffer at %u\n", attempts);
+    ok(valid, "retry exhaustion produced an invalid name at %u\n", attempts);
+    ok(status == STATUS_FILE_SYSTEM_LIMITATION,
+       "retry exhaustion returned %#lx after %u successes\n", status, attempts);
+    ok(attempts >= 999999 && attempts < 1000005, "unexpected retry limit %u\n", attempts);
+}
+
+#endif
 START_TEST(rtl)
 {
     InitFunctionPtrs();
+#ifdef __REACTOS__
+    test_RtlGenerate8dot3Name();
+#endif
 
     test_RtlQueryProcessDebugInformation();
     test_RtlCompareMemory();
@@ -4163,9 +4442,13 @@ START_TEST(rtl)
     test_RtlFirstFreeAce();
     test_RtlInitializeSid();
     test_RtlValidSecurityDescriptor();
+#ifdef __REACTOS__
+    test_RtlValidRelativeSecurityDescriptor();
+#endif
     test_RtlFindExportedRoutineByName();
     test_RtlGetDeviceFamilyInfoEnum();
     test_RtlConvertDeviceFamilyInfoToString();
     test_rb_tree();
+    test_RtlDeriveCapabilitySidsFromName();
     test_user_procs();
 }

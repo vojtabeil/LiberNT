@@ -76,6 +76,18 @@
 #error "Something is wrong with NDIS environment"
 #endif
 
+static FORCEINLINE ULONG ParaNdisCurrentProcessorIndex(VOID)
+{
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    ULONG ProcessorIndex = KeGetCurrentProcessorIndex();
+#else
+    ULONG ProcessorIndex = KeGetCurrentProcessorNumber();
+#endif
+
+    ASSERT(ProcessorIndex < MAXIMUM_PROCESSORS);
+    return ProcessorIndex;
+}
+
 //define to see when the status register is unreadable(see ParaNdis_ResetVirtIONetDevice)
 //#define VIRTIO_RESET_VERIFY
 
@@ -111,8 +123,13 @@
 #define VIRTIO_NET_F_CTRL_RX    18      /* Control channel RX mode support */
 #define VIRTIO_NET_F_CTRL_VLAN  19      /* Control channel VLAN filtering */
 #define VIRTIO_NET_F_CTRL_RX_EXTRA 20   /* Extra RX mode control support */
+#define VIRTIO_NET_F_SPEED_DUPLEX  63
 
 #define VIRTIO_NET_S_LINK_UP    1       /* Link is up */
+
+#define VIRTIO_NET_CONFIG_SPEED_OFFSET  12
+#define VIRTIO_NET_CONFIG_DUPLEX_OFFSET 16
+#define VIRTIO_NET_DUPLEX_HALF          0x00
 
 #define VIRTIO_NET_INVALID_INTERRUPT_STATUS     0xFF
 
@@ -258,6 +275,7 @@ typedef struct _tagChecksumCheckResult
     };
 }tChecksumCheckResult;
 
+#ifndef __REACTOS__
 /*
 for simplicity, we use for NDIS5 the same statistics as native NDIS6 uses
 */
@@ -282,11 +300,19 @@ typedef struct _tagNdisStatistics
     ULONG64                     ifOutDiscards;
     ULONG64                     ifOutErrors;
 }NDIS_STATISTICS_INFO;
+#endif
 
+#ifdef __REACTOS__
+typedef PNET_BUFFER tPacketType;
+typedef PNET_BUFFER_LIST tPacketHolderType;
+typedef PNET_BUFFER_LIST tPacketIndicationType;
+#else
 typedef PNDIS_PACKET tPacketType;
 typedef PNDIS_PACKET tPacketHolderType;
 typedef PNDIS_PACKET tPacketIndicationType;
+#endif
 
+#ifndef __REACTOS__
 typedef struct _tagNdisOffloadParams
 {
     UCHAR   IPv4Checksum;
@@ -298,6 +324,7 @@ typedef struct _tagNdisOffloadParams
     UCHAR   UDPIPv6Checksum;
     UCHAR   LsoV2IPv6;
 }NDIS_OFFLOAD_PARAMETERS;
+#endif
 
 //#define UNIFY_LOCKS
 
@@ -369,6 +396,7 @@ typedef struct _tagPARANDIS_ADAPTER
     BOOLEAN                 bUseScatterGather;
     BOOLEAN                 bBatchReceive;
     BOOLEAN                 bLinkDetectSupported;
+    BOOLEAN                 bSpeedDuplexSupported;
     BOOLEAN                 bDoHardwareChecksum;
     BOOLEAN                 bDoGuestChecksumOnReceive;
     BOOLEAN                 bDoIPCheckTx;
@@ -394,6 +422,8 @@ typedef struct _tagPARANDIS_ADAPTER
     ULONG                   ulPriorityVlanSetting;
     ULONG                   VlanId;
     ULONGLONG               ulFormalLinkSpeed;
+    ULONGLONG               ulConfiguredLinkSpeed;
+    NDIS_MEDIA_DUPLEX_STATE MediaDuplexState;
     ULONG                   ulEnableWakeup;
     tMaxPacketSize          MaxPacketSize;
     ULONG                   nEnableDPCChecker;
@@ -475,15 +505,28 @@ typedef struct _tagPARANDIS_ADAPTER
     ULONG                       ulTxMessage;
     ULONG                       ulControlMessage;
 
+#ifdef __REACTOS__
+    NDIS_HANDLE                 InterruptHandle;
+    NDIS_HANDLE                 ReceiveNblPool;
+    NDIS_HANDLE                 DmaHandle;
+    PNDIS_OID_REQUEST           PendingOidRequest;
+    LONG                        PauseStepsPending;
+#else
     NDIS_MINIPORT_INTERRUPT     Interrupt;
     NDIS_HANDLE                 PacketPool;
     NDIS_HANDLE                 BuffersPool;
     NDIS_HANDLE                 WrapperConfigurationHandle;
+#endif
     LIST_ENTRY                  SendQueue;
     LIST_ENTRY                  TxWaitingList;
     NDIS_EVENT                  HaltEvent;
+#ifdef __REACTOS__
+    NDIS_HANDLE                 ConnectTimer;
+    NDIS_HANDLE                 DPCPostProcessTimer;
+#else
     NDIS_TIMER                  ConnectTimer;
     NDIS_TIMER                  DPCPostProcessTimer;
+#endif
     BOOLEAN                     bDmaInitialized;
 }PARANDIS_ADAPTER, *PPARANDIS_ADAPTER;
 

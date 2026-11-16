@@ -16,8 +16,6 @@
 #include <new>
 #include <wine/debug.h>
 
-WINE_DEFAULT_DEBUG_CHANNEL(policy);
-
 typedef enum tagPOLICY_STATE
 {
     POLICY_STATE_UNCACHED  = 0, // Uncached
@@ -77,6 +75,10 @@ static const SHPOLICY_ITEM g_PolicyItems[] =
 class CPolicyCache
 {
 public:
+    CPolicyCache() : m_hGlobalCounter(NULL), m_pResults(NULL)
+    {
+    }
+
     ~CPolicyCache()
     {
         LocalFree(m_pResults);

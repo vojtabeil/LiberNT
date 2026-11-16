@@ -12,6 +12,7 @@
  */
 
 #include <msafd.h>
+#include <ntsecapi.h>
 
 #include <winuser.h>
 #include <wchar.h>
@@ -22,11 +23,22 @@ DWORD CatalogEntryId; /* CatalogEntryId for upcalls */
 LPWPUCOMPLETEOVERLAPPEDREQUEST lpWPUCompleteOverlappedRequest;
 PSOCKET_INFORMATION SocketListHead = NULL;
 CRITICAL_SECTION SocketListLock;
+static LONG StartupCount;
 LIST_ENTRY SockHelpersListHead = { NULL, NULL };
 ULONG SockAsyncThreadRefCount;
 HANDLE SockAsyncHelperAfdHandle;
 HANDLE SockAsyncCompletionPort = NULL;
 BOOLEAN SockAsyncSelectCalled;
+
+static int
+SetSocketInformationEx(PSOCKET_INFORMATION Socket,
+                       ULONG AfdInformationClass,
+                       PBOOLEAN Boolean,
+                       PULONG Ulong,
+                       PLARGE_INTEGER LargeInteger,
+                       LPWSAOVERLAPPED Overlapped,
+                       LPWSAOVERLAPPED_COMPLETION_ROUTINE CompletionRoutine,
+                       LPINT Errno);
 
 
 
@@ -69,6 +81,7 @@ WSPSocket(int AddressFamily,
     LARGE_INTEGER               GroupData;
     INT                         Status;
     PSOCK_SHARED_INFO           SharedData = NULL;
+    PSOCK_SHARED_INFO           MappedData;
 
     TRACE("Creating Socket, getting TDI Name - AddressFamily (%d)  SocketType (%d)  Protocol (%d).\n",
         AddressFamily, SocketType, Protocol);
@@ -86,20 +99,46 @@ WSPSocket(int AddressFamily,
             Status = WSAEINVAL;
             goto error;
         }
-        SharedData = MapViewOfFile(UlongToPtr(lpProtocolInfo->dwServiceFlags3),
+        MappedData = MapViewOfFile(UlongToPtr(lpProtocolInfo->dwServiceFlags3),
                                    FILE_MAP_ALL_ACCESS,
                                    0,
                                    0,
                                    sizeof(SOCK_SHARED_INFO));
-        if (!SharedData)
+        if (!MappedData)
         {
             Status = WSAEINVAL;
             goto error;
         }
-        InterlockedIncrement(&SharedData->RefCount);
+        SharedData = HeapAlloc(GlobalHeap, 0, sizeof(*SharedData));
+        if (SharedData)
+        {
+            *SharedData = *MappedData;
+            SharedData->RefCount = 1;
+        }
+        UnmapViewOfFile(MappedData);
+        NtClose(UlongToHandle(lpProtocolInfo->dwServiceFlags3));
+        if (!SharedData)
+        {
+            Status = WSAENOBUFS;
+            goto error;
+        }
         AddressFamily = SharedData->AddressFamily;
         SocketType = SharedData->SocketType;
         Protocol = SharedData->Protocol;
+    }
+    else if (lpProtocolInfo)
+    {
+        if (AddressFamily == AF_UNSPEC || AddressFamily == FROM_PROTOCOL_INFO)
+            AddressFamily = lpProtocolInfo->iAddressFamily;
+        if (SocketType == 0 || SocketType == FROM_PROTOCOL_INFO)
+            SocketType = lpProtocolInfo->iSocketType;
+        if (Protocol == 0 || Protocol == FROM_PROTOCOL_INFO)
+            Protocol = lpProtocolInfo->iProtocol;
+        if (AddressFamily <= AF_UNSPEC)
+        {
+            Status = WSAEAFNOSUPPORT;
+            goto error;
+        }
     }
 
     if (AddressFamily == AF_UNSPEC && SocketType == 0 && Protocol == 0)
@@ -112,43 +151,51 @@ WSPSocket(int AddressFamily,
     if (AddressFamily == AF_UNSPEC)
         AddressFamily = AF_INET;
 
-    if (SocketType == 0)
+    if (AddressFamily == AF_UNIX)
     {
-        switch (Protocol)
-        {
-        case IPPROTO_TCP:
+        if (SocketType == 0)
             SocketType = SOCK_STREAM;
-            break;
-        case IPPROTO_UDP:
-            SocketType = SOCK_DGRAM;
-            break;
-        case IPPROTO_RAW:
-            SocketType = SOCK_RAW;
-            break;
-        default:
-            TRACE("Unknown Protocol (%d). We will try SOCK_STREAM.\n", Protocol);
-            SocketType = SOCK_STREAM;
-            break;
-        }
     }
-
-    if (Protocol == 0)
+    else
     {
-        switch (SocketType)
+        if (SocketType == 0)
         {
-        case SOCK_STREAM:
-            Protocol = IPPROTO_TCP;
-            break;
-        case SOCK_DGRAM:
-            Protocol = IPPROTO_UDP;
-            break;
-        case SOCK_RAW:
-            Protocol = IPPROTO_RAW;
-            break;
-        default:
-            TRACE("Unknown SocketType (%d). We will try IPPROTO_TCP.\n", SocketType);
-            Protocol = IPPROTO_TCP;
-            break;
+            switch (Protocol)
+            {
+            case IPPROTO_TCP:
+                SocketType = SOCK_STREAM;
+                break;
+            case IPPROTO_UDP:
+                SocketType = SOCK_DGRAM;
+                break;
+            case IPPROTO_RAW:
+                SocketType = SOCK_RAW;
+                break;
+            default:
+                TRACE("Unknown Protocol (%d). We will try SOCK_STREAM.\n", Protocol);
+                SocketType = SOCK_STREAM;
+                break;
+            }
+        }
+
+        if (Protocol == 0)
+        {
+            switch (SocketType)
+            {
+            case SOCK_STREAM:
+                Protocol = IPPROTO_TCP;
+                break;
+            case SOCK_DGRAM:
+                Protocol = IPPROTO_UDP;
+                break;
+            case SOCK_RAW:
+                Protocol = IPPROTO_RAW;
+                break;
+            default:
+                TRACE("Unknown SocketType (%d). We will try IPPROTO_TCP.\n", SocketType);
+                Protocol = IPPROTO_TCP;
+                break;
+            }
         }
     }
 
@@ -181,10 +228,11 @@ WSPSocket(int AddressFamily,
         goto error;
     }
     RtlZeroMemory(Socket, sizeof(*Socket));
+    Socket->RefCount = 1;
     if (SharedData)
     {
         Socket->SharedData = SharedData;
-        Socket->SharedDataHandle = UlongToHandle(lpProtocolInfo->dwServiceFlags3);
+        Socket->SharedDataHandle = INVALID_HANDLE_VALUE;
         Sock = UlongToHandle(lpProtocolInfo->dwServiceFlags4);
         Socket->Handle = (SOCKET)lpProtocolInfo->dwServiceFlags4;
     }
@@ -210,10 +258,11 @@ WSPSocket(int AddressFamily,
         Socket->SharedData->CreateFlags = dwFlags;
         Socket->SharedData->ServiceFlags1 = lpProtocolInfo->dwServiceFlags1;
         Socket->SharedData->ProviderFlags = lpProtocolInfo->dwProviderFlags;
+        Socket->SharedData->CatalogEntryId = lpProtocolInfo->dwCatalogEntryId;
         Socket->SharedData->UseSAN = FALSE;
         Socket->SharedData->NonBlocking = FALSE; /* Sockets start blocking */
-        Socket->SharedData->RecvTimeout = INFINITE;
-        Socket->SharedData->SendTimeout = INFINITE;
+        Socket->SharedData->RecvTimeout = 0;
+        Socket->SharedData->SendTimeout = 0;
         Socket->SharedData->OobInline = FALSE;
 
         /* Ask alex about this */
@@ -229,8 +278,8 @@ WSPSocket(int AddressFamily,
     Socket->HelperContext = HelperDLLContext;
     Socket->HelperData = HelperData;
     Socket->HelperEvents = HelperEvents;
-    Socket->LocalAddress = &Socket->SharedData->WSLocalAddress;
-    Socket->RemoteAddress = &Socket->SharedData->WSRemoteAddress;
+    Socket->LocalAddress = (PSOCKADDR)&Socket->SharedData->WSLocalAddress;
+    Socket->RemoteAddress = (PSOCKADDR)&Socket->SharedData->WSRemoteAddress;
     Socket->SanData = NULL;
     RtlCopyMemory(&Socket->ProtocolInfo, lpProtocolInfo, sizeof(Socket->ProtocolInfo));
     if (SharedData)
@@ -422,8 +471,7 @@ error:
 
     if( SharedData )
     {
-        UnmapViewOfFile(SharedData);
-        NtClose(UlongToHandle(lpProtocolInfo->dwServiceFlags3));
+        HeapFree(GlobalHeap, 0, SharedData);
     }
     else
     {
@@ -466,6 +514,8 @@ WSPDuplicateSocket(
             *lpErrno = WSAENOTSOCK;
         return SOCKET_ERROR;
     }
+    if (!lpProtocolInfo)
+        return MsafdReturnWithErrno(STATUS_ACCESS_VIOLATION, lpErrno, 0, NULL);
     if ( !(hProcess = OpenProcess(PROCESS_DUP_HANDLE, FALSE, dwProcessId)) )
         return MsafdReturnWithErrno(STATUS_INVALID_PARAMETER, lpErrno, 0, NULL);
 
@@ -478,13 +528,24 @@ WSPDuplicateSocket(
                                                      0,
                                                      (sizeof(SOCK_SHARED_INFO) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1),
                                                      NULL);
-        if( Socket->SharedDataHandle == INVALID_HANDLE_VALUE )
+        if( Socket->SharedDataHandle == NULL )
+        {
+            Socket->SharedDataHandle = INVALID_HANDLE_VALUE;
+            NtClose(hProcess);
             return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL);
+        }
         pSharedData = MapViewOfFile(Socket->SharedDataHandle,
                                     FILE_MAP_ALL_ACCESS,
                                     0,
                                     0,
                                     sizeof(SOCK_SHARED_INFO));
+        if (!pSharedData)
+        {
+            NtClose(Socket->SharedDataHandle);
+            Socket->SharedDataHandle = INVALID_HANDLE_VALUE;
+            NtClose(hProcess);
+            return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL);
+        }
 
         RtlCopyMemory(pSharedData, Socket->SharedData, sizeof(SOCK_SHARED_INFO));
         pOldSharedData = Socket->SharedData;
@@ -511,13 +572,14 @@ WSPDuplicateSocket(
                                   0,
                                   FALSE,
                                   DUPLICATE_SAME_ACCESS);
-    NtClose(hProcess);
     if( !bDuplicated )
+    {
+        DuplicateHandle(hProcess, hDuplicatedSharedData, NULL, NULL, 0, FALSE,
+                        DUPLICATE_CLOSE_SOURCE);
+        NtClose(hProcess);
         return MsafdReturnWithErrno(STATUS_ACCESS_DENIED, lpErrno, 0, NULL);
-
-
-    if (!lpProtocolInfo)
-        return MsafdReturnWithErrno(STATUS_ACCESS_VIOLATION, lpErrno, 0, NULL);
+    }
+    NtClose(hProcess);
 
     RtlCopyMemory(lpProtocolInfo, &Socket->ProtocolInfo, sizeof(*lpProtocolInfo));
 
@@ -542,7 +604,14 @@ TranslateNtStatusError(NTSTATUS Status)
           return WSAEWOULDBLOCK;
 
        case STATUS_TIMEOUT:
+       case STATUS_IO_TIMEOUT:
           return WSAETIMEDOUT;
+
+       case STATUS_HOST_DOWN:
+          return WSAEHOSTDOWN;
+
+       case STATUS_GRACEFUL_DISCONNECT:
+          return WSAEDISCON;
 
        case STATUS_SUCCESS:
           return NO_ERROR;
@@ -575,7 +644,14 @@ TranslateNtStatusError(NTSTATUS Status)
 
        case STATUS_REMOTE_NOT_LISTENING:
        case STATUS_REMOTE_DISCONNECT:
+       case STATUS_CONNECTION_REFUSED:
           return WSAECONNREFUSED;
+
+       case STATUS_CONNECTION_RESET:
+          return WSAECONNRESET;
+
+       case STATUS_CONNECTION_ABORTED:
+          return WSAECONNABORTED;
 
        case STATUS_NETWORK_UNREACHABLE:
           return WSAENETUNREACH;
@@ -601,6 +677,9 @@ TranslateNtStatusError(NTSTATUS Status)
        case STATUS_ACCESS_DENIED:
           return WSAEACCES;
 
+       case STATUS_RECEIVE_EXPEDITED:
+          return NO_ERROR;
+
        case STATUS_NOT_IMPLEMENTED:
           return WSAEOPNOTSUPP;
 
@@ -608,6 +687,84 @@ TranslateNtStatusError(NTSTATUS Status)
           ERR("MSAFD: Unhandled NTSTATUS value: 0x%x\n", Status);
           return WSAENETDOWN;
     }
+}
+
+typedef struct _MSAFD_THREAD_EVENT
+{
+    HANDLE Event;
+    BOOLEAN Busy;
+} MSAFD_THREAD_EVENT, *PMSAFD_THREAD_EVENT;
+
+static DWORD MsafdThreadEventIndex = FLS_OUT_OF_INDEXES;
+
+static VOID WINAPI
+MsafdFreeThreadEvent(
+    _In_ PVOID Data)
+{
+    PMSAFD_THREAD_EVENT Entry = Data;
+
+    if (!Entry)
+        return;
+    if (Entry->Event)
+        NtClose(Entry->Event);
+    HeapFree(GlobalHeap, 0, Entry);
+}
+
+NTSTATUS
+MsafdAcquireEvent(
+    _Out_ PHANDLE Event,
+    _Out_ PBOOLEAN Shared)
+{
+    PMSAFD_THREAD_EVENT Entry;
+    NTSTATUS Status;
+
+    *Shared = FALSE;
+    if (MsafdThreadEventIndex != FLS_OUT_OF_INDEXES)
+    {
+        Entry = FlsGetValue(MsafdThreadEventIndex);
+        if (!Entry)
+        {
+            Entry = HeapAlloc(GlobalHeap, HEAP_ZERO_MEMORY, sizeof(*Entry));
+            if (Entry)
+            {
+                Status = NtCreateEvent(&Entry->Event, EVENT_ALL_ACCESS,
+                                       NULL, SynchronizationEvent, FALSE);
+                if (!NT_SUCCESS(Status) || !FlsSetValue(MsafdThreadEventIndex, Entry))
+                {
+                    MsafdFreeThreadEvent(Entry);
+                    Entry = NULL;
+                }
+            }
+        }
+        if (Entry && !Entry->Busy)
+        {
+            Entry->Busy = TRUE;
+            *Event = Entry->Event;
+            *Shared = TRUE;
+            return STATUS_SUCCESS;
+        }
+    }
+    return NtCreateEvent(Event, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE);
+}
+
+VOID
+MsafdReleaseEvent(
+    _In_ HANDLE Event,
+    _In_ BOOLEAN Shared,
+    _In_ BOOLEAN Reset)
+{
+    PMSAFD_THREAD_EVENT Entry;
+
+    if (!Shared)
+    {
+        NtClose(Event);
+        return;
+    }
+    if (Reset)
+        NtResetEvent(Event, NULL);
+    Entry = FlsGetValue(MsafdThreadEventIndex);
+    if (Entry)
+        Entry->Busy = FALSE;
 }
 
 VOID
@@ -622,6 +779,48 @@ MsafdWaitForAlert(
         if (Result != WAIT_IO_COMPLETION)
             break;
     }
+}
+
+NTSTATUS
+MsafdWaitForCompletion(
+    _In_ PSOCKET_INFORMATION Socket,
+    _In_ HANDLE hObject,
+    _In_ PIO_STATUS_BLOCK IoStatusBlock,
+    _In_ DWORD Timeout)
+{
+    IO_STATUS_BLOCK CancelIosb;
+    ULONGLONG Deadline;
+    ULONGLONG Now;
+    DWORD Result;
+
+    if (!(Socket->SharedData->CreateFlags & WSA_FLAG_OVERLAPPED) ||
+        Timeout == 0 || Timeout == INFINITE)
+    {
+        MsafdWaitForAlert(hObject);
+        return IoStatusBlock->Status;
+    }
+
+    Deadline = GetTickCount64() + Timeout;
+    for (;;)
+    {
+        Now = GetTickCount64();
+        Result = WaitForSingleObjectEx(hObject,
+                                       Now < Deadline ? (DWORD)(Deadline - Now) : 0,
+                                       TRUE);
+        if (Result != WAIT_IO_COMPLETION)
+            break;
+    }
+
+    if (Result != WAIT_TIMEOUT)
+        return IoStatusBlock->Status;
+
+    NtCancelIoFileEx((HANDLE)Socket->Handle, IoStatusBlock, &CancelIosb);
+    MsafdWaitForAlert(hObject);
+
+    if (IoStatusBlock->Status == STATUS_CANCELLED)
+        return STATUS_TIMEOUT;
+
+    return IoStatusBlock->Status;
 }
 
 /*
@@ -653,9 +852,6 @@ WSPCloseSocket(IN SOCKET Handle,
        if (lpErrno) *lpErrno = WSAENOTSOCK;
        return SOCKET_ERROR;
     }
-
-    /* HACK: Allow APC to be processed */
-    SleepEx(0, TRUE);
 
     if (Socket->HelperEvents & WSH_NOTIFY_CLOSE)
     {
@@ -697,6 +893,21 @@ WSPCloseSocket(IN SOCKET Handle,
     References = InterlockedDecrement(&Socket->SharedData->RefCount);
     if (References)
         goto ok;
+
+    /* An inherited or duplicated endpoint stays alive for its other holders */
+    {
+        OBJECT_BASIC_INFORMATION ObjectInfo;
+        ULONG ReturnLength = 0;
+
+        Status = NtQueryObject((HANDLE)Handle,
+                               ObjectBasicInformation,
+                               &ObjectInfo,
+                               sizeof(ObjectInfo),
+                               &ReturnLength);
+
+        if (NT_SUCCESS(Status) && ObjectInfo.HandleCount > 1)
+            goto ok;
+    }
 
     /* Set the state to close */
     OldState = Socket->SharedData->State;
@@ -789,7 +1000,7 @@ WSPCloseSocket(IN SOCKET Handle,
                 /* Wait for return */
                 if (Status == STATUS_PENDING)
                 {
-                    MsafdWaitForAlert(SockEvent);
+                    WaitForSingleObject(SockEvent, INFINITE);
                     Status = IoStatusBlock.Status;
                 }
             }
@@ -829,19 +1040,36 @@ ok:
     NtClose((HANDLE)Handle);
     NtClose(SockEvent);
 
-    if( Socket->SharedDataHandle != INVALID_HANDLE_VALUE )
+    SockDereferenceSocket(Socket);
+    return MsafdReturnWithErrno(STATUS_SUCCESS, lpErrno, 0, NULL);
+}
+
+VOID
+SockDereferenceSocket(PSOCKET_INFORMATION Socket)
+{
+    if (InterlockedDecrement(&Socket->RefCount))
+        return;
+
+    if (Socket->SharedDataHandle != INVALID_HANDLE_VALUE)
     {
         /* It is a duplicated socket, so unmap the memory */
         UnmapViewOfFile(Socket->SharedData);
         NtClose(Socket->SharedDataHandle);
-        Socket->SharedData = NULL;
     }
-    if( !References && Socket->SharedData )
+    else if (!Socket->SharedData->RefCount)
     {
         HeapFree(GlobalHeap, 0, Socket->SharedData);
     }
     HeapFree(GlobalHeap, 0, Socket);
-    return MsafdReturnWithErrno(Status, lpErrno, 0, NULL);
+}
+
+static VOID
+SockFreeAsyncData(PASYNC_DATA AsyncData)
+{
+    PSOCKET_INFORMATION Socket = AsyncData->ParentSocket;
+
+    HeapFree(GetProcessHeap(), 0, AsyncData);
+    SockDereferenceSocket(Socket);
 }
 
 
@@ -869,6 +1097,11 @@ WSPBind(SOCKET Handle,
     SOCKADDR_INFO           SocketInfo;
     HANDLE                  SockEvent;
     ULONG connectSize;
+    ULONG RandomAttempts = 0;
+    BOOLEAN Randomized = FALSE;
+    PTA_ADDRESS DualStack = NULL;
+    DWORD V6Only = TRUE;
+    INT V6OnlyLength = sizeof(V6Only);
 
     /* Get the Socket Structure associate to this Socket*/
     Socket = GetSocketStructure(Handle);
@@ -882,9 +1115,9 @@ WSPBind(SOCKET Handle,
        if (lpErrno) *lpErrno = WSAEINVAL;
        return SOCKET_ERROR;
     }
-    if (!SocketAddress || SocketAddressLength < Socket->SharedData->SizeOfLocalAddress)
+    if (!SocketAddress || SocketAddressLength < Socket->HelperData->MinWSAddressLength)
     {
-        if (lpErrno) *lpErrno = WSAEINVAL;
+        if (lpErrno) *lpErrno = WSAEFAULT;
         return SOCKET_ERROR;
     }
 
@@ -927,41 +1160,101 @@ WSPBind(SOCKET Handle,
                    SocketAddress->sa_data,
                    SocketAddressLength - sizeof(SocketAddress->sa_family));
 
+    if (SocketAddress->sa_family == AF_INET6 &&
+        (SocketInfo.AddressInfo == SockaddrAddressInfoWildcard ||
+         (SocketAddressLength >= (int)sizeof(SOCKADDR_IN6) &&
+          IN6_IS_ADDR_V4MAPPED(&((const SOCKADDR_IN6 *)SocketAddress)->sin6_addr))) &&
+        Socket->HelperData->WSHGetSocketInformation(Socket->HelperContext,
+                                                    Handle,
+                                                    Socket->TdiAddressHandle,
+                                                    Socket->TdiConnectionHandle,
+                                                    IPPROTO_IPV6,
+                                                    IPV6_V6ONLY,
+                                                    (PCHAR)&V6Only,
+                                                    &V6OnlyLength) == NO_ERROR &&
+        !V6Only)
+    {
+        DualStack = (PTA_ADDRESS)(BindData->Address.Address[0].Address + BindData->Address.Address[0].AddressLength);
+        BindData->Address.TAAddressCount = 2;
+        DualStack->AddressLength = TDI_ADDRESS_LENGTH_IP;
+        DualStack->AddressType = TDI_ADDRESS_TYPE_IP;
+        RtlZeroMemory(DualStack->Address, TDI_ADDRESS_LENGTH_IP);
+    }
+
     /* Set the Share Type */
     if (Socket->SharedData->ExclusiveAddressUse)
     {
         BindData->ShareType = AFD_SHARE_EXCLUSIVE;
     }
-    else if (SocketInfo.EndpointInfo == SockaddrEndpointInfoWildcard)
-    {
-        BindData->ShareType = AFD_SHARE_WILDCARD;
-    }
     else if (Socket->SharedData->ReuseAddresses)
     {
         BindData->ShareType = AFD_SHARE_REUSE;
+    }
+    else if (SocketInfo.EndpointInfo == SockaddrEndpointInfoWildcard)
+    {
+        BindData->ShareType = AFD_SHARE_WILDCARD;
     }
     else
     {
         BindData->ShareType = AFD_SHARE_UNIQUE;
     }
 
-    /* Send IOCTL */
-    Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
-                                   SockEvent,
-                                   NULL,
-                                   NULL,
-                                   &IOSB,
-                                   IOCTL_AFD_BIND,
-                                   BindData,
-                                   connectSize,
-                                   BindData,
-                                   connectSize);
-
-    /* Wait for return */
-    if (Status == STATUS_PENDING)
+    if (Socket->RandomizePort &&
+        (SocketAddress->sa_family == AF_INET || SocketAddress->sa_family == AF_INET6) &&
+        SocketAddressLength >= (int)(sizeof(SocketAddress->sa_family) + sizeof(USHORT)) &&
+        BindData->Address.Address[0].Address[0] == 0 &&
+        BindData->Address.Address[0].Address[1] == 0)
     {
-        MsafdWaitForAlert(SockEvent);
-        Status = IOSB.Status;
+        RandomAttempts = 16;
+    }
+
+    for (;;)
+    {
+        USHORT Random = 0;
+
+        if (RandomAttempts != 0 && !RtlGenRandom(&Random, sizeof(Random)))
+            RandomAttempts = 0;
+        if (RandomAttempts != 0)
+        {
+            USHORT Port = (USHORT)(49152 + Random % (65535 - 49152 + 1));
+
+            BindData->Address.Address[0].Address[0] = (UCHAR)(Port >> 8);
+            BindData->Address.Address[0].Address[1] = (UCHAR)(Port & 0xff);
+            RandomAttempts--;
+            Randomized = TRUE;
+        }
+        else if (Randomized)
+        {
+            BindData->Address.Address[0].Address[0] = 0;
+            BindData->Address.Address[0].Address[1] = 0;
+            Randomized = FALSE;
+        }
+
+        if (DualStack)
+            RtlCopyMemory(DualStack->Address, BindData->Address.Address[0].Address, sizeof(USHORT));
+
+        /* Send IOCTL */
+        Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
+                                       SockEvent,
+                                       NULL,
+                                       NULL,
+                                       &IOSB,
+                                       IOCTL_AFD_BIND,
+                                       BindData,
+                                       connectSize,
+                                       BindData,
+                                       connectSize);
+
+        /* Wait for return */
+        if (Status == STATUS_PENDING)
+        {
+            MsafdWaitForAlert(SockEvent);
+            Status = IOSB.Status;
+        }
+
+        if (!Randomized ||
+            (Status != STATUS_ADDRESS_ALREADY_EXISTS && Status != STATUS_SHARING_VIOLATION))
+            break;
     }
 
     NtClose( SockEvent );
@@ -1077,6 +1370,9 @@ WSPListen(SOCKET Handle,
 }
 
 
+DWORD
+GetCurrentTimeInSeconds(VOID);
+
 int
 WSPAPI
 WSPSelect(IN int nfds,
@@ -1147,8 +1443,7 @@ WSPSelect(IN int nfds,
     }
     else
     {
-        Timeout = RtlEnlargedIntegerMultiply
-            ((timeout->tv_sec * 1000) + (timeout->tv_usec / 1000), -10000);
+        Timeout.QuadPart = -(((LONGLONG)timeout->tv_sec * 10000000) + ((LONGLONG)timeout->tv_usec * 10));
         /* Negative timeouts are illegal.  Since the kernel represents an
          * incremental timeout as a negative number, we check for a positive
          * result.
@@ -1263,7 +1558,10 @@ WSPSelect(IN int nfds,
             }
             PollInfo->Handles[j].Handle = writefds->fd_array[i];
             PollInfo->Handles[j].Events |= AFD_EVENT_SEND;
-            if (Socket->SharedData->NonBlocking != 0)
+            /* A connect started while nonblocking is reported even if the
+             * socket was switched back to blocking before select (Rust's
+             * TcpStream::connect_timeout does exactly that). */
+            if (Socket->SharedData->NonBlocking != 0 || Socket->ConnectPending)
                 PollInfo->Handles[j].Events |= AFD_EVENT_CONNECT;
         }
     }
@@ -1296,7 +1594,7 @@ WSPSelect(IN int nfds,
             PollInfo->Handles[j].Handle = exceptfds->fd_array[i];
             if (Socket->SharedData->OobInline == 0)
                 PollInfo->Handles[j].Events |= AFD_EVENT_OOB_RECEIVE;
-            if (Socket->SharedData->NonBlocking != 0)
+            if (Socket->SharedData->NonBlocking != 0 || Socket->ConnectPending || Socket->ConnectFailed)
                 PollInfo->Handles[j].Events |= AFD_EVENT_CONNECT_FAIL;
         }
     }
@@ -1341,17 +1639,25 @@ WSPSelect(IN int nfds,
     {
         Events = PollInfo->Handles[i].Events;
         Handle = PollInfo->Handles[i].Handle;
+        if (!Events)
+            continue;
+        Socket = GetSocketStructure(Handle);
+        if (!Socket)
+        {
+            if (Events & AFD_EVENT_CLOSE)
+            {
+                if (readfds)
+                    FD_SET(Handle, readfds);
+                continue;
+            }
+            TRACE("Invalid socket handle found %d\n", Handle);
+            if (lpErrno) *lpErrno = WSAENOTSOCK;
+            HeapFree(GlobalHeap, 0, PollBuffer);
+            NtClose(SockEvent);
+            return SOCKET_ERROR;
+        }
         for(x = 1; x; x<<=1)
         {
-            Socket = GetSocketStructure(Handle);
-            if (!Socket)
-            {
-                TRACE("Invalid socket handle found %d\n", Handle);
-                if (lpErrno) *lpErrno = WSAENOTSOCK;
-                HeapFree(GlobalHeap, 0, PollBuffer);
-                NtClose(SockEvent);
-                return SOCKET_ERROR;
-            }
             switch (Events & x)
             {
                 case AFD_EVENT_RECEIVE:
@@ -1380,7 +1686,23 @@ WSPSelect(IN int nfds,
                     TRACE("Event %x on handle %x\n",
                         Events,
                         Handle);
-                    if( writefds && Socket->SharedData->NonBlocking != 0 )
+                    /* Only requested for a connect in flight (see above). AFD
+                     * has connected the socket; mark it so right away, the
+                     * completion worker may not have run yet and calls such
+                     * as getpeername would fail with WSAENOTCONN. */
+                    if (Socket->ConnectPending)
+                    {
+                        EnterCriticalSection(&SocketListLock);
+                        if (Socket->ConnectPending &&
+                            (Socket->SharedData->State == SocketOpen || Socket->SharedData->State == SocketBound))
+                        {
+                            Socket->SharedData->SocketLastError = NO_ERROR;
+                            Socket->SharedData->State = SocketConnected;
+                            Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
+                        }
+                        LeaveCriticalSection(&SocketListLock);
+                    }
+                    if( writefds )
                         FD_SET(Handle, writefds);
                     break;
                 case AFD_EVENT_OOB_RECEIVE:
@@ -1396,7 +1718,9 @@ WSPSelect(IN int nfds,
                     TRACE("Event %x on handle %x\n",
                         Events,
                         Handle);
-                    if( exceptfds && Socket->SharedData->NonBlocking != 0 )
+                    Socket->SharedData->SocketLastError =
+                        TranslateNtStatusError(PollInfo->Handles[i].Status);
+                    if( exceptfds )
                         FD_SET(Handle, exceptfds);
                     break;
             }
@@ -1474,7 +1798,7 @@ WSPAccept(
     ULONG                       CallBack;
     SOCKET                      AcceptSocket;
     PSOCKET_INFORMATION         AcceptSocketInfo;
-    UCHAR                       ReceiveBuffer[0x1A];
+    UCHAR                       ReceiveBuffer[sizeof(AFD_RECEIVED_ACCEPT_DATA) + 128];
     HANDLE                      SockEvent;
 
     /* Get the Socket Structure associate to this Socket*/
@@ -1482,15 +1806,16 @@ WSPAccept(
     if (!Socket)
     {
        if (lpErrno) *lpErrno = WSAENOTSOCK;
-       return SOCKET_ERROR;
+       return INVALID_SOCKET;
     }
     if (!Socket->SharedData->Listening)
     {
        if (lpErrno) *lpErrno = WSAEINVAL;
-       return SOCKET_ERROR;
+       return INVALID_SOCKET;
     }
-    if ((SocketAddress && !SocketAddressLength) ||
-        (SocketAddressLength && !SocketAddress) ||
+    if (!SocketAddressLength)
+        SocketAddress = NULL;
+    if ((SocketAddressLength && !SocketAddress) ||
         (SocketAddressLength && *SocketAddressLength < sizeof(SOCKADDR)))
     {
        if (lpErrno) *lpErrno = WSAEFAULT;
@@ -1505,7 +1830,7 @@ WSPAccept(
 
     if( !NT_SUCCESS(Status) )
     {
-        return SOCKET_ERROR;
+        return INVALID_SOCKET;
     }
 
     /* Dynamic Structure...ugh */
@@ -1522,14 +1847,14 @@ WSPAccept(
         if (WSPSelect(0, &ReadSet, NULL, NULL, &Timeout, lpErrno) == SOCKET_ERROR)
         {
             NtClose(SockEvent);
-            return SOCKET_ERROR;
+            return INVALID_SOCKET;
         }
 
         if (ReadSet.fd_array[0] != Socket->Handle)
         {
             NtClose(SockEvent);
             if (lpErrno) *lpErrno = WSAEWOULDBLOCK;
-            return SOCKET_ERROR;
+            return INVALID_SOCKET;
         }
     }
 
@@ -1543,7 +1868,7 @@ WSPAccept(
                                    NULL,
                                    0,
                                    ListenReceiveData,
-                                   0xA + sizeof(*ListenReceiveData));
+                                   sizeof(ReceiveBuffer));
 
     /* Wait for return */
     if (Status == STATUS_PENDING)
@@ -1555,7 +1880,8 @@ WSPAccept(
     if (!NT_SUCCESS(Status))
     {
         NtClose( SockEvent );
-        return MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+        MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+        return INVALID_SOCKET;
     }
 
     if (lpfnCondition != NULL)
@@ -1588,7 +1914,8 @@ WSPAccept(
             if (!NT_SUCCESS(Status))
             {
                 NtClose( SockEvent );
-                return MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+                MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+                return INVALID_SOCKET;
             }
 
             /* How much data to allocate */
@@ -1600,7 +1927,8 @@ WSPAccept(
                 PendingData = HeapAlloc(GlobalHeap, 0, PendingDataLength);
                 if (!PendingData)
                 {
-                    return MsafdReturnWithErrno( STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL );
+                    MsafdReturnWithErrno( STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL );
+                    return INVALID_SOCKET;
                 }
 
                 /* We want the data now */
@@ -1628,7 +1956,8 @@ WSPAccept(
                 if (!NT_SUCCESS(Status))
                 {
                     NtClose( SockEvent );
-                    return MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+                    MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+                    return INVALID_SOCKET;
                 }
             }
         }
@@ -1642,20 +1971,21 @@ WSPAccept(
         CalleeID.buf = (PVOID)Socket->LocalAddress;
         CalleeID.len = Socket->SharedData->SizeOfLocalAddress;
 
-        RemoteAddress = HeapAlloc(GlobalHeap, 0, sizeof(*RemoteAddress));
+        RemoteAddress = HeapAlloc(GlobalHeap, 0, Socket->SharedData->SizeOfRemoteAddress);
         if (!RemoteAddress)
         {
-            return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL);
+            MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL);
+            return INVALID_SOCKET;
         }
 
         /* Set up Address in SOCKADDR Format */
         RtlCopyMemory (RemoteAddress,
                        &ListenReceiveData->Address.Address[0].AddressType,
-                       sizeof(*RemoteAddress));
+                       Socket->SharedData->SizeOfRemoteAddress);
 
         /* Build Caller ID */
         CallerID.buf = (PVOID)RemoteAddress;
-        CallerID.len = sizeof(*RemoteAddress);
+        CallerID.len = Socket->SharedData->SizeOfRemoteAddress;
 
         /* Build Caller Data */
         CallerData.buf = PendingData;
@@ -1667,7 +1997,8 @@ WSPAccept(
             /* Allocate Buffer for Callee Data */
             CalleeDataBuffer = HeapAlloc(GlobalHeap, 0, 4096);
             if (!CalleeDataBuffer) {
-                return MsafdReturnWithErrno( STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL );
+                MsafdReturnWithErrno( STATUS_INSUFFICIENT_RESOURCES, lpErrno, 0, NULL );
+                return INVALID_SOCKET;
             }
             CalleeData.buf = CalleeDataBuffer;
             CalleeData.len = 4096;
@@ -1734,18 +2065,19 @@ WSPAccept(
 
             if (!NT_SUCCESS(Status))
             {
-                return MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+                MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+                return INVALID_SOCKET;
             }
 
             if (CallBack == CF_REJECT )
             {
                 if (lpErrno) *lpErrno = WSAECONNREFUSED;
-                return SOCKET_ERROR;
+                return INVALID_SOCKET;
             }
             else
             {
-                if (lpErrno) *lpErrno = WSAECONNREFUSED;
-                return SOCKET_ERROR;
+                if (lpErrno) *lpErrno = WSATRY_AGAIN;
+                return INVALID_SOCKET;
             }
         }
     }
@@ -1759,7 +2091,7 @@ WSPAccept(
                               Socket->SharedData->CreateFlags,
                               lpErrno);
     if (AcceptSocket == INVALID_SOCKET)
-        return SOCKET_ERROR;
+        return INVALID_SOCKET;
 
     /* Set up the Accept Structure */
     AcceptData.ListenHandle = (HANDLE)AcceptSocket;
@@ -1789,7 +2121,8 @@ WSPAccept(
     {
         NtClose(SockEvent);
         WSPCloseSocket( AcceptSocket, lpErrno );
-        return MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+        MsafdReturnWithErrno( Status, lpErrno, 0, NULL );
+        return INVALID_SOCKET;
     }
 
     AcceptSocketInfo = GetSocketStructure(AcceptSocket);
@@ -1797,7 +2130,8 @@ WSPAccept(
     {
         NtClose(SockEvent);
         WSPCloseSocket( AcceptSocket, lpErrno );
-        return MsafdReturnWithErrno( STATUS_PROTOCOL_NOT_SUPPORTED, lpErrno, 0, NULL );
+        MsafdReturnWithErrno( STATUS_PROTOCOL_NOT_SUPPORTED, lpErrno, 0, NULL );
+        return INVALID_SOCKET;
     }
 
     AcceptSocketInfo->SharedData->State = SocketConnected;
@@ -1807,11 +2141,16 @@ WSPAccept(
     /* Return Address in SOCKADDR FORMAT */
     if( SocketAddress )
     {
+        INT CopyLength = Socket->SharedData->SizeOfRemoteAddress;
+
+        if (SocketAddressLength && *SocketAddressLength < CopyLength)
+            CopyLength = *SocketAddressLength;
+
         RtlCopyMemory (SocketAddress,
                        &ListenReceiveData->Address.Address[0].AddressType,
-                       sizeof(*RemoteAddress));
+                       CopyLength);
         if( SocketAddressLength )
-            *SocketAddressLength = sizeof(*RemoteAddress);
+            *SocketAddressLength = CopyLength;
     }
 
     NtClose( SockEvent );
@@ -1832,7 +2171,7 @@ WSPAccept(
         if (Status)
         {
             if (lpErrno) *lpErrno = Status;
-            return SOCKET_ERROR;
+            return INVALID_SOCKET;
         }
     }
 
@@ -1842,58 +2181,82 @@ WSPAccept(
     return AcceptSocket;
 }
 
-static
-VOID
-NTAPI
-MsafdConnectAPC(
-    _In_ PVOID ApcContext,
-    _In_ PIO_STATUS_BLOCK IoStatusBlock,
-    _In_ ULONG Reserved)
+static VOID
+MsafdCompleteConnect(
+    _In_ PMSAFD_CONNECT_CONTEXT Context)
 {
-    PMSAFD_CONNECT_APC_CONTEXT Context = ApcContext;
+    PSOCKET_INFORMATION Socket;
+    PIO_STATUS_BLOCK IoStatusBlock = &Context->IoStatusBlock;
 
-    TRACE("MsafdConnectAPC(%p %lx %lx)\n", ApcContext, IoStatusBlock->Status, IoStatusBlock->Information);
+    TRACE("MsafdCompleteConnect(%p %lx %lx)\n",
+          Context,
+          IoStatusBlock->Status,
+          IoStatusBlock->Information);
 
-    PSOCKET_INFORMATION Socket = GetSocketStructure(Context->lpSocket);
-    if (!Socket)
+    EnterCriticalSection(&SocketListLock);
+
+    Socket = SocketListHead;
+    while (Socket && Socket->Handle != Context->lpSocket)
+        Socket = Socket->NextSocket;
+
+    if (Socket)
+        Socket->ConnectPending = FALSE;
+
+    if (Socket && Socket->SharedData->State != SocketClosed)
     {
-        // FIXME: Socket is closed before this APC could run
-        HeapFree(GlobalHeap, 0, ApcContext);
-        return;
+        if (IoStatusBlock->Status == STATUS_SUCCESS)
+        {
+            Socket->SharedData->SocketLastError = NO_ERROR;
+            Socket->SharedData->State = SocketConnected;
+            Socket->TdiConnectionHandle = (HANDLE)IoStatusBlock->Information;
+            Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
+        }
+        else
+        {
+            /* SO_ERROR reports why the connect failed. */
+            Socket->SharedData->SocketLastError = TranslateNtStatusError(IoStatusBlock->Status);
+            Socket->ConnectFailed = TRUE;
+        }
+
+        /* Re-enable Async Event */
+        SockReenableAsyncSelectEvent(Socket, FD_WRITE);
+
+        /* FIXME: THIS IS NOT RIGHT!!! HACK HACK HACK! */
+        SockReenableAsyncSelectEvent(Socket, FD_CONNECT);
+
+        if (IoStatusBlock->Status == STATUS_SUCCESS && (Socket->HelperEvents & WSH_NOTIFY_CONNECT))
+        {
+            Socket->HelperData->WSHNotify(Socket->HelperContext,
+                                          Socket->Handle,
+                                          Socket->TdiAddressHandle,
+                                          Socket->TdiConnectionHandle,
+                                          WSH_NOTIFY_CONNECT);
+        }
+        else if (IoStatusBlock->Status != STATUS_SUCCESS && (Socket->HelperEvents & WSH_NOTIFY_CONNECT_ERROR))
+        {
+            Socket->HelperData->WSHNotify(Socket->HelperContext,
+                                          Socket->Handle,
+                                          Socket->TdiAddressHandle,
+                                          Socket->TdiConnectionHandle,
+                                          WSH_NOTIFY_CONNECT_ERROR);
+        }
     }
 
-    Socket->SharedData->SocketLastError = TranslateNtStatusError(IoStatusBlock->Status);
-    if (IoStatusBlock->Status == STATUS_SUCCESS)
-    {
-        Socket->SharedData->State = SocketConnected;
-        Socket->TdiConnectionHandle = (HANDLE)IoStatusBlock->Information;
-        Socket->SharedData->ConnectTime = GetCurrentTimeInSeconds();
-    }
+    LeaveCriticalSection(&SocketListLock);
 
-    /* Re-enable Async Event */
-    SockReenableAsyncSelectEvent(Socket, FD_WRITE);
+    NtClose(Context->Event);
+    HeapFree(GlobalHeap, 0, Context);
+}
 
-    /* FIXME: THIS IS NOT RIGHT!!! HACK HACK HACK! */
-    SockReenableAsyncSelectEvent(Socket, FD_CONNECT);
+static DWORD WINAPI
+MsafdConnectWorker(
+    _In_ PVOID Parameter)
+{
+    PMSAFD_CONNECT_CONTEXT Context = Parameter;
 
-    if (IoStatusBlock->Status == STATUS_SUCCESS && (Socket->HelperEvents & WSH_NOTIFY_CONNECT))
-    {
-        Socket->HelperData->WSHNotify(Socket->HelperContext,
-                                      Socket->Handle,
-                                      Socket->TdiAddressHandle,
-                                      Socket->TdiConnectionHandle,
-                                      WSH_NOTIFY_CONNECT);
-    }
-    else if (IoStatusBlock->Status != STATUS_SUCCESS && (Socket->HelperEvents & WSH_NOTIFY_CONNECT_ERROR))
-    {
-        Socket->HelperData->WSHNotify(Socket->HelperContext,
-                                      Socket->Handle,
-                                      Socket->TdiAddressHandle,
-                                      Socket->TdiConnectionHandle,
-                                      WSH_NOTIFY_CONNECT_ERROR);
-    }
-
-    HeapFree(GlobalHeap, 0, ApcContext);
+    WaitForSingleObject(Context->Event, INFINITE);
+    MsafdCompleteConnect(Context);
+    return 0;
 }
 
 int
@@ -1917,9 +2280,9 @@ WSPConnect(SOCKET Handle,
     ULONG                      InConnectDataLength;
     HANDLE                     SockEvent;
     int                        SocketDataLength;
-    PMSAFD_CONNECT_APC_CONTEXT APCContext = NULL;
-    PIO_APC_ROUTINE            APCFunction = NULL;
-    UCHAR                      Buffer[128];
+    PMSAFD_CONNECT_CONTEXT     ConnectContext = NULL;
+    UCHAR                      Buffer[256];
+    BOOLEAN                    CompletionHandled = FALSE;
 
     TRACE("WSPConnect(%x)\n", Handle);
 
@@ -1995,7 +2358,7 @@ WSPConnect(SOCKET Handle,
 
     int connectionInfoSize = FIELD_OFFSET(AFD_CONNECT_INFO, RemoteAddress.Address[0].Address[SocketDataLength]);
 
-    if (connectionInfoSize > 128)
+    if (connectionInfoSize > (int)sizeof(Buffer))
     {
         *lpErrno = WSAEFAULT;
         return SOCKET_ERROR;
@@ -2051,20 +2414,20 @@ WSPConnect(SOCKET Handle,
     ConnectInfo->UseSAN = FALSE;
     ConnectInfo->Unknown = 0;
 
-    /* Verify if we should use APC */
+    /* Allocate persistent completion state for a nonblocking connect. */
     if (Socket->SharedData->NonBlocking)
     {
-        APCContext = HeapAlloc(GlobalHeap, 0, sizeof(*APCContext));
-        if (!APCContext)
+        ConnectContext = HeapAlloc(GlobalHeap, HEAP_ZERO_MEMORY, sizeof(*ConnectContext));
+        if (!ConnectContext)
         {
-            ERR("Not enough memory for APC Context\n");
+            ERR("Not enough memory for connect context\n");
             Status = STATUS_INSUFFICIENT_RESOURCES;
             goto Leave;
         }
-        APCContext->lpSocket = Handle;
-        APCFunction = &MsafdConnectAPC;
+        ConnectContext->lpSocket = Handle;
+        ConnectContext->Event = SockEvent;
 
-        IOSB = &APCContext->IoStatusBlock;
+        IOSB = &ConnectContext->IoStatusBlock;
     }
 
     IOSB->Status = STATUS_PENDING;
@@ -2072,9 +2435,9 @@ WSPConnect(SOCKET Handle,
 
     /* Send IOCTL */
     Status = NtDeviceIoControlFile((HANDLE)Handle,
-                                   APCFunction ? NULL : SockEvent,
-                                   APCFunction,
-                                   APCContext,
+                                   SockEvent,
+                                   NULL,
+                                   NULL,
                                    IOSB,
                                    IOCTL_AFD_CONNECT,
                                    ConnectInfo,
@@ -2085,14 +2448,30 @@ WSPConnect(SOCKET Handle,
     {
         if (Status == STATUS_PENDING)
         {
-            Status = STATUS_CANT_WAIT; // WSAEWOULDBLOCK
-            goto Leave;
+            EnterCriticalSection(&SocketListLock);
+            Socket->ConnectPending = TRUE;
+            Socket->ConnectFailed = FALSE;
+            LeaveCriticalSection(&SocketListLock);
+            if (QueueUserWorkItem(MsafdConnectWorker,
+                                  ConnectContext,
+                                  WT_EXECUTELONGFUNCTION))
+            {
+                CompletionHandled = TRUE;
+                ConnectContext = NULL;
+                SockEvent = NULL;
+                Status = STATUS_CANT_WAIT; // WSAEWOULDBLOCK
+                goto Leave;
+            }
+
+            /* Preserve completion ownership if the worker pool is unavailable. */
+            MsafdWaitForAlert(SockEvent);
+            Status = IOSB->Status;
         }
-        else
-        {
-            /* HACK: Allow APC to be processed */
-            SleepEx(0, TRUE);
-        }
+
+        MsafdCompleteConnect(ConnectContext);
+        CompletionHandled = TRUE;
+        ConnectContext = NULL;
+        SockEvent = NULL;
     }
     else
     {
@@ -2137,40 +2516,44 @@ WSPConnect(SOCKET Handle,
 Leave:
     TRACE("Ending %lx\n", Status);
 
-    NtClose(SockEvent);
+    if (SockEvent)
+        NtClose(SockEvent);
 
-    /* Re-enable Async Event */
-    SockReenableAsyncSelectEvent(Socket, FD_WRITE);
-
-    /* FIXME: THIS IS NOT RIGHT!!! HACK HACK HACK! */
-    SockReenableAsyncSelectEvent(Socket, FD_CONNECT);
-
-    if (Status == STATUS_SUCCESS && (Socket->HelperEvents & WSH_NOTIFY_CONNECT))
+    if (!CompletionHandled)
     {
-        Errno = Socket->HelperData->WSHNotify(Socket->HelperContext,
-                                              Socket->Handle,
-                                              Socket->TdiAddressHandle,
-                                              Socket->TdiConnectionHandle,
-                                              WSH_NOTIFY_CONNECT);
+        /* Re-enable Async Event */
+        SockReenableAsyncSelectEvent(Socket, FD_WRITE);
 
-        if (Errno)
+        /* FIXME: THIS IS NOT RIGHT!!! HACK HACK HACK! */
+        SockReenableAsyncSelectEvent(Socket, FD_CONNECT);
+
+        if (Status == STATUS_SUCCESS && (Socket->HelperEvents & WSH_NOTIFY_CONNECT))
         {
-            if (lpErrno) *lpErrno = Errno;
-            return SOCKET_ERROR;
+            Errno = Socket->HelperData->WSHNotify(Socket->HelperContext,
+                                                  Socket->Handle,
+                                                  Socket->TdiAddressHandle,
+                                                  Socket->TdiConnectionHandle,
+                                                  WSH_NOTIFY_CONNECT);
+
+            if (Errno)
+            {
+                if (lpErrno) *lpErrno = Errno;
+                return SOCKET_ERROR;
+            }
         }
-    }
-    else if (Status != STATUS_SUCCESS && (Socket->HelperEvents & WSH_NOTIFY_CONNECT_ERROR))
-    {
-        Errno = Socket->HelperData->WSHNotify(Socket->HelperContext,
-                                              Socket->Handle,
-                                              Socket->TdiAddressHandle,
-                                              Socket->TdiConnectionHandle,
-                                              WSH_NOTIFY_CONNECT_ERROR);
-
-        if (Errno)
+        else if (Status != STATUS_SUCCESS && (Socket->HelperEvents & WSH_NOTIFY_CONNECT_ERROR))
         {
-            if (lpErrno) *lpErrno = Errno;
-            return SOCKET_ERROR;
+            Errno = Socket->HelperData->WSHNotify(Socket->HelperContext,
+                                                  Socket->Handle,
+                                                  Socket->TdiAddressHandle,
+                                                  Socket->TdiConnectionHandle,
+                                                  WSH_NOTIFY_CONNECT_ERROR);
+
+            if (Errno)
+            {
+                if (lpErrno) *lpErrno = Errno;
+                return SOCKET_ERROR;
+            }
         }
     }
 
@@ -2385,6 +2768,12 @@ WSPGetSockName(IN SOCKET Handle,
         return SOCKET_ERROR;
     }
 
+    if (Socket->SharedData->State == SocketOpen)
+    {
+        if (lpErrno) *lpErrno = WSAEINVAL;
+        return SOCKET_ERROR;
+    }
+
     Status = NtCreateEvent(&SockEvent,
                            EVENT_ALL_ACCESS,
                            NULL,
@@ -2438,6 +2827,13 @@ WSPGetSockName(IN SOCKET Handle,
                            SocketAddress->Address[0].Address,
                            SocketAddress->Address[0].AddressLength);
             *NameLength = Socket->SharedData->SizeOfLocalAddress;
+            if (Name->sa_family == AF_UNIX && SocketAddress->Address[0].Address[0] != '\0')
+            {
+                *NameLength = min(*NameLength,
+                                  (INT)(FIELD_OFFSET(SOCKADDR, sa_data) +
+                                        strnlen((PCSTR)SocketAddress->Address[0].Address,
+                                                SocketAddress->Address[0].AddressLength) + 1));
+            }
             TRACE("NameLength %d Address: %x Port %x\n",
                           *NameLength, ((struct sockaddr_in *)Name)->sin_addr.s_addr,
                           ((struct sockaddr_in *)Name)->sin_port);
@@ -2561,6 +2957,14 @@ WSPGetPeerName(IN SOCKET s,
     return MsafdReturnWithErrno ( Status, lpErrno, 0, NULL );
 }
 
+static
+VOID
+NTAPI
+MsafdInfoAPC(
+    _In_ PVOID ApcContext,
+    _In_ PIO_STATUS_BLOCK IoStatusBlock,
+    _In_ ULONG Reserved);
+
 INT
 WSPAPI
 WSPIoctl(IN  SOCKET Handle,
@@ -2623,8 +3027,46 @@ WSPIoctl(IN  SOCKET Handle,
                 }
             }
             Socket->SharedData->NonBlocking = NonBlocking ? 1 : 0;
-            NeedsCompletion = FALSE;
-            Errno = SetSocketInformation(Socket, AFD_INFO_BLOCKING_MODE, &NonBlocking, NULL, NULL, lpOverlapped, lpCompletionRoutine);
+            if (lpOverlapped && !lpCompletionRoutine &&
+                !(Socket->SharedData->CreateFlags & SO_SYNCHRONOUS_NONALERT))
+            {
+                AFD_INFO InfoData;
+                HANDLE SockEvent;
+                NTSTATUS Status;
+
+                Status = NtCreateEvent(&SockEvent, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE);
+                if (!NT_SUCCESS(Status))
+                {
+                    Errno = WSAENOBUFS;
+                    break;
+                }
+                RtlZeroMemory(&InfoData, sizeof(InfoData));
+                InfoData.InformationClass = AFD_INFO_BLOCKING_MODE;
+                InfoData.Information.Boolean = NonBlocking;
+                lpOverlapped->Internal = STATUS_PENDING;
+                Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
+                                               SockEvent,
+                                               NULL,
+                                               lpOverlapped,
+                                               (PIO_STATUS_BLOCK)&lpOverlapped->Internal,
+                                               IOCTL_AFD_SET_INFO,
+                                               &InfoData,
+                                               sizeof(InfoData),
+                                               NULL,
+                                               0);
+                if (Status == STATUS_PENDING)
+                {
+                    MsafdWaitForAlert(SockEvent);
+                    Status = (NTSTATUS)lpOverlapped->Internal;
+                }
+                NtClose(SockEvent);
+                NeedsCompletion = FALSE;
+                Errno = MsafdReturnWithErrno(Status, NULL, 0, NULL);
+                if (Errno == NO_ERROR)
+                    Ret = NO_ERROR;
+                break;
+            }
+            Errno = SetSocketInformation(Socket, AFD_INFO_BLOCKING_MODE, &NonBlocking, NULL, NULL, NULL, NULL);
             if (Errno == NO_ERROR)
                 Ret = NO_ERROR;
             break;
@@ -2666,10 +3108,26 @@ WSPIoctl(IN  SOCKET Handle,
                 break;
             }
 
-            /* FIXME: Return false if OOBINLINE is true for now
-               We should MSG_PEEK|MSG_OOB check with driver
-            */
-            *(BOOL*)lpvOutBuffer = !Socket->SharedData->OobInline;
+            *(BOOL*)lpvOutBuffer = TRUE;
+            if (!Socket->SharedData->OobInline)
+            {
+                AFD_RECV_INFO OobRecvInfo;
+                WSABUF OobBuffer;
+                CHAR OobByte;
+                IO_STATUS_BLOCK OobIosb;
+
+                OobBuffer.len = sizeof(OobByte);
+                OobBuffer.buf = &OobByte;
+                OobRecvInfo.BufferArray = (PAFD_WSABUF)&OobBuffer;
+                OobRecvInfo.BufferCount = 1;
+                OobRecvInfo.AfdFlags = AFD_IMMEDIATE;
+                OobRecvInfo.TdiFlags = TDI_RECEIVE_EXPEDITED | TDI_RECEIVE_PEEK;
+                if (NtDeviceIoControlFile((HANDLE)Handle, NULL, NULL, NULL, &OobIosb, IOCTL_AFD_RECV,
+                                          &OobRecvInfo, sizeof(OobRecvInfo), NULL, 0) == STATUS_RECEIVE_EXPEDITED)
+                {
+                    *(BOOL*)lpvOutBuffer = FALSE;
+                }
+            }
 
             cbRet = sizeof(BOOL);
             Errno = NO_ERROR;
@@ -2695,6 +3153,7 @@ WSPIoctl(IN  SOCKET Handle,
                 GUID ConnectExGUID = WSAID_CONNECTEX;
                 GUID DisconnectExGUID = WSAID_DISCONNECTEX;
                 GUID GetAcceptExSockaddrsGUID = WSAID_GETACCEPTEXSOCKADDRS;
+                GUID RecvMsgGUID = WSAID_WSARECVMSG;
 
                 if (IsEqualGUID(&AcceptExGUID, lpvInBuffer))
                 {
@@ -2722,12 +3181,14 @@ WSPIoctl(IN  SOCKET Handle,
                     *((PVOID *)lpvOutBuffer) = WSPGetAcceptExSockaddrs;
                     cbRet = sizeof(PVOID);
                     Errno = NO_ERROR;
-                    /* See CORE-14966 and associated commits.
-                     * Original line below was 'Ret = NO_ERROR:'.
-                     * This caused winetest ws2_32:sock to hang.
-                     * This new Ret value allows the test to complete. */
-                    ERR("SIO_GET_EXTENSION_FUNCTION_POINTER UNIMPLEMENTED\n");
-                    Ret = SOCKET_ERROR;
+                    Ret = NO_ERROR;
+                }
+                else if (IsEqualGUID(&RecvMsgGUID, lpvInBuffer))
+                {
+                    *((PVOID *)lpvOutBuffer) = WSPRecvMsg;
+                    cbRet = sizeof(PVOID);
+                    Errno = NO_ERROR;
+                    Ret = NO_ERROR;
                 }
                 else
                 {
@@ -2737,10 +3198,137 @@ WSPIoctl(IN  SOCKET Handle,
             }
 
             break;
+        case SIO_EXT_SENDMSG:
+        {
+            LPWSASENDMSG SendMsg = lpvInBuffer;
+
+            NeedsCompletion = FALSE;
+            if (IS_INTRESOURCE(SendMsg) || cbInBuffer < sizeof(*SendMsg) || IS_INTRESOURCE(SendMsg->lpMsg))
+            {
+                Errno = WSAEFAULT;
+                break;
+            }
+
+            Ret = WSPSendTo(Handle,
+                            SendMsg->lpMsg->lpBuffers,
+                            SendMsg->lpMsg->dwBufferCount,
+                            SendMsg->lpNumberOfBytesSent,
+                            SendMsg->dwFlags,
+                            SendMsg->lpMsg->name,
+                            SendMsg->lpMsg->namelen,
+                            SendMsg->lpOverlapped,
+                            SendMsg->lpCompletionRoutine,
+                            lpThreadId,
+                            &Errno);
+            break;
+        }
+        case SIO_BASE_HANDLE:
+            /*
+             * This provider is the base service provider, so its socket is
+             * already the handle requested by SIO_BASE_HANDLE.  Successful
+             * base-handle queries are synchronous; this provider cannot queue
+             * the unsupported overlapped form yet.
+             */
+            NeedsCompletion = FALSE;
+            if (lpOverlapped)
+            {
+                Errno = WSAEOPNOTSUPP;
+                break;
+            }
+            if (IS_INTRESOURCE(lpvOutBuffer) || cbOutBuffer < sizeof(SOCKET))
+            {
+                Errno = WSAEFAULT;
+                break;
+            }
+
+            *(SOCKET *)lpvOutBuffer = Handle;
+            cbRet = sizeof(SOCKET);
+            Errno = NO_ERROR;
+            Ret = NO_ERROR;
+            break;
+        case SIO_ADDRESS_LIST_CHANGE:
+        {
+            ULONG AfdFlags = 0;
+            IO_STATUS_BLOCK SyncIosb;
+            PIO_STATUS_BLOCK Iosb = &SyncIosb;
+            HANDLE ChangeEvent = NULL;
+            PIO_APC_ROUTINE ApcFunction = NULL;
+            PVOID ApcContext = NULL;
+            PMSAFD_INFO_APC_CONTEXT InfoApcContext;
+            NTSTATUS Status;
+
+            NeedsCompletion = FALSE;
+
+            if (!lpOverlapped)
+            {
+                if (Socket->SharedData->NonBlocking)
+                    AfdFlags = AFD_IMMEDIATE;
+
+                Status = NtCreateEvent(&ChangeEvent, EVENT_ALL_ACCESS, NULL, SynchronizationEvent, FALSE);
+                if (!NT_SUCCESS(Status))
+                {
+                    Errno = TranslateNtStatusError(Status);
+                    break;
+                }
+            }
+            else
+            {
+                Iosb = (PIO_STATUS_BLOCK)lpOverlapped;
+                if (lpCompletionRoutine)
+                {
+                    InfoApcContext = HeapAlloc(GlobalHeap, 0, sizeof(*InfoApcContext));
+                    if (!InfoApcContext)
+                    {
+                        Errno = WSAENOBUFS;
+                        break;
+                    }
+                    InfoApcContext->lpOverlapped = lpOverlapped;
+                    InfoApcContext->lpCompletionRoutine = lpCompletionRoutine;
+                    InfoApcContext->lpInfoData = NULL;
+                    ApcFunction = &MsafdInfoAPC;
+                    ApcContext = InfoApcContext;
+                }
+                else
+                {
+                    ChangeEvent = lpOverlapped->hEvent;
+                    if (!((ULONG_PTR)ChangeEvent & 1))
+                        ApcContext = lpOverlapped;
+                }
+            }
+
+            Iosb->Status = STATUS_PENDING;
+            Iosb->Information = 0;
+
+            Status = NtDeviceIoControlFile((HANDLE)Handle,
+                                           ChangeEvent,
+                                           ApcFunction,
+                                           ApcContext,
+                                           Iosb,
+                                           IOCTL_AFD_ADDRESS_LIST_CHANGE,
+                                           &AfdFlags,
+                                           sizeof(AfdFlags),
+                                           NULL,
+                                           0);
+
+            if (!lpOverlapped)
+            {
+                if (Status == STATUS_PENDING)
+                {
+                    MsafdWaitForAlert(ChangeEvent);
+                    Status = SyncIosb.Status;
+                }
+                NtClose(ChangeEvent);
+            }
+
+            Errno = TranslateNtStatusError(Status);
+            if (Errno == NO_ERROR)
+                Ret = NO_ERROR;
+            break;
+        }
         case SIO_ADDRESS_LIST_QUERY:
             if (IS_INTRESOURCE(lpvOutBuffer) || cbOutBuffer == 0)
             {
-                cbRet = sizeof(SOCKET_ADDRESS_LIST) + sizeof(Socket->SharedData->WSLocalAddress);
+                cbRet = sizeof(SOCKET_ADDRESS_LIST) + Socket->SharedData->SizeOfLocalAddress;
                 Errno = WSAEFAULT;
                 break;
             }
@@ -2750,18 +3338,18 @@ WSPIoctl(IN  SOCKET Handle,
                 break;
             }
 
-            cbRet = sizeof(SOCKET_ADDRESS_LIST) + sizeof(Socket->SharedData->WSLocalAddress);
+            cbRet = sizeof(SOCKET_ADDRESS_LIST) + Socket->SharedData->SizeOfLocalAddress;
 
             ((SOCKET_ADDRESS_LIST*)lpvOutBuffer)->iAddressCount = 1;
 
-            if (cbOutBuffer < (sizeof(SOCKET_ADDRESS_LIST) + sizeof(Socket->SharedData->WSLocalAddress)))
+            if (cbOutBuffer < (sizeof(SOCKET_ADDRESS_LIST) + Socket->SharedData->SizeOfLocalAddress))
             {
                 Errno = WSAEFAULT;
                 break;
             }
 
-            ((SOCKET_ADDRESS_LIST*)lpvOutBuffer)->Address[0].iSockaddrLength = sizeof(Socket->SharedData->WSLocalAddress);
-            ((SOCKET_ADDRESS_LIST*)lpvOutBuffer)->Address[0].lpSockaddr = &Socket->SharedData->WSLocalAddress;
+            ((SOCKET_ADDRESS_LIST*)lpvOutBuffer)->Address[0].iSockaddrLength = Socket->SharedData->SizeOfLocalAddress;
+            ((SOCKET_ADDRESS_LIST*)lpvOutBuffer)->Address[0].lpSockaddr = (PSOCKADDR)&Socket->SharedData->WSLocalAddress;
 
             Errno = NO_ERROR;
             Ret = NO_ERROR;
@@ -2822,6 +3410,7 @@ WSPGetSockOpt(IN SOCKET Handle,
     PVOID Buffer;
     INT BufferSize;
     BOOL BoolBuffer;
+    BOOLEAN BooleanBuffer;
     DWORD DwordBuffer;
     INT Errno;
 
@@ -2923,6 +3512,12 @@ WSPGetSockOpt(IN SOCKET Handle,
                     BufferSize = sizeof(BOOL);
                     break;
 
+                case SO_RANDOMIZE_PORT:
+                    BooleanBuffer = (Socket->RandomizePort != FALSE);
+                    Buffer = &BooleanBuffer;
+                    BufferSize = sizeof(BOOLEAN);
+                    break;
+
                 case SO_ERROR:
                     Buffer = &Socket->SharedData->SocketLastError;
                     BufferSize = sizeof(INT);
@@ -2947,29 +3542,78 @@ WSPGetSockOpt(IN SOCKET Handle,
                     BufferSize = sizeof(Socket->ProtocolInfo);
                     break;
 
+                case SO_BSP_STATE:
+                {
+                    PCSADDR_INFO CsAddr = (PCSADDR_INFO)OptionValue;
+                    INT AddressSize;
+
+                    if (Socket->SharedData->AddressFamily == AF_INET)
+                        AddressSize = sizeof(SOCKADDR_IN);
+                    else if (Socket->SharedData->AddressFamily == AF_INET6)
+                        AddressSize = sizeof(SOCKADDR_IN6);
+                    else
+                    {
+                        if (lpErrno) *lpErrno = WSAEAFNOSUPPORT;
+                        return SOCKET_ERROR;
+                    }
+
+                    if (*OptionLength < (INT)sizeof(CSADDR_INFO) + 2 * AddressSize)
+                    {
+                        if (lpErrno) *lpErrno = WSAEFAULT;
+                        return SOCKET_ERROR;
+                    }
+
+                    CsAddr->LocalAddr.lpSockaddr = (LPSOCKADDR)(CsAddr + 1);
+                    CsAddr->LocalAddr.iSockaddrLength = AddressSize;
+                    if (WSPGetSockName(Handle, CsAddr->LocalAddr.lpSockaddr,
+                                       &CsAddr->LocalAddr.iSockaddrLength, &Errno) != NO_ERROR)
+                    {
+                        CsAddr->LocalAddr.lpSockaddr = NULL;
+                        CsAddr->LocalAddr.iSockaddrLength = 0;
+                    }
+
+                    CsAddr->RemoteAddr.lpSockaddr = (LPSOCKADDR)((PCHAR)(CsAddr + 1) + AddressSize);
+                    CsAddr->RemoteAddr.iSockaddrLength = AddressSize;
+                    if (WSPGetPeerName(Handle, CsAddr->RemoteAddr.lpSockaddr,
+                                       &CsAddr->RemoteAddr.iSockaddrLength, &Errno) != NO_ERROR)
+                    {
+                        CsAddr->RemoteAddr.lpSockaddr = NULL;
+                        CsAddr->RemoteAddr.iSockaddrLength = 0;
+                    }
+
+                    CsAddr->iSocketType = Socket->SharedData->SocketType;
+                    CsAddr->iProtocol = Socket->SharedData->Protocol;
+                    return NO_ERROR;
+                }
+
+                case SO_MAX_MSG_SIZE:
+                    goto SendToHelper;
+
                 case SO_GROUP_ID:
                 case SO_GROUP_PRIORITY:
-                case SO_MAX_MSG_SIZE:
+                    DbgPrint("MSAFD: Get unimplemented optname %x\n", OptionName);
+                    if (lpErrno) *lpErrno = WSAENOPROTOOPT;
+                    return SOCKET_ERROR;
 
                 default:
                     DbgPrint("MSAFD: Get unknown optname %x\n", OptionName);
-                    if (lpErrno) *lpErrno = WSAENOPROTOOPT;
+                    if (lpErrno) *lpErrno = WSAEINVAL;
+                    *OptionLength = 0;
                     return SOCKET_ERROR;
             }
 
             if (*OptionLength < BufferSize)
             {
                 if (lpErrno) *lpErrno = WSAEFAULT;
-                *OptionLength = BufferSize;
                 return SOCKET_ERROR;
             }
             RtlCopyMemory(OptionValue, Buffer, BufferSize);
+            *OptionLength = BufferSize;
 
             return 0;
 
         default:
-            if (lpErrno) *lpErrno = WSAEINVAL;
-            return SOCKET_ERROR;
+            break;
     }
 
 SendToHelper:
@@ -2981,6 +3625,8 @@ SendToHelper:
                                                         OptionName,
                                                         OptionValue,
                                                         (LPINT)OptionLength);
+    if (Errno != NO_ERROR && Errno != WSAEFAULT)
+        *OptionLength = 0;
     if (lpErrno) *lpErrno = Errno;
     return (Errno == NO_ERROR) ? NO_ERROR : SOCKET_ERROR;
 }
@@ -3107,6 +3753,7 @@ WSPSetSockOpt(
 {
     PSOCKET_INFORMATION Socket;
     INT Errno;
+    BOOLEAN OobInline;
 
     /* Get the Socket Structure associate to this Socket*/
     Socket = GetSocketStructure(s);
@@ -3143,6 +3790,8 @@ WSPSetSockOpt(
                   return SOCKET_ERROR;
               }
               Socket->SharedData->OobInline = (*optval != 0) ? 1 : 0;
+              OobInline = Socket->SharedData->OobInline;
+              SetSocketInformation(Socket, AFD_INFO_INLINING_MODE, &OobInline, NULL, NULL, NULL, NULL);
               return NO_ERROR;
 
            case SO_DONTLINGER:
@@ -3172,6 +3821,15 @@ WSPSetSockOpt(
               Socket->SharedData->ExclusiveAddressUse = (*optval != 0) ? 1 : 0;
               return NO_ERROR;
 
+           case SO_RANDOMIZE_PORT:
+              if (optlen < sizeof(BOOLEAN))
+              {
+                  if (lpErrno) *lpErrno = WSAEFAULT;
+                  return SOCKET_ERROR;
+              }
+              Socket->RandomizePort = (*optval != 0);
+              return NO_ERROR;
+
            case SO_LINGER:
               if (optlen < sizeof(struct linger))
               {
@@ -3197,13 +3855,7 @@ WSPSetSockOpt(
                                    NULL,
                                    NULL,
                                    NULL);
-              GetSocketInformation(Socket,
-                                   AFD_INFO_SEND_WINDOW_SIZE,
-                                   NULL,
-                                   &Socket->SharedData->SizeOfSendBuffer,
-                                   NULL,
-                                   NULL,
-                                   NULL);
+              Socket->SharedData->SizeOfSendBuffer = *(PULONG)optval;
 
               return NO_ERROR;
 
@@ -3215,27 +3867,28 @@ WSPSetSockOpt(
               }
 
               /* FIXME: We should not have to limit the packet receive buffer size like this. workaround for CORE-15804 */
-              if (*(PULONG)optval > 0x2000)
-                  *(PULONG)optval = 0x2000;
+              {
+                  ULONG RecvBufferSize = *(PULONG)optval;
 
-              SetSocketInformation(Socket,
-                                   AFD_INFO_RECEIVE_WINDOW_SIZE,
-                                   NULL,
-                                   (PULONG)optval,
-                                   NULL,
-                                   NULL,
-                                   NULL);
-              GetSocketInformation(Socket,
-                                   AFD_INFO_RECEIVE_WINDOW_SIZE,
-                                   NULL,
-                                   &Socket->SharedData->SizeOfRecvBuffer,
-                                   NULL,
-                                   NULL,
-                                   NULL);
+                  if (Socket->SharedData->SocketType != SOCK_DGRAM && RecvBufferSize > 0x2000)
+                      RecvBufferSize = 0x2000;
+
+                  if (SetSocketInformationEx(Socket,
+                                             AFD_INFO_RECEIVE_WINDOW_SIZE,
+                                             NULL,
+                                             &RecvBufferSize,
+                                             NULL,
+                                             NULL,
+                                             NULL,
+                                             lpErrno) == SOCKET_ERROR)
+                      return SOCKET_ERROR;
+              }
+              Socket->SharedData->SizeOfRecvBuffer = *(PULONG)optval;
 
               return NO_ERROR;
 
            case SO_UPDATE_CONNECT_CONTEXT:
+           case SO_UPDATE_ACCEPT_CONTEXT:
               return MsafdUpdateConnectionContext(s, lpErrno);
 
            case SO_ERROR:
@@ -3299,6 +3952,138 @@ SendToHelper:
     return (Errno == NO_ERROR) ? NO_ERROR : SOCKET_ERROR;
 }
 
+static PSOCKET_INFORMATION
+SockFindAndReferenceSocket(SOCKET Handle)
+{
+    PSOCKET_INFORMATION Socket;
+
+    EnterCriticalSection(&SocketListLock);
+    for (Socket = SocketListHead; Socket != NULL; Socket = Socket->NextSocket)
+    {
+        if (Socket->Handle == Handle)
+        {
+            InterlockedIncrement(&Socket->RefCount);
+            break;
+        }
+    }
+    LeaveCriticalSection(&SocketListLock);
+
+    return Socket;
+}
+
+static VOID
+SockReleaseCallReference(PSOCKET_INFORMATION Socket)
+{
+    if (Socket != NULL)
+        SockDereferenceSocket(Socket);
+}
+
+#define SOCK_REFERENCED_CALL(Type, Handle, Call) \
+    { \
+        PSOCKET_INFORMATION Socket = SockFindAndReferenceSocket(Handle); \
+        Type Result = Call; \
+        SockReleaseCallReference(Socket); \
+        return Result; \
+    }
+
+static SOCKET WSPAPI
+SockWSPAccept(SOCKET s, struct sockaddr FAR *addr, LPINT addrlen, LPCONDITIONPROC lpfnCondition,
+              DWORD_PTR dwCallbackData, LPINT lpErrno)
+SOCK_REFERENCED_CALL(SOCKET, s, WSPAccept(s, addr, addrlen, lpfnCondition, dwCallbackData, lpErrno))
+
+static INT WSPAPI
+SockWSPAsyncSelect(SOCKET s, HWND hWnd, UINT wMsg, LONG lEvent, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPAsyncSelect(s, hWnd, wMsg, lEvent, lpErrno))
+
+static INT WSPAPI
+SockWSPBind(SOCKET s, CONST SOCKADDR *name, INT namelen, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPBind(s, name, namelen, lpErrno))
+
+static INT WSPAPI
+SockWSPCloseSocket(SOCKET s, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPCloseSocket(s, lpErrno))
+
+static INT WSPAPI
+SockWSPConnect(SOCKET s, CONST SOCKADDR *name, INT namelen, LPWSABUF lpCallerData, LPWSABUF lpCalleeData,
+               LPQOS lpSQOS, LPQOS lpGQOS, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPConnect(s, name, namelen, lpCallerData, lpCalleeData, lpSQOS, lpGQOS, lpErrno))
+
+static INT WSPAPI
+SockWSPDuplicateSocket(SOCKET s, DWORD dwProcessId, LPWSAPROTOCOL_INFOW lpProtocolInfo, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPDuplicateSocket(s, dwProcessId, lpProtocolInfo, lpErrno))
+
+static INT WSPAPI
+SockWSPEnumNetworkEvents(SOCKET s, WSAEVENT hEventObject, LPWSANETWORKEVENTS lpNetworkEvents, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPEnumNetworkEvents(s, hEventObject, lpNetworkEvents, lpErrno))
+
+static INT WSPAPI
+SockWSPEventSelect(SOCKET s, WSAEVENT hEventObject, LONG lNetworkEvents, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPEventSelect(s, hEventObject, lNetworkEvents, lpErrno))
+
+static BOOL WSPAPI
+SockWSPGetOverlappedResult(SOCKET s, LPWSAOVERLAPPED lpOverlapped, LPDWORD lpcbTransfer, BOOL fWait,
+                           LPDWORD lpdwFlags, LPINT lpErrno)
+SOCK_REFERENCED_CALL(BOOL, s, WSPGetOverlappedResult(s, lpOverlapped, lpcbTransfer, fWait, lpdwFlags, lpErrno))
+
+static INT WSPAPI
+SockWSPGetPeerName(SOCKET s, LPSOCKADDR name, LPINT namelen, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPGetPeerName(s, name, namelen, lpErrno))
+
+static INT WSPAPI
+SockWSPGetSockName(SOCKET s, LPSOCKADDR name, LPINT namelen, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPGetSockName(s, name, namelen, lpErrno))
+
+static INT WSPAPI
+SockWSPGetSockOpt(SOCKET s, INT level, INT optname, CHAR FAR *optval, LPINT optlen, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPGetSockOpt(s, level, optname, optval, optlen, lpErrno))
+
+static INT WSPAPI
+SockWSPIoctl(SOCKET s, DWORD dwIoControlCode, LPVOID lpvInBuffer, DWORD cbInBuffer, LPVOID lpvOutBuffer,
+             DWORD cbOutBuffer, LPDWORD lpcbBytesReturned, LPWSAOVERLAPPED lpOverlapped,
+             LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, LPWSATHREADID lpThreadId, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPIoctl(s, dwIoControlCode, lpvInBuffer, cbInBuffer, lpvOutBuffer, cbOutBuffer,
+                                      lpcbBytesReturned, lpOverlapped, lpCompletionRoutine, lpThreadId, lpErrno))
+
+static INT WSPAPI
+SockWSPListen(SOCKET s, INT backlog, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPListen(s, backlog, lpErrno))
+
+static INT WSPAPI
+SockWSPRecv(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount, LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags,
+            LPWSAOVERLAPPED lpOverlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+            LPWSATHREADID lpThreadId, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPRecv(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpOverlapped,
+                                     lpCompletionRoutine, lpThreadId, lpErrno))
+
+static INT WSPAPI
+SockWSPRecvFrom(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount, LPDWORD lpNumberOfBytesRecvd, LPDWORD lpFlags,
+                LPSOCKADDR lpFrom, LPINT lpFromlen, LPWSAOVERLAPPED lpOverlapped,
+                LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, LPWSATHREADID lpThreadId, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPRecvFrom(s, lpBuffers, dwBufferCount, lpNumberOfBytesRecvd, lpFlags, lpFrom,
+                                         lpFromlen, lpOverlapped, lpCompletionRoutine, lpThreadId, lpErrno))
+
+static INT WSPAPI
+SockWSPSend(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount, LPDWORD lpNumberOfBytesSent, DWORD dwFlags,
+            LPWSAOVERLAPPED lpOverlapped, LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine,
+            LPWSATHREADID lpThreadId, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPSend(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpOverlapped,
+                                     lpCompletionRoutine, lpThreadId, lpErrno))
+
+static INT WSPAPI
+SockWSPSendTo(SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount, LPDWORD lpNumberOfBytesSent, DWORD dwFlags,
+              CONST SOCKADDR *lpTo, INT iTolen, LPWSAOVERLAPPED lpOverlapped,
+              LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine, LPWSATHREADID lpThreadId, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPSendTo(s, lpBuffers, dwBufferCount, lpNumberOfBytesSent, dwFlags, lpTo, iTolen,
+                                       lpOverlapped, lpCompletionRoutine, lpThreadId, lpErrno))
+
+static INT WSPAPI
+SockWSPSetSockOpt(SOCKET s, INT level, INT optname, CONST CHAR FAR *optval, INT optlen, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPSetSockOpt(s, level, optname, optval, optlen, lpErrno))
+
+static INT WSPAPI
+SockWSPShutdown(SOCKET s, INT how, LPINT lpErrno)
+SOCK_REFERENCED_CALL(INT, s, WSPShutdown(s, how, lpErrno))
+
 /*
  * FUNCTION: Initialize service provider for a client
  * ARGUMENTS:
@@ -3335,40 +4120,41 @@ WSPStartup(
 
     if (Status == NO_ERROR)
     {
-        lpProcTable->lpWSPAccept = WSPAccept;
+        lpProcTable->lpWSPAccept = SockWSPAccept;
         lpProcTable->lpWSPAddressToString = WSPAddressToString;
-        lpProcTable->lpWSPAsyncSelect = WSPAsyncSelect;
-        lpProcTable->lpWSPBind = WSPBind;
+        lpProcTable->lpWSPAsyncSelect = SockWSPAsyncSelect;
+        lpProcTable->lpWSPBind = SockWSPBind;
         lpProcTable->lpWSPCancelBlockingCall = WSPCancelBlockingCall;
         lpProcTable->lpWSPCleanup = WSPCleanup;
-        lpProcTable->lpWSPCloseSocket = WSPCloseSocket;
-        lpProcTable->lpWSPConnect = WSPConnect;
-        lpProcTable->lpWSPDuplicateSocket = WSPDuplicateSocket;
-        lpProcTable->lpWSPEnumNetworkEvents = WSPEnumNetworkEvents;
-        lpProcTable->lpWSPEventSelect = WSPEventSelect;
-        lpProcTable->lpWSPGetOverlappedResult = WSPGetOverlappedResult;
-        lpProcTable->lpWSPGetPeerName = WSPGetPeerName;
-        lpProcTable->lpWSPGetSockName = WSPGetSockName;
-        lpProcTable->lpWSPGetSockOpt = WSPGetSockOpt;
+        lpProcTable->lpWSPCloseSocket = SockWSPCloseSocket;
+        lpProcTable->lpWSPConnect = SockWSPConnect;
+        lpProcTable->lpWSPDuplicateSocket = SockWSPDuplicateSocket;
+        lpProcTable->lpWSPEnumNetworkEvents = SockWSPEnumNetworkEvents;
+        lpProcTable->lpWSPEventSelect = SockWSPEventSelect;
+        lpProcTable->lpWSPGetOverlappedResult = SockWSPGetOverlappedResult;
+        lpProcTable->lpWSPGetPeerName = SockWSPGetPeerName;
+        lpProcTable->lpWSPGetSockName = SockWSPGetSockName;
+        lpProcTable->lpWSPGetSockOpt = SockWSPGetSockOpt;
         lpProcTable->lpWSPGetQOSByName = WSPGetQOSByName;
-        lpProcTable->lpWSPIoctl = WSPIoctl;
+        lpProcTable->lpWSPIoctl = SockWSPIoctl;
         lpProcTable->lpWSPJoinLeaf = WSPJoinLeaf;
-        lpProcTable->lpWSPListen = WSPListen;
-        lpProcTable->lpWSPRecv = WSPRecv;
+        lpProcTable->lpWSPListen = SockWSPListen;
+        lpProcTable->lpWSPRecv = SockWSPRecv;
         lpProcTable->lpWSPRecvDisconnect = WSPRecvDisconnect;
-        lpProcTable->lpWSPRecvFrom = WSPRecvFrom;
+        lpProcTable->lpWSPRecvFrom = SockWSPRecvFrom;
         lpProcTable->lpWSPSelect = WSPSelect;
-        lpProcTable->lpWSPSend = WSPSend;
+        lpProcTable->lpWSPSend = SockWSPSend;
         lpProcTable->lpWSPSendDisconnect = WSPSendDisconnect;
-        lpProcTable->lpWSPSendTo = WSPSendTo;
-        lpProcTable->lpWSPSetSockOpt = WSPSetSockOpt;
-        lpProcTable->lpWSPShutdown = WSPShutdown;
+        lpProcTable->lpWSPSendTo = SockWSPSendTo;
+        lpProcTable->lpWSPSetSockOpt = SockWSPSetSockOpt;
+        lpProcTable->lpWSPShutdown = SockWSPShutdown;
         lpProcTable->lpWSPSocket = WSPSocket;
         lpProcTable->lpWSPStringToAddress = WSPStringToAddress;
         lpWSPData->wVersion     = MAKEWORD(2, 2);
         lpWSPData->wHighVersion = MAKEWORD(2, 2);
         /* Save CatalogEntryId for all upcalls */
         CatalogEntryId = lpProtocolInfo->dwCatalogEntryId;
+        InterlockedIncrement(&StartupCount);
     }
 
     TRACE("Status (%d).\n", Status);
@@ -3386,7 +4172,7 @@ WSPAddressToString(IN LPSOCKADDR lpsaAddress,
                    OUT LPINT lpErrno)
 {
     SIZE_T size;
-    WCHAR buffer[54]; /* 32 digits + 7':' + '[' + '%" + 5 digits + ']:' + 5 digits + '\0' */
+    WCHAR buffer[INET6_ADDRSTRLEN];
     WCHAR *p;
 
     if (!lpsaAddress || !lpszAddressString || !lpdwAddressStringLength)
@@ -3417,9 +4203,38 @@ WSPAddressToString(IN LPSOCKADDR lpsaAddress,
                 *p = 0;
             }
             break;
+        case AF_INET6:
+        {
+            SOCKADDR_IN6 *Address6 = (SOCKADDR_IN6 *)lpsaAddress;
+            ULONG Length = RTL_NUMBER_OF(buffer);
+
+            if (dwAddressLength < sizeof(SOCKADDR_IN6) ||
+                !NT_SUCCESS(RtlIpv6AddressToStringExW(&Address6->sin6_addr,
+                                                      Address6->sin6_scope_id,
+                                                      Address6->sin6_port,
+                                                      buffer,
+                                                      &Length)))
+            {
+                if (lpErrno) *lpErrno = WSAEINVAL;
+                return SOCKET_ERROR;
+            }
+            break;
+        }
         default:
-            if (lpErrno) *lpErrno = WSAEINVAL;
-            return SOCKET_ERROR;
+        {
+            PHELPER_DATA HelperData;
+            INT Errno = SockGetHelperForFamily(lpsaAddress->sa_family, &HelperData);
+
+            if (Errno == NO_ERROR)
+            {
+                Errno = HelperData->WSHAddressToString ?
+                        HelperData->WSHAddressToString(lpsaAddress, dwAddressLength, lpProtocolInfo,
+                                                       lpszAddressString, lpdwAddressStringLength) :
+                        WSAEINVAL;
+            }
+            if (lpErrno) *lpErrno = Errno;
+            return Errno == NO_ERROR ? 0 : SOCKET_ERROR;
+        }
     }
 
     size = wcslen(buffer) + 1;
@@ -3544,6 +4359,47 @@ WSPStringToAddress(IN LPWSTR AddressString,
             sockaddr->sin_port = port;
         }
     }
+    else if (AddressFamily == AF_INET6)
+    {
+        SOCKADDR_IN6 *Address6 = (SOCKADDR_IN6 *)lpAddress;
+        IN6_ADDR Address;
+        ULONG ScopeId;
+        USHORT Port;
+
+        if (*lpAddressLength < (INT)sizeof(SOCKADDR_IN6))
+        {
+            if (lpErrno) *lpErrno = WSAEFAULT;
+        }
+        else if (!NT_SUCCESS(RtlIpv6StringToAddressExW(AddressString, &Address, &ScopeId, &Port)))
+        {
+            if (lpErrno) *lpErrno = WSAEINVAL;
+        }
+        else
+        {
+            if (lpErrno) *lpErrno = NO_ERROR;
+            *lpAddressLength = sizeof(SOCKADDR_IN6);
+            memset(Address6, 0, sizeof(*Address6));
+            Address6->sin6_family = AF_INET6;
+            Address6->sin6_addr = Address;
+            Address6->sin6_scope_id = ScopeId;
+            Address6->sin6_port = Port;
+        }
+    }
+    else
+    {
+        PHELPER_DATA HelperData;
+        DWORD Length = *lpAddressLength;
+        INT Errno = SockGetHelperForFamily(AddressFamily, &HelperData);
+
+        if (Errno == NO_ERROR)
+        {
+            Errno = HelperData->WSHStringToAddress ?
+                    HelperData->WSHStringToAddress(AddressString, AddressFamily, lpProtocolInfo, lpAddress, &Length) :
+                    WSAEINVAL;
+            *lpAddressLength = Length;
+        }
+        if (lpErrno) *lpErrno = Errno;
+    }
 
     if (lpErrno && !*lpErrno)
     {
@@ -3560,12 +4416,55 @@ WSPStringToAddress(IN LPWSTR AddressString,
  * RETURNS:
  *     0 if successful, or SOCKET_ERROR if not
  */
+static
+VOID
+MsafdCloseAllSockets(VOID)
+{
+    PSOCKET_INFORMATION Socket;
+    SOCKET *Handles;
+    ULONG Count = 0, Index = 0;
+    INT Errno;
+
+    EnterCriticalSection(&SocketListLock);
+    for (Socket = SocketListHead; Socket; Socket = Socket->NextSocket)
+        Count++;
+
+    Handles = Count ? HeapAlloc(GlobalHeap, 0, Count * sizeof(SOCKET)) : NULL;
+    if (Handles)
+    {
+        for (Socket = SocketListHead; Socket; Socket = Socket->NextSocket)
+            Handles[Index++] = Socket->Handle;
+    }
+    LeaveCriticalSection(&SocketListLock);
+
+    if (!Handles)
+        return;
+
+    for (Index = 0; Index < Count; Index++)
+        WSPCloseSocket(Handles[Index], &Errno);
+
+    HeapFree(GlobalHeap, 0, Handles);
+}
+
 INT
 WSPAPI
 WSPCleanup(OUT LPINT lpErrno)
 
 {
+    LONG Count;
+
     TRACE("Leaving.\n");
+
+    Count = InterlockedDecrement(&StartupCount);
+    if (Count < 0)
+    {
+        InterlockedIncrement(&StartupCount);
+        if (lpErrno) *lpErrno = WSANOTINITIALISED;
+        return SOCKET_ERROR;
+    }
+
+    if (Count == 0 && !RtlDllShutdownInProgress())
+        MsafdCloseAllSockets();
 
     if (lpErrno) *lpErrno = NO_ERROR;
 
@@ -3585,7 +4484,7 @@ MsafdInfoAPC(
     TRACE("MsafdInfoAPC(%p %lx %lx)\n", ApcContext, IoStatusBlock->Status, IoStatusBlock->Information);
 
     if (Context->lpCompletionRoutine)
-        Context->lpCompletionRoutine(IoStatusBlock->Status, IoStatusBlock->Information, Context->lpOverlapped, 0);
+        Context->lpCompletionRoutine(TranslateNtStatusError(IoStatusBlock->Status), IoStatusBlock->Information, Context->lpOverlapped, 0);
 
     /* Free IOCTL buffer */
     HeapFree(GlobalHeap, 0, Context->lpInfoData);
@@ -3719,14 +4618,15 @@ GetSocketInformation(PSOCKET_INFORMATION Socket,
 }
 
 
-int
-SetSocketInformation(PSOCKET_INFORMATION Socket,
-                     ULONG AfdInformationClass,
-                     PBOOLEAN Boolean OPTIONAL,
-                     PULONG Ulong OPTIONAL,
-                     PLARGE_INTEGER LargeInteger OPTIONAL,
-                     LPWSAOVERLAPPED Overlapped OPTIONAL,
-                     LPWSAOVERLAPPED_COMPLETION_ROUTINE CompletionRoutine OPTIONAL)
+static int
+SetSocketInformationEx(PSOCKET_INFORMATION Socket,
+                       ULONG AfdInformationClass,
+                       PBOOLEAN Boolean OPTIONAL,
+                       PULONG Ulong OPTIONAL,
+                       PLARGE_INTEGER LargeInteger OPTIONAL,
+                       LPWSAOVERLAPPED Overlapped OPTIONAL,
+                       LPWSAOVERLAPPED_COMPLETION_ROUTINE CompletionRoutine OPTIONAL,
+                       LPINT Errno OPTIONAL)
 {
     PIO_STATUS_BLOCK        IOSB;
     IO_STATUS_BLOCK         DummyIOSB;
@@ -3739,7 +4639,7 @@ SetSocketInformation(PSOCKET_INFORMATION Socket,
 
     InfoData = HeapAlloc(GlobalHeap, 0, sizeof(*InfoData));
     if (!InfoData)
-        return SOCKET_ERROR;
+        return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, Errno, 0, NULL);
 
     Status = NtCreateEvent(&SockEvent,
                            EVENT_ALL_ACCESS,
@@ -3749,7 +4649,7 @@ SetSocketInformation(PSOCKET_INFORMATION Socket,
     if (!NT_SUCCESS(Status))
     {
         HeapFree(GlobalHeap, 0, InfoData);
-        return SOCKET_ERROR;
+        return MsafdReturnWithErrno(Status, Errno, 0, NULL);
     }
 
     /* Set Info Class */
@@ -3786,7 +4686,7 @@ SetSocketInformation(PSOCKET_INFORMATION Socket,
             TRACE("Opened without flag WSA_FLAG_OVERLAPPED. Do nothing.\n");
             NtClose(SockEvent);
             HeapFree(GlobalHeap, 0, InfoData);
-            return MsafdReturnWithErrno(STATUS_SUCCESS, NULL, 0, NULL);
+            return MsafdReturnWithErrno(STATUS_SUCCESS, Errno, 0, NULL);
         }
 
         APCContext = HeapAlloc(GlobalHeap, 0, sizeof(*APCContext));
@@ -3795,7 +4695,7 @@ SetSocketInformation(PSOCKET_INFORMATION Socket,
             ERR("Not enough memory for APC Context\n");
             NtClose(SockEvent);
             HeapFree(GlobalHeap, 0, InfoData);
-            return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, NULL, 0, NULL);
+            return MsafdReturnWithErrno(STATUS_INSUFFICIENT_RESOURCES, Errno, 0, NULL);
         }
         APCContext->lpCompletionRoutine = CompletionRoutine;
         APCContext->lpOverlapped = Overlapped;
@@ -3838,7 +4738,208 @@ SetSocketInformation(PSOCKET_INFORMATION Socket,
         HeapFree(GlobalHeap, 0, InfoData);
     }
 
-    return MsafdReturnWithErrno(Status, NULL, 0, NULL);
+    return MsafdReturnWithErrno(Status, Errno, 0, NULL);
+}
+
+int
+SetSocketInformation(PSOCKET_INFORMATION Socket,
+                     ULONG AfdInformationClass,
+                     PBOOLEAN Boolean OPTIONAL,
+                     PULONG Ulong OPTIONAL,
+                     PLARGE_INTEGER LargeInteger OPTIONAL,
+                     LPWSAOVERLAPPED Overlapped OPTIONAL,
+                     LPWSAOVERLAPPED_COMPLETION_ROUTINE CompletionRoutine OPTIONAL)
+{
+    return SetSocketInformationEx(Socket, AfdInformationClass, Boolean, Ulong,
+                                  LargeInteger, Overlapped, CompletionRoutine, NULL);
+}
+
+static PSOCKET_INFORMATION
+SockAdoptInheritedSocket(SOCKET Handle)
+{
+    IO_STATUS_BLOCK IOSB;
+    HANDLE SockEvent;
+    NTSTATUS Status;
+    ULONG ContextSize = 0;
+    PSOCKET_CONTEXT ContextData = NULL;
+    PSOCKET_INFORMATION Socket = NULL;
+    PSOCKET_INFORMATION Existing;
+    PHELPER_DATA HelperData = NULL;
+    PVOID HelperContext = NULL;
+    DWORD HelperEvents = 0;
+    UNICODE_STRING TransportName;
+    INT AddressFamily, SocketType, Protocol;
+
+    RtlZeroMemory(&TransportName, sizeof(TransportName));
+
+    Status = NtCreateEvent(&SockEvent,
+                           EVENT_ALL_ACCESS,
+                           NULL,
+                           SynchronizationEvent,
+                           FALSE);
+    if (!NT_SUCCESS(Status))
+        return NULL;
+
+    Status = NtDeviceIoControlFile((HANDLE)Handle,
+                                   SockEvent,
+                                   NULL,
+                                   NULL,
+                                   &IOSB,
+                                   IOCTL_AFD_GET_CONTEXT_SIZE,
+                                   NULL,
+                                   0,
+                                   &ContextSize,
+                                   sizeof(ContextSize));
+    if (Status == STATUS_PENDING)
+    {
+        MsafdWaitForAlert(SockEvent);
+        Status = IOSB.Status;
+    }
+
+    if (!NT_SUCCESS(Status) || ContextSize < sizeof(SOCKET_CONTEXT))
+        goto fail;
+
+    ContextData = HeapAlloc(GlobalHeap, HEAP_ZERO_MEMORY, ContextSize);
+    if (!ContextData)
+        goto fail;
+
+    Status = NtDeviceIoControlFile((HANDLE)Handle,
+                                   SockEvent,
+                                   NULL,
+                                   NULL,
+                                   &IOSB,
+                                   IOCTL_AFD_GET_CONTEXT,
+                                   NULL,
+                                   0,
+                                   ContextData,
+                                   ContextSize);
+    if (Status == STATUS_PENDING)
+    {
+        MsafdWaitForAlert(SockEvent);
+        Status = IOSB.Status;
+    }
+
+    if (!NT_SUCCESS(Status))
+        goto fail;
+
+    AddressFamily = ContextData->SharedData.AddressFamily;
+    SocketType = ContextData->SharedData.SocketType;
+    Protocol = ContextData->SharedData.Protocol;
+
+    if (AddressFamily == 0 || SocketType == 0)
+        goto fail;
+
+    if (ContextData->SharedData.SizeOfLocalAddress <= 0 ||
+        ContextData->SharedData.SizeOfLocalAddress > (INT)sizeof(ContextData->LocalAddress))
+    {
+        goto fail;
+    }
+
+    if (SockGetTdiName(&AddressFamily,
+                       &SocketType,
+                       &Protocol,
+                       0,
+                       ContextData->SharedData.CreateFlags,
+                       &TransportName,
+                       &HelperContext,
+                       &HelperData,
+                       &HelperEvents) != NO_ERROR)
+    {
+        goto fail;
+    }
+
+    Socket = HeapAlloc(GlobalHeap, HEAP_ZERO_MEMORY, sizeof(*Socket));
+    if (!Socket)
+        goto fail;
+    Socket->RefCount = 1;
+
+    Socket->SharedData = HeapAlloc(GlobalHeap, 0, sizeof(*Socket->SharedData));
+    if (!Socket->SharedData)
+        goto fail;
+
+    *Socket->SharedData = ContextData->SharedData;
+    Socket->SharedData->RefCount = 1;
+    Socket->SharedDataHandle = INVALID_HANDLE_VALUE;
+    Socket->Handle = Handle;
+    Socket->HelperContext = HelperContext;
+    Socket->HelperData = HelperData;
+    Socket->HelperEvents = HelperEvents;
+    Socket->LocalAddress = (PSOCKADDR)&Socket->SharedData->WSLocalAddress;
+    Socket->RemoteAddress = (PSOCKADDR)&Socket->SharedData->WSRemoteAddress;
+    Socket->SanData = NULL;
+    Socket->TrySAN = FALSE;
+    Socket->ProtocolInfo.dwCatalogEntryId = ContextData->SharedData.CatalogEntryId;
+    Socket->ProtocolInfo.dwServiceFlags1 = ContextData->SharedData.ServiceFlags1;
+    Socket->ProtocolInfo.dwProviderFlags = ContextData->SharedData.ProviderFlags;
+    Socket->ProtocolInfo.iVersion = 2;
+    Socket->ProtocolInfo.iAddressFamily = AddressFamily;
+    Socket->ProtocolInfo.iSocketType = SocketType;
+    Socket->ProtocolInfo.iProtocol = Protocol;
+    Socket->ProtocolInfo.iMaxSockAddr = HelperData->MaxWSAddressLength;
+    Socket->ProtocolInfo.iMinSockAddr = HelperData->MinWSAddressLength;
+
+    if (ContextData->SharedData.CatalogEntryId == 0)
+    {
+        ERR("Inherited socket %p has no catalog entry id\n", (PVOID)Handle);
+        goto fail;
+    }
+
+    RtlCopyMemory(Socket->LocalAddress,
+                  &ContextData->LocalAddress,
+                  ContextData->SharedData.SizeOfLocalAddress);
+    RtlCopyMemory(Socket->RemoteAddress,
+                  &ContextData->RemoteAddress,
+                  min(ContextData->SharedData.SizeOfRemoteAddress,
+                      (INT)sizeof(ContextData->RemoteAddress)));
+
+    EnterCriticalSection(&SocketListLock);
+
+    Existing = SocketListHead;
+    while (Existing)
+    {
+        if (Existing->Handle == Handle)
+            break;
+        Existing = Existing->NextSocket;
+    }
+
+    if (Existing)
+    {
+        LeaveCriticalSection(&SocketListLock);
+        HeapFree(GlobalHeap, 0, Socket->SharedData);
+        HeapFree(GlobalHeap, 0, Socket);
+        Socket = Existing;
+    }
+    else
+    {
+        Socket->NextSocket = SocketListHead;
+        SocketListHead = Socket;
+        LeaveCriticalSection(&SocketListLock);
+    }
+
+    if (TransportName.Buffer)
+        HeapFree(GetProcessHeap(), 0, TransportName.Buffer);
+
+    HeapFree(GlobalHeap, 0, ContextData);
+    NtClose(SockEvent);
+
+    return Socket;
+
+fail:
+    if (TransportName.Buffer)
+        HeapFree(GetProcessHeap(), 0, TransportName.Buffer);
+
+    if (Socket && Socket->SharedData)
+        HeapFree(GlobalHeap, 0, Socket->SharedData);
+
+    if (Socket)
+        HeapFree(GlobalHeap, 0, Socket);
+
+    if (ContextData)
+        HeapFree(GlobalHeap, 0, ContextData);
+
+    NtClose(SockEvent);
+
+    return NULL;
 }
 
 PSOCKET_INFORMATION
@@ -3862,7 +4963,7 @@ GetSocketStructure(SOCKET Handle)
 
     LeaveCriticalSection(&SocketListLock);
 
-    return NULL;
+    return SockAdoptInheritedSocket(Handle);
 }
 
 int CreateContext(PSOCKET_INFORMATION Socket)
@@ -3886,10 +4987,10 @@ int CreateContext(PSOCKET_INFORMATION Socket)
     ContextData.SizeOfHelperData = 0;
     RtlCopyMemory (&ContextData.LocalAddress,
                    Socket->LocalAddress,
-                   Socket->SharedData->SizeOfLocalAddress);
+                   min(Socket->SharedData->SizeOfLocalAddress, sizeof(ContextData.LocalAddress)));
     RtlCopyMemory (&ContextData.RemoteAddress,
                    Socket->RemoteAddress,
-                   Socket->SharedData->SizeOfRemoteAddress);
+                   min(Socket->SharedData->SizeOfRemoteAddress, sizeof(ContextData.RemoteAddress)));
 
     /* Send IOCTL */
     Status = NtDeviceIoControlFile((HANDLE)Socket->Handle,
@@ -3920,7 +5021,7 @@ BOOLEAN SockCreateOrReferenceAsyncThread(VOID)
     HANDLE hAsyncThread;
     DWORD AsyncThreadId;
     HANDLE AsyncEvent;
-    OBJECT_HANDLE_FLAG_INFORMATION HandleFlags;
+    OBJECT_HANDLE_ATTRIBUTE_INFORMATION HandleFlags;
     NTSTATUS Status;
 
     /* Check if the Thread Already Exists */
@@ -4016,7 +5117,7 @@ BOOLEAN SockGetAsyncSelectHelperAfdHandle(VOID)
     OBJECT_ATTRIBUTES ObjectAttributes;
     IO_STATUS_BLOCK IoSb;
     FILE_COMPLETION_INFORMATION CompletionInfo;
-    OBJECT_HANDLE_FLAG_INFORMATION HandleFlags;
+    OBJECT_HANDLE_ATTRIBUTE_INFORMATION HandleFlags;
 
     /* First, make sure we're not already initialized */
     if (SockAsyncHelperAfdHandle)
@@ -4085,6 +5186,7 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
     /* Check if the Sequence  Number Changed behind our back */
     if (AsyncData->SequenceNumber != Socket->SharedData->SequenceNumber )
     {
+        SockFreeAsyncData(AsyncData);
         return;
     }
 
@@ -4092,6 +5194,7 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
     if (!NT_SUCCESS(IoStatusBlock->Status))
     {
         /* FIXME: Perform Upcall */
+        SockFreeAsyncData(AsyncData);
         return;
     }
 
@@ -4103,13 +5206,12 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
                 if (0 != (Socket->SharedData->AsyncEvents & FD_READ) &&
                     0 == (Socket->SharedData->AsyncDisabledEvents & FD_READ))
                 {
+                    InterlockedOr(&Socket->SharedData->AsyncDisabledEvents, FD_READ);
                     /* Make the Notification */
                     (Upcalls.lpWPUPostMessage)(Socket->SharedData->hWnd,
                                                Socket->SharedData->wMsg,
                                                Socket->Handle,
                                                WSAMAKESELECTREPLY(FD_READ, 0));
-                    /* Disable this event until the next read(); */
-                    Socket->SharedData->AsyncDisabledEvents |= FD_READ;
                 }
             break;
 
@@ -4117,13 +5219,12 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
             if (0 != (Socket->SharedData->AsyncEvents & FD_OOB) &&
                 0 == (Socket->SharedData->AsyncDisabledEvents & FD_OOB))
             {
+                InterlockedOr(&Socket->SharedData->AsyncDisabledEvents, FD_OOB);
                 /* Make the Notification */
                 (Upcalls.lpWPUPostMessage)(Socket->SharedData->hWnd,
                                            Socket->SharedData->wMsg,
                                            Socket->Handle,
                                            WSAMAKESELECTREPLY(FD_OOB, 0));
-                /* Disable this event until the next read(); */
-                Socket->SharedData->AsyncDisabledEvents |= FD_OOB;
             }
             break;
 
@@ -4131,13 +5232,12 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
                 if (0 != (Socket->SharedData->AsyncEvents & FD_WRITE) &&
                     0 == (Socket->SharedData->AsyncDisabledEvents & FD_WRITE))
                 {
+                    InterlockedOr(&Socket->SharedData->AsyncDisabledEvents, FD_WRITE);
                     /* Make the Notification */
                     (Upcalls.lpWPUPostMessage)(Socket->SharedData->hWnd,
                                                Socket->SharedData->wMsg,
                                                Socket->Handle,
                                                WSAMAKESELECTREPLY(FD_WRITE, 0));
-                    /* Disable this event until the next write(); */
-                    Socket->SharedData->AsyncDisabledEvents |= FD_WRITE;
                 }
                 break;
 
@@ -4147,13 +5247,12 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
                 if (0 != (Socket->SharedData->AsyncEvents & FD_CONNECT) &&
                     0 == (Socket->SharedData->AsyncDisabledEvents & FD_CONNECT))
                 {
+                    InterlockedOr(&Socket->SharedData->AsyncDisabledEvents, FD_CONNECT);
                     /* Make the Notification */
                     (Upcalls.lpWPUPostMessage)(Socket->SharedData->hWnd,
                         Socket->SharedData->wMsg,
                         Socket->Handle,
                         WSAMAKESELECTREPLY(FD_CONNECT, 0));
-                    /* Disable this event forever; */
-                    Socket->SharedData->AsyncDisabledEvents |= FD_CONNECT;
                 }
                 break;
 
@@ -4161,13 +5260,12 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
                 if (0 != (Socket->SharedData->AsyncEvents & FD_ACCEPT) &&
                     0 == (Socket->SharedData->AsyncDisabledEvents & FD_ACCEPT))
                 {
+                    InterlockedOr(&Socket->SharedData->AsyncDisabledEvents, FD_ACCEPT);
                     /* Make the Notification */
                     (Upcalls.lpWPUPostMessage)(Socket->SharedData->hWnd,
                                                Socket->SharedData->wMsg,
                                                Socket->Handle,
                                                WSAMAKESELECTREPLY(FD_ACCEPT, 0));
-                    /* Disable this event until the next accept(); */
-                    Socket->SharedData->AsyncDisabledEvents |= FD_ACCEPT;
                 }
                 break;
 
@@ -4177,13 +5275,12 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
                 if (0 != (Socket->SharedData->AsyncEvents & FD_CLOSE) &&
                     0 == (Socket->SharedData->AsyncDisabledEvents & FD_CLOSE))
                 {
+                    InterlockedOr(&Socket->SharedData->AsyncDisabledEvents, FD_CLOSE);
                     /* Make the Notification */
                     (Upcalls.lpWPUPostMessage)(Socket->SharedData->hWnd,
                                                Socket->SharedData->wMsg,
                                                Socket->Handle,
                                                WSAMAKESELECTREPLY(FD_CLOSE, 0));
-                    /* Disable this event forever; */
-                    Socket->SharedData->AsyncDisabledEvents |= FD_CLOSE;
                 }
                  break;
             /* FIXME: Support QOS */
@@ -4193,6 +5290,7 @@ VOID SockAsyncSelectCompletionRoutine(PVOID Context, PIO_STATUS_BLOCK IoStatusBl
     /* Check if there are any events left for us to check */
     if ((Socket->SharedData->AsyncEvents & (~Socket->SharedData->AsyncDisabledEvents)) == 0 )
     {
+        SockFreeAsyncData(AsyncData);
         return;
     }
 
@@ -4311,7 +5409,7 @@ VOID SockProcessQueuedAsyncSelect(PVOID Context, PIO_STATUS_BLOCK IoStatusBlock)
     /* Free the Context */
     if (FreeContext)
     {
-        HeapFree(GetProcessHeap(), 0, AsyncData);
+        SockFreeAsyncData(AsyncData);
     }
 
     return;
@@ -4324,13 +5422,10 @@ SockReenableAsyncSelectEvent (IN PSOCKET_INFORMATION Socket,
     PASYNC_DATA AsyncData;
 
     /* Make sure the event is actually disabled */
-    if (!(Socket->SharedData->AsyncDisabledEvents & Event))
+    if (!(InterlockedAnd(&Socket->SharedData->AsyncDisabledEvents, ~Event) & Event))
     {
         return;
     }
-
-    /* Re-enable it */
-    Socket->SharedData->AsyncDisabledEvents &= ~Event;
 
     /* Return if no more events are being polled */
     if ((Socket->SharedData->AsyncEvents & (~Socket->SharedData->AsyncDisabledEvents)) == 0 )
@@ -4350,6 +5445,7 @@ SockReenableAsyncSelectEvent (IN PSOCKET_INFORMATION Socket,
 
     /* Set up the Async Data */
     AsyncData->ParentSocket = Socket;
+    InterlockedIncrement(&Socket->RefCount);
     AsyncData->SequenceNumber = Socket->SharedData->SequenceNumber;
 
     /* Begin Async Select by using I/O Completion */
@@ -4385,6 +5481,7 @@ DllMain(HANDLE hInstDll,
 
         /* Heap to use when allocating */
         GlobalHeap = GetProcessHeap();
+        MsafdThreadEventIndex = FlsAlloc(MsafdFreeThreadEvent);
 
         /* Initialize the lock that protects our socket list */
         InitializeCriticalSection(&SocketListLock);
@@ -4403,6 +5500,8 @@ DllMain(HANDLE hInstDll,
 
         /* Delete the socket list lock */
         DeleteCriticalSection(&SocketListLock);
+        if (MsafdThreadEventIndex != FLS_OUT_OF_INDEXES)
+            FlsFree(MsafdThreadEventIndex);
 
         break;
     }

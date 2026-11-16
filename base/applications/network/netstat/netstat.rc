@@ -2,7 +2,7 @@
 #include <winuser.h>
 #include "resource.h"
 
-#define REACTOS_STR_FILE_DESCRIPTION    "ReactOS Network Statistics Utility"
+#define REACTOS_STR_FILE_DESCRIPTION    "LiberNT Network Statistics Utility"
 #define REACTOS_STR_INTERNAL_NAME       "netstat"
 #define REACTOS_STR_ORIGINAL_FILENAME   "netstat.exe"
 #define REACTOS_STR_ORIGINAL_COPYRIGHT  "Ged Murphy (gedmurphy@gmail.com)"
@@ -14,11 +14,17 @@
 #ifdef LANGUAGE_EN_US
     #include "lang/en-US.rc"
 #endif
+#ifdef LANGUAGE_JA_JP
+    #include "lang/ja-JP.rc"
+#endif
 #ifdef LANGUAGE_PL_PL
     #include "lang/pl-PL.rc"
 #endif
 #ifdef LANGUAGE_RU_RU
     #include "lang/ru-RU.rc"
+#endif
+#ifdef LANGUAGE_ZH_CN
+    #include "lang/zh-CN.rc"
 #endif
 #ifdef LANGUAGE_ZH_TW
     #include "lang/zh-TW.rc"

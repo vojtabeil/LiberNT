@@ -36,9 +36,17 @@ typedef struct ETH_HEADER {
 #define IP_MAX_RECV_BACKLOG 0x20
 
 /* Per adapter information */
+#define LAN_MAX_MULTICAST 32
+
 typedef struct LAN_ADAPTER {
     LIST_ENTRY ListEntry;                   /* Entry on list */
     KSPIN_LOCK Lock;                        /* Lock for this structure */
+    LIST_ENTRY ReconfigureQueue;            /* Status indications in arrival order */
+    BOOLEAN ReconfigureActive;              /* One worker drains this adapter's queue */
+    EX_RUNDOWN_REF WorkRundown;             /* Protects queued adapter work */
+    EX_RUNDOWN_REF RequestRundown;
+    volatile LONG Closing;                  /* New callbacks must not queue work */
+    BOOLEAN Listed;                         /* Adapter is on the global list */
     UCHAR State, OldState;                  /* State of the adapter */
     BOOLEAN CompletingReset;                /* Reset is finishing */
     KEVENT Event;                           /* Opening event */
@@ -55,10 +63,16 @@ typedef struct LAN_ADAPTER {
     UINT MTU;                               /* Maximum Transfer Unit */
     UINT MinFrameSize;                      /* Minimum frame size in bytes */
     UINT MaxPacketSize;                     /* Maximum packet size when sending */
-    UINT MaxSendPackets;                    /* Maximum number of packets per send */
-    UINT MacOptions;                        /* MAC options for NIC driver/adapter */
     UINT Speed;                             /* Link speed */
+    ULONG64 LinkSpeed;
+    NDIS_HANDLE NblPool;
+    volatile LONG Paused;
+    volatile LONG PendingSends;
+    KEVENT SendsDoneEvent;
     UINT PacketFilter;                      /* Packet filter for this adapter */
+    UCHAR MulticastList[LAN_MAX_MULTICAST][IEEE_802_ADDR_LENGTH];
+    ULONG MulticastRefs[LAN_MAX_MULTICAST];
+    ULONG MulticastCount;
 } LAN_ADAPTER, *PLAN_ADAPTER;
 
 /* LAN adapter state constants */
@@ -83,8 +97,8 @@ typedef struct LAN_ADAPTER {
 
 
 NDIS_STATUS LANRegisterAdapter(
-    PNDIS_STRING AdapterName,
-		PNDIS_STRING RegistryPath);
+    NDIS_HANDLE BindContext,
+    PNDIS_BIND_PARAMETERS BindParameters);
 
 NDIS_STATUS LANUnregisterAdapter(
     PLAN_ADAPTER Adapter);
@@ -100,6 +114,11 @@ VOID LANShutdown(VOID);
 
 NTSTATUS TcpipLanGetDwordOid( PIP_INTERFACE Interface, NDIS_OID Oid,
                               PULONG Result );
+
+NDIS_STATUS LANUpdateMulticastList(
+    PVOID Context,
+    const UCHAR *Address,
+    BOOLEAN Add);
 
 NDIS_STATUS NDISCall(
     PLAN_ADAPTER Adapter,

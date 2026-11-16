@@ -33,6 +33,14 @@ struct default_callback_context
     UINT message;
 };
 
+struct source_media
+{
+    WCHAR root[MAX_PATH];
+    WCHAR *desc, *tag;
+    BOOL resolved;
+    BOOL cabinet;
+};
+
 struct file_op
 {
     struct file_op *next;
@@ -45,6 +53,7 @@ struct file_op
     WCHAR          *dst_path;
     WCHAR          *dst_file;
     PSECURITY_DESCRIPTOR  dst_sd;
+    struct source_media *media;
 };
 
 struct file_op_queue
@@ -56,11 +65,16 @@ struct file_op_queue
 
 struct file_queue
 {
+    DWORD                magic;
     struct file_op_queue copy_queue;
     struct file_op_queue delete_queue;
     struct file_op_queue rename_queue;
     DWORD                flags;
+    struct source_media **sources;
+    unsigned int         source_count;
 };
+
+#define FILE_QUEUE_MAGIC 0x21514653
 
 
 static inline WCHAR *strdupW( const WCHAR *str )
@@ -126,14 +140,16 @@ static void concat_W( WCHAR *buffer, const WCHAR *src1, const WCHAR *src2, const
         strcpyW( buffer, src1 );
         buffer += strlenW(buffer );
         if (buffer[-1] != '\\') *buffer++ = '\\';
+        *buffer = 0;
         if (src2) while (*src2 == '\\') src2++;
     }
 
-    if (src2)
+    if (src2 && *src2)
     {
         strcpyW( buffer, src2 );
         buffer += strlenW(buffer );
         if (buffer[-1] != '\\') *buffer++ = '\\';
+        *buffer = 0;
         if (src3) while (*src3 == '\\') src3++;
     }
 
@@ -151,8 +167,9 @@ static BOOL build_filepathsW( const struct file_op *op, FILEPATHS_W *paths )
 {
     unsigned int src_len = 1, dst_len = 1;
     WCHAR *source = (PWSTR)paths->Source, *target = (PWSTR)paths->Target;
+    const WCHAR *root = op->media ? op->media->root : op->src_root;
 
-    if (op->src_root) src_len += strlenW(op->src_root) + 1;
+    if (root) src_len += strlenW(root) + 1;
     if (op->src_path) src_len += strlenW(op->src_path) + 1;
     if (op->src_file) src_len += strlenW(op->src_file) + 1;
     if (op->dst_path) dst_len += strlenW(op->dst_path) + 1;
@@ -171,7 +188,7 @@ static BOOL build_filepathsW( const struct file_op *op, FILEPATHS_W *paths )
         paths->Target = target = HeapAlloc( GetProcessHeap(), 0, dst_len );
     }
     if (!source || !target) return FALSE;
-    concat_W( source, op->src_root, op->src_path, op->src_file );
+    concat_W( source, root, op->src_path, op->src_file );
     concat_W( target, NULL, op->dst_path, op->dst_file );
     paths->Win32Error = 0;
     paths->Flags      = 0;
@@ -251,7 +268,29 @@ UINT CALLBACK QUEUE_callback_WtoA( void *context, UINT notification,
         break;
 
     case SPFILENOTIFY_NEEDMEDIA:
-        FIXME("mapping for %d not implemented\n",notification);
+    {
+        const SOURCE_MEDIA_W *mediaW = (const SOURCE_MEDIA_W *)param1;
+        char path[MAX_PATH];
+        SOURCE_MEDIA_A mediaA;
+
+        mediaA.Reserved = NULL;
+        mediaA.Tagfile = strdupWtoA(mediaW->Tagfile);
+        mediaA.Description = strdupWtoA(mediaW->Description);
+        mediaA.SourcePath = strdupWtoA(mediaW->SourcePath);
+        mediaA.SourceFile = strdupWtoA(mediaW->SourceFile);
+        mediaA.Flags = mediaW->Flags;
+        path[0] = 0;
+
+        ret = callback_ctx->orig_handler(callback_ctx->orig_context, notification,
+                (UINT_PTR)&mediaA, (UINT_PTR)&path);
+        MultiByteToWideChar(CP_ACP, 0, path, -1, (WCHAR *)param2, MAX_PATH);
+
+        HeapFree(GetProcessHeap(), 0, (char *)mediaA.Tagfile);
+        HeapFree(GetProcessHeap(), 0, (char *)mediaA.Description);
+        HeapFree(GetProcessHeap(), 0, (char *)mediaA.SourcePath);
+        HeapFree(GetProcessHeap(), 0, (char *)mediaA.SourceFile);
+        break;
+    }
     case SPFILENOTIFY_STARTQUEUE:
     case SPFILENOTIFY_ENDQUEUE:
     case SPFILENOTIFY_STARTSUBQUEUE:
@@ -269,79 +308,33 @@ UINT CALLBACK QUEUE_callback_WtoA( void *context, UINT notification,
  *
  * Retrieve the source file information for a given file.
  */
-static void get_src_file_info( HINF hinf, struct file_op *op )
+static void get_src_file_info( HINF hinf, const WCHAR *src_file, SP_FILE_COPY_PARAMS_W *params,
+                             WCHAR *src_root, WCHAR *src_path)
 {
-    static const WCHAR SourceDisksNames[] =
-        {'S','o','u','r','c','e','D','i','s','k','s','N','a','m','e','s',0};
-    static const WCHAR SourceDisksFiles[] =
-        {'S','o','u','r','c','e','D','i','s','k','s','F','i','l','e','s',0};
+    UINT diskid;
+    DWORD len;
 
-    INFCONTEXT file_ctx, disk_ctx;
-    INT id, diskid;
-    DWORD len, len2;
-    WCHAR SectionName[MAX_PATH];
-
-    /* find the SourceDisksFiles entry */
-    if(!SetupDiGetActualSectionToInstallW(hinf, SourceDisksFiles, SectionName, MAX_PATH, NULL, NULL))
+    if (!SetupGetSourceFileLocationW( hinf, NULL, src_file, &diskid, src_path, MAX_PATH, &len ))
         return;
-    if (!SetupFindFirstLineW( hinf, SectionName, op->src_file, &file_ctx ))
-    {
-        if ((op->style & (SP_COPY_SOURCE_ABSOLUTE|SP_COPY_SOURCEPATH_ABSOLUTE))) return;
-        /* no specific info, use .inf file source directory */
-        if (!op->src_root) op->src_root = PARSER_get_src_root( hinf );
-        return;
-    }
-    if (!SetupGetIntField( &file_ctx, 1, &diskid )) return;
 
-    /* now find the diskid in the SourceDisksNames section */
-    if(!SetupDiGetActualSectionToInstallW(hinf, SourceDisksNames, SectionName, MAX_PATH, NULL, NULL))
-        return;
-    if (!SetupFindFirstLineW( hinf, SectionName, NULL, &disk_ctx )) return;
-    for (;;)
-    {
-        if (SetupGetIntField( &disk_ctx, 0, &id ) && (id == diskid)) break;
-        if (!SetupFindNextLine( &disk_ctx, &disk_ctx )) return;
-    }
+    if (len > 1)
+        params->SourcePath = src_path;
 
-    /* and fill in the missing info */
+    if (SetupGetSourceInfoW( hinf, diskid, SRCINFO_DESCRIPTION, NULL, 0, &len ) && len > 1
+            && (params->SourceDescription = HeapAlloc( GetProcessHeap(), 0, len * sizeof(WCHAR) )))
+        SetupGetSourceInfoW( hinf, diskid, SRCINFO_DESCRIPTION, (WCHAR *)params->SourceDescription, len, NULL );
 
-    if (!op->src_descr)
-    {
-        if (SetupGetStringFieldW( &disk_ctx, 1, NULL, 0, &len ) &&
-            (op->src_descr = HeapAlloc( GetProcessHeap(), 0, len*sizeof(WCHAR) )))
-            SetupGetStringFieldW( &disk_ctx, 1, op->src_descr, len, NULL );
-    }
-    if (!op->src_tag)
-    {
-        if (SetupGetStringFieldW( &disk_ctx, 2, NULL, 0, &len ) &&
-            (op->src_tag = HeapAlloc( GetProcessHeap(), 0, len*sizeof(WCHAR) )))
-            SetupGetStringFieldW( &disk_ctx, 2, op->src_tag, len, NULL );
-    }
-    if (!op->src_path && !(op->style & SP_COPY_SOURCE_ABSOLUTE))
-    {
-        len = len2 = 0;
-        if (!(op->style & SP_COPY_SOURCEPATH_ABSOLUTE))
-        {
-            /* retrieve relative path for this disk */
-            if (!SetupGetStringFieldW( &disk_ctx, 4, NULL, 0, &len )) len = 0;
-        }
-        /* retrieve relative path for this file */
-        if (!SetupGetStringFieldW( &file_ctx, 2, NULL, 0, &len2 )) len2 = 0;
+    if (SetupGetSourceInfoW( hinf, diskid, SRCINFO_TAGFILE, NULL, 0, &len ) && len > 1
+            && (params->SourceTagfile = HeapAlloc( GetProcessHeap(), 0, len * sizeof(WCHAR) )))
+        SetupGetSourceInfoW( hinf, diskid, SRCINFO_TAGFILE, (WCHAR *)params->SourceTagfile, len, NULL );
 
-        if ((len || len2) &&
-            (op->src_path = HeapAlloc( GetProcessHeap(), 0, (len+len2)*sizeof(WCHAR) )))
-        {
-            WCHAR *ptr = op->src_path;
-            if (len)
-            {
-                SetupGetStringFieldW( &disk_ctx, 4, op->src_path, len, NULL );
-                ptr = op->src_path + strlenW(op->src_path);
-                if (len2 && ptr > op->src_path && ptr[-1] != '\\') *ptr++ = '\\';
-            }
-            if (!SetupGetStringFieldW( &file_ctx, 2, ptr, len2, NULL )) *ptr = 0;
-        }
+    if (SetupGetSourceInfoW( hinf, diskid, SRCINFO_PATH, NULL, 0, &len ) && len > 1
+            && len < MAX_PATH - lstrlenW( src_root ) - 1)
+    {
+        lstrcatW( src_root, L"\\" );
+        SetupGetSourceInfoW( hinf, diskid, SRCINFO_PATH, src_root + lstrlenW( src_root ),
+                              MAX_PATH - lstrlenW( src_root ), NULL );
     }
-    if (!op->src_root) op->src_root = PARSER_get_src_root(hinf);
 }
 
 
@@ -355,10 +348,14 @@ static WCHAR *get_destination_dir( HINF hinf, const WCHAR *section )
     static const WCHAR Dest[] = {'D','e','s','t','i','n','a','t','i','o','n','D','i','r','s',0};
     static const WCHAR Def[]  = {'D','e','f','a','u','l','t','D','e','s','t','D','i','r',0};
     INFCONTEXT context;
+    WCHAR systemdir[MAX_PATH], *dir;
+    BOOL ret;
 
-    if (!SetupFindFirstLineW( hinf, Dest, section, &context ) &&
-        !SetupFindFirstLineW( hinf, Dest, Def, &context )) return NULL;
-    return PARSER_get_dest_dir( &context );
+    if (!section || !(ret = SetupFindFirstLineW( hinf, Dest, section, &context )))
+        ret = SetupFindFirstLineW( hinf, Dest, Def, &context );
+    if (ret && (dir = PARSER_get_dest_dir( &context ))) return dir;
+    GetSystemDirectoryW( systemdir, MAX_PATH );
+    return strdupW( systemdir );
 }
 
 struct extract_cab_ctx
@@ -448,6 +445,7 @@ HSPFILEQ WINAPI SetupOpenFileQueue(void)
 
     if (!(queue = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*queue))))
         return INVALID_HANDLE_VALUE;
+    queue->magic = FILE_QUEUE_MAGIC;
     return queue;
 }
 
@@ -459,10 +457,111 @@ BOOL WINAPI SetupCloseFileQueue( HSPFILEQ handle )
 {
     struct file_queue *queue = handle;
 
+    unsigned int i;
+
+    if (queue->magic != FILE_QUEUE_MAGIC)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
     free_file_op_queue( &queue->copy_queue );
     free_file_op_queue( &queue->rename_queue );
     free_file_op_queue( &queue->delete_queue );
+    for (i = 0; i < queue->source_count; ++i)
+    {
+        HeapFree( GetProcessHeap(), 0, queue->sources[i]->desc );
+        HeapFree( GetProcessHeap(), 0, queue->sources[i]->tag );
+        HeapFree( GetProcessHeap(), 0, queue->sources[i] );
+    }
+    HeapFree( GetProcessHeap(), 0, queue->sources );
     HeapFree( GetProcessHeap(), 0, queue );
+    return TRUE;
+}
+
+
+static BOOL equal_str( const WCHAR *a, const WCHAR *b )
+{
+    return (!a && !b) || (a && b && !strcmpW( a, b ));
+}
+
+static struct source_media *get_source_media( struct file_queue *queue,
+        const WCHAR *root, const WCHAR *desc, const WCHAR *tag )
+{
+    struct source_media **sources, *media;
+    unsigned int i;
+
+    for (i = 0; i < queue->source_count; ++i)
+    {
+        if (!strcmpW( root, queue->sources[i]->root )
+                && equal_str( desc, queue->sources[i]->desc )
+                && equal_str( tag, queue->sources[i]->tag ))
+        {
+            return queue->sources[i];
+        }
+    }
+
+    if (strlenW( root ) >= MAX_PATH) return NULL;
+    if (!(media = HeapAlloc( GetProcessHeap(), 0, sizeof(*media) ))) return NULL;
+    if (queue->sources)
+        sources = HeapReAlloc( GetProcessHeap(), 0, queue->sources, (queue->source_count + 1) * sizeof(*sources) );
+    else
+        sources = HeapAlloc( GetProcessHeap(), 0, sizeof(*sources) );
+    if (!sources)
+    {
+        HeapFree( GetProcessHeap(), 0, media );
+        return NULL;
+    }
+    queue->sources = sources;
+    strcpyW( media->root, root );
+    media->desc = strdupW( desc );
+    media->tag = strdupW( tag );
+    media->resolved = FALSE;
+    media->cabinet = FALSE;
+    sources[queue->source_count++] = media;
+    return media;
+}
+
+static BOOL queue_copy_op( struct file_queue *queue, struct file_op *op )
+{
+    static const WCHAR emptyW[] = {0};
+    struct file_op_queue single;
+    struct file_op *existing;
+
+    for (existing = queue->copy_queue.head; existing; existing = existing->next)
+    {
+        if (existing->style == op->style
+                && equal_str( existing->src_root, op->src_root )
+                && equal_str( existing->src_path, op->src_path )
+                && equal_str( existing->src_file, op->src_file )
+                && equal_str( existing->src_descr, op->src_descr )
+                && equal_str( existing->src_tag, op->src_tag )
+                && equal_str( existing->dst_path, op->dst_path )
+                && equal_str( existing->dst_file, op->dst_file )
+                && ((!existing->dst_sd && !op->dst_sd)
+                    || (existing->dst_sd && op->dst_sd
+                        && GetSecurityDescriptorLength( existing->dst_sd ) == GetSecurityDescriptorLength( op->dst_sd )
+                        && !memcmp( existing->dst_sd, op->dst_sd, GetSecurityDescriptorLength( op->dst_sd ) ))))
+        {
+            op->next = NULL;
+            single.head = single.tail = op;
+            single.count = 1;
+            free_file_op_queue( &single );
+            return TRUE;
+        }
+    }
+
+    op->media = get_source_media( queue, op->src_root ? op->src_root : emptyW, op->src_descr, op->src_tag );
+    if (!op->media)
+    {
+        op->next = NULL;
+        single.head = single.tail = op;
+        single.count = 1;
+        free_file_op_queue( &single );
+        SetLastError( ERROR_NOT_ENOUGH_MEMORY );
+        return FALSE;
+    }
+    queue_file_op( &queue->copy_queue, op );
     return TRUE;
 }
 
@@ -485,22 +584,18 @@ BOOL WINAPI SetupQueueCopyIndirectA( PSP_FILE_COPY_PARAMS_A params )
     op->dst_path   = strdupAtoW( params->TargetDirectory );
     op->dst_file   = strdupAtoW( params->TargetFilename );
     op->dst_sd     = NULL;
+    op->media      = NULL;
 
     /* some defaults */
+    if (!op->dst_file) op->dst_file = op->src_file;
     if (!op->src_file) op->src_file = op->dst_file;
-    if (params->LayoutInf)
-    {
-        get_src_file_info( params->LayoutInf, op );
-        if (!op->dst_path) op->dst_path = get_destination_dir( params->LayoutInf, op->dst_file );
-    }
 
     TRACE( "root=%s path=%s file=%s -> dir=%s file=%s  descr=%s tag=%s\n",
            debugstr_w(op->src_root), debugstr_w(op->src_path), debugstr_w(op->src_file),
            debugstr_w(op->dst_path), debugstr_w(op->dst_file),
            debugstr_w(op->src_descr), debugstr_w(op->src_tag) );
 
-    queue_file_op( &queue->copy_queue, op );
-    return TRUE;
+    return queue_copy_op( queue, op );
 }
 
 
@@ -522,24 +617,20 @@ BOOL WINAPI SetupQueueCopyIndirectW( PSP_FILE_COPY_PARAMS_W params )
     op->dst_path   = strdupW( params->TargetDirectory );
     op->dst_file   = strdupW( params->TargetFilename );
     op->dst_sd     = NULL;
+    op->media      = NULL;
     if (params->SecurityDescriptor)
         ConvertStringSecurityDescriptorToSecurityDescriptorW( params->SecurityDescriptor, SDDL_REVISION_1, &op->dst_sd, NULL );
 
     /* some defaults */
+    if (!op->dst_file) op->dst_file = op->src_file;
     if (!op->src_file) op->src_file = op->dst_file;
-    if (params->LayoutInf)
-    {
-        get_src_file_info( params->LayoutInf, op );
-        if (!op->dst_path) op->dst_path = get_destination_dir( params->LayoutInf, op->dst_file );
-    }
 
     TRACE( "root=%s path=%s file=%s -> dir=%s file=%s  descr=%s tag=%s\n",
            debugstr_w(op->src_root), debugstr_w(op->src_path), debugstr_w(op->src_file),
            debugstr_w(op->dst_path), debugstr_w(op->dst_file),
            debugstr_w(op->src_descr), debugstr_w(op->src_tag) );
 
-    queue_file_op( &queue->copy_queue, op );
-    return TRUE;
+    return queue_copy_op( queue, op );
 }
 
 
@@ -596,24 +687,21 @@ BOOL WINAPI SetupQueueCopyW( HSPFILEQ queue, PCWSTR src_root, PCWSTR src_path, P
 /***********************************************************************
  *            SetupQueueDefaultCopyA   (SETUPAPI.@)
  */
-BOOL WINAPI SetupQueueDefaultCopyA( HSPFILEQ queue, HINF hinf, PCSTR src_root, PCSTR src_file,
-                                    PCSTR dst_file, DWORD style )
+BOOL WINAPI SetupQueueDefaultCopyA( HSPFILEQ queue, HINF hinf, const char *src_rootA,
+                                    const char *src_fileA, const char *dst_fileA, DWORD style )
 {
-    SP_FILE_COPY_PARAMS_A params;
+    WCHAR src_rootW[MAX_PATH], src_fileW[MAX_PATH], dst_fileW[MAX_PATH];
 
-    params.cbSize             = sizeof(params);
-    params.QueueHandle        = queue;
-    params.SourceRootPath     = src_root;
-    params.SourcePath         = NULL;
-    params.SourceFilename     = src_file;
-    params.SourceDescription  = NULL;
-    params.SourceTagfile      = NULL;
-    params.TargetDirectory    = NULL;
-    params.TargetFilename     = dst_file;
-    params.CopyStyle          = style;
-    params.LayoutInf          = hinf;
-    params.SecurityDescriptor = NULL;
-    return SetupQueueCopyIndirectA( &params );
+    if (!src_rootA || !src_fileA || !dst_fileA)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    MultiByteToWideChar( CP_ACP, 0, src_rootA, -1, src_rootW, ARRAY_SIZE(src_rootW) );
+    MultiByteToWideChar( CP_ACP, 0, src_fileA, -1, src_fileW, ARRAY_SIZE(src_fileW) );
+    MultiByteToWideChar( CP_ACP, 0, dst_fileA, -1, dst_fileW, ARRAY_SIZE(dst_fileW) );
+    return SetupQueueDefaultCopyW( queue, hinf, src_rootW, src_fileW, dst_fileW, style );
 }
 
 
@@ -623,21 +711,39 @@ BOOL WINAPI SetupQueueDefaultCopyA( HSPFILEQ queue, HINF hinf, PCSTR src_root, P
 BOOL WINAPI SetupQueueDefaultCopyW( HSPFILEQ queue, HINF hinf, PCWSTR src_root, PCWSTR src_file,
                                     PCWSTR dst_file, DWORD style )
 {
+    WCHAR src_root_buffer[MAX_PATH], src_path[MAX_PATH];
     SP_FILE_COPY_PARAMS_W params;
+    BOOL ret;
+
+    if (!src_root || !src_file || !dst_file)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
 
     params.cbSize             = sizeof(params);
     params.QueueHandle        = queue;
-    params.SourceRootPath     = src_root;
+    params.SourceRootPath     = src_root_buffer;
     params.SourcePath         = NULL;
     params.SourceFilename     = src_file;
     params.SourceDescription  = NULL;
     params.SourceTagfile      = NULL;
-    params.TargetDirectory    = NULL;
     params.TargetFilename     = dst_file;
     params.CopyStyle          = style;
-    params.LayoutInf          = hinf;
+    params.LayoutInf          = NULL;
     params.SecurityDescriptor = NULL;
-    return SetupQueueCopyIndirectW( &params );
+
+    lstrcpyW( src_root_buffer, src_root );
+    src_path[0] = 0;
+    if (!(params.TargetDirectory = get_destination_dir( hinf, NULL ))) return FALSE;
+    get_src_file_info( hinf, src_file, &params, src_root_buffer, src_path );
+
+    ret = SetupQueueCopyIndirectW( &params );
+
+    HeapFree( GetProcessHeap(), 0, (WCHAR *)params.TargetDirectory );
+    HeapFree( GetProcessHeap(), 0, (WCHAR *)params.SourceDescription );
+    HeapFree( GetProcessHeap(), 0, (WCHAR *)params.SourceTagfile );
+    return ret;
 }
 
 
@@ -659,6 +765,7 @@ BOOL WINAPI SetupQueueDeleteA( HSPFILEQ handle, PCSTR part1, PCSTR part2 )
     op->dst_path   = strdupAtoW( part1 );
     op->dst_file   = strdupAtoW( part2 );
     op->dst_sd     = NULL;
+    op->media      = NULL;
     queue_file_op( &queue->delete_queue, op );
     return TRUE;
 }
@@ -682,6 +789,7 @@ BOOL WINAPI SetupQueueDeleteW( HSPFILEQ handle, PCWSTR part1, PCWSTR part2 )
     op->dst_path   = strdupW( part1 );
     op->dst_file   = strdupW( part2 );
     op->dst_sd     = NULL;
+    op->media      = NULL;
     queue_file_op( &queue->delete_queue, op );
     return TRUE;
 }
@@ -703,9 +811,10 @@ BOOL WINAPI SetupQueueRenameA( HSPFILEQ handle, PCSTR SourcePath, PCSTR SourceFi
     op->src_file   = strdupAtoW( SourceFilename );
     op->src_descr  = NULL;
     op->src_tag    = NULL;
-    op->dst_path   = strdupAtoW( TargetPath );
+    op->dst_path   = strdupAtoW( TargetPath ? TargetPath : SourcePath );
     op->dst_file   = strdupAtoW( TargetFilename );
     op->dst_sd     = NULL;
+    op->media      = NULL;
     queue_file_op( &queue->rename_queue, op );
     return TRUE;
 }
@@ -727,9 +836,10 @@ BOOL WINAPI SetupQueueRenameW( HSPFILEQ handle, PCWSTR SourcePath, PCWSTR Source
     op->src_file   = strdupW( SourceFilename );
     op->src_descr  = NULL;
     op->src_tag    = NULL;
-    op->dst_path   = strdupW( TargetPath );
+    op->dst_path   = strdupW( TargetPath ? TargetPath : SourcePath );
     op->dst_file   = strdupW( TargetFilename );
     op->dst_sd     = NULL;
+    op->media      = NULL;
     queue_file_op( &queue->rename_queue, op );
     return TRUE;
 }
@@ -775,13 +885,19 @@ BOOL WINAPI SetupQueueCopySectionW( HSPFILEQ queue, PCWSTR src_root, HINF hinf, 
     SP_FILE_COPY_PARAMS_W params;
     LPWSTR security_key, security_descriptor = NULL;
     INFCONTEXT context, security_context;
-    WCHAR dest[MAX_PATH], src[MAX_PATH];
+    WCHAR dest[MAX_PATH], src[MAX_PATH], root[MAX_PATH], path[MAX_PATH];
     INT flags;
     DWORD required;
     BOOL ret;
 
     TRACE( "hinf=%p/%p section=%s root=%s\n",
            hinf, hlist, debugstr_w(section), debugstr_w(src_root) );
+
+    if (!src_root)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
 
     /* Check for .Security section */
     security_key = MyMalloc( (strlenW( section ) + strlenW( DotSecurity )) * sizeof(WCHAR) + sizeof(UNICODE_NULL) );
@@ -813,19 +929,25 @@ BOOL WINAPI SetupQueueCopySectionW( HSPFILEQ queue, PCWSTR src_root, HINF hinf, 
 
     params.cbSize             = sizeof(params);
     params.QueueHandle        = queue;
-    params.SourceRootPath     = src_root;
+    params.SourceRootPath     = root;
     params.SourcePath         = NULL;
     params.SourceDescription  = NULL;
     params.SourceTagfile      = NULL;
+    params.TargetDirectory    = NULL;
     params.TargetFilename     = dest;
     params.CopyStyle          = style;
-    params.LayoutInf          = hinf;
+    params.LayoutInf          = NULL;
     params.SecurityDescriptor = security_descriptor;
 
     ret = FALSE;
     if (!hlist) hlist = hinf;
     if (!hinf) hinf = hlist;
-    if (!SetupFindFirstLineW( hlist, section, NULL, &context )) goto done;
+    if (!SetupFindFirstLineW( hlist, section, NULL, &context ))
+    {
+        if (SetupGetLineCountW( hlist, section ) == 0) ret = TRUE;
+        else SetLastError( ERROR_SECTION_NOT_FOUND );
+        goto done;
+    }
     if (!(params.TargetDirectory = get_destination_dir( hinf, section ))) goto done;
     do
     {
@@ -834,12 +956,23 @@ BOOL WINAPI SetupQueueCopySectionW( HSPFILEQ queue, PCWSTR src_root, HINF hinf, 
         if (!SetupGetStringFieldW( &context, 2, src, sizeof(src)/sizeof(WCHAR), NULL )) *src = 0;
         if (!SetupGetIntField( &context, 4, &flags )) flags = 0;  /* FIXME */
 
-        params.SourceFilename = *src ? src : NULL;
-        if (!SetupQueueCopyIndirectW( &params )) goto done;
+        params.SourceFilename = *src ? src : dest;
+        params.SourcePath = NULL;
+        params.SourceDescription = NULL;
+        params.SourceTagfile = NULL;
+        lstrcpyW( root, src_root );
+        path[0] = 0;
+        get_src_file_info( hinf, params.SourceFilename, &params, root, path );
+        ret = SetupQueueCopyIndirectW( &params );
+        HeapFree( GetProcessHeap(), 0, (WCHAR *)params.SourceDescription );
+        HeapFree( GetProcessHeap(), 0, (WCHAR *)params.SourceTagfile );
+        if (!ret) goto done;
+        ret = FALSE;
     } while (SetupFindNextLine( &context, &context ));
     ret = TRUE;
 
 done:
+    HeapFree( GetProcessHeap(), 0, (WCHAR *)params.TargetDirectory );
     if (security_descriptor)
         MyFree( security_descriptor );
     return ret;
@@ -878,7 +1011,11 @@ BOOL WINAPI SetupQueueDeleteSectionW( HSPFILEQ queue, HINF hinf, HINF hlist, PCW
     TRACE( "hinf=%p/%p section=%s\n", hinf, hlist, debugstr_w(section) );
 
     if (!hlist) hlist = hinf;
-    if (!SetupFindFirstLineW( hlist, section, NULL, &context )) return FALSE;
+    if (!SetupFindFirstLineW( hlist, section, NULL, &context ))
+    {
+        SetLastError( ERROR_SECTION_NOT_FOUND );
+        return FALSE;
+    }
     if (!(dest_dir = get_destination_dir( hinf, section ))) return FALSE;
     do
     {
@@ -926,7 +1063,11 @@ BOOL WINAPI SetupQueueRenameSectionW( HSPFILEQ queue, HINF hinf, HINF hlist, PCW
     TRACE( "hinf=%p/%p section=%s\n", hinf, hlist, debugstr_w(section) );
 
     if (!hlist) hlist = hinf;
-    if (!SetupFindFirstLineW( hlist, section, NULL, &context )) return FALSE;
+    if (!SetupFindFirstLineW( hlist, section, NULL, &context ))
+    {
+        SetLastError( ERROR_SECTION_NOT_FOUND );
+        return FALSE;
+    }
     if (!(dest_dir = get_destination_dir( hinf, section ))) return FALSE;
     do
     {
@@ -1009,6 +1150,27 @@ static BOOL create_full_pathW(const WCHAR *path)
     return ret;
 }
 
+#ifdef __REACTOS__
+static BOOL is_lz_compressed_file( LPCWSTR file )
+{
+    static const BYTE lz_magic[] = { 0x53, 0x5a, 0x44, 0x44, 0x88, 0xf0, 0x27, 0x33 };
+    BYTE buffer[sizeof(lz_magic)];
+    HANDLE handle;
+    DWORD size;
+    BOOL compressed;
+
+    handle = CreateFileW( file, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          NULL, OPEN_EXISTING, 0, NULL );
+    if (handle == INVALID_HANDLE_VALUE)
+        return TRUE;
+
+    compressed = ReadFile( handle, buffer, sizeof(buffer), &size, NULL ) && size == sizeof(buffer) &&
+                 !memcmp( buffer, lz_magic, sizeof(lz_magic) );
+    CloseHandle( handle );
+    return compressed;
+}
+#endif
+
 static BOOL do_file_copyW( LPCWSTR source, LPCWSTR target, DWORD style,
                            PSP_FILE_CALLBACK_W handler, PVOID context )
 {
@@ -1019,17 +1181,30 @@ static BOOL do_file_copyW( LPCWSTR source, LPCWSTR target, DWORD style,
     OFSTRUCT OfStruct;
     WCHAR TempPath[MAX_PATH];
     WCHAR TempFile[MAX_PATH];
+    WCHAR *Filename;
     LONG lRes;
-    DWORD dwLastError;
+    DWORD dwLastError, Length;
+    BOOL bDelayed = FALSE;
 #endif
 
     TRACE("copy %s to %s style 0x%x\n",debugstr_w(source),debugstr_w(target),style);
 
 #ifdef __REACTOS__
-    /* Get a temp file name */
-    if (!GetTempPathW(ARRAYSIZE(TempPath), TempPath))
+    Length = GetFullPathNameW(source, ARRAYSIZE(TempPath), TempPath, NULL);
+    if (Length && Length < ARRAYSIZE(TempPath) &&
+        (Length = GetFullPathNameW(target, ARRAYSIZE(TempFile), TempFile, NULL)) &&
+        Length < ARRAYSIZE(TempFile) && !lstrcmpiW(TempPath, TempFile) &&
+        GetFileAttributesW(TempFile) != INVALID_FILE_ATTRIBUTES)
     {
-        ERR("GetTempPathW error\n");
+        SetLastError(ERROR_SUCCESS);
+        return TRUE;
+    }
+
+    /* A forced no-overwrite does not require the source to exist. */
+    if ((style & SP_COPY_FORCE_NOOVERWRITE) &&
+        GetFileAttributesW(target) != INVALID_FILE_ATTRIBUTES)
+    {
+        SetLastError(ERROR_SUCCESS);
         return FALSE;
     }
 
@@ -1040,6 +1215,37 @@ static BOOL do_file_copyW( LPCWSTR source, LPCWSTR target, DWORD style,
         TRACE("LZOpenFileW(1) error %d %s\n", (int)hSource, debugstr_w(source));
         return FALSE;
     }
+
+    /* Decide whether to copy before creating or extracting any temporary file. */
+    if ((style & SP_COPY_REPLACEONLY) &&
+        GetFileAttributesW(target) == INVALID_FILE_ATTRIBUTES)
+        docopy = FALSE;
+    if (docopy && (style & SP_COPY_NOOVERWRITE) &&
+        GetFileAttributesW(target) != INVALID_FILE_ATTRIBUTES)
+    {
+        FILEPATHS_W filepaths = { target, source, ERROR_SUCCESS, 0 };
+        docopy = handler && handler(context, SPFILENOTIFY_TARGETEXISTS, (UINT_PTR)&filepaths, 0);
+    }
+    if (!docopy)
+    {
+        LZClose(hSource);
+        SetLastError(ERROR_SUCCESS);
+        return FALSE;
+    }
+    /* An explicit overwrite decision must survive the remaining copy checks. */
+    style &= ~SP_COPY_NOOVERWRITE;
+
+    /* Extract beside the destination: TEMP need not exist or be writable,
+     * and the final rename must stay on the destination volume. */
+    Length = GetFullPathNameW(target, ARRAYSIZE(TempPath), TempPath, &Filename);
+    if (!Length || Length >= ARRAYSIZE(TempPath) || !Filename)
+    {
+        dwLastError = !Length ? GetLastError() : ERROR_FILENAME_EXCED_RANGE;
+        LZClose(hSource);
+        SetLastError(dwLastError);
+        return FALSE;
+    }
+    *Filename = 0;
 
     if (!GetTempFileNameW(TempPath, L"", 0, TempFile))
     {
@@ -1056,44 +1262,59 @@ static BOOL do_file_copyW( LPCWSTR source, LPCWSTR target, DWORD style,
         return FALSE;
     }
 
-    /* Extract the compressed file to a temp location */
-    hTemp = LZOpenFileW(TempFile, &OfStruct, OF_CREATE);
-    if (hTemp < 0)
+    if (!is_lz_compressed_file(source))
     {
-        dwLastError = GetLastError();
-
-        ERR("LZOpenFileW(2) error %d %s\n", (int)hTemp, debugstr_w(TempFile));
-
-        /* Close the source handle */
         LZClose(hSource);
 
-        /* Delete temp file if an error is signaled */
-        DeleteFileW(TempFile);
-
-        /* Restore error condition triggered by LZOpenFileW */
-        SetLastError(dwLastError);
-
-        return FALSE;
+        if (!CopyFileW(source, TempFile, FALSE))
+        {
+            dwLastError = GetLastError();
+            DeleteFileW(TempFile);
+            SetLastError(dwLastError);
+            return FALSE;
+        }
     }
-
-    lRes = LZCopy(hSource, hTemp);
-
-    dwLastError = GetLastError();
-
-    LZClose(hSource);
-    LZClose(hTemp);
-
-    if (lRes < 0)
+    else
     {
-        ERR("LZCopy error %d (%s, %s)\n", (int)lRes, debugstr_w(source), debugstr_w(TempFile));
+        /* Extract the compressed file to a temp location */
+        hTemp = LZOpenFileW(TempFile, &OfStruct, OF_CREATE);
+        if (hTemp < 0)
+        {
+            dwLastError = GetLastError();
 
-        /* Delete temp file if copy was not successful */
-        DeleteFileW(TempFile);
+            ERR("LZOpenFileW(2) error %d %s\n", (int)hTemp, debugstr_w(TempFile));
 
-        /* Restore error condition triggered by LZCopy */
-        SetLastError(dwLastError);
+            /* Close the source handle */
+            LZClose(hSource);
 
-        return FALSE;
+            /* Delete temp file if an error is signaled */
+            DeleteFileW(TempFile);
+
+            /* Restore error condition triggered by LZOpenFileW */
+            SetLastError(dwLastError);
+
+            return FALSE;
+        }
+
+        lRes = LZCopy(hSource, hTemp);
+
+        dwLastError = GetLastError();
+
+        LZClose(hSource);
+        LZClose(hTemp);
+
+        if (lRes < 0)
+        {
+            ERR("LZCopy error %d (%s, %s)\n", (int)lRes, debugstr_w(source), debugstr_w(TempFile));
+
+            /* Delete temp file if copy was not successful */
+            DeleteFileW(TempFile);
+
+            /* Restore error condition triggered by LZCopy */
+            SetLastError(dwLastError);
+
+            return FALSE;
+        }
     }
 #endif
 
@@ -1209,17 +1430,44 @@ static BOOL do_file_copyW( LPCWSTR source, LPCWSTR target, DWORD style,
             docopy = FALSE;
         }
     }
-    if (style & (SP_COPY_NODECOMP | SP_COPY_LANGUAGEAWARE | SP_COPY_FORCE_IN_USE |
-                 SP_COPY_IN_USE_NEEDS_REBOOT | SP_COPY_NOSKIP | SP_COPY_WARNIFSKIP))
+    if (style & (SP_COPY_NODECOMP | SP_COPY_LANGUAGEAWARE |
+                 SP_COPY_NOSKIP | SP_COPY_WARNIFSKIP))
     {
         ERR("Unsupported style(s) 0x%x\n",style);
     }
 
     if (docopy)
     {
+#ifdef __REACTOS__
+        if ((style & SP_COPY_FORCE_IN_USE) && GetFileAttributesW(target) != INVALID_FILE_ATTRIBUTES)
+        {
+            rc = FALSE;
+            SetLastError(ERROR_SHARING_VIOLATION);
+        }
+        else
+#endif
         rc = MoveFileExW(TempFile,target,MOVEFILE_REPLACE_EXISTING);
         TRACE("Did copy... rc was %i\n",rc);
+#ifdef __REACTOS__
+        if (!rc && (GetLastError() == ERROR_SHARING_VIOLATION || GetLastError() == ERROR_ACCESS_DENIED))
+        {
+            rc = MoveFileExW(TempFile, target, MOVEFILE_REPLACE_EXISTING | MOVEFILE_DELAY_UNTIL_REBOOT);
+            if (rc)
+            {
+                FILEPATHS_W filepaths = { target, source, ERROR_SUCCESS, 0 };
+
+                bDelayed = TRUE;
+                if (handler)
+                    handler(context, SPFILENOTIFY_FILEOPDELAYED, (UINT_PTR)&filepaths, 0);
+            }
+        }
+#endif
     }
+#ifdef __REACTOS__
+    dwLastError = docopy && !rc ? GetLastError() : ERROR_SUCCESS;
+    if (!bDelayed)
+        DeleteFileW(TempFile);
+#endif
 
     /* after copy processing */
     if (style & SP_COPY_DELETESOURCE)
@@ -1228,6 +1476,9 @@ static BOOL do_file_copyW( LPCWSTR source, LPCWSTR target, DWORD style,
             DeleteFileW(source);
     }
 
+#ifdef __REACTOS__
+    SetLastError(dwLastError);
+#endif
     return rc;
 }
 
@@ -1274,6 +1525,19 @@ exit:
 }
 
 /***********************************************************************
+ *            SetupInstallFileExA   (SETUPAPI.@)
+ */
+#ifdef __REACTOS__
+BOOL WINAPI SetupInstallFileExA( HINF hinf, PINFCONTEXT inf_context, PCSTR source, PCSTR root,
+                                 PCSTR dest, DWORD style, PSP_FILE_CALLBACK_A handler,
+                                 PVOID context, PBOOL in_use )
+{
+    if (in_use) FIXME("no file in use support\n");
+    return SetupInstallFileA( hinf, inf_context, source, root, dest, style, handler, context );
+}
+#endif
+
+/***********************************************************************
  *            SetupInstallFileW   (SETUPAPI.@)
  */
 BOOL WINAPI SetupInstallFileW( HINF hinf, PINFCONTEXT inf_context, PCWSTR source, PCWSTR root,
@@ -1282,15 +1546,19 @@ BOOL WINAPI SetupInstallFileW( HINF hinf, PINFCONTEXT inf_context, PCWSTR source
     static const WCHAR CopyFiles[] = {'C','o','p','y','F','i','l','e','s',0};
 
     BOOL ret, absolute = (root && *root && !(style & SP_COPY_SOURCE_ABSOLUTE));
-    WCHAR *buffer, *p, *inf_source = NULL;
+    WCHAR *buffer, *p, *inf_source = NULL, dest_path[MAX_PATH], source_path[MAX_PATH];
     unsigned int len;
 
     TRACE("%p %p %s %s %s %x %p %p\n", hinf, inf_context, debugstr_w(source), debugstr_w(root),
           debugstr_w(dest), style, handler, context);
 
+    dest_path[0] = 0;
+    source_path[0] = 0;
+
     if (hinf)
     {
         INFCONTEXT ctx;
+        WCHAR *dest_dir;
 
         if (!inf_context)
         {
@@ -1309,6 +1577,19 @@ BOOL WINAPI SetupInstallFileW( HINF hinf, PINFCONTEXT inf_context, PCWSTR source
             return FALSE;
         }
         source = inf_source;
+        if (!(style & SP_COPY_SOURCE_ABSOLUTE))
+        {
+            UINT diskid;
+
+            if (!SetupGetSourceFileLocationW( hinf, NULL, source, &diskid, source_path, MAX_PATH, NULL ))
+                source_path[0] = 0;
+        }
+        if ((dest_dir = get_destination_dir( hinf, NULL )))
+        {
+            lstrcpyW( dest_path, dest_dir );
+            lstrcatW( dest_path, L"\\" );
+            HeapFree( GetProcessHeap(), 0, dest_dir );
+        }
     }
     else if (!source)
     {
@@ -1318,6 +1599,7 @@ BOOL WINAPI SetupInstallFileW( HINF hinf, PINFCONTEXT inf_context, PCWSTR source
 
     len = strlenW( source ) + 1;
     if (absolute) len += strlenW( root ) + 1;
+    if (*source_path) len += strlenW( source_path ) + 1;
 
     if (!(p = buffer = HeapAlloc( GetProcessHeap(), 0, len * sizeof(WCHAR) )))
     {
@@ -1332,14 +1614,91 @@ BOOL WINAPI SetupInstallFileW( HINF hinf, PINFCONTEXT inf_context, PCWSTR source
         p += strlenW( buffer );
         if (p[-1] != '\\') *p++ = '\\';
     }
+    if (*source_path)
+    {
+        strcpyW( p, source_path );
+        p += strlenW( p );
+        if (p[-1] != '\\') *p++ = '\\';
+    }
     while (*source == '\\') source++;
     strcpyW( p, source );
 
-    ret = do_file_copyW( buffer, dest, style, handler, context );
+    lstrcatW( dest_path, dest );
+    ret = do_file_copyW( buffer, dest_path, style, handler, context );
 
     HeapFree( GetProcessHeap(), 0, inf_source );
     HeapFree( GetProcessHeap(), 0, buffer );
     return ret;
+}
+
+/***********************************************************************
+ *            SetupInstallFileExW   (SETUPAPI.@)
+ */
+#ifdef __REACTOS__
+BOOL WINAPI SetupInstallFileExW( HINF hinf, PINFCONTEXT inf_context, PCWSTR source, PCWSTR root,
+                                 PCWSTR dest, DWORD style, PSP_FILE_CALLBACK_W handler,
+                                 PVOID context, PBOOL in_use )
+{
+    if (in_use) FIXME("no file in use support\n");
+    return SetupInstallFileW( hinf, inf_context, source, root, dest, style, handler, context );
+}
+#endif
+
+static BOOL queue_copy_file( const WCHAR *source, const WCHAR *dest,
+        const struct file_op *op, PSP_FILE_CALLBACK_W handler, void *context )
+{
+    TRACE("copying file %s -> %s\n", debugstr_w(source), debugstr_w(dest));
+
+    if (op->dst_path && !create_full_pathW(op->dst_path))
+        return FALSE;
+
+    if (op->dst_file && strchrW(op->dst_file, '\\'))
+    {
+        WCHAR *parent = HeapAlloc(GetProcessHeap(), 0, (strlenW(dest) + 1) * sizeof(WCHAR));
+        WCHAR *slash;
+        BOOL created;
+
+        if (!parent)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        strcpyW(parent, dest);
+        slash = strrchrW(parent, '\\');
+        if (slash)
+            *slash = 0;
+        created = !slash || create_full_pathW(parent);
+        HeapFree(GetProcessHeap(), 0, parent);
+        if (!created)
+            return FALSE;
+    }
+
+    if (!do_file_copyW(source, dest, op->style, handler, context) && GetLastError() != ERROR_SUCCESS)
+    {
+        if (!op->media->tag || !extract_cabinet_file(op->media->tag, op->media->root, op->src_file, dest))
+            return FALSE;
+        op->media->cabinet = TRUE;
+    }
+
+    if (op->dst_sd)
+    {
+        PSID psidOwner = NULL, psidGroup = NULL;
+        PACL pDacl = NULL, pSacl = NULL;
+        SECURITY_INFORMATION security_info = 0;
+        BOOL present, dummy;
+
+        if (GetSecurityDescriptorOwner( op->dst_sd, &psidOwner, &dummy ) && psidOwner)
+            security_info |= OWNER_SECURITY_INFORMATION;
+        if (GetSecurityDescriptorGroup( op->dst_sd, &psidGroup, &dummy ) && psidGroup)
+            security_info |= GROUP_SECURITY_INFORMATION;
+        if (GetSecurityDescriptorDacl( op->dst_sd, &present, &pDacl, &dummy ))
+            security_info |= DACL_SECURITY_INFORMATION;
+        if (GetSecurityDescriptorSacl( op->dst_sd, &present, &pSacl, &dummy ))
+            security_info |= DACL_SECURITY_INFORMATION;
+        SetNamedSecurityInfoW( (LPWSTR)dest, SE_FILE_OBJECT, security_info,
+            psidOwner, psidGroup, pDacl, pSacl );
+    }
+    return TRUE;
 }
 
 /***********************************************************************
@@ -1420,58 +1779,133 @@ BOOL WINAPI SetupCommitFileQueueW( HWND owner, HSPFILEQ handle, PSP_FILE_CALLBAC
         {
             WCHAR newpath[MAX_PATH];
 
-            build_filepathsW( op, &paths );
-            op_result = handler( context, SPFILENOTIFY_STARTCOPY, (UINT_PTR)&paths, FILEOP_COPY );
-            if (op_result == FILEOP_ABORT) goto done;
-            if (op_result == FILEOP_NEWPATH) op_result = FILEOP_DOIT;
-            while (op_result == FILEOP_DOIT || op_result == FILEOP_NEWPATH)
+            if (!op->media->resolved)
             {
-                TRACE( "copying file %s -> %s\n",
-                       debugstr_w( op_result == FILEOP_NEWPATH ? newpath : paths.Source ),
-                       debugstr_w(paths.Target) );
-                if (op->dst_path)
-                {
-                    if (!create_full_pathW( op->dst_path ))
-                    {
-                        paths.Win32Error = GetLastError();
-                        op_result = handler( context, SPFILENOTIFY_COPYERROR,
-                                     (UINT_PTR)&paths, (UINT_PTR)newpath );
-                        if (op_result == FILEOP_ABORT) goto done;
-                    }
-                }
-                if (do_file_copyW( op_result == FILEOP_NEWPATH ? newpath : paths.Source,
-                               paths.Target, op->style, handler, context )) break;  /* success */
-                /* try to extract it from the cabinet file */
-                if (op->src_tag)
-                {
-                    if (extract_cabinet_file( op->src_tag, op->src_root,
-                                              op->src_file, paths.Target )) break;
-                }
-                paths.Win32Error = GetLastError();
-                op_result = handler( context, SPFILENOTIFY_COPYERROR,
-                                     (UINT_PTR)&paths, (UINT_PTR)newpath );
-                if (op_result == FILEOP_ABORT) goto done;
-            }
-            if (op->dst_sd)
-            {
-                PSID psidOwner = NULL, psidGroup = NULL;
-                PACL pDacl = NULL, pSacl = NULL;
-                SECURITY_INFORMATION security_info = 0;
-                BOOL present, dummy;
+                WCHAR src_path[MAX_PATH];
+                size_t path_len = 0;
 
-                if (GetSecurityDescriptorOwner( op->dst_sd, &psidOwner, &dummy ) && psidOwner)
-                    security_info |= OWNER_SECURITY_INFORMATION;
-                if (GetSecurityDescriptorGroup( op->dst_sd, &psidGroup, &dummy ) && psidGroup)
-                    security_info |= GROUP_SECURITY_INFORMATION;
-                if (GetSecurityDescriptorDacl( op->dst_sd, &present, &pDacl, &dummy ))
-                    security_info |= DACL_SECURITY_INFORMATION;
-                if (GetSecurityDescriptorSacl( op->dst_sd, &present, &pSacl, &dummy ))
-                    security_info |= DACL_SECURITY_INFORMATION;
-                SetNamedSecurityInfoW( (LPWSTR)paths.Target, SE_FILE_OBJECT, security_info,
-                    psidOwner, psidGroup, pDacl, pSacl );
-                /* Yes, ignore the return code... */
+                src_path[0] = 0;
+                if (op->src_path)
+                {
+                    path_len = lstrlenW(op->src_path);
+                    if (path_len < ARRAYSIZE(src_path) &&
+                        lstrlenW(op->media->root) + 1 + path_len < ARRAYSIZE(op->media->root))
+                    {
+                        lstrcpyW(src_path, op->src_path);
+                        lstrcatW(op->media->root, L"\\");
+                        lstrcatW(op->media->root, op->src_path);
+                    }
+                    else
+                    {
+                        path_len = 0;
+                    }
+
+                    HeapFree(GetProcessHeap(), 0, op->src_path);
+                    op->src_path = NULL;
+                }
+
+                for (;;)
+                {
+                    SOURCE_MEDIA_W media;
+                    media.Reserved = NULL;
+                    media.Tagfile = op->media->tag;
+                    media.Description = op->media->desc;
+                    media.SourcePath = op->media->root;
+                    media.SourceFile = op->src_file;
+                    media.Flags = op->style & (SP_COPY_WARNIFSKIP | SP_COPY_NOSKIP | SP_FLAG_CABINETCONTINUATION | SP_COPY_NOBROWSE);
+
+                    newpath[0] = 0;
+                    op_result = handler( context, SPFILENOTIFY_NEEDMEDIA, (UINT_PTR)&media, (UINT_PTR)newpath );
+
+                    if (op_result == FILEOP_ABORT)
+                        goto done;
+                    else if (op_result == FILEOP_SKIP)
+                        break;
+                    else if (op_result == FILEOP_NEWPATH)
+                        lstrcpyW(op->media->root, newpath);
+                    else if (op_result != FILEOP_DOIT)
+                        FIXME("Unhandled return value %#x.\n", op_result);
+
+                    build_filepathsW( op, &paths );
+                    op_result = handler( context, SPFILENOTIFY_STARTCOPY, (UINT_PTR)&paths, FILEOP_COPY );
+                    if (op_result == FILEOP_ABORT)
+                        goto done;
+                    else if (op_result == FILEOP_SKIP)
+                        break;
+                    else if (op_result != FILEOP_DOIT)
+                        FIXME("Unhandled return value %#x.\n", op_result);
+
+                    if (queue_copy_file( paths.Source, paths.Target, op, handler, context ))
+                    {
+                        if (path_len > 0 && !op->media->cabinet)
+                        {
+                            size_t root_len = lstrlenW(op->media->root);
+                            if (path_len <= root_len && !wcsnicmp(op->media->root + root_len - path_len, src_path, path_len))
+                                op->media->root[root_len - path_len - 1] = 0;
+                        }
+                        op->media->resolved = TRUE;
+                        handler( context, SPFILENOTIFY_ENDCOPY, (UINT_PTR)&paths, 0 );
+                        break;
+                    }
+                    paths.Win32Error = GetLastError();
+                    if ((paths.Win32Error == ERROR_PATH_NOT_FOUND ||
+                         paths.Win32Error == ERROR_FILE_NOT_FOUND) &&
+                        GetFileAttributesW( paths.Source ) == INVALID_FILE_ATTRIBUTES)
+                        continue;
+
+                    newpath[0] = 0;
+                    op_result = handler( context, SPFILENOTIFY_COPYERROR, (UINT_PTR)&paths, (UINT_PTR)newpath );
+                    if (op_result == FILEOP_ABORT)
+                        goto done;
+                    else if (op_result == FILEOP_SKIP)
+                        break;
+                    else if (op_result == FILEOP_NEWPATH)
+                    {
+                        lstrcpyW(op->media->root, newpath);
+                        build_filepathsW(op, &paths);
+                    }
+                    else if (op_result != FILEOP_DOIT)
+                        FIXME("Unhandled return value %#x.\n", op_result);
+                }
+
+                if (!op->media->resolved && path_len > 0)
+                {
+                    size_t root_len = lstrlenW(op->media->root);
+                    if (path_len < root_len && !wcsnicmp(op->media->root + root_len - path_len, src_path, path_len))
+                        op->media->root[root_len - path_len - 1] = 0;
+                }
             }
-            handler( context, SPFILENOTIFY_ENDCOPY, (UINT_PTR)&paths, 0 );
+            else
+            {
+                build_filepathsW( op, &paths );
+                op_result = handler( context, SPFILENOTIFY_STARTCOPY, (UINT_PTR)&paths, FILEOP_COPY );
+                if (op_result == FILEOP_ABORT)
+                    goto done;
+                else if (op_result == FILEOP_SKIP)
+                    continue;
+                else if (op_result != FILEOP_DOIT)
+                    FIXME("Unhandled return value %#x.\n", op_result);
+
+                while (op_result == FILEOP_DOIT || op_result == FILEOP_NEWPATH)
+                {
+                    if (queue_copy_file( paths.Source, paths.Target, op, handler, context ))
+                        break;
+
+                    paths.Win32Error = GetLastError();
+                    newpath[0] = 0;
+                    op_result = handler( context, SPFILENOTIFY_COPYERROR, (UINT_PTR)&paths, (UINT_PTR)newpath );
+                    if (op_result == FILEOP_ABORT)
+                        goto done;
+                    else if (op_result == FILEOP_NEWPATH)
+                    {
+                        lstrcpyW(op->media->root, newpath);
+                        build_filepathsW(op, &paths);
+                    }
+                    else if (op_result != FILEOP_SKIP && op_result != FILEOP_DOIT)
+                        FIXME("Unhandled return value %#x.\n", op_result);
+                }
+                handler( context, SPFILENOTIFY_ENDCOPY, (UINT_PTR)&paths, 0 );
+            }
         }
         handler( context, SPFILENOTIFY_ENDSUBQUEUE, FILEOP_COPY, 0 );
     }
@@ -1659,6 +2093,38 @@ void WINAPI SetupTermDefaultQueueCallback( PVOID context )
 }
 
 
+static BOOL media_file_present_w( const WCHAR *root, const WCHAR *file )
+{
+    WCHAR path[2 * MAX_PATH + 2];
+    DWORD attributes;
+
+    if (!file || !*file) return FALSE;
+    if (lstrlenW( root ) + lstrlenW( file ) + 2 > ARRAYSIZE(path)) return FALSE;
+    concat_W( path, root, NULL, file );
+    attributes = GetFileAttributesW( path );
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static BOOL media_file_present_a( const char *root, const char *file )
+{
+    char path[2 * MAX_PATH + 2];
+    DWORD attributes;
+    size_t len;
+
+    if (!file || !*file) return FALSE;
+    len = root ? strlen( root ) : 0;
+    if (len + strlen( file ) + 2 > ARRAYSIZE(path)) return FALSE;
+    path[0] = 0;
+    if (len)
+    {
+        strcpy( path, root );
+        if (path[len - 1] != '\\') strcat( path, "\\" );
+    }
+    strcat( path, file );
+    attributes = GetFileAttributesA( path );
+    return attributes != INVALID_FILE_ATTRIBUTES && !(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
 /***********************************************************************
  *            SetupDefaultQueueCallbackA   (SETUPAPI.@)
  */
@@ -1713,8 +2179,15 @@ UINT WINAPI SetupDefaultQueueCallbackA( PVOID context, UINT notification,
              debugstr_a(paths->Source), debugstr_a(paths->Target) );
         return FILEOP_SKIP;
     case SPFILENOTIFY_NEEDMEDIA:
-        TRACE( "need media\n" );
-        return FILEOP_SKIP;
+    {
+        const SOURCE_MEDIA_A *media = (const SOURCE_MEDIA_A *)param1;
+        TRACE( "need media %s %s\n", debugstr_a(media->SourcePath), debugstr_a(media->SourceFile) );
+        if (!media_file_present_a( media->SourcePath, media->SourceFile ) &&
+            !media_file_present_a( media->SourcePath, media->Tagfile ))
+            return FILEOP_SKIP;
+        strcpy( (char *)param2, media->SourcePath );
+        return FILEOP_DOIT;
+    }
     default:
         FIXME( "notification %d params %lx,%lx\n", notification, param1, param2 );
         break;
@@ -1778,8 +2251,15 @@ UINT WINAPI SetupDefaultQueueCallbackW( PVOID context, UINT notification,
              debugstr_w(paths->Source), debugstr_w(paths->Target) );
         return FILEOP_SKIP;
     case SPFILENOTIFY_NEEDMEDIA:
-        TRACE( "need media\n" );
-        return FILEOP_SKIP;
+    {
+        const SOURCE_MEDIA_W *media = (const SOURCE_MEDIA_W *)param1;
+        TRACE( "need media %s %s\n", debugstr_w(media->SourcePath), debugstr_w(media->SourceFile) );
+        if (!media_file_present_w( media->SourcePath, media->SourceFile ) &&
+            !media_file_present_w( media->SourcePath, media->Tagfile ))
+            return FILEOP_SKIP;
+        lstrcpyW( (WCHAR *)param2, media->SourcePath );
+        return FILEOP_DOIT;
+    }
     default:
         FIXME( "notification %d params %lx,%lx\n", notification, param1, param2 );
         break;

@@ -8,7 +8,6 @@ list(APPEND HAL_XBOX_ASM_SOURCE
 list(APPEND HAL_XBOX_SOURCE
     generic/beep.c
     generic/cmos.c
-    generic/display.c
     generic/dma.c
     generic/drive.c
     generic/halinit.c
@@ -26,8 +25,6 @@ list(APPEND HAL_XBOX_SOURCE
     legacy/bus/cmosbus.c
     legacy/bus/isabus.c
     legacy/bus/pcibus.c
-    ${CMAKE_CURRENT_BINARY_DIR}/pci_classes.c
-    ${CMAKE_CURRENT_BINARY_DIR}/pci_vendors.c
     legacy/bus/sysbus.c
     legacy/bussupp.c
     legacy/halpnpdd.c
@@ -45,5 +42,8 @@ list(APPEND HAL_XBOX_SOURCE
 add_asm_files(lib_hal_xbox_asm ${HAL_XBOX_ASM_SOURCE})
 add_library(lib_hal_xbox OBJECT ${HAL_XBOX_SOURCE} ${lib_hal_xbox_asm})
 add_dependencies(lib_hal_xbox bugcodes xdk asm)
+# bussupp.c names devices from the shared PCI tables
+target_include_directories(lib_hal_xbox PRIVATE $<TARGET_PROPERTY:halcommon,INTERFACE_INCLUDE_DIRECTORIES>)
+add_dependencies(lib_hal_xbox halcommon)
 #add_pch(lib_hal_xbox xbox/halxbox.h)
 target_compile_definitions(lib_hal_xbox PRIVATE SARCH_XBOX)

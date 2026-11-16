@@ -214,8 +214,12 @@ MountMgrTargetDeviceNotification(IN PVOID NotificationStructure,
     DeviceExtension = DeviceInformation->DeviceExtension;
     Notification = NotificationStructure;
 
-    /* The notification have to be unregistered already (in device interface change handler) */
-    ASSERT(!IsEqualGUID(&Notification->Event, &GUID_TARGET_DEVICE_REMOVE_COMPLETE));
+    /* The interface removal notification may not arrive first. */
+    if (IsEqualGUID(&Notification->Event, &GUID_TARGET_DEVICE_REMOVE_COMPLETE))
+    {
+        MountMgrMountedDeviceRemoval(DeviceExtension, &DeviceInformation->SymbolicName);
+        return STATUS_SUCCESS;
+    }
 
     /* It it's to signal that a volume has been mounted
      * Verify if a database sync is required and execute it
@@ -458,19 +462,19 @@ RemoveWorkItem(IN PUNIQUE_ID_WORK_ITEM WorkItem)
 {
     PDEVICE_EXTENSION DeviceExtension = WorkItem->DeviceExtension;
 
-    KeWaitForSingleObject(&(DeviceExtension->DeviceLock), Executive, KernelMode, FALSE, NULL);
+    MmpAcquireDeviceLock(DeviceExtension);
 
     /* If even if being worked, it's too late */
     if (WorkItem->Event)
     {
-        KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+        MmpReleaseDeviceLock(DeviceExtension);
         KeSetEvent(WorkItem->Event, 0, FALSE);
     }
     else
     {
         /* Otherwise, remove it from the list, and delete it */
         RemoveEntryList(&(WorkItem->UniqueIdWorkerItemListEntry));
-        KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+        MmpReleaseDeviceLock(DeviceExtension);
         IoFreeIrp(WorkItem->Irp);
         FreePool(WorkItem->DeviceName.Buffer);
         FreePool(WorkItem->IrpBuffer);
@@ -709,9 +713,9 @@ IssueUniqueIdChangeNotify(IN PDEVICE_EXTENSION DeviceExtension,
     WorkItem->IrpBufferLength = sizeof(MOUNTDEV_UNIQUE_ID_CHANGE_NOTIFY_OUTPUT) + 1024;
 
     /* Add the worker in the list */
-    KeWaitForSingleObject(&(DeviceExtension->DeviceLock), Executive, KernelMode, FALSE, NULL);
+    MmpAcquireDeviceLock(DeviceExtension);
     InsertHeadList(&(DeviceExtension->UniqueIdWorkerItemListHead), &(WorkItem->UniqueIdWorkerItemListEntry));
-    KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+    MmpReleaseDeviceLock(DeviceExtension);
 
     /* And call the worker */
     IssueUniqueIdChangeNotifyWorker(WorkItem, UniqueId);

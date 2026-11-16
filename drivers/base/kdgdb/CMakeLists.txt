@@ -4,23 +4,27 @@ spec2def(kdgdb.dll kdgdb.spec)
 list(APPEND SOURCE
     gdb_input.c
     gdb_receive.c
+    gdb_regs.c
     gdb_send.c
     kdcom.c
     kdpacket.c
     utils.c
     kdgdb.h)
 
-# TODO: ARM...
+# TODO: ARM (32-bit)...
 if(ARCH STREQUAL "i386")
-    list(APPEND SOURCE i386_sup.c)
+    list(APPEND SOURCE i386_sup.c hwbp_x86.c)
 elseif(ARCH STREQUAL "amd64")
-    list(APPEND SOURCE amd64_sup.c)
+    list(APPEND SOURCE amd64_sup.c hwbp_x86.c)
+elseif(ARCH STREQUAL "arm64")
+    list(APPEND SOURCE arm64_sup.c hwbp_arm64.c)
 endif()
 
 add_library(kdgdb MODULE
     ${SOURCE}
     kdgdb.rc
     ${CMAKE_CURRENT_BINARY_DIR}/kdgdb.def)
+target_compile_definitions(kdgdb PRIVATE NTDDI_VERSION=${REACTOS_TARGET_NTDDI})
 add_pch(kdgdb kdgdb.h SOURCE)
 
 set_module_type(kdgdb kerneldll ENTRYPOINT 0)

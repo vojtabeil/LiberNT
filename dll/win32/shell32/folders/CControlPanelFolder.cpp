@@ -20,6 +20,7 @@
  */
 
 #include <precomp.h>
+#include <propkey.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(shell);
 
@@ -90,6 +91,18 @@ static const CLSID* IsRegItem(LPCITEMIDLIST pidl)
     if (type == PT_CONTROLS_OLDREGITEM || type == PT_CONTROLS_NEWREGITEM)
         return (CLSID*)((BYTE*)pidl + (pidl->mkid.cb - sizeof(CLSID)));
     return NULL;
+}
+
+static BOOL IsNameSpaceItem(IShellFolder2 *pRegFolder, PCUITEMID_CHILD pidl)
+{
+    const CLSID *pclsid = IsRegItem(pidl);
+    WCHAR szName[2 + CHARS_IN_GUID] = L"::";
+    CComHeapPtr<ITEMIDLIST> pidlItem;
+
+    if (!pclsid || !_ILIsPidlSimple(pidl))
+        return FALSE;
+    StringFromGUID2(*pclsid, szName + 2, CHARS_IN_GUID);
+    return SUCCEEDED(pRegFolder->ParseDisplayName(NULL, NULL, szName, NULL, &pidlItem, NULL));
 }
 
 static LPITEMIDLIST _ILCreateCPanelApplet(LPCWSTR pszName, LPCWSTR pszDisplayName, LPCWSTR pszComment, int iIconIdx)
@@ -163,8 +176,25 @@ HRESULT CCPLExtractIcon_CreateInstance(IShellFolder * psf, LPCITEMIDLIST pidl, R
     return initIcon->QueryInterface(riid, ppvOut);
 }
 
+static BOOL IsCplDontLoad(LPCWSTR pszPath)
+{
+    static const WCHAR szKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Control Panel\\don't load";
+    LPCWSTR pszFile = PathFindFileNameW(pszPath);
+    HKEY hRoots[2] = { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER };
+    for (UINT i = 0; i < _countof(hRoots); i++)
+    {
+        DWORD cb = 0;
+        if (SHGetValueW(hRoots[i], szKey, pszFile, NULL, NULL, &cb) == ERROR_SUCCESS)
+            return TRUE;
+    }
+    return FALSE;
+}
+
 BOOL CControlPanelEnum::RegisterCPanelApp(LPCWSTR wpath)
 {
+    if (IsCplDontLoad(wpath))
+        return TRUE;
+
     CPlApplet* applet = Control_LoadApplet(0, wpath, NULL);
     int iconIdx;
 
@@ -269,15 +299,70 @@ BOOL CControlPanelEnum::CreateCPanelEnumList(DWORD dwFlags)
     return TRUE;
 }
 
+struct APPLET_LIST
+{
+    UINT Count;
+    PITEMID_CHILD Items[ANYSIZE_ARRAY];
+};
+
+static VOID FreeAppletList(APPLET_LIST *pList)
+{
+    for (UINT i = 0; i < pList->Count; i++)
+        ILFree(pList->Items[i]);
+    SHFree(pList);
+}
+
 CControlPanelFolder::CControlPanelFolder()
 {
     pidlRoot = NULL;    /* absolute pidl */
+    m_cBackReferences = 0;
+    m_pApplets = NULL;
 }
 
 CControlPanelFolder::~CControlPanelFolder()
 {
     TRACE("-- destroying IShellFolder(%p)\n", this);
+    if (m_pApplets)
+        FreeAppletList(m_pApplets);
     SHFree(pidlRoot);
+}
+
+/* Listing the applets loads every one of them, so a folder lists them once for all the names it parses */
+APPLET_LIST *CControlPanelFolder::GetApplets(HWND hwndOwner)
+{
+    CComPtr<IEnumIDList> pEnum;
+    CSimpleArray<PITEMID_CHILD> Items;
+    PITEMID_CHILD pidlChild;
+    APPLET_LIST *pList;
+
+    if (m_pApplets)
+        return m_pApplets;
+
+    if (FAILED(EnumObjects(hwndOwner, SHCONTF_NONFOLDERS, &pEnum)))
+        return NULL;
+
+    while (pEnum->Next(1, &pidlChild, NULL) == S_OK)
+    {
+        if (!_ILGetCPanelPointer(pidlChild) || !Items.Add(pidlChild))
+            ILFree(pidlChild);
+    }
+
+    pList = (APPLET_LIST *)SHAlloc(FIELD_OFFSET(APPLET_LIST, Items) + Items.GetSize() * sizeof(pList->Items[0]));
+    if (!pList)
+    {
+        for (int i = 0; i < Items.GetSize(); i++)
+            ILFree(Items[i]);
+        return NULL;
+    }
+
+    pList->Count = (UINT)Items.GetSize();
+    for (UINT i = 0; i < pList->Count; i++)
+        pList->Items[i] = Items[i];
+
+    if (InterlockedCompareExchangePointer((PVOID *)&m_pApplets, pList, NULL) != NULL)
+        FreeAppletList(pList);
+
+    return m_pApplets;
 }
 
 /**************************************************************************
@@ -292,7 +377,36 @@ HRESULT WINAPI CControlPanelFolder::ParseDisplayName(
     DWORD *pdwAttributes)
 {
     /* We only support parsing guid names */
-    return m_regFolder->ParseDisplayName(hwndOwner, pbc, lpszDisplayName, pchEaten, ppidl, pdwAttributes);
+    HRESULT hr = m_regFolder->ParseDisplayName(hwndOwner, pbc, lpszDisplayName, pchEaten, ppidl, pdwAttributes);
+    if (SUCCEEDED(hr) || !lpszDisplayName || !ppidl)
+        return hr;
+
+    APPLET_LIST *pApplets = GetApplets(hwndOwner);
+    if (!pApplets)
+        return hr;
+
+    for (UINT i = 0; i < pApplets->Count; i++)
+    {
+        PITEMID_CHILD pidlChild = pApplets->Items[i];
+        PIDLCPanelStruct *pCPanel = _ILGetCPanelPointer(pidlChild);
+        if (!lstrcmpiW(pCPanel->szName + pCPanel->offsDispName, lpszDisplayName))
+        {
+            pidlChild = ILClone(pidlChild);
+            if (!pidlChild)
+                return E_OUTOFMEMORY;
+            if (pdwAttributes && *pdwAttributes)
+            {
+                DWORD dwAttributes = ~0u;
+                GetAttributesOf(1, &pidlChild, &dwAttributes);
+                *pdwAttributes = dwAttributes;
+            }
+            if (pchEaten)
+                *pchEaten = (DWORD)wcslen(lpszDisplayName);
+            *ppidl = pidlChild;
+            return S_OK;
+        }
+    }
+    return hr;
 }
 
 /**************************************************************************
@@ -386,8 +500,13 @@ HRESULT WINAPI CControlPanelFolder::CreateViewObject(HWND hwndOwner, REFIID riid
             WARN("IContextMenu not implemented\n");
             hr = E_NOTIMPL;
         } else if (IsEqualIID(riid, IID_IShellView)) {
-            SFV_CREATE sfvparams = { sizeof(SFV_CREATE), this , NULL, this };
-            hr = SHCreateShellFolderView(&sfvparams, (IShellView**)ppvOut);
+            CComPtr<CControlPanelFolderViewCB> sfviewcb;
+            hr = ShellObjectCreator(sfviewcb);
+            if (SUCCEEDED(hr))
+            {
+                SFV_CREATE sfvparams = { sizeof(SFV_CREATE), this , NULL, sfviewcb };
+                hr = SHCreateShellFolderView(&sfvparams, (IShellView**)ppvOut);
+            }
         }
     }
     TRACE("--(%p)->(interface=%p)\n", this, ppvOut);
@@ -400,6 +519,7 @@ HRESULT WINAPI CControlPanelFolder::CreateViewObject(HWND hwndOwner, REFIID riid
 HRESULT WINAPI CControlPanelFolder::GetAttributesOf(UINT cidl, PCUITEMID_CHILD_ARRAY apidl, DWORD * rgfInOut)
 {
     HRESULT hr = S_OK;
+    BOOL bInvalid = FALSE;
     static const DWORD dwControlPanelAttributes =
         SFGAO_HASSUBFOLDER | SFGAO_FOLDER | SFGAO_CANLINK;
 
@@ -410,9 +530,6 @@ HRESULT WINAPI CControlPanelFolder::GetAttributesOf(UINT cidl, PCUITEMID_CHILD_A
         return E_INVALIDARG;
     if (cidl && !apidl)
         return E_INVALIDARG;
-
-    if (*rgfInOut == 0)
-        *rgfInOut = ~0;
 
     if (!cidl)
     {
@@ -425,6 +542,11 @@ HRESULT WINAPI CControlPanelFolder::GetAttributesOf(UINT cidl, PCUITEMID_CHILD_A
             pdump(*apidl);
             if (_ILIsCPanelStruct(*apidl))
                 *rgfInOut &= SFGAO_CANLINK;
+            else if ((*rgfInOut & SFGAO_VALIDATE) && !IsNameSpaceItem(m_regFolder, *apidl))
+            {
+                *rgfInOut &= SFGAO_VALIDATE;
+                bInvalid = TRUE;
+            }
             else if (_ILIsSpecialFolder(*apidl))
                 m_regFolder->GetAttributesOf(1, apidl, rgfInOut);
             else
@@ -434,7 +556,8 @@ HRESULT WINAPI CControlPanelFolder::GetAttributesOf(UINT cidl, PCUITEMID_CHILD_A
         }
     }
     /* make sure SFGAO_VALIDATE is cleared, some apps depend on that */
-    *rgfInOut &= ~SFGAO_VALIDATE;
+    if (!bInvalid)
+        *rgfInOut &= ~SFGAO_VALIDATE;
 
     TRACE("-- result=0x%08x\n", *rgfInOut);
     return hr;
@@ -555,10 +678,7 @@ HRESULT WINAPI CControlPanelFolder::EnumSearches(IEnumExtraSearch **ppenum)
 HRESULT WINAPI CControlPanelFolder::GetDefaultColumn(DWORD dwRes, ULONG *pSort, ULONG *pDisplay)
 {
     TRACE("(%p)\n", this);
-
-    if (pSort) *pSort = 0;
-    if (pDisplay) *pDisplay = 0;
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 HRESULT WINAPI CControlPanelFolder::GetDefaultColumnState(UINT iColumn, DWORD *pcsFlags)
@@ -571,9 +691,61 @@ HRESULT WINAPI CControlPanelFolder::GetDefaultColumnState(UINT iColumn, DWORD *p
     return S_OK;
 }
 
+static const SHCOLUMNID SCID_ControlPanelCategory = { { 0x305CA226, 0xD286, 0x468E, { 0xB8, 0x48, 0x2B, 0x2E, 0x8E, 0x69, 0x7B, 0x74 } }, 2 };
+
+static HRESULT ReadRegItemDetail(const CLSID *pclsid, LPCWSTR pszValue, VARIANT *pv)
+{
+    WCHAR szGuid[40], szKey[64], szBuf[256];
+    DWORD cb = sizeof(szBuf), dwType = 0;
+    StringFromGUID2(*pclsid, szGuid, _countof(szGuid));
+    wsprintfW(szKey, L"CLSID\\%s", szGuid);
+    if (SHGetValueW(HKEY_CLASSES_ROOT, szKey, pszValue, &dwType, szBuf, &cb) != ERROR_SUCCESS)
+        return E_FAIL;
+    if (dwType == REG_DWORD)
+        wsprintfW(szBuf, L"%d", *(DWORD*)szBuf);
+    else if (dwType != REG_SZ && dwType != REG_EXPAND_SZ)
+        return E_FAIL;
+    V_VT(pv) = VT_BSTR;
+    V_BSTR(pv) = SysAllocString(szBuf);
+    return V_BSTR(pv) ? S_OK : E_OUTOFMEMORY;
+}
+
+static HRESULT ReadCplCategory(PIDLCPanelStruct *pCPanel, VARIANT *pv)
+{
+    static const WCHAR szKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Control Panel\\Extended Properties\\{305CA226-D286-468e-B848-2B2E8E697B74} 2";
+    LPCWSTR pszNames[2] = { pCPanel->szName, PathFindFileNameW(pCPanel->szName) };
+    for (UINT i = 0; i < _countof(pszNames); i++)
+    {
+        DWORD dwCat = 0, cb = sizeof(dwCat), dwType = 0;
+        if (SHGetValueW(HKEY_LOCAL_MACHINE, szKey, pszNames[i], &dwType, &dwCat, &cb) == ERROR_SUCCESS && dwType == REG_DWORD)
+        {
+            V_VT(pv) = VT_UI4;
+            V_UI4(pv) = dwCat;
+            return S_OK;
+        }
+    }
+    return E_FAIL;
+}
+
 HRESULT WINAPI CControlPanelFolder::GetDetailsEx(PCUITEMID_CHILD pidl, const SHCOLUMNID *pscid, VARIANT *pv)
 {
-    if (IsRegItem(pidl))
+    const CLSID *pclsid = IsRegItem(pidl);
+    if (IsEqualGUID(pscid->fmtid, PKEY_ApplicationName.fmtid) && pscid->pid == PKEY_ApplicationName.pid)
+    {
+        if (pclsid)
+            return ReadRegItemDetail(pclsid, L"System.ApplicationName", pv);
+        return E_FAIL;
+    }
+    if (IsEqualGUID(pscid->fmtid, SCID_ControlPanelCategory.fmtid) && pscid->pid == SCID_ControlPanelCategory.pid)
+    {
+        if (pclsid)
+            return ReadRegItemDetail(pclsid, L"System.ControlPanel.Category", pv);
+        PIDLCPanelStruct *pCPanel = _ILGetCPanelPointer(pidl);
+        if (pCPanel)
+            return ReadCplCategory(pCPanel, pv);
+        return E_FAIL;
+    }
+    if (pclsid)
         return m_regFolder->GetDetailsEx(pidl, pscid, pv);
     return SH32_GetDetailsOfPKeyAsVariant(this, pidl, pscid, pv, FALSE);
 }
@@ -673,7 +845,171 @@ HRESULT WINAPI CControlPanelFolder::GetCurFolder(PIDLIST_ABSOLUTE * pidl)
     return S_OK;
 }
 
-HRESULT WINAPI CControlPanelFolder::MessageSFVCB(UINT uMsg, WPARAM wParam, LPARAM lParam)
+HRESULT WINAPI CControlPanelFolder::GetOverlayIndex(PCUITEMID_CHILD pidl, int *pIndex)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::GetOverlayIconIndex(PCUITEMID_CHILD pidl, int *pIconIndex)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::GetIconOf(PCUITEMID_CHILD pidl, UINT flags, int *pIconIndex)
+{
+    CComPtr<IExtractIconW> pei;
+    WCHAR szIconFile[MAX_PATH];
+    INT iIcon = 0;
+    UINT uFlags = 0;
+    HRESULT hr;
+
+    if (!pidl || !pIconIndex)
+        return E_INVALIDARG;
+
+    hr = GetUIObjectOf(NULL, 1, &pidl, IID_NULL_PPV_ARG(IExtractIconW, &pei));
+    if (FAILED(hr))
+        return S_FALSE;
+    hr = pei->GetIconLocation(flags, szIconFile, _countof(szIconFile), &iIcon, &uFlags);
+    if (hr != S_OK || (uFlags & (GIL_NOTFILENAME | GIL_DONTCACHE)))
+        return S_FALSE;
+
+    *pIconIndex = SIC_GetIconIndex(szIconFile, iIcon, uFlags);
+    return (*pIconIndex >= 0) ? S_OK : S_FALSE;
+}
+
+HRESULT WINAPI CControlPanelFolder::CreateStream(LPCOLESTR pwcsName, DWORD grfMode, DWORD reserved1, DWORD reserved2, IStream **ppstm)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::OpenStream(LPCOLESTR pwcsName, void *reserved1, DWORD grfMode, DWORD reserved2, IStream **ppstm)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::CreateStorage(LPCOLESTR pwcsName, DWORD grfMode, DWORD reserved1, DWORD reserved2, IStorage **ppstg)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::OpenStorage(LPCOLESTR pwcsName, IStorage *pstgPriority, DWORD grfMode, SNB snbExclude, DWORD reserved, IStorage **ppstg)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::CopyTo(DWORD ciidExclude, const IID *rgiidExclude, SNB snbExclude, IStorage *pstgDest)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::MoveElementTo(LPCOLESTR pwcsName, IStorage *pstgDest, LPCOLESTR pwcsNewName, DWORD grfFlags)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::Commit(DWORD grfCommitFlags)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::Revert()
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::EnumElements(DWORD reserved1, void *reserved2, DWORD reserved3, IEnumSTATSTG **ppenum)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::DestroyElement(LPCOLESTR pwcsName)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::RenameElement(LPCOLESTR pwcsOldName, LPCOLESTR pwcsNewName)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::SetElementTimes(LPCOLESTR pwcsName, const FILETIME *pctime, const FILETIME *patime, const FILETIME *pmtime)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::SetClass(REFCLSID clsid)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::SetStateBits(DWORD grfStateBits, DWORD grfMask)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::Stat(STATSTG *pstatstg, DWORD grfStatFlag)
+{
+    return E_FAIL;
+}
+
+HRESULT WINAPI CControlPanelFolder::CallBack(IShellFolder *psf, HWND hwndOwner, IDataObject *pdtobj, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    if (uMsg == DFM_MERGECONTEXTMENU)
+        return S_OK;
+    return E_NOTIMPL;
+}
+
+HRESULT WINAPI CControlPanelFolder::GetFolderType(FOLDERTYPEID *pftid)
+{
+    if (!pftid)
+        return E_POINTER;
+    *pftid = FOLDERTYPEID_ControlPanelClassic;
+    return S_OK;
+}
+
+HRESULT WINAPI CControlPanelFolder::GetCustomAttributes(PCUITEMID_CHILD pidl, DWORD dwFlags, ControlPanelCategoryInfo *pInfo, DWORD *pdwAttributes)
+{
+    if (pdwAttributes)
+        *pdwAttributes &= ~(SFGAO_CANMOVE | SFGAO_CANDELETE);
+    return S_OK;
+}
+
+HRESULT WINAPI CControlPanelFolder::RemoveBackReferences()
+{
+    CComPtr<IObjectWithBackReferences> pobr;
+    if (m_regFolder && SUCCEEDED(m_regFolder->QueryInterface(IID_PPV_ARG(IObjectWithBackReferences, &pobr))))
+        pobr->RemoveBackReferences();
+    return S_OK;
+}
+
+HRESULT WINAPI CControlPanelFolder::AddRefBackReference()
+{
+    InterlockedIncrement(&m_cBackReferences);
+    return S_OK;
+}
+
+HRESULT WINAPI CControlPanelFolder::ReleaseBackReference()
+{
+    LONG cRefs = m_cBackReferences;
+    while (cRefs > 0)
+    {
+        LONG cPrev = InterlockedCompareExchange(&m_cBackReferences, cRefs - 1, cRefs);
+        if (cPrev == cRefs)
+            break;
+        cRefs = cPrev;
+    }
+    return S_OK;
+}
+
+HRESULT WINAPI CControlPanelFolder::SetRemoteComputer(LPCWSTR pszComputer)
+{
+    m_pszRemoteComputer.Free();
+    if (pszComputer)
+        return SHStrDupW(pszComputer, &m_pszRemoteComputer);
+    return S_OK;
+}
+
+HRESULT WINAPI CControlPanelFolderViewCB::MessageSFVCB(UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
     switch (uMsg)
     {
@@ -888,6 +1224,65 @@ static HRESULT FindExeCplClass(LPCWSTR Canonical, LPWSTR clsid)
     return hr;
 }
 
+static BOOL IsAllDigits(LPCWSTR psz)
+{
+    if (!psz || !*psz)
+        return FALSE;
+    for (; *psz; psz++)
+        if (*psz < L'0' || *psz > L'9')
+            return FALSE;
+    return TRUE;
+}
+
+static HRESULT ExecuteCplClassCommand(LPCWSTR pszClsKey, LPCWSTR pszPage)
+{
+    WCHAR szKey[MAX_PATH], szRaw[MAX_PATH * 2], szCmd[MAX_PATH * 2], szFile[MAX_PATH];
+    DWORD cb = sizeof(szRaw);
+    StringCchPrintfW(szKey, _countof(szKey), L"%s\\Shell\\Open\\Command", pszClsKey);
+    if (SHGetValueW(HKEY_CLASSES_ROOT, szKey, NULL, NULL, szRaw, &cb) != ERROR_SUCCESS || !szRaw[0])
+        return S_FALSE;
+    ExpandEnvironmentStringsW(szRaw, szCmd, _countof(szCmd));
+    if (pszPage && *pszPage)
+    {
+        if (StrStrIW(szCmd, L"Control_RunDLL"))
+        {
+            if (IsAllDigits(pszPage))
+            {
+                LPCWSTR pszAt = StrRChrW(szCmd, NULL, L'@');
+                StringCchCatW(szCmd, _countof(szCmd), (pszAt && !StrChrW(pszAt, L',')) ? L"," : L",,");
+                StringCchCatW(szCmd, _countof(szCmd), pszPage);
+            }
+            else
+            {
+                StringCchCatW(szCmd, _countof(szCmd), L",,");
+                StringCchCatW(szCmd, _countof(szCmd), pszPage);
+            }
+        }
+    }
+    LPWSTR p = szCmd;
+    while (*p == L' ') p++;
+    UINT i = 0;
+    if (*p == L'"')
+    {
+        p++;
+        while (*p && *p != L'"' && i < _countof(szFile) - 1) szFile[i++] = *p++;
+        if (*p == L'"') p++;
+    }
+    else
+    {
+        while (*p && *p != L' ' && i < _countof(szFile) - 1) szFile[i++] = *p++;
+    }
+    szFile[i] = 0;
+    while (*p == L' ') p++;
+    SHELLEXECUTEINFOW sei = { sizeof(sei), SEE_MASK_FLAG_DDEWAIT };
+    sei.lpFile = szFile;
+    sei.lpParameters = *p ? p : NULL;
+    sei.nShow = SW_SHOW;
+    if (!ShellExecuteExW(&sei))
+        return HRESULT_FROM_WIN32(GetLastError());
+    return S_OK;
+}
+
 HRESULT WINAPI COpenControlPanel::Open(LPCWSTR pszName, LPCWSTR pszPage, IUnknown *punkSite)
 {
     WCHAR path[MAX_PATH], clspath[MAX_PATH];
@@ -905,6 +1300,9 @@ HRESULT WINAPI COpenControlPanel::Open(LPCWSTR pszName, LPCWSTR pszPage, IUnknow
         LPWSTR clsid = clspath + wsprintfW(clspath, L"CLSID\\");
         if (SUCCEEDED(hr = FindExeCplClass(pszName, clsid)))
         {
+            hr = ExecuteCplClassCommand(clspath, pszPage);
+            if (hr != S_FALSE)
+                return hr;
             if (SUCCEEDED(hr = CreateCplAbsoluteParsingPath(L"::", clsid, path, _countof(path))))
             {
                 // NT6 will execute "::{26EE0668-A00A-44D7-9371-BEB064C98683}\0\::{clsid}[\pszPage]"

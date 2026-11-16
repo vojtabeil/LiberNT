@@ -27,16 +27,36 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winuser.h"
-#ifdef __REACTOS__
-#include <winnls.h>
-#endif
 #include "ole2.h"
 #include "urlmon.h"
 #include "wininet.h"
 
 #include "wine/list.h"
 
+#ifdef __REACTOS__
+#include <stdlib.h>
+#include <string.h>
+
+static inline WCHAR *urlmon_wcsdup(const WCHAR *str)
+{
+    size_t size;
+    WCHAR *ret;
+
+    if (!str)
+        return NULL;
+
+    size = (lstrlenW(str) + 1) * sizeof(*str);
+    ret = malloc(size);
+
+    if (ret)
+        memcpy(ret, str, size);
+    return ret;
+}
+#define wcsdup urlmon_wcsdup
+#endif
+
 extern HINSTANCE hProxyDll;
+extern HRESULT PersistentZoneIdentifier_Construct(IUnknown *pUnkOuter, LPVOID *ppobj);
 extern HRESULT SecManagerImpl_Construct(IUnknown *pUnkOuter, LPVOID *ppobj);
 extern HRESULT ZoneMgrImpl_Construct(IUnknown *pUnkOuter, LPVOID *ppobj);
 extern HRESULT StdURLMoniker_Construct(IUnknown *pUnkOuter, LPVOID *ppobj);
@@ -47,7 +67,6 @@ extern HRESULT FtpProtocol_Construct(IUnknown *pUnkOuter, LPVOID *ppobj);
 extern HRESULT GopherProtocol_Construct(IUnknown *pUnkOuter, LPVOID *ppobj);
 extern HRESULT MkProtocol_Construct(IUnknown *pUnkOuter, LPVOID *ppobj);
 extern HRESULT MimeFilter_Construct(IUnknown *pUnkOuter, LPVOID *ppobj);
-extern HRESULT Uri_Construct(IUnknown *pUnkOuter, LPVOID *ppobj);
 
 extern BOOL WINAPI URLMON_DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved);
 extern HRESULT WINAPI URLMON_DllGetClassObject(REFCLSID rclsid, REFIID iid,LPVOID *ppv);
@@ -55,7 +74,6 @@ extern HRESULT WINAPI URLMON_DllRegisterServer(void);
 extern HRESULT WINAPI URLMON_DllUnregisterServer(void);
 
 extern GUID const CLSID_PSFactoryBuffer;
-extern GUID const CLSID_CUri;
 
 /**********************************************************************
  * Dll lifetime tracking declaration for urlmon.dll
@@ -70,6 +88,12 @@ IInternetProtocolInfo *get_protocol_info(LPCWSTR);
 HRESULT get_protocol_handler(IUri*,CLSID*,IClassFactory**);
 IInternetProtocol *get_mime_filter(LPCWSTR);
 BOOL is_registered_protocol(LPCWSTR);
+#ifdef __REACTOS__
+BOOL is_direct_builtin_protocol(IUri*);
+#ifdef __REACTOS__
+extern const GUID SID_LiberNTStartNotImplemented;
+#endif
+#endif
 HRESULT register_namespace(IClassFactory*,REFIID,LPCWSTR,BOOL);
 HINTERNET get_internet_session(IInternetBindInfo*);
 WCHAR *get_useragent(void);
@@ -153,6 +177,9 @@ struct ProtocolVtbl {
 #define FLAG_RESULT_REPORTED          0x0020
 #define FLAG_ERROR                    0x0040
 #define FLAG_SYNC_READ                0x0080
+#ifdef __REACTOS__
+#define FLAG_NO_CONNECT_STATUS        0x0100
+#endif
 
 HRESULT protocol_start(Protocol*,IInternetProtocol*,IUri*,IInternetProtocolSink*,IInternetBindInfo*);
 HRESULT protocol_continue(Protocol*,PROTOCOLDATA*);
@@ -196,6 +223,13 @@ typedef struct {
     BOOL reported_result;
     BOOL reported_mime;
     DWORD pi;
+#ifdef __REACTOS__
+    BOOL redirecting;
+    BOOL url_binding;
+    BOOL terminated;
+    LONG lock_count;
+    CLSID clsid;
+#endif
 
     DWORD bscf;
     ULONG progress;

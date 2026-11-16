@@ -3,10 +3,189 @@
  * LICENSE:     GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:     Small library with probing utilities for thread/process classes information
  * COPYRIGHT:   Copyright 2020 George Bișoc <george.bisoc@reactos.org>
+ *              Copyright 2026 Ahmed ARIF <arif.ing@outlook.com>
  */
 
 #include "precomp.h"
 #include <internal/ps_i.h>
+
+typedef struct _WINDOWS11_STATUS
+{
+    ULONG InfoClass;
+    NTSTATUS ProbeStatus;
+    NTSTATUS Status;
+} WINDOWS11_STATUS;
+
+static const WINDOWS11_STATUS Windows11QueryProcessStatus[] =
+{
+    { 18, STATUS_DATATYPE_MISALIGNMENT, STATUS_ACCESS_VIOLATION },
+    { 47, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_PARAMETER },
+    { 47, STATUS_ACCESS_VIOLATION, STATUS_INVALID_PARAMETER },
+    { 76, STATUS_INFO_LENGTH_MISMATCH, STATUS_ACCESS_VIOLATION },
+    { 83, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 83, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+};
+
+static const WINDOWS11_STATUS Windows11SetProcessStatus[] =
+{
+    { 47, STATUS_INFO_LENGTH_MISMATCH, STATUS_DATATYPE_MISALIGNMENT },
+    { 47, STATUS_ACCESS_VIOLATION, STATUS_DATATYPE_MISALIGNMENT },
+    { 58, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 58, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 64, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 64, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 75, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 75, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 76, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 76, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 83, STATUS_INFO_LENGTH_MISMATCH, STATUS_DATATYPE_MISALIGNMENT },
+    { 83, STATUS_ACCESS_VIOLATION, STATUS_DATATYPE_MISALIGNMENT },
+};
+
+static const WINDOWS11_STATUS Windows11QueryThreadStatus[] =
+{
+    { 6, STATUS_DATATYPE_MISALIGNMENT, STATUS_NOT_IMPLEMENTED },
+    { 6, STATUS_INFO_LENGTH_MISMATCH, STATUS_NOT_IMPLEMENTED },
+    { 6, STATUS_ACCESS_VIOLATION, STATUS_NOT_IMPLEMENTED },
+    { 17, STATUS_DATATYPE_MISALIGNMENT, STATUS_ACCESS_VIOLATION },
+    { 21, STATUS_DATATYPE_MISALIGNMENT, STATUS_INFO_LENGTH_MISMATCH },
+    { 21, STATUS_ACCESS_VIOLATION, STATUS_INFO_LENGTH_MISMATCH },
+    { 26, STATUS_DATATYPE_MISALIGNMENT, STATUS_INFO_LENGTH_MISMATCH },
+    { 26, STATUS_ACCESS_VIOLATION, STATUS_INFO_LENGTH_MISMATCH },
+    { 28, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+    { 28, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 29, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_PARAMETER },
+    { 29, STATUS_ACCESS_VIOLATION, STATUS_INVALID_PARAMETER },
+    { 31, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+    { 31, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 32, STATUS_DATATYPE_MISALIGNMENT, STATUS_ACCESS_VIOLATION },
+    { 34, STATUS_DATATYPE_MISALIGNMENT, STATUS_ACCESS_VIOLATION },
+    { 46, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 46, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 47, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 47, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 48, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 48, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 49, STATUS_INFO_LENGTH_MISMATCH, STATUS_ACCESS_VIOLATION },
+    { 50, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 50, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 51, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+    { 51, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 52, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+    { 52, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 53, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+    { 53, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 53, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+};
+
+static const WINDOWS11_STATUS Windows11SetThreadStatus[] =
+{
+    { 9, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_PARAMETER },
+    { 9, STATUS_ACCESS_VIOLATION, STATUS_INVALID_PARAMETER },
+    { 15, STATUS_INFO_LENGTH_MISMATCH, STATUS_NOT_IMPLEMENTED },
+    { 15, STATUS_ACCESS_VIOLATION, STATUS_NOT_IMPLEMENTED },
+    { 28, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+    { 28, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 29, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_PARAMETER },
+    { 29, STATUS_ACCESS_VIOLATION, STATUS_INVALID_PARAMETER },
+    { 31, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+    { 31, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 32, STATUS_DATATYPE_MISALIGNMENT, STATUS_INFO_LENGTH_MISMATCH },
+    { 32, STATUS_ACCESS_VIOLATION, STATUS_INFO_LENGTH_MISMATCH },
+    { 35, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 35, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 36, STATUS_INFO_LENGTH_MISMATCH, STATUS_NOT_SUPPORTED },
+    { 36, STATUS_ACCESS_VIOLATION, STATUS_NOT_SUPPORTED },
+    { 37, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 37, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 40, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 40, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 41, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 41, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 45, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 45, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 50, STATUS_INFO_LENGTH_MISMATCH, STATUS_ACCESS_DENIED },
+    { 50, STATUS_ACCESS_VIOLATION, STATUS_ACCESS_DENIED },
+    { 51, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+    { 51, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 52, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+    { 52, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 53, STATUS_DATATYPE_MISALIGNMENT, STATUS_INFO_LENGTH_MISMATCH },
+    { 53, STATUS_ACCESS_VIOLATION, STATUS_INFO_LENGTH_MISMATCH },
+    { 54, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 54, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 55, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 55, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+};
+
+static const WINDOWS11_STATUS Windows11X86QueryProcessStatus[] =
+{
+    { 10, STATUS_INFO_LENGTH_MISMATCH, STATUS_NOT_IMPLEMENTED },
+    { 10, STATUS_ACCESS_VIOLATION, STATUS_NOT_IMPLEMENTED },
+    { 83, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+};
+
+static const WINDOWS11_STATUS Windows11X86SetProcessStatus[] =
+{
+    { 10, STATUS_INFO_LENGTH_MISMATCH, STATUS_NOT_IMPLEMENTED },
+    { 10, STATUS_ACCESS_VIOLATION, STATUS_NOT_IMPLEMENTED },
+    { 11, STATUS_INFO_LENGTH_MISMATCH, STATUS_NOT_IMPLEMENTED },
+    { 11, STATUS_ACCESS_VIOLATION, STATUS_NOT_IMPLEMENTED },
+    { 13, STATUS_INFO_LENGTH_MISMATCH, STATUS_NOT_IMPLEMENTED },
+    { 13, STATUS_ACCESS_VIOLATION, STATUS_NOT_IMPLEMENTED },
+    { 83, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+    { 83, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 83, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+};
+
+static const WINDOWS11_STATUS Windows11X86QueryThreadStatus[] =
+{
+    { 29, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+    { 29, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 29, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 48, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+};
+
+static const WINDOWS11_STATUS Windows11X86SetThreadStatus[] =
+{
+    { 29, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+    { 29, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 29, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+    { 48, STATUS_DATATYPE_MISALIGNMENT, STATUS_INVALID_INFO_CLASS },
+    { 48, STATUS_INFO_LENGTH_MISMATCH, STATUS_INVALID_INFO_CLASS },
+    { 48, STATUS_ACCESS_VIOLATION, STATUS_INVALID_INFO_CLASS },
+};
+
+static
+BOOLEAN
+IsWindows11Status(
+    _In_reads_(Count) const WINDOWS11_STATUS *Table,
+    _In_ ULONG Count,
+    _In_ ULONG InfoClass,
+    _In_ NTSTATUS ProbeStatus,
+    _In_ NTSTATUS Status)
+{
+    ULONG Index;
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        if (Table[Index].InfoClass == InfoClass && Table[Index].ProbeStatus == ProbeStatus && Table[Index].Status == Status)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static
+BOOLEAN
+IsWindows11X86Status(
+    _In_reads_(Count) const WINDOWS11_STATUS *Table,
+    _In_ ULONG Count,
+    _In_ ULONG InfoClass,
+    _In_ NTSTATUS ProbeStatus,
+    _In_ NTSTATUS Status)
+{
+    return sizeof(PVOID) == sizeof(ULONG) && IsWindows11Status(Table, Count, InfoClass, ProbeStatus, Status);
+}
 
 VOID
 QuerySetProcessValidator(
@@ -51,6 +230,7 @@ QuerySetProcessValidator(
                  * where the function expects STATUS_INFO_LENGTH_MISMATCH instead.
                  */
                 case ProcessImageFileName:
+                case ProcessCommandLineInformation:
                 {
                     SpecialStatus = STATUS_INFO_LENGTH_MISMATCH;
                     break;
@@ -128,7 +308,9 @@ QuerySetProcessValidator(
                                                NULL);
 
             /* And probe the results we've got */
-            ok(Status == ExpectedStatus || Status == SpecialStatus,
+            ok(Status == ExpectedStatus || Status == SpecialStatus ||
+               IsWindows11Status(Windows11QueryProcessStatus, RTL_NUMBER_OF(Windows11QueryProcessStatus), InfoClassIndex, ExpectedStatus, Status) ||
+               IsWindows11X86Status(Windows11X86QueryProcessStatus, RTL_NUMBER_OF(Windows11X86QueryProcessStatus), InfoClassIndex, ExpectedStatus, Status),
                 "0x%lx or special status (0x%lx) expected but got 0x%lx for class information %lu in query information process operation!\n", ExpectedStatus, SpecialStatus, Status, InfoClassIndex);
             break;
         }
@@ -183,6 +365,7 @@ QuerySetProcessValidator(
                 case ProcessDebugObjectHandle:
                 case ProcessCookie:
                 case ProcessImageInformation:
+                case ProcessCommandLineInformation:
                 {
                     SpecialStatus = STATUS_INVALID_INFO_CLASS;
                     break;
@@ -222,6 +405,15 @@ QuerySetProcessValidator(
                     break;
                 }
 #endif
+
+#ifdef _M_AMD64
+                /* Only an arm64 host manages writes to executable memory */
+                case ProcessManageWritesToExecutableMemory:
+                {
+                    SpecialStatus = STATUS_INVALID_INFO_CLASS;
+                    break;
+                }
+#endif
             }
 
             /* Set the information */
@@ -231,7 +423,9 @@ QuerySetProcessValidator(
                                              InfoLength);
 
             /* And probe the results we've got */
-            ok(Status == ExpectedStatus || Status == SpecialStatus,
+            ok(Status == ExpectedStatus || Status == SpecialStatus ||
+               IsWindows11Status(Windows11SetProcessStatus, RTL_NUMBER_OF(Windows11SetProcessStatus), InfoClassIndex, ExpectedStatus, Status) ||
+               IsWindows11X86Status(Windows11X86SetProcessStatus, RTL_NUMBER_OF(Windows11X86SetProcessStatus), InfoClassIndex, ExpectedStatus, Status),
                 "0x%lx or special status (0x%lx) expected but got 0x%lx for class information %lu in set information process operation!\n", ExpectedStatus, SpecialStatus, Status, InfoClassIndex);
             break;
         }
@@ -335,7 +529,9 @@ QuerySetThreadValidator(
                                               NULL);
 
             /* And probe the results we've got */
-            ok(Status == ExpectedStatus || Status == SpecialStatus || Status == STATUS_DATATYPE_MISALIGNMENT,
+            ok(Status == ExpectedStatus || Status == SpecialStatus || Status == STATUS_DATATYPE_MISALIGNMENT ||
+               IsWindows11Status(Windows11QueryThreadStatus, RTL_NUMBER_OF(Windows11QueryThreadStatus), InfoClassIndex, ExpectedStatus, Status) ||
+               IsWindows11X86Status(Windows11X86QueryThreadStatus, RTL_NUMBER_OF(Windows11X86QueryThreadStatus), InfoClassIndex, ExpectedStatus, Status),
                 "0x%lx or special status (0x%lx) expected but got 0x%lx for class information %lu in query information thread operation!\n", ExpectedStatus, SpecialStatus, Status, InfoClassIndex);
             break;
         }
@@ -431,7 +627,9 @@ QuerySetThreadValidator(
                                             InfoLength);
 
             /* And probe the results we've got */
-            ok(Status == ExpectedStatus || Status == SpecialStatus || Status == STATUS_DATATYPE_MISALIGNMENT || Status == STATUS_SUCCESS,
+            ok(Status == ExpectedStatus || Status == SpecialStatus || Status == STATUS_DATATYPE_MISALIGNMENT || Status == STATUS_SUCCESS ||
+               IsWindows11Status(Windows11SetThreadStatus, RTL_NUMBER_OF(Windows11SetThreadStatus), InfoClassIndex, ExpectedStatus, Status) ||
+               IsWindows11X86Status(Windows11X86SetThreadStatus, RTL_NUMBER_OF(Windows11X86SetThreadStatus), InfoClassIndex, ExpectedStatus, Status),
                 "0x%lx or special status (0x%lx) expected but got 0x%lx for class information %lu in set information thread operation!\n", ExpectedStatus, SpecialStatus, Status, InfoClassIndex);
         }
 

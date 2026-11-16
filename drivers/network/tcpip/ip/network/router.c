@@ -14,34 +14,54 @@
 
 #include "precomp.h"
 
+#include <nldef.h>
+#include <tcpip_undoc.h>
+
 LIST_ENTRY FIBListHead;
 KSPIN_LOCK FIBLock;
 
 UINT
-ProcessAutoMetric(
+IPAutomaticMetric(
     _In_ PIP_INTERFACE Interface)
 {
+    static const struct { ULONG64 Speed; UINT Metric; } Wired[] =
+    {
+        {100000000000ULL, 5}, {40000000000ULL, 10}, {10000000000ULL, 15}, {2000000000ULL, 20},
+        {200000000, 25}, {80000000, 35}, {20000000, 45}, {4000000, 55}, {500000, 65}
+    }, Wireless[] =
+    {
+        {2000000000ULL, 25}, {500000000, 30}, {200000000, 35}, {150000000, 40}, {80000000, 45}, {50000000, 50},
+        {20000000, 55}, {10000000, 60}, {4000000, 65}, {2000000, 70}, {500000, 75}, {200000, 80}
+    };
+    ULONG64 Speed = Interface->TransmitLinkSpeed;
+    UINT i;
+
     if (Interface == Loopback)
-        return 1;
+        return 75;
+    if (Interface->Wireless || Interface->HalfDuplex)
+        Speed /= 2;
+    if (Interface->Wireless)
+    {
+        for (i = 0; i < RTL_NUMBER_OF(Wireless); i++)
+        {
+            if (Speed >= Wireless[i].Speed)
+                return Wireless[i].Metric;
+        }
+        return 85;
+    }
+    for (i = 0; i < RTL_NUMBER_OF(Wired); i++)
+    {
+        if (Speed >= Wired[i].Speed)
+            return Wired[i].Metric;
+    }
+    return 75;
+}
 
-    if (Interface->Metric != 0)
-        return Interface->Metric;
-
-    /* Auto metric */
-    if (Interface->Speed > 2000000000)
-        return 5;
-    else if (Interface->Speed > 200000000)
-        return 10;
-    else if (Interface->Speed > 80000000)
-        return 20;
-    else if (Interface->Speed > 20000000)
-        return 25;
-    else if (Interface->Speed > 4000000)
-        return 30;
-    else if (Interface->Speed > 500000)
-        return 40;
-    else
-        return 50;
+UINT
+IPInterfaceMetric(
+    _In_ PIP_INTERFACE Interface)
+{
+    return Interface->ManualMetric ? Interface->InterfaceMetric : IPAutomaticMetric(Interface);
 }
 
 
@@ -99,6 +119,8 @@ VOID DestroyFIBE(
     /* Unlink the FIB entry from the list */
     RemoveEntryList(&FIBE->ListEntry);
 
+    NBDereferenceNeighbor(FIBE->Router);
+
     /* And free the FIB entry */
     FreeFIB(FIBE);
 }
@@ -130,9 +152,12 @@ VOID DestroyFIBEs(
 
 UINT CountFIBs(PIP_INTERFACE IF) {
     UINT FibCount = 0;
+    KIRQL OldIrql;
     PLIST_ENTRY CurrentEntry;
     PLIST_ENTRY NextEntry;
     PFIB_ENTRY Current;
+
+    TcpipAcquireSpinLock(&FIBLock, &OldIrql);
 
     CurrentEntry = FIBListHead.Flink;
     while (CurrentEntry != &FIBListHead) {
@@ -143,15 +168,20 @@ UINT CountFIBs(PIP_INTERFACE IF) {
         CurrentEntry = NextEntry;
     }
 
+    TcpipReleaseSpinLock(&FIBLock, OldIrql);
+
     return FibCount;
 }
 
 
-UINT CopyFIBs( PIP_INTERFACE IF, PFIB_ENTRY Target ) {
+UINT CopyFIBs( PIP_INTERFACE IF, PFIB_ENTRY Target, UINT Capacity ) {
     UINT FibCount = 0;
+    KIRQL OldIrql;
     PLIST_ENTRY CurrentEntry;
     PLIST_ENTRY NextEntry;
     PFIB_ENTRY Current;
+
+    TcpipAcquireSpinLock(&FIBLock, &OldIrql);
 
     CurrentEntry = FIBListHead.Flink;
     while (CurrentEntry != &FIBListHead) {
@@ -159,11 +189,17 @@ UINT CopyFIBs( PIP_INTERFACE IF, PFIB_ENTRY Target ) {
 	Current = CONTAINING_RECORD(CurrentEntry, FIB_ENTRY, ListEntry);
         if (Current->Router->Interface == IF)
         {
-	    Target[FibCount] = *Current;
-	    FibCount++;
+		    if (FibCount < Capacity)
+		    {
+		        Target[FibCount] = *Current;
+		        NBReferenceNeighbor(Target[FibCount].Router);
+		    }
+		    FibCount++;
         }
         CurrentEntry = NextEntry;
     }
+
+    TcpipReleaseSpinLock(&FIBLock, OldIrql);
 
     return FibCount;
 }
@@ -258,15 +294,53 @@ PFIB_ENTRY RouterAddRoute(
 		   sizeof(FIBE->Netmask) );
     FIBE->Router         = Router;
     FIBE->Metric         = Metric;
+    FIBE->Origin         = NlroManual;
+    FIBE->Lifetime       = 0;
+    FIBE->Updated        = KeQueryInterruptTime();
+    NBReferenceNeighbor(Router);
 
     /* Add FIB to the forward information base */
     TcpipInterlockedInsertTailList(&FIBListHead, &FIBE->ListEntry, &FIBLock);
 
+    TiSignalChange();
     return FIBE;
 }
 
 
-PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination)
+static PNEIGHBOR_CACHE_ENTRY RouterRenewNeighbor(PNEIGHBOR_CACHE_ENTRY Removed)
+{
+    KIRQL OldIrql;
+    PLIST_ENTRY CurrentEntry;
+    PFIB_ENTRY Current;
+    PNEIGHBOR_CACHE_ENTRY NCE;
+
+    NCE = NBFindOrCreateNeighbor(Removed->Interface, &Removed->Address, TRUE);
+    if (!NCE)
+        return Removed;
+
+    TcpipAcquireSpinLock(&FIBLock, &OldIrql);
+
+    for (CurrentEntry = FIBListHead.Flink;
+         CurrentEntry != &FIBListHead;
+         CurrentEntry = CurrentEntry->Flink)
+    {
+        Current = CONTAINING_RECORD(CurrentEntry, FIB_ENTRY, ListEntry);
+
+        if (Current->Router == Removed)
+        {
+            NBReferenceNeighbor(NCE);
+            Current->Router = NCE;
+            NBDereferenceNeighbor(Removed);
+        }
+    }
+
+    TcpipReleaseSpinLock(&FIBLock, OldIrql);
+
+    NBDereferenceNeighbor(Removed);
+    return NCE;
+}
+
+static PNEIGHBOR_CACHE_ENTRY RouterFindRoute(PIP_ADDRESS Destination, PIP_INTERFACE Interface)
 /*
  * FUNCTION: Finds a router to use to get to Destination
  * ARGUMENTS:
@@ -282,7 +356,7 @@ PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination)
     PLIST_ENTRY NextEntry;
     PFIB_ENTRY Current;
     UCHAR State;
-    UINT Length, BestLength = 0, MaskLength;
+    UINT Length, BestLength = 0, MaskLength, BestMetric = 0;
     PNEIGHBOR_CACHE_ENTRY NCE, BestNCE = NULL;
 
     TI_DbgPrint(DEBUG_ROUTER, ("Called. Destination (0x%X)\n", Destination));
@@ -305,18 +379,32 @@ PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination)
 	TI_DbgPrint(DEBUG_ROUTER,("This-Route: %s (Sharing %d bits)\n",
 				  A2S(&NCE->Address), Length));
 
-	if(Length >= MaskLength && (Length > BestLength || !BestNCE) &&
-           ((!(State & NUD_STALE) && !(State & NUD_INCOMPLETE)) || !BestNCE)) {
+	/* Routes through a disconnected interface stay configured, but are
+	 * inactive until its media connects again. */
+	if(Length >= MaskLength &&
+           (!BestNCE || MaskLength > BestLength ||
+            (MaskLength == BestLength && Current->Metric + IPInterfaceMetric(NCE->Interface) < BestMetric)) &&
+           ((!(State & NUD_STALE) && !(State & NUD_INCOMPLETE)) || !BestNCE) &&
+           (!Interface || NCE->Interface == Interface) &&
+           (MaskLength || !NCE->Interface->DisableDefaultRoutes) &&
+           IsInterfaceOperational(NCE->Interface)) {
 	    /* This seems to be a better router */
 	    BestNCE    = NCE;
-	    BestLength = Length;
+	    BestLength = MaskLength;
+	    BestMetric = Current->Metric + IPInterfaceMetric(NCE->Interface);
 	    TI_DbgPrint(DEBUG_ROUTER,("Route selected\n"));
 	}
 
         CurrentEntry = NextEntry;
     }
 
+    if (BestNCE)
+        NBReferenceNeighbor(BestNCE);
+
     TcpipReleaseSpinLock(&FIBLock, OldIrql);
+
+    if (BestNCE && BestNCE->Removed)
+        BestNCE = RouterRenewNeighbor(BestNCE);
 
     if( BestNCE ) {
 	TI_DbgPrint(DEBUG_ROUTER,("Routing to %s\n", A2S(&BestNCE->Address)));
@@ -325,6 +413,66 @@ PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination)
     }
 
     return BestNCE;
+}
+
+PNEIGHBOR_CACHE_ENTRY RouterGetRoute(PIP_ADDRESS Destination)
+{
+    return RouterFindRoute(Destination, NULL);
+}
+
+PNEIGHBOR_CACHE_ENTRY RouteGetRouteOnInterface(PIP_ADDRESS Destination, PIP_INTERFACE Interface)
+{
+    PNEIGHBOR_CACHE_ENTRY NCE;
+
+    if (Destination->Type != IP_ADDRESS_V4)
+        return NULL;
+
+    if (IsInterfaceBroadcast(Interface, Destination))
+    {
+        NCE = NBLocateNeighbor(Destination, Interface);
+        if (!NCE)
+            NCE = NBAddNeighbor(Interface, Destination, NULL,
+                                Interface->AddressLength, NUD_PERMANENT, 0);
+        return NCE;
+    }
+
+    if (IsInterfaceOnLink(Interface, Destination))
+    {
+        return NBFindOrCreateNeighbor(Interface, Destination, FALSE);
+    }
+
+    return RouterFindRoute(Destination, Interface);
+}
+
+PNEIGHBOR_CACHE_ENTRY RouteGetRouteFromSource(PIP_ADDRESS Destination, PIP_INTERFACE SourceInterface)
+{
+    PIP_INTERFACE Owner;
+
+    if (SourceInterface->WeakHostSend || SourceInterface == Loopback)
+        return RouteGetRouteToDestination(Destination);
+    Owner = AddrLocateInterface(Destination);
+    if (Owner)
+    {
+        IPDereferenceInterface(Owner);
+        return RouteGetRouteToDestination(Destination);
+    }
+    return RouteGetRouteOnInterface(Destination, SourceInterface);
+}
+
+PNEIGHBOR_CACHE_ENTRY RouteGetMulticastRoute(PIP_ADDRESS Destination, ULONG Selector)
+{
+    PIP_INTERFACE Interface = GetMulticastInterface(Selector);
+    PNEIGHBOR_CACHE_ENTRY Neighbor;
+    ULONG Address = DN2H(Destination->Address.IPv4Address);
+    UCHAR LinkAddress[6] = {0x01, 0x00, 0x5e, (Address >> 16) & 0x7f,
+                           (Address >> 8) & 0xff, Address & 0xff};
+    if (!Interface) return NULL;
+    Neighbor = NBLocateNeighbor(Destination, Interface);
+    if (!Neighbor && (Interface->AddressLength == sizeof(LinkAddress) || Interface == Loopback))
+        Neighbor = NBAddNeighbor(Interface, Destination, Interface == Loopback ? NULL : LinkAddress,
+                                 Interface->AddressLength, NUD_PERMANENT, 0);
+    IPDereferenceInterface(Interface);
+    return Neighbor;
 }
 
 PNEIGHBOR_CACHE_ENTRY RouteGetRouteToDestination(PIP_ADDRESS Destination)
@@ -357,6 +505,7 @@ PNEIGHBOR_CACHE_ENTRY RouteGetRouteToDestination(PIP_ADDRESS Destination)
     if (Interface) {
 	/* The destination address is on-link. Check our neighbor cache */
 	NCE = NBFindOrCreateNeighbor(Interface, Destination, FALSE);
+        IPDereferenceInterface(Interface);
     } else {
 	/* Destination is not on any subnets we're on. Find a router to use */
 	NCE = RouterGetRoute(Destination);
@@ -444,7 +593,10 @@ NTSTATUS RouterRemoveRoute(PIP_ADDRESS Target, PIP_ADDRESS Router)
 
     TI_DbgPrint(DEBUG_ROUTER, ("Leaving\n"));
 
-    return Found ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+    if (!Found)
+        return STATUS_UNSUCCESSFUL;
+    TiSignalChange();
+    return STATUS_SUCCESS;
 }
 
 
@@ -452,7 +604,8 @@ PFIB_ENTRY RouterCreateRoute(
     PIP_ADDRESS NetworkAddress,
     PIP_ADDRESS Netmask,
     PIP_ADDRESS RouterAddress,
-    PIP_INTERFACE Interface)
+    PIP_INTERFACE Interface,
+    UINT Metric)
 /*
  * FUNCTION: Creates a route with IPv4 addresses as parameters
  * ARGUMENTS:
@@ -470,6 +623,7 @@ PFIB_ENTRY RouterCreateRoute(
     PLIST_ENTRY CurrentEntry;
     PLIST_ENTRY NextEntry;
     PFIB_ENTRY Current;
+    PFIB_ENTRY FIBE;
     PNEIGHBOR_CACHE_ENTRY NCE;
 
     TcpipAcquireSpinLock(&FIBLock, &OldIrql);
@@ -503,7 +657,149 @@ PFIB_ENTRY RouterCreateRoute(
         return NULL;
     }
 
-    return RouterAddRoute(NetworkAddress, Netmask, NCE, ProcessAutoMetric(Interface));
+    FIBE = RouterAddRoute(NetworkAddress, Netmask, NCE, Metric);
+    NBDereferenceNeighbor(NCE);
+    return FIBE;
+}
+
+
+BOOLEAN RouterSetAdvertisedRoute(PIP_INTERFACE Interface, PIP_ADDRESS RouterAddress, UINT Metric, ULONG Lifetime)
+{
+    PNEIGHBOR_CACHE_ENTRY NCE;
+    PLIST_ENTRY Entry;
+    PFIB_ENTRY FIBE;
+    IP_ADDRESS Default;
+    KIRQL OldIrql;
+
+    TcpipAcquireSpinLock(&FIBLock, &OldIrql);
+    for (Entry = FIBListHead.Flink; Entry != &FIBListHead; Entry = Entry->Flink)
+    {
+        FIBE = CONTAINING_RECORD(Entry, FIB_ENTRY, ListEntry);
+        if (FIBE->Origin == NlroRouterAdvertisement && FIBE->Router->Interface == Interface &&
+            AddrIsEqual(&FIBE->Router->Address, RouterAddress))
+        {
+            FIBE->Metric = Metric;
+            FIBE->Lifetime = Lifetime;
+            FIBE->Updated = KeQueryInterruptTime();
+            TcpipReleaseSpinLock(&FIBLock, OldIrql);
+            return TRUE;
+        }
+    }
+    TcpipReleaseSpinLock(&FIBLock, OldIrql);
+
+    NCE = NBFindOrCreateNeighbor(Interface, RouterAddress, TRUE);
+    if (!NCE)
+        return FALSE;
+
+    AddrInitIPv4(&Default, 0);
+    FIBE = RouterAddRoute(&Default, &Default, NCE, Metric);
+    NBDereferenceNeighbor(NCE);
+    if (!FIBE)
+        return FALSE;
+
+    TcpipAcquireSpinLock(&FIBLock, &OldIrql);
+    FIBE->Origin = NlroRouterAdvertisement;
+    FIBE->Lifetime = Lifetime;
+    TcpipReleaseSpinLock(&FIBLock, OldIrql);
+    return TRUE;
+}
+
+VOID RouterRemoveAdvertisedRoutes(PIP_INTERFACE Interface, PIP_ADDRESS RouterAddress)
+{
+    PLIST_ENTRY Entry, Next;
+    KIRQL OldIrql;
+
+    TcpipAcquireSpinLock(&FIBLock, &OldIrql);
+    for (Entry = FIBListHead.Flink; Entry != &FIBListHead; Entry = Next)
+    {
+        PFIB_ENTRY FIBE = CONTAINING_RECORD(Entry, FIB_ENTRY, ListEntry);
+
+        Next = Entry->Flink;
+        if (FIBE->Origin == NlroRouterAdvertisement && FIBE->Router->Interface == Interface &&
+            (!RouterAddress || AddrIsEqual(&FIBE->Router->Address, RouterAddress)))
+            DestroyFIBE(FIBE);
+    }
+    TcpipReleaseSpinLock(&FIBLock, OldIrql);
+}
+
+VOID RouterAgeAdvertisedRoutes(VOID)
+{
+    ULONGLONG Now = KeQueryInterruptTime();
+    PLIST_ENTRY Entry, Next;
+    KIRQL OldIrql;
+
+    TcpipAcquireSpinLock(&FIBLock, &OldIrql);
+    for (Entry = FIBListHead.Flink; Entry != &FIBListHead; Entry = Next)
+    {
+        PFIB_ENTRY FIBE = CONTAINING_RECORD(Entry, FIB_ENTRY, ListEntry);
+
+        Next = Entry->Flink;
+        if (FIBE->Origin == NlroRouterAdvertisement &&
+            Now >= FIBE->Updated + (ULONGLONG)FIBE->Lifetime * 10000000)
+            DestroyFIBE(FIBE);
+    }
+    TcpipReleaseSpinLock(&FIBLock, OldIrql);
+}
+
+NTSTATUS RouterQueryRouteV4(PIP4_ROUTE_INFO Info)
+{
+    ULONGLONG Now = KeQueryInterruptTime();
+    NTSTATUS Status = STATUS_NOT_FOUND;
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+
+    TcpipAcquireSpinLock(&FIBLock, &OldIrql);
+    for (Entry = FIBListHead.Flink; Entry != &FIBListHead; Entry = Entry->Flink)
+    {
+        PFIB_ENTRY FIBE = CONTAINING_RECORD(Entry, FIB_ENTRY, ListEntry);
+        ULONG Elapsed = (ULONG)((Now - FIBE->Updated) / 10000000);
+
+        if (FIBE->Router->Interface->Index != Info->Index ||
+            FIBE->NetworkAddress.Address.IPv4Address != Info->Destination ||
+            FIBE->Netmask.Address.IPv4Address != Info->Mask ||
+            FIBE->Router->Address.Address.IPv4Address != Info->NextHop)
+            continue;
+
+        Info->Origin = FIBE->Origin;
+        Info->Age = Elapsed;
+        if (FIBE->Origin == NlroRouterAdvertisement)
+            Info->ValidLifetime = FIBE->Lifetime > Elapsed ? FIBE->Lifetime - Elapsed : 0;
+        else
+            Info->ValidLifetime = FIBE->Lifetime ? FIBE->Lifetime : MAXULONG;
+        Status = STATUS_SUCCESS;
+        break;
+    }
+    TcpipReleaseSpinLock(&FIBLock, OldIrql);
+
+    return Status;
+}
+
+
+NTSTATUS RouterSetRouteV4(PIP4_ROUTE_INFO Info)
+{
+    NTSTATUS Status = STATUS_NOT_FOUND;
+    PLIST_ENTRY Entry;
+    KIRQL OldIrql;
+
+    TcpipAcquireSpinLock(&FIBLock, &OldIrql);
+    for (Entry = FIBListHead.Flink; Entry != &FIBListHead; Entry = Entry->Flink)
+    {
+        PFIB_ENTRY FIBE = CONTAINING_RECORD(Entry, FIB_ENTRY, ListEntry);
+
+        if (FIBE->Router->Interface->Index != Info->Index ||
+            FIBE->NetworkAddress.Address.IPv4Address != Info->Destination ||
+            FIBE->Netmask.Address.IPv4Address != Info->Mask ||
+            FIBE->Router->Address.Address.IPv4Address != Info->NextHop ||
+            FIBE->Origin == NlroRouterAdvertisement)
+            continue;
+
+        FIBE->Lifetime = Info->ValidLifetime == MAXULONG ? 0 : Info->ValidLifetime;
+        Status = STATUS_SUCCESS;
+        break;
+    }
+    TcpipReleaseSpinLock(&FIBLock, OldIrql);
+
+    return Status;
 }
 
 

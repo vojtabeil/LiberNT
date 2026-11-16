@@ -51,16 +51,49 @@ typedef struct
 
 /* usermode call-back mechanism */
 
+typedef struct _KMT_EVENT_PAIR_RESPONSE
+{
+    NTSTATUS CreateStatus;
+    HANDLE CreateHandle;
+    NTSTATUS OpenStatus;
+    HANDLE OpenHandle;
+    NTSTATUS SetHighStatus;
+    NTSTATUS SetHighWaitLowStatus;
+    NTSTATUS SetLowStatus;
+    NTSTATUS SetLowWaitHighStatus;
+    NTSTATUS WaitHighStatus;
+    NTSTATUS WaitLowStatus;
+} KMT_EVENT_PAIR_RESPONSE, *PKMT_EVENT_PAIR_RESPONSE;
+
 /* list of supported operations */
 typedef enum _KMT_CALLBACK_INFORMATION_CLASS
 {
-    QueryVirtualMemory
+    QueryVirtualMemory,
+    QueryEventPairBehavior,
+    CreateProfile
 } KMT_CALLBACK_INFORMATION_CLASS, *PKMT_CALLBACK_INFORMATION_CLASS;
+
+typedef struct _KMT_PROFILE_PARAMETERS
+{
+    PVOID RangeBase;
+    SIZE_T RangeSize;
+    ULONG BucketSize;
+    PULONG Buffer;
+    ULONG BufferSize;
+    KPROFILE_SOURCE Source;
+    KAFFINITY Affinity;
+} KMT_PROFILE_PARAMETERS;
 
 /* TODO: "response" is a little generic */
 typedef union _KMT_RESPONSE
 {
     MEMORY_BASIC_INFORMATION MemInfo;
+    KMT_EVENT_PAIR_RESPONSE EventPair;
+    struct
+    {
+        NTSTATUS Status;
+        HANDLE Handle;
+    } Profile;
 } KMT_RESPONSE, *PKMT_RESPONSE;
 
 /* this struct is sent from driver to usermode */
@@ -158,6 +191,7 @@ typedef struct
 {
     PKMT_RESULTBUFFER ResultBuffer;
     PMDL Mdl;
+    FAST_MUTEX ResultBufferLock;
 } KMT_DEVICE_EXTENSION, *PKMT_DEVICE_EXTENSION;
 
 extern BOOLEAN KmtIsCheckedBuild;
@@ -166,11 +200,17 @@ extern BOOLEAN KmtIsVirtualMachine;
 extern PCSTR KmtMajorFunctionNames[];
 extern PDRIVER_OBJECT KmtDriverObject;
 
+#ifdef _M_IX86
+#define KmtIsNt5I386() (GetNTVersion() < _WIN32_WINNT_VISTA)
+#else
+#define KmtIsNt5I386() FALSE
+#endif
+
 VOID KmtSetIrql(IN KIRQL NewIrql);
 BOOLEAN KmtAreInterruptsEnabled(VOID);
-ULONG KmtGetPoolTag(PVOID Memory);
-USHORT KmtGetPoolType(PVOID Memory);
 PVOID KmtGetSystemRoutineAddress(IN PCWSTR RoutineName);
+NTSTATUS KmtMapResultBuffer(IN PDEVICE_OBJECT DeviceObject, OUT PMDL *Mdl, OUT PKMT_RESULTBUFFER *Buffer);
+VOID KmtUnmapResultBuffer(IN PMDL Mdl);
 PKTHREAD KmtStartThread(IN PKSTART_ROUTINE StartRoutine, IN PVOID StartContext OPTIONAL);
 VOID KmtFinishThread(IN PKTHREAD Thread OPTIONAL, IN PKEVENT Event OPTIONAL);
 #elif defined KMT_USER_MODE
@@ -239,11 +279,44 @@ BOOLEAN KmtSkip(INT Condition, PCSTR FileAndLine, PCSTR Format, ...)            
 PVOID KmtAllocateGuarded(SIZE_T SizeRequested);
 VOID KmtFreeGuarded(PVOID Pointer);
 
+#if defined(__GNUC__) || defined(__clang__)
+/* Each value and each expectation is evaluated once; the value keeps its type and the expectation takes the one they compare in */
+#ifdef __cplusplus
+#define KMT_VALUE_TYPE(value)               __typeof__(+(value))
+#define KMT_COMPARED_TYPE(value, expected)  __typeof__(true ? (value) : (expected))
+#else
+#define KMT_VALUE_TYPE(value)               __typeof__(1 ? (value) : (value))
+#define KMT_COMPARED_TYPE(value, expected)  __typeof__(1 ? (value) : (expected))
+#endif
+#ifdef KMT_KERNEL_MODE
+#define ok_irql(irql)                       ({ KIRQL KmtOkIrql__ = KeGetCurrentIrql(), KmtOkExpectedIrql__ = (irql);    \
+                                               ok(KmtOkIrql__ == KmtOkExpectedIrql__, "IRQL is %d, expected %d\n",      \
+                                                  KmtOkIrql__, KmtOkExpectedIrql__); })
+#endif /* defined KMT_KERNEL_MODE */
+#define ok_eq_print(value, expected, spec)  ({ KMT_VALUE_TYPE(value) KmtOkValue__ = (value);                            \
+                                               KMT_COMPARED_TYPE(KmtOkValue__, expected) KmtOkExpected__ = (expected);  \
+                                               ok(KmtOkValue__ == KmtOkExpected__, #value " = " spec ", expected " spec "\n", \
+                                                  KmtOkValue__, KmtOkExpected__); })
+#else
 #ifdef KMT_KERNEL_MODE
 #define ok_irql(irql)                       ok(KeGetCurrentIrql() == irql, "IRQL is %d, expected %d\n", KeGetCurrentIrql(), irql)
 #endif /* defined KMT_KERNEL_MODE */
+/*
+ * NOTE: value is evaluated TWICE (once compared, once printed).  Never pass an
+ * expression with side effects: a mutating call runs twice, and a wait on a
+ * synchronization event consumes two signals and then blocks.  Assign to a
+ * local first and compare that.
+ */
 #define ok_eq_print(value, expected, spec)  ok((value) == (expected), #value " = " spec ", expected " spec "\n", value, expected)
+#endif
+#if defined(__GNUC__) || defined(__clang__)
+#define ok_eq_pointer(value, expected)      ({ const void *KmtOkValue__ = (const void *)(value);                         \
+                                               const void *KmtOkExpected__ = (const void *)(expected);                  \
+                                               ok(KmtOkValue__ == KmtOkExpected__, #value " = %p, expected %p\n",       \
+                                                  KmtOkValue__, KmtOkExpected__); })
+#else
 #define ok_eq_pointer(value, expected)      ok_eq_print(value, expected, "%p")
+#endif
 #define ok_eq_int(value, expected)          ok_eq_print(value, expected, "%d")
 #define ok_eq_uint(value, expected)         ok_eq_print(value, expected, "%u")
 #define ok_eq_long(value, expected)         ok_eq_print(value, expected, "%ld")
@@ -264,15 +337,38 @@ VOID KmtFreeGuarded(PVOID Pointer);
 #define ok_eq_hex(value, expected)          ok_eq_print(value, expected, "0x%08lx")
 #define ok_bool_true(value, desc)           ok((value) == TRUE, desc " FALSE, expected TRUE\n")
 #define ok_bool_false(value, desc)          ok((value) == FALSE, desc " TRUE, expected FALSE\n")
+#if defined(__GNUC__) || defined(__clang__)
+#define ok_eq_bool(value, expected)         ({ KMT_VALUE_TYPE(value) KmtOkValue__ = (value);                            \
+                                               KMT_COMPARED_TYPE(KmtOkValue__, expected) KmtOkExpected__ = (expected);  \
+                                               ok(KmtOkValue__ == KmtOkExpected__, #value " = %s, expected %s\n",       \
+                                                  KmtOkValue__ ? "TRUE" : "FALSE", KmtOkExpected__ ? "TRUE" : "FALSE"); })
+#define ok_eq_str(value, expected)          ({ KMT_VALUE_TYPE(value) KmtOkValue__ = (value);                            \
+                                               KMT_COMPARED_TYPE(KmtOkValue__, expected) KmtOkExpected__ = (expected);  \
+                                               ok(!strcmp(KmtOkValue__, KmtOkExpected__),                               \
+                                                  #value " = \"%s\", expected \"%s\"\n", KmtOkValue__, KmtOkExpected__); })
+#define ok_eq_wstr(value, expected)         ({ KMT_VALUE_TYPE(value) KmtOkValue__ = (value);                            \
+                                               KMT_COMPARED_TYPE(KmtOkValue__, expected) KmtOkExpected__ = (expected);  \
+                                               ok(!wcscmp(KmtOkValue__, KmtOkExpected__),                               \
+                                                  #value " = \"%ls\", expected \"%ls\"\n", KmtOkValue__, KmtOkExpected__); })
+#else
 #define ok_eq_bool(value, expected)         ok((value) == (expected), #value " = %s, expected %s\n",    \
                                                 (value) ? "TRUE" : "FALSE",                             \
                                                 (expected) ? "TRUE" : "FALSE")
 #define ok_eq_str(value, expected)          ok(!strcmp(value, expected), #value " = \"%s\", expected \"%s\"\n", value, expected)
 #define ok_eq_wstr(value, expected)         ok(!wcscmp(value, expected), #value " = \"%ls\", expected \"%ls\"\n", value, expected)
+#endif
 #define ok_eq_tag(value, expected)          ok_eq_print(value, expected, "0x%08lx")
 
 #define ok_eq_hex64(value, expected)        ok_eq_print(value, expected, "%I64x")
+#if defined(__GNUC__) || defined(__clang__)
+#define ok_eq_xmm(value, expected)          ({ __typeof__(value) KmtOkValue__ = (value);                                \
+                                               __typeof__(expected) KmtOkExpected__ = (expected);                       \
+                                               ok(KmtOkValue__.Low == KmtOkExpected__.Low,                              \
+                                                  #value " = %I64x'%08I64x, expected %I64x'%08I64x\n", KmtOkValue__.Low, \
+                                                  KmtOkValue__.High, KmtOkExpected__.Low, KmtOkExpected__.High); })
+#else
 #define ok_eq_xmm(value, expected)          ok((value).Low == (expected).Low, #value " = %I64x'%08I64x, expected %I64x'%08I64x\n", (value).Low, (value).High, (expected).Low, (expected).High)
+#endif
 
 #define KMT_MAKE_CODE(ControlCode)  CTL_CODE(FILE_DEVICE_UNKNOWN,           \
                                              0xC00 + (ControlCode),         \
@@ -406,6 +502,10 @@ VOID KmtFinishTest(PCSTR TestName)
                                     ResultBuffer->Failures,
                                     ResultBuffer->Skipped);
     KmtAddToLogBuffer(ResultBuffer, MessageBuffer, MessageLength);
+
+#ifdef KMT_USER_MODE
+    OutputDebugStringA(MessageBuffer);
+#endif
 }
 
 BOOLEAN KmtVOk(INT Condition, PCSTR FileAndLine, PCSTR Format, va_list Arguments)
@@ -539,6 +639,25 @@ static inline ULONG GetNTDDIVersion(VOID)
     RTL_OSVERSIONINFOW OSVersion;
     OSVersion.dwOSVersionInfoSize = sizeof(OSVersion);
     RtlGetVersion(&OSVersion);
+    if (OSVersion.dwBuildNumber >= 27695) return NTDDI_WIN11_SE;
+    if (OSVersion.dwBuildNumber >= 25947) return NTDDI_WIN11_GE;
+    if (OSVersion.dwBuildNumber >= 25905) return NTDDI_WIN11_GA;
+    if (OSVersion.dwBuildNumber >= 25246) return NTDDI_WIN11_ZN;
+    if (OSVersion.dwBuildNumber >= 25057) return NTDDI_WIN11_CU;
+    if (OSVersion.dwBuildNumber >= 22449) return NTDDI_WIN11_NI;
+    if (OSVersion.dwBuildNumber >= 19044) return NTDDI_WIN10_CO;
+    if (OSVersion.dwBuildNumber >= 19043) return NTDDI_WIN10_FE;
+    if (OSVersion.dwBuildNumber >= 19042) return NTDDI_WIN10_MN;
+    if (OSVersion.dwBuildNumber >= 19041) return NTDDI_WIN10_VB;
+    if (OSVersion.dwBuildNumber >= 18362) return NTDDI_WIN10_19H1;
+    if (OSVersion.dwBuildNumber >= 17763) return NTDDI_WIN10_RS5;
+    if (OSVersion.dwBuildNumber >= 17134) return NTDDI_WIN10_RS4;
+    if (OSVersion.dwBuildNumber >= 16299) return NTDDI_WIN10_RS3;
+    if (OSVersion.dwBuildNumber >= 15063) return NTDDI_WIN10_RS2;
+    if (OSVersion.dwBuildNumber >= 14393) return NTDDI_WIN10_RS1;
+    if (OSVersion.dwBuildNumber >= 10586) return NTDDI_WIN10_TH2;
+    if (OSVersion.dwBuildNumber >= 10240) return NTDDI_WIN10;
+
     switch (OSVersion.dwBuildNumber)
     {
         case 3790: return NTDDI_WS03;
@@ -549,6 +668,7 @@ static inline ULONG GetNTDDIVersion(VOID)
         case 7600: return NTDDI_WIN7;
         case 7601: return NTDDI_WIN7SP1;
         case 9200: return NTDDI_WIN8;
+        case 26100: return NTDDI_WIN11_GE;
 
         default:
             trace("Unknown build number: %lu\n", OSVersion.dwBuildNumber);

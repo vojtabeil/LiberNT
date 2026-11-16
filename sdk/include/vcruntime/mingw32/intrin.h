@@ -28,6 +28,8 @@
 #ifndef KJK_INTRIN_H_
 #define KJK_INTRIN_H_
 
+#include "../intrin_target.h"
+
 #ifndef RC_INVOKED
 
 #ifndef _SIZE_T_DEFINED
@@ -93,9 +95,11 @@
 #include "intrin_mips.h"
 #elif defined(_M_ARM)
 #include "intrin_arm.h"
-#elif defined(_M_ARM64) || defined(__aarch64__)
+#elif _VCRT_ARM64_INTRINSICS
 #include "intrin_arm64.h"
-#elif defined(__x86_64__)
+#elif defined(_M_RISCV64)
+#include "intrin_riscv64.h"
+#elif _VCRT_GNU_AMD64_CODEGEN
 /* TODO: the x64 architecture shares most of the i386 intrinsics. It should be easy to support */
 #include "intrin_x86.h"
 #else
@@ -107,7 +111,9 @@
 /* BUGBUG: only good for use in macros. Cannot be taken the address of */
 #define __noop(...) ((void)0)
 
+#if !HAS_BUILTIN(__assume)
 #define __assume(x) if (!(x)) __builtin_unreachable()
+#endif
 
 #endif
 

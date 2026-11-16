@@ -145,11 +145,39 @@ static HRESULT on_mime_message_available(MimeHtmlProtocol *protocol, IMimeMessag
         PropVariantClear(&value);
     }
 
+#ifndef __REACTOS__
     /* FIXME: Create and report cache file. */
+#endif
 
     hres = IMimeBody_GetData(mime_body, IET_DECODED, &protocol->stream);
     if(FAILED(hres))
         return report_result(protocol, hres);
+
+#ifdef __REACTOS__
+    {
+        WCHAR dir[MAX_PATH], path[MAX_PATH];
+        LARGE_INTEGER zero = {{0}};
+        BYTE buf[4096];
+        ULONG read;
+        DWORD written;
+        HANDLE file;
+
+        if(GetTempPathW(ARRAY_SIZE(dir), dir) && GetTempFileNameW(dir, L"wbk", 0, path)) {
+            file = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+            if(file != INVALID_HANDLE_VALUE) {
+                for(;;) {
+                    read = 0;
+                    if(FAILED(IStream_Read(protocol->stream, buf, sizeof(buf), &read)) || !read)
+                        break;
+                    WriteFile(file, buf, read, &written, NULL);
+                }
+                CloseHandle(file);
+                IStream_Seek(protocol->stream, zero, STREAM_SEEK_SET, NULL);
+                IInternetProtocolSink_ReportProgress(protocol->sink, BINDSTATUS_CACHEFILENAMEAVAILABLE, path);
+            }
+        }
+    }
+#endif
 
     IInternetProtocolSink_ReportData(protocol->sink, BSCF_FIRSTDATANOTIFICATION
                                      | BSCF_INTERMEDIATEDATANOTIFICATION
@@ -298,7 +326,11 @@ static HRESULT WINAPI BindStatusCallback_GetBindInfo(IBindStatusCallback *iface,
 
     TRACE("(%p)\n", This);
 
+#ifdef __REACTOS__
+    *grfBINDF = BINDF_ASYNCHRONOUS | BINDF_ASYNCSTORAGE | BINDF_PULLDATA;
+#else
     *grfBINDF = BINDF_ASYNCHRONOUS;
+#endif
     return S_OK;
 }
 
@@ -316,6 +348,10 @@ static HRESULT WINAPI BindStatusCallback_OnDataAvailable(IBindStatusCallback *if
 
     while(1) {
         hres = IStream_Read(pstgmed->pstm, buf, sizeof(buf), &read);
+#ifdef __REACTOS__
+        if(hres == E_PENDING)
+            break;
+#endif
         if(FAILED(hres))
             return hres;
         if(!read)
@@ -652,8 +688,21 @@ static HRESULT WINAPI MimeHtmlProtocolInfo_CombineUrl(IInternetProtocolInfo *ifa
         return hres;
 
     if(!wcsnicmp(pwzRelativeUrl, mhtml_prefixW, len)) {
+#ifdef __REACTOS__
+        const WCHAR *result = wcschr(pwzRelativeUrl, '!') ? pwzRelativeUrl : pwzRelativeUrl + len;
+
+        len = lstrlenW(result);
+        if(len >= cchResult) {
+            *pcchResult = 0;
+            return E_FAIL;
+        }
+        lstrcpyW(pwzResult, result);
+        *pcchResult = len;
+        return S_OK;
+#else
         FIXME("Relative URL is mhtml protocol\n");
         return INET_E_USE_DEFAULT_PROTOCOLHANDLER;
+#endif
     }
 
     len += url.mhtml_len;

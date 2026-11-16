@@ -42,8 +42,12 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(msxml);
 
-static const WCHAR colspaceW[] = {':',' ',0};
-static const WCHAR crlfW[] = {'\r','\n',0};
+#ifdef __REACTOS__
+#define IServerXMLHTTPRequest IServerXMLHTTPRequest2
+#define IServerXMLHTTPRequestVtbl IServerXMLHTTPRequest2Vtbl
+#define ERROR_WINHTTP_CANNOT_CALL_BEFORE_OPEN 12100
+#endif
+
 static const DWORD safety_supported_options =
     INTERFACESAFE_FOR_UNTRUSTED_CALLER |
     INTERFACESAFE_FOR_UNTRUSTED_DATA   |
@@ -99,12 +103,34 @@ typedef struct
 
     /* IObjectSafety */
     DWORD safeopt;
+#ifdef __REACTOS__
+    MSXML_VERSION version;
+#endif
 } httprequest;
+
+#ifdef __REACTOS__
+#define XHR_E_NOT_OPENED   ((HRESULT)0xc00c023e)
+#define XHR_E_NO_DATA      ((HRESULT)0xc00c023f)
+#define XHR_E_ALREADY_SENT ((HRESULT)0xc00c0240)
+
+static HRESULT httprequest_state_error(const httprequest *This, HRESULT msxml6_hr, HRESULT hr)
+{
+    return This->version == MSXML6 ? msxml6_hr : hr;
+}
+#endif
 
 typedef struct
 {
     httprequest req;
     IServerXMLHTTPRequest IServerXMLHTTPRequest_iface;
+#ifdef __REACTOS__
+    DispatchEx dispex;
+    SXH_PROXY_SETTING proxy_setting;
+    BSTR proxy_server;
+    BSTR proxy_bypass;
+    BSTR proxy_user;
+    BSTR proxy_password;
+#endif
 } serverhttp;
 
 static inline httprequest *impl_from_IXMLHTTPRequest( IXMLHTTPRequest *iface )
@@ -459,9 +485,7 @@ static ULONG WINAPI BSCHttpNegotiate_Release(IHttpNegotiate *iface)
 static HRESULT WINAPI BSCHttpNegotiate_BeginningTransaction(IHttpNegotiate *iface,
         LPCWSTR url, LPCWSTR headers, DWORD reserved, LPWSTR *add_headers)
 {
-    static const WCHAR content_type_utf8W[] = {'C','o','n','t','e','n','t','-','T','y','p','e',':',' ',
-        't','e','x','t','/','p','l','a','i','n',';','c','h','a','r','s','e','t','=','u','t','f','-','8','\r','\n',0};
-    static const WCHAR refererW[] = {'R','e','f','e','r','e','r',':',' ',0};
+    static const WCHAR content_type_utf8W[] = L"Content-Type: text/plain;charset=utf-8\r\n";
 
     BindStatusCallback *This = impl_from_IHttpNegotiate(iface);
     const struct httpheader *entry;
@@ -482,7 +506,7 @@ static HRESULT WINAPI BSCHttpNegotiate_BeginningTransaction(IHttpNegotiate *ifac
     if (This->request->base_uri)
     {
         IUri_GetRawUri(This->request->base_uri, &base_uri);
-        size += SysStringLen(base_uri)*sizeof(WCHAR) + sizeof(refererW) + sizeof(crlfW);
+        size += SysStringLen(base_uri)*sizeof(WCHAR) + sizeof(L"Referer: ") + sizeof(L"\r\n");
     }
 
     if (!size)
@@ -507,10 +531,10 @@ static HRESULT WINAPI BSCHttpNegotiate_BeginningTransaction(IHttpNegotiate *ifac
 
     if (base_uri)
     {
-        lstrcpyW(ptr, refererW);
+        lstrcpyW(ptr, L"Referer: ");
         lstrcatW(ptr, base_uri);
-        lstrcatW(ptr, crlfW);
-        ptr += lstrlenW(refererW) + SysStringLen(base_uri) + lstrlenW(crlfW);
+        lstrcatW(ptr, L"\r\n");
+        ptr += lstrlenW(L"Referer: ") + SysStringLen(base_uri) + lstrlenW(L"\r\n");
         SysFreeString(base_uri);
     }
 
@@ -520,14 +544,14 @@ static HRESULT WINAPI BSCHttpNegotiate_BeginningTransaction(IHttpNegotiate *ifac
         lstrcpyW(ptr, entry->header);
         ptr += SysStringLen(entry->header);
 
-        lstrcpyW(ptr, colspaceW);
-        ptr += ARRAY_SIZE(colspaceW) - 1;
+        lstrcpyW(ptr, L": ");
+        ptr += 2;
 
         lstrcpyW(ptr, entry->value);
         ptr += SysStringLen(entry->value);
 
-        lstrcpyW(ptr, crlfW);
-        ptr += ARRAY_SIZE(crlfW) - 1;
+        lstrcpyW(ptr, L"\r\n");
+        ptr += 2;
     }
 
     *add_headers = buff;
@@ -539,7 +563,7 @@ static void add_response_header(httprequest *This, const WCHAR *data, int len)
 {
     struct httpheader *entry;
     const WCHAR *ptr = data;
-    BSTR header, value;
+    BSTR header = NULL, value = NULL;
 
     while (*ptr)
     {
@@ -561,6 +585,10 @@ static void add_response_header(httprequest *This, const WCHAR *data, int len)
     TRACE("got header %s:%s\n", debugstr_w(header), debugstr_w(value));
 
     entry = malloc(sizeof(*entry));
+#ifdef __REACTOS__
+    if (!entry)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     entry->header = header;
     entry->value  = value;
     list_add_head(&This->respheaders, &entry->entry);
@@ -869,12 +897,6 @@ static HRESULT verify_uri(httprequest *This, IUri *uri)
 static HRESULT httprequest_open(httprequest *This, BSTR method, BSTR url,
         VARIANT async, VARIANT user, VARIANT password)
 {
-    static const WCHAR MethodHeadW[] = {'H','E','A','D',0};
-    static const WCHAR MethodGetW[] = {'G','E','T',0};
-    static const WCHAR MethodPutW[] = {'P','U','T',0};
-    static const WCHAR MethodPostW[] = {'P','O','S','T',0};
-    static const WCHAR MethodDeleteW[] = {'D','E','L','E','T','E',0};
-    static const WCHAR MethodPropFindW[] = {'P','R','O','P','F','I','N','D',0};
     VARIANT str, is_async;
     IUri *uri;
     HRESULT hr;
@@ -892,21 +914,21 @@ static HRESULT httprequest_open(httprequest *This, BSTR method, BSTR url,
     This->user = This->password = NULL;
     free_request_headers(This);
 
-    if (!wcsicmp(method, MethodGetW))
+    if (!wcsicmp(method, L"GET"))
     {
         This->verb = BINDVERB_GET;
     }
-    else if (!wcsicmp(method, MethodPutW))
+    else if (!wcsicmp(method, L"PUT"))
     {
         This->verb = BINDVERB_PUT;
     }
-    else if (!wcsicmp(method, MethodPostW))
+    else if (!wcsicmp(method, L"POST"))
     {
         This->verb = BINDVERB_POST;
     }
-    else if (!wcsicmp(method, MethodDeleteW) ||
-             !wcsicmp(method, MethodHeadW) ||
-             !wcsicmp(method, MethodPropFindW))
+    else if (!wcsicmp(method, L"DELETE") ||
+             !wcsicmp(method, L"HEAD") ||
+             !wcsicmp(method, L"PROPFIND"))
     {
         This->verb = BINDVERB_CUSTOM;
         SysReAllocString(&This->custom, method);
@@ -985,6 +1007,9 @@ static HRESULT httprequest_setRequestHeader(httprequest *This, BSTR header, BSTR
     struct httpheader *entry;
 
     if (!header || !*header) return E_INVALIDARG;
+#ifdef __REACTOS__
+    if (This->state == READYSTATE_UNINITIALIZED) return httprequest_state_error(This, XHR_E_NOT_OPENED, E_FAIL);
+#endif
     if (This->state != READYSTATE_LOADING) return E_FAIL;
     if (!value) return E_INVALIDARG;
 
@@ -1013,8 +1038,8 @@ static HRESULT httprequest_setRequestHeader(httprequest *This, BSTR header, BSTR
     entry->value  = SysAllocString(value);
 
     /* header length including null terminator */
-    This->reqheader_size += SysStringLen(entry->header) + ARRAY_SIZE(colspaceW) +
-        SysStringLen(entry->value) + ARRAY_SIZE(crlfW) - 1;
+    This->reqheader_size += SysStringLen(entry->header) + sizeof(": ") - 1 +
+        SysStringLen(entry->value) + sizeof("\r\n");
 
     list_add_head(&This->reqheaders, &entry->entry);
 
@@ -1072,6 +1097,10 @@ static HRESULT httprequest_send(httprequest *This, VARIANT body)
     BindStatusCallback *bsc = NULL;
     HRESULT hr;
 
+#ifdef __REACTOS__
+    if (This->state == READYSTATE_UNINITIALIZED) return httprequest_state_error(This, XHR_E_NOT_OPENED, E_FAIL);
+    if (This->state == READYSTATE_COMPLETE) return httprequest_state_error(This, XHR_E_ALREADY_SENT, E_FAIL);
+#endif
     if (This->state != READYSTATE_LOADING) return E_FAIL;
 
     hr = BindStatusCallback_create(This, &bsc, &body);
@@ -1097,12 +1126,19 @@ static HRESULT httprequest_get_status(httprequest *This, LONG *status)
 
     *status = This->status;
 
+#ifdef __REACTOS__
+    return This->state == READYSTATE_COMPLETE ? S_OK : httprequest_state_error(This, XHR_E_NO_DATA, E_FAIL);
+#else
     return This->state == READYSTATE_COMPLETE ? S_OK : E_FAIL;
+#endif
 }
 
 static HRESULT httprequest_get_statusText(httprequest *This, BSTR *status)
 {
     if (!status) return E_POINTER;
+#ifdef __REACTOS__
+    if (This->state != READYSTATE_COMPLETE) return httprequest_state_error(This, XHR_E_NO_DATA, E_FAIL);
+#endif
     if (This->state != READYSTATE_COMPLETE) return E_FAIL;
 
     *status = SysAllocString(This->status_text);
@@ -1247,6 +1283,9 @@ static HRESULT httprequest_get_responseBody(httprequest *This, VARIANT *body)
     if (!body) return E_INVALIDARG;
     V_VT(body) = VT_EMPTY;
 
+#ifdef __REACTOS__
+    if (This->state != READYSTATE_COMPLETE) return httprequest_state_error(This, XHR_E_NO_DATA, E_PENDING);
+#endif
     if (This->state != READYSTATE_COMPLETE) return E_PENDING;
 
     hr = GetHGlobalFromStream(This->bsc->stream, &hglobal);
@@ -1298,6 +1337,9 @@ static HRESULT httprequest_get_responseStream(httprequest *This, VARIANT *body)
     if (!body) return E_INVALIDARG;
     V_VT(body) = VT_EMPTY;
 
+#ifdef __REACTOS__
+    if (This->state != READYSTATE_COMPLETE) return httprequest_state_error(This, XHR_E_NO_DATA, E_PENDING);
+#endif
     if (This->state != READYSTATE_COMPLETE) return E_PENDING;
 
     hr = IStream_Clone(This->bsc->stream, &stream);
@@ -1502,8 +1544,16 @@ static HRESULT WINAPI XMLHTTPRequest_getAllResponseHeaders(IXMLHTTPRequest *ifac
 static HRESULT WINAPI XMLHTTPRequest_send(IXMLHTTPRequest *iface, VARIANT body)
 {
     httprequest *This = impl_from_IXMLHTTPRequest( iface );
+#ifdef __REACTOS__
+    HRESULT hr;
+
+    TRACE("(%p)->(%s)\n", This, debugstr_variant(&body));
+    hr = httprequest_send(This, body);
+    return hr == HRESULT_FROM_WIN32(ERROR_INTERNET_NAME_NOT_RESOLVED) ? INET_E_RESOURCE_NOT_FOUND : hr;
+#else
     TRACE("(%p)->(%s)\n", This, debugstr_variant(&body));
     return httprequest_send(This, body);
+#endif
 }
 
 static HRESULT WINAPI XMLHTTPRequest_abort(IXMLHTTPRequest *iface)
@@ -1660,6 +1710,63 @@ IUri *get_base_uri(IUnknown *site)
     return uri;
 }
 
+#ifdef __REACTOS__
+static IUri *httprequest_get_site_uri(httprequest *This)
+{
+    IHTMLElementCollection *elements;
+    IServiceProvider *provider;
+    IOleClientSite *client_site;
+    IXMLDOMDocument *xmldoc;
+    IHTMLDocument2 *doc;
+    IBindHost *bind_host;
+    IUri *uri = NULL;
+    LONG length;
+    BSTR url;
+    HRESULT hr;
+
+    if (FAILED(IUnknown_QueryInterface(This->site, &IID_IServiceProvider, (void **)&provider)))
+        return NULL;
+
+    /* TODO: bind through the host's IBindHost and take the base URL from a hosting XML document. */
+    if (SUCCEEDED(IServiceProvider_QueryService(provider, &SID_SBindHost, &IID_IBindHost, (void **)&bind_host)))
+        IBindHost_Release(bind_host);
+
+    hr = IServiceProvider_QueryService(provider, &SID_SContainerDispatch, &IID_IHTMLDocument2, (void **)&doc);
+    if (FAILED(hr))
+        hr = IServiceProvider_QueryService(provider, &SID_SInternetHostSecurityManager, &IID_IHTMLDocument2, (void **)&doc);
+    if (SUCCEEDED(hr))
+    {
+        if (SUCCEEDED(IHTMLDocument2_get_all(doc, &elements)))
+        {
+            IHTMLElementCollection_get_length(elements, &length);
+            IHTMLElementCollection_Release(elements);
+        }
+        url = NULL;
+        if (SUCCEEDED(IHTMLDocument2_get_URL(doc, &url)) && url && *url && FAILED(CreateUri(url, 0, 0, &uri)))
+            uri = NULL;
+        SysFreeString(url);
+        IHTMLDocument2_Release(doc);
+    }
+
+    if (SUCCEEDED(IUnknown_QueryInterface(This->site, &IID_IXMLDOMDocument, (void **)&xmldoc)))
+        IXMLDOMDocument_Release(xmldoc);
+
+    if (This->version < MSXML6 || (This->safeopt & INTERFACESAFE_FOR_UNTRUSTED_DATA))
+    {
+        if (SUCCEEDED(IUnknown_QueryInterface(This->site, &IID_IOleClientSite, (void **)&client_site)))
+            IOleClientSite_Release(client_site);
+        if (SUCCEEDED(IServiceProvider_QueryService(provider, &SID_SInternetHostSecurityManager, &IID_IXMLDOMDocument,
+                                                    (void **)&xmldoc)))
+        {
+            IXMLDOMDocument_Release(xmldoc);
+        }
+    }
+
+    IServiceProvider_Release(provider);
+    return uri;
+}
+#endif
+
 static HRESULT WINAPI httprequest_ObjectWithSite_SetSite( IObjectWithSite *iface, IUnknown *punk )
 {
     httprequest *This = impl_from_IObjectWithSite(iface);
@@ -1669,14 +1776,21 @@ static HRESULT WINAPI httprequest_ObjectWithSite_SetSite( IObjectWithSite *iface
     if(This->site)
         IUnknown_Release( This->site );
     if(This->base_uri)
+    {
         IUri_Release(This->base_uri);
+        This->base_uri = NULL;
+    }
 
     This->site = punk;
 
     if (punk)
     {
         IUnknown_AddRef( punk );
+#ifdef __REACTOS__
+        This->base_uri = httprequest_get_site_uri(This);
+#else
         This->base_uri = get_base_uri(This->site);
+#endif
     }
 
     return S_OK;
@@ -1791,6 +1905,9 @@ static HRESULT WINAPI ServerXMLHTTPRequest_QueryInterface(IServerXMLHTTPRequest 
     TRACE("(%p)->(%s %p)\n", This, debugstr_guid(riid), obj);
 
     if ( IsEqualGUID( riid, &IID_IServerXMLHTTPRequest) ||
+#ifdef __REACTOS__
+         IsEqualGUID( riid, &IID_IServerXMLHTTPRequest2) ||
+#endif
          IsEqualGUID( riid, &IID_IXMLHTTPRequest) ||
          IsEqualGUID( riid, &IID_IDispatch) ||
          IsEqualGUID( riid, &IID_IUnknown) )
@@ -1801,6 +1918,12 @@ static HRESULT WINAPI ServerXMLHTTPRequest_QueryInterface(IServerXMLHTTPRequest 
     {
         *obj = &This->req.ISupportErrorInfo_iface;
     }
+#ifdef __REACTOS__
+    else if (This->req.version == MSXML6 && dispex_query_interface(&This->dispex, riid, obj))
+    {
+        return *obj ? S_OK : E_NOINTERFACE;
+    }
+#endif
     else
     {
         TRACE("Unsupported interface %s\n", debugstr_guid(riid));
@@ -1831,6 +1954,12 @@ static ULONG WINAPI ServerXMLHTTPRequest_Release(IServerXMLHTTPRequest *iface)
     if (!ref)
     {
         httprequest_release(&request->req);
+#ifdef __REACTOS__
+        SysFreeString(request->proxy_server);
+        SysFreeString(request->proxy_bypass);
+        SysFreeString(request->proxy_user);
+        SysFreeString(request->proxy_password);
+#endif
         free(request);
     }
 
@@ -1852,7 +1981,11 @@ static HRESULT WINAPI ServerXMLHTTPRequest_GetTypeInfo(IServerXMLHTTPRequest *if
 {
     TRACE("%p, %u, %lx, %p.\n", iface, iTInfo, lcid, ppTInfo);
 
+#ifdef __REACTOS__
+    return get_typeinfo(IServerXMLHTTPRequest2_tid, ppTInfo);
+#else
     return get_typeinfo(IServerXMLHTTPRequest_tid, ppTInfo);
+#endif
 }
 
 static HRESULT WINAPI ServerXMLHTTPRequest_GetIDsOfNames(IServerXMLHTTPRequest *iface, REFIID riid,
@@ -1867,7 +2000,11 @@ static HRESULT WINAPI ServerXMLHTTPRequest_GetIDsOfNames(IServerXMLHTTPRequest *
     if(!rgszNames || cNames == 0 || !rgDispId)
         return E_INVALIDARG;
 
+#ifdef __REACTOS__
+    hr = get_typeinfo(IServerXMLHTTPRequest2_tid, &typeinfo);
+#else
     hr = get_typeinfo(IServerXMLHTTPRequest_tid, &typeinfo);
+#endif
     if(SUCCEEDED(hr))
     {
         hr = ITypeInfo_GetIDsOfNames(typeinfo, rgszNames, cNames, rgDispId);
@@ -1887,7 +2024,11 @@ static HRESULT WINAPI ServerXMLHTTPRequest_Invoke(IServerXMLHTTPRequest *iface, 
     TRACE("%p, %ld, %s %lx, %d, %p, %p, %p, %p.\n", iface, dispIdMember, debugstr_guid(riid),
           lcid, wFlags, pDispParams, pVarResult, pExcepInfo, puArgErr);
 
+#ifdef __REACTOS__
+    hr = get_typeinfo(IServerXMLHTTPRequest2_tid, &typeinfo);
+#else
     hr = get_typeinfo(IServerXMLHTTPRequest_tid, &typeinfo);
+#endif
     if(SUCCEEDED(hr))
     {
         hr = ITypeInfo_Invoke(typeinfo, iface, dispIdMember, wFlags, pDispParams, pVarResult, pExcepInfo, puArgErr);
@@ -2025,6 +2166,51 @@ static HRESULT WINAPI ServerXMLHTTPRequest_setOption(IServerXMLHTTPRequest *ifac
     return E_NOTIMPL;
 }
 
+#ifdef __REACTOS__
+static BSTR serverhttp_variant_string(const VARIANT *value)
+{
+    return V_VT(value) == VT_BSTR ? SysAllocString(V_BSTR(value)) : NULL;
+}
+
+static HRESULT WINAPI ServerXMLHTTPRequest_setProxy(IServerXMLHTTPRequest *iface, SXH_PROXY_SETTING setting,
+        VARIANT server, VARIANT bypass)
+{
+    serverhttp *This = impl_from_IServerXMLHTTPRequest( iface );
+
+    TRACE("(%p)->(%d %s %s)\n", This, setting, debugstr_variant(&server), debugstr_variant(&bypass));
+
+    if ((UINT)setting > SXH_PROXY_SET_PROXY)
+        return E_INVALIDARG;
+
+    /* FIXME: the proxy is recorded but the urlmon binding still uses the session proxy. */
+    SysFreeString(This->proxy_server);
+    SysFreeString(This->proxy_bypass);
+    This->proxy_setting = setting;
+    This->proxy_server = serverhttp_variant_string(&server);
+    This->proxy_bypass = serverhttp_variant_string(&bypass);
+    return S_OK;
+}
+
+static HRESULT WINAPI ServerXMLHTTPRequest_setProxyCredentials(IServerXMLHTTPRequest *iface, BSTR user, BSTR password)
+{
+    serverhttp *This = impl_from_IServerXMLHTTPRequest( iface );
+
+    TRACE("(%p)->(%s %p)\n", This, debugstr_w(user), password);
+
+    if (This->req.state == READYSTATE_UNINITIALIZED)
+        return HRESULT_FROM_WIN32(ERROR_WINHTTP_CANNOT_CALL_BEFORE_OPEN);
+    if (!user || !*user || !password)
+        return E_INVALIDARG;
+
+    /* FIXME: the credentials are recorded but not offered to a proxy. */
+    SysFreeString(This->proxy_user);
+    SysFreeString(This->proxy_password);
+    This->proxy_user = SysAllocString(user);
+    This->proxy_password = SysAllocString(password);
+    return S_OK;
+}
+#endif
+
 static const struct IServerXMLHTTPRequestVtbl ServerXMLHTTPRequestVtbl =
 {
     ServerXMLHTTPRequest_QueryInterface,
@@ -2052,6 +2238,10 @@ static const struct IServerXMLHTTPRequestVtbl ServerXMLHTTPRequestVtbl =
     ServerXMLHTTPRequest_waitForResponse,
     ServerXMLHTTPRequest_getOption,
     ServerXMLHTTPRequest_setOption
+#ifdef __REACTOS__
+    , ServerXMLHTTPRequest_setProxy,
+    ServerXMLHTTPRequest_setProxyCredentials
+#endif
 };
 
 static void init_httprequest(httprequest *req)
@@ -2083,6 +2273,9 @@ static void init_httprequest(httprequest *req)
 
     req->site = NULL;
     req->safeopt = 0;
+#ifdef __REACTOS__
+    req->version = MSXML_DEFAULT;
+#endif
 }
 
 HRESULT XMLHTTPRequest_create(void **obj)
@@ -2115,6 +2308,13 @@ HRESULT ServerXMLHTTP_create(void **obj)
 
     init_httprequest(&req->req);
     req->IServerXMLHTTPRequest_iface.lpVtbl = &ServerXMLHTTPRequestVtbl;
+#ifdef __REACTOS__
+    req->proxy_setting = SXH_PROXY_SET_DEFAULT;
+    req->proxy_server = NULL;
+    req->proxy_bypass = NULL;
+    req->proxy_user = NULL;
+    req->proxy_password = NULL;
+#endif
 
     *obj = &req->IServerXMLHTTPRequest_iface;
 
@@ -2122,3 +2322,44 @@ HRESULT ServerXMLHTTP_create(void **obj)
 
     return S_OK;
 }
+
+#ifdef __REACTOS__
+static const tid_t serverhttp_iface_tids[] =
+{
+    IServerXMLHTTPRequest2_tid,
+    0
+};
+
+static dispex_static_data_t serverhttp_dispex =
+{
+    NULL,
+    IServerXMLHTTPRequest2_tid,
+    NULL,
+    serverhttp_iface_tids
+};
+
+HRESULT XMLHTTPRequest_create_version(MSXML_VERSION version, void **obj)
+{
+    HRESULT hr;
+
+    if (SUCCEEDED(hr = XMLHTTPRequest_create(obj)))
+        impl_from_IXMLHTTPRequest(*obj)->version = version;
+
+    return hr;
+}
+
+HRESULT ServerXMLHTTP_create_version(MSXML_VERSION version, void **obj)
+{
+    serverhttp *req;
+    HRESULT hr;
+
+    if (SUCCEEDED(hr = ServerXMLHTTP_create(obj)))
+    {
+        req = impl_from_IServerXMLHTTPRequest(*obj);
+        req->req.version = version;
+        init_dispex(&req->dispex, (IUnknown *)&req->IServerXMLHTTPRequest_iface, &serverhttp_dispex);
+    }
+
+    return hr;
+}
+#endif

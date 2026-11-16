@@ -49,6 +49,16 @@ extern "C" {
 #endif
 #endif /* !SNDMSG */
 
+#ifndef SNDMSGA
+#ifdef __cplusplus
+#define SNDMSGA ::SendMessageA
+#define SNDMSGW ::SendMessageW
+#else
+#define SNDMSGA SendMessageA
+#define SNDMSGW SendMessageW
+#endif
+#endif /* !SNDMSGA */
+
   WINCOMMCTRLAPI void WINAPI InitCommonControls(void);
 
   typedef struct tagINITCOMMONCONTROLSEX {
@@ -251,7 +261,9 @@ extern "C" {
 #define BCSIF_STYLE 0x00000004
 #define BCSIF_SIZE  0x00000008
 
+#define BCSS_NOSPLIT 0x00000001
 #define BCSS_STRETCH 0x00000002
+#define BCSS_ALIGNLEFT 0x00000004
 #define BCSS_IMAGE   0x00000008
 
 #define BCN_FIRST (0U-1250U)
@@ -2505,6 +2517,17 @@ typedef struct tagNMBCDROPDOWN {
 #define LVHT_BELOW 0x10
 #define LVHT_TORIGHT 0x20
 #define LVHT_TOLEFT 0x40
+#if (_WIN32_WINNT >= 0x0600)
+#define LVHT_EX_GROUP_HEADER 0x10000000
+#define LVHT_EX_GROUP_FOOTER 0x20000000
+#define LVHT_EX_GROUP_COLLAPSE 0x40000000
+#define LVHT_EX_GROUP_BACKGROUND 0x80000000
+#define LVHT_EX_GROUP_STATEICON 0x01000000
+#define LVHT_EX_GROUP_SUBSETLINK 0x02000000
+#define LVHT_EX_GROUP (LVHT_EX_GROUP_BACKGROUND | LVHT_EX_GROUP_COLLAPSE | LVHT_EX_GROUP_FOOTER | LVHT_EX_GROUP_HEADER | LVHT_EX_GROUP_STATEICON | LVHT_EX_GROUP_SUBSETLINK)
+#define LVHT_EX_ONCONTENTS 0x04000000
+#define LVHT_EX_FOOTER 0x08000000
+#endif
 
 #define LV_HITTESTINFO LVHITTESTINFO
 
@@ -2515,6 +2538,9 @@ typedef struct tagNMBCDROPDOWN {
     UINT flags;
     int iItem;
     int iSubItem;
+#if (_WIN32_WINNT >= 0x0600)
+    int iGroup;
+#endif
   } LVHITTESTINFO,*LPLVHITTESTINFO;
 
 #define LVM_HITTEST (LVM_FIRST+18)
@@ -2686,6 +2712,8 @@ typedef struct tagNMBCDROPDOWN {
 
 #define LVM_GETITEMTEXT __MINGW_NAME_AW(LVM_GETITEMTEXT)
 
+#define ListView_GetItemTextA(hwndLV,i,iSubItem_,pszText_,cchTextMax_) { LVITEMA _ms_lvi; _ms_lvi.iSubItem = iSubItem_; _ms_lvi.cchTextMax = cchTextMax_; _ms_lvi.pszText = pszText_; SNDMSGA((hwndLV),LVM_GETITEMTEXTA,(WPARAM)(i),(LPARAM)(LVITEMA *)&_ms_lvi);}
+#define ListView_GetItemTextW(hwndLV,i,iSubItem_,pszText_,cchTextMax_) { LVITEMW _ms_lvi; _ms_lvi.iSubItem = iSubItem_; _ms_lvi.cchTextMax = cchTextMax_; _ms_lvi.pszText = pszText_; SNDMSGW((hwndLV),LVM_GETITEMTEXTW,(WPARAM)(i),(LPARAM)(LVITEMW *)&_ms_lvi);}
 #define ListView_GetItemText(hwndLV,i,iSubItem_,pszText_,cchTextMax_) { LV_ITEM _ms_lvi; _ms_lvi.iSubItem = iSubItem_; _ms_lvi.cchTextMax = cchTextMax_; _ms_lvi.pszText = pszText_; SNDMSG((hwndLV),LVM_GETITEMTEXT,(WPARAM)(i),(LPARAM)(LV_ITEM *)&_ms_lvi);}
 
 #define LVM_SETITEMTEXTA (LVM_FIRST+46)
@@ -2858,10 +2886,29 @@ typedef struct tagNMBCDROPDOWN {
 #define LVGF_STATE 0x4
 #define LVGF_ALIGN 0x8
 #define LVGF_GROUPID 0x10
+#if (_WIN32_WINNT >= 0x0600)
+#define LVGF_SUBTITLE 0x100
+#define LVGF_TASK 0x200
+#define LVGF_DESCRIPTIONTOP 0x400
+#define LVGF_DESCRIPTIONBOTTOM 0x800
+#define LVGF_TITLEIMAGE 0x1000
+#define LVGF_EXTENDEDIMAGE 0x2000
+#define LVGF_ITEMS 0x4000
+#define LVGF_SUBSET 0x8000
+#define LVGF_SUBSETITEMS 0x10000
+#endif
 
 #define LVGS_NORMAL 0x0
 #define LVGS_COLLAPSED 0x1
 #define LVGS_HIDDEN 0x2
+#if (_WIN32_WINNT >= 0x0600)
+#define LVGS_NOHEADER 0x4
+#define LVGS_COLLAPSIBLE 0x8
+#define LVGS_FOCUSED 0x10
+#define LVGS_SELECTED 0x20
+#define LVGS_SUBSETED 0x40
+#define LVGS_SUBSETLINKFOCUSED 0x80
+#endif
 
 #define LVGA_HEADER_LEFT 0x1
 #define LVGA_HEADER_CENTER 0x2
@@ -2881,7 +2928,27 @@ typedef struct tagNMBCDROPDOWN {
     UINT stateMask;
     UINT state;
     UINT uAlign;
+#if (_WIN32_WINNT >= 0x0600)
+    LPWSTR pszSubtitle;
+    UINT cchSubtitle;
+    LPWSTR pszTask;
+    UINT cchTask;
+    LPWSTR pszDescriptionTop;
+    UINT cchDescriptionTop;
+    LPWSTR pszDescriptionBottom;
+    UINT cchDescriptionBottom;
+    int iTitleImage;
+    int iExtendedImage;
+    int iFirstItem;
+    UINT cItems;
+    LPWSTR pszSubsetTitle;
+    UINT cchSubsetTitle;
+#endif
   } LVGROUP,*PLVGROUP;
+
+#if (_WIN32_WINNT >= 0x0600)
+#define LVGROUP_V5_SIZE CCSIZEOF_STRUCT(LVGROUP,uAlign)
+#endif
 
 #define LVM_INSERTGROUP (LVM_FIRST+145)
 #define ListView_InsertGroup(hwnd,index,pgrp) SNDMSG((hwnd),LVM_INSERTGROUP,(WPARAM)index,(LPARAM)pgrp)
@@ -2939,6 +3006,23 @@ typedef struct tagNMBCDROPDOWN {
 #define ListView_RemoveAllGroups(hwnd) SNDMSG((hwnd),LVM_REMOVEALLGROUPS,0,0)
 #define LVM_HASGROUP (LVM_FIRST+161)
 #define ListView_HasGroup(hwnd,dwGroupId) SNDMSG((hwnd),LVM_HASGROUP,dwGroupId,0)
+#define LVM_GETGROUPCOUNT (LVM_FIRST + 152)
+#define ListView_GetGroupCount(hwnd) SNDMSG((hwnd),LVM_GETGROUPCOUNT,(WPARAM)0,(LPARAM)0)
+#define LVM_GETGROUPINFOBYINDEX (LVM_FIRST + 153)
+#define ListView_GetGroupInfoByIndex(hwnd, iIndex, pgrp) SNDMSG((hwnd),LVM_GETGROUPINFOBYINDEX,(WPARAM)(iIndex),(LPARAM)(pgrp))
+#define LVGGR_GROUP 0
+#define LVGGR_HEADER 1
+#define LVGGR_LABEL 2
+#define LVGGR_SUBSETLINK 3
+#define LVM_GETGROUPRECT (LVM_FIRST+98)
+#define ListView_GetGroupRect(hwnd, iGroupId, type, prc) SNDMSG((hwnd),LVM_GETGROUPRECT,(WPARAM)(iGroupId),((prc) ? (((RECT *)(prc))->top = (type)),(LPARAM)(RECT *)(prc) : (LPARAM)(RECT *)NULL))
+#define LVM_GETGROUPSTATE (LVM_FIRST+92)
+#define ListView_GetGroupState(hwnd, dwGroupId, dwMask) (UINT)SNDMSG((hwnd), LVM_GETGROUPSTATE,(WPARAM)(dwGroupId),(LPARAM)(dwMask))
+#define ListView_SetGroupState(hwnd,dwGroupId,dwMask,dwState) { LVGROUP _macro_lvg; _macro_lvg.cbSize = sizeof(_macro_lvg); _macro_lvg.mask = LVGF_STATE; _macro_lvg.stateMask = dwMask; _macro_lvg.state = dwState; SNDMSG((hwnd),LVM_SETGROUPINFO,(WPARAM)(dwGroupId),(LPARAM)(LVGROUP *)&_macro_lvg); }
+#define ListView_SetGroupHeaderImageList(hwnd,himl) (HIMAGELIST)SNDMSG((hwnd),LVM_SETIMAGELIST,(WPARAM)LVSIL_GROUPHEADER,(LPARAM)(HIMAGELIST)(himl))
+#define ListView_GetGroupHeaderImageList(hwnd) (HIMAGELIST)SNDMSG((hwnd),LVM_GETIMAGELIST,(WPARAM)LVSIL_GROUPHEADER,0L)
+#define LVM_GETFOCUSEDGROUP (LVM_FIRST+93)
+#define ListView_GetFocusedGroup(hwnd) SNDMSG((hwnd), LVM_GETFOCUSEDGROUP, 0, 0)
 
 #define LVTVIF_AUTOSIZE 0x0
 #define LVTVIF_FIXEDWIDTH 0x1
@@ -3022,6 +3106,57 @@ typedef struct tagNMBCDROPDOWN {
 #define ListView_MapIDToIndex(hwnd,id) (UINT)SNDMSG((hwnd),LVM_MAPIDTOINDEX,(WPARAM)id,(LPARAM)0)
 #define LVM_ISITEMVISIBLE (LVM_FIRST+182)
 #define ListView_IsItemVisible(hwnd,index) (UINT)SNDMSG((hwnd),LVM_ISITEMVISIBLE,(WPARAM)(index),(LPARAM)0)
+
+#if NTDDI_VERSION >= 0x06000000
+#define LVM_GETEMPTYTEXT (LVM_FIRST + 204)
+#define ListView_GetEmptyText(hwnd, pszText, cchText) (BOOL)SNDMSG((hwnd), LVM_GETEMPTYTEXT,(WPARAM)(cchText),(LPARAM)(pszText))
+#define LVM_GETFOOTERRECT (LVM_FIRST + 205)
+#define ListView_GetFooterRect(hwnd, prc) (BOOL)SNDMSG((hwnd), LVM_GETFOOTERRECT,(WPARAM)0,(LPARAM)(prc))
+
+#define LVFF_ITEMCOUNT 0x1
+
+  typedef struct tagLVFOOTERINFO {
+    UINT mask;
+    LPWSTR pszText;
+    int cchTextMax;
+    UINT cItems;
+  } LVFOOTERINFO,*LPLVFOOTERINFO;
+
+#define LVM_GETFOOTERINFO (LVM_FIRST+206)
+#define ListView_GetFooterInfo(hwnd, plvfi) (BOOL)SNDMSG((hwnd), LVM_GETFOOTERINFO,(WPARAM)0,(LPARAM)(plvfi))
+#define LVM_GETFOOTERITEMRECT (LVM_FIRST+207)
+#define ListView_GetFooterItemRect(hwnd, iItem, prc) (BOOL)SNDMSG((hwnd), LVM_GETFOOTERITEMRECT,(WPARAM)(iItem),(LPARAM)(prc))
+
+#define LVFIF_TEXT 0x1
+#define LVFIF_STATE 0x2
+
+#define LVFIS_FOCUSED 0x1
+
+  typedef struct tagLVFOOTERITEM {
+    UINT mask;
+    int iItem;
+    LPWSTR pszText;
+    int cchTextMax;
+    UINT state;
+    UINT stateMask;
+  } LVFOOTERITEM,*LPLVFOOTERITEM;
+
+#define LVM_GETFOOTERITEM (LVM_FIRST+208)
+#define ListView_GetFooterItem(hwnd, iItem, pfi) (BOOL)SNDMSG((hwnd), LVM_GETFOOTERITEM,(WPARAM)(iItem),(LPARAM)(pfi))
+
+  typedef struct tagLVITEMINDEX {
+    int iItem;
+    int iGroup;
+  } LVITEMINDEX,*PLVITEMINDEX;
+
+#define LVM_GETITEMINDEXRECT (LVM_FIRST+209)
+#define ListView_GetItemIndexRect(hwnd, plvii, iSubItem, code, prc) (BOOL)SNDMSG((hwnd), LVM_GETITEMINDEXRECT,(WPARAM)(LVITEMINDEX *)(plvii),((prc) ? ((((LPRECT)(prc))->top = (iSubItem)),(((LPRECT)(prc))->left = (code)),(LPARAM)(prc)) : (LPARAM)(LPRECT)NULL))
+#define LVM_SETITEMINDEXSTATE (LVM_FIRST+210)
+#define ListView_SetItemIndexState(hwndLV, plvii, data, mask) { LV_ITEM _macro_lvi; _macro_lvi.stateMask = (mask); _macro_lvi.state = (data); SNDMSG((hwndLV),LVM_SETITEMINDEXSTATE,(WPARAM)(LVITEMINDEX *)(plvii),(LPARAM)(LV_ITEM *)&_macro_lvi); }
+
+#define LVM_GETNEXTITEMINDEX (LVM_FIRST + 211)
+#define ListView_GetNextItemIndex(hwnd, plvii, flags) (BOOL)SNDMSG((hwnd), LVM_GETNEXTITEMINDEX,(WPARAM)(LVITEMINDEX *)(plvii), MAKELPARAM((flags), 0))
+#endif
 
 #define LVBKIMAGE __MINGW_NAME_AW(LVBKIMAGE)
 #define LPLVBKIMAGE __MINGW_NAME_AW(LPLVBKIMAGE)
@@ -3168,6 +3303,11 @@ typedef struct tagNMBCDROPDOWN {
 #define LVN_INCREMENTALSEARCHA  (LVN_FIRST-62)
 #define LVN_INCREMENTALSEARCHW  (LVN_FIRST-63)
 
+#if NTDDI_VERSION >= 0x06000000
+#define LVN_COLUMNDROPDOWN (LVN_FIRST-64)
+#define LVN_COLUMNOVERFLOWCLICK (LVN_FIRST-66)
+#endif
+
 #define LVIF_DI_SETITEM 0x1000
 
 #define LV_DISPINFOA NMLVDISPINFOA
@@ -3190,7 +3330,7 @@ typedef struct tagNMBCDROPDOWN {
 
 #define LV_KEYDOWN NMLVKEYDOWN
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
   typedef struct tagLVKEYDOWN {
     NMHDR hdr;
@@ -3198,7 +3338,7 @@ typedef struct tagNMBCDROPDOWN {
     UINT flags;
   } NMLVKEYDOWN,*LPNMLVKEYDOWN;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 #define LVN_MARQUEEBEGIN (LVN_FIRST-56)
 
@@ -3239,6 +3379,20 @@ typedef struct tagNMBCDROPDOWN {
 
 #define LVN_BEGINSCROLL (LVN_FIRST-80)
 #define LVN_ENDSCROLL (LVN_FIRST-81)
+
+#if NTDDI_VERSION >= 0x06000000
+#define LVN_LINKCLICK (LVN_FIRST-84)
+
+#define EMF_CENTERED 0x1
+
+  typedef struct tagNMLVEMPTYMARKUP {
+    NMHDR hdr;
+    DWORD dwFlags;
+    WCHAR szMarkup[2048 + 32 + sizeof("://")];
+  } NMLVEMPTYMARKUP;
+
+#define LVN_GETEMPTYMARKUP (LVN_FIRST-87)
+#endif
 
 #endif /* !NOLISTVIEW */
 
@@ -3589,6 +3743,11 @@ typedef struct tagNMBCDROPDOWN {
 #define TreeView_SetScrollTime(hwnd,uTime) (UINT)SNDMSG((hwnd),TVM_SETSCROLLTIME,uTime,0)
 #define TVM_GETSCROLLTIME (TV_FIRST+34)
 #define TreeView_GetScrollTime(hwnd) (UINT)SNDMSG((hwnd),TVM_GETSCROLLTIME,0,0)
+#define TVM_SETBORDER (TV_FIRST+35)
+#define TreeView_SetBorder(hwnd, dwFlags, xBorder, yBorder) (int)SNDMSG((hwnd), TVM_SETBORDER,(WPARAM)(dwFlags), MAKELPARAM(xBorder, yBorder))
+
+#define TVSBF_XBORDER 0x1
+#define TVSBF_YBORDER 0x2
 #define TVM_SETINSERTMARKCOLOR (TV_FIRST+37)
 #define TreeView_SetInsertMarkColor(hwnd,clr) (COLORREF)SNDMSG((hwnd),TVM_SETINSERTMARKCOLOR,0,(LPARAM)(clr))
 #define TVM_GETINSERTMARKCOLOR (TV_FIRST+38)
@@ -3609,6 +3768,34 @@ typedef struct tagNMBCDROPDOWN {
 
 #define TVM_MAPHTREEITEMTOACCID (TV_FIRST+43)
 #define TreeView_MapHTREEITEMToAccID(hwnd,htreeitem) (UINT)SNDMSG((hwnd),TVM_MAPHTREEITEMTOACCID,(WPARAM)htreeitem,0)
+#define TVM_SETEXTENDEDSTYLE (TV_FIRST+44)
+#define TreeView_SetExtendedStyle(hwnd, dw, mask) (DWORD)SNDMSG((hwnd), TVM_SETEXTENDEDSTYLE, mask, dw)
+#define TVM_GETEXTENDEDSTYLE (TV_FIRST+45)
+#define TreeView_GetExtendedStyle(hwnd) (DWORD)SNDMSG((hwnd), TVM_GETEXTENDEDSTYLE, 0, 0)
+#define TVM_SETHOT (TV_FIRST+58)
+#define TreeView_SetHot(hwnd, hitem) SNDMSG((hwnd), TVM_SETHOT, 0,(LPARAM)(hitem))
+#define TVM_SETAUTOSCROLLINFO (TV_FIRST+59)
+#define TreeView_SetAutoScrollInfo(hwnd, uPixPerSec, uUpdateTime) SNDMSG((hwnd), TVM_SETAUTOSCROLLINFO,(WPARAM)(uPixPerSec),(LPARAM)(uUpdateTime))
+
+#if NTDDI_VERSION >= 0x06000000
+#define TVM_GETSELECTEDCOUNT (TV_FIRST+70)
+#define TreeView_GetSelectedCount(hwnd) (DWORD)SNDMSG((hwnd), TVM_GETSELECTEDCOUNT, 0, 0)
+#define TVM_SHOWINFOTIP (TV_FIRST+71)
+#define TreeView_ShowInfoTip(hwnd, hitem) (DWORD)SNDMSG((hwnd), TVM_SHOWINFOTIP, 0,(LPARAM)(hitem))
+
+  typedef enum _TVITEMPART {
+    TVGIPR_BUTTON = 0x0001
+  } TVITEMPART;
+
+  typedef struct tagTVGETITEMPARTRECTINFO {
+    HTREEITEM hti;
+    RECT *prc;
+    TVITEMPART partID;
+  } TVGETITEMPARTRECTINFO;
+
+#define TVM_GETITEMPARTRECT (TV_FIRST+72)
+#define TreeView_GetItemPartRect(hwnd, hitem, prc, partid) { TVGETITEMPARTRECTINFO info; info.hti = (hitem); info.prc = (prc); info.partID = (partid); (BOOL)SNDMSG((hwnd), TVM_GETITEMPARTRECT, 0,(LPARAM)&info); }
+#endif
 
   typedef int (CALLBACK *PFNTVCOMPARE)(LPARAM lParam1,LPARAM lParam2,LPARAM lParamSort);
 
@@ -3719,6 +3906,11 @@ typedef struct tagTVDISPINFOEXW {
 #define TVN_GETINFOTIPA (TVN_FIRST-13)
 #define TVN_GETINFOTIPW (TVN_FIRST-14)
 #define TVN_SINGLEEXPAND (TVN_FIRST-15)
+#define TVN_ITEMCHANGINGA (TVN_FIRST-16)
+#define TVN_ITEMCHANGINGW (TVN_FIRST-17)
+#define TVN_ITEMCHANGEDA (TVN_FIRST-18)
+#define TVN_ITEMCHANGEDW (TVN_FIRST-19)
+#define TVN_ASYNCDRAW (TVN_FIRST-20)
 
 #define TVNRET_DEFAULT 0
 #define TVNRET_SKIPOLD 1
@@ -3726,7 +3918,26 @@ typedef struct tagTVDISPINFOEXW {
 
 #define TV_KEYDOWN NMTVKEYDOWN
 
-#include <pshpack1.h>
+  typedef struct tagTVITEMCHANGE {
+    NMHDR hdr;
+    UINT uChanged;
+    HTREEITEM hItem;
+    UINT uStateNew;
+    UINT uStateOld;
+    LPARAM lParam;
+  } NMTVITEMCHANGE;
+
+  typedef struct tagNMTVASYNCDRAW {
+    NMHDR hdr;
+    IMAGELISTDRAWPARAMS *pimldp;
+    HRESULT hr;
+    HTREEITEM hItem;
+    LPARAM lParam;
+    DWORD dwRetFlags;
+    int iRetImageIndex;
+  } NMTVASYNCDRAW;
+
+#pragma pack(push, 1)
 
   typedef struct tagTVKEYDOWN {
     NMHDR hdr;
@@ -3734,7 +3945,7 @@ typedef struct tagTVDISPINFOEXW {
     UINT flags;
   } NMTVKEYDOWN,*LPNMTVKEYDOWN;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 #define TVN_SELCHANGING __MINGW_NAME_AW(TVN_SELCHANGING)
 #define TVN_SELCHANGED __MINGW_NAME_AW(TVN_SELCHANGED)
@@ -4124,7 +4335,7 @@ typedef struct tagTVDISPINFOEXW {
 
 #define TC_KEYDOWN NMTCKEYDOWN
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
   typedef struct tagTCKEYDOWN {
     NMHDR hdr;
@@ -4132,7 +4343,7 @@ typedef struct tagTVDISPINFOEXW {
     UINT flags;
   } NMTCKEYDOWN;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 #define TCN_SELCHANGE (TCN_FIRST - 1)
 #define TCN_SELCHANGING (TCN_FIRST - 2)
@@ -4316,6 +4527,7 @@ typedef struct {
 #define MCS_NOTODAY            0x0010
 #define MCS_NOTRAILINGDATES    0x0040
 #define MCS_SHORTDAYSOFWEEK    0x0080
+#define MCS_NOSELCHANGEONNAV   0x0100
 
 #define GMR_VISIBLE 0
 #define GMR_DAYSTATE 1
@@ -4568,7 +4780,7 @@ typedef struct {
 #define PGK_CONTROL 2
 #define PGK_MENU 4
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
   typedef struct {
     NMHDR hdr;
@@ -4580,7 +4792,7 @@ typedef struct {
     int iScroll;
   }NMPGSCROLL,*LPNMPGSCROLL;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 #define PGN_CALCSIZE (PGN_FIRST-2)
 
@@ -4671,6 +4883,7 @@ typedef struct {
   } NMBCHOTITEM,*LPNMBCHOTITEM;
 
 #define BST_HOT 0x200
+#define BST_DROPDOWNPUSHED 0x400
 
 #define BS_SPLITBUTTON    0x0000000C
 #define BS_DEFSPLITBUTTON 0x0000000D
@@ -4752,6 +4965,10 @@ typedef struct {
 #define LIS_FOCUSED 0x1
 #define LIS_ENABLED 0x2
 #define LIS_VISITED 0x4
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+#define LIS_HOTTRACK 0x8
+#define LIS_DEFAULTCOLORS 0x10
+#endif
 
   typedef struct tagLITEM {
     UINT mask;
@@ -5108,7 +5325,7 @@ typedef const void*
 
 #ifndef NOTASKDIALOG
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 enum _TASKDIALOG_FLAGS
 {
@@ -5255,7 +5472,7 @@ TaskDialogIndirect(
   _Out_opt_ int *,
   _Out_opt_ BOOL *);
 
-#include <poppack.h>
+#pragma pack(pop)
 
 #endif /* !NOTASKDIALOG */
 
@@ -5265,6 +5482,9 @@ enum _LI_METRIC
    LIM_SMALL,
    LIM_LARGE,
 };
+
+HRESULT WINAPI LoadIconMetric(_In_opt_ HINSTANCE, _In_ PCWSTR, _In_ int, _Out_ HICON *);
+HRESULT WINAPI LoadIconWithScaleDown(_In_opt_ HINSTANCE, _In_ PCWSTR, _In_ int, _In_ int, _Out_ HICON *);
 #endif
 
 #ifdef __cplusplus

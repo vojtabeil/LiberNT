@@ -84,6 +84,10 @@ LPWSTR RPCRT4_strndupW(LPCWSTR src, INT slen)
   if (slen == -1) slen = lstrlenW(src);
   len = slen;
   s = malloc((len + 1) * sizeof(WCHAR));
+#ifdef __REACTOS__
+  if (!s)
+      RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
   memcpy(s, src, len*sizeof(WCHAR));
   s[len] = 0;
   return s;
@@ -94,6 +98,10 @@ static RPC_STATUS RPCRT4_AllocBinding(RpcBinding** Binding, BOOL server)
   RpcBinding* NewBinding;
 
   NewBinding = calloc(1, sizeof(RpcBinding));
+#ifdef __REACTOS__
+  if (!NewBinding)
+      RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
   NewBinding->refs = 1;
   NewBinding->server = server;
 
@@ -642,6 +650,13 @@ RPC_STATUS WINAPI RpcStringBindingParseA( RPC_CSTR StringBinding, RPC_CSTR *ObjU
   else if (NetworkAddr) 
     *NetworkAddr = unescape_string_binding_component(data, -1);
 
+#ifdef __REACTOS__
+  if (ObjUuid && !*ObjUuid) *ObjUuid = calloc(1, 1);
+  if (Protseq && !*Protseq) *Protseq = calloc(1, 1);
+  if (NetworkAddr && !*NetworkAddr) *NetworkAddr = calloc(1, 1);
+  if (Endpoint && !*Endpoint) *Endpoint = calloc(1, 1);
+  if (Options && !*Options) *Options = calloc(1, 1);
+#endif
   return RPC_S_OK;
 
 fail:
@@ -752,6 +767,13 @@ RPC_STATUS WINAPI RpcStringBindingParseW( RPC_WSTR StringBinding, RPC_WSTR *ObjU
   } else if (NetworkAddr) 
     *NetworkAddr = unescape_string_binding_componentW(data, -1);
 
+#ifdef __REACTOS__
+  if (ObjUuid && !*ObjUuid) *ObjUuid = calloc(1, sizeof(WCHAR));
+  if (Protseq && !*Protseq) *Protseq = calloc(1, sizeof(WCHAR));
+  if (NetworkAddr && !*NetworkAddr) *NetworkAddr = calloc(1, sizeof(WCHAR));
+  if (Endpoint && !*Endpoint) *Endpoint = calloc(1, sizeof(WCHAR));
+  if (Options && !*Options) *Options = calloc(1, sizeof(WCHAR));
+#endif
   return RPC_S_OK;
 
 fail:
@@ -831,6 +853,11 @@ RPC_STATUS WINAPI RpcBindingFromStringBindingA( RPC_CSTR StringBinding, RPC_BIND
   ret = RpcStringBindingParseA(StringBinding, &ObjectUuid, &Protseq,
                               &NetworkAddr, &Endpoint, &Options);
   if (ret != RPC_S_OK) return ret;
+#ifdef __REACTOS__
+  if (ObjectUuid && !*ObjectUuid) RpcStringFreeA(&ObjectUuid);
+  if (Endpoint && !*Endpoint) RpcStringFreeA(&Endpoint);
+  if (Options && !*Options) RpcStringFreeA(&Options);
+#endif
 
   ret = UuidFromStringA(ObjectUuid, &Uuid);
 
@@ -871,6 +898,11 @@ RPC_STATUS WINAPI RpcBindingFromStringBindingW( RPC_WSTR StringBinding, RPC_BIND
   ret = RpcStringBindingParseW(StringBinding, &ObjectUuid, &Protseq,
                               &NetworkAddr, &Endpoint, &Options);
   if (ret != RPC_S_OK) return ret;
+#ifdef __REACTOS__
+  if (ObjectUuid && !*ObjectUuid) RpcStringFreeW(&ObjectUuid);
+  if (Endpoint && !*Endpoint) RpcStringFreeW(&Endpoint);
+  if (Options && !*Options) RpcStringFreeW(&Options);
+#endif
 
   ret = UuidFromStringW(ObjectUuid, &Uuid);
 
@@ -1042,7 +1074,11 @@ RPC_STATUS WINAPI RpcImpersonateClient(RPC_BINDING_HANDLE BindingHandle)
     TRACE("(%p)\n", BindingHandle);
 
     if (!BindingHandle) BindingHandle = I_RpcGetCurrentCallHandle();
+#ifdef __REACTOS__
+    if (!BindingHandle) return RPC_S_NO_CALL_ACTIVE;
+#else
     if (!BindingHandle) return RPC_S_INVALID_BINDING;
+#endif
 
     bind = BindingHandle;
     if (bind->FromConn)
@@ -1114,6 +1150,9 @@ RPC_STATUS RpcAuthInfo_Create(ULONG AuthnLevel, ULONG AuthnSvc,
     AuthInfo->cbMaxToken = cbMaxToken;
     AuthInfo->identity = identity;
     AuthInfo->server_principal_name = NULL;
+#ifdef __REACTOS__
+    AuthInfo->AuthzSvc = RPC_C_AUTHZ_NONE;
+#endif
 
     /* duplicate the SEC_WINNT_AUTH_IDENTITY structure, if applicable, to
      * enable better matching in RpcAuthInfo_IsEqual */
@@ -1516,11 +1555,15 @@ RpcBindingInqAuthInfoExW( RPC_BINDING_HANDLE Binding, RPC_WSTR *ServerPrincName,
     if (AuthnLevel) *AuthnLevel = bind->AuthInfo->AuthnLevel;
     if (AuthnSvc) *AuthnSvc = bind->AuthInfo->AuthnSvc;
     if (AuthIdentity) *AuthIdentity = bind->AuthInfo->identity;
+#ifdef __REACTOS__
+    if (AuthzSvc) *AuthzSvc = bind->AuthInfo->AuthzSvc;
+#else
     if (AuthzSvc)
     {
         FIXME("authorization service not implemented\n");
         *AuthzSvc = RPC_C_AUTHZ_NONE;
     }
+#endif
 
     return RPC_S_OK;
 }
@@ -1755,6 +1798,9 @@ RpcBindingSetAuthInfoExA( RPC_BINDING_HANDLE Binding, RPC_CSTR ServerPrincName,
     if (r == RPC_S_OK)
     {
       new_auth_info->server_principal_name = RPCRT4_strdupAtoW((char *)ServerPrincName);
+#ifdef __REACTOS__
+      new_auth_info->AuthzSvc = AuthzSvr;
+#endif
       if (!ServerPrincName || new_auth_info->server_principal_name)
       {
         if (bind->AuthInfo) RpcAuthInfo_Release(bind->AuthInfo);
@@ -1886,6 +1932,9 @@ RpcBindingSetAuthInfoExW( RPC_BINDING_HANDLE Binding, RPC_WSTR ServerPrincName, 
     if (r == RPC_S_OK)
     {
       new_auth_info->server_principal_name = wcsdup(ServerPrincName);
+#ifdef __REACTOS__
+      new_auth_info->AuthzSvc = AuthzSvr;
+#endif
       if (!ServerPrincName || new_auth_info->server_principal_name)
       {
         if (bind->AuthInfo) RpcAuthInfo_Release(bind->AuthInfo);
@@ -1983,3 +2032,25 @@ RPC_STATUS WINAPI I_RpcBindingInqLocalClientPID(RPC_BINDING_HANDLE ClientBinding
 
     return connection->ops->inquire_client_pid(connection, ClientPID);
 }
+
+#ifdef __REACTOS__
+RPC_STATUS WINAPI I_RpcOpenClientProcess(RPC_BINDING_HANDLE Binding, ULONG DesiredAccess, void **ClientProcess)
+{
+    RPC_STATUS status;
+    HANDLE process;
+    ULONG pid;
+
+    TRACE("%p %lu %p\n", Binding, DesiredAccess, ClientProcess);
+
+    status = I_RpcBindingInqLocalClientPID(Binding, &pid);
+    if (status != RPC_S_OK)
+        return status;
+
+    process = OpenProcess(DesiredAccess, FALSE, pid);
+    if (!process)
+        return GetLastError();
+
+    *ClientProcess = process;
+    return RPC_S_OK;
+}
+#endif

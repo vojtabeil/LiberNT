@@ -198,7 +198,11 @@ inline BOOL operator>=(const CHString& s1, const CHString& s2) { return s1.Compa
 /* Have GCC link to the symbols exported by framedyn.dll */
 #if defined(__GNUC__) && !defined(CHSTRING_BUILD)
 
+#ifdef __clang__
+#define DEFINE_FRAMEDYN_ALIAS(alias, orig) __asm__(".weak " #alias "\n.set " #alias ", \"" #orig "\"");
+#else
 #define DEFINE_FRAMEDYN_ALIAS(alias, orig) __asm__(".set " #alias ", \"" #orig "\"");
+#endif
 
 #ifdef _M_IX86
 DEFINE_FRAMEDYN_ALIAS(__ZN8CHString16AllocBeforeWriteEi, ?AllocBeforeWrite@CHString@@IAEXH@Z)
@@ -283,7 +287,7 @@ DEFINE_FRAMEDYN_ALIAS(__ZN8Provider5FlushEv, ?Flush@Provider@@MAEXXZ)
 DEFINE_FRAMEDYN_ALIAS(__ZN8Provider21ValidateDeletionFlagsEl, ?ValidateDeletionFlags@Provider@@MAEJJ@Z)
 DEFINE_FRAMEDYN_ALIAS(__ZN8Provider19ValidateMethodFlagsEl, ?ValidateMethodFlags@Provider@@MAEJJ@Z)
 DEFINE_FRAMEDYN_ALIAS(__ZN8Provider18ValidateQueryFlagsEl, ?ValidateQueryFlags@Provider@@MAEJJ@Z)
-#elif defined(_M_AMD64)
+#elif defined(_WIN64)
 DEFINE_FRAMEDYN_ALIAS(_ZN8CHString16AllocBeforeWriteEi, ?AllocBeforeWrite@CHString@@IEAAXH@Z) // protected: void __thiscall CHString::AllocBeforeWrite(int)
 DEFINE_FRAMEDYN_ALIAS(_ZN8CHString11AllocBufferEi, ?AllocBuffer@CHString@@IEAAXH@Z) // protected: void __thiscall CHString::AllocBuffer(int)
 DEFINE_FRAMEDYN_ALIAS(_ZNK8CHString9AllocCopyERS_iii, ?AllocCopy@CHString@@IEBAXAEAV1@HHH@Z) // protected: void __thiscall CHString::AllocCopy(class CHString &,int,int,int)const

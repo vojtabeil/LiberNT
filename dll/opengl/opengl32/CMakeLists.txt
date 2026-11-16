@@ -1,7 +1,14 @@
 
+if(REACTOS_USE_WDDM)
+    remove_definitions(-DDXGKDDI_INTERFACE_VERSION=0x1052)
+    add_definitions(-DDXGKDDI_INTERFACE_VERSION=0x11007)
+endif()
+
 spec2def(opengl32.dll opengl32.spec ADD_IMPORTLIB)
 
-include_directories(../mesa)
+include_directories(
+    ../mesa
+    ${REACTOS_SOURCE_DIR}/subsystems/win/win32k/include)
 
 add_definitions(
     -D_GDI32_ # prevent gl* being declared __declspec(dllimport) in MS headers
@@ -36,6 +43,10 @@ add_library(opengl32 MODULE
     ${SOURCE}
     ${opengl32_asm}
     ${CMAKE_CURRENT_BINARY_DIR}/opengl32.def)
+
+if(WOW64_I386_RUNTIME AND ARCH STREQUAL "i386")
+    target_compile_definitions(opengl32 PRIVATE WOW64_I386_RUNTIME)
+endif()
 
 target_link_libraries(opengl32
     wine

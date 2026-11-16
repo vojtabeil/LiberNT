@@ -22,13 +22,20 @@
 
 #define IDM_CONSOLE_SMALL      1000
 #define IDM_CONSOLE_LARGE      1001
+#define IDM_TREEVIEW_CONTEXT   1002
 
 #define IDM_FILE_NEW           1010
 #define IDM_FILE_OPEN          1011
 #define IDM_FILE_SAVE          1012
 #define IDM_FILE_SAVEAS        1013
 #define IDM_FILE_ADD           1014
-#define IDM_FILE_EXIT          1015
+#define IDM_FILE_OPTIONS       1015
+#define IDM_FILE_RECENT1       1016
+#define IDM_FILE_RECENT2       1017
+#define IDM_FILE_RECENT3       1018
+#define IDM_FILE_RECENT4       1019
+#define IDM_FILE_RECENT_SEP    1020
+#define IDM_FILE_EXIT          1021
 
 #define IDM_ACTION_NEW         1050
 #define IDM_ACTION_RENAME      1051
@@ -49,22 +56,31 @@
 #define IDM_WINDOWS_TILE       1202
 #define IDM_WINDOWS_ARRANGE    1203
 
-#define IDM_HELP_ABOUT         1251
+#define IDM_HELP_TOPICS        1250
+#define IDM_HELP_ABOUT_MMC     1251
+#define IDM_HELP_ABOUT_SNAPIN  1252
 #define IDM_MDI_FIRSTCHILD     9500
 
 #define IDM_TB_UNDO            1500
 #define IDM_TB_REDO            1501
 #define IDM_TB_UP              1502
 #define IDM_TB_SCOPE_PANE      1503
-#define IDM_TB_HELP            1504
-#define IDM_TB_ACTIONS_PANE    1505
+#define IDM_TB_EXPORT_LIST     1504
+#define IDM_TB_HELP            1505
+#define IDM_TB_ACTIONS_PANE    1506
 
 #define IDD_DIALOG_ADD                3000
-#define IDC_BUTTON_ADD                3001
-#define IDC_BUTTON_REMOVE             3002
-#define IDC_LIST_AVAILABLE            3003
-#define IDC_LIST_SELECTED             3004
-#define IDC_DESCRIPTION               3005
+#define IDC_ADD_BUTTON_ADD            3001
+#define IDC_ADD_BUTTON_REMOVE         3002
+#define IDC_ADD_LIST_AVAILABLE        3003
+#define IDC_ADD_LIST_SELECTED         3004
+#define IDC_ADD_DESCRIPTION           3005
+#define IDC_ADD_BUTTON_UP             3006
+#define IDC_ADD_BUTTON_DOWN           3007
+#define IDC_ADD_ADVANCED              3008
+#define IDC_ADD_TEXT_SELECTED         3009
+#define IDC_ADD_TEXT_PARENT           3010
+#define IDC_ADD_LIST_PARENT           3011
 
 #define IDD_CUSTOMIZE                 3100
 #define IDC_CUSTOMIZE_SCOPEPANE       3101
@@ -76,6 +92,39 @@
 #define IDC_CUSTOMIZE_ACTIONSPANE     3107
 #define IDC_CUSTOMIZE_SNAPIN_MENUS    3108
 #define IDC_CUSTOMIZE_SNAPIN_TOOLBARS 3109
+
+#define IDD_CONSOLEOPTIONS            3200
+#define IDC_CONSOLEICON               3201
+#define IDC_CONSOLENAME               3202
+#define IDC_CONSOLESYMBOL             3203
+#define IDC_CONSOLEMODE               3204
+#define IDC_CONSOLEDESCRIPTION        3205
+#define IDC_CONSOLENOSAVE             3206
+#define IDC_CONSOLECUSTOM             3207
+
+#define IDD_ABOUT_SNAPIN              3300
+#define IDC_ABOUT_ICON                3301
+#define IDC_ABOUT_INFO                3302
+#define IDC_ABOUT_DESCRIPTION         3303
+
+#define IDD_ADVANCED                  3400
+#define IDC_ADVANCED_CHECK            3401
+
+#define IDS_CONSOLEROOT               5010
+
+#define IDS_AUTHORMODE                5100
+#define IDS_USERMODE_FULL             5101
+#define IDS_USERMODE_MULTIPLE         5102
+#define IDS_USERMODE_SINGLE           5103
+
+#define IDS_AUTHORMODE_DESC           5104
+#define IDS_USERMODE_FULL_DESC        5105
+#define IDS_USERMODE_MULTIPLE_DESC    5106
+#define IDS_USERMODE_SINGLE_DESC      5107
+
+#define IDS_ABOUT_VERSION             5501
+#define IDS_ABOUT_SNAPIN              5502
+
 
 #ifndef IDC_STATIC
 #define IDC_STATIC  -1

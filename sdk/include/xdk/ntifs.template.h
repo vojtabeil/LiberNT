@@ -23,11 +23,8 @@
 
 #pragma once
 
-#ifndef _NTIFS_
-#define _NTIFS_
-
 #define _NTIFS_INCLUDED_
-#define _GNU_NTIFS_ // FIXME: Only for ext2fs
+#define _GNU_NTIFS_
 
 #ifdef __cplusplus
 extern "C" {
@@ -69,8 +66,21 @@ typedef STRING LSA_STRING, *PLSA_STRING;
 typedef OBJECT_ATTRIBUTES LSA_OBJECT_ATTRIBUTES, *PLSA_OBJECT_ATTRIBUTES;
 
 $include (setypes.h)
+$include (obtypes.h)
 $include (rtltypes.h)
 $include (rtlfuncs.h)
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+__kernel_entry
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtQueryObject(
+  _In_opt_ HANDLE Handle,
+  _In_ OBJECT_INFORMATION_CLASS ObjectInformationClass,
+  _Out_writes_bytes_opt_(ObjectInformationLength) PVOID ObjectInformation,
+  _In_ ULONG ObjectInformationLength,
+  _Out_opt_ PULONG ReturnLength);
 
 #if (NTDDI_VERSION >= NTDDI_WIN2K)
 
@@ -1056,29 +1066,6 @@ typedef struct _MSV1_0_GETUSERINFO_RESPONSE {
 
 $include (iotypes.h)
 
-$include (obtypes.h)
-
-typedef enum _OBJECT_INFORMATION_CLASS {
-  ObjectBasicInformation = 0,
-  ObjectTypeInformation = 2,
-#if 1 // FIXME: we should remove these, but the kernel needs them :-/
-  /* Not for public use */
-  ObjectNameInformation = 1,
-  ObjectTypesInformation = 3,
-  ObjectHandleFlagInformation = 4,
-#if (NTDDI_VERSION >= NTDDI_WS03)
-  ObjectSessionInformation = 5,
-#endif
-#if (NTDDI_VERSION >= NTDDI_WIN10_RS2)
-  ObjectSessionObjectInformation = 6,
-#endif
-#if (NTDDI_VERSION >= NTDDI_WIN11_SE)
-  ObjectSetRefTraceInformation = 7,
-#endif
-  MaxObjectInfoClass
-#endif // FIXME
-} OBJECT_INFORMATION_CLASS;
-
 typedef struct _PUBLIC_OBJECT_BASIC_INFORMATION {
   ULONG Attributes;
   ACCESS_MASK GrantedAccess;
@@ -1089,21 +1076,8 @@ typedef struct _PUBLIC_OBJECT_BASIC_INFORMATION {
 
 typedef struct _PUBLIC_OBJECT_TYPE_INFORMATION {
   UNICODE_STRING TypeName;
-  ULONG Reserved[22];
+  ULONG Reserved [22];
 } PUBLIC_OBJECT_TYPE_INFORMATION, *PPUBLIC_OBJECT_TYPE_INFORMATION;
-
-_IRQL_requires_max_(PASSIVE_LEVEL)
-__kernel_entry
-NTSYSCALLAPI
-NTSTATUS
-NTAPI
-NtQueryObject(
-  _In_opt_ HANDLE Handle,
-  _In_ OBJECT_INFORMATION_CLASS ObjectInformationClass,
-  _Out_writes_bytes_opt_(ObjectInformationLength) PVOID ObjectInformation,
-  _In_ ULONG ObjectInformationLength,
-  _Out_opt_ PULONG ReturnLength);
-
 
 #define SYSTEM_PAGE_PRIORITY_BITS       3
 #define SYSTEM_PAGE_PRIORITY_LEVELS     (1 << SYSTEM_PAGE_PRIORITY_BITS)
@@ -1269,6 +1243,16 @@ typedef struct _SRV_OPEN_ECP_CONTEXT {
   BOOLEAN OplockFinalState;
 } SRV_OPEN_ECP_CONTEXT, *PSRV_OPEN_ECP_CONTEXT;
 
+#define SRV_OPEN_ECP_CONTEXT_VERSION_2  2
+
+typedef enum _SRV_INSTANCE_TYPE {
+  SrvInstanceTypeUndefined = 0,
+  SrvInstanceTypePrimary,
+  SrvInstanceTypeCsv,
+  SrvInstanceTypeSBL,
+  SrvInstanceTypeSR
+} SRV_INSTANCE_TYPE;
+
 #endif /* (NTDDI_VERSION >= NTDDI_WIN7) */
 
 #define PIN_WAIT                        (1)
@@ -1306,6 +1290,7 @@ typedef struct _QUERY_PATH_RESPONSE {
 
 #define VOLSNAPCONTROLTYPE                              0x00000053
 #define IOCTL_VOLSNAP_FLUSH_AND_HOLD_WRITES             CTL_CODE(VOLSNAPCONTROLTYPE, 0, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
+#define IOCTL_VOLSNAP_RELEASE_WRITES                    CTL_CODE(VOLSNAPCONTROLTYPE, 1, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 
 /* FIXME : These definitions below don't belong here (or anywhere in ddk really) */
 #ifndef VER_PRODUCTBUILD
@@ -1420,6 +1405,21 @@ typedef enum _FILE_STORAGE_TYPE {
     StorageTypeEmbedding,
     StorageTypeStream
 } FILE_STORAGE_TYPE;
+
+typedef struct _OBJECT_BASIC_INFORMATION
+{
+    ULONG Attributes;
+    ACCESS_MASK GrantedAccess;
+    ULONG HandleCount;
+    ULONG PointerCount;
+    ULONG PagedPoolCharge;
+    ULONG NonPagedPoolCharge;
+    ULONG Reserved[ 3 ];
+    ULONG NameInfoSize;
+    ULONG TypeInfoSize;
+    ULONG SecurityDescriptorSize;
+    LARGE_INTEGER CreationTime;
+} OBJECT_BASIC_INFORMATION, *POBJECT_BASIC_INFORMATION;
 
 typedef struct _FILE_COPY_ON_WRITE_INFORMATION {
     BOOLEAN ReplaceIfExists;
@@ -1546,6 +1546,46 @@ typedef struct _MOVEFILE_DESCRIPTOR {
      ULONG          NumVcns;
      ULONG          Reserved1;
 } MOVEFILE_DESCRIPTOR, *PMOVEFILE_DESCRIPTOR;
+
+typedef struct _OBJECT_BASIC_INFO {
+    ULONG           Attributes;
+    ACCESS_MASK     GrantedAccess;
+    ULONG           HandleCount;
+    ULONG           ReferenceCount;
+    ULONG           PagedPoolUsage;
+    ULONG           NonPagedPoolUsage;
+    ULONG           Reserved[3];
+    ULONG           NameInformationLength;
+    ULONG           TypeInformationLength;
+    ULONG           SecurityDescriptorLength;
+    LARGE_INTEGER   CreateTime;
+} OBJECT_BASIC_INFO, *POBJECT_BASIC_INFO;
+
+typedef struct _OBJECT_HANDLE_ATTRIBUTE_INFO {
+    BOOLEAN Inherit;
+    BOOLEAN ProtectFromClose;
+} OBJECT_HANDLE_ATTRIBUTE_INFO, *POBJECT_HANDLE_ATTRIBUTE_INFO;
+
+typedef struct _OBJECT_NAME_INFO {
+    UNICODE_STRING  ObjectName;
+    WCHAR           ObjectNameBuffer[1];
+} OBJECT_NAME_INFO, *POBJECT_NAME_INFO;
+
+typedef struct _OBJECT_PROTECTION_INFO {
+    BOOLEAN Inherit;
+    BOOLEAN ProtectHandle;
+} OBJECT_PROTECTION_INFO, *POBJECT_PROTECTION_INFO;
+
+typedef struct _OBJECT_TYPE_INFO {
+    UNICODE_STRING  ObjectTypeName;
+    UCHAR           Unknown[0x58];
+    WCHAR           ObjectTypeNameBuffer[1];
+} OBJECT_TYPE_INFO, *POBJECT_TYPE_INFO;
+
+typedef struct _OBJECT_ALL_TYPES_INFO {
+    ULONG               NumberOfObjectTypes;
+    OBJECT_TYPE_INFO    ObjectsTypeInfo[1];
+} OBJECT_ALL_TYPES_INFO, *POBJECT_ALL_TYPES_INFO;
 
 #if defined(USE_LPC6432)
 #define LPC_CLIENT_ID CLIENT_ID64
@@ -1758,8 +1798,179 @@ RtlSetSaclSecurityDescriptor (
 
 #endif
 
+#define FILE_INVALID_FILE_ID               ((LONGLONG)-1LL)
+
+typedef struct _FILE_ID_128 {
+    UCHAR Identifier[16];
+} FILE_ID_128, *PFILE_ID_128;
+
+typedef struct _FILE_ID_INFORMATION {
+    ULONGLONG VolumeSerialNumber;
+    FILE_ID_128 FileId;
+} FILE_ID_INFORMATION, *PFILE_ID_INFORMATION;
+
+#define FILE_CS_FLAG_CASE_SENSITIVE_DIR     0x00000001
+
+typedef struct _FILE_CASE_SENSITIVE_INFORMATION {
+    ULONG Flags;
+} FILE_CASE_SENSITIVE_INFORMATION, *PFILE_CASE_SENSITIVE_INFORMATION;
+
+typedef struct _FILE_STAT_INFORMATION {
+    LARGE_INTEGER FileId;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER AllocationSize;
+    LARGE_INTEGER EndOfFile;
+    ULONG FileAttributes;
+    ULONG ReparseTag;
+    ULONG NumberOfLinks;
+    ACCESS_MASK EffectiveAccess;
+} FILE_STAT_INFORMATION, *PFILE_STAT_INFORMATION;
+
+#define LX_FILE_METADATA_HAS_UID 0x1
+#define LX_FILE_METADATA_HAS_GID 0x2
+#define LX_FILE_METADATA_HAS_MODE 0x4
+#define LX_FILE_METADATA_HAS_DEVICE_ID 0x8
+#define LX_FILE_CASE_SENSITIVE_DIR 0x10
+
+typedef struct _FILE_STAT_LX_INFORMATION {
+    LARGE_INTEGER FileId;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER AllocationSize;
+    LARGE_INTEGER EndOfFile;
+    ULONG FileAttributes;
+    ULONG ReparseTag;
+    ULONG NumberOfLinks;
+    ACCESS_MASK EffectiveAccess;
+    ULONG LxFlags;
+    ULONG LxUid;
+    ULONG LxGid;
+    ULONG LxMode;
+    ULONG LxDeviceIdMajor;
+    ULONG LxDeviceIdMinor;
+} FILE_STAT_LX_INFORMATION, *PFILE_STAT_LX_INFORMATION;
+
+#define LX_FILE_METADATA_UID_EA_NAME "$LXUID"
+#define LX_FILE_METADATA_GID_EA_NAME "$LXGID"
+#define LX_FILE_METADATA_MODE_EA_NAME "$LXMOD"
+#define LX_FILE_METADATA_DEVICE_ID_EA_NAME "$LXDEV"
+
+#if ((NTDDI_VERSION >= NTDDI_WIN10_RS1))
+
+#define FILE_RENAME_REPLACE_IF_EXISTS                     0x00000001
+#define FILE_RENAME_POSIX_SEMANTICS                       0x00000002
+#define FILE_RENAME_SUPPRESS_PIN_STATE_INHERITANCE        0x00000004
+#define FILE_RENAME_SUPPRESS_STORAGE_RESERVE_INHERITANCE  0x00000008
+#define FILE_RENAME_NO_INCREASE_AVAILABLE_SPACE           0x00000010
+#define FILE_RENAME_NO_DECREASE_AVAILABLE_SPACE           0x00000020
+#define FILE_RENAME_PRESERVE_AVAILABLE_SPACE              0x00000030
+#define FILE_RENAME_IGNORE_READONLY_ATTRIBUTE             0x00000040
+#define FILE_RENAME_FORCE_RESIZE_TARGET_SR                0x00000080
+#define FILE_RENAME_FORCE_RESIZE_SOURCE_SR                0x00000100
+#define FILE_RENAME_FORCE_RESIZE_SR                       0x00000180
+
+#endif
+#if ((_WIN32_WINNT >= _WIN32_WINNT_WIN7))
+
+typedef enum _CSV_CONTROL_OP {
+    CsvControlStartRedirectFile                  = 0x02,
+    CsvControlStopRedirectFile                   = 0x03,
+    CsvControlQueryRedirectState                 = 0x04,
+    CsvControlQueryFileRevision                  = 0x06,
+    CsvControlQueryMdsPath                       = 0x08,
+    CsvControlQueryFileRevisionFileId128         = 0x09,
+    CsvControlQueryVolumeRedirectState           = 0x0a,
+    CsvControlEnableUSNRangeModificationTracking = 0x0d,
+    CsvControlMarkHandleLocalVolumeMount         = 0x0e,
+    CsvControlUnmarkHandleLocalVolumeMount       = 0x0f,
+    CsvControlGetCsvFsMdsPathV2                  = 0x12,
+    CsvControlDisableCaching                     = 0x13,
+    CsvControlEnableCaching                      = 0x14,
+    CsvControlStartForceDFO                      = 0x15,
+    CsvControlStopForceDFO                       = 0x16,
+    CsvControlQueryMdsPathNoPause                = 0x17,
+    CsvControlSetVolumeId                        = 0x18,
+    CsvControlQueryVolumeId                      = 0x19,
+} CSV_CONTROL_OP, *PCSV_CONTROL_OP;
+
+typedef struct _CSV_CONTROL_PARAM {
+    CSV_CONTROL_OP Operation;
+    LONGLONG Unused;
+} CSV_CONTROL_PARAM, *PCSV_CONTROL_PARAM;
+
+typedef struct _CSV_QUERY_FILE_REVISION {
+    LONGLONG FileId;
+    LONGLONG FileRevision[3];
+} CSV_QUERY_FILE_REVISION, *PCSV_QUERY_FILE_REVISION;
+
+#endif
+#if ((NTDDI_VERSION >= NTDDI_WIN8))
+
+DEFINE_GUID( GUID_ECP_CSV_DOWN_LEVEL_OPEN,
+             0x4248be44,
+             0x647f,
+             0x488f,
+             0x8b, 0xe5, 0xa0, 0x8a, 0xaf, 0x70, 0xf0, 0x28);
+
+DEFINE_GUID(GUID_ECP_CSV_QUERY_FILE_REVISION,
+            0x44aec90b,
+            0xde65,
+            0x4d46,
+            0x8f, 0xbf, 0x76, 0x3f, 0x9d, 0x97, 0xb, 0x1d);
+
+typedef struct _CSV_QUERY_FILE_REVISION_ECP_CONTEXT {
+    LONGLONG FileId;
+    LONGLONG FileRevision[3];
+} CSV_QUERY_FILE_REVISION_ECP_CONTEXT, *PCSV_QUERY_FILE_REVISION_ECP_CONTEXT;
+
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_WIN10_VB)
+
+typedef struct _COPY_INFORMATION {
+    PFILE_OBJECT SourceFileObject;
+    LONGLONG SourceFileOffset;
+} COPY_INFORMATION, *PCOPY_INFORMATION;
+
+NTSTATUS
+NTAPI
+IoGetCopyInformationExtension (
+    _In_ PIRP Irp,
+    _Out_ PCOPY_INFORMATION CopyInformation
+    );
+
+#endif
+
+#define OPEN_REPARSE_POINT_VERSION_EX                                           (0x80000000)
+
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS4) || (defined(INCLUDE_OPEN_REPARSE_SUPPORT))
+#define OPEN_REPARSE_POINT_REPARSE_IF_NON_FINAL_COMPONENT                       (0x00000016)
+#define OPEN_REPARSE_POINT_REPARSE_IF_DIRECTORY_FINAL_COMPONENT_ALWAYS          (0x00000048)
+#define OPEN_REPARSE_POINT_REPARSE_IF_NON_DIRECTORY_NON_FINAL_COMPONENT_ALWAYS  (0x00000050)
+#define OPEN_REPARSE_POINT_REPARSE_IF_NON_DIRECTORY_FINAL_COMPONENT_ALWAYS      (0x00000060)
+#define OPEN_REPARSE_POINT_REPARSE_IF_FINAL_COMPONENT                           (0x00000028)
+#define OPEN_REPARSE_POINT_REPARSE_IF_FINAL_COMPONENT_ALWAYS                    (0x00000068)
+#define OPEN_REPARSE_POINT_REPARSE_ALWAYS                                       (0x0000007E)
+#endif
+
+typedef struct _OPEN_REPARSE_LIST_ENTRY {
+    LIST_ENTRY OpenReparseListEntry;
+    ULONG      ReparseTag;
+    ULONG      Flags;
+    GUID       ReparseGuid;
+    USHORT     Size;
+    USHORT     RemainingLength;
+} OPEN_REPARSE_LIST_ENTRY, *POPEN_REPARSE_LIST_ENTRY;
+
+typedef struct _OPEN_REPARSE_LIST {
+    LIST_ENTRY OpenReparseList;
+} OPEN_REPARSE_LIST, *POPEN_REPARSE_LIST;
+
 #ifdef __cplusplus
 }
 #endif
-
-#endif /* _NTIFS_ */

@@ -2,6 +2,7 @@
 @ stdcall LdrUnregisterDllNotification(ptr)
 
 @ stdcall NtGetCurrentProcessorNumberEx(ptr)
+@ stdcall NtQuerySystemInformationEx(long ptr long ptr long ptr)
 
 @ stdcall RtlGetProductInfo(long long long long ptr)
 @ stdcall RtlInitializeConditionVariable(ptr)
@@ -19,7 +20,6 @@
 @ stdcall RtlRunOnceBeginInitialize(ptr long ptr)
 @ stdcall RtlRunOnceComplete(ptr long ptr)
 @ stdcall RtlRunOnceExecuteOnce(ptr ptr ptr ptr)
-@ stdcall RtlWow64GetProcessMachines(ptr ptr ptr)
 
 @ stdcall RtlConnectToSm(ptr ptr long ptr) SmConnectToSm
 @ stdcall RtlSendMsgToSm(ptr ptr) SmSendMsgToSm

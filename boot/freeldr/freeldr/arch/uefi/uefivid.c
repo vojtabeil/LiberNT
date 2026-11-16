@@ -6,6 +6,7 @@
  */
 
 #include <uefildr.h>
+#include <EdidActive.h>
 #include "../vidfb.h"
 
 #include <debug.h>
@@ -16,11 +17,42 @@ DBG_DEFAULT_CHANNEL(UI);
 extern EFI_SYSTEM_TABLE* GlobalSystemTable;
 extern EFI_HANDLE GlobalImageHandle;
 EFI_GUID EfiGraphicsOutputProtocol = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+EFI_GUID EfiEdidActiveProtocol = EFI_EDID_ACTIVE_PROTOCOL_GUID;
 EFI_GUID AppleGraphInfoProtocol = APPLE_GRAPH_INFO_PROTOCOL_GUID;
+static EFI_GUID EfiGraphicsOutputTransformProtocol =
+    {0xac775d0f, 0x1199, 0x42e2, {0x92, 0x00, 0x71, 0xdc, 0x78, 0xaa, 0x65, 0xbb}};
 
 ULONG_PTR VramAddress;
 ULONG VramSize;
 PCM_FRAMEBUF_DEVICE_DATA FrameBufferData = NULL;
+
+static EFI_GRAPHICS_OUTPUT_PROTOCOL* UefiBltOnlyGop = NULL;
+static EFI_GRAPHICS_OUTPUT_BLT_PIXEL* UefiBltOnlyBuffer = NULL;
+static UINTN UefiBltOnlyDelta = 0;
+static UINT32 UefiBltOnlyWidth = 0;
+static UINT32 UefiBltOnlyHeight = 0;
+static BOOLEAN UefiBltOnlyMode = FALSE;
+static BOOLEAN UefiBltOnlyErrorLogged = FALSE;
+static EFI_GRAPHICS_OUTPUT_PROTOCOL* UefiGop = NULL;
+static ULONG_PTR UefiRenderAddress = 0;
+static UINT32 UefiRenderPixelsPerScanLine = 0;
+static CM_FRAMEBUF_DEVICE_DATA UefiHandoffFrameBufferData;
+static UCHAR UefiActiveEdid[128];
+static BOOLEAN UefiActiveEdidValid = FALSE;
+
+#define EFI_GRAPHICS_OUTPUT_TRANSFORM_VERSION          1
+#define EFI_GRAPHICS_OUTPUT_TRANSFORM_FIXED_SCANOUT     0x00000001
+
+typedef struct _EFI_GRAPHICS_OUTPUT_TRANSFORM_PROTOCOL
+{
+    UINT32 Size;
+    UINT32 Version;
+    UINT32 Flags;
+    UINT32 Rotation;
+    UINT32 LogicalWidth;
+    UINT32 LogicalHeight;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL* LinearGop;
+} EFI_GRAPHICS_OUTPUT_TRANSFORM_PROTOCOL;
 
 typedef struct _UEFI_BGRT_LOGO
 {
@@ -41,9 +73,22 @@ typedef struct _UEFI_BGRT_LOGO
 } UEFI_BGRT_LOGO, *PUEFI_BGRT_LOGO;
 
 static UEFI_BGRT_LOGO UefiBgrtLogo = {0};
+static BOOLEAN UefiBgrtLogoShown = FALSE;
+
+typedef enum _UEFI_GOP_SCROLL_RESULT
+{
+    UefiGopScrollFailed,
+    UefiGopScrollMoved,
+    UefiGopScrollComplete
+} UEFI_GOP_SCROLL_RESULT;
 
 #define BMP_SIGNATURE 0x4D42
 #define BI_RGB        0
+
+#define EDID_BLOCK_SIZE                128
+#define EDID_FEATURE_SUPPORT_OFFSET     24
+#define EDID_PREFERRED_TIMING           0x02
+#define EDID_FIRST_DETAILED_TIMING      54
 
 #define BGRT_STATUS_ORIENTATION_MASK  (0x3 << 1)
 #define BGRT_ORIENTATION_0            0
@@ -51,9 +96,7 @@ static UEFI_BGRT_LOGO UefiBgrtLogo = {0};
 #define BGRT_ORIENTATION_180          2
 #define BGRT_ORIENTATION_270          3
 
-#define LOWEST_SUPPORTED_RES 1
-
-#include <pshpack1.h>
+#pragma pack(push, 1)
 typedef struct _BMP_FILE_HEADER
 {
     USHORT Type;
@@ -77,7 +120,7 @@ typedef struct _BMP_INFO_HEADER
     ULONG ClrUsed;
     ULONG ClrImportant;
 } BMP_INFO_HEADER, *PBMP_INFO_HEADER;
-#include <poppack.h>
+#pragma pack(pop)
 
 C_ASSERT(sizeof(BMP_FILE_HEADER) == 14);
 C_ASSERT(sizeof(BMP_INFO_HEADER) == 40);
@@ -109,7 +152,229 @@ static EFI_PIXEL_BITMASK EfiPixelMasks[] =
     {0,          0,          0,          0}             // PixelBitMask, PixelBltOnly, ...
 };
 
+static
+EFI_STATUS
+UefiInitializeBltOnlyHandoff(
+    _In_ EFI_GRAPHICS_OUTPUT_PROTOCOL* ConsoleGop);
+
 #endif /* UEFI */
+
+static
+VOID
+UefiBltPixelFromTextBackground(
+    _In_ UCHAR Attr,
+    _Out_ EFI_GRAPHICS_OUTPUT_BLT_PIXEL* Pixel)
+{
+    UCHAR Color = (Attr >> 4) & 0x0F;
+    UCHAR Intensity = ((Color & 0x08) == 0) ? 127 : 255;
+
+    Pixel->Blue = (Color & 0x01) ? Intensity : 0;
+    Pixel->Green = (Color & 0x02) ? Intensity : 0;
+    Pixel->Red = (Color & 0x04) ? Intensity : 0;
+    Pixel->Reserved = 0;
+}
+
+static
+UEFI_GOP_SCROLL_RESULT
+UefiVideoGopScrollUp(
+    _In_ UCHAR Attr,
+    _In_ ULONG Lines)
+{
+    EFI_STATUS Status;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL* Gop;
+    EFI_GRAPHICS_OUTPUT_BLT_PIXEL FillPixel;
+    ULONG Unused, CellHeight;
+    ULONG ScrollPixels;
+    UINT32 GopWidth, GopHeight;
+    UINTN CopyHeight;
+
+    Gop = (UefiGop != NULL) ? UefiGop : UefiBltOnlyGop;
+    if ((Gop == NULL) || (Gop->Blt == NULL) ||
+        (Gop->Mode == NULL) || (Gop->Mode->Info == NULL))
+    {
+        return UefiGopScrollFailed;
+    }
+
+    GopWidth = Gop->Mode->Info->HorizontalResolution;
+    GopHeight = Gop->Mode->Info->VerticalResolution;
+    FbConsGetCellSize(&Unused, &CellHeight);
+    if ((GopWidth == 0) || (GopHeight == 0) || (CellHeight == 0))
+        return UefiGopScrollFailed;
+
+    /* Let the software path handle degenerate scrolls covering the screen */
+    if ((Lines == 0) || (Lines > (GopHeight - 1) / CellHeight))
+        return UefiGopScrollFailed;
+
+    ScrollPixels = Lines * CellHeight;
+    CopyHeight = GopHeight - ScrollPixels;
+    Status = Gop->Blt(Gop, NULL, EfiBltVideoToVideo, 0, ScrollPixels, 0, 0, GopWidth, CopyHeight, 0);
+    if (Status != EFI_SUCCESS)
+        return UefiGopScrollFailed;
+
+    UefiBltPixelFromTextBackground(Attr, &FillPixel);
+    Status = Gop->Blt(Gop, &FillPixel, EfiBltVideoFill, 0, 0, 0, CopyHeight, GopWidth, ScrollPixels, 0);
+    if (Status != EFI_SUCCESS)
+    {
+        ERR("GOP scroll clear failed: %lu\n", Status);
+        return UefiGopScrollMoved;
+    }
+
+    return UefiGopScrollComplete;
+}
+
+static
+VOID
+UefiBltOnlyReset(VOID)
+{
+    if (UefiBltOnlyBuffer != NULL)
+    {
+        GlobalSystemTable->BootServices->FreePool(UefiBltOnlyBuffer);
+    }
+
+    UefiBltOnlyGop = NULL;
+    UefiBltOnlyBuffer = NULL;
+    UefiBltOnlyDelta = 0;
+    UefiBltOnlyWidth = 0;
+    UefiBltOnlyHeight = 0;
+    UefiBltOnlyMode = FALSE;
+    UefiBltOnlyErrorLogged = FALSE;
+}
+
+static
+VOID
+UefiBltOnlyFlushRect(
+    _In_ UINTN X,
+    _In_ UINTN Y,
+    _In_ UINTN Width,
+    _In_ UINTN Height)
+{
+    EFI_STATUS Status;
+
+    if (!UefiBltOnlyMode || !UefiBltOnlyGop || !UefiBltOnlyBuffer)
+        return;
+
+    if ((Width == 0) || (Height == 0) ||
+        (X >= UefiBltOnlyWidth) || (Y >= UefiBltOnlyHeight))
+    {
+        return;
+    }
+
+    Width = min(Width, UefiBltOnlyWidth - X);
+    Height = min(Height, UefiBltOnlyHeight - Y);
+
+    Status = UefiBltOnlyGop->Blt(UefiBltOnlyGop,
+                                 UefiBltOnlyBuffer,
+                                 EfiBltBufferToVideo,
+                                 X,
+                                 Y,
+                                 X,
+                                 Y,
+                                 Width,
+                                 Height,
+                                 UefiBltOnlyDelta);
+    if ((Status != EFI_SUCCESS) && !UefiBltOnlyErrorLogged)
+    {
+        ERR("GOP PixelBltOnly flush failed: %lu\n", Status);
+        UefiBltOnlyErrorLogged = TRUE;
+    }
+}
+
+static
+VOID
+UefiBltOnlyFlush(VOID)
+{
+    UefiBltOnlyFlushRect(0, 0, UefiBltOnlyWidth, UefiBltOnlyHeight);
+}
+
+static
+VOID
+UefiVideoFlushDirty(VOID)
+{
+    ULONG X, Y, Width, Height;
+
+    if (!FbConsTakeDirtyRect(&X, &Y, &Width, &Height))
+        return;
+
+    if (UefiBltOnlyMode)
+        UefiBltOnlyFlushRect(X, Y, Width, Height);
+}
+
+static
+EFI_STATUS
+UefiInitializeBltOnlyGop(
+    _In_ EFI_GRAPHICS_OUTPUT_PROTOCOL* Gop)
+{
+    EFI_STATUS Status;
+    UINT32 Width, Height;
+    ULONGLONG BufferSize;
+
+    Width = Gop->Mode->Info->HorizontalResolution;
+    Height = Gop->Mode->Info->VerticalResolution;
+
+    if ((Width == 0) || (Height == 0))
+        return EFI_UNSUPPORTED;
+
+    if (Width > MAXULONGLONG / Height / sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL))
+        return EFI_OUT_OF_RESOURCES;
+
+    BufferSize = (ULONGLONG)Width * Height * sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL);
+    if (BufferSize > MAXULONG)
+    {
+        ERR("GOP PixelBltOnly shadow framebuffer is too large: %llu\n", BufferSize);
+        return EFI_OUT_OF_RESOURCES;
+    }
+
+    UefiBltOnlyReset();
+
+    Status = GlobalSystemTable->BootServices->AllocatePool(EfiLoaderData,
+                                                           (UINTN)BufferSize,
+                                                           (VOID**)&UefiBltOnlyBuffer);
+    if (Status != EFI_SUCCESS)
+    {
+        ERR("Failed to allocate GOP PixelBltOnly shadow framebuffer: %lu\n", Status);
+        return Status;
+    }
+
+    RtlZeroMemory(UefiBltOnlyBuffer, (SIZE_T)BufferSize);
+
+    /*
+     * PixelBltOnly has no firmware-owned linear framebuffer. Render into a
+     * shadow buffer using the EFI BLT pixel layout, and do not expose it as
+     * VramAddress/FrameBufferData to ntoskrnl.
+     */
+    UefiBltOnlyGop = Gop;
+    UefiBltOnlyDelta = Width * sizeof(EFI_GRAPHICS_OUTPUT_BLT_PIXEL);
+    UefiBltOnlyWidth = Width;
+    UefiBltOnlyHeight = Height;
+    UefiBltOnlyMode = TRUE;
+    VramAddress = 0;
+    VramSize = 0;
+    FrameBufferData = NULL;
+
+    if (!VidFbInitializeVideo(NULL,
+                              (ULONG_PTR)UefiBltOnlyBuffer,
+                              (ULONG)BufferSize,
+                              Width,
+                              Height,
+                              Width,
+                              RTL_BITS_OF(EFI_GRAPHICS_OUTPUT_BLT_PIXEL),
+                              (PPIXEL_BITMASK)&EfiPixelMasks[PixelBlueGreenRedReserved8BitPerColor]))
+    {
+        ERR("Couldn't initialize GOP PixelBltOnly shadow framebuffer\n");
+        UefiBltOnlyReset();
+        return EFI_UNSUPPORTED;
+    }
+
+    TRACE("Using GOP PixelBltOnly shadow framebuffer: %ux%u, size %llu\n",
+          Width,
+          Height,
+          BufferSize);
+
+    (void)UefiInitializeBltOnlyHandoff(Gop);
+
+    UefiBltOnlyFlush();
+    return EFI_SUCCESS;
+}
 
 BOOLEAN
 UefiCalculateBmpRowStride(
@@ -242,6 +507,30 @@ UefiGetLogoPixelAddress(
 }
 
 static
+BOOLEAN
+UefiQueryKeptLogoRect(
+    _Out_ PULONG Left,
+    _Out_ PULONG Top,
+    _Out_ PULONG Width,
+    _Out_ PULONG Height)
+{
+    if (!UefiBgrtLogo.Valid ||
+        (!UiKeepFirmwareScreen && !UiProgressBar.Show) ||
+        (UefiBgrtLogo.DrawWidth == 0) ||
+        (UefiBgrtLogo.DrawHeight == 0) ||
+        (UefiRenderAddress == 0))
+    {
+        return FALSE;
+    }
+
+    *Left = UefiBgrtLogo.PositionX;
+    *Top = UefiBgrtLogo.PositionY;
+    *Width = UefiBgrtLogo.DrawWidth;
+    *Height = UefiBgrtLogo.DrawHeight;
+    return TRUE;
+}
+
+static
 VOID
 UefiInitializeBgrtLogo(VOID)
 {
@@ -278,11 +567,13 @@ UefiInitializeBgrtLogo(VOID)
         return;
     }
 
-    if ((BgrtTable->Status & BGRT_STATUS_IMAGE_VALID) == 0)
-    {
-        TRACE("BGRT image is not marked valid\n");
-        return;
-    }
+    TRACE("BGRT table: version %u, status 0x%02x, type %u, image 0x%llx, offset (%lu,%lu)\n",
+          BgrtTable->Version,
+          BgrtTable->Status,
+          BgrtTable->ImageType,
+          BgrtTable->LogoAddress,
+          BgrtTable->OffsetX,
+          BgrtTable->OffsetY);
 
     if (BgrtTable->ImageType != BgrtImageTypeBitmap)
     {
@@ -312,6 +603,15 @@ UefiInitializeBgrtLogo(VOID)
     }
 
     InfoHeader = (PBMP_INFO_HEADER)(FileHeader + 1);
+    TRACE("BGRT BMP: file size %lu, bits offset %lu, header size %lu, %ldx%ld, planes %u, %u bpp, compression %lu\n",
+          FileHeader->Size,
+          FileHeader->BitsOffset,
+          InfoHeader->Size,
+          InfoHeader->Width,
+          InfoHeader->Height,
+          InfoHeader->Planes,
+          InfoHeader->BitCount,
+          InfoHeader->Compression);
     if ((InfoHeader->Size < sizeof(*InfoHeader)) ||
         (InfoHeader->Size > FileHeader->Size - sizeof(*FileHeader)))
     {
@@ -426,6 +726,8 @@ UefiInitializeBgrtLogo(VOID)
           UefiBgrtLogo.PositionX, UefiBgrtLogo.PositionY,
           UefiBgrtLogo.SourceX, UefiBgrtLogo.SourceY,
           UefiBgrtLogo.DrawWidth, UefiBgrtLogo.DrawHeight);
+
+    VidFbSetPresentKeepRectQuery(UefiQueryKeptLogoRect);
 }
 
 static
@@ -434,10 +736,20 @@ UefiDrawBgrtLogo(VOID)
 {
     PUCHAR VramBase;
     ULONG BytesPerPixel, Pitch;
+    ULONG DirtyX, DirtyY, DirtyWidth, DirtyHeight;
+    ULONG DirtyRight, DirtyBottom;
+    ULONG DrawLeft, DrawTop, DrawRight, DrawBottom;
+    LONG SourceDeltaX, SourceDeltaY;
     ULONG Row, Col;
 
-    if (!UefiBgrtLogo.Valid || !UiProgressBar.Show)
+    if (!UefiBgrtLogo.Valid)
         return;
+
+    if (!UiKeepFirmwareScreen && !UiProgressBar.Show)
+    {
+        UefiBgrtLogoShown = FALSE;
+        return;
+    }
 
     if ((UefiBgrtLogo.DrawWidth == 0) || (UefiBgrtLogo.DrawHeight == 0))
         return;
@@ -446,36 +758,461 @@ UefiDrawBgrtLogo(VOID)
         return;
 
     BytesPerPixel = FrameBufferData->BitsPerPixel / 8;
-    Pitch = FrameBufferData->PixelsPerScanLine * BytesPerPixel;
-    VramBase = (PUCHAR)VramAddress;
+    if (UefiRenderAddress == 0)
+        return;
 
-    for (Row = 0; Row < UefiBgrtLogo.DrawHeight; ++Row)
+    if (!UefiBgrtLogoShown)
+    {
+        FbConsMarkDirtyRect(UefiBgrtLogo.PositionX,
+                            UefiBgrtLogo.PositionY,
+                            UefiBgrtLogo.DrawWidth,
+                            UefiBgrtLogo.DrawHeight);
+        UefiBgrtLogoShown = TRUE;
+    }
+
+    /*
+     * The text renderer already tracks the pixels changed by this update.
+     * Redraw only the part of the firmware logo that those pixels covered;
+     * redrawing the full BGRT bitmap for every progress tick is prohibitively
+     * expensive on emulated framebuffers.
+     */
+    if (!FbConsPeekDirtyRect(&DirtyX,
+                             &DirtyY,
+                             &DirtyWidth,
+                             &DirtyHeight))
+    {
+        return;
+    }
+
+    DirtyRight = DirtyX + DirtyWidth;
+    DirtyBottom = DirtyY + DirtyHeight;
+    DrawLeft = max(DirtyX, UefiBgrtLogo.PositionX);
+    DrawTop = max(DirtyY, UefiBgrtLogo.PositionY);
+    DrawRight = min(DirtyRight,
+                    UefiBgrtLogo.PositionX + UefiBgrtLogo.DrawWidth);
+    DrawBottom = min(DirtyBottom,
+                     UefiBgrtLogo.PositionY + UefiBgrtLogo.DrawHeight);
+
+    if ((DrawLeft >= DrawRight) || (DrawTop >= DrawBottom))
+        return;
+
+    Pitch = UefiRenderPixelsPerScanLine * BytesPerPixel;
+    VramBase = (PUCHAR)UefiRenderAddress;
+
+    switch (UefiBgrtLogo.Orientation)
+    {
+        case BGRT_ORIENTATION_90:
+            SourceDeltaX = 0;
+            SourceDeltaY = -1;
+            break;
+
+        case BGRT_ORIENTATION_180:
+            SourceDeltaX = -1;
+            SourceDeltaY = 0;
+            break;
+
+        case BGRT_ORIENTATION_270:
+            SourceDeltaX = 0;
+            SourceDeltaY = 1;
+            break;
+
+        case BGRT_ORIENTATION_0:
+        default:
+            SourceDeltaX = 1;
+            SourceDeltaY = 0;
+            break;
+    }
+
+    for (Row = DrawTop; Row < DrawBottom; ++Row)
     {
         PULONG DestinationRow;
+        ULONG LogoRow = Row - UefiBgrtLogo.PositionY;
+        ULONG SourceX, SourceY;
 
         DestinationRow = (PULONG)(VramBase +
-                                  (UefiBgrtLogo.PositionY + Row) * Pitch +
-                                  UefiBgrtLogo.PositionX * BytesPerPixel);
+                                  Row * Pitch +
+                                  DrawLeft * BytesPerPixel);
 
-        for (Col = 0; Col < UefiBgrtLogo.DrawWidth; ++Col)
+        UefiGetLogoSourceCoordinates(&UefiBgrtLogo,
+                                     UefiBgrtLogo.SourceX +
+                                         (DrawLeft - UefiBgrtLogo.PositionX),
+                                     UefiBgrtLogo.SourceY + LogoRow,
+                                     &SourceX,
+                                     &SourceY);
+
+        for (Col = DrawLeft; Col < DrawRight; ++Col)
         {
-            ULONG SourceX, SourceY;
             PUCHAR SourcePixel;
-
-            UefiGetLogoSourceCoordinates(&UefiBgrtLogo,
-                                         UefiBgrtLogo.SourceX + Col,
-                                         UefiBgrtLogo.SourceY + Row,
-                                         &SourceX,
-                                         &SourceY);
 
             SourcePixel = UefiGetLogoPixelAddress(&UefiBgrtLogo, SourceX, SourceY);
 
-            DestinationRow[Col] = 0xFF000000 |
-                                  (SourcePixel[2] << 16) |
-                                  (SourcePixel[1] << 8) |
-                                  SourcePixel[0];
+            DestinationRow[Col - DrawLeft] = 0xFF000000 |
+                                             (SourcePixel[2] << 16) |
+                                             (SourcePixel[1] << 8) |
+                                             SourcePixel[0];
+
+            SourceX += (ULONG)SourceDeltaX;
+            SourceY += (ULONG)SourceDeltaY;
         }
     }
+}
+
+static
+BOOLEAN
+UefiLoadEdidForGop(
+    _In_ EFI_GRAPHICS_OUTPUT_PROTOCOL* Gop)
+{
+    static const UCHAR EdidHeader[8] =
+        {0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00};
+    EFI_EDID_ACTIVE_PROTOCOL* EdidActive = NULL;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL* HandleGop;
+    EFI_HANDLE* Handles = NULL;
+    EFI_STATUS Status;
+    UINTN HandleCount = 0;
+    UINTN HandleIndex;
+    UINTN ByteIndex;
+    UCHAR Checksum = 0;
+
+    UefiActiveEdidValid = FALSE;
+    Status = GlobalSystemTable->BootServices->LocateHandleBuffer(
+                 ByProtocol,
+                 &EfiGraphicsOutputProtocol,
+                 NULL,
+                 &HandleCount,
+                 &Handles);
+    if ((Status != EFI_SUCCESS) || (Handles == NULL))
+        return FALSE;
+
+    Status = EFI_NOT_FOUND;
+    for (HandleIndex = 0; HandleIndex < HandleCount; ++HandleIndex)
+    {
+        HandleGop = NULL;
+        if (GlobalSystemTable->BootServices->HandleProtocol(
+                Handles[HandleIndex],
+                &EfiGraphicsOutputProtocol,
+                (VOID**)&HandleGop) != EFI_SUCCESS ||
+            HandleGop != Gop)
+        {
+            continue;
+        }
+
+        Status = GlobalSystemTable->BootServices->HandleProtocol(
+                     Handles[HandleIndex],
+                     &EfiEdidActiveProtocol,
+                     (VOID**)&EdidActive);
+        break;
+    }
+    GlobalSystemTable->BootServices->FreePool(Handles);
+
+    if ((Status != EFI_SUCCESS) || (EdidActive == NULL) ||
+        (EdidActive->SizeOfEdid < EDID_BLOCK_SIZE) ||
+        (EdidActive->Edid == NULL) ||
+        (RtlCompareMemory(EdidActive->Edid,
+                          EdidHeader,
+                          sizeof(EdidHeader)) != sizeof(EdidHeader)))
+    {
+        return FALSE;
+    }
+
+    for (ByteIndex = 0; ByteIndex < EDID_BLOCK_SIZE; ++ByteIndex)
+        Checksum += EdidActive->Edid[ByteIndex];
+    if (Checksum != 0)
+        return FALSE;
+
+    RtlCopyMemory(UefiActiveEdid,
+                  EdidActive->Edid,
+                  sizeof(UefiActiveEdid));
+    UefiActiveEdidValid = TRUE;
+    return TRUE;
+}
+
+static
+BOOLEAN
+UefiGetEdidPreferredResolution(
+    _Out_ UINT32* Width,
+    _Out_ UINT32* Height)
+{
+    const UCHAR* Edid;
+    const UCHAR* Timing;
+
+    if (!UefiActiveEdidValid)
+        return FALSE;
+
+    Edid = UefiActiveEdid;
+
+    if (!(Edid[EDID_FEATURE_SUPPORT_OFFSET] & EDID_PREFERRED_TIMING))
+        return FALSE;
+
+    Timing = Edid + EDID_FIRST_DETAILED_TIMING;
+    if ((Timing[0] == 0) && (Timing[1] == 0))
+        return FALSE;
+
+    *Width = Timing[2] | ((UINT32)(Timing[4] & 0xF0) << 4);
+    *Height = Timing[5] | ((UINT32)(Timing[7] & 0xF0) << 4);
+    return ((*Width != 0) && (*Height != 0));
+}
+
+static
+BOOLEAN
+UefiIsUsableLinearGopMode(
+    _In_ EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info)
+{
+    ULONG BitsPerPixel;
+
+    if ((Info->HorizontalResolution == 0) ||
+        (Info->VerticalResolution == 0) ||
+        (Info->PixelsPerScanLine < Info->HorizontalResolution))
+    {
+        return FALSE;
+    }
+
+    if ((Info->PixelFormat == PixelRedGreenBlueReserved8BitPerColor) ||
+        (Info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor))
+    {
+        return TRUE;
+    }
+
+    if (Info->PixelFormat != PixelBitMask)
+        return FALSE;
+
+    BitsPerPixel =
+        PixelBitmasksToBpp(Info->PixelInformation.RedMask,
+                           Info->PixelInformation.GreenMask,
+                           Info->PixelInformation.BlueMask,
+                           Info->PixelInformation.ReservedMask);
+    return (BitsPerPixel == 32);
+}
+
+static
+BOOLEAN
+UefiGetGopPixelLayout(
+    _In_ EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info,
+    _Out_ EFI_PIXEL_BITMASK** PixelMasks,
+    _Out_ PULONG BitsPerPixel)
+{
+    switch (Info->PixelFormat)
+    {
+        case PixelRedGreenBlueReserved8BitPerColor:
+        case PixelBlueGreenRedReserved8BitPerColor:
+            *PixelMasks = &EfiPixelMasks[Info->PixelFormat];
+            *BitsPerPixel = RTL_BITS_OF(EFI_GRAPHICS_OUTPUT_BLT_PIXEL);
+            return TRUE;
+
+        case PixelBitMask:
+            *PixelMasks = &Info->PixelInformation;
+            *BitsPerPixel =
+                PixelBitmasksToBpp(Info->PixelInformation.RedMask,
+                                   Info->PixelInformation.GreenMask,
+                                   Info->PixelInformation.BlueMask,
+                                   Info->PixelInformation.ReservedMask);
+            return (*BitsPerPixel != 0);
+
+        default:
+            *PixelMasks = NULL;
+            *BitsPerPixel = 0;
+            return FALSE;
+    }
+}
+
+/*
+ * PixelBltOnly is a perfectly valid console protocol, but it cannot be handed
+ * to an operating system as linear memory.  A firmware may publish the
+ * versioned transform protocol on that same handle to name the companion
+ * linear GOP and describe the logical-to-physical transform.  This keeps GOP
+ * selection generic and avoids guessing from panel resolutions.
+ */
+static
+EFI_STATUS
+UefiInitializeBltOnlyHandoff(
+    _In_ EFI_GRAPHICS_OUTPUT_PROTOCOL* ConsoleGop)
+{
+    EFI_GRAPHICS_OUTPUT_TRANSFORM_PROTOCOL* Transform = NULL;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL* HandleGop;
+    EFI_GRAPHICS_OUTPUT_PROTOCOL* LinearGop;
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* LinearInfo;
+    EFI_PIXEL_BITMASK* PixelMasks;
+    EFI_HANDLE* Handles = NULL;
+    EFI_STATUS Status;
+    UINTN HandleCount = 0;
+    UINTN Index;
+    ULONG BitsPerPixel;
+    ULONGLONG MinimumSize;
+    BOOLEAN DimensionsMatch;
+
+    Status = GlobalSystemTable->BootServices->LocateHandleBuffer(
+                 ByProtocol,
+                 &EfiGraphicsOutputTransformProtocol,
+                 NULL,
+                 &HandleCount,
+                 &Handles);
+    if ((Status != EFI_SUCCESS) || (Handles == NULL))
+        return Status;
+
+    Status = EFI_NOT_FOUND;
+    for (Index = 0; Index < HandleCount; ++Index)
+    {
+        HandleGop = NULL;
+        if (GlobalSystemTable->BootServices->HandleProtocol(
+                Handles[Index],
+                &EfiGraphicsOutputProtocol,
+                (VOID**)&HandleGop) != EFI_SUCCESS ||
+            HandleGop != ConsoleGop)
+        {
+            continue;
+        }
+
+        Status = GlobalSystemTable->BootServices->HandleProtocol(
+                     Handles[Index],
+                     &EfiGraphicsOutputTransformProtocol,
+                     (VOID**)&Transform);
+        break;
+    }
+    GlobalSystemTable->BootServices->FreePool(Handles);
+
+    if ((Status != EFI_SUCCESS) || (Transform == NULL))
+        return (Status == EFI_SUCCESS) ? EFI_NOT_FOUND : Status;
+
+    if ((Transform->Version != EFI_GRAPHICS_OUTPUT_TRANSFORM_VERSION) ||
+        (Transform->Size < sizeof(*Transform)) ||
+        (Transform->Rotation > LoaderFramebufferRotation270) ||
+        (Transform->LogicalWidth == 0) ||
+        (Transform->LogicalHeight == 0) ||
+        (Transform->LinearGop == NULL))
+    {
+        return EFI_INCOMPATIBLE_VERSION;
+    }
+
+    if ((ConsoleGop->Mode == NULL) || (ConsoleGop->Mode->Info == NULL) ||
+        (ConsoleGop->Mode->Info->HorizontalResolution != Transform->LogicalWidth) ||
+        (ConsoleGop->Mode->Info->VerticalResolution != Transform->LogicalHeight))
+    {
+        return EFI_UNSUPPORTED;
+    }
+
+    LinearGop = Transform->LinearGop;
+    if ((LinearGop->Mode == NULL) || (LinearGop->Mode->Info == NULL) ||
+        (LinearGop->Mode->FrameBufferBase == 0) ||
+        (LinearGop->Mode->FrameBufferSize == 0))
+    {
+        return EFI_UNSUPPORTED;
+    }
+
+    LinearInfo = LinearGop->Mode->Info;
+    if (!UefiIsUsableLinearGopMode(LinearInfo) ||
+        !UefiGetGopPixelLayout(LinearInfo, &PixelMasks, &BitsPerPixel))
+    {
+        return EFI_UNSUPPORTED;
+    }
+
+    if ((Transform->Rotation == LoaderFramebufferRotation90) ||
+        (Transform->Rotation == LoaderFramebufferRotation270))
+    {
+        DimensionsMatch =
+            (Transform->LogicalWidth == LinearInfo->VerticalResolution) &&
+            (Transform->LogicalHeight == LinearInfo->HorizontalResolution);
+    }
+    else
+    {
+        DimensionsMatch =
+            (Transform->LogicalWidth == LinearInfo->HorizontalResolution) &&
+            (Transform->LogicalHeight == LinearInfo->VerticalResolution);
+    }
+    if (!DimensionsMatch)
+        return EFI_UNSUPPORTED;
+
+    MinimumSize = (ULONGLONG)LinearInfo->VerticalResolution *
+                  LinearInfo->PixelsPerScanLine * ((BitsPerPixel + 7) / 8);
+    if ((MinimumSize > LinearGop->Mode->FrameBufferSize) ||
+        (LinearGop->Mode->FrameBufferSize > MAXULONG) ||
+        ((EFI_PHYSICAL_ADDRESS)(ULONG_PTR)LinearGop->Mode->FrameBufferBase !=
+            LinearGop->Mode->FrameBufferBase))
+    {
+        return EFI_BAD_BUFFER_SIZE;
+    }
+
+    RtlZeroMemory(&UefiHandoffFrameBufferData,
+                  sizeof(UefiHandoffFrameBufferData));
+    UefiHandoffFrameBufferData.Version = 1;
+    UefiHandoffFrameBufferData.Revision = 5;
+    UefiHandoffFrameBufferData.FrameBufferOffset = 0;
+    UefiHandoffFrameBufferData.ScreenWidth = LinearInfo->HorizontalResolution;
+    UefiHandoffFrameBufferData.ScreenHeight = LinearInfo->VerticalResolution;
+    UefiHandoffFrameBufferData.PixelsPerScanLine = LinearInfo->PixelsPerScanLine;
+    UefiHandoffFrameBufferData.BitsPerPixel = BitsPerPixel;
+    UefiHandoffFrameBufferData.PixelMasks.RedMask = PixelMasks->RedMask;
+    UefiHandoffFrameBufferData.PixelMasks.GreenMask = PixelMasks->GreenMask;
+    UefiHandoffFrameBufferData.PixelMasks.BlueMask = PixelMasks->BlueMask;
+    UefiHandoffFrameBufferData.PixelMasks.ReservedMask = PixelMasks->ReservedMask;
+    UefiHandoffFrameBufferData.Dpi = LOADER_PARAMETER_FRAMEBUFFER_DPI_DEFAULT;
+    UefiHandoffFrameBufferData.TransformFlags =
+        (Transform->Flags & EFI_GRAPHICS_OUTPUT_TRANSFORM_FIXED_SCANOUT) ?
+            LOADER_PARAMETER_FRAMEBUFFER_FLAG_FIXED_SCANOUT : 0;
+    UefiHandoffFrameBufferData.Rotation = Transform->Rotation;
+    UefiHandoffFrameBufferData.LogicalWidth = Transform->LogicalWidth;
+    UefiHandoffFrameBufferData.LogicalHeight = Transform->LogicalHeight;
+
+    VramAddress = (ULONG_PTR)LinearGop->Mode->FrameBufferBase;
+    VramSize = (ULONG)LinearGop->Mode->FrameBufferSize;
+    FrameBufferData = &UefiHandoffFrameBufferData;
+    return EFI_SUCCESS;
+}
+
+static
+UINT32
+UefiSelectPreferredGopMode(
+    _In_ EFI_GRAPHICS_OUTPUT_PROTOCOL* Gop,
+    _In_ UINT32 PreferredWidth,
+    _In_ UINT32 PreferredHeight)
+{
+    EFI_STATUS Status;
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION* Info;
+    UINTN SizeOfInfo;
+    UINT32 Mode, BestMode;
+
+    BestMode = Gop->Mode->Mode;
+    Info = Gop->Mode->Info;
+    if (UefiIsUsableLinearGopMode(Info) &&
+        (Info->HorizontalResolution == PreferredWidth) &&
+        (Info->VerticalResolution == PreferredHeight))
+    {
+        return BestMode;
+    }
+
+    for (Mode = 0; Mode < Gop->Mode->MaxMode; ++Mode)
+    {
+        Info = NULL;
+        SizeOfInfo = 0;
+        Status = Gop->QueryMode(Gop, Mode, &SizeOfInfo, &Info);
+        if ((Status != EFI_SUCCESS) || (Info == NULL))
+        {
+            TRACE("Could not query GOP mode %u (status %llx)\n",
+                  Mode,
+                  (ULONGLONG)Status);
+            continue;
+        }
+
+        TRACE("GOP mode %u: %ux%u, pixel format %u, stride %u\n",
+              Mode,
+              Info->HorizontalResolution,
+              Info->VerticalResolution,
+              Info->PixelFormat,
+              Info->PixelsPerScanLine);
+
+        if (UefiIsUsableLinearGopMode(Info))
+        {
+            if ((Info->HorizontalResolution == PreferredWidth) &&
+                (Info->VerticalResolution == PreferredHeight))
+            {
+                BestMode = Mode;
+                GlobalSystemTable->BootServices->FreePool(Info);
+                break;
+            }
+        }
+
+        GlobalSystemTable->BootServices->FreePool(Info);
+    }
+
+    return BestMode;
 }
 
 static
@@ -484,6 +1221,8 @@ UefiInitializeGop(VOID)
 {
     EFI_STATUS Status;
     EFI_GRAPHICS_OUTPUT_PROTOCOL* gop = NULL;
+    UINT32 SelectedMode;
+    UINT32 PreferredWidth, PreferredHeight;
 
     EFI_GRAPHICS_PIXEL_FORMAT PixelFormat;
     EFI_PIXEL_BITMASK* pPixelBitmask;
@@ -492,54 +1231,87 @@ UefiInitializeGop(VOID)
     Status = GlobalSystemTable->BootServices->LocateProtocol(&EfiGraphicsOutputProtocol, 0, (void**)&gop);
     if (Status != EFI_SUCCESS)
     {
-        TRACE("Failed to find GOP with status %d\n", Status);
+        /* Without a framebuffer the kernel starts headless, every display
+         * adapter is refused POST ownership and the desktop stays on the
+         * basic-display fallback, so say why rather than tracing it. */
+        ERR("Failed to find GOP with status %llx\n", (ULONGLONG)Status);
         return Status;
     }
+    if (gop->Mode == NULL || gop->Mode->Info == NULL)
+    {
+        ERR("GOP located but has no mode information (Mode=%p)\n", gop->Mode);
+        return EFI_UNSUPPORTED;
+    }
 
-    /* We don't need high resolutions for freeldr */
-    gop->SetMode(gop, LOWEST_SUPPORTED_RES);
+    UefiLoadEdidForGop(gop);
+
+    TRACE("Firmware GOP mode %u of %u: %ux%u, pixel format %u, stride %u\n",
+          gop->Mode->Mode,
+          gop->Mode->MaxMode,
+          gop->Mode->Info->HorizontalResolution,
+          gop->Mode->Info->VerticalResolution,
+          gop->Mode->Info->PixelFormat,
+          gop->Mode->Info->PixelsPerScanLine);
+
+    if (UefiGetEdidPreferredResolution(&PreferredWidth, &PreferredHeight))
+    {
+        TRACE("EDID preferred resolution is %ux%u\n",
+              PreferredWidth,
+              PreferredHeight);
+
+        /*
+         * Some firmware starts UEFI applications in a low-resolution
+         * compatibility mode. Switch to the monitor's EDID preferred timing
+         * when GOP advertises a compatible linear framebuffer for it.
+         */
+        SelectedMode = UefiSelectPreferredGopMode(gop,
+                                                  PreferredWidth,
+                                                  PreferredHeight);
+        if (SelectedMode != gop->Mode->Mode)
+        {
+            Status = gop->SetMode(gop, SelectedMode);
+            if (Status != EFI_SUCCESS)
+            {
+                WARN("Could not set GOP mode %u (status %llx), keeping mode %u\n",
+                     SelectedMode,
+                     (ULONGLONG)Status,
+                     gop->Mode->Mode);
+            }
+        }
+        else if ((gop->Mode->Info->HorizontalResolution != PreferredWidth) ||
+                 (gop->Mode->Info->VerticalResolution != PreferredHeight))
+        {
+            WARN("GOP does not expose EDID preferred resolution %ux%u\n",
+                 PreferredWidth,
+                 PreferredHeight);
+        }
+    }
+
+    TRACE("Using GOP mode %u: %ux%u, pixel format %u, stride %u\n",
+          gop->Mode->Mode,
+          gop->Mode->Info->HorizontalResolution,
+          gop->Mode->Info->VerticalResolution,
+          gop->Mode->Info->PixelFormat,
+          gop->Mode->Info->PixelsPerScanLine);
 
     /* Physical format of the pixel */
     PixelFormat = gop->Mode->Info->PixelFormat;
-    switch (PixelFormat)
+    if (PixelFormat == PixelBltOnly)
     {
-        case PixelRedGreenBlueReserved8BitPerColor:
-        case PixelBlueGreenRedReserved8BitPerColor:
-        {
-            pPixelBitmask = &EfiPixelMasks[PixelFormat];
-            BitsPerPixel = RTL_BITS_OF(EFI_GRAPHICS_OUTPUT_BLT_PIXEL);
-            break;
-        }
-
-        case PixelBitMask:
-        {
-            /*
-             * When the GOP pixel format is given by PixelBitMask, the pixel
-             * element size _may be_ different from 4 bytes.
-             * See UEFI Spec Rev.2.10 Section 12.9 "Graphics Output Protocol":
-             * example code "GetPixelElementSize()" function.
-             */
-            pPixelBitmask = &gop->Mode->Info->PixelInformation;
-            BitsPerPixel =
-                PixelBitmasksToBpp(pPixelBitmask->RedMask,
-                                   pPixelBitmask->GreenMask,
-                                   pPixelBitmask->BlueMask,
-                                   pPixelBitmask->ReservedMask);
-            break;
-        }
-
-        case PixelBltOnly:
-        default:
-        {
-            ERR("Unsupported UEFI GOP format %lu\n", PixelFormat);
-            pPixelBitmask = NULL;
-            BitsPerPixel = 0;
-            break;
-        }
+        return UefiInitializeBltOnlyGop(gop);
+    }
+    if (!UefiGetGopPixelLayout(gop->Mode->Info,
+                               &pPixelBitmask,
+                               &BitsPerPixel))
+    {
+        ERR("Unsupported UEFI GOP format %lu\n", PixelFormat);
+        return EFI_UNSUPPORTED;
     }
 
     VramAddress = (ULONG_PTR)gop->Mode->FrameBufferBase;
     VramSize = gop->Mode->FrameBufferSize;
+    UefiGop = gop;
+
     if (!VidFbInitializeVideo(&FrameBufferData,
                               VramAddress,
                               VramSize,
@@ -550,10 +1322,13 @@ UefiInitializeGop(VOID)
                               (PPIXEL_BITMASK)pPixelBitmask))
     {
         ERR("Couldn't initialize video framebuffer\n");
+        UefiGop = NULL;
         Status = EFI_UNSUPPORTED;
     }
     else
     {
+        UefiRenderAddress = VramAddress;
+        UefiRenderPixelsPerScanLine = gop->Mode->Info->PixelsPerScanLine;
         UefiInitializeBgrtLogo();
     }
     return Status;
@@ -596,6 +1371,7 @@ UefiInitializeAppleGraphics(VOID)
 
     VramAddress = (ULONG_PTR)BaseAddress;
     VramSize = (ULONG)FrameBufferSize;
+
     if (!VidFbInitializeVideo(&FrameBufferData,
                               VramAddress,
                               VramSize,
@@ -610,6 +1386,8 @@ UefiInitializeAppleGraphics(VOID)
     }
     else
     {
+        UefiRenderAddress = VramAddress;
+        UefiRenderPixelsPerScanLine = BytesPerRow / 4;
         UefiInitializeBgrtLogo();
     }
 
@@ -637,17 +1415,57 @@ UefiInitializeVideo(VOID)
     return Status;
 }
 
+BOOLEAN
+UefiVideoGetEdid(
+    _Out_writes_bytes_(EDID_BLOCK_SIZE) PUCHAR Edid)
+{
+    if ((Edid == NULL) || !UefiActiveEdidValid)
+        return FALSE;
+
+    RtlCopyMemory(Edid, UefiActiveEdid, sizeof(UefiActiveEdid));
+    return TRUE;
+}
+
+VOID
+UefiVideoPrepareForExitBootServices(VOID)
+{
+    UefiGop = NULL;
+    UefiBltOnlyGop = NULL;
+    UefiBltOnlyMode = FALSE;
+}
+
+VOID
+UefiVideoExitBootServices(VOID)
+{
+    UefiGop = NULL;
+    UefiBltOnlyGop = NULL;
+    UefiBltOnlyMode = FALSE;
+}
 
 VOID
 UefiVideoClearScreen(UCHAR Attr)
 {
-    FbConsClearScreen(Attr);
+    if (UiKeepFirmwareScreen && UefiBgrtLogo.Valid &&
+        (UefiBgrtLogo.DrawWidth != 0) && (UefiBgrtLogo.DrawHeight != 0))
+    {
+        FbConsClearScreenExcept(Attr,
+                                UefiBgrtLogo.PositionX,
+                                UefiBgrtLogo.PositionY,
+                                UefiBgrtLogo.DrawWidth,
+                                UefiBgrtLogo.DrawHeight);
+    }
+    else
+    {
+        FbConsClearScreen(Attr);
+    }
+    UefiVideoFlushDirty();
 }
 
 VOID
 UefiVideoPutChar(int Ch, UCHAR Attr, unsigned X, unsigned Y)
 {
     FbConsPutChar(Ch, Attr, X, Y);
+    UefiVideoFlushDirty();
 }
 
 VOID
@@ -659,8 +1477,9 @@ UefiVideoGetDisplaySize(PULONG Width, PULONG Height, PULONG Depth)
 VIDEODISPLAYMODE
 UefiVideoSetDisplayMode(PCSTR DisplayMode, BOOLEAN Init)
 {
-    /* We only have one mode, semi-text */
-    return VideoTextMode;
+    UNREFERENCED_PARAMETER(DisplayMode);
+    UNREFERENCED_PARAMETER(Init);
+    return VideoGraphicsMode;
 }
 
 ULONG
@@ -674,6 +1493,52 @@ UefiVideoCopyOffScreenBufferToVRAM(PVOID Buffer)
 {
     FbConsCopyOffScreenBufferToVRAM(Buffer);
     UefiDrawBgrtLogo();
+    UefiVideoFlushDirty();
+}
+
+VOID
+UefiVideoSync(VOID)
+{
+    UefiDrawBgrtLogo();
+    UefiVideoFlushDirty();
+}
+
+VOID
+UefiVideoScrollUp(UCHAR Attr, ULONG Lines)
+{
+    UEFI_GOP_SCROLL_RESULT Result;
+
+    if (UefiBltOnlyMode)
+    {
+        /* GOP operates on the visible frame, so first publish pending draws */
+        UefiVideoFlushDirty();
+
+        /* Keep the PixelBltOnly buffer authoritative if the firmware BLT fails */
+        FbConsScrollUp(Attr, Lines);
+        Result = UefiVideoGopScrollUp(Attr, Lines);
+        if (Result == UefiGopScrollComplete)
+            FbConsResetDirtyRect();
+        else
+            UefiVideoFlushDirty();
+        return;
+    }
+
+    Result = UefiVideoGopScrollUp(Attr, Lines);
+    if (Result != UefiGopScrollFailed)
+    {
+        if (Result == UefiGopScrollMoved)
+        {
+            /* Video-to-video succeeded; finish the failed GOP fill directly */
+            FbConsClearScrollArea(Attr, Lines);
+            UefiVideoFlushDirty();
+        }
+
+        FbConsScrollTextCache(Attr, Lines);
+        return;
+    }
+
+    FbConsScrollUp(Attr, Lines);
+    UefiVideoFlushDirty();
 }
 
 VOID

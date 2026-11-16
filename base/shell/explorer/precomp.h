@@ -48,13 +48,92 @@
 #include <ui/rosctrls.h>
 #include <ui/rosdlgs.h>
 #include <shellutils.h>
+#include <reactos/trayicons.h>
+#include <reactos/colorscheme.h>
 
 #include "tmschema.h"
 #include "resource.h"
+#include "taskbarpin.h"
 
 #include <wine/debug.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(explorernew);
+
+HIMAGELIST CreateStartOrbImageList(INT Size);
+HBITMAP CreateStartOrbBitmap(INT Size, UINT ResourceId);
+INT GetStartOrbExtent(HBITMAP Bitmap);
+BOOL DrawStartOrbBitmap(HDC hdc, HBITMAP Source, INT x, INT y, INT Size, double Scale);
+
+static inline INT
+ShellScaleForDpi(INT Value)
+{
+    HDC hdc = GetDC(NULL);
+    INT dpi = 96;
+
+    if (hdc)
+    {
+        dpi = GetDeviceCaps(hdc, LOGPIXELSY);
+        ReleaseDC(NULL, hdc);
+    }
+
+    if (dpi <= 0)
+        dpi = 96;
+
+    return MulDiv(Value, dpi, 96);
+}
+
+static inline BOOL
+ShellGetTaskbarMaterial(COLORREF *pcr, INT *pcyTaskRow = NULL)
+{
+    HTHEME hTheme;
+    COLORREF cr = 0;
+    BOOL bComposited = FALSE;
+    HRESULT hr;
+
+    if (pcyTaskRow)
+        *pcyTaskRow = 0;
+
+    if (!IsThemeActive())
+        return FALSE;
+    hTheme = ShellOpenTaskbarMaterial();
+    if (!hTheme)
+        return FALSE;
+    hr = GetThemeBool(hTheme, 0, 0, SHELL_TMT_COMPOSITED, &bComposited);
+    if (SUCCEEDED(hr) && bComposited)
+        hr = GetThemeColor(hTheme, 0, 0, SHELL_TMT_FILLCOLOR, &cr);
+    else
+        hr = E_FAIL;
+    if (SUCCEEDED(hr) && pcyTaskRow)
+    {
+        POINT MinSize;
+        if (SUCCEEDED(GetThemePosition(hTheme, 0, 0, TMT_MINSIZE, &MinSize)) &&
+            MinSize.y > 0)
+        {
+            *pcyTaskRow = ShellScaleForDpi(MinSize.y);
+        }
+    }
+    CloseThemeData(hTheme);
+    if (FAILED(hr))
+        return FALSE;
+    *pcr = cr;
+    return TRUE;
+}
+
+static inline COLORREF
+ShellLiftColor(COLORREF cr, INT lift)
+{
+    return RGB(max(0, min(255, GetRValue(cr) + lift)),
+               max(0, min(255, GetGValue(cr) + lift)),
+               max(0, min(255, GetBValue(cr) + lift)));
+}
+
+static inline BOOL
+ShellTaskbarIsLight(VOID)
+{
+    COLORREF cr;
+
+    return ShellGetTaskbarMaterial(&cr) && ShellColorIsLight(cr);
+}
 
 #define ASSERT(cond) \
     do if (!(cond)) { \
@@ -111,6 +190,16 @@ BOOL GetRegValue(IN LPCWSTR pszSubKey, IN LPCWSTR pszValueName, IN BOOL bDefault
 BOOL SetRegDword(IN LPCWSTR pszSubKey, IN LPCWSTR pszValueName, IN DWORD dwValue);
 BOOL GetAdvancedBool(IN LPCWSTR pszValueName, IN BOOL bDefaultValue);
 BOOL SetAdvancedDword(IN LPCWSTR pszValueName, IN DWORD dwValue);
+BOOL GetVersionInfoString(IN LPCWSTR szFileName, IN LPCWSTR szVersionInfo, OUT LPWSTR szBuffer, IN UINT cbBufLen);
+
+#define TRAY_PILL_HOT     1
+#define TRAY_PILL_PRESSED 2
+#define TRAY_PILL_CHECKED 3
+
+VOID ShellDrawTrayPill(IN HDC hdc, IN const RECT *prc, IN INT iState);
+VOID ShellGetTrayPillRect(IN const RECT *prcClient, OUT RECT *prcPill);
+VOID ShellDrawTrayGlyph(IN HDC hdc, IN const RECT *prc, IN UINT nIconId);
+VOID ShellDrawIconTinted(IN HDC hdc, IN INT x, IN INT y, IN HICON hIcon, IN INT cx, IN INT cy, IN COLORREF crInk);
 
 /*
  *  rshell.c
@@ -120,7 +209,6 @@ VOID InitRSHELL(VOID);
 HRESULT WINAPI _CStartMenu_CreateInstance(REFIID riid, void **ppv);
 HANDLE WINAPI _SHCreateDesktop(IShellDesktopTray *ShellDesk);
 BOOL WINAPI _SHDesktopMessageLoop(HANDLE hDesktop);
-BOOL WINAPI _WinList_Init(void);
 void WINAPI _ShellDDEInit(BOOL bInit);
 HRESULT WINAPI _CBandSiteMenu_CreateInstance(REFIID riid, void **ppv);
 HRESULT WINAPI _CBandSite_CreateInstance(LPUNKNOWN pUnkOuter, REFIID riid, void **ppv);
@@ -131,6 +219,11 @@ HRESULT WINAPI _CBandSite_CreateInstance(LPUNKNOWN pUnkOuter, REFIID riid, void 
 
 #define TWM_GETTASKSWITCH (WM_USER + 236)
 #define TWM_OPENSTARTMENU (WM_USER + 260)
+#define TWM_SHOWVOLUMEFLYOUT (WM_USER + 270)
+#define TWM_SHOWNETWORKFLYOUT (WM_USER + 271)
+#define TWM_SHOWCALENDARFLYOUT (WM_USER + 272)
+#define TWM_SHOWPOWERFLYOUT (WM_USER + 273)
+#define TWM_SHOWBLUETOOTHFLYOUT (WM_USER + 274)
 #define TWM_SETTINGSCHANGED (WM_USER + 300)
 #define TWM_SETZORDER (WM_USER + 338)
 
@@ -350,6 +443,9 @@ UpdateStartMenu(IN OUT IMenuPopup *pMenuPopup,
                 IN BOOL bSmallIcons,
                 IN BOOL bRefresh);
 
+#include "startmnu2.h"
+#include "trayflyouts.h"
+
 /*
  * startmnucust.cpp
  */
@@ -380,8 +476,52 @@ static inline BOOL GetHideClock()
 #define TNWM_GETMINIMUMSIZE (WM_USER + 0x100)
 #define TNWM_CHANGETRAYPOS  (WM_USER + 0x104)
 #define TNWM_GETSHOWDESKTOPBUTTON (WM_USER + 0x7601)
+#define TNWM_GETTRAYICONS   (WM_USER + 0x7602)
+#define TNWM_TRAYICONEVENT  (WM_USER + 0x7603)
+#define TNWM_SETPROMOTED    (WM_USER + 0x7604)
+#define TNWM_GETICONANCHOR  (WM_USER + 0x7605)
+#define TCWM_NOTIFICATIONSCHANGED (WM_USER + 0x7606)
+
+#define TNWM_MINSIZE_MODERN 2
 
 #define NTNWM_REALIGN   (0x1)
+#define NTNWM_ICONSCHANGED (0x2)
+
+#define TRAYICON_APP       0
+#define TRAYICON_NETWORK   1
+#define TRAYICON_VOLUME    2
+#define TRAYICON_POWER     3
+#define TRAYICON_BLUETOOTH 4
+
+typedef struct _TRAYICONITEM
+{
+    HWND hWnd;
+    UINT uID;
+    INT Kind;
+    INT iImage;
+    WCHAR szTip[128];
+} TRAYICONITEM, *PTRAYICONITEM;
+
+typedef struct _TRAYICONLIST
+{
+    HIMAGELIST himl;
+    UINT cItems;
+    TRAYICONITEM Items[32];
+} TRAYICONLIST, *PTRAYICONLIST;
+
+typedef struct _TRAYICONEVENT
+{
+    HWND hWnd;
+    UINT uID;
+    UINT uMsg;
+} TRAYICONEVENT, *PTRAYICONEVENT;
+
+static inline BOOL
+ShellIsModernTray(IN BOOL bHorizontal)
+{
+    COLORREF cr;
+    return bHorizontal && ShellGetTaskbarMaterial(&cr);
+}
 
 HRESULT CTrayNotifyWnd_CreateInstance(HWND hwndParent, REFIID riid, void **ppv);
 
@@ -395,6 +535,7 @@ HRESULT CSysPagerWnd_CreateInstance(HWND hwndParent, REFIID riid, void **ppv);
  */
 
 #define TSWM_UPDATETASKBARPOS   (WM_USER + 2)
+#define TSWM_ACTIVATETASKINDEX  (WM_USER + 8)
 
 HRESULT CTaskSwitchWnd_CreateInstance(IN HWND hWndParent, IN OUT ITrayWindow *Tray, REFIID riid, void **ppv);
 

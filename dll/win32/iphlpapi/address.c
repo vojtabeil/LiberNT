@@ -19,74 +19,7 @@ GetInterfacesList(
     _Out_ TDIEntityID **EntityList,
     _Out_ ULONG* InterfaceCount)
 {
-
-    TCP_REQUEST_QUERY_INFORMATION_EX TcpQueryInfo;
-    IO_STATUS_BLOCK StatusBlock;
-    NTSTATUS Status;
-    ULONG_PTR BufferSize;
-
-    ZeroMemory(&TcpQueryInfo, sizeof(TcpQueryInfo));
-    TcpQueryInfo.ID.toi_class = INFO_CLASS_GENERIC;
-    TcpQueryInfo.ID.toi_type = INFO_TYPE_PROVIDER;
-    TcpQueryInfo.ID.toi_id = ENTITY_LIST_ID;
-    TcpQueryInfo.ID.toi_entity.tei_entity = GENERIC_ENTITY;
-    TcpQueryInfo.ID.toi_entity.tei_instance = 0;
-
-    Status = NtDeviceIoControlFile(
-        TcpFile,
-        NULL,
-        NULL,
-        NULL,
-        &StatusBlock,
-        IOCTL_TCP_QUERY_INFORMATION_EX,
-        &TcpQueryInfo,
-        sizeof(TcpQueryInfo),
-        NULL,
-        0);
-    if (Status == STATUS_PENDING)
-    {
-        /* So we have to wait a bit */
-        Status = NtWaitForSingleObject(TcpFile, FALSE, NULL);
-        if (NT_SUCCESS(Status))
-            Status = StatusBlock.Status;
-    }
-
-    if (!NT_SUCCESS(Status))
-        return Status;
-
-    BufferSize = StatusBlock.Information;
-    *EntityList = HeapAlloc(GetProcessHeap(), 0, BufferSize);
-    if (!*EntityList)
-        return STATUS_NO_MEMORY;
-
-    /* Do the real call */
-    Status = NtDeviceIoControlFile(
-        TcpFile,
-        NULL,
-        NULL,
-        NULL,
-        &StatusBlock,
-        IOCTL_TCP_QUERY_INFORMATION_EX,
-        &TcpQueryInfo,
-        sizeof(TcpQueryInfo),
-        *EntityList,
-        BufferSize);
-    if (Status == STATUS_PENDING)
-    {
-        /* So we have to wait a bit */
-        Status = NtWaitForSingleObject(TcpFile, FALSE, NULL);
-        if (NT_SUCCESS(Status))
-            Status = StatusBlock.Status;
-    }
-
-    if (!NT_SUCCESS(Status))
-    {
-        HeapFree(GetProcessHeap(), 0, *EntityList);
-        return Status;
-    }
-
-    *InterfaceCount = BufferSize / sizeof(TDIEntityID);
-    return Status;
+    return tdiGetEntityIDSet(TcpFile, EntityList, InterfaceCount);
 }
 
 static
@@ -318,7 +251,7 @@ CountPrefixBits(
 
     for (i = 0; i < sizeof(ULONG) * 8; i++)
     {
-        if ((Netmask & (1 << i)) == 0)
+        if ((Netmask & (1U << i)) == 0)
             break;
         BitCount++;
     }
@@ -386,7 +319,7 @@ GetAdaptersAddresses(
         ZeroMemory(Ptr, RemainingSize);
 
     /* open the tcpip driver */
-    Status = openTcpFile(&TcpFile, FILE_READ_DATA);
+    Status = openTcpFile(&TcpFile, 0);
     if (!NT_SUCCESS(Status))
     {
         ERR("Could not open handle to tcpip.sys. Status %08x\n", Status);
@@ -986,6 +919,63 @@ GetAdaptersAddresses(
         }
     }
 
+    if (Flags & GAA_FLAG_INCLUDE_GATEWAYS)
+    {
+        RouteTable* Routes = getRouteTable();
+
+        if (Routes)
+        {
+            for (i = 0; i < Routes->numRoutes; i++)
+            {
+                PIP_ADAPTER_ADDRESSES CurrentAA = NULL;
+                ULONG Size = sizeof(IP_ADAPTER_GATEWAY_ADDRESS) + sizeof(SOCKADDR);
+
+                if ((Routes->routes[i].dest != 0) || (Routes->routes[i].mask != 0) ||
+                    (Routes->routes[i].gateway == 0))
+                {
+                    continue;
+                }
+
+                if (pAdapterAddresses)
+                {
+                    CurrentAA = pAdapterAddresses;
+                    while (CurrentAA)
+                    {
+                        if (CurrentAA->IfIndex == Routes->routes[i].ifIndex)
+                            break;
+
+                        CurrentAA = CurrentAA->Next;
+                    }
+
+                    if (!CurrentAA)
+                        continue;
+                }
+
+                if (Ptr && (RemainingSize >= Size))
+                {
+                    PIP_ADAPTER_GATEWAY_ADDRESS Gateway = (PIP_ADAPTER_GATEWAY_ADDRESS)Ptr;
+
+                    ZeroMemory(Gateway, Size);
+                    Gateway->Length = sizeof(IP_ADAPTER_GATEWAY_ADDRESS);
+                    Gateway->Next = CurrentAA->FirstGatewayAddress;
+                    Gateway->Address.lpSockaddr = (LPSOCKADDR)(Gateway + 1);
+                    Gateway->Address.iSockaddrLength = sizeof(SOCKADDR);
+                    Gateway->Address.lpSockaddr->sa_family = AF_INET;
+                    ((LPSOCKADDR_IN)Gateway->Address.lpSockaddr)->sin_port = 0;
+                    ((LPSOCKADDR_IN)Gateway->Address.lpSockaddr)->sin_addr.S_un.S_addr = Routes->routes[i].gateway;
+
+                    CurrentAA->FirstGatewayAddress = Gateway;
+                    Ptr += Size;
+                    RemainingSize -= Size;
+                }
+
+                TotalSize += Size;
+            }
+
+            HeapFree(GetProcessHeap(), 0, Routes);
+        }
+    }
+
 Success:
     /* We're done */
     HeapFree(GetProcessHeap(), 0, InterfacesList);
@@ -1026,7 +1016,7 @@ NhpAllocateAndGetInterfaceInfoFromStack(
           ppTable, pdwCount, bOrder, hHeap, dwFlags);
 
     /* open the tcpip driver */
-    Status = openTcpFile(&TcpFile, FILE_READ_DATA);
+    Status = openTcpFile(&TcpFile, 0);
     if (!NT_SUCCESS(Status))
     {
         ERR("Could not open handle to tcpip.sys. Status %08x\n", Status);

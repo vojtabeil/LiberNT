@@ -6,16 +6,19 @@
 #include <windef.h>
 #include <winbase.h>
 
-/* Redefine NTDDI_VERSION to 2K3 SP1 to get correct NDK definitions */
-#undef NTDDI_VERSION
-#define NTDDI_VERSION NTDDI_WS03SP1
+/* NTDDI_VERSION is set globally from REACTOS_TARGET_NT (and overridden to
+ * 0x600 here by CMakeLists.txt). Do not force WS03SP1 — that would silently
+ * downgrade NDK struct layouts and create the same ABI mismatches that hid
+ * RAM in System Properties (see kernel32/k32.h fix). */
 
 #define NTOS_MODE_USER
 #include <ndk/iofuncs.h>
 #include <ndk/kefuncs.h>
+#include <ndk/mmfuncs.h>
 #include <ndk/obfuncs.h>
 #include <ndk/psfuncs.h>
 #include <ndk/rtlfuncs.h>
+#include <ndk/setypes.h>
 
 /* CSRSS Headers */
 #include <win/base.h>

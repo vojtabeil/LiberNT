@@ -256,6 +256,13 @@ static HRESULT WINAPI JScriptError_GetExceptionInfo(IActiveScriptError *iface, E
         jsstr_to_bstr(This->ei.source, &excepinfo->bstrSource);
     if(This->ei.message)
         jsstr_to_bstr(This->ei.message, &excepinfo->bstrDescription);
+#ifdef __REACTOS__
+    if(This->ei.help_file)
+        jsstr_to_bstr(This->ei.help_file, &excepinfo->bstrHelpFile);
+    excepinfo->dwHelpContext = This->ei.help_context;
+    if(!This->ei.host_info && !This->ei.resource_message)
+        excepinfo->wReserved = LOWORD(GetUserDefaultLCID());
+#endif
     return S_OK;
 }
 
@@ -335,6 +342,16 @@ void reset_ei(jsexcept_t *ei)
         jsstr_release(ei->line);
         ei->line = NULL;
     }
+#ifdef __REACTOS__
+    if(ei->help_file) {
+        jsstr_release(ei->help_file);
+        ei->help_file = NULL;
+    }
+    ei->help_context = 0;
+    ei->host_info = FALSE;
+    ei->resource_message = FALSE;
+    ei->host_error = FALSE;
+#endif
 }
 
 void enter_script(script_ctx_t *ctx, jsexcept_t *ei)
@@ -962,7 +979,7 @@ static HRESULT WINAPI JScript_GetScriptDispatch(IActiveScript *iface, LPCOLESTR 
     }
 
     script_obj = This->ctx->global;
-    if(pstrItemName) {
+    if(pstrItemName && *pstrItemName) {
         named_item_t *item = lookup_named_item(This->ctx, pstrItemName, 0);
         if(!item) return E_INVALIDARG;
         if(item->script_obj) script_obj = item->script_obj;
@@ -1459,10 +1476,34 @@ static HRESULT WINAPI WineJScript_InitHostObject(IWineJScript *iface, IWineJSDis
 }
 
 static HRESULT WINAPI WineJScript_InitHostConstructor(IWineJScript *iface, IWineJSDispatchHost *constr,
-                                                      IWineJSDispatch *prototype, IWineJSDispatch **ret)
+                                                      const WCHAR *method_name, IWineJSDispatch **ret)
 {
     JScript *This = impl_from_IWineJScript(iface);
-    return init_host_constructor(This->ctx, constr, prototype, ret);
+    return init_host_constructor(This->ctx, constr, method_name, ret);
+}
+
+static HRESULT WINAPI WineJScript_CreateObject(IWineJScript *iface, IWineJSDispatch **ret)
+{
+    JScript *This = impl_from_IWineJScript(iface);
+    jsdisp_t *jsdisp;
+    HRESULT hres;
+
+    hres = create_object(This->ctx, NULL, &jsdisp);
+    if(SUCCEEDED(hres))
+        *ret = &jsdisp->IWineJSDispatch_iface;
+    return hres;
+}
+
+static HRESULT WINAPI WineJScript_CreateArrayBuffer(IWineJScript *iface, DWORD size, IWineJSDispatch **arraybuf, void **data)
+{
+    JScript *This = impl_from_IWineJScript(iface);
+    return create_arraybuffer(This->ctx, size, arraybuf, data);
+}
+
+static HRESULT WINAPI WineJScript_FillGlobals(IWineJScript *iface, IWineJSDispatchHost *script_global)
+{
+    JScript *This = impl_from_IWineJScript(iface);
+    return fill_globals(This->ctx, script_global);
 }
 
 static const IWineJScriptVtbl WineJScriptVtbl = {
@@ -1471,6 +1512,9 @@ static const IWineJScriptVtbl WineJScriptVtbl = {
     WineJScript_Release,
     WineJScript_InitHostObject,
     WineJScript_InitHostConstructor,
+    WineJScript_CreateObject,
+    WineJScript_CreateArrayBuffer,
+    WineJScript_FillGlobals,
 };
 
 HRESULT create_jscript_object(BOOL is_encode, REFIID riid, void **ppv)

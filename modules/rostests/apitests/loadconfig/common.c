@@ -8,6 +8,8 @@
 #include "loadconfig.h"
 
 
+static ULONG_PTR ImageSecurityCookie = sizeof(void *) == 8 ? (ULONG_PTR)0x00002B992DDFA232ULL : (ULONG_PTR)0xBB40E64EUL;
+
 // Tell the linker we want a LOAD_CONFIG
 const IMAGE_LOAD_CONFIG_DIRECTORY _load_config_used =
 {
@@ -28,7 +30,7 @@ const IMAGE_LOAD_CONFIG_DIRECTORY _load_config_used =
     0,                          // CSDVersion
     0,                          // Reserved1
     0,                          // EditList
-    0,                          // SecurityCookie
+    (ULONG_PTR)&ImageSecurityCookie, // SecurityCookie
 };
 
 
@@ -63,7 +65,7 @@ BOOL check_loadconfig()
         ok(!(LoadConfig->GlobalFlagsClear & FLG_USER_STACK_TRACE_DB),
            "Invalid GlobalFlagsClear: %lx\n", LoadConfig->GlobalFlagsClear);
         ok(LoadConfig->Size == sizeof(IMAGE_LOAD_CONFIG_DIRECTORY),
-           "Unexpected size difference: %lu vs %u\n", LoadConfig->Size, sizeof(IMAGE_LOAD_CONFIG_DIRECTORY));
+           "Unexpected size difference: %lu vs %Iu\n", LoadConfig->Size, sizeof(IMAGE_LOAD_CONFIG_DIRECTORY));
     }
 
     return Result;

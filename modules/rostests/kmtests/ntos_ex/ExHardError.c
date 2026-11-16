@@ -6,6 +6,7 @@
  */
 
 #include <kmt_test.h>
+#include <ntifs.h>
 
 /* TODO: don't require user interaction, test Io* routines,
  *       test NTSTATUS values with special handling */
@@ -27,8 +28,56 @@ SetParameters(
 
 #define NoResponse 27
 
-#define CheckHardError(ErrStatus, UnicodeStringMask, ResponseOption,    \
+static
+BOOLEAN
+DisableShutdownPrivilege(
+    OUT PHANDLE TokenHandle,
+    OUT PTOKEN_PRIVILEGES PreviousState)
+{
+    NTSTATUS Status;
+    TOKEN_PRIVILEGES NewState;
+    ULONG ReturnLength;
+
+    *TokenHandle = NULL;
+    RtlZeroMemory(PreviousState, sizeof(*PreviousState));
+
+    Status = ZwOpenProcessToken(NtCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, TokenHandle);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    NewState.PrivilegeCount = 1;
+    NewState.Privileges[0].Luid = SeExports->SeShutdownPrivilege;
+    NewState.Privileges[0].Attributes = 0;
+    Status = ZwAdjustPrivilegesToken(*TokenHandle, FALSE, &NewState, sizeof(*PreviousState), PreviousState, &ReturnLength);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        ZwClose(*TokenHandle);
+        *TokenHandle = NULL;
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static
+VOID
+RestoreShutdownPrivilege(
+    IN HANDLE TokenHandle,
+    IN PTOKEN_PRIVILEGES PreviousState)
+{
+    NTSTATUS Status;
+    ULONG ReturnLength;
+
+    Status = ZwAdjustPrivilegesToken(TokenHandle, FALSE, PreviousState, 0, NULL, &ReturnLength);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ZwClose(TokenHandle);
+}
+
+#define CheckHardErrorEx(ErrStatus, UnicodeStringMask, ResponseOption,  \
                         ExpectedStatus, ExpectedResponse,               \
+                        CheckResponse,                                  \
                         NumberOfParameters, ...) do                     \
 {                                                                       \
     SetParameters(HardErrorParameters, NumberOfParameters, __VA_ARGS__);\
@@ -44,8 +93,17 @@ SetParameters(
         Status = _SEH2_GetExceptionCode();                              \
     } _SEH2_END;                                                        \
     ok_eq_hex(Status, ExpectedStatus);                                  \
-    ok_eq_ulong(Response, (ULONG)ExpectedResponse);                     \
+    if (CheckResponse)                                                  \
+        ok_eq_ulong(Response, (ULONG)ExpectedResponse);                 \
 } while (0)
+
+#define CheckHardError(ErrStatus, UnicodeStringMask, ResponseOption,    \
+                        ExpectedStatus, ExpectedResponse,               \
+                        NumberOfParameters, ...)                        \
+    CheckHardErrorEx(ErrStatus, UnicodeStringMask, ResponseOption,      \
+                     ExpectedStatus, ExpectedResponse,                  \
+                     TRUE,                                              \
+                     NumberOfParameters, __VA_ARGS__)
 
 #define CheckInformationalHardError(ErrStatus, String, Thread,          \
                                         ExpectedStatus, ExpectedRet) do \
@@ -81,6 +139,11 @@ TestHardError(
     UNICODE_STRING String2 = RTL_CONSTANT_STRING(StringBuffer2);
     ULONG_PTR HardErrorParameters[6];
     BOOLEAN Ret;
+    BOOLEAN TestShutdownOption;
+    BOOLEAN CheckShutdownResponse;
+    ULONG ShutdownResponse;
+    HANDLE TokenHandle;
+    TOKEN_PRIVILEGES PreviousState;
 
     String1.Length = sizeof L"Parameter1" - sizeof UNICODE_NULL;
     String1Ansi.Length = sizeof "Parameter1" - sizeof ANSI_NULL;
@@ -94,25 +157,29 @@ TestHardError(
     CheckHardError(0x40000003,                  0, OptionOk,                STATUS_SUCCESS,            ResponseNotHandled,     6, 1, 2, 3, 4, 5, 6);           // TODO: interactive on ROS
     }
 
-    // The return value is a random large value on Windows Server 2003
-    if (GetNTVersion() > _WIN32_WINNT_WS03)
+    /* The return value is a random large value on Windows Server 2003. */
+    TestShutdownOption = (GetNTVersion() > _WIN32_WINNT_WS03);
+#if !defined(_WIN64)
+    TestShutdownOption = TestShutdownOption && (GetNTVersion() < _WIN32_WINNT_WIN8);
+#endif
+    if (TestShutdownOption)
     {
+        ShutdownResponse = ResponseReturnToCaller;
+        CheckShutdownResponse = FALSE;
 #if _WIN64
         if (GetNTVersion() == _WIN32_WINNT_VISTA)
         {
-            CheckHardError(0x40000004,                  0, OptionShutdownSystem,    STATUS_PRIVILEGE_NOT_HELD, 64,     0, 0);
-        }
-        else
-        {
-            CheckHardError(0x40000004,                  0, OptionShutdownSystem,    STATUS_PRIVILEGE_NOT_HELD, ResponseReturnToCaller,     0, 0);
-        }
-#else
-        // Return value is also a random large value on 32-bit 8+
-        if (GetNTVersion() < _WIN32_WINNT_WIN8)
-        {
-            CheckHardError(0x40000004,                  0, OptionShutdownSystem,    STATUS_PRIVILEGE_NOT_HELD, ResponseReturnToCaller,     0, 0);
+            ShutdownResponse = 64;
+            CheckShutdownResponse = TRUE;
         }
 #endif
+        if (DisableShutdownPrivilege(&TokenHandle, &PreviousState))
+        {
+            CheckHardErrorEx(0x40000004, 0, OptionShutdownSystem, STATUS_PRIVILEGE_NOT_HELD, ShutdownResponse, CheckShutdownResponse, 0, 0);
+            RestoreShutdownPrivilege(TokenHandle, &PreviousState);
+        }
+        else
+            skip(1, "Could not disable SeShutdownPrivilege\n");
     }
 
     if (InteractivePart1)
@@ -136,12 +203,19 @@ TestHardError(
     CheckHardError(0x40000013,                  0, OptionYesNoCancel,       STATUS_SUCCESS,            ResponseNo,             0, 0);                          // outputs a box :|
     CheckHardError(0x40000013,                  0, OptionYesNoCancel,       STATUS_SUCCESS,            ResponseCancel,         0, 0);                          // outputs a box :|
     }
-    CheckHardError(0x40000009,                  0, 9,                       STATUS_SUCCESS,            ResponseReturnToCaller,     0, 0);
-    CheckHardError(0x4000000a,                  0, 10,                      STATUS_SUCCESS,            ResponseReturnToCaller,     0, 0);
-    CheckHardError(0x4000000b,                  0, 11,                      STATUS_SUCCESS,            ResponseReturnToCaller,     0, 0);
-    CheckHardError(0x4000000c,                  0, 12,                      STATUS_SUCCESS,            ResponseReturnToCaller,     0, 0);
-    CheckHardError(0x4000000d,                  0, MAXULONG / 2 + 1,        STATUS_SUCCESS,            ResponseReturnToCaller,     0, 0);
-    CheckHardError(0x4000000d,                  0, MAXULONG,                STATUS_SUCCESS,            ResponseReturnToCaller,     0, 0);
+    /* Unknown response options return ResponseNotHandled on NT 6.1+ and
+     * ResponseReturnToCaller on older kernels. */
+    {
+        HARDERROR_RESPONSE _UnknownResp = (GetNTVersion() >= _WIN32_WINNT_WIN7)
+                                            ? ResponseNotHandled
+                                            : ResponseReturnToCaller;
+        CheckHardError(0x40000009,                  0, 9,                       STATUS_SUCCESS,            _UnknownResp,         0, 0);
+        CheckHardError(0x4000000a,                  0, 10,                      STATUS_SUCCESS,            _UnknownResp,         0, 0);
+        CheckHardError(0x4000000b,                  0, 11,                      STATUS_SUCCESS,            _UnknownResp,         0, 0);
+        CheckHardError(0x4000000c,                  0, 12,                      STATUS_SUCCESS,            _UnknownResp,         0, 0);
+        CheckHardError(0x4000000d,                  0, MAXULONG / 2 + 1,        STATUS_SUCCESS,            _UnknownResp,         0, 0);
+        CheckHardError(0x4000000d,                  0, MAXULONG,                STATUS_SUCCESS,            _UnknownResp,         0, 0);
+    }
 
     if (InteractivePart2)
     {

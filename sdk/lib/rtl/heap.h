@@ -14,13 +14,19 @@
 /* Core heap definitions */
 #define HEAP_SEGMENTS 64
 
+#define HEAP_LFH_INDEX 0xFF
+#define HEAP_LFH_FRONT_END 2
+#define HEAP_LFH_OVERHEAD 8
+#define HEAP_LFH_MAX_BLOCK 0x400
+#define HEAP_LFH_BUCKETS ((HEAP_LFH_MAX_BLOCK >> HEAP_ENTRY_SHIFT) + 1)
+
 #define HEAP_ENTRY_SIZE ((ULONG)sizeof(HEAP_ENTRY))
 #ifdef _WIN64
 #define HEAP_ENTRY_SHIFT 4
 #else
 #define HEAP_ENTRY_SHIFT 3
 #endif
-#define HEAP_MAX_BLOCK_SIZE ((0x80000 - PAGE_SIZE) >> HEAP_ENTRY_SHIFT)
+#define HEAP_MAX_BLOCK_SIZE (0x10000 - (PAGE_SIZE >> HEAP_ENTRY_SHIFT))
 
 #define ARENA_INUSE_FILLER     0xBAADF00D
 #define ARENA_FREE_FILLER      0xFEEEFEEE
@@ -253,12 +259,10 @@ typedef struct _HEAP
     USHORT MaximumTagIndex;
     PHEAP_TAG_ENTRY TagEntries;
     LIST_ENTRY UCRList;
-    LIST_ENTRY UCRSegments; // FIXME: non-Vista
     ULONG_PTR AlignRound;
     ULONG_PTR AlignMask;
     LIST_ENTRY VirtualAllocdBlocks;
     LIST_ENTRY SegmentList;
-    struct _HEAP_SEGMENT *Segments[HEAP_SEGMENTS]; //FIXME: non-Vista
     USHORT AllocatorBackTraceIndex;
     ULONG NonDedicatedListLength;
     PVOID BlocksIndex; // HEAP_LIST_LOOKUP
@@ -270,6 +274,10 @@ typedef struct _HEAP
     PVOID FrontEndHeap;
     USHORT FrontHeapLockCount;
     UCHAR FrontEndHeapType;
+    UCHAR RequestedFrontEndHeapType;
+    PUSHORT FrontEndHeapUsageData;
+    USHORT FrontEndHeapMaximumIndex;
+    UCHAR FrontEndHeapStatusBitmap[(HEAP_LFH_BUCKETS + 7) / 8];
     HEAP_COUNTERS Counters;
     HEAP_TUNING_PARAMETERS TuningParameters;
     RTL_BITMAP FreeHintBitmap;  // FIXME: non-Vista
@@ -281,6 +289,23 @@ typedef struct _HEAP_SEGMENT
     HEAP_SEGMENT_MEMBERS;
 } HEAP_SEGMENT, *PHEAP_SEGMENT;
 
+FORCEINLINE
+PHEAP_SEGMENT
+RtlpHeapSegmentFromAddress(PHEAP Heap, PVOID Address)
+{
+    PLIST_ENTRY Link;
+    PHEAP_SEGMENT Segment;
+
+    for (Link = Heap->SegmentList.Flink; Link != &Heap->SegmentList; Link = Link->Flink)
+    {
+        Segment = CONTAINING_RECORD(Link, HEAP_SEGMENT, SegmentListEntry);
+        if ((ULONG_PTR)Address >= (ULONG_PTR)Segment->BaseAddress &&
+            (ULONG_PTR)Address < (ULONG_PTR)Segment->LastValidEntry)
+            return Segment;
+    }
+    return NULL;
+}
+
 typedef struct _HEAP_UCR_DESCRIPTOR
 {
     LIST_ENTRY ListEntry;
@@ -289,12 +314,8 @@ typedef struct _HEAP_UCR_DESCRIPTOR
     SIZE_T Size;
 } HEAP_UCR_DESCRIPTOR, *PHEAP_UCR_DESCRIPTOR;
 
-typedef struct _HEAP_UCR_SEGMENT
-{
-    LIST_ENTRY ListEntry;
-    SIZE_T ReservedSize;
-    SIZE_T CommittedSize;
-} HEAP_UCR_SEGMENT, *PHEAP_UCR_SEGMENT;
+#define HEAP_UCR_TAIL_SIZE ((HEAP_ENTRY_SIZE + (ULONG)sizeof(HEAP_UCR_DESCRIPTOR)) >> HEAP_ENTRY_SHIFT)
+C_ASSERT((sizeof(HEAP_UCR_DESCRIPTOR) & (sizeof(HEAP_ENTRY) - 1)) == 0);
 
 typedef struct _HEAP_ENTRY_EXTRA
 {
@@ -324,6 +345,7 @@ typedef struct _HEAP_VIRTUAL_ALLOC_ENTRY
 /* Global variables */
 extern RTL_CRITICAL_SECTION RtlpProcessHeapsListLock;
 extern BOOLEAN RtlpPageHeapEnabled;
+extern ULONG RtlpDisableHeapLookaside;
 
 /* Functions declarations */
 
@@ -479,5 +501,62 @@ RtlpRemoveHeapFromProcessList(PHEAP Heap);
 VOID
 NTAPI
 RtlInitializeHeapManager(VOID);
+
+VOID
+RtlpLfhInitializeHeap(PHEAP Heap, ULONG Flags, PRTL_HEAP_PARAMETERS Parameters, PVOID UsageData);
+
+SIZE_T
+RtlpLfhUsageDataSize(PHEAP Heap, ULONG Flags, PRTL_HEAP_PARAMETERS Parameters);
+
+VOID
+RtlpLfhDestroyHeap(PHEAP Heap);
+
+NTSTATUS
+RtlpLfhSetCompatibility(PHEAP Heap, ULONG Value);
+
+PVOID
+RtlpLfhAllocate(PHEAP Heap, ULONG Flags, SIZE_T Size);
+
+VOID
+RtlpLfhNoteBackendAllocate(PHEAP Heap, ULONG Flags, SIZE_T Size);
+
+VOID
+RtlpLfhNoteBackendFree(PHEAP Heap, PHEAP_ENTRY HeapEntry);
+
+typedef struct _RTLP_LFH_SLOT
+{
+    PVOID Block;
+    ULONG Index;
+} RTLP_LFH_SLOT, *PRTLP_LFH_SLOT;
+
+PHEAP
+RtlpLfhOwner(PVOID Ptr);
+
+PHEAP
+RtlpLfhLookup(PVOID Ptr, PRTLP_LFH_SLOT Slot);
+
+BOOLEAN
+RtlpLfhFree(PVOID Ptr, PRTLP_LFH_SLOT Slot);
+
+SIZE_T
+RtlpLfhSize(PHEAP Heap, PVOID Ptr);
+
+PVOID
+RtlpLfhReAllocate(PHEAP Heap, ULONG Flags, PVOID Ptr, SIZE_T Size);
+
+BOOLEAN
+RtlpLfhValidate(PHEAP Heap, PVOID Ptr);
+
+BOOLEAN
+RtlpLfhWalkUserBlock(PHEAP Heap, PHEAP_ENTRY Entry, struct _RTL_HEAP_WALK_ENTRY *WalkEntry);
+
+NTSTATUS
+RtlpLfhWalkNext(PHEAP Heap, struct _RTL_HEAP_WALK_ENTRY *WalkEntry, PHEAP_ENTRY *Next);
+
+BOOLEAN
+RtlpLfhWalkRegion(PHEAP Heap, struct _RTL_HEAP_WALK_ENTRY *WalkEntry);
+
+BOOLEAN
+RtlpLfhIsRegion(PHEAP Heap, PVOID Address);
 
 #endif

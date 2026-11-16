@@ -32,10 +32,16 @@
 #include <string.h>
 #include "wine/list.h"
 
+#ifdef __REACTOS__
+#define BG_MIN_RETRY_DELAY             60
+#define BG_DEFAULT_RETRY_DELAY         600
+#define BG_DEFAULT_NO_PROGRESS_TIMEOUT 1209600
+#endif
+
 /* Background copy job vtbl and related data */
 typedef struct
 {
-    IBackgroundCopyJob3 IBackgroundCopyJob3_iface;
+    IBackgroundCopyJob4 IBackgroundCopyJob4_iface;
     IBackgroundCopyJobHttpOptions IBackgroundCopyJobHttpOptions_iface;
     LONG ref;
     LPWSTR displayName;
@@ -66,6 +72,17 @@ typedef struct
     HANDLE wait;
     HANDLE cancel;
     HANDLE done;
+#ifdef __REACTOS__
+    ULONG retry_delay;
+    ULONG no_progress_timeout;
+    ULONG error_count;
+    ULONGLONG retry_time;
+    ULONGLONG transient_since;
+    BG_JOB_PROXY_USAGE proxy_usage;
+    WCHAR *proxy_list;
+    WCHAR *proxy_bypass_list;
+    BG_JOB_PRIORITY priority;
+#endif
 } BackgroundCopyJobImpl;
 
 /* Background copy file vtbl and related data */
@@ -96,32 +113,25 @@ typedef struct
     IClassFactory IClassFactory_iface;
 } ClassFactoryImpl;
 
-extern HANDLE stop_event DECLSPEC_HIDDEN;
-extern ClassFactoryImpl BITS_ClassFactory DECLSPEC_HIDDEN;
-extern BackgroundCopyManagerImpl globalMgr DECLSPEC_HIDDEN;
+extern HANDLE stop_event;
+extern ClassFactoryImpl BITS_ClassFactory;
+extern BackgroundCopyManagerImpl globalMgr;
 
-HRESULT BackgroundCopyManagerConstructor(LPVOID *ppObj) DECLSPEC_HIDDEN;
+HRESULT BackgroundCopyManagerConstructor(LPVOID *ppObj);
 HRESULT BackgroundCopyJobConstructor(LPCWSTR displayName, BG_JOB_TYPE type,
-                                     GUID *pJobId, BackgroundCopyJobImpl **job) DECLSPEC_HIDDEN;
+                                     GUID *pJobId, BackgroundCopyJobImpl **job);
 HRESULT enum_copy_job_create(BackgroundCopyManagerImpl *qmgr,
-        IEnumBackgroundCopyJobs **enumjob) DECLSPEC_HIDDEN;
+        IEnumBackgroundCopyJobs **enumjob);
 HRESULT BackgroundCopyFileConstructor(BackgroundCopyJobImpl *owner,
                                       LPCWSTR remoteName, LPCWSTR localName,
-                                      BackgroundCopyFileImpl **file) DECLSPEC_HIDDEN;
-HRESULT EnumBackgroundCopyFilesConstructor(BackgroundCopyJobImpl*, IEnumBackgroundCopyFiles**) DECLSPEC_HIDDEN;
-DWORD WINAPI fileTransfer(void *param) DECLSPEC_HIDDEN;
-void processJob(BackgroundCopyJobImpl *job) DECLSPEC_HIDDEN;
-BOOL processFile(BackgroundCopyFileImpl *file, BackgroundCopyJobImpl *job) DECLSPEC_HIDDEN;
-BOOL transitionJobState(BackgroundCopyJobImpl *job, BG_JOB_STATE from, BG_JOB_STATE to) DECLSPEC_HIDDEN;
+                                      BackgroundCopyFileImpl **file);
+HRESULT EnumBackgroundCopyFilesConstructor(BackgroundCopyJobImpl*, IEnumBackgroundCopyFiles**);
+DWORD WINAPI fileTransfer(void *param);
+void processJob(BackgroundCopyJobImpl *job);
+BOOL processFile(BackgroundCopyFileImpl *file, BackgroundCopyJobImpl *job);
+BOOL transitionJobState(BackgroundCopyJobImpl *job, BG_JOB_STATE from, BG_JOB_STATE to);
 
 /* Little helper functions */
-static inline WCHAR *strdupW(const WCHAR *src)
-{
-    WCHAR *dst = HeapAlloc(GetProcessHeap(), 0, (lstrlenW(src) + 1) * sizeof(WCHAR));
-    if (dst) lstrcpyW(dst, src);
-    return dst;
-}
-
 static inline WCHAR *co_strdupW(const WCHAR *src)
 {
     WCHAR *dst = CoTaskMemAlloc((lstrlenW(src) + 1) * sizeof(WCHAR));

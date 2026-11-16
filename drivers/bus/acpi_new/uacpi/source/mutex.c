@@ -3,7 +3,6 @@
 #include <uacpi/internal/log.h>
 #include <uacpi/internal/registers.h>
 #include <uacpi/internal/context.h>
-#include <uacpi/internal/io.h>
 #include <uacpi/kernel_api.h>
 #include <uacpi/internal/namespace.h>
 
@@ -16,14 +15,14 @@
 #define GLOBAL_LOCK_OWNED_BIT 1
 #define GLOBAL_LOCK_OWNED (1 << GLOBAL_LOCK_OWNED_BIT)
 
-#define GLOBAL_LOCK_MASK 3u
+#define GLOBAL_LOCK_MASK 0b11u
 
 static uacpi_bool try_acquire_global_lock_from_firmware(uacpi_u32 *lock)
 {
     uacpi_u32 value, new_value;
     uacpi_bool was_owned;
 
-    value = uacpi_mmio_read32(lock);
+    value = *(volatile uacpi_u32*)lock;
     do {
         was_owned = (value & GLOBAL_LOCK_OWNED) >> GLOBAL_LOCK_OWNED_BIT;
 
@@ -45,7 +44,7 @@ static uacpi_bool do_release_global_lock_to_firmware(uacpi_u32 *lock)
 {
     uacpi_u32 value, new_value;
 
-    value = uacpi_mmio_read32(lock);
+    value = *(volatile uacpi_u32*)lock;
     do {
         new_value = value & ~GLOBAL_LOCK_MASK;
     } while (!uacpi_atomic_cmpxchg32(lock, &value, new_value));
@@ -66,7 +65,7 @@ static uacpi_status uacpi_acquire_global_lock_from_firmware(void)
     for (;;) {
         spins++;
         uacpi_trace(
-            "trying to acquire the global lock from firmware... (attempt %u)",
+            "trying to acquire the global lock from firmware... (attempt %u)\n",
             spins
         );
 
@@ -82,7 +81,7 @@ static uacpi_status uacpi_acquire_global_lock_from_firmware(void)
         g_uacpi_rt_ctx.global_lock_pending = UACPI_TRUE;
         uacpi_trace(
             "global lock is owned by firmware, waiting for a release "
-            "notification..."
+            "notification...\n"
         );
         uacpi_kernel_unlock_spinlock(g_uacpi_rt_ctx.global_lock_spinlock, flags);
 
@@ -94,11 +93,11 @@ static uacpi_status uacpi_acquire_global_lock_from_firmware(void)
     uacpi_kernel_unlock_spinlock(g_uacpi_rt_ctx.global_lock_spinlock, flags);
 
     if (uacpi_unlikely(!success)) {
-        uacpi_error("unable to acquire global lock after %u attempts", spins);
+        uacpi_error("unable to acquire global lock after %u attempts\n", spins);
         return UACPI_STATUS_HARDWARE_TIMEOUT;
     }
 
-    uacpi_trace("global lock successfully acquired after %u attempt%s",
+    uacpi_trace("global lock successfully acquired after %u attempt%s\n",
                 spins, spins > 1 ? "s" : "");
     return UACPI_STATUS_OK;
 }
@@ -108,10 +107,10 @@ static void uacpi_release_global_lock_to_firmware(void)
     if (!g_uacpi_rt_ctx.has_global_lock)
         return;
 
-    uacpi_trace("releasing the global lock to firmware...");
+    uacpi_trace("releasing the global lock to firmware...\n");
     if (do_release_global_lock_to_firmware(&g_uacpi_rt_ctx.facs->global_lock)) {
         uacpi_trace("notifying firmware of the global lock release since the "
-                    "pending bit was set");
+                    "pending bit was set\n");
         uacpi_write_register_field(UACPI_REGISTER_FIELD_GBL_RLS, 1);
     }
 }
@@ -139,7 +138,7 @@ uacpi_status uacpi_acquire_native_mutex_with_timeout(
 
     if (uacpi_unlikely(ret != UACPI_STATUS_TIMEOUT || timeout == 0xFFFF)) {
         uacpi_error(
-            "unexpected status %08X (%s) while acquiring %p (timeout=%04X)",
+            "unexpected status %08X (%s) while acquiring %p (timeout=%04X)\n",
             ret, uacpi_status_to_string(ret), mtx, timeout
         );
     }
@@ -209,7 +208,7 @@ uacpi_status uacpi_acquire_aml_mutex(uacpi_mutex *mutex, uacpi_u16 timeout)
         if (uacpi_unlikely(mutex->depth == 0xFFFF)) {
             uacpi_warn(
                 "failing an attempt to acquire mutex @%p, too many recursive "
-                "acquires", mutex
+                "acquires\n", mutex
             );
             return UACPI_STATUS_DENIED;
         }
@@ -269,7 +268,7 @@ uacpi_status uacpi_recursive_lock_deinit(struct uacpi_recursive_lock *lock)
 {
     if (uacpi_unlikely(lock->depth)) {
         uacpi_warn(
-            "de-initializing active recursive lock %p with depth=%zu",
+            "de-initializing active recursive lock %p with depth=%zu\n",
             lock, lock->depth
         );
         lock->depth = 0;
@@ -334,7 +333,7 @@ uacpi_status uacpi_rw_lock_init(struct uacpi_rw_lock *lock)
 uacpi_status uacpi_rw_lock_deinit(struct uacpi_rw_lock *lock)
 {
     if (uacpi_unlikely(lock->num_readers)) {
-        uacpi_warn("de-initializing rw_lock %p with %zu active readers",
+        uacpi_warn("de-initializing rw_lock %p with %zu active readers\n",
                    lock, lock->num_readers);
         lock->num_readers = 0;
     }

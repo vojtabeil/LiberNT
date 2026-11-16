@@ -6,6 +6,10 @@
  */
 
 #include <math.h>
+#include "libm.h"
+#include "libm_util.h"
+#define USE_RAISE_FPSW_FLAGS
+#include "libm_inlines.h"
 
 int
 __cdecl
@@ -15,6 +19,8 @@ _invoke_matherr(
     double arg1,
     double arg2,
     double retval);
+
+double __cdecl __acrt_report_math_error(int type, char const* name, double arg1, double arg2, double retval, int error);
 
 /*!
  * @brief Handles an error condition.
@@ -44,9 +50,9 @@ _handle_error(
 {
     double retval = *(double*)&value;
 
-    _invoke_matherr(type, fname, arg1, arg2, retval);
+    raise_fpsw_flags(flags);
 
-    return retval;
+    return __acrt_report_math_error(type, fname, arg1, arg2, retval, error);
 }
 
 
@@ -66,7 +72,7 @@ _handle_errorf(
 {
     float retval = *(float*)&value;
 
-    _invoke_matherr(type, fname, arg1, arg2, retval);
+    raise_fpsw_flags(flags);
 
-    return retval;
+    return (float)__acrt_report_math_error(type, fname, arg1, arg2, retval, error);
 }

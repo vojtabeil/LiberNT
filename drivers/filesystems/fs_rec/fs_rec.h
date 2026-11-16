@@ -138,7 +138,7 @@ typedef struct BIOS_PARAMETER_BLOCK
 } BIOS_PARAMETER_BLOCK, *PBIOS_PARAMETER_BLOCK;
 
 /* UDFS Structures */
-#include <pshpack1.h>
+#pragma pack(push, 1)
 typedef struct _TAG
 {
     USHORT Identifier;
@@ -163,13 +163,14 @@ typedef struct _AVDP
     EXTENT MainVolumeDescriptorExtent;
     EXTENT ReserveVolumeDescriptorExtent;
 } AVDP, *PAVDP;
-#include <poppack.h>
+#pragma pack(pop)
 
 /* Filesystem Types */
 typedef enum _FILE_SYSTEM_TYPE
 {
     FS_TYPE_UNUSED,
     FS_TYPE_VFAT,
+    FS_TYPE_EXFAT,
     FS_TYPE_NTFS,
     FS_TYPE_CDFS,
     FS_TYPE_UDFS,
@@ -207,6 +208,13 @@ FsRecCdfsFsControl(
 NTSTATUS
 NTAPI
 FsRecVfatFsControl(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN PIRP Irp
+);
+
+NTSTATUS
+NTAPI
+FsRecExFatFsControl(
     IN PDEVICE_OBJECT DeviceObject,
     IN PIRP Irp
 );

@@ -31,6 +31,7 @@
 
 NTSTATUS find_entry( PVOID BaseAddress, LDR_RESOURCE_INFO *info,
                      ULONG level, void **ret, int want_dir );
+PVOID NTAPI RtlpGetResourceModuleForEntry( PVOID BaseAddress, PVOID Entry );
 
 /* FUNCTIONS ****************************************************************/
 
@@ -222,6 +223,7 @@ static NTSTATUS LdrpAccessResource( PVOID BaseAddress, IMAGE_RESOURCE_DATA_ENTRY
     {
         ULONG dirsize;
 
+        BaseAddress = RtlpGetResourceModuleForEntry( BaseAddress, entry );
         if (!RtlImageDirectoryEntryToData( BaseAddress, TRUE, IMAGE_DIRECTORY_ENTRY_RESOURCE, &dirsize ))
             status = STATUS_RESOURCE_DATA_NOT_FOUND;
         else
@@ -230,10 +232,10 @@ static NTSTATUS LdrpAccessResource( PVOID BaseAddress, IMAGE_RESOURCE_DATA_ENTRY
             {
                 if (is_data_file_module(BaseAddress))
                 {
-                    PVOID mod = (PVOID)((ULONG_PTR)BaseAddress & ~1);
+                    PVOID mod = (PVOID)((ULONG_PTR)BaseAddress & ~(ULONG_PTR)3);
                     *ptr = RtlImageRvaToVa( RtlImageNtHeader(mod), mod, entry->OffsetToData, NULL );
                 }
-                else *ptr = (char *)BaseAddress + entry->OffsetToData;
+                else *ptr = (char *)((ULONG_PTR)BaseAddress & ~(ULONG_PTR)3) + entry->OffsetToData;
             }
             if (size) *size = entry->Size;
         }
@@ -327,6 +329,67 @@ LdrFindResourceDirectory_U(IN PVOID BaseAddress,
     }
     _SEH2_END;
     return status;
+}
+
+NTSTATUS
+NTAPI
+LdrResFindResource(
+    _In_ PVOID BaseAddress,
+    _In_ ULONG_PTR Type,
+    _In_ ULONG_PTR Name,
+    _In_ ULONG_PTR Language,
+    _Out_opt_ PVOID *Resource,
+    _Out_opt_ PVOID CultureName,
+    _Out_opt_ PULONG ResourceSize,
+    _Out_opt_ PULONG LanguageFound,
+    _In_ ULONG Flags)
+{
+    LDR_RESOURCE_INFO ResourceInfo;
+    PIMAGE_RESOURCE_DATA_ENTRY ResourceEntry;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(CultureName);
+    if ((BaseAddress == NULL) || ((Flags & 0xC02) != 0))
+        return STATUS_INVALID_PARAMETER;
+
+    ResourceInfo.Type = Type;
+    ResourceInfo.Name = Name;
+    ResourceInfo.Language = Language;
+    Status = LdrFindResource_U(BaseAddress, &ResourceInfo, 3, &ResourceEntry);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (LanguageFound != NULL)
+        *LanguageFound = (ULONG)Language;
+    return LdrAccessResource(BaseAddress, ResourceEntry, Resource, ResourceSize);
+}
+
+NTSTATUS
+NTAPI
+LdrResFindResourceDirectory(
+    _In_ PVOID BaseAddress,
+    _In_opt_ ULONG_PTR Type,
+    _In_opt_ ULONG_PTR Name,
+    _Out_opt_ PIMAGE_RESOURCE_DIRECTORY *Directory,
+    _Out_opt_ PVOID CultureName,
+    _Out_opt_ PULONG LanguageFound,
+    _In_ ULONG Flags,
+    _In_opt_ PVOID Reserved)
+{
+    LDR_RESOURCE_INFO ResourceInfo;
+    ULONG Level;
+
+    UNREFERENCED_PARAMETER(CultureName);
+    UNREFERENCED_PARAMETER(LanguageFound);
+    UNREFERENCED_PARAMETER(Reserved);
+    if ((BaseAddress == NULL) || (Directory == NULL) || ((Flags & 0xC00) != 0))
+        return STATUS_INVALID_PARAMETER;
+
+    ResourceInfo.Type = Type;
+    ResourceInfo.Name = Name;
+    ResourceInfo.Language = 0;
+    Level = Name != 0 ? 2 : Type != 0 ? 1 : 0;
+    return LdrFindResourceDirectory_U(BaseAddress, &ResourceInfo, Level, Directory);
 }
 
 

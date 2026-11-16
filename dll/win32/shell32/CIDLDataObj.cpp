@@ -91,8 +91,11 @@ HRESULT WINAPI IEnumFORMATETCImpl::Skip(ULONG celt)
 {
     TRACE("(%p)->(num=%u)\n", this, celt);
 
-    if (posFmt + celt >= countFmt)
+    if (celt > countFmt - posFmt)
+    {
+        posFmt = countFmt;
         return S_FALSE;
+    }
     posFmt += celt;
     return S_OK;
 }
@@ -115,7 +118,7 @@ HRESULT WINAPI IEnumFORMATETCImpl::Clone(LPENUMFORMATETC* ppenum)
     hResult = IEnumFORMATETC_Constructor(countFmt, pFmt, ppenum);
     if (FAILED_UNEXPECTEDLY(hResult))
         return hResult;
-    return (*ppenum)->Skip(posFmt);
+    return S_OK;
 }
 
 HRESULT IEnumFORMATETC_Constructor(UINT cfmt, const FORMATETC afmt[], IEnumFORMATETC **ppFormat)
@@ -191,7 +194,7 @@ CIDLDataObj::~CIDLDataObj()
 
 HRESULT WINAPI CIDLDataObj::Initialize(HWND hwndOwner, PCIDLIST_ABSOLUTE pMyPidl, PCUIDLIST_RELATIVE_ARRAY apidlx, UINT cidlx, BOOL bAddAdditionalFormats)
 {
-    HGLOBAL hida = RenderSHELLIDLIST((LPITEMIDLIST)pMyPidl, (LPITEMIDLIST*)apidlx, cidlx);
+    HGLOBAL hida = RenderSHELLIDLIST(pMyPidl, (const ITEMIDLIST **)apidlx, cidlx);
     if (!hida)
     {
         ERR("Failed to render " CFSTR_SHELLIDLISTA "\n");
@@ -207,6 +210,34 @@ HRESULT WINAPI CIDLDataObj::Initialize(HWND hwndOwner, PCIDLIST_ABSOLUTE pMyPidl
     HRESULT hr = SetData(&Format, &medium, TRUE);
     if (!FAILED_UNEXPECTEDLY(hr) && bAddAdditionalFormats)
     {
+        BOOL bFileSystem = TRUE;
+        for (UINT i = 0; i < cidlx && bFileSystem; ++i)
+        {
+            CComHeapPtr<ITEMIDLIST> pidl(ILCombine(pMyPidl, apidlx[i]));
+            CComPtr<IShellFolder> psfParent;
+            PCUITEMID_CHILD pidlChild;
+            SFGAOF Attributes = SFGAO_FILESYSTEM;
+
+            if (ILIsEmpty(pidl))
+                continue;
+            bFileSystem = SUCCEEDED(SHBindToParent(pidl, IID_PPV_ARG(IShellFolder, &psfParent), &pidlChild)) &&
+                          SUCCEEDED(psfParent->GetAttributesOf(1, &pidlChild, &Attributes)) &&
+                          (Attributes & SFGAO_FILESYSTEM);
+        }
+
+        if (!bFileSystem)
+        {
+            Format.cfFormat = RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT);
+            medium.hGlobal = GlobalAlloc(GHND, sizeof(DWORD));
+            if (!medium.hGlobal)
+                return E_OUTOFMEMORY;
+            DWORD *pdwEffect = (DWORD *)GlobalLock(medium.hGlobal);
+            if (pdwEffect)
+                *pdwEffect = DROPEFFECT_LINK;
+            GlobalUnlock(medium.hGlobal);
+            return SetData(&Format, &medium, TRUE);
+        }
+
         /* The Windows default shell IDataObject::GetData fails with DV_E_CLIPFORMAT if the desktop is present.
          * Windows does return HDROP in EnumFormatEtc and does not fail until GetData is called.
          * Failing GetData causes 7-Zip 23.01 to not add its menu to the desktop folder. */
@@ -217,19 +248,19 @@ HRESULT WINAPI CIDLDataObj::Initialize(HWND hwndOwner, PCIDLIST_ABSOLUTE pMyPidl
         }
 
         Format.cfFormat = CF_HDROP;
-        medium.hGlobal = RenderHDROP((LPITEMIDLIST)pMyPidl, (LPITEMIDLIST*)apidlx, cidlx);
+        medium.hGlobal = RenderHDROP(pMyPidl, (const ITEMIDLIST **)apidlx, cidlx);
         hr = SetData(&Format, &medium, TRUE);
         if (FAILED_UNEXPECTEDLY(hr))
             return hr;
 
         Format.cfFormat = RegisterClipboardFormatA(CFSTR_FILENAMEA);
-        medium.hGlobal = RenderFILENAMEA((LPITEMIDLIST)pMyPidl, (LPITEMIDLIST*)apidlx, cidlx);
+        medium.hGlobal = RenderFILENAMEA(pMyPidl, (const ITEMIDLIST **)apidlx, cidlx);
         hr = SetData(&Format, &medium, TRUE);
         if (FAILED_UNEXPECTEDLY(hr))
             return hr;
 
         Format.cfFormat = RegisterClipboardFormatW(CFSTR_FILENAMEW);
-        medium.hGlobal = RenderFILENAMEW((LPITEMIDLIST)pMyPidl, (LPITEMIDLIST*)apidlx, cidlx);
+        medium.hGlobal = RenderFILENAMEW(pMyPidl, (const ITEMIDLIST **)apidlx, cidlx);
         hr = SetData(&Format, &medium, TRUE);
         if (FAILED_UNEXPECTEDLY(hr))
             return hr;
@@ -254,25 +285,46 @@ HRESULT WINAPI CIDLDataObj::GetData(LPFORMATETC pformatetcIn, STGMEDIUM *pmedium
         const FORMATETC& fmt = m_Formats[n];
         if (fmt.cfFormat == pformatetcIn->cfFormat &&
             fmt.dwAspect == pformatetcIn->dwAspect &&
-            fmt.tymed == pformatetcIn->tymed)
+            (fmt.tymed & pformatetcIn->tymed))
         {
             if (m_FailGetHDrop && fmt.cfFormat == CF_HDROP)
                 return DV_E_CLIPFORMAT;
 
-            if (pformatetcIn->tymed != TYMED_HGLOBAL)
+            if (m_Storage[n].tymed != TYMED_HGLOBAL)
             {
                 UNIMPLEMENTED;
-                return E_INVALIDARG;
+                return DV_E_TYMED;
             }
-            else
+
+            if (!m_Storage[n].hGlobal)
+                return DV_E_FORMATETC;
+
+            SIZE_T cb = GlobalSize(m_Storage[n].hGlobal);
+            HGLOBAL hCopy = GlobalAlloc(GMEM_MOVEABLE, cb);
+            if (!hCopy)
+                return E_OUTOFMEMORY;
+            PVOID pDst = GlobalLock(hCopy);
+            PVOID pSrc = GlobalLock(m_Storage[n].hGlobal);
+            if (!pDst || !pSrc)
             {
-                *pmedium = m_Storage[n];
-                return QueryInterface(IID_PPV_ARG(IUnknown, &pmedium->pUnkForRelease));
+                if (pSrc)
+                    GlobalUnlock(m_Storage[n].hGlobal);
+                if (pDst)
+                    GlobalUnlock(hCopy);
+                GlobalFree(hCopy);
+                return E_OUTOFMEMORY;
             }
+            CopyMemory(pDst, pSrc, cb);
+            GlobalUnlock(m_Storage[n].hGlobal);
+            GlobalUnlock(hCopy);
+
+            pmedium->tymed = TYMED_HGLOBAL;
+            pmedium->hGlobal = hCopy;
+            return S_OK;
         }
     }
 
-    return E_INVALIDARG;
+    return DV_E_FORMATETC;
 }
 
 HRESULT WINAPI CIDLDataObj::GetDataHere(LPFORMATETC pformatetc, STGMEDIUM *pmedium)
@@ -290,7 +342,7 @@ HRESULT WINAPI CIDLDataObj::QueryGetData(LPFORMATETC pformatetc)
         const FORMATETC& fmt = m_Formats[n];
         if (fmt.cfFormat == pformatetc->cfFormat &&
             fmt.dwAspect == pformatetc->dwAspect &&
-            fmt.tymed == pformatetc->tymed)
+            (fmt.tymed & pformatetc->tymed))
         {
             return S_OK;
         }
@@ -301,14 +353,17 @@ HRESULT WINAPI CIDLDataObj::QueryGetData(LPFORMATETC pformatetc)
 
 HRESULT WINAPI CIDLDataObj::GetCanonicalFormatEtc(LPFORMATETC pformatectIn, LPFORMATETC pformatetcOut)
 {
-    //FIXME("(%p)->()\n", this);
+    if (!pformatectIn || !pformatetcOut)
+        return E_INVALIDARG;
+    *pformatetcOut = *pformatectIn;
+    pformatetcOut->ptd = NULL;
     return DATA_S_SAMEFORMATETC;
 }
 
 HRESULT WINAPI CIDLDataObj::SetData(LPFORMATETC pformatetc, STGMEDIUM *pmedium, BOOL fRelease)
 {
     if (!fRelease)
-        return E_INVALIDARG;
+        return E_NOTIMPL;
 
     for (int n = 0; n < m_Formats.GetSize(); ++n)
     {
@@ -334,13 +389,12 @@ HRESULT WINAPI CIDLDataObj::EnumFormatEtc(DWORD dwDirection, IEnumFORMATETC **pp
     TRACE("(%p)->()\n", this);
     *ppenumFormatEtc = NULL;
 
-    /* only get data */
-    if (DATADIR_GET == dwDirection)
+    if (DATADIR_GET == dwDirection || DATADIR_SET == dwDirection)
     {
         return IEnumFORMATETC_Constructor(m_Formats.GetSize(), m_Formats.GetData(), ppenumFormatEtc);
     }
 
-    return E_NOTIMPL;
+    return E_INVALIDARG;
 }
 
 HRESULT WINAPI CIDLDataObj::DAdvise(FORMATETC *pformatetc, DWORD advf, IAdviseSink *pAdvSink, DWORD *pdwConnection)

@@ -114,6 +114,12 @@ SmpCheckForCrashDump(
     IN PUNICODE_STRING FileName
 );
 
+ULONGLONG
+NTAPI
+SmpQueryCrashDumpPageFileSize(
+    IN ULONGLONG Ram
+);
+
 /* pagefile.c */
 
 VOID
@@ -160,7 +166,8 @@ SmpInit(
 ULONG
 NTAPI
 SmpApiLoop(
-    _In_ PVOID Parameter);
+    IN PVOID Parameter
+);
 
 /* smsbapi.c */
 
@@ -284,6 +291,12 @@ SmpLoadSubSystem(
 
 NTSTATUS
 NTAPI
+SmpLoadSubSystemsForSystemSession(
+    OUT PHANDLE ProcessId
+);
+
+NTSTATUS
+NTAPI
 SmpLoadSubSystemsForMuSession(
     IN PULONG MuSessionId,
     OUT PHANDLE ProcessId,
@@ -313,6 +326,12 @@ SmpParseCommandLine(
     OUT PUNICODE_STRING FileName,
     OUT PUNICODE_STRING Directory,
     OUT PUNICODE_STRING Arguments
+);
+
+BOOLEAN
+NTAPI
+SmpQueryRegistrySosOption(
+    VOID
 );
 
 BOOLEAN

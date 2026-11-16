@@ -1,0 +1,119 @@
+/*
+ * PROJECT:         LiberNT kernel-mode tests
+ * LICENSE:         GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later)
+ * PURPOSE:         Kernel-Mode Test Suite IPI and generic DPC call API
+ */
+
+#include <kmt_test.h>
+
+#define NDEBUG
+#include <debug.h>
+
+static volatile LONG IpiCalls;
+static volatile LONG64 IpiMask;
+
+static
+ULONG_PTR
+NTAPI
+IpiBroadcastWorker(
+    _In_ ULONG_PTR Argument)
+{
+    ok_eq_ulongptr(Argument, (ULONG_PTR)0x1BADD00D);
+    InterlockedIncrement(&IpiCalls);
+    InterlockedOr64(&IpiMask, (LONG64)((KAFFINITY)1 << KeGetCurrentProcessorNumberEx(NULL)));
+    return 0x77;
+}
+
+static
+VOID
+TestIpiGenericCall(VOID)
+{
+    ULONG_PTR Result;
+    ULONG Round;
+    ULONG Delivered = 0;
+
+    for (Round = 0; Round < 4; Round++)
+    {
+        IpiCalls = 0;
+        IpiMask = 0;
+        Result = KeIpiGenericCall(IpiBroadcastWorker, (ULONG_PTR)0x1BADD00D);
+        ok_eq_ulongptr(Result, (ULONG_PTR)0x77);
+        ok_eq_long(IpiCalls, (LONG)KeNumberProcessors);
+        ok_eq_ulonglong((ULONGLONG)IpiMask, (ULONGLONG)KeQueryActiveProcessors());
+    }
+
+    /* One send following another is the case the local APIC has to be let
+     * finish, so run them with nothing in between. */
+    for (Round = 0; Round < 256; Round++)
+    {
+        IpiCalls = 0;
+        IpiMask = 0;
+        Result = KeIpiGenericCall(IpiBroadcastWorker, (ULONG_PTR)0x1BADD00D);
+        if (Result == (ULONG_PTR)0x77 &&
+            IpiCalls == (LONG)KeNumberProcessors &&
+            (ULONGLONG)IpiMask == (ULONGLONG)KeQueryActiveProcessors())
+        {
+            Delivered++;
+        }
+    }
+    ok_eq_ulong(Delivered, 256ul);
+}
+
+static volatile LONG DpcCalls;
+static volatile LONG DpcSyncObserved;
+
+static
+VOID
+NTAPI
+GenericDpcRoutine(
+    _In_ PKDPC Dpc,
+    _In_opt_ PVOID DeferredContext,
+    _In_opt_ PVOID SystemArgument1,
+    _In_opt_ PVOID SystemArgument2)
+{
+    UNREFERENCED_PARAMETER(Dpc);
+    ok_eq_pointer(DeferredContext, (PVOID)(ULONG_PTR)0xD00DFEED);
+    ok_eq_uint(KeGetCurrentIrql(), DISPATCH_LEVEL);
+
+    InterlockedIncrement(&DpcCalls);
+    if (KeSignalCallDpcSynchronize(SystemArgument2))
+        InterlockedIncrement(&DpcSyncObserved);
+    KeSignalCallDpcDone(SystemArgument1);
+}
+
+static
+VOID
+TestGenericCallDpc(VOID)
+{
+    ULONG Round;
+    ULONG Reached = 0;
+
+    DpcCalls = 0;
+    DpcSyncObserved = 0;
+
+    KeGenericCallDpc(GenericDpcRoutine, (PVOID)(ULONG_PTR)0xD00DFEED);
+
+    ok_eq_long(DpcCalls, (LONG)KeNumberProcessors);
+    ok_eq_long(DpcSyncObserved, 1L);
+
+    KeFlushQueuedDpcs();
+
+    /* A processor that stops ending its interrupts answers the first round
+     * and no other, so run them back to back. */
+    for (Round = 0; Round < 64; Round++)
+    {
+        DpcCalls = 0;
+        DpcSyncObserved = 0;
+        KeGenericCallDpc(GenericDpcRoutine, (PVOID)(ULONG_PTR)0xD00DFEED);
+        if (DpcCalls == (LONG)KeNumberProcessors && DpcSyncObserved == 1L)
+            Reached++;
+        KeFlushQueuedDpcs();
+    }
+    ok_eq_ulong(Reached, 64ul);
+}
+
+START_TEST(KeIpiKM)
+{
+    TestIpiGenericCall();
+    TestGenericCallDpc();
+}

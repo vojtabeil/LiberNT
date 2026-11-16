@@ -117,10 +117,10 @@ struct cmdHistory * cfgets (char *buf, unsigned int length, struct cmdHistory *c
 					// crn@ozemail.com.au
 					if (cmdhist != NULL) {
 						if (!strcmp(buf, ""))
-							strncpy(buf, cmdhist->cmd, 79);
+							lstrcpynA(buf, cmdhist->cmd, 80);
 						else if (cmdhist->prev != NULL) {
 							cmdhist = cmdhist->prev;
-							strncpy(buf, cmdhist->cmd, 79);
+							lstrcpynA(buf, cmdhist->cmd, 80);
 						}
 						current = strlen(buf);
 					}
@@ -132,7 +132,7 @@ struct cmdHistory * cfgets (char *buf, unsigned int length, struct cmdHistory *c
 					if (cmdhist != NULL) {
 						if (cmdhist->next != NULL) {
 							cmdhist = cmdhist->next;
-							strncpy(buf, cmdhist->cmd, 79);
+							lstrcpynA(buf, cmdhist->cmd, 80);
 						} else {
 							strncpy(buf, "", 79);
 						}
@@ -195,7 +195,7 @@ struct cmdHistory * cfgets (char *buf, unsigned int length, struct cmdHistory *c
 					break;
 				case VK_DELETE:
 					if (current > 0 && current > cursor) {
-						strcpy(&buf[cursor],&buf[cursor+1]);
+						memmove(&buf[cursor], &buf[cursor+1], strlen(&buf[cursor+1]) + 1);
 						current--;
 						buf[current] = 0;
 						printit("\r");
@@ -206,7 +206,7 @@ struct cmdHistory * cfgets (char *buf, unsigned int length, struct cmdHistory *c
 					break;
 				case VK_BACK:
 					if (cursor > 0 ) {
-						strcpy(&buf[cursor-1],&buf[cursor]);
+						memmove(&buf[cursor-1], &buf[cursor], strlen(&buf[cursor]) + 1);
 						current--;
 						cursor--;
 						buf[current] = 0;

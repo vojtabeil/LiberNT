@@ -2,8 +2,16 @@
 #define STANDALONE
 #include <wine/test.h>
 
+extern void func_WindowPropertyStore(void);
 extern void func_AddCommas(void);
 extern void func_AssocCreateElement(void);
+extern void func_AssocCreateForClasses(void);
+extern void func_DefaultProperties(void);
+extern void func_ILLoadFromStreamEx(void);
+extern void func_ItemPropertyStores(void);
+extern void func_LocalizedName(void);
+extern void func_SHAssocEnumHandlers(void);
+extern void func_SHGetDriveMedia(void);
 extern void func_Control_RunDLLW(void);
 extern void func_CFSFolder(void);
 extern void func_CheckEscapes(void);
@@ -16,24 +24,30 @@ extern void func_CShellLink(void);
 extern void func_CUserNotification(void);
 extern void func_DragDrop(void);
 extern void func_ExtractIconEx(void);
+extern void func_FileTypeName(void);
 extern void func_FindExecutable(void);
 extern void func_GetDisplayNameOf(void);
 extern void func_GUIDFromString(void);
+extern void func_IconPositions(void);
 extern void func_ILCreateFromPath(void);
 extern void func_ILIsEqual(void);
 extern void func_Int64ToString(void);
-extern void func_IQueryAssociations(void);
 extern void func_IShellFolderViewCB(void);
 extern void func_LockServer(void);
 extern void func_menu(void);
 extern void func_OpenAs_RunDLL(void);
 extern void func_PathIsEqualOrSubFolder(void);
+extern void func_PathIsSlow(void);
 extern void func_PathIsTemporary(void);
 extern void func_PathMakeUniqueName(void);
 extern void func_PathProcessCommand(void);
 extern void func_PathResolve(void);
+extern void func_ProgramFilesDir(void);
+extern void func_SHGetFolderPathToken(void);
 extern void func_PIDL(void);
 extern void func_RealShellExecuteEx(void);
+extern void func_RegItemDisplayName(void);
+extern void func_RegItemParse(void);
 extern void func_SHAppBarMessage(void);
 extern void func_SHChangeNotify(void);
 extern void func_SHCreateDataObject(void);
@@ -46,10 +60,13 @@ extern void func_She(void);
 extern void func_ShellExec_RunDLL(void);
 extern void func_ShellExecCmdLine(void);
 extern void func_ShellExecuteEx(void);
+extern void func_ShellExecuteLink(void);
 extern void func_ShellExecuteW(void);
 extern void func_ShellHook(void);
+extern void func_Shell_NotifyIconGetRect(void);
 extern void func_ShellState(void);
 extern void func_SHGetAttributesFromDataObject(void);
+extern void func_SHOpenFolderAndSelectItems(void);
 extern void func_SHGetComputerDisplayNameW(void);
 extern void func_SHGetFileInfo(void);
 extern void func_SHGetUnreadMailCountW(void);
@@ -62,11 +79,36 @@ extern void func_SHSimpleIDListFromPath(void);
 extern void func_SHRestricted(void);
 extern void func_SHSetUnreadMailCountW(void);
 extern void func_StrRStr(void);
+extern void func_StartMenuPin(void);
+
+extern void func_Win81Ordinals(void);
+
+extern void func_ModernShell(void);
+extern void func_Thumbnails(void);
+extern void func_ShellItemProperties(void);
+extern void func_SearchFolder(void);
+extern void func_RecentDocs(void);
+extern void func_PreviewHandler(void);
 
 const struct test winetest_testlist[] =
 {
+    { "ModernShell", func_ModernShell },
+    { "Thumbnails", func_Thumbnails },
+    { "ShellItemProperties", func_ShellItemProperties },
+    { "SearchFolder", func_SearchFolder },
+    { "RecentDocs", func_RecentDocs },
+    { "PreviewHandler", func_PreviewHandler },
+    { "WindowPropertyStore", func_WindowPropertyStore },
+    { "StartMenuPin", func_StartMenuPin },
     { "AddCommas", func_AddCommas },
     { "AssocCreateElement", func_AssocCreateElement },
+    { "AssocCreateForClasses", func_AssocCreateForClasses },
+    { "DefaultProperties", func_DefaultProperties },
+    { "ILLoadFromStreamEx", func_ILLoadFromStreamEx },
+    { "ItemPropertyStores", func_ItemPropertyStores },
+    { "LocalizedName", func_LocalizedName },
+    { "SHAssocEnumHandlers", func_SHAssocEnumHandlers },
+    { "SHGetDriveMedia", func_SHGetDriveMedia },
     { "Control_RunDLLW", func_Control_RunDLLW },
     { "CFSFolder", func_CFSFolder },
     { "CheckEscapes", func_CheckEscapes },
@@ -79,24 +121,30 @@ const struct test winetest_testlist[] =
     //{ "CUserNotification", func_CUserNotification }, // Test is broken on Win 2003
     { "DragDrop", func_DragDrop },
     { "ExtractIconEx", func_ExtractIconEx },
+    { "FileTypeName", func_FileTypeName },
     { "FindExecutable", func_FindExecutable },
     { "GetDisplayNameOf", func_GetDisplayNameOf },
     { "GUIDFromString", func_GUIDFromString },
+    { "IconPositions", func_IconPositions },
     { "ILCreateFromPath", func_ILCreateFromPath },
     { "ILIsEqual", func_ILIsEqual },
     { "Int64ToString", func_Int64ToString },
-    { "IQueryAssociations", func_IQueryAssociations },
     { "IShellFolderViewCB", func_IShellFolderViewCB },
     { "LockServer", func_LockServer },
     { "menu", func_menu },
     //{ "OpenAs_RunDLL", func_OpenAs_RunDLL }, // Test hangs on Win 2003
     { "PathIsEqualOrSubFolder", func_PathIsEqualOrSubFolder },
+    { "PathIsSlow", func_PathIsSlow },
     { "PathIsTemporary", func_PathIsTemporary },
     { "PathMakeUniqueName", func_PathMakeUniqueName },
     { "PathProcessCommand", func_PathProcessCommand },
     { "PathResolve", func_PathResolve },
+    { "ProgramFilesDir", func_ProgramFilesDir },
+    { "SHGetFolderPathToken", func_SHGetFolderPathToken },
     { "PIDL", func_PIDL },
     { "RealShellExecuteEx", func_RealShellExecuteEx },
+    { "RegItemDisplayName", func_RegItemDisplayName },
+    { "RegItemParse", func_RegItemParse },
     { "SHAppBarMessage", func_SHAppBarMessage },
     { "SHChangeNotify", func_SHChangeNotify },
     { "SHCreateDataObject", func_SHCreateDataObject },
@@ -109,10 +157,13 @@ const struct test winetest_testlist[] =
     //{ "ShellExec_RunDLL", func_ShellExec_RunDLL }, Broke on Windows
     //{ "ShellExecCmdLine", func_ShellExecCmdLine }, Broke on Windows
     { "ShellExecuteEx", func_ShellExecuteEx }, // Mostly broken on Windows, only simple tests enabled
+    { "ShellExecuteLink", func_ShellExecuteLink },
     //{ "ShellExecuteW", func_ShellExecuteW }, Broke on Windows
     { "ShellHook", func_ShellHook },
+    { "Shell_NotifyIconGetRect", func_Shell_NotifyIconGetRect },
     { "ShellState", func_ShellState },
     { "SHGetAttributesFromDataObject", func_SHGetAttributesFromDataObject },
+    { "SHOpenFolderAndSelectItems", func_SHOpenFolderAndSelectItems },
     { "SHGetComputerDisplayNameW", func_SHGetComputerDisplayNameW },
     { "SHGetFileInfo", func_SHGetFileInfo },
     { "SHGetUnreadMailCountW", func_SHGetUnreadMailCountW },
@@ -126,5 +177,6 @@ const struct test winetest_testlist[] =
     { "SHSetUnreadMailCountW", func_SHSetUnreadMailCountW },
     { "StrRStr", func_StrRStr },
 
+    { "Win81Ordinals", func_Win81Ordinals },
     { 0, 0 }
 };

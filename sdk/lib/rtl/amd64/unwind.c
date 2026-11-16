@@ -85,23 +85,25 @@ RtlLookupFunctionTable(
     OUT PULONG Length)
 {
     PVOID Table;
-    ULONG Size;
+    PVOID BaseAddress;
+    ULONG Size = 0;
 
     /* Find corresponding file header from code address */
-    if (!RtlPcToFileHeader((PVOID)ControlPc, (PVOID*)ImageBase))
+    if (!RtlPcToFileHeader((PVOID)ControlPc, &BaseAddress))
     {
         /* Nothing found */
         return NULL;
     }
 
+    *ImageBase = (DWORD64)BaseAddress;
+
     /* Locate the exception directory */
-    Table = RtlImageDirectoryEntryToData((PVOID)*ImageBase,
+    Table = RtlImageDirectoryEntryToData(BaseAddress,
                                          TRUE,
                                          IMAGE_DIRECTORY_ENTRY_EXCEPTION,
                                          &Size);
 
-    /* Return the number of entries */
-    *Length = Size / sizeof(RUNTIME_FUNCTION);
+    *Length = Size;
 
     /* Return the address of the table */
     return Table;
@@ -144,7 +146,7 @@ RtlLookupFunctionEntry(
 
     /* Do a binary search */
     IndexLo = 0;
-    IndexHi = TableLength;
+    IndexHi = TableLength / sizeof(RUNTIME_FUNCTION);
     while (IndexHi > IndexLo)
     {
         IndexMid = (IndexLo + IndexHi) / 2;
@@ -163,6 +165,7 @@ RtlLookupFunctionEntry(
         else
         {
             /* ControlPc is within limits, return entry */
+            /* TODO: follow RUNTIME_FUNCTION_INDIRECT entries */
             return FunctionEntry;
         }
     }
@@ -280,14 +283,6 @@ SetXmmRegFromStackValue(
     }
 }
 
-static
-__inline
-M128A
-GetXmmReg(PCONTEXT Context, BYTE Reg)
-{
-    return ((M128A*)(&Context->Xmm0))[Reg];
-}
-
 /*! RtlpTryToUnwindEpilog
  * \brief Helper function that tries to unwind epilog instructions.
  * \return TRUE if we have been in an epilog and it could be unwound.
@@ -298,6 +293,85 @@ GetXmmReg(PCONTEXT Context, BYTE Reg)
  * \todo
  *  - Test and compare with Windows behaviour
  */
+static
+BOOLEAN
+RtlpIsInEpilogV2(
+    _In_ PUNWIND_INFO UnwindInfo,
+    _In_ PRUNTIME_FUNCTION FunctionEntry,
+    _In_ ULONG64 ControlRva)
+{
+    ULONG EpilogSize, EpilogOffset;
+    ULONG Index;
+
+    if (UnwindInfo->UnwindCode[0].UnwindOp != UWOP_EPILOG)
+        return FALSE;
+
+    EpilogSize = UnwindInfo->UnwindCode[0].CodeOffset;
+    if (UnwindInfo->UnwindCode[0].OpInfo & 1)
+    {
+        EpilogOffset = FunctionEntry->EndAddress - EpilogSize;
+        if (ControlRva - EpilogOffset < EpilogSize)
+            return TRUE;
+    }
+
+    for (Index = 1; Index < UnwindInfo->CountOfCodes; Index++)
+    {
+        if (UnwindInfo->UnwindCode[Index].UnwindOp != UWOP_EPILOG)
+            break;
+
+        EpilogOffset = UnwindInfo->UnwindCode[Index].CodeOffset +
+                       UnwindInfo->UnwindCode[Index].OpInfo * 256;
+        if (EpilogOffset == 0)
+            break;
+
+        EpilogOffset = FunctionEntry->EndAddress - EpilogOffset;
+        if (ControlRva - EpilogOffset < EpilogSize)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+static
+ULONG
+RtlpGetPrimaryBeginAddress(
+    _In_ ULONG64 ImageBase,
+    _In_ PRUNTIME_FUNCTION FunctionEntry)
+{
+    PUNWIND_INFO UnwindInfo = RVA(ImageBase, FunctionEntry->UnwindData);
+
+    while (UnwindInfo->Flags & UNW_FLAG_CHAININFO)
+    {
+        FunctionEntry = (PRUNTIME_FUNCTION)&UnwindInfo->UnwindCode[(UnwindInfo->CountOfCodes + 1) & ~1];
+        UnwindInfo = RVA(ImageBase, FunctionEntry->UnwindData);
+    }
+
+    return FunctionEntry->BeginAddress;
+}
+
+static
+BOOLEAN
+RtlpIsJumpWithinFunction(
+    _In_ ULONG64 ImageBase,
+    _In_ PRUNTIME_FUNCTION FunctionEntry,
+    _In_ ULONG64 Target)
+{
+    PRUNTIME_FUNCTION TargetEntry;
+    ULONG64 TargetBase;
+    ULONG PrimaryBegin, TableLength;
+
+    if (RtlLookupFunctionTable(Target, &TargetBase, &TableLength) == NULL)
+        return FALSE;
+
+    TargetEntry = RtlLookupFunctionEntry(Target, &TargetBase, NULL);
+    if ((TargetEntry == NULL) || (TargetBase != ImageBase))
+        return FALSE;
+
+    PrimaryBegin = RtlpGetPrimaryBeginAddress(ImageBase, FunctionEntry);
+    return (RtlpGetPrimaryBeginAddress(TargetBase, TargetEntry) == PrimaryBegin) &&
+           (Target - ImageBase != PrimaryBegin);
+}
+
 static
 __inline
 BOOLEAN
@@ -312,7 +386,7 @@ RtlpTryToUnwindEpilog(
     BYTE *InstrPtr;
     DWORD Instr;
     BYTE Reg, Mod;
-    ULONG64 EndAddress;
+    ULONG64 BeginAddress, EndAddress;
 
     /* Make a local copy of the context */
     LocalContext = *Context;
@@ -369,7 +443,8 @@ RtlpTryToUnwindEpilog(
     }
 
     /* Loop the following instructions before the ret */
-    EndAddress = FunctionEntry->EndAddress + ImageBase - 1;
+    BeginAddress = FunctionEntry->BeginAddress + ImageBase;
+    EndAddress = FunctionEntry->EndAddress + ImageBase;
     while ((DWORD64)InstrPtr < EndAddress)
     {
         Instr = *(DWORD*)InstrPtr;
@@ -394,26 +469,51 @@ RtlpTryToUnwindEpilog(
             continue;
         }
 
-        /* Opcode not allowed for Epilog */
-        return FALSE;
+        break;
     }
 
-    // check for popfq
-
-    // also allow end with jmp imm, jmp [target], iretq
-
-    /* Check if we are at the ret instruction */
-    if ((DWORD64)InstrPtr != EndAddress)
-    {
-        /* If we went past the end of the function, something is broken! */
-        ASSERT((DWORD64)InstrPtr <= EndAddress);
+    if ((DWORD64)InstrPtr >= EndAddress)
         return FALSE;
-    }
 
-    /* Make sure this is really a ret instruction */
-    if (*InstrPtr != 0xc3)
+    if (InstrPtr[0] == 0xf3 && (DWORD64)InstrPtr + 1 < EndAddress)
+        InstrPtr++;
+
+    if (InstrPtr[0] != 0xc3)
     {
-        return FALSE;
+        ULONG64 Target;
+
+        if (InstrPtr[0] == 0xe9 && (DWORD64)InstrPtr + 5 <= EndAddress)
+        {
+            Target = (ULONG64)InstrPtr + 5 + *(LONG*)(InstrPtr + 1);
+        }
+        else if (InstrPtr[0] == 0xeb && (DWORD64)InstrPtr + 2 <= EndAddress)
+        {
+            Target = (ULONG64)InstrPtr + 2 + (CHAR)InstrPtr[1];
+        }
+        else if ((InstrPtr[0] & 0xf8) == 0x48)
+        {
+            if ((DWORD64)InstrPtr + 3 > EndAddress ||
+                InstrPtr[1] != 0xff ||
+                (InstrPtr[2] & 0x38) != 0x20)
+            {
+                return FALSE;
+            }
+            Target = 0;
+        }
+        else
+        {
+            if ((DWORD64)InstrPtr + 6 > EndAddress ||
+                InstrPtr[0] != 0xff ||
+                InstrPtr[1] != 0x25)
+            {
+                return FALSE;
+            }
+            Target = 0;
+        }
+        if (Target != 0 && Target >= BeginAddress && Target < EndAddress)
+            return FALSE;
+        if (Target != 0 && RtlpIsJumpWithinFunction(ImageBase, FunctionEntry, Target))
+            return FALSE;
     }
 
     /* Unwind is finished, pop new Rip from Stack */
@@ -491,6 +591,8 @@ RtlVirtualUnwind(
     UNWIND_CODE UnwindCode;
     BYTE Reg;
     PULONG LanguageHandler;
+    ULONG64 FrameBase;
+    BOOLEAN InProlog;
 
     /* Get relative virtual address */
     ControlRva = ControlPc - ImageBase;
@@ -505,16 +607,21 @@ RtlVirtualUnwind(
     /* Get a pointer to the unwind info */
     UnwindInfo = RVA(ImageBase, FunctionEntry->UnwindData);
 
-    /* The language specific handler data follows the unwind info */
-    LanguageHandler = ALIGN_UP_POINTER_BY(&UnwindInfo->UnwindCode[UnwindInfo->CountOfCodes], sizeof(ULONG));
-
     /* Calculate relative offset to function start */
     CodeOffset = ControlRva - FunctionEntry->BeginAddress;
 
     *EstablisherFrame = GetEstablisherFrame(Context, UnwindInfo, CodeOffset);
 
+    /* A no-handler stack walk may feed us the terminal frame produced by the
+       previous unwind. Do not let it dereference the null stack pointer. */
+    if ((HandlerType == UNW_FLAG_NHANDLER) && (Context->Rsp < 0x10000))
+    {
+        return NULL;
+    }
+
     /* Check if we are in the function epilog and try to finish it */
-    if ((CodeOffset > UnwindInfo->SizeOfProlog) && (UnwindInfo->CountOfCodes > 0))
+    if ((CodeOffset > UnwindInfo->SizeOfProlog) && (UnwindInfo->CountOfCodes > 0) &&
+        ((UnwindInfo->Version < 2) || RtlpIsInEpilogV2(UnwindInfo, FunctionEntry, ControlRva)))
     {
         if (RtlpTryToUnwindEpilog(Context, ControlPc, ContextPointers, ImageBase, FunctionEntry))
         {
@@ -533,9 +640,21 @@ RtlVirtualUnwind(
 
 RepeatChainedInfo:
 
+    FrameBase = Context->Rsp;
+    if (UnwindInfo->FrameRegister)
+        FrameBase = GetReg(Context, UnwindInfo->FrameRegister) - UnwindInfo->FrameOffset * 16;
+    InProlog = ((ControlRva >= FunctionEntry->BeginAddress) &&
+                (ControlRva < FunctionEntry->BeginAddress + UnwindInfo->SizeOfProlog));
+
     /* Process the remaining unwind ops */
     while (i < UnwindInfo->CountOfCodes)
     {
+        /* A frame-register unwind can also produce a terminal stack pointer. */
+        if ((HandlerType == UNW_FLAG_NHANDLER) && (Context->Rsp < 0x10000))
+        {
+            return NULL;
+        }
+
         UnwindCode = UnwindInfo->UnwindCode[i];
         switch (UnwindCode.UnwindOp)
         {
@@ -566,8 +685,7 @@ RepeatChainedInfo:
                 break;
 
             case UWOP_SET_FPREG:
-                Reg = UnwindInfo->FrameRegister;
-                Context->Rsp = GetReg(Context, Reg) - UnwindInfo->FrameOffset * 16;
+                Context->Rsp = FrameBase;
                 i++;
                 break;
 
@@ -576,14 +694,14 @@ RepeatChainedInfo:
                 Offset = UnwindInfo->UnwindCode[i + 1].FrameOffset;
                 /* The slot stores offset / 8; adding it to a DWORD64* scales it back to bytes.
                  * See https://github.com/dotnet/runtime/blob/421be955e4b70cddf583b10f5ad99814b713fb87/src/coreclr/unwinder/amd64/unwinder.cpp#L831 */
-                SetRegFromStackValue(Context, ContextPointers, Reg, (DWORD64*)Context->Rsp + Offset);
+                SetRegFromStackValue(Context, ContextPointers, Reg, (DWORD64*)FrameBase + Offset);
                 i += 2;
                 break;
 
             case UWOP_SAVE_NONVOL_FAR:
                 Reg = UnwindCode.OpInfo;
                 Offset = *(ULONG*)(&UnwindInfo->UnwindCode[i + 1]);
-                SetRegFromStackValue(Context, ContextPointers, Reg, (PDWORD64)(Context->Rsp + Offset));
+                SetRegFromStackValue(Context, ContextPointers, Reg, (PDWORD64)(FrameBase + Offset));
                 i += 3;
                 break;
 
@@ -592,7 +710,6 @@ RepeatChainedInfo:
                 break;
 
             case UWOP_SPARE_CODE:
-                ASSERT(FALSE);
                 i += 3;
                 break;
 
@@ -601,14 +718,14 @@ RepeatChainedInfo:
                 Offset = UnwindInfo->UnwindCode[i + 1].FrameOffset;
                 /* The slot stores offset / 16; adding it to an M128A* scales it back to bytes.
                  * See https://github.com/dotnet/runtime/blob/421be955e4b70cddf583b10f5ad99814b713fb87/src/coreclr/unwinder/amd64/unwinder.cpp#L890 */
-                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)Context->Rsp + Offset);
+                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)FrameBase + Offset);
                 i += 2;
                 break;
 
             case UWOP_SAVE_XMM128_FAR:
                 Reg = UnwindCode.OpInfo;
                 Offset = *(ULONG*)(&UnwindInfo->UnwindCode[i + 1]);
-                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)(Context->Rsp + Offset));
+                SetXmmRegFromStackValue(Context, ContextPointers, Reg, (M128A*)(FrameBase + Offset));
                 i += 3;
                 break;
 
@@ -644,8 +761,11 @@ RepeatChainedInfo:
 Exit:
 
     /* Check if we have a handler and return it */
-    if (UnwindInfo->Flags & (HandlerType & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER)))
+    if (!InProlog && (UnwindInfo->Flags & (HandlerType & (UNW_FLAG_EHANDLER | UNW_FLAG_UHANDLER))))
     {
+        /* Chained records end in a RUNTIME_FUNCTION, not a handler RVA.
+         * Use the final primary record after following the complete chain. */
+        LanguageHandler = ALIGN_UP_POINTER_BY(&UnwindInfo->UnwindCode[UnwindInfo->CountOfCodes], sizeof(ULONG));
         *HandlerData = (LanguageHandler + 1);
         return RVA(ImageBase, *LanguageHandler);
     }
@@ -699,7 +819,17 @@ RtlpExecuteHandlerForUnwindHandler(
         }
     }
 
-    // TODO: properly handle nested exceptions
+    if (IS_DISPATCHING(ExceptionRecord->ExceptionFlags))
+    {
+        if (IS_UNWINDING(ExceptionFlags))
+        {
+            *DispatcherContext = *PreviousDispatcherContext;
+            return ExceptionCollidedUnwind;
+        }
+
+        DispatcherContext->EstablisherFrame = PreviousDispatcherContext->EstablisherFrame;
+        return ExceptionNestedException;
+    }
 
     return ExceptionContinueSearch;
 }
@@ -733,6 +863,7 @@ RtlpUnwindInternal(
     PRUNTIME_FUNCTION FunctionEntry;
     ULONG_PTR StackLow, StackHigh;
     ULONG64 ImageBase, EstablisherFrame;
+    ULONG64 NestedFrame = 0;
     CONTEXT UnwindContext;
 
     /* Get the current stack limits */
@@ -746,6 +877,7 @@ RtlpUnwindInternal(
 
     /* Copy the context */
     UnwindContext = *ContextRecord;
+    UnwindContext.ContextFlags &= ~(CONTEXT_XSTATE & ~CONTEXT_AMD64);
 
     /* Set up the constant fields of the dispatcher context */
     DispatcherContext.ContextRecord =
@@ -758,6 +890,7 @@ RtlpUnwindInternal(
     {
         if (!RtlpIsStackPointerValid(UnwindContext.Rsp, StackLow, StackHigh))
         {
+            DPRINT("RtlpUnwindInternal: invalid Rsp %p (low %p, high %p), Rip %p, TargetFrame %p, TargetIp %p\n", (PVOID)UnwindContext.Rsp, (PVOID)StackLow, (PVOID)StackHigh, (PVOID)UnwindContext.Rip, TargetFrame, TargetIp);
             return FALSE;
         }
 
@@ -767,6 +900,7 @@ RtlpUnwindInternal(
         {
             /* No function entry, so this must be a leaf function. Pop the return address from the stack.
                Note: this can happen after the first frame as the result of an exception */
+            DPRINT("RtlpUnwindInternal: no function entry for Rip %p, popping Rip %p from Rsp %p (TargetFrame %p)\n", (PVOID)UnwindContext.Rip, (PVOID)*(DWORD64*)UnwindContext.Rsp, (PVOID)UnwindContext.Rsp, TargetFrame);
             UnwindContext.Rip = *(DWORD64*)UnwindContext.Rsp;
             UnwindContext.Rsp += sizeof(DWORD64);
 
@@ -848,6 +982,12 @@ RtlpUnwindInternal(
                 ExceptionRecord->ExceptionFlags &= ~(EXCEPTION_TARGET_UNWIND |
                                                      EXCEPTION_COLLIDED_UNWIND);
 
+                if (EstablisherFrame == NestedFrame)
+                {
+                    ExceptionRecord->ExceptionFlags &= ~EXCEPTION_NESTED_CALL;
+                    NestedFrame = 0;
+                }
+
                 /* Check if we do exception handling */
                 if (HandlerType == UNW_FLAG_EHANDLER)
                 {
@@ -865,8 +1005,12 @@ RtlpUnwindInternal(
                     }
                     else if (Disposition == ExceptionNestedException)
                     {
-                        /// TODO
-                        __debugbreak();
+                        ExceptionRecord->ExceptionFlags |= EXCEPTION_NESTED_CALL;
+                        if (DispatcherContext.EstablisherFrame > NestedFrame)
+                        {
+                            NestedFrame = DispatcherContext.EstablisherFrame;
+                        }
+                        Disposition = ExceptionContinueSearch;
                     }
                 }
 
@@ -877,7 +1021,11 @@ RtlpUnwindInternal(
                        that resulted in this unwind. The installed handler has
                        already copied the original dispatcher context, we now
                        need to copy back the original context. */
-                    UnwindContext = *ContextRecord = *DispatcherContext.ContextRecord;
+                    UnwindContext = *DispatcherContext.ContextRecord;
+                    if (HandlerType == UNW_FLAG_UHANDLER)
+                    {
+                        *ContextRecord = UnwindContext;
+                    }
 
                     /* The original context was from "before" the unwind, so we
                        need to do an additional virtual unwind to restore the
@@ -892,14 +1040,23 @@ RtlpUnwindInternal(
                                      NULL);
 
                     /* Restore the context pointer and establisher frame. */
-                    DispatcherContext.ContextRecord = &UnwindContext;
+                    DispatcherContext.ContextRecord =
+                        (HandlerType == UNW_FLAG_UHANDLER) ? ContextRecord : &UnwindContext;
+                    DispatcherContext.TargetIp = (ULONG64)TargetIp;
                     EstablisherFrame = DispatcherContext.EstablisherFrame;
 
                     /* Set the exception flags to indicate that we collided
                        with an unwind and continue the handler loop, which
                        will run any additional handlers from the previous
                        unwind. */
-                    ExceptionRecord->ExceptionFlags |= EXCEPTION_COLLIDED_UNWIND;
+                    if (HandlerType == UNW_FLAG_UHANDLER)
+                    {
+                        ExceptionRecord->ExceptionFlags |= EXCEPTION_COLLIDED_UNWIND;
+                    }
+                    if (EstablisherFrame == (ULONG64)TargetFrame)
+                    {
+                        ExceptionRecord->ExceptionFlags |= EXCEPTION_TARGET_UNWIND;
+                    }
                     continue;
                 }
 
@@ -909,7 +1066,7 @@ RtlpUnwindInternal(
                     __debugbreak();
                     RtlRaiseStatus(STATUS_INVALID_DISPOSITION);
                 }
-            } while (ExceptionRecord->ExceptionFlags & EXCEPTION_COLLIDED_UNWIND);
+            } while (Disposition == ExceptionCollidedUnwind);
         }
 
         /* Check, if we have left our stack (8.) */
@@ -1019,24 +1176,31 @@ RtlUnwind(
                 NULL);
 }
 
+static
+DECLSPEC_NOINLINE
 ULONG
 NTAPI
-RtlWalkFrameChain(OUT PVOID *Callers,
-                  IN ULONG Count,
-                  IN ULONG Flags)
+RtlpWalkFrameChain(OUT PVOID *Callers,
+                   IN ULONG Count,
+                   IN ULONG Flags)
 {
     CONTEXT Context;
     ULONG64 ControlPc, ImageBase, EstablisherFrame;
     ULONG64 StackLow, StackHigh;
     PVOID HandlerData;
-    ULONG i, FramesToSkip;
+    ULONG i = 0, FramesToSkip;
     PRUNTIME_FUNCTION FunctionEntry;
     MODE CurrentMode = RtlpGetMode();
 
     DPRINT("Enter RtlWalkFrameChain\n");
 
-    /* The upper bits in Flags define how many frames to skip */
-    FramesToSkip = Flags >> 8;
+    if ((Callers == NULL) || (Count == 0))
+    {
+        return 0;
+    }
+
+    /* Skip the public wrapper in addition to the caller-requested frames. */
+    FramesToSkip = (Flags >> 8) + 1;
 
     /* Capture the current Context */
     RtlCaptureContext(&Context);
@@ -1097,7 +1261,7 @@ RtlWalkFrameChain(OUT PVOID *Callers,
             {
                 /* Check if we left the user range */
                 if ((Context.Rip < 0x10000) ||
-                    (Context.Rip > 0x000007FFFFFEFFFFULL))
+                    (Context.Rip > (ULONG_PTR)MI_HIGHEST_USER_ADDRESS))
                 {
                     break;
                 }
@@ -1128,6 +1292,41 @@ RtlWalkFrameChain(OUT PVOID *Callers,
 
     DPRINT("RtlWalkFrameChain returns %ld\n", i);
     return i;
+}
+
+DECLSPEC_NOINLINE
+ULONG
+NTAPI
+RtlWalkFrameChain(OUT PVOID *Callers,
+                  IN ULONG Count,
+                  IN ULONG Flags)
+{
+    ULONG_PTR StackLow, StackHigh, StackPointer;
+    ULONG Frames;
+
+    if (Callers == NULL || Count == 0)
+        return 0;
+
+    if (RtlpGetMode() == KernelMode)
+    {
+        RtlpGetStackLimits(&StackLow, &StackHigh);
+        StackPointer = (ULONG_PTR)&StackLow;
+
+        /*
+         * Check in a small frame, before allocating the walker's CONTEXT.
+         * Virtual unwinding needs another CONTEXT plus space for lookup and
+         * exception handling. A diagnostic stack walk must not exhaust the
+         * committed kernel stack while trying to capture its caller.
+         */
+        if (StackPointer < StackLow || StackPointer >= StackHigh ||
+            StackPointer - StackLow < 2 * PAGE_SIZE)
+        {
+            return 0;
+        }
+    }
+
+    Frames = RtlpWalkFrameChain(Callers, Count, Flags);
+    return Frames != 0 ? Frames - 1 : 0;
 }
 
 /*! RtlGetCallersAddress
@@ -1284,6 +1483,12 @@ VOID
 RtlpRestoreContextInternal(
     _In_ PCONTEXT ContextRecord);
 
+PVOID
+RtlpCallConsolidateCallback(
+    _In_ PCONTEXT ContextRecord,
+    _In_ PVOID (*Callback)(EXCEPTION_RECORD*),
+    _In_ PEXCEPTION_RECORD ExceptionRecord);
+
 VOID
 RtlRestoreContext(
     _In_ PCONTEXT ContextRecord,
@@ -1295,8 +1500,7 @@ RtlRestoreContext(
             (ExceptionRecord->NumberParameters >= 1))
         {
             PVOID (*Consolidate)(EXCEPTION_RECORD*) = (PVOID)ExceptionRecord->ExceptionInformation[0];
-            // FIXME: This should be called through an asm wrapper to allow handling recursive unwinding
-            ContextRecord->Rip = (ULONG64)Consolidate(ExceptionRecord);
+            ContextRecord->Rip = (ULONG64)RtlpCallConsolidateCallback(ContextRecord, Consolidate, ExceptionRecord);
         }
         else if ((ExceptionRecord->ExceptionCode == STATUS_LONGJUMP) &&
                  (ExceptionRecord->NumberParameters >= 1))

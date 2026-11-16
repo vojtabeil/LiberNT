@@ -71,14 +71,6 @@ C_ASSERT(FIELD_OFFSET(BIOS_MEMORY_MAP, ExtendedAttributes) == 20);
 /* Int 15h AX=E820h Entry maximal size. */
 C_ASSERT(sizeof(BIOS_MEMORY_MAP) == 24);
 
-/* FIXME: Should be moved to NDK, and respective ACPI header files */
-typedef struct _ACPI_BIOS_DATA
-{
-    PHYSICAL_ADDRESS RSDTAddress;
-    ULONGLONG Count;
-    BIOS_MEMORY_MAP MemoryMap[1]; /* Count of BIOS memory map entries */
-} ACPI_BIOS_DATA, *PACPI_BIOS_DATA;
-
 typedef struct _DOCKING_STATE_INFORMATION
 {
     ULONG DockLocationID;
@@ -87,7 +79,7 @@ typedef struct _DOCKING_STATE_INFORMATION
     USHORT ReturnCode;
 } DOCKING_STATE_INFORMATION, *PDOCKING_STATE_INFORMATION;
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 typedef struct
 {
     unsigned long    eax;
@@ -164,7 +156,7 @@ typedef union
     WORDREGS    w;
     BYTEREGS    b;
 } REGS;
-#include <poppack.h>
+#pragma pack(pop)
 
 // Int386()
 //

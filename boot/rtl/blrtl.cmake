@@ -26,7 +26,7 @@ list(APPEND SOURCE
     nlsboot.c
     ${NTOS_RTL_SOURCE_DIR}/random.c
     ## res.c    ## Optional? Needs SEH
-    # ${NTOS_RTL_SOURCE_DIR}/time.c     ## Optional
+    ${NTOS_RTL_SOURCE_DIR}/time.c
     ${NTOS_RTL_SOURCE_DIR}/unicode.c
     ${NTOS_RTL_SOURCE_DIR}/rtl.h)
 
@@ -50,6 +50,21 @@ elseif(ARCH STREQUAL "arm")
     list(APPEND ASM_SOURCE
         ${NTOS_RTL_SOURCE_DIR}/arm/debug_asm.S)
     list(APPEND SOURCE
+        ${NTOS_RTL_SOURCE_DIR}/byteswap.c
+        ${NTOS_RTL_SOURCE_DIR}/mem.c)
+elseif(ARCH STREQUAL "arm64")
+    list(APPEND ASM_SOURCE
+        ${NTOS_RTL_SOURCE_DIR}/arm64/debug_asm.S)
+    list(APPEND SOURCE
+        ${NTOS_RTL_SOURCE_DIR}/bitmap64.c
+        ${NTOS_RTL_SOURCE_DIR}/byteswap.c
+        ${NTOS_RTL_SOURCE_DIR}/mem.c)
+elseif(ARCH STREQUAL "ppc")
+    list(APPEND SOURCE
+        ${NTOS_RTL_SOURCE_DIR}/mem.c)
+elseif(ARCH STREQUAL "riscv64")
+    list(APPEND SOURCE
+        ${NTOS_RTL_SOURCE_DIR}/bitmap64.c
         ${NTOS_RTL_SOURCE_DIR}/byteswap.c
         ${NTOS_RTL_SOURCE_DIR}/mem.c)
 endif()

@@ -5,11 +5,13 @@
  * PURPOSE:         PE Loader Public APIs
  * PROGRAMMERS:     Alex Ionescu (alex@relsoft.net)
  *                  Aleksey Bragin (aleksey@reactos.org)
+ *                  Ahmed ARIF (arif.ing@outlook.com)
  */
 
 /* INCLUDES *****************************************************************/
 
 #include <ntdll.h>
+#include <delayloadhandler.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -24,6 +26,143 @@ ULONG AlternateResourceModuleCount;
 extern PLDR_MANIFEST_PROBER_ROUTINE LdrpManifestProberRoutine;
 
 /* FUNCTIONS *****************************************************************/
+
+static PVOID
+LdrpDelayRvaToAddress(PVOID BaseAddress, ULONG Rva)
+{
+    return (PBYTE)BaseAddress + Rva;
+}
+
+/*
+ * Resolve one entry from an RVA-based delay import descriptor.  The callback
+ * contract follows the public delay-load helper ABI; unlike the compiler
+ * helper, a NULL failure hook leaves the unresolved entry as NULL.
+ */
+PVOID
+NTAPI
+LdrResolveDelayLoadedAPI(
+    _In_ PVOID ParentBase,
+    _In_ PCIMAGE_DELAYLOAD_DESCRIPTOR Descriptor,
+    _In_opt_ PDELAYLOAD_FAILURE_DLL_CALLBACK DllHook,
+    _In_opt_ PDELAYLOAD_FAILURE_SYSTEM_ROUTINE SystemHook,
+    _In_ PIMAGE_THUNK_DATA ThunkAddress,
+    _In_ ULONG Flags)
+{
+    PIMAGE_THUNK_DATA ImportAddressTable, ImportNameTable;
+    PIMAGE_IMPORT_BY_NAME ImportByName;
+    DELAYLOAD_INFO DelayInfo;
+    PVOID ProcedureAddress = NULL;
+    PVOID *ModuleHandle;
+    UNICODE_STRING ModuleName;
+    ANSI_STRING ProcedureName;
+    PCSTR TargetDllName;
+    ULONG_PTR Index;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(Flags);
+
+    ModuleHandle = LdrpDelayRvaToAddress(ParentBase, Descriptor->ModuleHandleRVA);
+    ImportAddressTable = LdrpDelayRvaToAddress(ParentBase, Descriptor->ImportAddressTableRVA);
+    ImportNameTable = LdrpDelayRvaToAddress(ParentBase, Descriptor->ImportNameTableRVA);
+    TargetDllName = LdrpDelayRvaToAddress(ParentBase, Descriptor->DllNameRVA);
+    Index = ThunkAddress - ImportAddressTable;
+
+    if (!*ModuleHandle)
+    {
+        if (!RtlCreateUnicodeStringFromAsciiz(&ModuleName, TargetDllName))
+        {
+            Status = STATUS_NO_MEMORY;
+            goto Failure;
+        }
+
+        Status = LdrLoadDll(NULL, 0, &ModuleName, ModuleHandle);
+        RtlFreeUnicodeString(&ModuleName);
+        if (!NT_SUCCESS(Status)) goto Failure;
+    }
+
+    if (IMAGE_SNAP_BY_ORDINAL(ImportNameTable[Index].u1.Ordinal))
+    {
+        Status = LdrGetProcedureAddress(*ModuleHandle, NULL, IMAGE_ORDINAL(ImportNameTable[Index].u1.Ordinal), &ProcedureAddress);
+    }
+    else
+    {
+        ImportByName = LdrpDelayRvaToAddress(ParentBase, ImportNameTable[Index].u1.AddressOfData);
+        RtlInitAnsiString(&ProcedureName, (PCSZ)ImportByName->Name);
+        Status = LdrGetProcedureAddress(*ModuleHandle, &ProcedureName, 0, &ProcedureAddress);
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        ImportAddressTable[Index].u1.Function = (ULONG_PTR)ProcedureAddress;
+        return ProcedureAddress;
+    }
+
+Failure:
+    RtlZeroMemory(&DelayInfo, sizeof(DelayInfo));
+    DelayInfo.Size = sizeof(DelayInfo);
+    DelayInfo.DelayloadDescriptor = Descriptor;
+    DelayInfo.ThunkAddress = ThunkAddress;
+    DelayInfo.TargetDllName = TargetDllName;
+    DelayInfo.TargetApiDescriptor.ImportDescribedByName = !IMAGE_SNAP_BY_ORDINAL(ImportNameTable[Index].u1.Ordinal);
+    if (DelayInfo.TargetApiDescriptor.ImportDescribedByName)
+    {
+        ImportByName = LdrpDelayRvaToAddress(ParentBase, ImportNameTable[Index].u1.AddressOfData);
+        DelayInfo.TargetApiDescriptor.Description.Name = (PCSTR)ImportByName->Name;
+    }
+    else
+    {
+        DelayInfo.TargetApiDescriptor.Description.Ordinal = IMAGE_ORDINAL(ImportNameTable[Index].u1.Ordinal);
+    }
+    DelayInfo.TargetModuleBase = *ModuleHandle;
+    DelayInfo.LastError = Status;
+
+    if (DllHook) return DllHook(DELAYLOAD_GPA_FAILURE, &DelayInfo);
+    if (!SystemHook) return NULL;
+    if (DelayInfo.TargetApiDescriptor.ImportDescribedByName) return SystemHook(TargetDllName, DelayInfo.TargetApiDescriptor.Description.Name);
+    return SystemHook(TargetDllName, (PCSTR)(ULONG_PTR)DelayInfo.TargetApiDescriptor.Description.Ordinal);
+}
+
+/*
+ * Resolve every delayed import from one named DLL.  Win11 rejects non-zero
+ * flags, matches the descriptor name without case sensitivity, and reports a
+ * failed entry with STATUS_DELAY_LOAD_FAILED.
+ */
+NTSTATUS
+NTAPI
+LdrResolveDelayLoadsFromDll(
+    _In_ PVOID ParentBase,
+    _In_ PCSTR TargetDllName,
+    _In_ ULONG Flags)
+{
+    PIMAGE_DELAYLOAD_DESCRIPTOR Descriptor, DescriptorEnd;
+    PIMAGE_THUNK_DATA ImportAddressTable;
+    ULONG DirectorySize;
+    NTSTATUS Status;
+
+    if (Flags) return STATUS_INVALID_PARAMETER;
+
+    Descriptor = RtlImageDirectoryEntryToData((HMODULE)ParentBase, TRUE, IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT, &DirectorySize);
+    if (!Descriptor) return STATUS_DLL_NOT_FOUND;
+
+    DescriptorEnd = Descriptor + DirectorySize / sizeof(*Descriptor);
+    while (Descriptor < DescriptorEnd && Descriptor->DllNameRVA)
+    {
+        if (!_stricmp(LdrpDelayRvaToAddress(ParentBase, Descriptor->DllNameRVA), TargetDllName)) break;
+        Descriptor++;
+    }
+
+    if (Descriptor == DescriptorEnd || !Descriptor->DllNameRVA) return STATUS_DLL_NOT_FOUND;
+
+    Status = STATUS_SUCCESS;
+    ImportAddressTable = LdrpDelayRvaToAddress(ParentBase, Descriptor->ImportAddressTableRVA);
+    while (ImportAddressTable->u1.Function)
+    {
+        if (!LdrResolveDelayLoadedAPI(ParentBase, Descriptor, NULL, NULL, ImportAddressTable, 0)) Status = STATUS_DELAY_LOAD_FAILED;
+        ImportAddressTable++;
+    }
+
+    return Status;
+}
 
 NTSTATUS
 NTAPI
@@ -318,6 +457,7 @@ LdrLoadDll(
     WCHAR StringBuffer[MAX_PATH];
     UNICODE_STRING StaticString, DynamicString;
     BOOLEAN RedirectedDll = FALSE;
+    BOOLEAN ApiSetRedirected = FALSE;
     NTSTATUS Status;
     ULONG_PTR Cookie;
     PUNICODE_STRING OldTldDll;
@@ -327,14 +467,23 @@ LdrLoadDll(
     RtlInitEmptyUnicodeString(&StaticString, StringBuffer, sizeof(StringBuffer));
     RtlInitEmptyUnicodeString(&DynamicString, NULL, 0);
 
-    Status = LdrpApplyFileNameRedirection(DllName, &LdrApiDefaultExtension, &StaticString, &DynamicString, &DllName, &RedirectedDll);
+    Status = LdrpApplyFileNameRedirection(DllName, &LdrApiDefaultExtension, &StaticString, &DynamicString, &DllName, &RedirectedDll, &ApiSetRedirected);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    if (!LdrpInLdrInit && !ShowSnaps && !LdrpOwnsLoaderLock() &&
+        LdrpReferenceLoadedDll(SearchPath, DllName, RedirectedDll && !ApiSetRedirected, BaseAddress))
+    {
+        if (DynamicString.Buffer)
+            RtlFreeUnicodeString(&DynamicString);
+        return STATUS_SUCCESS;
+    }
 
     /* Lock the loader lock */
     LdrLockLoaderLock(LDR_LOCK_LOADER_LOCK_FLAG_RAISE_ON_ERRORS, NULL, &Cookie);
 
     /* Check if there's a TLD DLL being loaded */
     OldTldDll = LdrpTopLevelDllBeingLoaded;
-    _SEH2_TRY
     {
 
         if (OldTldDll)
@@ -376,7 +525,7 @@ LdrLoadDll(
         LdrpTopLevelDllBeingLoaded = DllName;
 
         /* Load the DLL */
-        Status = LdrpLoadDll(RedirectedDll,
+        Status = LdrpLoadDll(RedirectedDll && !ApiSetRedirected,
                              SearchPath,
                              DllCharacteristics,
                              DllName,
@@ -399,16 +548,14 @@ LdrLoadDll(
                        Status);
         }
     }
-    _SEH2_FINALLY
-    {
-        /* Restore the old TLD DLL */
-        LdrpTopLevelDllBeingLoaded = OldTldDll;
 
-        /* Release the lock */
-        LdrUnlockLoaderLock(LDR_UNLOCK_LOADER_LOCK_FLAG_RAISE_ON_ERRORS, Cookie);
-    }
-    _SEH2_END;
+    /* Restore the old TLD DLL */
+    LdrpTopLevelDllBeingLoaded = OldTldDll;
 
+    /* Release the lock */
+    LdrUnlockLoaderLock(LDR_UNLOCK_LOADER_LOCK_FLAG_RAISE_ON_ERRORS, Cookie);
+
+Cleanup:
     /* Do we have a redirect string? */
     if (DynamicString.Buffer)
         RtlFreeUnicodeString(&DynamicString);
@@ -514,7 +661,8 @@ LdrGetDllHandleEx(
     UNICODE_STRING RedirectName, DynamicString, RawDllName;
     PUNICODE_STRING pRedirectName, CompareName;
     PWCHAR p1, p2, p3;
-    BOOLEAN Locked, RedirectedDll;
+    BOOLEAN Locked, RedirectedDll, Shared, SharedHeld = FALSE;
+    PLDR_DATA_TABLE_ENTRY CachedEntry;
     ULONG_PTR Cookie;
     ULONG LoadFlag, Length;
 
@@ -533,7 +681,8 @@ LdrGetDllHandleEx(
     if (DllHandle) *DllHandle = NULL;
 
     /* Check for a valid flag combination */
-    if ((Flags & ~(LDR_GET_DLL_HANDLE_EX_PIN | LDR_GET_DLL_HANDLE_EX_UNCHANGED_REFCOUNT)) ||
+    if ((Flags & ~(LDR_GET_DLL_HANDLE_EX_PIN | LDR_GET_DLL_HANDLE_EX_UNCHANGED_REFCOUNT | 0x00000004)) ||
+        ((Flags & LDR_GET_DLL_HANDLE_EX_PIN) && (Flags & LDR_GET_DLL_HANDLE_EX_UNCHANGED_REFCOUNT)) ||
         (!DllHandle && !(Flags & LDR_GET_DLL_HANDLE_EX_PIN)))
     {
         DPRINT1("Flags are invalid or no DllHandle given\n");
@@ -541,8 +690,11 @@ LdrGetDllHandleEx(
         goto Quickie;
     }
 
+    Shared = !LdrpInLdrInit && (Flags & LDR_GET_DLL_HANDLE_EX_UNCHANGED_REFCOUNT) &&
+             !ShowSnaps && !LdrpOwnsLoaderLock();
+
     /* If not initializing */
-    if (!LdrpInLdrInit)
+    if (!LdrpInLdrInit && !Shared)
     {
         /* Acquire the lock */
         Status = LdrLockLoaderLock(0, NULL, &Cookie);
@@ -552,8 +704,7 @@ LdrGetDllHandleEx(
         Locked = TRUE;
     }
 
-    Status = LdrpApplyFileNameRedirection(
-        pRedirectName, &LdrApiDefaultExtension, NULL, &DynamicString, &pRedirectName, &RedirectedDll);
+    Status = LdrpApplyFileNameRedirection(pRedirectName, &LdrApiDefaultExtension, NULL, &DynamicString, &pRedirectName, &RedirectedDll, NULL);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("LdrpApplyFileNameRedirection FAILED: (Status 0x%x)\n", Status);
@@ -563,31 +714,38 @@ LdrGetDllHandleEx(
     /* Set default failure code */
     Status = STATUS_DLL_NOT_FOUND;
 
+    if (Shared)
+    {
+        RtlAcquireSRWLockShared(&LdrpModuleDatatableLock);
+        SharedHeld = TRUE;
+    }
+
     /* Use the cache if we can */
-    if (LdrpGetModuleHandleCache)
+    CachedEntry = *(PLDR_DATA_TABLE_ENTRY volatile *)&LdrpGetModuleHandleCache;
+    if (CachedEntry)
     {
         /* Check if we were redirected */
         if (RedirectedDll)
         {
             /* Check the flag */
-            if (!(LdrpGetModuleHandleCache->Flags & LDRP_REDIRECTED))
+            if (!(CachedEntry->Flags & LDRP_REDIRECTED))
             {
                 goto DontCompare;
             }
 
             /* Use the right name */
-            CompareName = &LdrpGetModuleHandleCache->FullDllName;
+            CompareName = &CachedEntry->FullDllName;
         }
         else
         {
             /* Check the flag */
-            if (LdrpGetModuleHandleCache->Flags & LDRP_REDIRECTED)
+            if (CachedEntry->Flags & LDRP_REDIRECTED)
             {
                 goto DontCompare;
             }
 
             /* Use the right name */
-            CompareName = &LdrpGetModuleHandleCache->BaseDllName;
+            CompareName = &CachedEntry->BaseDllName;
         }
 
         /* Check if the name matches */
@@ -596,7 +754,7 @@ LdrGetDllHandleEx(
                                   TRUE))
         {
             /* Skip the rest */
-            LdrEntry = LdrpGetModuleHandleCache;
+            LdrEntry = CachedEntry;
 
             /* Return success */
             Status = STATUS_SUCCESS;
@@ -706,6 +864,12 @@ DontCompare:
         LdrEntry = NULL;
     }
 Quickie:
+    if (SharedHeld && LdrEntry && !LdrpIsModuleReady(LdrEntry))
+    {
+        LdrEntry = NULL;
+        Status = STATUS_DLL_NOT_FOUND;
+    }
+
     /* The success path must have a valid loader entry */
     ASSERT((LdrEntry != NULL) == NT_SUCCESS(Status));
 
@@ -727,7 +891,7 @@ Quickie:
             else
             {
                 /* Increase the load count */
-                LdrEntry->LoadCount++;
+                InterlockedIncrement16((PSHORT)&LdrEntry->LoadCount);
                 LoadFlag = LDRP_UPDATE_REFCOUNT;
             }
 
@@ -739,6 +903,9 @@ Quickie:
         /* Check if the caller is requesting the handle */
         if (DllHandle) *DllHandle = LdrEntry->DllBase;
     }
+
+    if (SharedHeld)
+        RtlReleaseSRWLockShared(&LdrpModuleDatatableLock);
 
     /* Free string if needed */
     if (DynamicString.Buffer) RtlFreeUnicodeString(&DynamicString);
@@ -793,7 +960,7 @@ LdrGetProcedureAddress(
     _Out_ PVOID *ProcedureAddress)
 {
     /* Call the internal routine and tell it to execute DllInit */
-    return LdrpGetProcedureAddress(BaseAddress, Name, Ordinal, ProcedureAddress, TRUE);
+    return LdrpGetProcedureAddress(BaseAddress, Name, Ordinal, ProcedureAddress, TRUE, NULL);
 }
 
 NTSTATUS
@@ -807,7 +974,57 @@ LdrGetProcedureAddressEx(
 {
     /* Call the internal routine and execute DllInit depending of flags */
     BOOLEAN ExecuteInit = !(Flags & LDR_GET_PROCEDURE_ADDRESS_DONT_RECORD_FORWARDER);
-    return LdrpGetProcedureAddress(BaseAddress, Name, Ordinal, ProcedureAddress, ExecuteInit);
+    return LdrpGetProcedureAddress(BaseAddress, Name, Ordinal, ProcedureAddress, ExecuteInit, NULL);
+}
+
+PVOID
+NTAPI
+RtlFindExportedRoutineByName(
+    _In_ PVOID BaseAddress,
+    _In_ PCSTR RoutineName)
+{
+    PIMAGE_EXPORT_DIRECTORY ExportDirectory;
+    PULONG Functions, Names;
+    PUSHORT Ordinals;
+    ULONG ExportSize, FunctionIndex;
+    LONG Low, High;
+
+    ExportDirectory = RtlImageDirectoryEntryToData(BaseAddress, TRUE, IMAGE_DIRECTORY_ENTRY_EXPORT, &ExportSize);
+    if (!ExportDirectory || ExportSize < sizeof(*ExportDirectory))
+        return NULL;
+
+    Names = (PULONG)((PUCHAR)BaseAddress + ExportDirectory->AddressOfNames);
+    Ordinals = (PUSHORT)((PUCHAR)BaseAddress + ExportDirectory->AddressOfNameOrdinals);
+    Low = 0;
+    High = ExportDirectory->NumberOfNames - 1;
+    while (Low <= High)
+    {
+        LONG Middle = Low + (High - Low) / 2;
+        PCSTR ExportName = (PCSTR)BaseAddress + Names[Middle];
+        LONG Result = strcmp(RoutineName, ExportName);
+
+        if (Result < 0)
+            High = Middle - 1;
+        else if (Result > 0)
+            Low = Middle + 1;
+        else
+        {
+            FunctionIndex = Ordinals[Middle];
+            if (FunctionIndex >= ExportDirectory->NumberOfFunctions)
+                return NULL;
+
+            Functions = (PULONG)((PUCHAR)BaseAddress + ExportDirectory->AddressOfFunctions);
+            if (!Functions[FunctionIndex])
+                return NULL;
+
+            RoutineName = (PCSTR)BaseAddress + Functions[FunctionIndex];
+            if ((PUCHAR)RoutineName >= (PUCHAR)ExportDirectory &&
+                (PUCHAR)RoutineName < (PUCHAR)ExportDirectory + ExportSize)
+                return NULL;
+            return (PVOID)RoutineName;
+        }
+    }
+    return NULL;
 }
 
 /*
@@ -829,7 +1046,7 @@ LdrVerifyImageMatchesChecksum(
     HANDLE SectionHandle;
     SIZE_T ViewSize;
     PVOID ViewBase;
-    BOOLEAN Result, NoActualCheck;
+    BOOLEAN Result = FALSE, NoActualCheck;
     NTSTATUS Status;
     PVOID ImportName;
     ULONG Size;
@@ -1265,7 +1482,7 @@ LdrAddRefDll(
             else
             {
                 /* Increase its load count by one */
-                LdrEntry->LoadCount++;
+                InterlockedIncrement16((PSHORT)&LdrEntry->LoadCount);
                 LdrpUpdateLoadCount2(LdrEntry, LDRP_UPDATE_REFCOUNT);
             }
 
@@ -1297,6 +1514,8 @@ quickie:
     return Status;
 }
 
+static ULONG LdrpUnloadScanDepth;
+
 /*
  * @implemented
  */
@@ -1314,6 +1533,30 @@ LdrUnloadDll(
     RTL_CALLER_ALLOCATED_ACTIVATION_CONTEXT_STACK_FRAME_EXTENDED ActCtx;
     PVOID CorImageData;
     ULONG ComSectionSize;
+    LDRP_WALK_SET Set;
+    BOOLEAN Released = FALSE, Walk = FALSE, SetReady = FALSE;
+
+    if (!LdrpInLdrInit && !ShowSnaps && !LdrpShutdownInProgress && !LdrpOwnsLoaderLock())
+    {
+        RtlAcquireSRWLockShared(&LdrpLoadCountWalkLock);
+        RtlAcquireSRWLockShared(&LdrpModuleDatatableLock);
+        if (LdrpCheckForLoadedDllHandle(BaseAddress, &LdrEntry))
+        {
+            if (*(volatile USHORT *)&LdrEntry->LoadCount == 0xFFFF)
+                Released = TRUE;
+            else if ((SetReady = LdrpAllocateWalkSet(&Set)))
+                Released = LdrpTryReferenceModule(LdrEntry, TRUE, &Walk);
+        }
+        RtlReleaseSRWLockShared(&LdrpModuleDatatableLock);
+
+        if (Walk)
+            LdrpWalkLoadCount(LdrEntry, LDRP_UPDATE_DEREFCOUNT, &Set);
+        RtlReleaseSRWLockShared(&LdrpLoadCountWalkLock);
+        if (SetReady)
+            LdrpFreeWalkSet(&Set);
+        if (Released)
+            return STATUS_SUCCESS;
+    }
 
     /* Get the LDR Lock */
     if (!LdrpInLdrInit) RtlEnterCriticalSection(Peb->LoaderLock);
@@ -1335,7 +1578,7 @@ LdrUnloadDll(
     if (LdrEntry->LoadCount != 0xFFFF)
     {
         /* Decrease it */
-        LdrEntry->LoadCount--;
+        InterlockedDecrement16((PSHORT)&LdrEntry->LoadCount);
 
         /* If it's a dll */
         if (LdrEntry->Flags & LDRP_IMAGE_DLL)
@@ -1367,6 +1610,9 @@ LdrUnloadDll(
 
     /* Check if this is our only unload and initialize the list if so */
     if (LdrpActiveUnloadCount == 1) InitializeListHead(&LdrpUnloadHead);
+
+    if (!LdrpUnloadScanDepth++)
+        RtlAcquireSRWLockExclusive(&LdrpLoadCountWalkLock);
 
     /* Loop the modules to build the list */
     NextEntry = Peb->Ldr->InInitializationOrderModuleList.Blink;
@@ -1404,9 +1650,11 @@ LdrUnloadDll(
 
             /* Unlink it */
             CurrentEntry = LdrEntry;
+            RtlAcquireSRWLockExclusive(&LdrpModuleDatatableLock);
             RemoveEntryList(&CurrentEntry->InInitializationOrderLinks);
             RemoveEntryList(&CurrentEntry->InMemoryOrderLinks);
             RemoveEntryList(&CurrentEntry->HashLinks);
+            LdrpGetModuleHandleCache = NULL;
 
             /* If there's more then one active unload */
             if (LdrpActiveUnloadCount > 1)
@@ -1415,11 +1663,15 @@ LdrUnloadDll(
                 LdrpLoadedDllHandleCache = NULL;
                 CurrentEntry->InMemoryOrderLinks.Flink = NULL;
             }
+            RtlReleaseSRWLockExclusive(&LdrpModuleDatatableLock);
 
             /* Add the entry on the unload list */
             InsertTailList(&LdrpUnloadHead, &CurrentEntry->HashLinks);
         }
     }
+
+    if (!--LdrpUnloadScanDepth)
+        RtlReleaseSRWLockExclusive(&LdrpLoadCountWalkLock);
 
     /* Only call the entrypoints once */
     if (LdrpActiveUnloadCount > 1) goto Quickie;
@@ -1437,8 +1689,10 @@ LdrUnloadDll(
 
         /* Set the entry and clear it from the list */
         CurrentEntry = LdrEntry;
+        RtlAcquireSRWLockExclusive(&LdrpModuleDatatableLock);
         LdrpLoadedDllHandleCache = NULL;
         CurrentEntry->InMemoryOrderLinks.Flink = NULL;
+        RtlReleaseSRWLockExclusive(&LdrpModuleDatatableLock);
 
         /* Move it from the global to the local list */
         RemoveEntryList(&CurrentEntry->HashLinks);
@@ -1448,7 +1702,7 @@ LdrUnloadDll(
         EntryPoint = LdrEntry->EntryPoint;
 
         /* Check if we should call it */
-        if ((EntryPoint) && (LdrEntry->Flags & LDRP_PROCESS_ATTACH_CALLED))
+        if ((EntryPoint || LdrEntry->TlsIndex) && (LdrEntry->Flags & LDRP_PROCESS_ATTACH_CALLED))
         {
             /* Show message */
             if (ShowSnaps)
@@ -1465,13 +1719,12 @@ LdrUnloadDll(
             RtlActivateActivationContextUnsafeFast(&ActCtx,
                                                    LdrEntry->EntryPointActivationContext);
 
+            if (LdrEntry->TlsIndex) LdrpCallTlsInitializers(LdrEntry, DLL_PROCESS_DETACH);
+
             /* Call the entrypoint */
             _SEH2_TRY
             {
-                LdrpCallInitRoutine(LdrEntry->EntryPoint,
-                                    LdrEntry->DllBase,
-                                    DLL_PROCESS_DETACH,
-                                    NULL);
+                if (EntryPoint) LdrpCallInitRoutine(LdrEntry->EntryPoint, LdrEntry->DllBase, DLL_PROCESS_DETACH, NULL);
             }
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
@@ -1484,8 +1737,15 @@ LdrUnloadDll(
             RtlDeactivateActivationContextUnsafeFast(&ActCtx);
         }
 
+        LdrpReleaseTlsData(LdrEntry);
+        LdrpReleaseForwarderReferences(LdrEntry->DllBase);
+
         /* Remove it from the list */
+        RtlAcquireSRWLockExclusive(&LdrpModuleDatatableLock);
         RemoveEntryList(&CurrentEntry->InLoadOrderLinks);
+        LdrpLoadedDllHandleCache = NULL;
+        LdrpGetModuleHandleCache = NULL;
+        RtlReleaseSRWLockExclusive(&LdrpModuleDatatableLock);
         CurrentEntry = NULL;
         NextEntry = LdrpUnloadHead.Flink;
     }
@@ -1513,7 +1773,8 @@ LdrUnloadDll(
 
 #if (_WIN32_WINNT >= _WIN32_WINNT_VISTA) || (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
         /* Send shutdown notification */
-        LdrpSendDllNotifications(CurrentEntry, LDR_DLL_NOTIFICATION_REASON_UNLOADED);
+        if (CurrentEntry->Flags & LDRP_LOAD_NOTIFICATIONS_SENT)
+            LdrpSendDllNotifications(CurrentEntry, LDR_DLL_NOTIFICATION_REASON_UNLOADED);
 #endif
 
         /* Check if this is a .NET executable */
@@ -1548,12 +1809,6 @@ LdrUnloadDll(
 
         /* Deallocate the Entry */
         LdrpFinalizeAndDeallocateDataTableEntry(CurrentEntry);
-
-        /* If this is the cached entry, invalidate it */
-        if (LdrpGetModuleHandleCache == CurrentEntry)
-        {
-            LdrpGetModuleHandleCache = NULL;
-        }
     }
 
 Quickie:
@@ -1614,21 +1869,7 @@ NTAPI
 LdrUnloadAlternateResourceModule(
     _In_ PVOID BaseAddress)
 {
-    ULONG_PTR Cookie;
-
-    /* Acquire the loader lock */
-    LdrLockLoaderLock(LDR_LOCK_LOADER_LOCK_FLAG_RAISE_ON_ERRORS, NULL, &Cookie);
-
-    /* Check if there's any alternate resources loaded */
-    if (AlternateResourceModuleCount)
-    {
-        UNIMPLEMENTED;
-    }
-
-    /* Release the loader lock */
-    LdrUnlockLoaderLock(LDR_UNLOCK_LOADER_LOCK_FLAG_RAISE_ON_ERRORS, Cookie);
-
-    /* All done */
+    LdrpUnloadAlternateResourceModule(BaseAddress);
     return TRUE;
 }
 
@@ -1639,8 +1880,7 @@ BOOLEAN
 NTAPI
 LdrFlushAlternateResourceModules(VOID)
 {
-    UNIMPLEMENTED;
-    return FALSE;
+    return LdrpFlushAlternateResourceModules();
 }
 
 /*
@@ -1675,6 +1915,125 @@ LdrInitShimEngineDynamic(IN PVOID BaseAddress)
         return TRUE;
     }
     return FALSE;
+}
+
+NTSTATUS
+NTAPI
+LdrGetDllHandleByName(
+    _In_opt_ PUNICODE_STRING BaseDllName,
+    _In_opt_ PUNICODE_STRING FullDllName,
+    _Out_ PVOID *DllHandle)
+{
+    PLDR_DATA_TABLE_ENTRY LdrEntry;
+    PLIST_ENTRY ListHead, NextEntry;
+    NTSTATUS Status;
+    ULONG_PTR Cookie = 0;
+    BOOLEAN Locked = FALSE;
+
+    if (!BaseDllName && !FullDllName)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!LdrpInLdrInit)
+    {
+        Status = LdrLockLoaderLock(0, NULL, &Cookie);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        Locked = TRUE;
+    }
+
+    Status = STATUS_DLL_NOT_FOUND;
+    ListHead = &NtCurrentPeb()->Ldr->InLoadOrderModuleList;
+    for (NextEntry = ListHead->Flink; NextEntry != ListHead; NextEntry = NextEntry->Flink)
+    {
+        LdrEntry = CONTAINING_RECORD(NextEntry, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks);
+        if (!LdrEntry->InMemoryOrderLinks.Flink)
+            continue;
+        if (BaseDllName && !RtlEqualUnicodeString(BaseDllName, &LdrEntry->BaseDllName, TRUE))
+            continue;
+        if (FullDllName && !RtlEqualUnicodeString(FullDllName, &LdrEntry->FullDllName, TRUE))
+            continue;
+
+        if (LdrEntry->LoadCount != 0xFFFF)
+        {
+            InterlockedIncrement16((PSHORT)&LdrEntry->LoadCount);
+            LdrpUpdateLoadCount2(LdrEntry, LDRP_UPDATE_REFCOUNT);
+            LdrpClearLoadInProgress();
+        }
+
+        *DllHandle = LdrEntry->DllBase;
+        Status = STATUS_SUCCESS;
+        break;
+    }
+
+    if (Locked)
+        LdrUnlockLoaderLock(0, Cookie);
+
+    return Status;
+}
+
+/*
+ * @implemented
+ *
+ * Wine-derived behavior: NULL module means the process image, undersized
+ * buffers receive a partial copy, and STATUS_BUFFER_TOO_SMALL is returned
+ * after copying.
+ */
+NTSTATUS
+NTAPI
+LdrGetDllFullName(PVOID hModule, UNICODE_STRING *FullDllName)
+{
+    PLDR_DATA_TABLE_ENTRY LdrEntry;
+    PLIST_ENTRY ListHead, NextEntry;
+    PPEB Peb = NtCurrentPeb();
+    NTSTATUS Status = STATUS_DLL_NOT_FOUND;
+    UNICODE_STRING Name;
+    BOOLEAN Shared, Found = FALSE;
+
+    if (!FullDllName)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!Peb->Ldr)
+        return STATUS_DLL_NOT_FOUND;
+
+    if (!hModule)
+        hModule = Peb->ImageBaseAddress;
+
+    Shared = !LdrpOwnsLoaderLock();
+    if (Shared)
+        RtlAcquireSRWLockShared(&LdrpModuleDatatableLock);
+
+    ListHead = &Peb->Ldr->InMemoryOrderModuleList;
+    NextEntry = ListHead->Flink;
+    while (!Found && NextEntry != ListHead)
+    {
+        LdrEntry = CONTAINING_RECORD(NextEntry, LDR_DATA_TABLE_ENTRY, InMemoryOrderLinks);
+        if (LdrEntry->DllBase == hModule)
+        {
+            Name = LdrEntry->FullDllName;
+            Found = TRUE;
+        }
+        NextEntry = NextEntry->Flink;
+    }
+
+    if (Shared)
+        RtlReleaseSRWLockShared(&LdrpModuleDatatableLock);
+
+    if (!Found)
+        return STATUS_DLL_NOT_FOUND;
+
+    _SEH2_TRY
+    {
+        Status = (FullDllName->MaximumLength < Name.Length + sizeof(WCHAR)) ?
+                 STATUS_BUFFER_TOO_SMALL : STATUS_SUCCESS;
+        RtlCopyUnicodeString(FullDllName, &Name);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    return Status;
 }
 
 /* EOF */

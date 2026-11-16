@@ -87,6 +87,15 @@ Author:
 #define CmResourceTypeDevicePrivate             129
 #define CmResourceTypePcCardConfig              130
 #define CmResourceTypeMfCardConfig              131
+#define CmResourceTypeConnection                132
+
+#define CM_RESOURCE_CONNECTION_CLASS_GPIO       0x01
+#define CM_RESOURCE_CONNECTION_CLASS_SERIAL     0x02
+
+#define CM_RESOURCE_CONNECTION_TYPE_GPIO_IO     0x02
+#define CM_RESOURCE_CONNECTION_TYPE_SERIAL_I2C  0x01
+#define CM_RESOURCE_CONNECTION_TYPE_SERIAL_SPI  0x02
+#define CM_RESOURCE_CONNECTION_TYPE_SERIAL_UART 0x03
 
 
 //
@@ -150,6 +159,7 @@ typedef enum _CM_SHARE_DISPOSITION
 #define CM_RESOURCE_DMA_TYPE_A            0x0010
 #define CM_RESOURCE_DMA_TYPE_B            0x0020
 #define CM_RESOURCE_DMA_TYPE_F            0x0040
+#define CM_RESOURCE_DMA_V3                0x0080
 
 //
 // Interrupt Resource Descriptor Flags
@@ -613,7 +623,7 @@ typedef struct _PLUGPLAY_BUS_INSTANCE
 //
 // Partial Resource Descriptor and List for Hardware
 //
-#include <pshpack1.h>
+#pragma pack(push, 1)
 typedef struct _CM_PARTIAL_RESOURCE_DESCRIPTOR
 {
     UCHAR Type;
@@ -671,6 +681,15 @@ typedef struct _CM_PARTIAL_RESOURCE_DESCRIPTOR
         } Dma;
         struct
         {
+            ULONG Channel;
+            ULONG RequestLine;
+            UCHAR TransferWidth;
+            UCHAR Reserved1;
+            UCHAR Reserved2;
+            UCHAR Reserved3;
+        } DmaV3;
+        struct
+        {
             ULONG Data[3];
         } DevicePrivate;
         struct
@@ -702,6 +721,15 @@ typedef struct _CM_PARTIAL_RESOURCE_DESCRIPTOR
             ULONG Length64;
         } Memory64;
 #endif
+        struct
+        {
+            UCHAR Class;
+            UCHAR Type;
+            UCHAR Reserved1;
+            UCHAR Reserved2;
+            ULONG IdLowPart;
+            ULONG IdHighPart;
+        } Connection;
     } u;
 } CM_PARTIAL_RESOURCE_DESCRIPTOR, *PCM_PARTIAL_RESOURCE_DESCRIPTOR;
 
@@ -758,11 +786,9 @@ typedef struct _CM_DISK_GEOMETRY_DEVICE_DATA
     ULONG NumberOfHeads;
 } CM_DISK_GEOMETRY_DEVICE_DATA, *PCM_DISK_GEOMETRY_DEVICE_DATA;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 #endif // _!NTOS_MODE_USER
 
 #endif // _CMTYPES_H
-
-
 

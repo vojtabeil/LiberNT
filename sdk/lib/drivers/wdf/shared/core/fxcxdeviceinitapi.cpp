@@ -454,6 +454,86 @@ Done:
     return;
 }
 
+__drv_maxIRQL(DISPATCH_LEVEL)
+VOID
+NTAPI
+WDFEXPORT(WdfCxDeviceInitSetPnpPowerEventCallbacks)(
+    _In_ PWDF_DRIVER_GLOBALS DriverGlobals,
+    _In_ PWDFCXDEVICE_INIT CxDeviceInit,
+    _In_ PWDFCX_PNPPOWER_EVENT_CALLBACKS CxPnpPowerCallbacks
+    )
+{
+    PFX_DRIVER_GLOBALS clientGlobals;
+    PFX_DRIVER_GLOBALS cxGlobals;
+    NTSTATUS status;
+
+    cxGlobals = GetFxDriverGlobals(DriverGlobals);
+    FxPointerNotNull(cxGlobals, CxDeviceInit);
+    clientGlobals = CxDeviceInit->ClientDriverGlobals;
+
+    status = FxValiateCx(clientGlobals, cxGlobals);
+    if (!NT_SUCCESS(status)) {
+        return;
+    }
+
+    FxPointerNotNull(clientGlobals, CxPnpPowerCallbacks);
+    if (CxPnpPowerCallbacks->Size != sizeof(WDFCX_PNPPOWER_EVENT_CALLBACKS)) {
+        DoTraceLevelMessage(clientGlobals,
+                            TRACE_LEVEL_ERROR,
+                            TRACINGDEVICE,
+                            "Invalid WDFCX_PNPPOWER_EVENT_CALLBACKS size %lu, expected %Iu",
+                            CxPnpPowerCallbacks->Size,
+                            sizeof(WDFCX_PNPPOWER_EVENT_CALLBACKS));
+        FxVerifierDbgBreakPoint(clientGlobals);
+        return;
+    }
+
+    RtlCopyMemory(&CxDeviceInit->PnpPowerCallbacks.PnpPowerCallbacks,
+                  CxPnpPowerCallbacks,
+                  sizeof(WDFCX_PNPPOWER_EVENT_CALLBACKS));
+    CxDeviceInit->PnpPowerCallbacks.Set = TRUE;
+}
+
+__drv_maxIRQL(DISPATCH_LEVEL)
+VOID
+NTAPI
+WDFEXPORT(WdfCxDeviceInitSetPowerPolicyEventCallbacks)(
+    _In_ PWDF_DRIVER_GLOBALS DriverGlobals,
+    _In_ PWDFCXDEVICE_INIT CxDeviceInit,
+    _In_ PWDFCX_POWER_POLICY_EVENT_CALLBACKS CxPowerPolicyCallbacks
+    )
+{
+    PFX_DRIVER_GLOBALS clientGlobals;
+    PFX_DRIVER_GLOBALS cxGlobals;
+    NTSTATUS status;
+
+    cxGlobals = GetFxDriverGlobals(DriverGlobals);
+    FxPointerNotNull(cxGlobals, CxDeviceInit);
+    clientGlobals = CxDeviceInit->ClientDriverGlobals;
+
+    status = FxValiateCx(clientGlobals, cxGlobals);
+    if (!NT_SUCCESS(status)) {
+        return;
+    }
+
+    FxPointerNotNull(clientGlobals, CxPowerPolicyCallbacks);
+    if (CxPowerPolicyCallbacks->Size != sizeof(WDFCX_POWER_POLICY_EVENT_CALLBACKS)) {
+        DoTraceLevelMessage(clientGlobals,
+                            TRACE_LEVEL_ERROR,
+                            TRACINGDEVICE,
+                            "Invalid WDFCX_POWER_POLICY_EVENT_CALLBACKS size %lu, expected %Iu",
+                            CxPowerPolicyCallbacks->Size,
+                            sizeof(WDFCX_POWER_POLICY_EVENT_CALLBACKS));
+        FxVerifierDbgBreakPoint(clientGlobals);
+        return;
+    }
+
+    RtlCopyMemory(&CxDeviceInit->PnpPowerCallbacks.PowerPolicyCallbacks,
+                  CxPowerPolicyCallbacks,
+                  sizeof(WDFCX_POWER_POLICY_EVENT_CALLBACKS));
+    CxDeviceInit->PnpPowerCallbacks.Set = TRUE;
+}
+
 _Must_inspect_result_
 __drv_maxIRQL(PASSIVE_LEVEL)
 PWDFCXDEVICE_INIT
@@ -502,5 +582,58 @@ Done:
     return cxDeviceInit;
 }
 
-} // extern "C"
+_Must_inspect_result_
+__drv_maxIRQL(DISPATCH_LEVEL)
+NTSTATUS
+NTAPI
+WDFEXPORT(WdfCxDeviceInitAllocateContext)(
+    _In_ PWDF_DRIVER_GLOBALS DriverGlobals,
+    _In_ PWDFDEVICE_INIT DeviceInit,
+    _In_ PWDF_OBJECT_ATTRIBUTES ContextAttributes,
+    _Outptr_opt_ PVOID* Context
+    )
+{
+    PFX_DRIVER_GLOBALS clientGlobals;
+    PFX_DRIVER_GLOBALS cxGlobals;
+    NTSTATUS status;
 
+    cxGlobals = GetFxDriverGlobals(DriverGlobals);
+    FxPointerNotNull(cxGlobals, DeviceInit);
+    clientGlobals = DeviceInit->DriverGlobals;
+
+    status = FxValiateCx(clientGlobals, cxGlobals);
+    if (!NT_SUCCESS(status)) {
+        return status;
+    }
+
+    return DeviceInit->AllocateCxContext(cxGlobals,
+                                         ContextAttributes,
+                                         Context);
+}
+
+__drv_maxIRQL(DISPATCH_LEVEL + 1)
+PVOID
+NTAPI
+WDFEXPORT(WdfCxDeviceInitGetTypedContextWorker)(
+    _In_ PWDF_DRIVER_GLOBALS DriverGlobals,
+    _In_ PWDFDEVICE_INIT DeviceInit,
+    _In_ PCWDF_OBJECT_CONTEXT_TYPE_INFO TypeInfo
+    )
+{
+    PFX_DRIVER_GLOBALS clientGlobals;
+    PFX_DRIVER_GLOBALS cxGlobals;
+    NTSTATUS status;
+
+    cxGlobals = GetFxDriverGlobals(DriverGlobals);
+    FxPointerNotNull(cxGlobals, DeviceInit);
+    clientGlobals = DeviceInit->DriverGlobals;
+
+    status = FxValiateCx(clientGlobals, cxGlobals);
+    if (!NT_SUCCESS(status)) {
+        return NULL;
+    }
+
+    return DeviceInit->GetCxTypedContext(TypeInfo);
+}
+
+} // extern "C"

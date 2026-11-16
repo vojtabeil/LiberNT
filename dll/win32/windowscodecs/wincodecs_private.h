@@ -19,36 +19,19 @@
 #ifndef WINCODECS_PRIVATE_H
 #define WINCODECS_PRIVATE_H
 
+#include <stdbool.h>
+
 #include "wincodec.h"
 #include "wincodecsdk.h"
 
 #include "wine/debug.h"
 
-#ifdef __REACTOS__
-#include <wine/library.h>
-#endif
-
-DEFINE_GUID(CLSID_WineTgaDecoder, 0xb11fc79a,0x67cc,0x43e6,0xa9,0xce,0xe3,0xd5,0x49,0x45,0xd3,0x04);
-
-DEFINE_GUID(GUID_WineContainerFormatTga, 0x0c44fda1,0xa5c5,0x4298,0x96,0x85,0x47,0x3f,0xc1,0x7c,0xd3,0x22);
-
-DEFINE_GUID(GUID_VendorWine, 0xddf46da1,0x7dc1,0x404e,0x98,0xf2,0xef,0xa4,0x8d,0xfc,0x95,0x0a);
-
-#ifdef __REACTOS__
-extern const GUID IID_IMILBitmap;
-extern const GUID IID_IMILBitmapSource;
-extern const GUID IID_IMILBitmapLock;
-extern const GUID IID_IMILBitmapScaler;
-extern const GUID IID_IMILFormatConverter;
-extern const GUID IID_IMILPalette;
-#else
 extern IID IID_IMILBitmap;
 extern IID IID_IMILBitmapSource;
 extern IID IID_IMILBitmapLock;
 extern IID IID_IMILBitmapScaler;
 extern IID IID_IMILFormatConverter;
 extern IID IID_IMILPalette;
-#endif
 
 #define INTERFACE IMILBitmapSource
 DECLARE_INTERFACE_(IMILBitmapSource,IUnknown)
@@ -117,28 +100,14 @@ DECLARE_INTERFACE_(IMILUnknown1,IUnknown)
     STDMETHOD_(HRESULT,QueryInterface)(THIS_ REFIID,void **) PURE;
     STDMETHOD_(ULONG,AddRef)(THIS) PURE;
     STDMETHOD_(ULONG,Release)(THIS) PURE;
-    /*** thiscall method ***/
-    #ifdef __REACTOS__
-    STDMETHOD_(void,unknown1)(THIS_ void*) PURE;
-    #else
     THISCALLMETHOD_(void,unknown1)(THIS_ void*) PURE;
-    #endif
     STDMETHOD_(HRESULT,unknown2)(THIS_ void*, void*) PURE;
-    #ifdef __REACTOS__
-    STDMETHOD_(HRESULT,unknown3)(THIS_ void*) PURE;
-    #else
     THISCALLMETHOD_(HRESULT,unknown3)(THIS_ void*) PURE;
-    #endif
     STDMETHOD_(HRESULT,unknown4)(THIS_ void*) PURE;
     STDMETHOD_(HRESULT,unknown5)(THIS_ void*) PURE;
     STDMETHOD_(HRESULT,unknown6)(THIS_ DWORD64) PURE;
     STDMETHOD_(HRESULT,unknown7)(THIS_ void*) PURE;
-    #ifdef __REACTOS__
-    /*** thiscall method ***/
-    STDMETHOD_(HRESULT,unknown8)(THIS) PURE;
-    #else
     THISCALLMETHOD_(HRESULT,unknown8)(THIS) PURE;
-    #endif
 };
 #undef INTERFACE
 
@@ -189,6 +158,8 @@ extern HRESULT ColorContext_Create(IWICColorContext **context);
 extern HRESULT ColorTransform_Create(IWICColorTransform **transform);
 extern HRESULT BitmapClipper_Create(IWICBitmapClipper **clipper);
 
+extern HRESULT create_stream_wrapper(IStream *input, ULONG offset, IStream **wrapper);
+
 extern HRESULT copy_pixels(UINT bpp, const BYTE *srcbuffer,
     UINT srcwidth, UINT srcheight, INT srcstride,
     const WICRect *rc, UINT dststride, UINT dstbuffersize, BYTE *dstbuffer);
@@ -211,6 +182,9 @@ extern HRESULT CreatePropertyBag2(const PROPBAG2 *options, UINT count,
                                   IPropertyBag2 **property);
 
 extern HRESULT CreateComponentInfo(REFCLSID clsid, IWICComponentInfo **ppIInfo);
+#ifdef __REACTOS__
+extern HRESULT GetCachedComponentInfo(REFCLSID clsid, IWICComponentInfo **ppIInfo);
+#endif
 extern void ReleaseComponentInfos(void);
 extern HRESULT CreateComponentEnumerator(DWORD componentTypes, DWORD options, IEnumUnknown **ppIEnumUnknown);
 extern HRESULT get_decoder_info(REFCLSID clsid, IWICBitmapDecoderInfo **info);
@@ -221,6 +195,20 @@ extern HRESULT IcoDibDecoder_CreateInstance(BmpDecoder **ppDecoder);
 extern void BmpDecoder_GetWICDecoder(BmpDecoder *This, IWICBitmapDecoder **ppDecoder);
 extern void BmpDecoder_FindIconMask(BmpDecoder *This, ULONG *mask_offset, int *topdown);
 
+static inline HRESULT init_propvar_from_string(const WCHAR *str, PROPVARIANT *var)
+{
+    size_t size = (wcslen(str) + 1) * sizeof(*str);
+    WCHAR *s;
+
+    if (!(s = CoTaskMemAlloc(size)))
+        return E_OUTOFMEMORY;
+    memcpy(s, str, size);
+
+    var->pwszVal = s;
+    var->vt = VT_LPWSTR;
+    return S_OK;
+}
+
 typedef struct _MetadataItem
 {
     PROPVARIANT schema;
@@ -228,35 +216,106 @@ typedef struct _MetadataItem
     PROPVARIANT value;
 } MetadataItem;
 
+enum metadatahandler_flags
+{
+    METADATAHANDLER_IS_WRITER = 0x1,
+    METADATAHANDLER_FIXED_ITEMS = 0x2, /* Items cannot be added or removed. */
+    METADATAHANDLER_NAMED_ITEMS = 0x4,
+    METADATAHANDLER_ABSOLUTE_OFFSETS = 0x8,
+    METADATAHANDLER_NESTED_ITEMS = 0x10,
+    METADATAHANDLER_CASE_SENSITIVE = 0x20,
+    METADATAHANDLER_DETACHED_LOAD = 0x40,
+};
+
+typedef struct MetadataHandler MetadataHandler;
+
 typedef struct _MetadataHandlerVtbl
 {
-    int is_writer;
+    DWORD flags;
     const CLSID *clsid;
-    HRESULT (*fnLoad)(IStream *stream, const GUID *preferred_vendor,
-        DWORD persist_options, MetadataItem **items, DWORD *item_count);
-    HRESULT (*fnSave)(IStream *stream, DWORD persist_options,
-        const MetadataItem *items, DWORD item_count);
-    HRESULT (*fnGetSizeMax)(const MetadataItem *items, DWORD item_count,
-        ULARGE_INTEGER *size);
+    HRESULT (*fnLoad)(MetadataHandler *handler, IStream *stream, const GUID *preferred_vendor,
+        DWORD persist_options);
+    HRESULT (*fnCreate)(MetadataHandler *handler);
+#ifdef __REACTOS__
+    HRESULT empty_value_error;
+    HRESULT invalid_index_error;
+#endif
+    HRESULT (*fnPrepareValue)(const PROPVARIANT *id, const PROPVARIANT *value, PROPVARIANT *normalized_id);
+    HRESULT (*fnSerialize)(const MetadataItem *items, DWORD count, DWORD options, ULONGLONG offset,
+            BOOL clear_dirty, BYTE **data, ULONG *size);
 } MetadataHandlerVtbl;
 
+typedef struct MetadataHandler
+{
+    IWICMetadataWriter IWICMetadataWriter_iface;
+    LONG ref;
+    IWICPersistStream IWICPersistStream_iface;
+    IWICStreamProvider IWICStreamProvider_iface;
+    const MetadataHandlerVtbl *vtable;
+    MetadataItem *items;
+    DWORD item_count;
+    DWORD persist_options;
+    IStream *stream;
+    ULARGE_INTEGER origin;
+    CRITICAL_SECTION lock;
+    ULONGLONG modification, saved_modification;
+} MetadataHandler;
+
 extern HRESULT MetadataReader_Create(const MetadataHandlerVtbl *vtable, REFIID iid, void** ppv);
+extern void MetadataHandler_FreeItems(MetadataHandler *handler);
+extern void clear_metadata_item(MetadataItem *item);
 
 extern HRESULT UnknownMetadataReader_CreateInstance(REFIID iid, void** ppv);
+extern HRESULT XMPStructReader_CreateInstance(REFIID iid, void **out);
+extern HRESULT XMPBagReader_CreateInstance(REFIID iid, void **out);
+extern HRESULT XMPSeqReader_CreateInstance(REFIID iid, void **out);
+extern HRESULT XMPAltReader_CreateInstance(REFIID iid, void **out);
+extern HRESULT UnknownMetadataWriter_CreateInstance(REFIID iid, void** ppv);
 extern HRESULT IfdMetadataReader_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT IfdMetadataWriter_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT GpsMetadataReader_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT GpsMetadataWriter_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT ExifMetadataReader_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT ExifMetadataWriter_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT App0MetadataReader_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT App1MetadataReader_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT App0MetadataWriter_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT App1MetadataWriter_CreateInstance(REFIID iid, void **ppv);
+#ifdef __REACTOS__
+extern HRESULT JpegLuminanceReader_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT JpegChrominanceReader_CreateInstance(REFIID iid, void **ppv);
+#endif
+extern HRESULT PngBkgdReader_CreateInstance(REFIID iid, void** ppv);
+extern HRESULT PngBkgdWriter_CreateInstance(REFIID iid, void** ppv);
 extern HRESULT PngChrmReader_CreateInstance(REFIID iid, void** ppv);
+extern HRESULT PngChrmWriter_CreateInstance(REFIID iid, void** ppv);
 extern HRESULT PngGamaReader_CreateInstance(REFIID iid, void** ppv);
+extern HRESULT PngGamaWriter_CreateInstance(REFIID iid, void** ppv);
 extern HRESULT PngHistReader_CreateInstance(REFIID iid, void** ppv);
+extern HRESULT PngHistWriter_CreateInstance(REFIID iid, void** ppv);
 extern HRESULT PngTextReader_CreateInstance(REFIID iid, void** ppv);
+extern HRESULT PngTextWriter_CreateInstance(REFIID iid, void** ppv);
 extern HRESULT PngTimeReader_CreateInstance(REFIID iid, void** ppv);
+extern HRESULT PngTimeWriter_CreateInstance(REFIID iid, void** ppv);
 extern HRESULT LSDReader_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT LSDWriter_CreateInstance(REFIID iid, void **ppv);
 extern HRESULT IMDReader_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT IMDWriter_CreateInstance(REFIID iid, void **ppv);
 extern HRESULT GCEReader_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT GCEWriter_CreateInstance(REFIID iid, void **ppv);
 extern HRESULT APEReader_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT APEWriter_CreateInstance(REFIID iid, void **ppv);
 extern HRESULT GifCommentReader_CreateInstance(REFIID iid, void **ppv);
-extern HRESULT MetadataQueryReader_CreateInstance(IWICMetadataBlockReader *, const WCHAR *, IWICMetadataQueryReader **);
-extern HRESULT MetadataQueryWriter_CreateInstance(IWICMetadataBlockWriter *, const WCHAR *, IWICMetadataQueryWriter **);
+extern HRESULT GifCommentWriter_CreateInstance(REFIID iid, void **ppv);
+extern HRESULT MetadataQueryReader_CreateInstanceFromBlockReader(IWICMetadataBlockReader *, IWICMetadataQueryReader **);
+extern HRESULT MetadataQueryWriter_CreateInstanceFromBlockWriter(IWICMetadataBlockWriter *, IWICMetadataQueryWriter **);
+extern HRESULT MetadataQueryReader_CreateInstance(IWICMetadataReader *, IWICMetadataQueryReader **);
+extern HRESULT MetadataQueryWriter_CreateInstance(IWICMetadataWriter *, IWICMetadataQueryWriter **);
 extern HRESULT stream_initialize_from_filehandle(IWICStream *iface, HANDLE hfile);
+
+HRESULT create_metadata_writer_enumerator(IUnknown **objects, UINT count, IEnumUnknown **ret);
+
+extern bool wincodecs_array_reserve(void **elements, size_t *capacity, size_t count, size_t size);
 
 static inline const char *debug_wic_rect(const WICRect *rect)
 {
@@ -277,8 +336,12 @@ struct decoder_info
     CLSID clsid;
 };
 
-#define DECODER_FLAGS_CAPABILITY_MASK 0x1f
-#define DECODER_FLAGS_UNSUPPORTED_COLOR_CONTEXT 0x80000000
+enum decoder_flags
+{
+    DECODER_FLAGS_CAPABILITY_MASK = 0x1f,
+    DECODER_FLAGS_UNSUPPORTED_COLOR_CONTEXT = 0x80000000,
+    DECODER_FLAGS_METADATA_AT_DECODER = 0x40000000,
+};
 
 struct decoder_stat
 {
@@ -297,9 +360,14 @@ struct decoder_frame
     WICColor palette[256];
 };
 
-#define DECODER_BLOCK_OPTION_MASK 0x0001000F
-#define DECODER_BLOCK_FULL_STREAM 0x80000000
-#define DECODER_BLOCK_READER_CLSID 0x40000000
+enum decoder_block_options
+{
+    DECODER_BLOCK_OPTION_MASK = 0x0001000F,
+    DECODER_BLOCK_FULL_STREAM = 0x80000000,
+    DECODER_BLOCK_READER_CLSID = 0x40000000,
+    DECODER_BLOCK_OFFSET_IS_PTR = 0x20000000,
+};
+
 struct decoder_block
 {
     ULONGLONG offset;
@@ -317,6 +385,7 @@ struct decoder_funcs
 {
     HRESULT (CDECL *initialize)(struct decoder* This, IStream *stream, struct decoder_stat *st);
     HRESULT (CDECL *get_frame_info)(struct decoder* This, UINT frame, struct decoder_frame *info);
+    HRESULT (CDECL *get_decoder_palette)(struct decoder* This, UINT frame, WICColor *colors, UINT *num_colors);
     HRESULT (CDECL *copy_pixels)(struct decoder* This, UINT frame, const WICRect *prc,
         UINT stride, UINT buffersize, BYTE *buffer);
     HRESULT (CDECL *get_metadata_blocks)(struct decoder* This, UINT frame, UINT *count,
@@ -334,6 +403,7 @@ HRESULT CDECL stream_write(IStream *stream, const void *buffer, ULONG write, ULO
 HRESULT CDECL decoder_create(const CLSID *decoder_clsid, struct decoder_info *info, struct decoder **result);
 HRESULT CDECL decoder_initialize(struct decoder *This, IStream *stream, struct decoder_stat *st);
 HRESULT CDECL decoder_get_frame_info(struct decoder* This, UINT frame, struct decoder_frame *info);
+HRESULT CDECL decoder_get_decoder_palette(struct decoder* This, UINT frame, WICColor *colors, UINT *num_colors);
 HRESULT CDECL decoder_copy_pixels(struct decoder* This, UINT frame, const WICRect *prc,
     UINT stride, UINT buffersize, BYTE *buffer);
 HRESULT CDECL decoder_get_metadata_blocks(struct decoder* This, UINT frame, UINT *count,
@@ -341,6 +411,15 @@ HRESULT CDECL decoder_get_metadata_blocks(struct decoder* This, UINT frame, UINT
 HRESULT CDECL decoder_get_color_context(struct decoder* This, UINT frame, UINT num,
     BYTE **data, DWORD *datasize);
 void CDECL decoder_destroy(struct decoder *This);
+
+HRESULT create_metadata_reader(REFGUID format, const GUID *vendor, DWORD options, IStream *stream,
+        IWICMetadataReader **reader);
+HRESULT create_metadata_writer(REFGUID format, const GUID *vendor, DWORD options,
+        IWICMetadataWriter **writer);
+HRESULT create_metadata_query_writer_from_reader(IWICMetadataQueryReader *query_reader, const GUID *vendor,
+        IWICMetadataQueryWriter **query_writer);
+HRESULT create_metadata_writer_from_reader(IWICMetadataReader *reader, const GUID *vendor,
+        IWICMetadataWriter **writer);
 
 struct encoder_funcs;
 
@@ -357,12 +436,14 @@ enum encoder_option
     ENCODER_OPTION_CHROMINANCE,
     ENCODER_OPTION_YCRCB_SUBSAMPLING,
     ENCODER_OPTION_SUPPRESS_APP0,
+    ENCODER_OPTION_LOSSLESS,
     ENCODER_OPTION_END
 };
 
 #define ENCODER_FLAGS_MULTI_FRAME 0x1
 #define ENCODER_FLAGS_ICNS_SIZE 0x2
 #define ENCODER_FLAGS_SUPPORTS_METADATA 0x4
+#define ENCODER_FLAGS_METADATA_UNINITIALIZED 0x8
 
 struct encoder_info
 {
@@ -382,6 +463,7 @@ struct encoder_frame
     UINT num_colors;
     WICColor palette[256];
     /* encoder options */
+    BOOL lossless;
     BOOL interlace;
     DWORD filter;
 };
@@ -391,13 +473,20 @@ struct encoder
     const struct encoder_funcs *vtable;
 };
 
+struct encoder_metadata
+{
+    GUID format;
+    BYTE *data;
+    ULONG size;
+};
+
 struct encoder_funcs
 {
     HRESULT (CDECL *initialize)(struct encoder* This, IStream *stream);
     HRESULT (CDECL *get_supported_format)(struct encoder* This, GUID *pixel_format, DWORD *bpp, BOOL *indexed);
     HRESULT (CDECL *create_frame)(struct encoder* This, const struct encoder_frame *frame);
     HRESULT (CDECL *write_lines)(struct encoder* This, BYTE *data, DWORD line_count, DWORD stride);
-    HRESULT (CDECL *commit_frame)(struct encoder* This);
+    HRESULT (CDECL *commit_frame)(struct encoder* This, const struct encoder_metadata *metadata, UINT metadata_count);
     HRESULT (CDECL *commit_file)(struct encoder* This);
     void (CDECL *destroy)(struct encoder* This);
 };
@@ -406,7 +495,7 @@ HRESULT CDECL encoder_initialize(struct encoder* This, IStream *stream);
 HRESULT CDECL encoder_get_supported_format(struct encoder* This, GUID *pixel_format, DWORD *bpp, BOOL *indexed);
 HRESULT CDECL encoder_create_frame(struct encoder* This, const struct encoder_frame *frame);
 HRESULT CDECL encoder_write_lines(struct encoder* This, BYTE *data, DWORD line_count, DWORD stride);
-HRESULT CDECL encoder_commit_frame(struct encoder* This);
+HRESULT CDECL encoder_commit_frame(struct encoder* This, const struct encoder_metadata *metadata, UINT metadata_count);
 HRESULT CDECL encoder_commit_file(struct encoder* This);
 void CDECL encoder_destroy(struct encoder* This);
 
@@ -424,5 +513,8 @@ extern HRESULT CommonDecoder_CreateInstance(struct decoder *decoder,
 
 extern HRESULT CommonEncoder_CreateInstance(struct encoder *encoder,
     const struct encoder_info *encoder_info, REFIID iid, void** ppv);
+
+HRESULT WmpEncoder_CreateInstance(REFIID iid, void **result);
+HRESULT WmpDecoder_CreateInstance(REFIID iid, void **result);
 
 #endif /* WINCODECS_PRIVATE_H */

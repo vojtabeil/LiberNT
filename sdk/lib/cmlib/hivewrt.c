@@ -56,224 +56,227 @@ HvpValidateBaseHeader(
     ASSERT(BaseBlock->Major == HSYS_MAJOR);
 }
 
-/**
- * @unimplemented
- * @brief
- * Writes dirty data in a transacted way to a hive
- * log file during hive syncing operation. Log
- * files are used by the kernel/bootloader to
- * perform recovery operations against a
- * damaged primary hive.
- *
- * @param[in] RegistryHive
- * A pointer to a hive descriptor where the log
- * belongs to and of which we write data into the
- * said log.
- *
- * @return
- * Returns TRUE if log transaction writing has succeeded,
- * FALSE otherwise.
- *
- * @remarks
- * The function is not completely implemented, that is,
- * it lacks the implementation for growing the log file size.
- * See the FIXME comment below for further details.
- */
+#if !defined(CMLIB_HOST) && !defined(_BLDR_)
+#define HV_LOG_FILE_SIZE_CAP (4 * 1024 * 1024)
+#define HV_LOG_FILE_GROWTH (1024 * 1024)
+
+static
+BOOLEAN
+HvpIsLogOnlyHive(
+    _In_ PHHIVE RegistryHive)
+{
+    return ((PCMHIVE)RegistryHive)->FileHandles[HFILE_TYPE_LOG] != NULL;
+}
+
+static
+BOOLEAN
+HvpReserveLog(
+    _In_ PHHIVE RegistryHive,
+    _In_ ULONG End)
+{
+    PCMHIVE CmHive = (PCMHIVE)RegistryHive;
+    ULONG Size = CmHive->LogFileSizes[0].LowPart;
+
+    if (End <= Size)
+        return TRUE;
+    if (!Size)
+    {
+        Size = HvpQueryFileSize(RegistryHive, HFILE_TYPE_LOG);
+        CmHive->LogFileSizes[0].QuadPart = Size;
+        if (End <= Size)
+            return TRUE;
+    }
+
+    End = ROUND_UP(End, HV_LOG_FILE_GROWTH);
+    if (!CmpFileSetSize(RegistryHive, HFILE_TYPE_LOG, End, Size))
+        return FALSE;
+    CmHive->LogFileSizes[0].QuadPart = End;
+    return TRUE;
+}
+
+static
+BOOLEAN
+HvpPrepareUnreconciledVector(
+    _In_ PHHIVE RegistryHive)
+{
+    ULONG Bits = RegistryHive->DirtyVector.SizeOfBitMap;
+    PULONG Buffer;
+
+    if (RegistryHive->UnreconciledVector.Buffer &&
+        RegistryHive->UnreconciledVector.SizeOfBitMap >= Bits)
+    {
+        return TRUE;
+    }
+
+    Buffer = RegistryHive->Allocate(Bits / 8, TRUE, TAG_CM);
+    if (!Buffer)
+        return FALSE;
+    RtlZeroMemory(Buffer, Bits / 8);
+    if (RegistryHive->UnreconciledVector.Buffer)
+    {
+        RtlCopyMemory(Buffer, RegistryHive->UnreconciledVector.Buffer,
+                      RegistryHive->UnreconciledVector.SizeOfBitMap / 8);
+        RegistryHive->Free(RegistryHive->UnreconciledVector.Buffer, 0);
+    }
+    RtlInitializeBitMap(&RegistryHive->UnreconciledVector, Buffer, Bits);
+    return TRUE;
+}
+
+static
+VOID
+HvpMergeUnreconciledVector(
+    _In_ PHHIVE RegistryHive)
+{
+    ULONG Index;
+
+    for (Index = 0; Index < RegistryHive->DirtyVector.SizeOfBitMap / 32; Index++)
+        RegistryHive->UnreconciledVector.Buffer[Index] |= RegistryHive->DirtyVector.Buffer[Index];
+    RegistryHive->UnreconciledCount = RtlNumberOfSetBits(&RegistryHive->UnreconciledVector);
+    RtlClearAllBits(&RegistryHive->DirtyVector);
+    RegistryHive->DirtyCount = 0;
+}
+#endif
+
 static
 BOOLEAN
 CMAPI
 HvpWriteLog(
-    _In_ PHHIVE RegistryHive)
+    _In_ PHHIVE RegistryHive,
+    _In_ BOOLEAN Append)
 {
-    BOOLEAN Success;
-    ULONG FileOffset;
-    ULONG BlockIndex;
-    ULONG LastIndex;
-    PVOID Block;
-    UINT32 BitmapSize, BufferSize;
-    PUCHAR HeaderBuffer, Ptr;
+    PHBASE_BLOCK BaseBlock = RegistryHive->BaseBlock;
+    ULONG BlockCount = RegistryHive->Storage[Stable].Length / HBLOCK_SIZE;
+    ULONG BlockIndex, RunEnd, RunCount, DirtyBlocks, Sequence;
+    ULONG HeaderSize, EntrySize, BufferSize, FileOffset, LogOffset;
+    PUCHAR Buffer, Data;
+    PHBASE_BLOCK LogBaseBlock;
+    PHV_LOG_ENTRY Entry;
+    PHV_LOG_DIRTY_PAGE Page;
+    BOOLEAN NewCycle, Success;
 
-    /*
-     * The hive log we are going to write data into
-     * has to be writable and with a sane storage.
-     */
-    ASSERT(!RegistryHive->ReadOnly);
-    ASSERT(RegistryHive->BaseBlock->Length ==
-           RegistryHive->Storage[Stable].Length * HBLOCK_SIZE);
+    if (BaseBlock->Sequence1 != BaseBlock->Sequence2)
+        return FALSE;
 
-    /* Validate the base header before we go further */
-    HvpValidateBaseHeader(RegistryHive);
-
-    /*
-     * The sequences can diverge during a forced system shutdown
-     * occurrence, such as during a power failure, a hardware
-     * failure or during a system crash, and when one of the
-     * sequences have been modified during writing into the log
-     * or hive. In such cases the hive needs a repair.
-     */
-    if (RegistryHive->BaseBlock->Sequence1 !=
-        RegistryHive->BaseBlock->Sequence2)
+    RunCount = 0;
+    DirtyBlocks = 0;
+    for (BlockIndex = 0; BlockIndex < BlockCount; BlockIndex = RunEnd + 1)
     {
-        DPRINT1("The sequences DO NOT MATCH (Sequence1 == 0x%x, Sequence2 == 0x%x)\n",
-                RegistryHive->BaseBlock->Sequence1, RegistryHive->BaseBlock->Sequence2);
+        RunEnd = BlockIndex;
+        if (!RtlCheckBit(&RegistryHive->DirtyVector, BlockIndex))
+            continue;
+        while (RunEnd + 1 < BlockCount && RtlCheckBit(&RegistryHive->DirtyVector, RunEnd + 1))
+            RunEnd++;
+        RunCount++;
+        DirtyBlocks += RunEnd - BlockIndex + 1;
+    }
+    if (!RunCount)
+        return TRUE;
+
+    NewCycle = !Append || !RegistryHive->CurrentLogOffset;
+    HeaderSize = NewCycle ? HSECTOR_SIZE : 0;
+    FileOffset = NewCycle ? 0 : RegistryHive->CurrentLogOffset;
+    LogOffset = FileOffset;
+    Sequence = Append ? BaseBlock->Sequence1 + 1 : BaseBlock->Sequence1;
+    BufferSize = ROUND_UP(HeaderSize + sizeof(HV_LOG_ENTRY) +
+                          RunCount * sizeof(HV_LOG_DIRTY_PAGE) +
+                          DirtyBlocks * HBLOCK_SIZE, HBLOCK_SIZE);
+    EntrySize = BufferSize - HeaderSize;
+    Buffer = RegistryHive->Allocate(BufferSize, TRUE, TAG_CM);
+    if (!Buffer)
+    {
+        DPRINT1("Failed to allocate 0x%lx bytes for the hive log entry\n", (unsigned long)BufferSize);
         return FALSE;
     }
+    RtlZeroMemory(Buffer, BufferSize);
 
-    /*
-     * FIXME: We must set a new file size for this log
-     * here but ReactOS lacks the necessary code implementation
-     * that manages the growing and shrinking of a hive's log
-     * size. So for now don't set any new size for the log.
-     */
-
-    /*
-     * Now calculate the bitmap and buffer sizes to hold up our
-     * contents in a buffer.
-     */
-    BitmapSize = ROUND_UP(sizeof(ULONG) + RegistryHive->DirtyVector.SizeOfBitMap, HSECTOR_SIZE);
-    BufferSize = HV_LOG_HEADER_SIZE + BitmapSize;
-
-    /* Now allocate the base header block buffer */
-    HeaderBuffer = RegistryHive->Allocate(BufferSize, TRUE, TAG_CM);
-    if (!HeaderBuffer)
+    if (HeaderSize)
     {
-        DPRINT1("Couldn't allocate buffer for base header block\n");
-        return FALSE;
+        LogBaseBlock = (PHBASE_BLOCK)Buffer;
+        RtlCopyMemory(LogBaseBlock, BaseBlock, HSECTOR_SIZE);
+        LogBaseBlock->Type = HV_LOG_INCREMENTAL_TYPE;
+        LogBaseBlock->Sequence1 = Sequence;
+        LogBaseBlock->Sequence2 = Sequence;
+        LogBaseBlock->CheckSum = HvpHiveHeaderChecksum(LogBaseBlock);
     }
 
-    /* Great, now zero out the buffer */
-    RtlZeroMemory(HeaderBuffer, BufferSize);
+    Entry = (PHV_LOG_ENTRY)(Buffer + HeaderSize);
+    Entry->Signature = HV_LOG_ENTRY_SIGNATURE;
+    Entry->Size = EntrySize;
+    Entry->Flags = BaseBlock->Flags & HV_LOG_ENTRY_FLAGS;
+    Entry->Sequence = Sequence;
+    Entry->Length = BaseBlock->Length;
+    Entry->DirtyPageCount = RunCount;
 
-    /*
-     * Update the base block of this hive and
-     * increment the primary sequence number
-     * as we are at the half of the work.
-     */
-    RegistryHive->BaseBlock->Type = HFILE_TYPE_LOG;
-    RegistryHive->BaseBlock->Sequence1++;
-    RegistryHive->BaseBlock->CheckSum = HvpHiveHeaderChecksum(RegistryHive->BaseBlock);
-
-    /* Copy the base block header */
-    RtlCopyMemory(HeaderBuffer, RegistryHive->BaseBlock, HV_LOG_HEADER_SIZE);
-    Ptr = HeaderBuffer + HV_LOG_HEADER_SIZE;
-
-    /* Copy the dirty vector */
-    *((PULONG)Ptr) = HV_LOG_DIRTY_SIGNATURE;
-    Ptr += sizeof(HV_LOG_DIRTY_SIGNATURE);
-
-    /*
-     * FIXME: In ReactOS a vector contains one bit per block
-     * whereas in Windows each bit within a vector is per
-     * sector. Furthermore, the dirty blocks within a respective
-     * hive has to be marked as such in an appropriate function
-     * for this purpose (probably HvMarkDirty or similar).
-     *
-     * For the moment being, mark the relevant dirty blocks
-     * here.
-     */
-    BlockIndex = 0;
-    while (BlockIndex < RegistryHive->Storage[Stable].Length)
+    Page = (PHV_LOG_DIRTY_PAGE)(Entry + 1);
+    Data = (PUCHAR)(Page + RunCount);
+    for (BlockIndex = 0; BlockIndex < BlockCount; BlockIndex++)
     {
-        /* Check if the block is clean or we're past the last block */
-        LastIndex = BlockIndex;
-        BlockIndex = RtlFindSetBits(&RegistryHive->DirtyVector, 1, BlockIndex);
-        if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex)
+        if (!RtlCheckBit(&RegistryHive->DirtyVector, BlockIndex))
+            continue;
+        if (!BlockIndex || !RtlCheckBit(&RegistryHive->DirtyVector, BlockIndex - 1))
         {
-            break;
+            Page->Offset = BlockIndex * HBLOCK_SIZE;
+            Page->Size = 0;
+            Page++;
         }
-
-        /*
-         * Mark this block as dirty and go to the next one.
-         *
-         * FIXME: We should rather use RtlSetBits but that crashes
-         * the system with a bugckeck. So for now mark blocks manually
-         * by hand.
-         */
-        Ptr[BlockIndex] = HV_LOG_DIRTY_BLOCK;
-        BlockIndex++;
+        Page[-1].Size += HBLOCK_SIZE;
+        RtlCopyMemory(Data, HvpLookupBlock(RegistryHive, Stable, BlockIndex), HBLOCK_SIZE);
+        Data += HBLOCK_SIZE;
     }
 
-    /* Now write the hive header and block bitmap into the log */
-    FileOffset = 0;
-    Success = RegistryHive->FileWrite(RegistryHive, HFILE_TYPE_LOG,
-                                      &FileOffset, HeaderBuffer, BufferSize);
-    RegistryHive->Free(HeaderBuffer, 0);
+    Entry->Hash1 = HvpComputeLogHash(Entry + 1, EntrySize - sizeof(HV_LOG_ENTRY));
+    Entry->Hash2 = HvpComputeLogHash(Entry, FIELD_OFFSET(HV_LOG_ENTRY, Hash2));
+
+    Success = TRUE;
+#if !defined(CMLIB_HOST) && !defined(_BLDR_)
+    if (Append)
+        Success = HvpReserveLog(RegistryHive, FileOffset + BufferSize);
+#endif
+    if (Success)
+    {
+        Success = RegistryHive->FileWrite(RegistryHive, HFILE_TYPE_LOG,
+                                          &FileOffset, Buffer, BufferSize);
+    }
+    RegistryHive->Free(Buffer, BufferSize);
     if (!Success)
     {
-        DPRINT1("Failed to write the hive header block to log (primary sequence)\n");
+        DPRINT1("Failed to write the hive log entry (sequence 0x%x)\n", Sequence);
         return FALSE;
     }
 
-    /* Now write the actual dirty data to log */
-    FileOffset = BufferSize;
-    BlockIndex = 0;
-    while (BlockIndex < RegistryHive->Storage[Stable].Length)
+    if (!CmpFileFlush(RegistryHive, HFILE_TYPE_LOG, NULL, 0))
     {
-        /* Check if the block is clean or we're past the last block */
-        LastIndex = BlockIndex;
-        BlockIndex = RtlFindSetBits(&RegistryHive->DirtyVector, 1, BlockIndex);
-        if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex)
-        {
-            break;
-        }
+        DPRINT1("Failed to flush the hive log\n");
+        return FALSE;
+    }
 
-        /* Get the block */
-        Block = (PVOID)RegistryHive->Storage[Stable].BlockList[BlockIndex].BlockAddress;
+    if (!Append)
+        return TRUE;
 
-        /* Write it to log */
-        Success = RegistryHive->FileWrite(RegistryHive, HFILE_TYPE_LOG,
-                                          &FileOffset, Block, HBLOCK_SIZE);
+    if (NewCycle)
+    {
+        BaseBlock->Type = HFILE_TYPE_PRIMARY;
+        BaseBlock->Sequence1 = Sequence;
+        BaseBlock->Sequence2 = Sequence - 1;
+        BaseBlock->CheckSum = HvpHiveHeaderChecksum(BaseBlock);
+        FileOffset = 0;
+        Success = RegistryHive->FileWrite(RegistryHive, HFILE_TYPE_PRIMARY,
+                                          &FileOffset, BaseBlock, sizeof(HBASE_BLOCK)) &&
+                  CmpFileFlush(RegistryHive, HFILE_TYPE_PRIMARY, NULL, 0);
         if (!Success)
         {
-            DPRINT1("Failed to write dirty block to log (block 0x%p, block index 0x%x)\n", Block, BlockIndex);
+            DPRINT1("Failed to mark the primary hive as logged\n");
+            BaseBlock->Sequence1 = Sequence - 1;
+            BaseBlock->CheckSum = HvpHiveHeaderChecksum(BaseBlock);
             return FALSE;
         }
-
-        /* Grow up the file offset as we go to the next block */
-        BlockIndex++;
-        FileOffset += HBLOCK_SIZE;
     }
 
-    /*
-     * We wrote the header and body of log with dirty,
-     * data do a flush immediately.
-     */
-    Success = RegistryHive->FileFlush(RegistryHive, HFILE_TYPE_LOG, NULL, 0);
-    if (!Success)
-    {
-        DPRINT1("Failed to flush the log\n");
-        return FALSE;
-    }
-
-    /*
-     * OK, we're now at 80% of the work done.
-     * Increment the secondary sequence and flush
-     * the log again. We can have a fully successful
-     * transacted write of a log if the sequences
-     * are synced up properly.
-     */
-    RegistryHive->BaseBlock->Sequence2++;
-    RegistryHive->BaseBlock->CheckSum = HvpHiveHeaderChecksum(RegistryHive->BaseBlock);
-
-    /* Write new stuff into log first */
-    FileOffset = 0;
-    Success = RegistryHive->FileWrite(RegistryHive, HFILE_TYPE_LOG,
-                                      &FileOffset, RegistryHive->BaseBlock,
-                                      HV_LOG_HEADER_SIZE);
-    if (!Success)
-    {
-        DPRINT1("Failed to write the log file (secondary sequence)\n");
-        return FALSE;
-    }
-
-    /* Flush it finally */
-    Success = RegistryHive->FileFlush(RegistryHive, HFILE_TYPE_LOG, NULL, 0);
-    if (!Success)
-    {
-        DPRINT1("Failed to flush the log\n");
-        return FALSE;
-    }
-
+    BaseBlock->Sequence1 = Sequence;
+    BaseBlock->Sequence2 = Sequence;
+    BaseBlock->CheckSum = HvpHiveHeaderChecksum(BaseBlock);
+    RegistryHive->CurrentLogOffset = LogOffset + BufferSize;
+    RegistryHive->CurrentLogSequence = Sequence;
     return TRUE;
 }
 
@@ -311,7 +314,9 @@ CMAPI
 HvpWriteHive(
     _In_ PHHIVE RegistryHive,
     _In_ BOOLEAN OnlyDirty,
-    _In_ ULONG FileType)
+    _In_ ULONG FileType,
+    _In_ BOOLEAN PrimaryDirty,
+    _In_ PRTL_BITMAP BlockVector)
 {
     BOOLEAN Success;
     ULONG FileOffset;
@@ -321,7 +326,7 @@ HvpWriteHive(
 
     ASSERT(!RegistryHive->ReadOnly);
     ASSERT(RegistryHive->BaseBlock->Length ==
-           RegistryHive->Storage[Stable].Length * HBLOCK_SIZE);
+           RegistryHive->Storage[Stable].Length);
     ASSERT(RegistryHive->BaseBlock->RootCell != HCELL_NIL);
 
     /* Validate the base header before we go further */
@@ -350,20 +355,29 @@ HvpWriteHive(
     RegistryHive->BaseBlock->Sequence1++;
     RegistryHive->BaseBlock->CheckSum = HvpHiveHeaderChecksum(RegistryHive->BaseBlock);
 
-    /* Write hive block */
-    FileOffset = 0;
-    Success = RegistryHive->FileWrite(RegistryHive, FileType,
-                                      &FileOffset, RegistryHive->BaseBlock,
-                                      sizeof(HBASE_BLOCK));
-    if (!Success)
+    if (!PrimaryDirty)
     {
-        DPRINT1("Failed to write the base block header to primary hive (primary sequence)\n");
-        return FALSE;
+        /* Write hive block */
+        FileOffset = 0;
+        Success = RegistryHive->FileWrite(RegistryHive, FileType,
+                                          &FileOffset, RegistryHive->BaseBlock,
+                                          sizeof(HBASE_BLOCK));
+        if (!Success)
+        {
+            DPRINT1("Failed to write the base block header to primary hive (primary sequence)\n");
+            return FALSE;
+        }
+
+        if (!CmpFileFlush(RegistryHive, FileType, NULL, 0))
+        {
+            DPRINT1("Failed to flush the primary hive base block\n");
+            return FALSE;
+        }
     }
 
     /* Write the whole primary hive, block by block */
     BlockIndex = 0;
-    while (BlockIndex < RegistryHive->Storage[Stable].Length)
+    while (BlockIndex < RegistryHive->Storage[Stable].Length / HBLOCK_SIZE)
     {
         /*
          * If we have to synchronize the registry hive we
@@ -376,15 +390,16 @@ HvpWriteHive(
         {
             /* Check if the block is clean or we're past the last block */
             LastIndex = BlockIndex;
-            BlockIndex = RtlFindSetBits(&RegistryHive->DirtyVector, 1, BlockIndex);
-            if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex)
+            BlockIndex = RtlFindSetBits(BlockVector, 1, BlockIndex);
+            if (BlockIndex == ~HV_CLEAN_BLOCK || BlockIndex < LastIndex ||
+                BlockIndex >= RegistryHive->Storage[Stable].Length / HBLOCK_SIZE)
             {
                 break;
             }
         }
 
         /* Get the block and offset position */
-        Block = (PVOID)RegistryHive->Storage[Stable].BlockList[BlockIndex].BlockAddress;
+        Block = HvpLookupBlock(RegistryHive, Stable, BlockIndex);
         FileOffset = (BlockIndex + 1) * HBLOCK_SIZE;
 
         /* Now write this block to primary hive file */
@@ -405,7 +420,7 @@ HvpWriteHive(
      * We wrote all the hive contents to the file, we
      * must flush the changes to disk now.
      */
-    Success = RegistryHive->FileFlush(RegistryHive, FileType, NULL, 0);
+    Success = CmpFileFlush(RegistryHive, FileType, NULL, 0);
     if (!Success)
     {
         DPRINT1("Failed to flush the primary hive\n");
@@ -433,16 +448,31 @@ HvpWriteHive(
         return FALSE;
     }
 
-    /* Flush the hive immediately */
-    Success = RegistryHive->FileFlush(RegistryHive, FileType, NULL, 0);
-    if (!Success)
+    return TRUE;
+}
+
+#if !defined(CMLIB_HOST) && !defined(_BLDR_)
+static
+BOOLEAN
+CMAPI
+HvpReconcileHive(
+    _In_ PHHIVE RegistryHive)
+{
+    if (!RegistryHive->CurrentLogOffset)
+        return TRUE;
+
+    if (!HvpWriteHive(RegistryHive, TRUE, HFILE_TYPE_PRIMARY, TRUE, &RegistryHive->UnreconciledVector) ||
+        !CmpFileFlush(RegistryHive, HFILE_TYPE_PRIMARY, NULL, 0))
     {
-        DPRINT1("Failed to flush the primary hive\n");
         return FALSE;
     }
 
+    RtlClearAllBits(&RegistryHive->UnreconciledVector);
+    RegistryHive->UnreconciledCount = 0;
+    RegistryHive->CurrentLogOffset = 0;
     return TRUE;
 }
+#endif
 
 /* PUBLIC FUNCTIONS ***********************************************************/
 
@@ -469,6 +499,7 @@ HvSyncHive(
 #if !defined(CMLIB_HOST) && !defined(_BLDR_)
     BOOLEAN HardErrors;
 #endif
+    BOOLEAN LogOnly;
 
     ASSERT(!RegistryHive->ReadOnly);
     ASSERT(RegistryHive->Signature == HV_HHIVE_SIGNATURE);
@@ -503,45 +534,61 @@ HvSyncHive(
     KeQuerySystemTime(&RegistryHive->BaseBlock->TimeStamp);
 #endif
 
-    /* Update the hive log file if present */
-    if (RegistryHive->Log)
-    {
-        if (!HvpWriteLog(RegistryHive))
-        {
-            DPRINT1("Failed to write a log whilst syncing the hive\n");
+
 #if !defined(CMLIB_HOST) && !defined(_BLDR_)
+    LogOnly = HvpIsLogOnlyHive(RegistryHive);
+    if (LogOnly && !HvpPrepareUnreconciledVector(RegistryHive))
+    {
+        if (RegistryHive->CurrentLogOffset && !HvpReconcileHive(RegistryHive))
+        {
             IoSetThreadHardErrorMode(HardErrors);
-#endif
             return FALSE;
         }
+        LogOnly = FALSE;
     }
-
-    /* Update the primary hive file */
-    if (!HvpWriteHive(RegistryHive, TRUE, HFILE_TYPE_PRIMARY))
+#else
+    LogOnly = FALSE;
+#endif
+    if (!HvpWriteLog(RegistryHive, LogOnly))
     {
-        DPRINT1("Failed to write the primary hive\n");
+        DPRINT1("Failed to write the hive log\n");
 #if !defined(CMLIB_HOST) && !defined(_BLDR_)
         IoSetThreadHardErrorMode(HardErrors);
 #endif
         return FALSE;
     }
 
-    /* Update the alternate hive file if present */
-    if (RegistryHive->Alternate)
+#if !defined(CMLIB_HOST) && !defined(_BLDR_)
+    if (LogOnly)
     {
-        if (!HvpWriteHive(RegistryHive, TRUE, HFILE_TYPE_ALTERNATE))
+        HvpMergeUnreconciledVector(RegistryHive);
+        if (RegistryHive->CurrentLogOffset >= HV_LOG_FILE_SIZE_CAP)
         {
-            DPRINT1("Failed to write the alternate hive\n");
+            if (!HvpReconcileHive(RegistryHive))
+            {
+                DPRINT1("Failed to reconcile the primary hive\n");
+                IoSetThreadHardErrorMode(HardErrors);
+                return FALSE;
+            }
+        }
+    }
+    else
+#endif
+    {
+        /* Update the primary hive file */
+        if (!HvpWriteHive(RegistryHive, TRUE, HFILE_TYPE_PRIMARY, FALSE, &RegistryHive->DirtyVector))
+        {
+            DPRINT1("Failed to write the primary hive\n");
 #if !defined(CMLIB_HOST) && !defined(_BLDR_)
             IoSetThreadHardErrorMode(HardErrors);
 #endif
             return FALSE;
         }
-    }
 
-    /* Clear dirty bitmap. */
-    RtlClearAllBits(&RegistryHive->DirtyVector);
-    RegistryHive->DirtyCount = 0;
+        /* Clear dirty bitmap. */
+        RtlClearAllBits(&RegistryHive->DirtyVector);
+        RegistryHive->DirtyCount = 0;
+    }
 
 #if !defined(CMLIB_HOST) && !defined(_BLDR_)
     IoSetThreadHardErrorMode(HardErrors);
@@ -550,7 +597,6 @@ HvSyncHive(
 }
 
 /**
- * @unimplemented
  * @brief
  * Determines whether a registry hive needs
  * to be shrinked or not based on its overall
@@ -570,8 +616,7 @@ CMAPI
 HvHiveWillShrink(
     _In_ PHHIVE RegistryHive)
 {
-    /* No shrinking yet */
-    UNIMPLEMENTED_ONCE;
+    UNREFERENCED_PARAMETER(RegistryHive);
     return FALSE;
 }
 
@@ -605,52 +650,44 @@ HvWriteHive(
 #endif
 
     /* Update hive file */
-    if (!HvpWriteHive(RegistryHive, FALSE, HFILE_TYPE_PRIMARY))
+    if (!HvpWriteHive(RegistryHive, FALSE, HFILE_TYPE_PRIMARY, FALSE, &RegistryHive->DirtyVector) ||
+        !CmpFileFlush(RegistryHive, HFILE_TYPE_PRIMARY, NULL, 0))
     {
         DPRINT1("Failed to write the hive\n");
         return FALSE;
     }
 
+    if (RegistryHive->UnreconciledVector.Buffer)
+        RtlClearAllBits(&RegistryHive->UnreconciledVector);
+    RegistryHive->UnreconciledCount = 0;
+    RegistryHive->CurrentLogOffset = 0;
     return TRUE;
 }
 
-/**
- * @brief
- * Writes data to an alternate registry hive.
- * An alternate hive is usually backed up by a primary
- * hive. This function is tipically used to force write
- * data into the alternate hive if both hives no longer match.
- *
- * @param[in] RegistryHive
- * A pointer to a hive descriptor where data
- * is to be written into.
- *
- * @return
- * Returns TRUE if hive writing has succeeded,
- * FALSE otherwise.
- */
 BOOLEAN
 CMAPI
-HvWriteAlternateHive(
+HvReconcileHive(
     _In_ PHHIVE RegistryHive)
 {
-    ASSERT(!RegistryHive->ReadOnly);
-    ASSERT(RegistryHive->Signature == HV_HHIVE_SIGNATURE);
-    ASSERT(RegistryHive->Alternate);
-
-#if !defined(_BLDR_)
-    /* Update hive header modification time */
-    KeQuerySystemTime(&RegistryHive->BaseBlock->TimeStamp);
+#if !defined(CMLIB_HOST) && !defined(_BLDR_)
+    BOOLEAN HardErrors;
+    BOOLEAN Success;
 #endif
 
-    /* Update hive file */
-    if (!HvpWriteHive(RegistryHive, FALSE, HFILE_TYPE_ALTERNATE))
-    {
-        DPRINT1("Failed to write the alternate hive\n");
+    if (!HvSyncHive(RegistryHive))
         return FALSE;
-    }
 
+#if !defined(CMLIB_HOST) && !defined(_BLDR_)
+    if (RegistryHive->HiveFlags & HIVE_VOLATILE)
+        return TRUE;
+
+    HardErrors = IoSetThreadHardErrorMode(FALSE);
+    Success = HvpReconcileHive(RegistryHive);
+    IoSetThreadHardErrorMode(HardErrors);
+    return Success;
+#else
     return TRUE;
+#endif
 }
 
 /**
@@ -676,7 +713,8 @@ HvSyncHiveFromRecover(
     ASSERT(RegistryHive->Signature == HV_HHIVE_SIGNATURE);
 
     /* Call the private API call to do the deed for us */
-    return HvpWriteHive(RegistryHive, TRUE, HFILE_TYPE_PRIMARY);
+    return HvpWriteHive(RegistryHive, TRUE, HFILE_TYPE_PRIMARY, TRUE, &RegistryHive->DirtyVector) &&
+           CmpFileFlush(RegistryHive, HFILE_TYPE_PRIMARY, NULL, 0);
 }
 
 /* EOF */

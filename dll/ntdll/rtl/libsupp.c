@@ -10,8 +10,16 @@
 /* INCLUDES *****************************************************************/
 
 #include <ntdll.h>
+#include <winnls.h>
 #include <apisets.h>
-#include <compat_undoc.h>
+#include <reactos/chpe.h>
+
+#ifdef WOW64_I386_RUNTIME
+#include <reactos/wow64shared.h>
+#define EXPLICIT_64BIT
+#include <ndk/peb_teb.h>
+#undef EXPLICIT_64BIT
+#endif
 
 #define NDEBUG
 #include <debug.h>
@@ -30,15 +38,53 @@ RtlpCheckForActiveDebugger(VOID)
     return NtCurrentPeb()->BeingDebugged;
 }
 
+ULONG
+NTAPI
+DebugPrint(
+    _In_ PSTRING DebugString,
+    _In_ ULONG ComponentId,
+    _In_ ULONG Level);
+
+BOOLEAN
+NTAPI
+RtlpDebugPrintWanted(
+    _Out_ PNTSTATUS Status)
+{
+    *Status = STATUS_DEVICE_NOT_CONNECTED;
+    return NtCurrentPeb()->BeingDebugged || (SharedUserData->KdDebuggerEnabled & 1);
+}
+
+NTSTATUS
+NTAPI
+RtlpDebugPrint(
+    _In_ PSTRING DebugString,
+    _In_ ULONG ComponentId,
+    _In_ ULONG Level)
+{
+    return DebugPrint(DebugString, ComponentId, Level);
+}
+
 BOOLEAN
 NTAPI
 RtlpSetInDbgPrint(VOID)
 {
     /* Check if it's already set and return TRUE if so */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    if (NtCurrentTeb()->ReservedPad0) return TRUE;
+
+    /* Set it and return */
+    NtCurrentTeb()->ReservedPad0 = TRUE;
+#elif (NTDDI_VERSION >= NTDDI_LONGHORN)
+    if (NtCurrentTeb()->SpareBool0) return TRUE;
+
+    /* Set it and return */
+    NtCurrentTeb()->SpareBool0 = TRUE;
+#else
     if (NtCurrentTeb()->InDbgPrint) return TRUE;
 
     /* Set it and return */
     NtCurrentTeb()->InDbgPrint = TRUE;
+#endif
     return FALSE;
 }
 
@@ -47,7 +93,13 @@ NTAPI
 RtlpClearInDbgPrint(VOID)
 {
     /* Clear the flag */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    NtCurrentTeb()->ReservedPad0 = FALSE;
+#elif (NTDDI_VERSION >= NTDDI_LONGHORN)
+    NtCurrentTeb()->SpareBool0 = FALSE;
+#else
     NtCurrentTeb()->InDbgPrint = FALSE;
+#endif
 }
 
 KPROCESSOR_MODE
@@ -65,6 +117,13 @@ NTAPI
 RtlGetCurrentPeb(VOID)
 {
     return NtCurrentPeb();
+}
+
+int *
+__cdecl
+_errno(void)
+{
+    return (int *)&NtCurrentTeb()->TlsSlots[16];
 }
 
 /*
@@ -88,6 +147,16 @@ RtlReleasePebLock(VOID)
 }
 
 /*
+ * @implemented
+ */
+LOGICAL
+NTAPI
+RtlTryAcquirePebLock(VOID)
+{
+    return RtlTryEnterCriticalSection(NtCurrentPeb()->FastPebLock);
+}
+
+/*
 * @implemented
 */
 ULONG
@@ -97,6 +166,8 @@ RtlGetNtGlobalFlags(VOID)
     PPEB pPeb = NtCurrentPeb();
     return pPeb->NtGlobalFlag;
 }
+
+#define RTL_HEAP_LOCK_SPIN_COUNT 4000
 
 NTSTATUS
 NTAPI
@@ -127,7 +198,12 @@ NTSTATUS
 NTAPI
 RtlInitializeHeapLock(IN OUT PHEAP_LOCK *Lock)
 {
-    return RtlInitializeCriticalSection(&(*Lock)->CriticalSection);
+    /*
+     * The heap lock is the most contended section in a multithreaded process
+     * and its critical path is short, so spin instead of going to the kernel.
+     */
+    return RtlInitializeCriticalSectionAndSpinCount(&(*Lock)->CriticalSection,
+                                                    RTL_HEAP_LOCK_SPIN_COUNT);
 }
 
 NTSTATUS
@@ -220,7 +296,7 @@ RtlpCaptureStackLimits(IN ULONG_PTR Ebp,
     return TRUE;
 }
 
-#ifndef _M_AMD64
+#if defined(_M_IX86) || defined(_M_ARM) || defined(_M_ARM64)
 /*
  * @implemented
  */
@@ -231,9 +307,12 @@ RtlWalkFrameChain(OUT PVOID *Callers,
                   IN ULONG Flags)
 {
     ULONG_PTR Stack, NewStack, StackBegin, StackEnd = 0;
-    ULONG Eip;
+    ULONG_PTR Eip;
     BOOLEAN Result, StopSearch = FALSE;
     ULONG i = 0;
+
+    if ((Callers == NULL) || (Count == 0))
+        return 0;
 
     /* Get current EBP */
 #if defined(_M_IX86)
@@ -251,6 +330,12 @@ RtlWalkFrameChain(OUT PVOID *Callers,
     __asm__("mov sp, %0" : "=r"(Stack) : );
 #elif defined(_MSC_VER)
     // FIXME: Hack. Probably won't work if this ever actually manages to run someday.
+    Stack = (ULONG_PTR)&Stack;
+#endif
+#elif defined(_M_ARM64) || defined(_ARM64_) || defined(__aarch64__)
+#if defined(__GNUC__) || defined(__clang__)
+    Stack = (ULONG_PTR)__builtin_frame_address(0);
+#elif defined(_MSC_VER)
     Stack = (ULONG_PTR)&Stack;
 #endif
 #else
@@ -306,7 +391,7 @@ RtlWalkFrameChain(OUT PVOID *Callers,
             /* FIXME: Check that EIP is inside a loaded module */
 
             /* Save this frame */
-            Callers[i] = (PVOID)Eip;
+            Callers[i] = (PVOID)(ULONG_PTR)Eip;
 
             /* Check if we should continue */
             if (StopSearch)
@@ -338,8 +423,21 @@ RtlpGetStackLimits(
     OUT PULONG_PTR LowLimit,
     OUT PULONG_PTR HighLimit)
 {
-    *LowLimit = (ULONG_PTR)NtCurrentTeb()->NtTib.StackLimit;
-    *HighLimit = (ULONG_PTR)NtCurrentTeb()->NtTib.StackBase;
+    PTEB Teb = NtCurrentTeb();
+    ULONG_PTR Current = (ULONG_PTR)&Teb;
+    PCHPE_V2_CPU_AREA_INFO CpuArea;
+
+    *LowLimit = (ULONG_PTR)Teb->NtTib.StackLimit;
+    *HighLimit = (ULONG_PTR)Teb->NtTib.StackBase;
+    if (sizeof(PVOID) != sizeof(ULONG64) || (Current >= *LowLimit && Current < *HighLimit))
+        return;
+
+    CpuArea = *(PCHPE_V2_CPU_AREA_INFO *)((PUCHAR)Teb + CHPE_TEB_CPU_AREA_OFFSET);
+    if (CpuArea && Current >= CpuArea->EmulatorStackLimit && Current < CpuArea->EmulatorStackBase)
+    {
+        *LowLimit = (ULONG_PTR)CpuArea->EmulatorStackLimit;
+        *HighLimit = (ULONG_PTR)CpuArea->EmulatorStackBase;
+    }
 }
 
 BOOLEAN
@@ -528,7 +626,7 @@ RtlImageNtHeaderEx(
     _In_ ULONG64 Size,
     _Out_ PIMAGE_NT_HEADERS *OutHeaders)
 {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
 
     /* Assume failure. This is also done in RtlpImageNtHeaderEx, but this is guarded by SEH. */
     if (OutHeaders != NULL)
@@ -561,20 +659,42 @@ IMAGE_RESOURCE_DIRECTORY *find_first_entry( IMAGE_RESOURCE_DIRECTORY *dir,
                                             void *root, int want_dir );
 int push_language( USHORT *list, ULONG pos, WORD lang );
 
+static int push_thread_ui_languages( USHORT *list, int pos )
+{
+    WCHAR languages[5 * 5 + 1];
+    ULONG count, size = RTL_NUMBER_OF(languages);
+    PCWSTR current;
+
+    if (!NT_SUCCESS(RtlGetThreadPreferredUILanguages( MUI_THREAD_LANGUAGES | MUI_LANGUAGE_ID, &count, languages, &size )))
+        return pos;
+
+    for (current = languages; *current; current += wcslen( current ) + 1)
+    {
+        UNICODE_STRING string;
+        ULONG value;
+
+        RtlInitUnicodeString( &string, current );
+        if (!NT_SUCCESS(RtlUnicodeStringToInteger( &string, 16, &value ))) continue;
+        pos = push_language( list, pos, (WORD)value );
+        pos = push_language( list, pos, MAKELANGID( PRIMARYLANGID(value), SUBLANG_NEUTRAL ) );
+    }
+    return pos;
+}
+
 /**********************************************************************
  *  find_entry
  *
  * Find a resource entry
  */
-NTSTATUS find_entry( PVOID BaseAddress, LDR_RESOURCE_INFO *info,
-                     ULONG level, void **ret, int want_dir )
+NTSTATUS LdrpFindModuleResourceEntry( PVOID BaseAddress, LDR_RESOURCE_INFO *info,
+                                      ULONG level, void **ret, BOOLEAN want_dir )
 {
     ULONG size;
     void *root;
     IMAGE_RESOURCE_DIRECTORY *resdirptr;
-    USHORT list[9];  /* list of languages to try */
+    USHORT list[20];  /* list of languages to try */
     int i, pos = 0;
-    LCID user_lcid, system_lcid;
+    LANGID ui_language;
 
     root = RtlImageDirectoryEntryToData( BaseAddress, TRUE, IMAGE_DIRECTORY_ENTRY_RESOURCE, &size );
     if (!root) return STATUS_RESOURCE_DATA_NOT_FOUND;
@@ -607,28 +727,28 @@ NTSTATUS find_entry( PVOID BaseAddress, LDR_RESOURCE_INFO *info,
         /* user defaults, unless SYS_DEFAULT sublanguage specified  */
         if (SUBLANGID(info->Language) != SUBLANG_SYS_DEFAULT)
         {
-            /* 4. current thread locale language */
-            pos = push_language( list, pos, LANGIDFROMLCID(NtCurrentTeb()->CurrentLocale) );
+            /* 4. thread UI languages */
+            pos = push_thread_ui_languages( list, pos );
 
-            if (NT_SUCCESS(NtQueryDefaultLocale(TRUE, &user_lcid)))
+            if (NT_SUCCESS(NtQueryDefaultUILanguage(&ui_language)))
             {
-                /* 5. user locale language */
-                pos = push_language( list, pos, LANGIDFROMLCID(user_lcid) );
+                /* 5. user UI language */
+                pos = push_language( list, pos, ui_language );
 
-                /* 6. user locale language with neutral sublanguage  */
-                pos = push_language( list, pos, MAKELANGID( PRIMARYLANGID(user_lcid), SUBLANG_NEUTRAL ) );
+                /* 6. user UI language with neutral sublanguage  */
+                pos = push_language( list, pos, MAKELANGID( PRIMARYLANGID(ui_language), SUBLANG_NEUTRAL ) );
             }
         }
 
         /* now system defaults */
 
-        if (NT_SUCCESS(NtQueryDefaultLocale(FALSE, &system_lcid)))
+        if (NT_SUCCESS(NtQueryInstallUILanguage(&ui_language)))
         {
-            /* 7. system locale language */
-            pos = push_language( list, pos, LANGIDFROMLCID( system_lcid ) );
+            /* 7. system UI language */
+            pos = push_language( list, pos, ui_language );
 
-            /* 8. system locale language with neutral sublanguage */
-            pos = push_language( list, pos, MAKELANGID( PRIMARYLANGID(system_lcid), SUBLANG_NEUTRAL ) );
+            /* 8. system UI language with neutral sublanguage */
+            pos = push_language( list, pos, MAKELANGID( PRIMARYLANGID(ui_language), SUBLANG_NEUTRAL ) );
         }
 
         /* 9. English */
@@ -651,6 +771,101 @@ done:
     return STATUS_SUCCESS;
 }
 
+static BOOLEAN LdrpIsResourceNotFound( NTSTATUS Status )
+{
+    return Status == STATUS_RESOURCE_TYPE_NOT_FOUND ||
+           Status == STATUS_RESOURCE_NAME_NOT_FOUND ||
+           Status == STATUS_RESOURCE_LANG_NOT_FOUND;
+}
+
+static BOOLEAN LdrpIsNeutralFirstResourceType( ULONG_PTR Type )
+{
+    if (IS_INTRESOURCE(Type))
+        return Type == (ULONG_PTR)RT_VERSION;
+    return !_wcsicmp( (LPCWSTR)Type, L"MUI" );
+}
+
+static NTSTATUS LdrpFindLocalizedResourceEntry( PVOID BaseAddress, LDR_RESOURCE_INFO *info,
+                                                ULONG level, void **ret, int want_dir )
+{
+    NTSTATUS Status, MuiStatus;
+    PVOID ResourceBase;
+    USHORT Language = level > 2 ? (USHORT)info->Language : 0;
+
+    if (want_dir || !level)
+        return LdrpFindModuleResourceEntry( BaseAddress, info, level, ret, !!want_dir );
+
+    if (LdrpIsNeutralFirstResourceType( info->Type ))
+    {
+        Status = LdrpFindModuleResourceEntry( BaseAddress, info, level, ret, FALSE );
+        if (!LdrpIsResourceNotFound( Status ))
+            return Status;
+
+        MuiStatus = LdrpGetAlternateResourceModule( BaseAddress, info->Type, Language, &ResourceBase );
+        if (MuiStatus == STATUS_RESOURCE_DATA_NOT_FOUND)
+            return Status;
+        if (!NT_SUCCESS(MuiStatus))
+            return MuiStatus;
+
+        return LdrpFindModuleResourceEntry( ResourceBase, info, level, ret, FALSE );
+    }
+
+    MuiStatus = LdrpGetAlternateResourceModule( BaseAddress, info->Type, Language, &ResourceBase );
+    if (MuiStatus == STATUS_RESOURCE_DATA_NOT_FOUND)
+        return LdrpFindModuleResourceEntry( BaseAddress, info, level, ret, FALSE );
+
+    if (NT_SUCCESS(MuiStatus))
+    {
+        Status = LdrpFindModuleResourceEntry( ResourceBase, info, level, ret, FALSE );
+        if (!LdrpIsResourceNotFound( Status ))
+            return Status;
+    }
+
+    Status = LdrpFindModuleResourceEntry( BaseAddress, info, level, ret, FALSE );
+    if (NT_SUCCESS(MuiStatus) || !LdrpIsResourceNotFound( Status ))
+        return Status;
+    return MuiStatus;
+}
+
+static BOOLEAN LdrpIsNeutralResourceType( ULONG_PTR Type )
+{
+    if (IS_INTRESOURCE(Type))
+    {
+        return Type == (ULONG_PTR)RT_CURSOR || Type == (ULONG_PTR)RT_BITMAP ||
+               Type == (ULONG_PTR)RT_ICON || Type == (ULONG_PTR)RT_GROUP_CURSOR ||
+               Type == (ULONG_PTR)RT_GROUP_ICON || Type == (ULONG_PTR)RT_ANICURSOR ||
+               Type == (ULONG_PTR)RT_ANIICON;
+    }
+    return !_wcsicmp( (LPCWSTR)Type, L"AVI" );
+}
+
+NTSTATUS find_entry( PVOID BaseAddress, LDR_RESOURCE_INFO *info,
+                     ULONG level, void **ret, int want_dir )
+{
+    NTSTATUS Status, NeutralStatus;
+    PVOID ResourceBase;
+
+    Status = LdrpFindLocalizedResourceEntry( BaseAddress, info, level, ret, want_dir );
+    if (!level || !LdrpIsNeutralResourceType( info->Type ) ||
+        (!LdrpIsResourceNotFound( Status ) && Status != STATUS_RESOURCE_DATA_NOT_FOUND) ||
+        !NT_SUCCESS(LdrpGetNeutralResourceModule( BaseAddress, &ResourceBase )))
+    {
+        return Status;
+    }
+
+    NeutralStatus = LdrpFindModuleResourceEntry( ResourceBase, info, level, ret, !!want_dir );
+    return NT_SUCCESS(NeutralStatus) ? NeutralStatus : Status;
+}
+
+PVOID
+NTAPI
+RtlpGetResourceModuleForEntry(
+    _In_ PVOID BaseAddress,
+    _In_ PVOID Entry)
+{
+    return LdrpGetResourceModuleForEntry(BaseAddress, Entry);
+}
+
 /*
  * @implemented
  */
@@ -662,8 +877,10 @@ RtlPcToFileHeader(IN PVOID PcValue,
     PLIST_ENTRY Entry;
     PLDR_DATA_TABLE_ENTRY Module;
     PVOID ImageBase = NULL;
+    BOOLEAN Shared = !LdrpOwnsLoaderLock();
 
-    RtlEnterCriticalSection (NtCurrentPeb()->LoaderLock);
+    if (Shared)
+        RtlAcquireSRWLockShared(&LdrpModuleDatatableLock);
     ModuleListHead = &NtCurrentPeb()->Ldr->InLoadOrderModuleList;
     Entry = ModuleListHead->Flink;
     while (Entry != ModuleListHead)
@@ -678,7 +895,8 @@ RtlPcToFileHeader(IN PVOID PcValue,
         }
         Entry = Entry->Flink;
     }
-    RtlLeaveCriticalSection (NtCurrentPeb()->LoaderLock);
+    if (Shared)
+        RtlReleaseSRWLockShared(&LdrpModuleDatatableLock);
 
     *BaseOfImage = ImageBase;
     return ImageBase;
@@ -711,61 +929,141 @@ NTSTATUS get_buffer(LPWSTR *buffer, SIZE_T needed, PUNICODE_STRING CallerBuffer,
 }
 
 /* NOTE: Remove this one once our actctx support becomes better */
-NTSTATUS find_actctx_dll( PUNICODE_STRING pnameW, LPWSTR *fullname, PUNICODE_STRING CallerBuffer, BOOLEAN bAllocateBuffer)
+/* A <file loadFrom="..."/> entry names the DLL's location explicitly: a
+ * directory when it ends with a separator, the file itself otherwise, and
+ * relative to the manifest when it is not absolute. */
+static NTSTATUS
+find_actctx_dll_load_from( const ACTCTX_SECTION_KEYED_DATA *data,
+                           const ACTIVATION_CONTEXT_DATA_DLL_REDIRECTION *dll,
+                           const WCHAR *manifest_path,
+                           PUNICODE_STRING pnameW, LPWSTR *fullname,
+                           PUNICODE_STRING CallerBuffer, BOOLEAN bAllocateBuffer )
+{
+    const ACTIVATION_CONTEXT_DATA_DLL_REDIRECTION_PATH_SEGMENT *segment =
+        (const void *)((const BYTE *)data->lpSectionBase + dll->PathSegmentOffset);
+    WCHAR path_buffer[MAX_PATH], expanded_buffer[MAX_PATH];
+    UNICODE_STRING path, expanded, part;
+    SIZE_T dirlen = 0, needed;
+    BOOLEAN append_name;
+    NTSTATUS status;
+    ULONG i, len;
+    WCHAR *p;
+
+    RtlInitEmptyUnicodeString( &path, path_buffer, sizeof(path_buffer) );
+    for (i = 0; i < dll->PathSegmentCount; i++)
+    {
+        part.Buffer = (PWSTR)((const BYTE *)data->lpSectionBase + segment[i].Offset);
+        part.Length = part.MaximumLength = (USHORT)segment[i].Length;
+        status = RtlAppendUnicodeStringToString( &path, &part );
+        if (!NT_SUCCESS(status)) return status;
+    }
+
+    if (dll->Flags & ACTIVATION_CONTEXT_DATA_DLL_REDIRECTION_PATH_EXPAND)
+    {
+        RtlInitEmptyUnicodeString( &expanded, expanded_buffer, sizeof(expanded_buffer) );
+        status = RtlExpandEnvironmentStrings_U( NULL, &path, &expanded, &len );
+        if (!NT_SUCCESS(status)) return status;
+        path = expanded;
+    }
+    if (!path.Length) return STATUS_SXS_KEY_NOT_FOUND;
+
+    append_name = path.Buffer[path.Length / sizeof(WCHAR) - 1] == L'\\' ||
+                  path.Buffer[path.Length / sizeof(WCHAR) - 1] == L'/';
+    if (RtlDetermineDosPathNameType_U( path.Buffer ) == RtlPathTypeRelative &&
+        manifest_path &&
+        (p = wcsrchr( manifest_path, L'\\' )))
+    {
+        dirlen = p + 1 - manifest_path;
+    }
+
+    needed = (dirlen + 1) * sizeof(WCHAR) + path.Length + (append_name ? pnameW->Length : 0);
+    status = get_buffer( fullname, needed, CallerBuffer, bAllocateBuffer );
+    if (!NT_SUCCESS(status)) return status;
+
+    p = *fullname;
+    memcpy( p, manifest_path, dirlen * sizeof(WCHAR) );
+    p += dirlen;
+    memcpy( p, path.Buffer, path.Length );
+    p += path.Length / sizeof(WCHAR);
+    if (append_name)
+    {
+        memcpy( p, pnameW->Buffer, pnameW->Length );
+        p += pnameW->Length / sizeof(WCHAR);
+    }
+    *p = UNICODE_NULL;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS NTAPI RtlpFindSystemDefaultActivationContextSectionString(ULONG Flags, ULONG SectionKind, PCUNICODE_STRING SectionName, PACTCTX_SECTION_KEYED_DATA Data);
+
+NTSTATUS find_actctx_dll( PUNICODE_STRING pnameW, LPWSTR *fullname, PUNICODE_STRING CallerBuffer, BOOLEAN bAllocateBuffer, BOOLEAN SystemDefault)
 {
     static const WCHAR winsxsW[] = {'\\','w','i','n','s','x','s','\\'};
     static const WCHAR dotManifestW[] = {'.','m','a','n','i','f','e','s','t',0};
 
-    ACTIVATION_CONTEXT_ASSEMBLY_DETAILED_INFORMATION *info;
+    PACTIVATION_CONTEXT_DATA_ASSEMBLY_INFORMATION info;
+    const ACTIVATION_CONTEXT_DATA_DLL_REDIRECTION *dll;
     ACTCTX_SECTION_KEYED_DATA data;
     NTSTATUS status;
-    SIZE_T needed, size = 1024;
-    WCHAR *p;
+    SIZE_T needed;
+    WCHAR *p, *manifest_path, *directory_name;
 
     data.cbSize = sizeof(data);
-    status = RtlFindActivationContextSectionString( FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX, NULL,
-                                                    ACTIVATION_CONTEXT_SECTION_DLL_REDIRECTION,
-                                                    pnameW, &data );
+    if (SystemDefault)
+        status = RtlpFindSystemDefaultActivationContextSectionString( FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX |
+                                                                      FIND_ACTCTX_SECTION_KEY_RETURN_ASSEMBLY_METADATA,
+                                                                      ACTIVATION_CONTEXT_SECTION_DLL_REDIRECTION,
+                                                                      pnameW, &data );
+    else
+        status = RtlFindActivationContextSectionString( FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX |
+                                                        FIND_ACTCTX_SECTION_KEY_RETURN_ASSEMBLY_METADATA, NULL,
+                                                        ACTIVATION_CONTEXT_SECTION_DLL_REDIRECTION,
+                                                        pnameW, &data );
     if (status != STATUS_SUCCESS)
     {
         //DPRINT1("RtlFindActivationContextSectionString returned 0x%x for %wZ\n", status, pnameW);
         return status;
     }
 
-    for (;;)
-    {
-        if (!(info = RtlAllocateHeap( RtlGetProcessHeap(), 0, size )))
-        {
-            status = STATUS_NO_MEMORY;
-            goto done;
-        }
-        status = RtlQueryInformationActivationContext( 0, data.hActCtx, &data.ulAssemblyRosterIndex,
-                                                       AssemblyDetailedInformationInActivationContext,
-                                                       info, size, &needed );
-        if (status == STATUS_SUCCESS) break;
-        if (status != STATUS_BUFFER_TOO_SMALL) goto done;
-        RtlFreeHeap( RtlGetProcessHeap(), 0, info );
-        size = needed;
-    }
-
-    DPRINT("manifestpath === %S\n", info->lpAssemblyManifestPath);
-    DPRINT("DirectoryName === %S\n", info->lpAssemblyDirectoryName);
-    if (!info->lpAssemblyManifestPath /*|| !info->lpAssemblyDirectoryName*/)
+    info = data.AssemblyMetadata.lpInformation;
+    if (!info)
     {
         status = STATUS_SXS_KEY_NOT_FOUND;
         goto done;
     }
 
-    if ((p = wcsrchr( info->lpAssemblyManifestPath, '\\' )))
+    manifest_path = info->ManifestPathLength ?
+                    (WCHAR *)((BYTE *)data.AssemblyMetadata.lpSectionBase + info->ManifestPathOffset) : NULL;
+    directory_name = info->AssemblyDirectoryNameLength ?
+                     (WCHAR *)((BYTE *)data.AssemblyMetadata.lpSectionBase + info->AssemblyDirectoryNameOffset) : NULL;
+
+    DPRINT("manifestpath === %S\n", manifest_path);
+    DPRINT("DirectoryName === %S\n", directory_name);
+
+    dll = data.lpData;
+    if (dll && dll->PathSegmentCount &&
+        !(dll->Flags & ACTIVATION_CONTEXT_DATA_DLL_REDIRECTION_PATH_OMITS_ASSEMBLY_ROOT))
     {
-        DWORD dirlen = info->ulAssemblyDirectoryNameLength / sizeof(WCHAR);
+        status = find_actctx_dll_load_from( &data, dll, manifest_path, pnameW, fullname, CallerBuffer, bAllocateBuffer );
+        goto done;
+    }
+
+    if (!manifest_path)
+    {
+        status = STATUS_SXS_KEY_NOT_FOUND;
+        goto done;
+    }
+
+    if ((p = wcsrchr( manifest_path, '\\' )))
+    {
+        DWORD dirlen = info->AssemblyDirectoryNameLength / sizeof(WCHAR);
 
         p++;
-        if (!info->lpAssemblyDirectoryName || _wcsnicmp( p, info->lpAssemblyDirectoryName, dirlen ) || _wcsicmp( p + dirlen, dotManifestW ))
+        if (!directory_name || _wcsnicmp( p, directory_name, dirlen ) || _wcsicmp( p + dirlen, dotManifestW ))
         {
             /* manifest name does not match directory name, so it's not a global
              * windows/winsxs manifest; use the manifest directory name instead */
-            dirlen = p - info->lpAssemblyManifestPath;
+            dirlen = p - manifest_path;
             needed = (dirlen + 1) * sizeof(WCHAR) + pnameW->Length;
 
             status = get_buffer(fullname, needed, CallerBuffer, bAllocateBuffer);
@@ -774,7 +1072,7 @@ NTSTATUS find_actctx_dll( PUNICODE_STRING pnameW, LPWSTR *fullname, PUNICODE_STR
 
             p = *fullname;
 
-            memcpy( p, info->lpAssemblyManifestPath, dirlen * sizeof(WCHAR) );
+            memcpy( p, manifest_path, dirlen * sizeof(WCHAR) );
             p += dirlen;
             memcpy( p, pnameW->Buffer, pnameW->Length);
             p += (pnameW->Length / sizeof(WCHAR));
@@ -785,7 +1083,7 @@ NTSTATUS find_actctx_dll( PUNICODE_STRING pnameW, LPWSTR *fullname, PUNICODE_STR
     }
 
     needed = (wcslen(SharedUserData->NtSystemRoot) * sizeof(WCHAR) +
-              sizeof(winsxsW) + info->ulAssemblyDirectoryNameLength + pnameW->Length + 2*sizeof(WCHAR));
+              sizeof(winsxsW) + info->AssemblyDirectoryNameLength + pnameW->Length + 2*sizeof(WCHAR));
 
     status = get_buffer(fullname, needed, CallerBuffer, bAllocateBuffer);
     if (!NT_SUCCESS(status))
@@ -797,15 +1095,14 @@ NTSTATUS find_actctx_dll( PUNICODE_STRING pnameW, LPWSTR *fullname, PUNICODE_STR
     p += wcslen(p);
     memcpy( p, winsxsW, sizeof(winsxsW) );
     p += sizeof(winsxsW) / sizeof(WCHAR);
-    memcpy( p, info->lpAssemblyDirectoryName, info->ulAssemblyDirectoryNameLength );
-    p += info->ulAssemblyDirectoryNameLength / sizeof(WCHAR);
+    memcpy( p, directory_name, info->AssemblyDirectoryNameLength );
+    p += info->AssemblyDirectoryNameLength / sizeof(WCHAR);
     *p++ = L'\\';
     memcpy( p, pnameW->Buffer, pnameW->Length);
     p += (pnameW->Length / sizeof(WCHAR));
     *p = L'\0';
 
 done:
-    RtlFreeHeap( RtlGetProcessHeap(), 0, info );
     RtlReleaseActivationContext( data.hActCtx );
     DPRINT("%S\n", fullname);
     return status;
@@ -833,6 +1130,7 @@ RtlDosApplyFileIsolationRedirection_Ustr(IN ULONG Flags,
     UNICODE_STRING localStr, localStr2, *pstrParam;
     WCHAR *p;
     BOOLEAN GotExtension;
+    BOOLEAN SystemDefault = FALSE;
     WCHAR c;
     C_ASSERT(sizeof(UNICODE_NULL) == sizeof(WCHAR));
 
@@ -930,6 +1228,35 @@ RtlDosApplyFileIsolationRedirection_Ustr(IN ULONG Flags,
         }
     }
 
+    /* Activation-context DLL redirection applies only to bare module names.
+     * Dot-local redirection above still applies when the caller supplies a path. */
+    for (p = OriginalName->Buffer + OriginalName->Length / sizeof(WCHAR); p > OriginalName->Buffer; p--)
+    {
+        if (p[-1] == L'\\' || p[-1] == L'/' || p[-1] == L':')
+        {
+            static const UNICODE_STRING System32 = RTL_CONSTANT_STRING(L"\\System32\\");
+            UNICODE_STRING Directory, NtSystemRoot, Tail;
+
+            Directory.Buffer = OriginalName->Buffer;
+            Directory.Length = (USHORT)((p - OriginalName->Buffer) * sizeof(WCHAR));
+            Directory.MaximumLength = Directory.Length;
+            RtlInitUnicodeString(&NtSystemRoot, SharedUserData->NtSystemRoot);
+            if (Directory.Length != NtSystemRoot.Length + System32.Length ||
+                !RtlPrefixUnicodeString(&NtSystemRoot, &Directory, TRUE))
+            {
+                return STATUS_SXS_KEY_NOT_FOUND;
+            }
+
+            Tail.Buffer = Directory.Buffer + NtSystemRoot.Length / sizeof(WCHAR);
+            Tail.Length = System32.Length;
+            Tail.MaximumLength = Tail.Length;
+            if (!RtlEqualUnicodeString(&Tail, &System32, TRUE))
+                return STATUS_SXS_KEY_NOT_FOUND;
+            SystemDefault = TRUE;
+            break;
+        }
+    }
+
     pstrParam = OriginalName;
 
     /* Get the file name with an extension */
@@ -972,7 +1299,7 @@ RtlDosApplyFileIsolationRedirection_Ustr(IN ULONG Flags,
     }
 
     /* Use wine's function as long as we use wine's sxs implementation in ntdll */
-    Status = find_actctx_dll(pstrParam, &fullname, StaticString, DynamicString != NULL);
+    Status = find_actctx_dll(pstrParam, &fullname, StaticString, DynamicString != NULL, SystemDefault);
     if (!NT_SUCCESS(Status))
     {
         return Status;
@@ -1007,40 +1334,62 @@ LdrpApisetVersion(VOID)
 
     if (CachedApisetVersion == ~0u)
     {
-        DWORD CompatVersion = RosGetProcessCompatVersion();
+        PPEB Peb = NtCurrentPeb();
+        DWORD OsVersion = (Peb->OSMajorVersion << 8) | Peb->OSMinorVersion;
 
-        switch (CompatVersion)
+        if (OsVersion >= _WIN32_WINNT_WIN10)
         {
-            case 0:
-                break;
-            case _WIN32_WINNT_VISTA:
-                /* No apisets in vista yet*/
-                CachedApisetVersion = 0;
-                break;
-            case _WIN32_WINNT_WIN7:
-                CachedApisetVersion = APISET_WIN7;
-                DPRINT1("Activating apisets for Win7\n");
-                break;
-            case _WIN32_WINNT_WIN8:
-                CachedApisetVersion = APISET_WIN8;
-                DPRINT1("Activating apisets for Win8\n");
-                break;
-            case _WIN32_WINNT_WINBLUE:
-                CachedApisetVersion = APISET_WIN81;
-                DPRINT1("Activating apisets for Win8.1\n");
-                break;
-            case _WIN32_WINNT_WIN10:
-                CachedApisetVersion = APISET_WIN10;
-                DPRINT1("Activating apisets for Win10\n");
-                break;
-            default:
-                DPRINT1("Unknown version 0x%x\n", CompatVersion);
-                CachedApisetVersion = 0;
-                break;
+            CachedApisetVersion = APISET_WIN10;
         }
+        else if (OsVersion >= _WIN32_WINNT_WINBLUE)
+        {
+            CachedApisetVersion = APISET_WIN81;
+        }
+        else if (OsVersion >= _WIN32_WINNT_WIN8)
+        {
+            CachedApisetVersion = APISET_WIN8;
+        }
+        else if (OsVersion >= _WIN32_WINNT_WIN7)
+        {
+            CachedApisetVersion = APISET_WIN7;
+        }
+        else
+        {
+            CachedApisetVersion = 0;
+        }
+
+        DPRINT("API-set schema 0x%lx selected for host version 0x%lx\n",
+                CachedApisetVersion, OsVersion);
     }
 
     return CachedApisetVersion;
+}
+
+NTSTATUS
+NTAPI
+ApiSetQueryApiSetPresence(
+    _In_ PCUNICODE_STRING Namespace,
+    _Out_ PBOOLEAN Present)
+{
+    UNICODE_STRING Host;
+    BOOLEAN Resolved = FALSE;
+    DWORD ApisetVersion = LdrpApisetVersion();
+
+    if (!ApisetVersion || !NT_SUCCESS(ApiSetResolveToHost(ApisetVersion, Namespace, &Resolved, &Host)))
+        Resolved = FALSE;
+
+    *Present = Resolved;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+ApiSetQueryApiSetPresenceEx(
+    _In_ PCUNICODE_STRING Namespace,
+    _Out_ PBOOLEAN InSchema,
+    _Out_ PBOOLEAN Present)
+{
+    return ApiSetQuerySchemaPresence(LdrpApisetVersion(), Namespace, InSchema, Present);
 }
 
 NTSYSAPI
@@ -1052,7 +1401,8 @@ LdrpApplyFileNameRedirection(
     _Inout_opt_ PUNICODE_STRING StaticString,
     _Inout_opt_ PUNICODE_STRING DynamicString,
     _Inout_ PUNICODE_STRING *NewName,
-    _Out_ PBOOLEAN RedirectedDll)
+    _Out_ PBOOLEAN RedirectedDll,
+    _Out_opt_ PBOOLEAN ApiSetRedirected)
 {
 
     /* Check for invalid parameters */
@@ -1072,6 +1422,8 @@ LdrpApplyFileNameRedirection(
     }
 
     *RedirectedDll = FALSE;
+    if (ApiSetRedirected)
+        *ApiSetRedirected = FALSE;
 
     PCUNICODE_STRING PrevNewName = *NewName;
     UNICODE_STRING ApisetName = {0};
@@ -1090,14 +1442,29 @@ LdrpApplyFileNameRedirection(
 
     if (*RedirectedDll)
     {
-        UNICODE_STRING NtSystemRoot;
+        UNICODE_STRING SystemDirectory;
         static const UNICODE_STRING System32 = RTL_CONSTANT_STRING(L"\\System32\\");
+        static const UNICODE_STRING Backslash = RTL_CONSTANT_STRING(L"\\");
+        PCUNICODE_STRING Separator;
         PUNICODE_STRING ResultPath = NULL;
 
         /* This is an apiset we can use */
-        RtlInitUnicodeString(&NtSystemRoot, SharedUserData->NtSystemRoot);
+        if (ApiSetRedirected)
+            *ApiSetRedirected = TRUE;
 
-        SIZE_T Needed = System32.Length + ApisetName.Length + NtSystemRoot.Length + sizeof(UNICODE_NULL);
+        /* The host is the module of that name in the process's own system directory, where its known DLLs live */
+        if (LdrpKnownDllPath.Length != 0)
+        {
+            SystemDirectory = LdrpKnownDllPath;
+            Separator = &Backslash;
+        }
+        else
+        {
+            RtlInitUnicodeString(&SystemDirectory, SharedUserData->NtSystemRoot);
+            Separator = &System32;
+        }
+
+        SIZE_T Needed = SystemDirectory.Length + Separator->Length + ApisetName.Length + sizeof(UNICODE_NULL);
 
         if (StaticString && StaticString->MaximumLength >= (USHORT)Needed)
         {
@@ -1123,10 +1490,32 @@ LdrpApplyFileNameRedirection(
             return STATUS_INVALID_PARAMETER;
         }
 
-        RtlAppendUnicodeStringToString(ResultPath, &NtSystemRoot);
-        RtlAppendUnicodeStringToString(ResultPath, &System32);
+        RtlAppendUnicodeStringToString(ResultPath, &SystemDirectory);
+        RtlAppendUnicodeStringToString(ResultPath, Separator);
         RtlAppendUnicodeStringToString(ResultPath, &ApisetName);
-        DPRINT1("ApiSetResolveToHost redirected %wZ to %wZ\n", OriginalName, ResultPath);
+
+        /* Log each apiset->host mapping once per process — the resolves
+         * repeat for every import of every module and flood the serial
+         * log (seconds of boot time at 115200 baud). */
+        {
+            static LONG ApisetPrinted[64];
+            ULONG NameHash = 0;
+            USHORT ci;
+            ULONG Slot;
+
+            for (ci = 0; ci < OriginalName->Length / sizeof(WCHAR); ci++)
+                NameHash = NameHash * 65599 + RtlUpcaseUnicodeChar(OriginalName->Buffer[ci]);
+            if (NameHash == 0)
+                NameHash = 1;
+            Slot = NameHash % RTL_NUMBER_OF(ApisetPrinted);
+
+            if (InterlockedCompareExchange(&ApisetPrinted[Slot],
+                                           (LONG)NameHash, 0) == 0)
+            {
+                DPRINT("ApiSetResolveToHost redirected %wZ to %wZ\n",
+                        OriginalName, ResultPath);
+            }
+        }
         *NewName = ResultPath;
     }
     else
@@ -1165,8 +1554,9 @@ NTSTATUS
 NTAPI
 RtlWow64EnableFsRedirection(IN BOOLEAN Wow64FsEnableRedirection)
 {
-    /* This is what Windows returns on x86 */
-    return STATUS_NOT_IMPLEMENTED;
+    PVOID OldValue;
+
+    return RtlWow64EnableFsRedirectionEx((PVOID)(ULONG_PTR)!Wow64FsEnableRedirection, &OldValue);
 }
 
 /*
@@ -1178,8 +1568,29 @@ NTAPI
 RtlWow64EnableFsRedirectionEx(IN PVOID Wow64FsEnableRedirection,
                               OUT PVOID *OldFsRedirectionLevel)
 {
-    /* This is what Windows returns on x86 */
+#ifdef WOW64_I386_RUNTIME
+    TEB64 *NativeTeb = UlongToPtr(NtCurrentTeb()->GdiBatchCount);
+    PVOID OldLevel;
+
+    if (!NativeTeb) return STATUS_NOT_IMPLEMENTED;
+
+    _SEH2_TRY
+    {
+        /* Save the old value before changing the native redirector's state. */
+        OldLevel = (PVOID)(ULONG_PTR)NativeTeb->TlsSlots[WOW64_TLS_FILESYSREDIR];
+        NativeTeb->TlsSlots[WOW64_TLS_FILESYSREDIR] = (ULONG_PTR)Wow64FsEnableRedirection;
+        *OldFsRedirectionLevel = OldLevel;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        _SEH2_YIELD(return _SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+    return STATUS_SUCCESS;
+#else
+    /* Native processes do not have a WoW64 filesystem redirector. */
     return STATUS_NOT_IMPLEMENTED;
+#endif
 }
 
 /*
@@ -1227,6 +1638,87 @@ RtlGetTickCount(VOID)
 
     /* Convert to milliseconds */
     return KiTickCountToMs(TickCount);
+}
+
+static
+NTSTATUS
+RtlpQueryTokenBuffer(
+    _In_ HANDLE Token,
+    _In_ TOKEN_INFORMATION_CLASS Class,
+    _Out_ PVOID *Buffer)
+{
+    ULONG Length = 0;
+    NTSTATUS Status;
+
+    *Buffer = NULL;
+    Status = NtQueryInformationToken(Token, Class, NULL, 0, &Length);
+    if (Status != STATUS_BUFFER_TOO_SMALL && !NT_SUCCESS(Status))
+        return Status;
+    *Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+    if (!*Buffer)
+        return STATUS_NO_MEMORY;
+    Status = NtQueryInformationToken(Token, Class, *Buffer, Length, &Length);
+    if (!NT_SUCCESS(Status))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, *Buffer);
+        *Buffer = NULL;
+    }
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+RtlCheckTokenMembershipEx(
+    _In_opt_ HANDLE TokenHandle,
+    _In_ PSID SidToCheck,
+    _In_ ULONG Flags,
+    _Out_ PBOOLEAN IsMember)
+{
+    HANDLE Token = TokenHandle;
+    BOOLEAN Opened = FALSE;
+    PTOKEN_USER User = NULL;
+    PTOKEN_GROUPS Groups = NULL;
+    ULONG Index;
+    NTSTATUS Status;
+
+    if (!IsMember || !SidToCheck || (Flags & ~3))
+        return STATUS_INVALID_PARAMETER;
+    *IsMember = FALSE;
+
+    if (!Token)
+    {
+        Status = NtOpenThreadTokenEx(NtCurrentThread(), TOKEN_QUERY, TRUE, 0, &Token);
+        if (!NT_SUCCESS(Status))
+            Status = NtOpenProcessTokenEx(NtCurrentProcess(), TOKEN_QUERY, 0, &Token);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        Opened = TRUE;
+    }
+
+    Status = RtlpQueryTokenBuffer(Token, TokenUser, (PVOID*)&User);
+    if (!NT_SUCCESS(Status)) goto Quit;
+    Status = RtlpQueryTokenBuffer(Token, TokenGroups, (PVOID*)&Groups);
+    if (!NT_SUCCESS(Status)) goto Quit;
+
+    if (RtlEqualSid(User->User.Sid, SidToCheck))
+        *IsMember = TRUE;
+    for (Index = 0; Index < Groups->GroupCount && !*IsMember; Index++)
+    {
+        if ((Groups->Groups[Index].Attributes & SE_GROUP_ENABLED) &&
+            !(Groups->Groups[Index].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) &&
+            RtlEqualSid(Groups->Groups[Index].Sid, SidToCheck))
+        {
+            *IsMember = TRUE;
+        }
+    }
+
+    Status = STATUS_SUCCESS;
+
+Quit:
+    if (Groups) RtlFreeHeap(RtlGetProcessHeap(), 0, Groups);
+    if (User) RtlFreeHeap(RtlGetProcessHeap(), 0, User);
+    if (Opened) NtClose(Token);
+    return Status;
 }
 
 /* EOF */

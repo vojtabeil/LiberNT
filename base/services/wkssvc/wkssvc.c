@@ -79,7 +79,7 @@ ServiceInit(VOID)
     HANDLE hThread;
     NTSTATUS Status;
 
-    ERR("ServiceInit()\n");
+    TRACE("ServiceInit()\n");
 
     /* Get the OS version */
     VersionInfo.dwOSVersionInfoSize = sizeof(VersionInfo);
@@ -136,7 +136,7 @@ ServiceShutdown(VOID)
 {
     NTSTATUS Status;
 
-    ERR("ServiceShutdown()\n");
+    TRACE("ServiceShutdown()\n");
 
     Status = LsaDeregisterLogonProcess(LsaHandle);
     if (!NT_SUCCESS(Status))

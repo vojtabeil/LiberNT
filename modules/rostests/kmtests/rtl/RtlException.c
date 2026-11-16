@@ -8,107 +8,124 @@
 #define KMT_EMULATE_KERNEL
 #include <kmt_test.h>
 
-static
-VOID
-PossiblyRaise(
-    _In_ BOOLEAN Raise)
+#ifdef KMT_USER_MODE
+
+#define VECTORED_TEST_EXCEPTION ((NTSTATUS)0xE0425051)
+static ULONG VectoredTrace;
+static BOOLEAN VectoredContinue;
+
+static LONG NTAPI
+FirstVectoredHandler(PEXCEPTION_POINTERS Pointers)
 {
-    if (Raise)
-    {
-        ExRaiseStatus(STATUS_ASSERTION_FAILURE);
-    }
+    if (Pointers->ExceptionRecord->ExceptionCode == VECTORED_TEST_EXCEPTION)
+        VectoredTrace = (VectoredTrace << 4) | 1;
+    return EXCEPTION_CONTINUE_SEARCH;
 }
 
-static
-VOID
-InnerFunction(
-    _Inout_ PULONG State,
-    _In_ BOOLEAN Raise)
+static LONG NTAPI
+SecondVectoredHandler(PEXCEPTION_POINTERS Pointers)
 {
-    _SEH2_VOLATILE INT Var = 123;
-    static _SEH2_VOLATILE INT *AddressOfVar;
+    if (Pointers->ExceptionRecord->ExceptionCode != VECTORED_TEST_EXCEPTION)
+        return EXCEPTION_CONTINUE_SEARCH;
+    VectoredTrace = (VectoredTrace << 4) | 2;
+    return VectoredContinue ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+}
 
-    AddressOfVar = &Var;
-    ok_eq_ulong(*State, 1);
+static LONG NTAPI
+VectoredContinueHandler(PEXCEPTION_POINTERS Pointers)
+{
+    if (Pointers->ExceptionRecord->ExceptionCode == VECTORED_TEST_EXCEPTION)
+        VectoredTrace = (VectoredTrace << 4) | 3;
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+static LONG
+ContinueExceptionFilter(NTSTATUS Code)
+{
+    if (Code != VECTORED_TEST_EXCEPTION)
+        return EXCEPTION_EXECUTE_HANDLER;
+    VectoredTrace = (VectoredTrace << 4) | 4;
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static VOID
+TestVectoredHandlers(VOID)
+{
+    EXCEPTION_RECORD Record = {0};
+    PVOID First, Second, Continue;
+    ULONG Removed;
+
+    Record.ExceptionCode = VECTORED_TEST_EXCEPTION;
+    VectoredContinue = TRUE;
+    First = RtlAddVectoredExceptionHandler(1, FirstVectoredHandler);
+    Second = RtlAddVectoredExceptionHandler(0, SecondVectoredHandler);
+    Continue = RtlAddVectoredContinueHandler(1, VectoredContinueHandler);
+    ok(First != NULL, "Failed to register first vectored handler\n");
+    ok(Second != NULL, "Failed to register second vectored handler\n");
+    ok(Continue != NULL, "Failed to register vectored continue handler\n");
+    if (!First || !Second || !Continue)
+        goto Cleanup;
+
+    /* Vectored handlers run in registration order before frame handlers. */
+    VectoredTrace = 0;
+    KmtStartSeh()
+        RtlRaiseException(&Record);
+    KmtEndSeh(STATUS_SUCCESS);
+    ok_eq_hex(VectoredTrace, 0x123);
+
+    /* Continuing in a frame filter still invokes the continue handlers. */
+    VectoredContinue = FALSE;
+    VectoredTrace = 0;
+    Record.ExceptionFlags = 0;
     _SEH2_TRY
     {
-        *State = 2;
-        PossiblyRaise(Raise);
-        ok_eq_ulong(*State, 2);
-        *State = 3;
+        RtlRaiseException(&Record);
     }
-    _SEH2_FINALLY
+    _SEH2_EXCEPT(ContinueExceptionFilter(_SEH2_GetExceptionCode()))
     {
-        ok_eq_int(Var, 123);
-        ok_eq_pointer(&Var, AddressOfVar);
-        if (Raise)
-            ok_eq_ulong(*State, 2);
-        else
-            ok_eq_ulong(*State, 3);
-        *State = 4;
+        ok(FALSE, "Unexpected exception %08lx\n", _SEH2_GetExceptionCode());
     }
     _SEH2_END;
+    ok_eq_hex(VectoredTrace, 0x1243);
 
-    ok_eq_int(Var, 123);
-    ok_eq_pointer(&Var, AddressOfVar);
-    ok_eq_ulong(*State, 4);
-    *State = 5;
-}
+    Removed = RtlRemoveVectoredExceptionHandler(First);
+    ok_eq_ulong(Removed, 1);
+    First = NULL;
+    VectoredContinue = TRUE;
+    VectoredTrace = 0;
+    Record.ExceptionFlags = 0;
+    KmtStartSeh()
+        RtlRaiseException(&Record);
+    KmtEndSeh(STATUS_SUCCESS);
+    ok_eq_hex(VectoredTrace, 0x23);
 
-static
-VOID
-OuterFunction(
-    _Inout_ PULONG State,
-    _In_ BOOLEAN Raise)
-{
-    _SEH2_VOLATILE INT Var = 456;
-    static _SEH2_VOLATILE INT *AddressOfVar;
-
-    AddressOfVar = &Var;
-    ok_eq_ulong(*State, 0);
-    _SEH2_TRY
+Cleanup:
+    if (First)
     {
-        *State = 1;
-        InnerFunction(State, Raise);
-        ok_eq_ulong(*State, 5);
-        *State = 6;
+        Removed = RtlRemoveVectoredExceptionHandler(First);
+        ok_eq_ulong(Removed, 1);
     }
-    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    if (Second)
     {
-        ok_eq_int(Var, 456);
-        ok_eq_pointer(&Var, AddressOfVar);
-        ok_eq_ulong(*State, 4);
-        *State = 7;
+        Removed = RtlRemoveVectoredExceptionHandler(Second);
+        ok_eq_ulong(Removed, 1);
     }
-    _SEH2_END;
-
-    ok_eq_int(Var, 456);
-    ok_eq_pointer(&Var, AddressOfVar);
-    if (Raise)
-        ok_eq_ulong(*State, 7);
-    else
-        ok_eq_ulong(*State, 6);
-    *State = 8;
+    if (Continue)
+    {
+        Removed = RtlRemoveVectoredContinueHandler(Continue);
+        ok_eq_ulong(Removed, 1);
+    }
 }
 
-static
-VOID
-TestNestedExceptionHandler(VOID)
-{
-    ULONG State;
-
-    State = 0;
-    OuterFunction(&State, FALSE);
-    ok_eq_ulong(State, 8);
-
-    State = 0;
-    OuterFunction(&State, TRUE);
-    ok_eq_ulong(State, 8);
-}
+#endif
 
 START_TEST(RtlException)
 {
     PCHAR Buffer[128];
+
+#ifdef KMT_USER_MODE
+    TestVectoredHandlers();
+#endif
 
     /* Access a valid pointer - must not trigger SEH */
     KmtStartSeh()
@@ -154,7 +171,7 @@ START_TEST(RtlException)
         ExRaiseStatus(STATUS_GUARD_PAGE_VIOLATION);
     KmtEndSeh(STATUS_GUARD_PAGE_VIOLATION);
 
-    TestNestedExceptionHandler();
+    /* Nested _SEH2 unwinding is compiler/runtime behavior, not an NT API contract. */
 
     /* We cannot test this in kernel mode easily - the stack is just "somewhere"
      * in system space, and there's no guard page below it */

@@ -18,6 +18,49 @@
 PLDR_MANIFEST_PROBER_ROUTINE LdrpManifestProberRoutine;
 ULONG LdrpNormalSnap;
 
+#if defined(_M_ARM64)
+#define LDRP_CHPE_IMPORT_REDIRECTION 1
+#else
+#define LDRP_CHPE_IMPORT_REDIRECTION 0
+#endif
+
+#if LDRP_CHPE_IMPORT_REDIRECTION
+static const UNICODE_STRING LdrpChpeBridgePath = RTL_CONSTANT_STRING(L"\\System32\\ntdll_chpe.dll");
+
+NTSTATUS
+LdrpBuildArm64EcImportName(PUNICODE_STRING ImportName,
+                           PUNICODE_STRING RedirectedImportName)
+{
+    UNICODE_STRING NtSystemRoot;
+    USHORT Length;
+
+    UNREFERENCED_PARAMETER(ImportName);
+
+    RtlInitUnicodeString(&NtSystemRoot, SharedUserData->NtSystemRoot);
+    if (NtSystemRoot.Length > MAXUSHORT - LdrpChpeBridgePath.Length - sizeof(UNICODE_NULL))
+        return STATUS_NAME_TOO_LONG;
+
+    Length = NtSystemRoot.Length + LdrpChpeBridgePath.Length;
+    RedirectedImportName->Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length + sizeof(UNICODE_NULL));
+    if (!RedirectedImportName->Buffer)
+        return STATUS_NO_MEMORY;
+
+    RedirectedImportName->Length = 0;
+    RedirectedImportName->MaximumLength = Length + sizeof(UNICODE_NULL);
+    RtlAppendUnicodeStringToString(RedirectedImportName, &NtSystemRoot);
+    RtlAppendUnicodeStringToString(RedirectedImportName, &LdrpChpeBridgePath);
+    RedirectedImportName->Buffer[RedirectedImportName->Length / sizeof(WCHAR)] = UNICODE_NULL;
+    return STATUS_SUCCESS;
+}
+#endif
+
+typedef struct _LDRP_IAT_PROTECTION_CONTEXT
+{
+    PVOID BaseAddress;
+    SIZE_T RegionSize;
+    ULONG OldProtect;
+} LDRP_IAT_PROTECTION_CONTEXT, *PLDRP_IAT_PROTECTION_CONTEXT;
+
 /* FUNCTIONS *****************************************************************/
 
 
@@ -26,17 +69,20 @@ NTAPI
 LdrpSnapIAT(IN PLDR_DATA_TABLE_ENTRY ExportLdrEntry,
             IN PLDR_DATA_TABLE_ENTRY ImportLdrEntry,
             IN PIMAGE_IMPORT_DESCRIPTOR IatEntry,
-            IN BOOLEAN EntriesValid)
+            IN BOOLEAN EntriesValid,
+            IN OUT PLDRP_IAT_PROTECTION_CONTEXT ProtectionContext OPTIONAL,
+            IN PWSTR DllPath OPTIONAL)
 {
-    PVOID Iat;
-    NTSTATUS Status;
+    PVOID Iat = NULL;
+    NTSTATUS Status = STATUS_SUCCESS;
     PIMAGE_THUNK_DATA OriginalThunk, FirstThunk;
     PIMAGE_NT_HEADERS NtHeader;
     PIMAGE_SECTION_HEADER SectionHeader;
     PIMAGE_EXPORT_DIRECTORY ExportDirectory;
     LPSTR ImportName;
-    ULONG ForwarderChain, i, Rva, OldProtect, IatSize, ExportSize;
-    SIZE_T ImportSize;
+    ULONG ForwarderChain, i, Rva, OldProtect = 0, IatSize, ExportSize;
+    SIZE_T ImportSize = 0;
+    BOOLEAN RestoreProtection = FALSE;
     DPRINT("LdrpSnapIAT(%wZ %wZ %p %u)\n", &ExportLdrEntry->BaseDllName, &ImportLdrEntry->BaseDllName, IatEntry, EntriesValid);
 
     /* Get export directory */
@@ -53,6 +99,9 @@ LdrpSnapIAT(IN PLDR_DATA_TABLE_ENTRY ExportLdrEntry,
                  &ExportLdrEntry->BaseDllName);
         return STATUS_INVALID_IMAGE_FORMAT;
     }
+
+    if (ProtectionContext && ProtectionContext->BaseAddress)
+        goto IatReady;
 
     /* Get the IAT */
     Iat = RtlImageDirectoryEntryToData(ImportLdrEntry->DllBase,
@@ -131,6 +180,24 @@ LdrpSnapIAT(IN PLDR_DATA_TABLE_ENTRY ExportLdrEntry,
         return Status;
     }
 
+    if (ProtectionContext)
+    {
+        ProtectionContext->BaseAddress = Iat;
+        ProtectionContext->RegionSize = ImportSize;
+        ProtectionContext->OldProtect = OldProtect;
+    }
+    else
+    {
+        RestoreProtection = TRUE;
+    }
+
+IatReady:
+#if LDRP_CHPE_IMPORT_REDIRECTION
+    /* ARM64EC auxiliary IAT entries must be rebuilt from their import-checker copies. */
+    if (EntriesValid && ChpeGetImageMachine(ImportLdrEntry->DllBase) == IMAGE_FILE_MACHINE_ARM64EC)
+        EntriesValid = FALSE;
+#endif
+
     /* Check if the Thunks are already valid */
     if (EntriesValid)
     {
@@ -168,7 +235,9 @@ LdrpSnapIAT(IN PLDR_DATA_TABLE_ENTRY ExportLdrEntry,
                                        ExportDirectory,
                                        ExportSize,
                                        TRUE,
-                                       ImportName);
+                                       ImportName,
+                                       DllPath,
+                                       FALSE);
 
                 /* Move to the next thunk */
                 FirstThunk++;
@@ -224,7 +293,9 @@ LdrpSnapIAT(IN PLDR_DATA_TABLE_ENTRY ExportLdrEntry,
                                        ExportDirectory,
                                        ExportSize,
                                        TRUE,
-                                       ImportName);
+                                       ImportName,
+                                       DllPath,
+                                       FALSE);
 
                 /* Next thunks */
                 OriginalThunk++;
@@ -240,15 +311,17 @@ LdrpSnapIAT(IN PLDR_DATA_TABLE_ENTRY ExportLdrEntry,
         }
     }
 
-    /* Protect the IAT again */
-    NtProtectVirtualMemory(NtCurrentProcess(),
-                           &Iat,
-                           &ImportSize,
-                           OldProtect,
-                           &OldProtect);
+    if (RestoreProtection)
+    {
+        /* Protect the IAT again */
+        NtProtectVirtualMemory(NtCurrentProcess(),
+                               &Iat,
+                               &ImportSize,
+                               OldProtect,
+                               &OldProtect);
+    }
 
-    /* Also flush out the cache */
-    NtFlushInstructionCache(NtCurrentProcess(), Iat, IatSize);
+    /* LdrpSnapThunk only writes data pointers in IMAGE_THUNK_DATA entries. */
 
     /* Return to Caller */
     return Status;
@@ -285,6 +358,7 @@ LdrpHandleOneNewFormatImportDescriptor(IN LPWSTR DllPath OPTIONAL,
 
     /* Load the module for this entry */
     Status = LdrpLoadImportModule(DllPath,
+                                  LdrEntry->DllBase,
                                   BoundImportName,
                                   &DllLdrEntry,
                                   &AlreadyLoaded);
@@ -358,6 +432,7 @@ LdrpHandleOneNewFormatImportDescriptor(IN LPWSTR DllPath OPTIONAL,
 
         /* Load the module */
         Status = LdrpLoadImportModule(DllPath,
+                                      LdrEntry->DllBase,
                                       ForwarderName,
                                       &ForwarderLdrEntry,
                                       &AlreadyLoaded);
@@ -459,7 +534,9 @@ LdrpHandleOneNewFormatImportDescriptor(IN LPWSTR DllPath OPTIONAL,
         Status = LdrpSnapIAT(DllLdrEntry,
                              LdrEntry,
                              ImportEntry,
-                             FALSE);
+                             FALSE,
+                             NULL,
+                             DllPath);
 
         /* Make sure we didn't fail */
         if (!NT_SUCCESS(Status))
@@ -515,7 +592,8 @@ NTSTATUS
 NTAPI
 LdrpHandleOneOldFormatImportDescriptor(IN LPWSTR DllPath OPTIONAL,
                                        IN PLDR_DATA_TABLE_ENTRY LdrEntry,
-                                       IN PIMAGE_IMPORT_DESCRIPTOR *ImportEntry)
+                                       IN PIMAGE_IMPORT_DESCRIPTOR *ImportEntry,
+                                       IN OUT PLDRP_IAT_PROTECTION_CONTEXT ProtectionContext)
 {
     LPSTR ImportName;
     NTSTATUS Status;
@@ -544,6 +622,7 @@ LdrpHandleOneOldFormatImportDescriptor(IN LPWSTR DllPath OPTIONAL,
 
     /* Load the module associated to it */
     Status = LdrpLoadImportModule(DllPath,
+                                  LdrEntry->DllBase,
                                   ImportName,
                                   &DllLdrEntry,
                                   &AlreadyLoaded);
@@ -580,7 +659,7 @@ LdrpHandleOneOldFormatImportDescriptor(IN LPWSTR DllPath OPTIONAL,
     }
 
     /* Now snap the IAT Entry */
-    Status = LdrpSnapIAT(DllLdrEntry, LdrEntry, *ImportEntry, FALSE);
+    Status = LdrpSnapIAT(DllLdrEntry, LdrEntry, *ImportEntry, FALSE, ProtectionContext, DllPath);
     if (!NT_SUCCESS(Status))
     {
         /* Fail */
@@ -607,20 +686,42 @@ LdrpHandleOldFormatImportDescriptors(IN LPWSTR DllPath OPTIONAL,
                                      IN PLDR_DATA_TABLE_ENTRY LdrEntry,
                                      IN PIMAGE_IMPORT_DESCRIPTOR ImportEntry)
 {
-    NTSTATUS Status;
+    _SEH2_VOLATILE LDRP_IAT_PROTECTION_CONTEXT ProtectionContext = {0};
+    NTSTATUS Status = STATUS_SUCCESS;
+    PVOID BaseAddress;
+    SIZE_T RegionSize;
+    ULONG CurrentProtect;
 
-    /* Check for Name and Thunk */
-    while ((ImportEntry->Name) && (ImportEntry->FirstThunk))
+    _SEH2_TRY
     {
-        /* Parse this descriptor */
-        Status = LdrpHandleOneOldFormatImportDescriptor(DllPath,
-                                                        LdrEntry,
-                                                        &ImportEntry);
-        if (!NT_SUCCESS(Status)) return Status;
+        /* Check for Name and Thunk */
+        while ((ImportEntry->Name) && (ImportEntry->FirstThunk))
+        {
+            /* Parse this descriptor */
+            Status = LdrpHandleOneOldFormatImportDescriptor(DllPath,
+                                                            LdrEntry,
+                                                            &ImportEntry,
+                                                            (PLDRP_IAT_PROTECTION_CONTEXT)&ProtectionContext);
+            if (!NT_SUCCESS(Status)) break;
+        }
     }
+    _SEH2_FINALLY
+    {
+        if (ProtectionContext.BaseAddress)
+        {
+            BaseAddress = ProtectionContext.BaseAddress;
+            RegionSize = ProtectionContext.RegionSize;
+            NtProtectVirtualMemory(NtCurrentProcess(),
+                                   &BaseAddress,
+                                   &RegionSize,
+                                   ProtectionContext.OldProtect,
+                                   &CurrentProtect);
+        }
+    }
+    _SEH2_END;
 
     /* Done */
-    return STATUS_SUCCESS;
+    return Status;
 }
 
 USHORT
@@ -797,6 +898,14 @@ LdrpWalkImportDescriptor(IN LPWSTR DllPath OPTIONAL,
     /* Release the activation context */
     RtlDeactivateActivationContextUnsafeFast(&ActCtx);
 
+    if (NT_SUCCESS(Status) &&
+        (LdrEntry->Flags & LDRP_IMAGE_DLL) &&
+        !(LdrEntry->Flags & LDRP_LOAD_NOTIFICATIONS_SENT))
+    {
+        LdrpSendDllNotifications(LdrEntry, LDR_DLL_NOTIFICATION_REASON_LOADED);
+        LdrEntry->Flags |= LDRP_LOAD_NOTIFICATIONS_SENT;
+    }
+
     DPRINT("LdrpWalkImportDescriptor - END (%wZ %p)\n", &LdrEntry->BaseDllName, LdrEntry);
 
     /* Return status */
@@ -806,6 +915,7 @@ LdrpWalkImportDescriptor(IN LPWSTR DllPath OPTIONAL,
 NTSTATUS
 NTAPI
 LdrpLoadImportModule(IN PWSTR DllPath OPTIONAL,
+                     IN PVOID ImportBase,
                      IN LPSTR ImportName,
                      OUT PLDR_DATA_TABLE_ENTRY *DataTableEntry,
                      OUT PBOOLEAN Existing)
@@ -820,11 +930,20 @@ LdrpLoadImportModule(IN PWSTR DllPath OPTIONAL,
     PTEB Teb = NtCurrentTeb();
     UNICODE_STRING RedirectedImpDescName;
     BOOLEAN RedirectedDll;
+    BOOLEAN ApiSetRedirected = FALSE;
+#if LDRP_CHPE_IMPORT_REDIRECTION
+    UNICODE_STRING ChpeImpDescName;
+    BOOLEAN ChpeRedirectedDll;
+#endif
 
-    DPRINT("LdrpLoadImportModule('%S' '%s' %p %p)\n", DllPath, ImportName, DataTableEntry, Existing);
+    DPRINT("LdrpLoadImportModule('%S' %p '%s' %p %p)\n", DllPath, ImportBase, ImportName, DataTableEntry, Existing);
 
     RedirectedDll = FALSE;
     RtlInitEmptyUnicodeString(&RedirectedImpDescName, NULL, 0);
+#if LDRP_CHPE_IMPORT_REDIRECTION
+    RtlInitEmptyUnicodeString(&ChpeImpDescName, NULL, 0);
+    ChpeRedirectedDll = FALSE;
+#endif
 
     /* Convert import descriptor name to unicode string */
     ImpDescName = &Teb->StaticUnicodeString;
@@ -876,15 +995,29 @@ LdrpLoadImportModule(IN PWSTR DllPath OPTIONAL,
     }
 
     /* Check if the SxS Assemblies specify another file */
-    Status = LdrpApplyFileNameRedirection(
-        ImpDescName, &LdrApiDefaultExtension, NULL, &RedirectedImpDescName, &ImpDescName, &RedirectedDll);
-
+    Status = LdrpApplyFileNameRedirection(ImpDescName, &LdrApiDefaultExtension, NULL, &RedirectedImpDescName, &ImpDescName, &RedirectedDll, &ApiSetRedirected);
     if (!NT_SUCCESS(Status))
     {
-        /* Unrecoverable SxS failure */
-        DPRINT1("LDR: LdrpApplyFileNameRedirection failed  with status %x for dll %wZ\n", Status, ImpDescName);
+        DPRINT1("LDR: LdrpApplyFileNameRedirection failed with status %x for dll %wZ\n", Status, ImpDescName);
         goto done;
     }
+
+#if LDRP_CHPE_IMPORT_REDIRECTION
+    if (ChpeShouldRedirectImport(ImportBase, ImpDescName))
+    {
+        Status = LdrpBuildArm64EcImportName(ImpDescName, &ChpeImpDescName);
+        if (!NT_SUCCESS(Status))
+            goto done;
+
+        if (RtlDoesFileExists_UStr(&ChpeImpDescName))
+        {
+            ImpDescName = &ChpeImpDescName;
+            RedirectedDll = TRUE;
+            ChpeRedirectedDll = TRUE;
+            ApiSetRedirected = FALSE;
+        }
+    }
+#endif
 
     /* Check if it's loaded */
     if (LdrpCheckForLoadedDll(DllPath,
@@ -895,6 +1028,16 @@ LdrpLoadImportModule(IN PWSTR DllPath OPTIONAL,
     {
         /* It's already existing in the list */
         *Existing = TRUE;
+#if LDRP_CHPE_IMPORT_REDIRECTION
+        if (ChpeRedirectedDll && ChpeGetImageMachine((*DataTableEntry)->DllBase) != IMAGE_FILE_MACHINE_ARM64EC)
+        {
+            Status = STATUS_INVALID_IMAGE_FORMAT;
+            goto done;
+        }
+
+        if (ChpeIsChpeProcess())
+            ChpeRegisterImageCodeRanges((*DataTableEntry)->DllBase);
+#endif
         Status = STATUS_SUCCESS;
         goto done;
     }
@@ -908,13 +1051,29 @@ LdrpLoadImportModule(IN PWSTR DllPath OPTIONAL,
                         ImpDescName->Buffer,
                         NULL,
                         TRUE,
-                        RedirectedDll,
+                        RedirectedDll && !ApiSetRedirected,
                         DataTableEntry);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("LDR: LdrpMapDll failed  with status %x for dll %wZ\n", Status, ImpDescName);
         goto done;
     }
+
+#if LDRP_CHPE_IMPORT_REDIRECTION
+    if (ChpeRedirectedDll && ChpeGetImageMachine((*DataTableEntry)->DllBase) != IMAGE_FILE_MACHINE_ARM64EC)
+    {
+        DPRINT1("LDR: CHPE redirected image %wZ is not ARM64EC\n", &(*DataTableEntry)->BaseDllName);
+        Status = STATUS_INVALID_IMAGE_FORMAT;
+        goto done;
+    }
+
+    if (ChpeIsChpeProcess() && !ChpeRegisterImageCodeRanges((*DataTableEntry)->DllBase))
+    {
+        DPRINT1("LDR: CHPE failed to register image code ranges for %wZ\n", &(*DataTableEntry)->BaseDllName);
+        Status = STATUS_INVALID_IMAGE_FORMAT;
+        goto done;
+    }
+#endif
 
     /* Walk its import descriptor table */
     Status = LdrpWalkImportDescriptor(DllPath,
@@ -927,9 +1086,210 @@ LdrpLoadImportModule(IN PWSTR DllPath OPTIONAL,
     }
 
 done:
+#if LDRP_CHPE_IMPORT_REDIRECTION
+    if (ChpeImpDescName.Buffer)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, ChpeImpDescName.Buffer);
+#endif
     RtlFreeUnicodeString(&RedirectedImpDescName);
 
     return Status;
+}
+
+typedef struct _LDRP_FORWARDER_REFERENCE
+{
+    LIST_ENTRY Links;
+    PVOID OwnerBase;
+    PVOID TargetBase;
+} LDRP_FORWARDER_REFERENCE, *PLDRP_FORWARDER_REFERENCE;
+
+static LIST_ENTRY LdrpForwarderReferenceList = { &LdrpForwarderReferenceList, &LdrpForwarderReferenceList };
+
+static
+BOOLEAN
+LdrpIsForwarderReferenced(
+    _In_ PVOID OwnerBase,
+    _In_ PVOID TargetBase)
+{
+    PLDRP_FORWARDER_REFERENCE Reference;
+    PLIST_ENTRY Entry;
+
+    for (Entry = LdrpForwarderReferenceList.Flink; Entry != &LdrpForwarderReferenceList; Entry = Entry->Flink)
+    {
+        Reference = CONTAINING_RECORD(Entry, LDRP_FORWARDER_REFERENCE, Links);
+        if (Reference->OwnerBase == OwnerBase && Reference->TargetBase == TargetBase)
+            return TRUE;
+    }
+
+    return FALSE;
+}
+
+static
+VOID
+LdrpAddForwarderReference(
+    _In_ PVOID OwnerBase,
+    _In_ PVOID TargetBase)
+{
+    PLDRP_FORWARDER_REFERENCE Reference;
+
+    Reference = RtlAllocateHeap(LdrpHeap, 0, sizeof(*Reference));
+    if (!Reference)
+        return;
+
+    Reference->OwnerBase = OwnerBase;
+    Reference->TargetBase = TargetBase;
+    RtlAcquireSRWLockExclusive(&LdrpModuleDatatableLock);
+    InsertTailList(&LdrpForwarderReferenceList, &Reference->Links);
+    RtlReleaseSRWLockExclusive(&LdrpModuleDatatableLock);
+}
+
+VOID
+NTAPI
+LdrpReleaseForwarderReferences(IN PVOID OwnerBase)
+{
+    PLDRP_FORWARDER_REFERENCE Reference;
+    PLIST_ENTRY Entry;
+    PVOID TargetBase;
+
+    Entry = LdrpForwarderReferenceList.Flink;
+    while (Entry != &LdrpForwarderReferenceList)
+    {
+        Reference = CONTAINING_RECORD(Entry, LDRP_FORWARDER_REFERENCE, Links);
+        if (Reference->OwnerBase != OwnerBase)
+        {
+            Entry = Entry->Flink;
+            continue;
+        }
+
+        TargetBase = Reference->TargetBase;
+        RtlAcquireSRWLockExclusive(&LdrpModuleDatatableLock);
+        RemoveEntryList(&Reference->Links);
+        RtlReleaseSRWLockExclusive(&LdrpModuleDatatableLock);
+        RtlFreeHeap(LdrpHeap, 0, Reference);
+
+        LdrUnloadDll(TargetBase);
+
+        Entry = LdrpForwarderReferenceList.Flink;
+    }
+}
+
+static
+BOOLEAN
+LdrpFindLoadedForwarder(
+    _In_opt_ PWSTR DllPath,
+    _In_ PUNICODE_STRING DllName,
+    _In_ BOOLEAN Redirected,
+    _Out_ PLDR_DATA_TABLE_ENTRY *LdrEntry)
+{
+    WCHAR NameBuffer[MAX_PATH + 6];
+    UNICODE_STRING RawDllName;
+    const WCHAR *p;
+
+    if (DllName->Length >= sizeof(NameBuffer))
+        return FALSE;
+
+    RtlInitEmptyUnicodeString(&RawDllName, NameBuffer, sizeof(NameBuffer));
+    RtlCopyUnicodeString(&RawDllName, DllName);
+
+    for (p = DllName->Buffer + DllName->Length / sizeof(WCHAR); p > DllName->Buffer; p--)
+    {
+        if (p[-1] == L'.')
+            return LdrpCheckForLoadedDll(DllPath, &RawDllName, FALSE, Redirected, LdrEntry);
+
+        if (p[-1] == L'\\')
+            break;
+    }
+
+    if ((DllName->Length + LdrApiDefaultExtension.Length + sizeof(UNICODE_NULL)) >= sizeof(NameBuffer))
+        return FALSE;
+
+    (VOID)RtlAppendUnicodeStringToString(&RawDllName, &LdrApiDefaultExtension);
+    return LdrpCheckForLoadedDll(DllPath, &RawDllName, FALSE, Redirected, LdrEntry);
+}
+
+static
+NTSTATUS
+LdrpFindReferencedForwarder(
+    _In_ PVOID OwnerBase,
+    _In_opt_ PWSTR DllPath,
+    _In_ PUNICODE_STRING DllName,
+    _In_ BOOLEAN Redirected,
+    _Out_ PVOID *TargetBase)
+{
+    PLDR_DATA_TABLE_ENTRY LdrEntry;
+    NTSTATUS Status = STATUS_RETRY;
+
+    RtlAcquireSRWLockShared(&LdrpModuleDatatableLock);
+    _SEH2_TRY
+    {
+        if (!DllPath)
+            DllPath = LdrpGetModuleLoadPath(OwnerBase);
+        if (LdrpFindLoadedForwarder(DllPath, DllName, Redirected, &LdrEntry) &&
+            LdrpIsModuleReady(LdrEntry) &&
+            ((*(volatile USHORT *)&LdrEntry->LoadCount == 0xFFFF) ||
+             LdrpIsForwarderReferenced(OwnerBase, LdrEntry->DllBase)))
+        {
+            *TargetBase = LdrEntry->DllBase;
+            Status = STATUS_SUCCESS;
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = STATUS_RETRY;
+    }
+    _SEH2_END;
+    RtlReleaseSRWLockShared(&LdrpModuleDatatableLock);
+
+    return Status;
+}
+
+BOOLEAN
+NTAPI
+LdrpReferenceLoadedDll(
+    _In_opt_ PWSTR DllPath,
+    _In_ PUNICODE_STRING DllName,
+    _In_ BOOLEAN Redirected,
+    _Out_ PVOID *BaseAddress)
+{
+    PLDR_DATA_TABLE_ENTRY LdrEntry = NULL;
+    LDRP_WALK_SET Set;
+    BOOLEAN Referenced = FALSE, Walk = FALSE, SetReady = FALSE;
+
+#if defined(_M_ARM64)
+    if (ChpeIsChpeProcess())
+        return FALSE;
+#endif
+
+    RtlAcquireSRWLockShared(&LdrpLoadCountWalkLock);
+    RtlAcquireSRWLockShared(&LdrpModuleDatatableLock);
+    _SEH2_TRY
+    {
+        if (LdrpFindLoadedForwarder(DllPath, DllName, Redirected, &LdrEntry) &&
+            LdrpIsModuleInitialized(LdrEntry))
+        {
+            if (*(volatile USHORT *)&LdrEntry->LoadCount == 0xFFFF)
+                Referenced = TRUE;
+            else if ((SetReady = LdrpAllocateWalkSet(&Set)))
+                Referenced = LdrpTryReferenceModule(LdrEntry, FALSE, &Walk);
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Referenced = FALSE;
+    }
+    _SEH2_END;
+    RtlReleaseSRWLockShared(&LdrpModuleDatatableLock);
+
+    if (Walk)
+        LdrpWalkLoadCount(LdrEntry, LDRP_UPDATE_REFCOUNT, &Set);
+    RtlReleaseSRWLockShared(&LdrpLoadCountWalkLock);
+    if (SetReady)
+        LdrpFreeWalkSet(&Set);
+
+    if (!Referenced)
+        return FALSE;
+
+    *BaseAddress = LdrEntry->DllBase;
+    return TRUE;
 }
 
 NTSTATUS
@@ -941,7 +1301,9 @@ LdrpSnapThunk(IN PVOID ExportBase,
               IN PIMAGE_EXPORT_DIRECTORY ExportDirectory,
               IN ULONG ExportSize,
               IN BOOLEAN Static,
-              IN LPSTR DllName)
+              IN LPSTR DllName,
+              IN PWSTR DllPath OPTIONAL,
+              IN BOOLEAN LookupOnly)
 {
     BOOLEAN IsOrdinal;
     USHORT Ordinal;
@@ -962,7 +1324,15 @@ LdrpSnapThunk(IN PVOID ExportBase,
     ANSI_STRING ForwarderName;
     PANSI_STRING ForwardName;
     PVOID ForwarderHandle = NULL;
+    PVOID ForwarderOwner = Static ? ImportBase : ExportBase;
+    PLDR_DATA_TABLE_ENTRY ForwarderLdrEntry;
+    BOOLEAN ForwarderReferenced = FALSE;
     ULONG ForwardOrdinal;
+    PWSTR ForwarderPath = DllPath;
+#if LDRP_CHPE_IMPORT_REDIRECTION
+    ULONG_PTR NativeFunction;
+    USHORT ImportMachine;
+#endif
 
     /* Check if the snap is by ordinal */
     if ((IsOrdinal = IMAGE_SNAP_BY_ORDINAL(OriginalThunk->u1.Ordinal)))
@@ -1013,7 +1383,7 @@ LdrpSnapThunk(IN PVOID ExportBase,
     {
 FailurePath:
         /* Check if we loeaded a forwarder DLL */
-        if (ForwarderHandle != NULL)
+        if (ForwarderReferenced)
         {
             /* Unload the forwarder DLL */
             LdrUnloadDll(ForwarderHandle);
@@ -1123,6 +1493,9 @@ FailurePath:
             /* Get the Import and Forwarder Names */
             ImportName = (LPSTR)Thunk->u1.Function;
 
+            if (!ForwarderPath && !Static && !LookupOnly)
+                ForwarderPath = LdrpGetModuleLoadPath(ExportBase);
+
             DotPosition = strchr(ImportName, '.');
             ASSERT(DotPosition != NULL);
             if (!DotPosition)
@@ -1140,34 +1513,80 @@ FailurePath:
             {
                 WCHAR StringBuffer[MAX_PATH];
                 UNICODE_STRING StaticString, *RedirectedImportName;
-                BOOLEAN Redirected = FALSE;
+                BOOLEAN Redirected = FALSE, ApiSetRedirected = FALSE;
+#if LDRP_CHPE_IMPORT_REDIRECTION
+                WCHAR ForwarderDllBuffer[MAX_PATH];
+                UNICODE_STRING ForwarderDllName, ChpeImportName;
+                PUNICODE_STRING ChpeCandidateName;
+#endif
 
                 RtlInitEmptyUnicodeString(&StaticString, StringBuffer, sizeof(StringBuffer));
+                RedirectedImportName = &TempUString;
+                Status = LdrpApplyFileNameRedirection(&TempUString, &LdrApiDefaultExtension, &StaticString, NULL, &RedirectedImportName, &Redirected, &ApiSetRedirected);
 
-                /* Check if the SxS Assemblies specify another file */
-                Status = LdrpApplyFileNameRedirection(
-                    &TempUString, &LdrApiDefaultExtension, &StaticString, NULL, &RedirectedImportName, &Redirected);
+#if LDRP_CHPE_IMPORT_REDIRECTION
+                RtlInitEmptyUnicodeString(&ForwarderDllName, ForwarderDllBuffer, sizeof(ForwarderDllBuffer));
+                RtlInitEmptyUnicodeString(&ChpeImportName, NULL, 0);
+                if (NT_SUCCESS(Status))
+                {
+                    ChpeCandidateName = RedirectedImportName;
+                    if (!Redirected)
+                    {
+                        Status = RtlAppendUnicodeStringToString(&ForwarderDllName, &TempUString);
+                        if (NT_SUCCESS(Status))
+                            Status = RtlAppendUnicodeStringToString(&ForwarderDllName, &LdrApiDefaultExtension);
+                        ChpeCandidateName = &ForwarderDllName;
+                    }
+
+                    /* Dynamic lookups use a synthetic import-name buffer.
+                     * Use the exporting image to select its forwarder's ABI. */
+                    if (NT_SUCCESS(Status) && ChpeShouldRedirectImport(Static ? ImportBase : ExportBase, ChpeCandidateName))
+                    {
+                        Status = LdrpBuildArm64EcImportName(ChpeCandidateName, &ChpeImportName);
+                        if (NT_SUCCESS(Status) && RtlDoesFileExists_UStr(&ChpeImportName))
+                        {
+                            RedirectedImportName = &ChpeImportName;
+                            Redirected = TRUE;
+                            ApiSetRedirected = FALSE;
+                        }
+                    }
+                }
+#endif
 
                 if (NT_SUCCESS(Status) && Redirected)
                 {
                     if (ShowSnaps)
                         DPRINT1("LDR: %Z got redirected to %wZ\n", &ForwarderName, RedirectedImportName);
                 }
-                else
-                {
-                    RedirectedImportName = &TempUString;
-                }
 
                 /* Load the forwarder */
-                Status = LdrpLoadDll(Redirected,
-                                     NULL,
-                                     NULL,
-                                     RedirectedImportName,
-                                     &ForwarderHandle,
-                                     FALSE);
+                if (NT_SUCCESS(Status) && LookupOnly)
+                {
+                    Status = LdrpFindReferencedForwarder(ForwarderOwner, ForwarderPath, RedirectedImportName, Redirected, &ForwarderHandle);
+                }
+                else if (NT_SUCCESS(Status))
+                {
+                    if (LdrpFindLoadedForwarder(ForwarderPath, RedirectedImportName, Redirected, &ForwarderLdrEntry) &&
+                        LdrpIsForwarderReferenced(ForwarderOwner, ForwarderLdrEntry->DllBase))
+                    {
+                        ForwarderHandle = ForwarderLdrEntry->DllBase;
+                    }
+                    else
+                    {
+                        Status = LdrpLoadDll(Redirected && !ApiSetRedirected, ForwarderPath, NULL, RedirectedImportName, &ForwarderHandle, FALSE);
+                        ForwarderReferenced = NT_SUCCESS(Status);
+                    }
+                }
 
+#if LDRP_CHPE_IMPORT_REDIRECTION
+                if (ChpeImportName.Buffer)
+                    RtlFreeHeap(RtlGetProcessHeap(), 0, ChpeImportName.Buffer);
+#endif
                 RtlFreeUnicodeString(&TempUString);
             }
+
+            if (LookupOnly && !NT_SUCCESS(Status))
+                return STATUS_RETRY;
 
             /* If the load or conversion failed, use the failure path */
             if (!NT_SUCCESS(Status)) goto FailurePath;
@@ -1202,15 +1621,40 @@ FailurePath:
                                              ForwardName,
                                              ForwardOrdinal,
                                              (PVOID*)&Thunk->u1.Function,
-                                             FALSE);
+                                             FALSE,
+                                             DllPath);
             /* If this fails, then error out */
             if (!NT_SUCCESS(Status)) goto FailurePath;
+
+            if (ForwarderReferenced)
+                LdrpAddForwarderReference(ForwarderOwner, ForwarderHandle);
         }
         else
         {
             /* It's not within the exports, let's hope it's valid */
             if (!AddressOfFunctions[Ordinal]) goto FailurePath;
+            LdrpArchSnapExport(ExportBase, Static ? ImportBase : NULL, &Thunk->u1.Function);
         }
+
+#if LDRP_CHPE_IMPORT_REDIRECTION
+        if (Static)
+        {
+            Status = ChpeValidateImportThunk(ImportBase, ExportBase, Thunk->u1.Function, DllName, IsOrdinal ? NULL : ImportName, OriginalOrdinal, IsOrdinal);
+            if (!NT_SUCCESS(Status))
+                return Status;
+
+            ImportMachine = ChpeGetImageMachine(ImportBase);
+            if (ImportMachine == IMAGE_FILE_MACHINE_ARM64EC &&
+                !ChpePatchArm64EcAuxiliaryIat(ImportBase, ExportBase, Thunk, Thunk->u1.Function))
+            {
+                return STATUS_INVALID_IMAGE_FORMAT;
+            }
+            else if (ImportMachine == IMAGE_FILE_MACHINE_ARM64 && ChpeGetArm64EcNativeFunction(ExportBase, Thunk->u1.Function, &NativeFunction))
+            {
+                Thunk->u1.Function = NativeFunction;
+            }
+        }
+#endif
 
         /* If we got here, then it's success */
         Status = STATUS_SUCCESS;

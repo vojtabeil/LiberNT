@@ -1,25 +1,69 @@
-#ifndef _NETIOAPI_H_
-#define _NETIOAPI_H_
+/*
+ * Copyright 2015 Hans Leidekker for CodeWeavers
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+#ifndef __WINE_NETIOAPI_H
+#define __WINE_NETIOAPI_H
 
-#ifdef _IPHLPAPI_H
-    #define NETIO_STATUS DWORD
-    #define NETIOAPI_API_ WINAPI
+#include <ws2def.h>
+#include <ws2ipdef.h>
+#include <ifdef.h>
+#include <nldef.h>
+#include <ntddndis.h>
+
+#ifndef IPHLPAPI_DLL_LINKAGE
+#if defined(__REACTOS__) && defined(__GNUC__)
+/* FIXME: CORE-6504 */
+#define IPHLPAPI_DLL_LINKAGE
 #else
-    #define NETIO_STATUS NTSTATUS
-    #define NETIOAPI_API_ NTAPI
+#define IPHLPAPI_DLL_LINKAGE DECLSPEC_IMPORT
+#endif
 #endif
 
+#ifndef ANY_SIZE
+#define ANY_SIZE 1
+#endif
+
+#if defined(_NTDDK_) || defined(_NTIFS_)
+#define NETIO_STATUS NTSTATUS
+#define NETIOAPI_API_ NTAPI
+#else
+#define NETIO_STATUS DWORD
+#define NETIOAPI_API_ WINAPI
+#endif
 #define NETIOAPI_API NETIO_STATUS NETIOAPI_API_
 
-#ifdef _WS2IPDEF_
-#include <ntddndis.h>
-#include <ifdef.h>
+typedef enum _MIB_IF_TABLE_LEVEL
+{
+    MibIfTableNormal,
+    MibIfTableRaw,
+    MibIfTableNormalWithoutStatistics,
+} MIB_IF_TABLE_LEVEL, *PMIB_IF_TABLE_LEVEL;
 
-typedef struct _MIB_IF_ROW2 {
+typedef enum _MIB_NOTIFICATION_TYPE
+{
+    MibParameterNotification,
+    MibAddInstance,
+    MibDeleteInstance,
+    MibInitialNotification,
+} MIB_NOTIFICATION_TYPE, *PMIB_NOTIFICATION_TYPE;
+
+typedef struct _MIB_IF_ROW2
+{
     NET_LUID InterfaceLuid;
     NET_IFINDEX InterfaceIndex;
     GUID InterfaceGuid;
@@ -35,7 +79,8 @@ typedef struct _MIB_IF_ROW2 {
     NDIS_PHYSICAL_MEDIUM PhysicalMediumType;
     NET_IF_ACCESS_TYPE AccessType;
     NET_IF_DIRECTION_TYPE DirectionType;
-    struct {
+    struct
+    {
         BOOLEAN HardwareInterface : 1;
         BOOLEAN FilterInterface : 1;
         BOOLEAN ConnectorPresent : 1;
@@ -78,13 +123,235 @@ typedef struct _MIB_IF_TABLE2
     MIB_IF_ROW2 Table[1];
 } MIB_IF_TABLE2, *PMIB_IF_TABLE2;
 
-NETIOAPI_API GetIfEntry2(IN OUT PMIB_IF_ROW2 Row);
-NETIOAPI_API GetIfTable2(OUT PMIB_IF_TABLE2 *Table);
+typedef struct _MIB_IPINTERFACE_ROW
+{
+    ADDRESS_FAMILY Family;
+    NET_LUID InterfaceLuid;
+    NET_IFINDEX InterfaceIndex;
+    ULONG MaxReassemblySize;
+    ULONG64 InterfaceIdentifier;
+    ULONG MinRouterAdvertisementInterval;
+    ULONG MaxRouterAdvertisementInterval;
+    BOOLEAN AdvertisingEnabled;
+    BOOLEAN ForwardingEnabled;
+    BOOLEAN WeakHostSend;
+    BOOLEAN WeakHostReceive;
+    BOOLEAN UseAutomaticMetric;
+    BOOLEAN UseNeighborUnreachabilityDetection;
+    BOOLEAN ManagedAddressConfigurationSupported;
+    BOOLEAN OtherStatefulConfigurationSupported;
+    BOOLEAN AdvertiseDefaultRoute;
+    NL_ROUTER_DISCOVERY_BEHAVIOR RouterDiscoveryBehavior;
+    ULONG DadTransmits;
+    ULONG BaseReachableTime;
+    ULONG RetransmitTime;
+    ULONG PathMtuDiscoveryTimeout;
+    NL_LINK_LOCAL_ADDRESS_BEHAVIOR LinkLocalAddressBehavior;
+    ULONG LinkLocalAddressTimeout;
+    ULONG ZoneIndices[ScopeLevelCount];
+    ULONG SitePrefixLength;
+    ULONG Metric;
+    ULONG NlMtu;
+    BOOLEAN Connected;
+    BOOLEAN SupportsWakeUpPatterns;
+    BOOLEAN SupportsNeighborDiscovery;
+    BOOLEAN SupportsRouterDiscovery;
+    ULONG ReachableTime;
+    NL_INTERFACE_OFFLOAD_ROD TransmitOffload;
+    NL_INTERFACE_OFFLOAD_ROD ReceiveOffload;
+    BOOLEAN DisableDefaultRoutes;
+} MIB_IPINTERFACE_ROW, *PMIB_IPINTERFACE_ROW;
 
-#endif
+typedef struct _MIB_IPINTERFACE_TABLE
+{
+    ULONG NumEntries;
+    MIB_IPINTERFACE_ROW Table[ANY_SIZE];
+} MIB_IPINTERFACE_TABLE, *PMIB_IPINTERFACE_TABLE;
 
-#ifdef __cplusplus
-}
-#endif
+typedef struct _MIB_UNICASTIPADDRESS_ROW
+{
+    SOCKADDR_INET       Address;
+    NET_LUID            InterfaceLuid;
+    NET_IFINDEX         InterfaceIndex;
+    NL_PREFIX_ORIGIN    PrefixOrigin;
+    NL_SUFFIX_ORIGIN    SuffixOrigin;
+    ULONG               ValidLifetime;
+    ULONG               PreferredLifetime;
+    UINT8               OnLinkPrefixLength;
+    BOOLEAN             SkipAsSource;
+    NL_DAD_STATE        DadState;
+    SCOPE_ID            ScopeId;
+    LARGE_INTEGER       CreationTimeStamp;
+} MIB_UNICASTIPADDRESS_ROW, *PMIB_UNICASTIPADDRESS_ROW;
 
-#endif
+typedef struct _MIB_UNICASTIPADDRESS_TABLE
+{
+    ULONG NumEntries;
+    MIB_UNICASTIPADDRESS_ROW Table[1];
+} MIB_UNICASTIPADDRESS_TABLE, *PMIB_UNICASTIPADDRESS_TABLE;
+
+typedef struct _MIB_ANYCASTIPADDRESS_ROW
+{
+    SOCKADDR_INET Address;
+    NET_LUID      InterfaceLuid;
+    NET_IFINDEX   InterfaceIndex;
+    SCOPE_ID      ScopeId;
+} MIB_ANYCASTIPADDRESS_ROW, *PMIB_ANYCASTIPADDRESS_ROW;
+
+typedef struct _MIB_ANYCASTIPADDRESS_TABLE
+{
+    ULONG                    NumEntries;
+    MIB_ANYCASTIPADDRESS_ROW Table[ANY_SIZE];
+} MIB_ANYCASTIPADDRESS_TABLE, *PMIB_ANYCASTIPADDRESS_TABLE;
+
+typedef struct _IP_ADDRESS_PREFIX
+{
+    SOCKADDR_INET Prefix;
+    UINT8         PrefixLength;
+} IP_ADDRESS_PREFIX, *PIP_ADDRESS_PREFIX;
+
+typedef struct _MIB_IPFORWARD_ROW2
+{
+    NET_LUID          InterfaceLuid;
+    NET_IFINDEX       InterfaceIndex;
+    IP_ADDRESS_PREFIX DestinationPrefix;
+    SOCKADDR_INET     NextHop;
+    UCHAR             SitePrefixLength;
+    ULONG             ValidLifetime;
+    ULONG             PreferredLifetime;
+    ULONG             Metric;
+    NL_ROUTE_PROTOCOL Protocol;
+    BOOLEAN           Loopback;
+    BOOLEAN           AutoconfigureAddress;
+    BOOLEAN           Publish;
+    BOOLEAN           Immortal;
+    ULONG             Age;
+    NL_ROUTE_ORIGIN   Origin;
+} MIB_IPFORWARD_ROW2, *PMIB_IPFORWARD_ROW2;
+
+typedef struct _MIB_IPFORWARD_TABLE2
+{
+    ULONG              NumEntries;
+    MIB_IPFORWARD_ROW2 Table[ANY_SIZE];
+} MIB_IPFORWARD_TABLE2, *PMIB_IPFORWARD_TABLE2;
+
+typedef struct _MIB_IPNET_ROW2
+{
+    SOCKADDR_INET Address;
+    NET_IFINDEX InterfaceIndex;
+    NET_LUID InterfaceLuid;
+    UCHAR PhysicalAddress[IF_MAX_PHYS_ADDRESS_LENGTH];
+    ULONG PhysicalAddressLength;
+    NL_NEIGHBOR_STATE State;
+
+    union
+    {
+        struct
+        {
+            BOOLEAN IsRouter : 1;
+            BOOLEAN IsUnreachable : 1;
+        } DUMMYSTRUCTNAME;
+        UCHAR Flags;
+    } DUMMYUNIONNAME;
+
+    union
+    {
+        ULONG LastReachable;
+        ULONG LastUnreachable;
+    } ReachabilityTime;
+} MIB_IPNET_ROW2, *PMIB_IPNET_ROW2;
+
+typedef struct _MIB_IPNET_TABLE2
+{
+    ULONG NumEntries;
+    MIB_IPNET_ROW2 Table[ANY_SIZE];
+} MIB_IPNET_TABLE2, *PMIB_IPNET_TABLE2;
+
+typedef struct _MIB_IPPATH_ROW
+{
+    SOCKADDR_INET Source;
+    SOCKADDR_INET Destination;
+    NET_LUID InterfaceLuid;
+    NET_IFINDEX InterfaceIndex;
+    SOCKADDR_INET CurrentNextHop;
+    ULONG PathMtu;
+    ULONG RttMean;
+    ULONG RttDeviation;
+    union
+    {
+        ULONG LastReachable;
+        ULONG LastUnreachable;
+    } DUMMYUNIONNAME;
+    BOOLEAN IsReachable;
+    ULONG64 LinkTransmitSpeed;
+    ULONG64 LinkReceiveSpeed;
+} MIB_IPPATH_ROW, *PMIB_IPPATH_ROW;
+
+typedef struct _MIB_IPPATH_TABLE
+{
+    ULONG NumEntries;
+    MIB_IPPATH_ROW Table[ANY_SIZE];
+} MIB_IPPATH_TABLE, *PMIB_IPPATH_TABLE;
+
+typedef VOID (NETIOAPI_API_ *PIPINTERFACE_CHANGE_CALLBACK)(PVOID, PMIB_IPINTERFACE_ROW,
+                                                    MIB_NOTIFICATION_TYPE);
+typedef VOID (NETIOAPI_API_ *PUNICAST_IPADDRESS_CHANGE_CALLBACK)(PVOID, PMIB_UNICASTIPADDRESS_ROW,
+                                                          MIB_NOTIFICATION_TYPE);
+
+typedef VOID (NETIOAPI_API_ *PIPFORWARD_CHANGE_CALLBACK)(VOID*,MIB_IPFORWARD_ROW2*,MIB_NOTIFICATION_TYPE);
+
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ CancelMibChangeNotify2(HANDLE);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ ConvertInterfaceAliasToLuid(const WCHAR*,NET_LUID*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ ConvertInterfaceGuidToLuid(const GUID*,NET_LUID*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ ConvertInterfaceIndexToLuid(NET_IFINDEX,NET_LUID*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ ConvertInterfaceLuidToAlias(const NET_LUID*,WCHAR*,SIZE_T);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ ConvertInterfaceLuidToGuid(const NET_LUID*,GUID*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ ConvertInterfaceLuidToIndex(const NET_LUID*,NET_IFINDEX*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ ConvertInterfaceLuidToNameA(const NET_LUID*,char*,SIZE_T);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ ConvertInterfaceLuidToNameW(const NET_LUID*,WCHAR*,SIZE_T);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ ConvertInterfaceNameToLuidA(const char*,NET_LUID*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ ConvertInterfaceNameToLuidW(const WCHAR*,NET_LUID*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ ConvertLengthToIpv4Mask(ULONG,ULONG*);
+IPHLPAPI_DLL_LINKAGE void NETIOAPI_API_ FreeMibTable(void*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetAnycastIpAddressTable(ADDRESS_FAMILY,MIB_ANYCASTIPADDRESS_TABLE**);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetBestRoute2(NET_LUID *luid, NET_IFINDEX index, const SOCKADDR_INET *source,
+                                                const SOCKADDR_INET *destination, ULONG options,
+                                                PMIB_IPFORWARD_ROW2 bestroute, SOCKADDR_INET *bestaddress);
+IPHLPAPI_DLL_LINKAGE NET_IF_COMPARTMENT_ID NETIOAPI_API_ GetCurrentThreadCompartmentId(void);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetIfEntry2(MIB_IF_ROW2*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetIfEntry2Ex(MIB_IF_TABLE_LEVEL,MIB_IF_ROW2*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetIfTable2(MIB_IF_TABLE2**);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetIfTable2Ex(MIB_IF_TABLE_LEVEL,MIB_IF_TABLE2**);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetIpForwardEntry2(MIB_IPFORWARD_ROW2*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetIpForwardTable2(ADDRESS_FAMILY,MIB_IPFORWARD_TABLE2**);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetIpInterfaceEntry(MIB_IPINTERFACE_ROW*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetIpInterfaceTable(ADDRESS_FAMILY,MIB_IPINTERFACE_TABLE**);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetIpNetEntry2(MIB_IPNET_ROW2*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetIpNetTable2(ADDRESS_FAMILY,MIB_IPNET_TABLE2**);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetUnicastIpAddressEntry(MIB_UNICASTIPADDRESS_ROW*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetUnicastIpAddressTable(ADDRESS_FAMILY,MIB_UNICASTIPADDRESS_TABLE**);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ NotifyIpInterfaceChange(ADDRESS_FAMILY,PIPINTERFACE_CHANGE_CALLBACK,PVOID,BOOLEAN,PHANDLE);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ NotifyRouteChange2(ADDRESS_FAMILY,PIPFORWARD_CHANGE_CALLBACK,PVOID,BOOLEAN,PHANDLE);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ NotifyUnicastIpAddressChange(ADDRESS_FAMILY,PUNICAST_IPADDRESS_CHANGE_CALLBACK,PVOID,BOOLEAN,PHANDLE);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ SetCurrentThreadCompartmentId(NET_IF_COMPARTMENT_ID);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ CreateIpForwardEntry2(const MIB_IPFORWARD_ROW2*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ CreateIpNetEntry2(const MIB_IPNET_ROW2*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ CreateUnicastIpAddressEntry(const MIB_UNICASTIPADDRESS_ROW*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ DeleteIpForwardEntry2(const MIB_IPFORWARD_ROW2*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ DeleteIpNetEntry2(const MIB_IPNET_ROW2*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ FlushIpNetTable2(ADDRESS_FAMILY,NET_IFINDEX);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ FlushIpPathTable(ADDRESS_FAMILY);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetIpPathEntry(PMIB_IPPATH_ROW);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ GetIpPathTable(ADDRESS_FAMILY,PMIB_IPPATH_TABLE*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ DeleteUnicastIpAddressEntry(const MIB_UNICASTIPADDRESS_ROW*);
+IPHLPAPI_DLL_LINKAGE void NETIOAPI_API_ InitializeIpForwardEntry(MIB_IPFORWARD_ROW2*);
+IPHLPAPI_DLL_LINKAGE void NETIOAPI_API_ InitializeIpInterfaceEntry(MIB_IPINTERFACE_ROW*);
+IPHLPAPI_DLL_LINKAGE void NETIOAPI_API_ InitializeUnicastIpAddressEntry(MIB_UNICASTIPADDRESS_ROW*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ SetIpInterfaceEntry(MIB_IPINTERFACE_ROW*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ SetIpForwardEntry2(const MIB_IPFORWARD_ROW2*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ SetIpNetEntry2(MIB_IPNET_ROW2*);
+IPHLPAPI_DLL_LINKAGE NETIO_STATUS NETIOAPI_API_ SetUnicastIpAddressEntry(const MIB_UNICASTIPADDRESS_ROW*);
+IPHLPAPI_DLL_LINKAGE PCHAR NETIOAPI_API_ if_indextoname(NET_IFINDEX,PCHAR);
+IPHLPAPI_DLL_LINKAGE NET_IFINDEX NETIOAPI_API_ if_nametoindex(PCSTR);
+
+#endif /* __WINE_NETIOAPI_H */

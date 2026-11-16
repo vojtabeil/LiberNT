@@ -1,9 +1,11 @@
 /* DO NOT USE THE PRECOMPILED HEADER FOR THIS FILE! */
 
-#include <ntdef.h>
-#include <miniport.h>
-#include <usb.h>
+#include <wdm.h>
 #include <initguid.h>
+#include <wdmguid.h>
+#include <hubbusif.h>
 #include <usbbusif.h>
+#include <usb.h>
+#include <usbdlib.h>
 
 /* NO CODE HERE, THIS IS JUST REQUIRED FOR THE GUID DEFINITIONS */

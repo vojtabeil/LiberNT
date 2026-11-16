@@ -27,6 +27,8 @@ Author:
 #include <section_attribs.h>
 
 #ifndef NTOS_MODE_USER
+struct _VID_DISPLAY_INFO;
+
 //
 // Ownership Functions
 //
@@ -76,6 +78,36 @@ BOOLEAN
 NTAPI
 InbvDisplayString(
     _In_ PCSTR String
+);
+
+BOOLEAN
+NTAPI
+InbvQueryDisplayInfo(
+    _Out_ struct _VID_DISPLAY_INFO *DisplayInfo
+);
+
+NTSTATUS
+NTAPI
+InbvQueryBootScreen(
+    _Out_writes_bytes_opt_(*Height * Stride) PVOID Bits,
+    _In_ LONG Stride,
+    _Inout_ PULONG Width,
+    _Inout_ PULONG Height
+);
+
+VOID
+NTAPI
+InbvDiscardBootScreen(
+    VOID
+);
+
+NTSTATUS
+NTAPI
+InbvCopyBootScreen(
+    _Out_writes_bytes_(Height * Stride) PVOID Bits,
+    _In_ LONG Stride,
+    _In_ ULONG Width,
+    _In_ ULONG Height
 );
 
 BOOLEAN

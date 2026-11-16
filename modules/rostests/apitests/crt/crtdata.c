@@ -19,6 +19,13 @@ static OSVERSIONINFOW s_osvi;
 extern char __ImageBase;
 static void* s_ImageEnd;
 
+#if !defined(_M_ARM) && !defined(_M_ARM64)
+static void* GetMsvcrtExport(const char* Name)
+{
+    return (void*)GetProcAddress(GetModuleHandleA("msvcrt.dll"), Name);
+}
+#endif
+
 int IsLocalSymbol(void* Address)
 {
     return ((Address >= (void*)&__ImageBase) && (Address <= s_ImageEnd));
@@ -75,7 +82,7 @@ void Test___badioinfo(void)
     ok(__badioinfo[0] != NULL, "__badioinfo is NULL\n");
 }
 
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
 void Test___initenv(void)
 {
     _CRTIMP extern char** __initenv;
@@ -89,23 +96,33 @@ void Test___initenv(void)
 
 void Test___lc_codepage(void)
 {
-    _CRTIMP extern unsigned int __lc_codepage;
-    ok_int(__lc_codepage, 0);
+    unsigned int* codepage = GetMsvcrtExport("__lc_codepage");
+    if (!codepage)
+    {
+        skip("__lc_codepage is not exported\n");
+        return;
+    }
+    ok_int(*codepage, 0);
     ok_int(___lc_codepage_func(), 0);
-    __lc_codepage++;
+    ++*codepage;
     ok_int(___lc_codepage_func(), 0);
-    __lc_codepage--;
+    --*codepage;
 }
 
 void Test___lc_collate_cp(void)
 {
-    _CRTIMP extern int __lc_collate_cp;
-    test_is_local_symbol(&__lc_collate_cp, FALSE);
-    ok_int(__lc_collate_cp, 0);
+    int* collate_cp = GetMsvcrtExport("__lc_collate_cp");
+    if (!collate_cp)
+    {
+        skip("__lc_collate_cp is not exported\n");
+        return;
+    }
+    test_is_local_symbol(collate_cp, FALSE);
+    ok_int(*collate_cp, 0);
     ok_int(___lc_collate_cp_func(), 0);
-    __lc_collate_cp++;
+    ++*collate_cp;
     ok_int(___lc_collate_cp_func(), 0);
-    __lc_collate_cp--;
+    --*collate_cp;
 }
 #endif // !_M_ARM
 
@@ -160,16 +177,21 @@ void Test___pioinfo(void)
 
 }
 
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
 void Test___setlc_active(void)
 {
     _CRTIMP extern unsigned int __setlc_active;
+    unsigned int (CDECL *get_active)(void) = GetMsvcrtExport("___setlc_active_func");
+    if (!get_active)
+    {
+        skip("___setlc_active_func is not exported\n");
+        return;
+    }
     ok_int(__setlc_active, 0);
 
-    _CRTIMP unsigned int ___setlc_active_func(void);
-    ok_int(___setlc_active_func(), __setlc_active);
+    ok_int(get_active(), __setlc_active);
     __setlc_active++;
-    ok_int(___setlc_active_func(), __setlc_active);
+    ok_int(get_active(), __setlc_active);
     __setlc_active--;
 }
 
@@ -177,10 +199,16 @@ void Test___unguarded_readlc_active(void)
 {
     _CRTIMP extern unsigned int __unguarded_readlc_active;
     void* p = &__unguarded_readlc_active;
+    unsigned int* (CDECL *get_active_address)(void) =
+        GetMsvcrtExport("___unguarded_readlc_active_add_func");
+    if (!get_active_address)
+    {
+        skip("___unguarded_readlc_active_add_func is not exported\n");
+        return;
+    }
     ok_int(__unguarded_readlc_active, 0);
 
-    _CRTIMP unsigned int* ___unguarded_readlc_active_add_func(void);
-    ok_ptr(___unguarded_readlc_active_add_func(), p);
+    ok_ptr(get_active_address(), p);
 }
 #endif // !_M_ARM
 
@@ -197,7 +225,7 @@ void Test___wargv(void)
 #endif
 }
 
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
 void Test___winitenv(void)
 {
     _CRTIMP extern wchar_t** __winitenv;
@@ -320,7 +348,7 @@ void Test__daylight(void)
     }
 }
 
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
 void Test__dstbias(void)
 {
     void* p = &_dstbias;
@@ -360,12 +388,17 @@ void Test__environ(void)
 
 void Test__fileinfo(void)
 {
-    _CRTIMP extern int _fileinfo;
-    ok_int(_fileinfo, -1);
+    int* fileinfo = GetMsvcrtExport("_fileinfo");
+    if (!fileinfo)
+    {
+        skip("_fileinfo is not exported\n");
+        return;
+    }
+    ok_int(*fileinfo, -1);
 
 #ifdef _M_IX86
     _CRTIMP int* __p__fileinfo();
-    ok_ptr(__p__fileinfo(), &_fileinfo);
+    ok_ptr(__p__fileinfo(), fileinfo);
 #endif
 }
 #endif // !_M_ARM
@@ -444,7 +477,7 @@ void Test__mbctype(void)
 #endif
 }
 
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
 void Test__osplatform(void)
 {
     ok_int(_osplatform, s_osvi.dwPlatformId);
@@ -541,14 +574,14 @@ void Test__tzname(void)
 
 void Test__wcmdln(void)
 {
-    _CRTIMP extern wchar_t* _wcmdln;
 #ifdef _M_IX86
+    _CRTIMP extern wchar_t* _wcmdln;
     _CRTIMP wchar_t** __p__wcmdln(void);
     ok_ptr(__p__wcmdln(), &_wcmdln);
 #endif
 }
 
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
 void Test__wenviron(void)
 {
     void* p = &_wenviron;
@@ -602,7 +635,7 @@ void Test__winminor(void)
     }
 }
 
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
 void Test__winver(void)
 {
     ok_int(_winver, (s_osvi.dwMajorVersion << 8) | s_osvi.dwMinorVersion);
@@ -684,7 +717,7 @@ START_TEST(crtdata)
     Test___argc();
     Test___argv();
     Test___badioinfo();
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
     Test___initenv();
     Test___lc_codepage();
     Test___lc_collate_cp();
@@ -692,12 +725,12 @@ START_TEST(crtdata)
     Test___lc_handle();
     Test___mb_cur_max();
     Test___pioinfo();
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
     Test___setlc_active();
     Test___unguarded_readlc_active();
 #endif
     Test___wargv();
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
     Test___winitenv();
 #endif
     Test__acmdln();
@@ -708,7 +741,7 @@ START_TEST(crtdata)
     Test__commode();
     Test__ctype();
     Test__daylight();
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
     Test__dstbias();
     Test__environ();
     Test__fileinfo();
@@ -717,7 +750,7 @@ START_TEST(crtdata)
     Test__iob();
     Test__mbcasemap();
     Test__mbctype();
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
     Test__osplatform();
 #endif
     Test__osver();
@@ -728,12 +761,12 @@ START_TEST(crtdata)
     Test__tzname();
     Test__wcmdln();
     Test__wctype();
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
     Test__wenviron();
 #endif
     Test__winmajor();
     Test__winminor();
-#ifndef _M_ARM
+#if !defined(_M_ARM) && !defined(_M_ARM64)
     Test__winver();
 #endif
     Test__wpgmptr();

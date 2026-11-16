@@ -427,7 +427,10 @@ VOID WINAPI FixSlashesAndColonW(_Inout_ LPWSTR lpwstr);
 BOOL WINAPI PathIsValidCharA(char c, DWORD dwClass);
 BOOL WINAPI PathIsValidCharW(WCHAR c, DWORD dwClass);
 BOOL WINAPI SHGetPathFromIDListWrapW(LPCITEMIDLIST pidl, LPWSTR pszPath);
-#ifndef _SHLWAPI_
+#ifdef WINSHLWAPI
+WINSHLWAPI BOOL WINAPI PathFileExistsAndAttributesA(LPCSTR lpszPath, DWORD* dwAttr);
+WINSHLWAPI BOOL WINAPI PathFileExistsAndAttributesW(LPCWSTR lpszPath, DWORD* dwAttr);
+#elif !defined(_SHLWAPI_)
 DECLSPEC_IMPORT BOOL WINAPI PathFileExistsAndAttributesA(LPCSTR lpszPath, DWORD* dwAttr);
 DECLSPEC_IMPORT BOOL WINAPI PathFileExistsAndAttributesW(LPCWSTR lpszPath, DWORD* dwAttr);
 #else
@@ -564,33 +567,6 @@ SHWindowsPolicyEx(_In_ REFGUID rpolid, _In_ DWORD dwDefaultValue)
     HRESULT hr = SHWindowsPolicyGetValue(rpolid, &dwData, &cbData);
     return (SUCCEEDED(hr) ? dwData : dwDefaultValue);
 }
-
-typedef struct _ASSOCMAKEVERB
-{
-    LPCWSTR pszVerb;
-    LPCWSTR pszFriendlyName;
-    LPCWSTR pszUnknown;
-    LPCWSTR pszExe;
-    LPCWSTR pszArgs;
-} ASSOCMAKEVERB;
-
-typedef struct _ASSOCMAKESHELL
-{
-    ASSOCMAKEVERB *pVerbs;
-    UINT Count;
-    UINT DefaultIndex;
-} ASSOCMAKESHELL;
-
-HRESULT WINAPI
-AssocMakeShell(SIZE_T Unknown, _In_ HKEY hClass, _In_ LPCWSTR pszExe, _In_ const ASSOCMAKESHELL *pAMS);
-HRESULT WINAPI
-AssocMakeProgid(SIZE_T Unknown1, SIZE_T Unknown2, SIZE_T Unknown3, SIZE_T Unknown4);
-HRESULT WINAPI
-AssocMakeApplicationByKeyW(SIZE_T Unknown1, SIZE_T Unknown2, SIZE_T Unknown3);
-HRESULT WINAPI
-AssocMakeApplicationByKeyA(SIZE_T Unknown1, SIZE_T Unknown2, SIZE_T Unknown3);
-HRESULT WINAPI
-AssocCopyVerbs(HKEY hSrc, HKEY hDst);
 
 #if (NTDDI_VERSION >= NTDDI_LONGHORN) || defined(_SHELL32_)
 HRESULT WINAPI

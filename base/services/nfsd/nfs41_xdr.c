@@ -183,18 +183,6 @@ static bool_t encode_component(
     return xdr_bytes(xdr, (char **)&component->name, &len, NFS4_OPAQUE_LIMIT);
 }
 
-static bool_t decode_component(
-    XDR *xdr,
-    nfs41_component *component)
-{
-    bool_t result;
-    uint32_t len;
-
-    result = xdr_bytes(xdr, (char **)&component->name, &len, NFS4_OPAQUE_LIMIT);
-    component->len = (result == FALSE) ? 0 : (unsigned short)len;
-    return result;
-}
-
 
 /* state_owner4 */
 static bool_t xdr_state_owner4(
@@ -3170,6 +3158,8 @@ static bool_t decode_op_getdeviceinfo(
             return xdr_u_int32_t(xdr, &ignored);
         }
         break;
+    default:
+        break;
     }
     return TRUE;
 }
@@ -3430,6 +3420,8 @@ static bool_t decode_op_layoutget(
         return decode_layout_res_ok(xdr, res->u.res_ok);
     case NFS4ERR_LAYOUTTRYLATER:
         return xdr_bool(xdr, &res->u.will_signal_layout_avail);
+    default:
+        break;
     }
     return TRUE;
 }

@@ -26,6 +26,25 @@ EXTERN_C const IID IID_INetCfgLock;
 #define INetCfgLock_IsWriteLocked(p,a)         (p)->lpVtbl->IsWriteLocked(p,a)
 #endif
 
+typedef enum tagCOMPONENT_CHARACTERISTICS
+{
+    NCF_VIRTUAL                     = 0x1,
+    NCF_SOFTWARE_ENUMERATED         = 0x2,
+    NCF_PHYSICAL                    = 0x4,
+    NCF_HIDDEN                      = 0x8,
+    NCF_NO_SERVICE                  = 0x10,
+    NCF_NOT_USER_REMOVABLE          = 0x20,
+    NCF_MULTIPORT_INSTANCED_ADAPTER = 0x40,
+    NCF_HAS_UI                      = 0x80,
+    NCF_SINGLE_INSTANCE             = 0x100,
+    NCF_FILTER                      = 0x400,
+    NCF_DONTEXPOSELOWER             = 0x1000,
+    NCF_HIDE_BINDING                = 0x2000,
+    NCF_NDIS_PROTOCOL               = 0x4000,
+    NCF_FIXED_BINDING               = 0x20000,
+    NCF_LW_FILTER                   = 0x40000
+} COMPONENT_CHARACTERISTICS;
+
 typedef enum
 {
     NCRP_QUERY_PROPERTY_UI  = 1,
@@ -299,20 +318,20 @@ DECLARE_INTERFACE_(INetCfg, IUnknown)
 EXTERN_C const GUID CLSID_CNetCfg;
 EXTERN_C const IID IID_INetCfg;
 
-#define NETCFG_E_ALREADY_INITIALIZED                 0x8004A020
-#define NETCFG_E_NOT_INITIALIZED                     0x8004A021
-#define NETCFG_E_IN_USE                              0x8004A022
-#define NETCFG_E_NO_WRITE_LOCK                       0x8004A024
-#define NETCFG_E_NEED_REBOOT                         0x8004A025
-#define NETCFG_E_ACTIVE_RAS_CONNECTIONS              0x8004A026
-#define NETCFG_E_ADAPTER_NOT_FOUND                   0x8004A027
-#define NETCFG_E_COMPONENT_REMOVED_PENDING_REBOOT    0x8004A028
-#define NETCFG_E_MAX_FILTER_LIMIT                    0x8004A029
-#define NETCFG_S_REBOOT                              0x8004A020
-#define NETCFG_S_DISABLE_QUERY                       0x8004A022
-#define NETCFG_S_STILL_REFERENCED                    0x8004A023
-#define NETCFG_S_CAUSED_SETUP_CHANGE                 0x8004A024
-#define NETCFG_S_COMMIT_NOW                          0x8004A025
+#define NETCFG_E_ALREADY_INITIALIZED                 MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0xA020)
+#define NETCFG_E_NOT_INITIALIZED                     MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0xA021)
+#define NETCFG_E_IN_USE                              MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0xA022)
+#define NETCFG_E_NO_WRITE_LOCK                       MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0xA024)
+#define NETCFG_E_NEED_REBOOT                         MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0xA025)
+#define NETCFG_E_ACTIVE_RAS_CONNECTIONS              MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0xA026)
+#define NETCFG_E_ADAPTER_NOT_FOUND                   MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0xA027)
+#define NETCFG_E_COMPONENT_REMOVED_PENDING_REBOOT    MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0xA028)
+#define NETCFG_E_MAX_FILTER_LIMIT                    MAKE_HRESULT(SEVERITY_ERROR, FACILITY_ITF, 0xA029)
+#define NETCFG_S_REBOOT                              MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_ITF, 0xA020)
+#define NETCFG_S_DISABLE_QUERY                       MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_ITF, 0xA022)
+#define NETCFG_S_STILL_REFERENCED                    MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_ITF, 0xA023)
+#define NETCFG_S_CAUSED_SETUP_CHANGE                 MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_ITF, 0xA024)
+#define NETCFG_S_COMMIT_NOW                          MAKE_HRESULT(SEVERITY_SUCCESS, FACILITY_ITF, 0xA025)
 
 EXTERN_C const IID IID_INetCfgClass;
 

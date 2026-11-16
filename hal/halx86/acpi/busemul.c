@@ -16,7 +16,6 @@
 
 /* PRIVATE FUNCTIONS **********************************************************/
 
-#ifndef _MINIHAL_
 CODE_SEG("INIT")
 VOID
 NTAPI
@@ -27,18 +26,19 @@ HalpRegisterKdSupportFunctions(VOID)
     KdReleasePciDeviceforDebugging = HalpReleasePciDeviceForDebugging;
 
     /* Register memory functions */
-#if (NTDDI_VERSION >= NTDDI_VISTA)
+#ifndef _MINIHAL_
+#if (NTDDI_VERSION >= NTDDI_VISTASP1)
     KdMapPhysicalMemory64 = HalpMapPhysicalMemory64Vista;
     KdUnmapVirtualAddress = HalpUnmapVirtualAddressVista;
 #else
     KdMapPhysicalMemory64 = HalpMapPhysicalMemory64;
     KdUnmapVirtualAddress = HalpUnmapVirtualAddress;
 #endif
+#endif
 
     /* Register ACPI stub */
     KdCheckPowerButton = HalpCheckPowerButton;
 }
-#endif // !_MINIHAL_
 
 NTSTATUS
 NTAPI
@@ -109,7 +109,6 @@ HalpFindBusAddressTranslation(IN PHYSICAL_ADDRESS BusAddress,
 
 /* PUBLIC FUNCTIONS **********************************************************/
 
-#ifndef _MINIHAL_
 /*
  * @implemented
  */
@@ -120,7 +119,6 @@ HalAdjustResourceList(IN OUT PIO_RESOURCE_REQUIREMENTS_LIST* pRequirementsList)
     /* Deprecated, return success */
     return STATUS_SUCCESS;
 }
-#endif // !_MINIHAL_
 
 /*
  * @implemented
@@ -203,11 +201,6 @@ HalGetBusDataByOffset(IN BUS_DATA_TYPE BusDataType,
         /* Call CMOS Function */
         return HalpGetCmosData(0, SlotNumber, Buffer, Length);
     }
-    else if (BusDataType == EisaConfiguration)
-    {
-        /* FIXME: TODO */
-        ASSERT(FALSE);
-    }
     else if ((BusDataType == PCIConfiguration) &&
              (HalpPCIConfigInitialized) &&
              ((BusNumber >= HalpMinPciBus) && (BusNumber <= HalpMaxPciBus)))
@@ -229,7 +222,6 @@ HalGetBusDataByOffset(IN BUS_DATA_TYPE BusDataType,
     return 0;
 }
 
-#ifndef _MINIHAL_
 /*
  * @implemented
  */
@@ -248,7 +240,6 @@ HalGetInterruptVector(IN INTERFACE_TYPE InterfaceType,
                                       Irql,
                                       Affinity);
 }
-#endif // !_MINIHAL_
 
 /*
  * @implemented

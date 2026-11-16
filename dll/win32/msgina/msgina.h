@@ -29,6 +29,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(msgina);
 
 #include "resource.h"
 
+#define WM_HIDESTATUSCURSOR (WM_APP + 1)
 
 typedef struct
 {
@@ -44,8 +45,10 @@ typedef struct
     BOOL bDontDisplayLastUserName;
     BOOL bShutdownWithoutLogon;
     BOOL bIgnoreShiftOverride;
+    BOOL bRefreshSettings;
 
     ULONG nShutdownAction;
+    INT nPendingAction;
 
     /* Information to be filled during logon */
     WCHAR UserName[256];
@@ -95,17 +98,39 @@ MyLogonUser(
     LPWSTR lpszUsername,
     LPWSTR lpszDomain,
     LPWSTR lpszPassword,
+    SECURITY_LOGON_TYPE LogonType,
     PHANDLE phToken,
     PNTSTATUS SubStatus);
 
+NTSTATUS
+MyChangePassword(
+    HANDLE LsaHandle,
+    ULONG AuthenticationPackage,
+    LPWSTR lpszDomain,
+    LPWSTR lpszUsername,
+    LPWSTR lpszOldPassword,
+    LPWSTR lpszNewPassword);
+
 /* msgina.c */
 
-BOOL
-DoAdminUnlock(
+NTSTATUS
+DoUnlock(
     IN PGINA_CONTEXT pgContext,
     IN PWSTR UserName,
     IN PWSTR Domain,
-    IN PWSTR Password);
+    IN PWSTR Password,
+    OUT PNTSTATUS SubStatus,
+    OUT PINT Action);
+
+BOOL
+GetUserPasswordHint(
+    IN PCWSTR UserName,
+    OUT PWSTR Hint,
+    IN SIZE_T HintLength);
+
+BOOL
+IsUserPasswordBlank(
+    IN PCWSTR UserName);
 
 NTSTATUS
 DoLoginTasks(
@@ -154,12 +179,6 @@ GetAllowedShutdownOptions(
     _In_opt_ HKEY hKeyCurrentUser,
     _In_opt_ HANDLE hUserToken);
 
-INT_PTR
-ShutdownDialog(
-    IN HWND hwndDlg,
-    IN DWORD ShutdownOptions,
-    IN PGINA_CONTEXT pgContext);
-
 /* utils.c */
 
 LONG
@@ -188,7 +207,6 @@ TestTokenPrivilege(
 PWSTR
 DuplicateString(
     _In_opt_ PCWSTR Str);
-
 
 #ifdef __cplusplus
 } // extern "C"

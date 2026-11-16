@@ -12,6 +12,7 @@
 #include <ks386.inc>
 
 EXTERN _LdrpInit@12:PROC
+EXTERN _RtlpUserThreadStart@8:PROC
 EXTERN _NtTestAlert@0:PROC
 EXTERN _RtlDispatchException@8:PROC
 EXTERN _RtlRaiseException@4:PROC
@@ -132,7 +133,7 @@ _KiUserCallbackDispatcher@12:
     pop edx
 
     /* Get the callback table */
-    mov eax, [fs:TEB_PEB]
+    mov eax, fs:[TEB_PEB]
     mov eax, [eax+PEB_KERNEL_CALLBACK_TABLE]
 
     /* Call the routine */
@@ -165,7 +166,7 @@ _KiRaiseUserExceptionDispatcher@0:
 
     /* Fill out the record */
     mov [esp+EXCEPTION_RECORD_EXCEPTION_ADDRESS], eax
-    mov eax, [fs:KPCR_TEB]
+    mov eax, fs:[KPCR_TEB]
     mov eax, [eax+TEB_EXCEPTION_CODE]
     mov [esp+EXCEPTION_RECORD_EXCEPTION_CODE], eax
     mov dword ptr [esp+EXCEPTION_RECORD_EXCEPTION_FLAGS], 0
@@ -274,5 +275,20 @@ PUBLIC _KiFastSystemCallRet@0
     ret
 
 .ENDP
+
+_RtlpFinalExceptionHandler:
+    mov eax, ExceptionContinueSearch
+    ret 16
+
+PUBLIC _RtlUserThreadStart@8
+_RtlUserThreadStart@8:
+    mov dword ptr [esp + 4], offset _RtlpFinalExceptionHandler
+    mov ecx, fs:[TEB_EXCEPTION_LIST]
+    mov [esp], ecx
+    mov fs:[TEB_EXCEPTION_LIST], esp
+    sub esp, 16
+    mov [esp + 8], ebx
+    mov [esp + 4], eax
+    jmp _RtlpUserThreadStart@8
 
 END

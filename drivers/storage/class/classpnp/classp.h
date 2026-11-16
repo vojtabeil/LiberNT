@@ -655,6 +655,13 @@ typedef struct _PNL_SLIST_HEADER {
 // add to the front of this structure to help prevent illegal
 // snooping by other utilities.
 //
+/*
+ *  How long an answer from the device stands in for a readiness check.
+ *  Media change detection itself runs on a one second tick, so this is well
+ *  inside what the class driver already accepts.
+ */
+#define CLASS_RECENTLY_READY_INTERVAL ((ULONGLONG)100 * 10 * 1000)
+
 struct _CLASS_PRIVATE_FDO_DATA {
 
     //
@@ -697,6 +704,8 @@ struct _CLASS_PRIVATE_FDO_DATA {
 
     ULONG TrackingFlags;
 
+    CLASS_FUNCTION_SUPPORT TemperatureProperty;
+
     /*
      * Flag to detect recursion caused by devices
      * reporting different capacity per each request
@@ -716,6 +725,13 @@ struct _CLASS_PRIVATE_FDO_DATA {
     ULONG MaxOutstandingIOPerLUN;
 
 #endif
+
+    /*
+     *  When the device last answered a request, and the media change count it
+     *  answered under, so a readiness check can be served from that answer.
+     */
+    ULONGLONG LastReadyTime;
+    ULONG LastReadyMediaChangeCount;
 
     /*
      *  Entry in static list used by debug extension to quickly find all class FDOs.
@@ -1272,7 +1288,7 @@ ClasspIsIdleRequest(
 #ifdef _MSC_VER
 #pragma warning(suppress:4305) // truncation is not an issue for this use case
 #endif
-    return ((BOOLEAN)Irp->Tail.Overlay.DriverContext[1]);
+    return (Irp->Tail.Overlay.DriverContext[1] != NULL);
 }
 
 FORCEINLINE
@@ -1826,6 +1842,12 @@ NTSTATUS ClasspAccessAlignmentProperty(
     );
 
 NTSTATUS ClasspDeviceSeekPenaltyProperty(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp,
+    _Inout_ PSCSI_REQUEST_BLOCK Srb
+    );
+
+NTSTATUS ClasspDeviceTemperatureProperty(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp,
     _Inout_ PSCSI_REQUEST_BLOCK Srb

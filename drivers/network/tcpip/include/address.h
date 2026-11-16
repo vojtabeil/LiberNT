@@ -17,6 +17,7 @@
 {                                                     \
     (IPAddress)->Type                = IP_ADDRESS_V4; \
     (IPAddress)->Address.IPv4Address = (RawAddress);  \
+    (IPAddress)->ScopeId             = 0;             \
 }
 
 #if DBG
@@ -25,6 +26,12 @@ PCHAR A2S(
     PIP_ADDRESS Address);
 
 #endif /* DBG */
+
+BOOLEAN TCPUnmapFromDualStack(
+    PIP_ADDRESS Address);
+
+BOOLEAN TCPAddressFileAcceptsMapped(
+    PADDRESS_FILE AddrFile);
 
 VOID IPAddressFree(
     PVOID Object);
@@ -41,6 +48,15 @@ NTSTATUS AddrBuildAddress(
     PTRANSPORT_ADDRESS TdiAddress,
     PIP_ADDRESS Address,
     PUSHORT Port);
+
+BOOLEAN LibIPIsLocalAddress(
+    const IP_ADDRESS *Address);
+
+NTSTATUS AddrBuildTransportAddress(
+    PIP_ADDRESS Address,
+    USHORT Port,
+    PTRANSPORT_ADDRESS TransportAddress,
+    ULONG TransportAddressLength);
 
 BOOLEAN AddrIsEqual(
     PIP_ADDRESS Address1,
@@ -65,6 +81,10 @@ PADDRESS_FILE AddrSearchFirst(
 
 PADDRESS_FILE AddrSearchNext(
     PAF_SEARCH SearchContext);
+
+BOOLEAN AddrFileReceiveMatch(
+    PADDRESS_FILE AddrFile,
+    PIP_ADDRESS RemoteAddress);
 
 unsigned long NTAPI inet_addr(const char*);
 

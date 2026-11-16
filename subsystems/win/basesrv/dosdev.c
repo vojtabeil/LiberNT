@@ -96,7 +96,7 @@ NTSTATUS
 IsGlobalSymbolicLink(HANDLE LinkHandle,
                      PBOOLEAN IsGlobal)
 {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
     DWORD ReturnLength;
     UNICODE_STRING GlobalString;
     OBJECT_NAME_INFORMATION NameInfo, *PNameInfo;
@@ -359,7 +359,13 @@ BaseSrvBSMThread(PVOID StartupContext)
     --BaseSrvpBSMThreadCount;
     RtlLeaveCriticalSection(&BaseSrvDDDBSMCritSec);
 
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    NtCurrentTeb()->ReservedPad1 = TRUE;
+#elif (NTDDI_VERSION >= NTDDI_LONGHORN)
+    NtCurrentTeb()->SpareBool1 = TRUE;
+#else
     NtCurrentTeb()->FreeStackOnTermination = TRUE;
+#endif
     NtTerminateThread(NtCurrentThread(), ExitStatus);
 
     return ExitStatus;
@@ -486,7 +492,7 @@ CSR_API(BaseSrvDefineDosDevice)
     PSID WorldSid;
     PWSTR lpBuffer;
     WCHAR Letter;
-    SHORT AbsLetter;
+    SHORT AbsLetter = 0;
     BOOLEAN DriveLetter = FALSE;
     BOOLEAN RemoveDefinition;
     BOOLEAN HandleTarget;
@@ -512,7 +518,7 @@ CSR_API(BaseSrvDefineDosDevice)
     WCHAR CurrentChar;
     PWSTR OrigPtr;
     PWSTR InterPtr;
-    BOOLEAN RemoveFound;
+    BOOLEAN RemoveFound = FALSE;
 
     if (!CsrValidateMessageBuffer(ApiMessage,
                                   (PVOID*)&DefineDosDeviceRequest->DeviceName.Buffer,

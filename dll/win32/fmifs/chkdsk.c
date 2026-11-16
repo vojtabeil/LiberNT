@@ -29,12 +29,12 @@ Chkdsk(
 {
     PIFS_PROVIDER Provider;
     UNICODE_STRING usDriveRoot;
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
     BOOLEAN Success = FALSE;
     WCHAR DriveName[MAX_PATH];
     WCHAR VolumeName[MAX_PATH];
 
-    Provider = LoadProvider(Format);
+    Provider = GetProvider(Format);
     if (!Provider)
     {
         /* Unknown file system */
@@ -88,9 +88,6 @@ Chkdsk(
     RtlFreeUnicodeString(&usDriveRoot);
 
 Quit:
-    if (Provider)
-        UnloadProvider(Provider);
-
     /* Report result */
     Callback(DONE, Status, &Success);
 }

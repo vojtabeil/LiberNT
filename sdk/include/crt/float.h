@@ -19,11 +19,11 @@
 #ifndef _MINGW_FLOAT_H_
 #define _MINGW_FLOAT_H_
 
-#if defined(__GNUC__)
+#if defined(__GNUC__) || defined(__clang__)
 #include "mingw32/gcc_float.h"
 #elif defined(_MSC_VER)
 #include "msc/msc_float.h"
-#else
+#elif !defined(RC_INVOKED)
 #error
 #endif
 
@@ -125,6 +125,15 @@ __cdecl
 _controlfp(
   _In_ unsigned int unNew,
   _In_ unsigned int unMask);
+
+__MINGW_NOTHROW
+_CRTIMP
+errno_t
+__cdecl
+_controlfp_s(
+  _Out_opt_ unsigned int *currentControl,
+  _In_ unsigned int newControl,
+  _In_ unsigned int mask);
 
 __MINGW_NOTHROW
 _CRTIMP

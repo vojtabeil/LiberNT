@@ -1,4 +1,13 @@
 #include "precomp.h"
+#include <winreg.h>
+#include <ws2ipdef.h>
+#include <iphlpapi.h>
+#include <netioapi.h>
+#include <ndk/iofuncs.h>
+#include <ndk/obfuncs.h>
+#include <tcpioctl.h>
+#include <tcpip_undoc.h>
+#include <strsafe.h>
 
 #include <debug.h>
 
@@ -490,6 +499,574 @@ DnsNameCopyAllocate()
     return ERROR_OUTOFMEMORY;
 }
 
+static DNS_STATUS
+AppendDnsServersFromKey(HKEY InterfaceKey,
+                        PIN_ADDR *Addresses,
+                        PDWORD AddressCount,
+                        PDWORD AddressCapacity)
+{
+    static const PCWSTR ValueNames[] = {L"NameServer", L"DhcpNameServer"};
+    DWORD ValueIndex;
+
+    for (ValueIndex = 0; ValueIndex < ARRAYSIZE(ValueNames); ++ValueIndex)
+    {
+        DWORD Size = 0, Type, InitialCount = *AddressCount;
+        PWSTR Buffer, Current;
+        LSTATUS Status;
+
+        Status = RegQueryValueExW(InterfaceKey, ValueNames[ValueIndex], NULL, &Type, NULL, &Size);
+        if (Status != ERROR_SUCCESS || Type != REG_SZ || !Size)
+            continue;
+
+        Buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size + sizeof(WCHAR));
+        if (!Buffer)
+            return ERROR_NOT_ENOUGH_MEMORY;
+
+        Status = RegQueryValueExW(InterfaceKey, ValueNames[ValueIndex], NULL, &Type, (PBYTE)Buffer, &Size);
+        if (Status == ERROR_SUCCESS && Type == REG_SZ)
+        {
+            Current = Buffer;
+            while (*Current)
+            {
+                PWSTR End;
+                PCWSTR Terminator;
+                IN_ADDR Address;
+                WCHAR Saved;
+                DWORD Index;
+                BOOLEAN ValidAddress;
+
+                while (*Current == L' ' || *Current == L'\t' ||
+                       *Current == L',' || *Current == L';')
+                    ++Current;
+                if (!*Current)
+                    break;
+
+                End = Current;
+                while (*End && *End != L' ' && *End != L'\t' &&
+                       *End != L',' && *End != L';')
+                    ++End;
+
+                Saved = *End;
+                *End = UNICODE_NULL;
+                Status = RtlIpv4StringToAddressW(Current, TRUE, &Terminator, &Address);
+                ValidAddress = NT_SUCCESS(Status) && !*Terminator;
+                *End = Saved;
+
+                if (ValidAddress)
+                {
+                    for (Index = 0; Index < *AddressCount; ++Index)
+                    {
+                        if ((*Addresses)[Index].S_un.S_addr == Address.S_un.S_addr)
+                            break;
+                    }
+
+                    if (Index == *AddressCount)
+                    {
+                        if (*AddressCount == *AddressCapacity)
+                        {
+                            DWORD NewCapacity = *AddressCapacity ? *AddressCapacity * 2 : 4;
+                            PIN_ADDR NewAddresses;
+
+                            if (*Addresses)
+                                NewAddresses = HeapReAlloc(GetProcessHeap(), 0, *Addresses, NewCapacity * sizeof(**Addresses));
+                            else
+                                NewAddresses = HeapAlloc(GetProcessHeap(), 0, NewCapacity * sizeof(**Addresses));
+                            if (!NewAddresses)
+                            {
+                                HeapFree(GetProcessHeap(), 0, Buffer);
+                                return ERROR_NOT_ENOUGH_MEMORY;
+                            }
+
+                            *Addresses = NewAddresses;
+                            *AddressCapacity = NewCapacity;
+                        }
+
+                        (*Addresses)[(*AddressCount)++] = Address;
+                    }
+                }
+
+                Current = End;
+            }
+        }
+
+        HeapFree(GetProcessHeap(), 0, Buffer);
+        if (*AddressCount != InitialCount)
+            break;
+    }
+
+    return ERROR_SUCCESS;
+}
+
+typedef DNS_STATUS (*DNS_INTERFACE_KEY_CALLBACK)(HKEY InterfaceKey, PVOID Context);
+
+typedef struct _DNS_IPV4_SERVERS
+{
+    PIN_ADDR Addresses;
+    DWORD Count;
+    DWORD Capacity;
+} DNS_IPV4_SERVERS, *PDNS_IPV4_SERVERS;
+
+typedef struct _DNS_IPV6_SERVERS
+{
+    PIN6_ADDR Addresses;
+    PULONG ScopeIds;
+    DWORD Count;
+    DWORD Capacity;
+    ULONG InterfaceIndex;
+} DNS_IPV6_SERVERS, *PDNS_IPV6_SERVERS;
+
+static DNS_STATUS
+AddIpv6DnsServer(PDNS_IPV6_SERVERS Servers, const IN6_ADDR *Address, ULONG ScopeId)
+{
+    DWORD Index;
+
+    if (IN6_IS_ADDR_UNSPECIFIED(Address))
+        return ERROR_SUCCESS;
+    for (Index = 0; Index < Servers->Count; ++Index)
+    {
+        if (!memcmp(&Servers->Addresses[Index], Address, sizeof(*Address)))
+            return ERROR_SUCCESS;
+    }
+
+    if (Servers->Count == Servers->Capacity)
+    {
+        DWORD NewCapacity = Servers->Capacity ? Servers->Capacity * 2 : 4;
+        PIN6_ADDR NewAddresses;
+        PULONG NewScopeIds;
+
+        NewAddresses = Servers->Addresses ?
+            HeapReAlloc(GetProcessHeap(), 0, Servers->Addresses, NewCapacity * sizeof(IN6_ADDR)) :
+            HeapAlloc(GetProcessHeap(), 0, NewCapacity * sizeof(IN6_ADDR));
+        if (!NewAddresses)
+            return ERROR_NOT_ENOUGH_MEMORY;
+        Servers->Addresses = NewAddresses;
+        NewScopeIds = Servers->ScopeIds ?
+            HeapReAlloc(GetProcessHeap(), 0, Servers->ScopeIds, NewCapacity * sizeof(ULONG)) :
+            HeapAlloc(GetProcessHeap(), 0, NewCapacity * sizeof(ULONG));
+        if (!NewScopeIds)
+            return ERROR_NOT_ENOUGH_MEMORY;
+        Servers->ScopeIds = NewScopeIds;
+        Servers->Capacity = NewCapacity;
+    }
+
+    Servers->Addresses[Servers->Count] = *Address;
+    Servers->ScopeIds[Servers->Count] = IN6_IS_ADDR_LINKLOCAL(Address) ? ScopeId : 0;
+    Servers->Count++;
+    return ERROR_SUCCESS;
+}
+
+static VOID
+AppendRouterAdvertisedDnsServers(PDNS_IPV6_SERVERS Servers)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Device\\Ip6");
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
+    PIP6_TABLE_HEADER Header;
+    PIP6_DNS_SERVER_ROW Rows;
+    ULONG Size = sizeof(IP6_TABLE_HEADER) + 32 * sizeof(IP6_DNS_SERVER_ROW), Index;
+    NTSTATUS Status;
+    HANDLE File;
+
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenFile(&File, SYNCHRONIZE, &Attributes, &Iosb, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               FILE_SYNCHRONOUS_IO_NONALERT)))
+        return;
+
+    Header = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (Header)
+    {
+        *(PULONG)Header = Ip6TableDnsServers;
+        Status = NtDeviceIoControlFile(File, NULL, NULL, NULL, &Iosb, IOCTL_IP6_QUERY_TABLE,
+                                       Header, sizeof(ULONG), Header, Size);
+        if (NT_SUCCESS(Status))
+        {
+            Rows = (PIP6_DNS_SERVER_ROW)(Header + 1);
+            for (Index = 0; Index < Header->Count; ++Index)
+            {
+                if (Servers->InterfaceIndex && Rows[Index].Index != Servers->InterfaceIndex)
+                    continue;
+                AddIpv6DnsServer(Servers, (const IN6_ADDR *)Rows[Index].Address, Rows[Index].Index);
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, Header);
+    }
+    NtClose(File);
+}
+
+static DNS_STATUS
+AppendIpv4DnsServers(HKEY InterfaceKey, PVOID Context)
+{
+    PDNS_IPV4_SERVERS Servers = Context;
+
+    return AppendDnsServersFromKey(InterfaceKey, &Servers->Addresses, &Servers->Count, &Servers->Capacity);
+}
+
+static DNS_STATUS
+AppendIpv6DnsServers(HKEY InterfaceKey, PVOID Context)
+{
+    PDNS_IPV6_SERVERS Servers = Context;
+    DWORD Size = 0, Type, Index;
+    PWSTR Buffer, Current;
+    LSTATUS Status;
+
+    BYTE Dhcp[16 * 8];
+
+    Size = sizeof(Dhcp);
+    if (RegQueryValueExW(InterfaceKey, L"Dhcpv6DNSServers", NULL, &Type, Dhcp, &Size) == ERROR_SUCCESS &&
+        Type == REG_BINARY)
+    {
+        for (Index = 0; Index + 16 <= Size; Index += 16)
+            AddIpv6DnsServer(Servers, (const IN6_ADDR *)&Dhcp[Index], Servers->InterfaceIndex);
+    }
+
+    Size = 0;
+    Status = RegQueryValueExW(InterfaceKey, L"NameServer", NULL, &Type, NULL, &Size);
+    if (Status != ERROR_SUCCESS || Type != REG_SZ || !Size)
+        return ERROR_SUCCESS;
+
+    Buffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Size + sizeof(WCHAR));
+    if (!Buffer)
+        return ERROR_NOT_ENOUGH_MEMORY;
+
+    Status = RegQueryValueExW(InterfaceKey, L"NameServer", NULL, &Type, (PBYTE)Buffer, &Size);
+    if (Status == ERROR_SUCCESS && Type == REG_SZ)
+    {
+        Current = Buffer;
+        while (*Current)
+        {
+            PWSTR End;
+            PCWSTR Terminator;
+            IN6_ADDR Address;
+            WCHAR Saved;
+            NTSTATUS NtStatus;
+
+            while (*Current == L' ' || *Current == L'\t' || *Current == L',' || *Current == L';')
+                ++Current;
+            if (!*Current)
+                break;
+
+            End = Current;
+            while (*End && *End != L' ' && *End != L'\t' && *End != L',' && *End != L';')
+                ++End;
+
+            Saved = *End;
+            *End = UNICODE_NULL;
+            NtStatus = RtlIpv6StringToAddressW(Current, &Terminator, &Address);
+            *End = Saved;
+
+            if (NT_SUCCESS(NtStatus) && Terminator == End &&
+                AddIpv6DnsServer(Servers, &Address, Servers->InterfaceIndex) != ERROR_SUCCESS)
+            {
+                HeapFree(GetProcessHeap(), 0, Buffer);
+                return ERROR_NOT_ENOUGH_MEMORY;
+            }
+
+            Current = End;
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, Buffer);
+    return ERROR_SUCCESS;
+}
+
+static DNS_STATUS
+WalkInterfaceKeys(PCWSTR InterfacesPath, PCWSTR AdapterName, DNS_INTERFACE_KEY_CALLBACK Callback, PVOID Context)
+{
+    DWORD Index;
+    HKEY InterfacesKey;
+    LSTATUS Status;
+
+    Status = RegOpenKeyExW(HKEY_LOCAL_MACHINE, InterfacesPath, 0, KEY_READ, &InterfacesKey);
+    if (Status != ERROR_SUCCESS)
+        return Status;
+
+    if (AdapterName && *AdapterName)
+    {
+        HKEY InterfaceKey;
+
+        Status = RegOpenKeyExW(InterfacesKey, AdapterName, 0, KEY_READ, &InterfaceKey);
+        if (Status == ERROR_SUCCESS)
+        {
+            Status = Callback(InterfaceKey, Context);
+            RegCloseKey(InterfaceKey);
+        }
+    }
+    else
+    {
+        DWORD SubKeyCount = 0, MaxSubKeyLength = 0;
+        PWSTR SubKeyName;
+
+        Status = RegQueryInfoKeyW(InterfacesKey, NULL, NULL, NULL, &SubKeyCount, &MaxSubKeyLength, NULL, NULL, NULL, NULL, NULL, NULL);
+        if (Status == ERROR_SUCCESS)
+        {
+            SubKeyName = HeapAlloc(GetProcessHeap(), 0, (MaxSubKeyLength + 1) * sizeof(WCHAR));
+            if (!SubKeyName)
+                Status = ERROR_NOT_ENOUGH_MEMORY;
+            else
+            {
+                for (Index = 0; Index < SubKeyCount; ++Index)
+                {
+                    DWORD NameLength = MaxSubKeyLength + 1;
+                    HKEY InterfaceKey;
+
+                    Status = RegEnumKeyExW(InterfacesKey, Index, SubKeyName, &NameLength, NULL, NULL, NULL, NULL);
+                    if (Status != ERROR_SUCCESS)
+                        continue;
+
+                    Status = RegOpenKeyExW(InterfacesKey, SubKeyName, 0, KEY_READ, &InterfaceKey);
+                    if (Status != ERROR_SUCCESS)
+                        continue;
+
+                    Status = Callback(InterfaceKey, Context);
+                    RegCloseKey(InterfaceKey);
+                    if (Status != ERROR_SUCCESS)
+                        break;
+                }
+
+                HeapFree(GetProcessHeap(), 0, SubKeyName);
+            }
+        }
+    }
+
+    RegCloseKey(InterfacesKey);
+    return Status;
+}
+
+static const WCHAR Tcpip4InterfacesPath[] =
+    L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters\\Interfaces";
+static const WCHAR Tcpip6InterfacesPath[] =
+    L"SYSTEM\\CurrentControlSet\\Services\\Tcpip6\\Parameters\\Interfaces";
+
+static DNS_STATUS
+QueryDnsServerList(PCWSTR AdapterName, PIP4_ARRAY Output, PDWORD OutputLength)
+{
+    DNS_IPV4_SERVERS Servers = {0};
+    DWORD Required, Index;
+    LSTATUS Status;
+
+    if (!OutputLength)
+        return ERROR_INVALID_PARAMETER;
+
+    Status = WalkInterfaceKeys(Tcpip4InterfacesPath, AdapterName, AppendIpv4DnsServers, &Servers);
+    if (Status != ERROR_SUCCESS)
+    {
+        HeapFree(GetProcessHeap(), 0, Servers.Addresses);
+        return Status;
+    }
+    if (!Servers.Count)
+    {
+        HeapFree(GetProcessHeap(), 0, Servers.Addresses);
+        return DNS_ERROR_NO_DNS_SERVERS;
+    }
+
+    Required = FIELD_OFFSET(IP4_ARRAY, AddrArray[Servers.Count]);
+    if (!Output || *OutputLength < Required)
+    {
+        *OutputLength = Required;
+        HeapFree(GetProcessHeap(), 0, Servers.Addresses);
+        return Output ? ERROR_MORE_DATA : ERROR_SUCCESS;
+    }
+
+    Output->AddrCount = Servers.Count;
+    for (Index = 0; Index < Servers.Count; ++Index)
+        Output->AddrArray[Index] = Servers.Addresses[Index].S_un.S_addr;
+    *OutputLength = Required;
+    HeapFree(GetProcessHeap(), 0, Servers.Addresses);
+    return ERROR_SUCCESS;
+}
+
+static ULONG
+AdapterNameToIndex(PCWSTR AdapterName)
+{
+    UNICODE_STRING String;
+    NET_LUID Luid;
+    NET_IFINDEX Index = 0;
+    GUID Guid;
+
+    RtlInitUnicodeString(&String, AdapterName);
+    if (!NT_SUCCESS(RtlGUIDFromString(&String, &Guid)) ||
+        ConvertInterfaceGuidToLuid(&Guid, &Luid) != NO_ERROR ||
+        ConvertInterfaceLuidToIndex(&Luid, &Index) != NO_ERROR)
+        return 0;
+    return Index;
+}
+
+static VOID
+QueryIpv6Suffixes(PCWSTR AdapterName, PWSTR List, DWORD Count)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\Device\\Ip6");
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK Iosb;
+    PIP6_TABLE_HEADER Header;
+    PIP6_DNS_SUFFIX_ROW Rows;
+    WCHAR Path[MAX_PATH];
+    ULONG Size = sizeof(IP6_TABLE_HEADER) + 8 * sizeof(IP6_DNS_SUFFIX_ROW), Index, InterfaceIndex;
+    DWORD ValueSize = Count * sizeof(WCHAR), Type;
+    HANDLE File;
+    HKEY Key;
+
+    List[0] = UNICODE_NULL;
+    StringCchPrintfW(Path, ARRAYSIZE(Path), L"%s\\%s", Tcpip6InterfacesPath, AdapterName);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, Path, 0, KEY_READ, &Key) == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW(Key, L"Dhcpv6DomainSearchList", NULL, &Type, (PBYTE)List, &ValueSize) != ERROR_SUCCESS ||
+            Type != REG_SZ)
+            List[0] = UNICODE_NULL;
+        List[Count - 1] = UNICODE_NULL;
+        RegCloseKey(Key);
+    }
+
+    InterfaceIndex = AdapterNameToIndex(AdapterName);
+    if (!InterfaceIndex)
+        return;
+    InitializeObjectAttributes(&Attributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (!NT_SUCCESS(NtOpenFile(&File, SYNCHRONIZE, &Attributes, &Iosb, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                               FILE_SYNCHRONOUS_IO_NONALERT)))
+        return;
+    Header = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (Header)
+    {
+        *(PULONG)Header = Ip6TableDnsSuffixes;
+        if (NT_SUCCESS(NtDeviceIoControlFile(File, NULL, NULL, NULL, &Iosb, IOCTL_IP6_QUERY_TABLE,
+                                             Header, sizeof(ULONG), Header, Size)))
+        {
+            Rows = (PIP6_DNS_SUFFIX_ROW)(Header + 1);
+            for (Index = 0; Index < Header->Count; Index++)
+            {
+                if (Rows[Index].Index != InterfaceIndex)
+                    continue;
+                if (List[0])
+                    StringCchCatW(List, Count, L",");
+                StringCchCatW(List, Count, Rows[Index].Suffix);
+            }
+        }
+        HeapFree(GetProcessHeap(), 0, Header);
+    }
+    NtClose(File);
+}
+
+static DNS_STATUS
+QueryDnsServerAddrArray(PCWSTR AdapterName, USHORT Family, PDNS_ADDR_ARRAY Output, PDWORD OutputLength)
+{
+    DNS_IPV4_SERVERS Servers4 = {0};
+    DNS_IPV6_SERVERS Servers6 = {0};
+    DWORD Required, Index, Total;
+    DNS_STATUS Status = ERROR_SUCCESS;
+
+    if (!OutputLength)
+        return ERROR_INVALID_PARAMETER;
+
+    if (Family == AF_UNSPEC || Family == AF_INET)
+    {
+        Status = WalkInterfaceKeys(Tcpip4InterfacesPath, AdapterName, AppendIpv4DnsServers, &Servers4);
+        if (Status == ERROR_FILE_NOT_FOUND)
+            Status = ERROR_SUCCESS;
+    }
+    if (Status == ERROR_SUCCESS && (Family == AF_UNSPEC || Family == AF_INET6))
+    {
+        if (AdapterName && *AdapterName)
+            Servers6.InterfaceIndex = AdapterNameToIndex(AdapterName);
+        Status = WalkInterfaceKeys(Tcpip6InterfacesPath, AdapterName, AppendIpv6DnsServers, &Servers6);
+        if (Status == ERROR_FILE_NOT_FOUND)
+            Status = ERROR_SUCCESS;
+        if (Status == ERROR_SUCCESS && (!(AdapterName && *AdapterName) || Servers6.InterfaceIndex))
+            AppendRouterAdvertisedDnsServers(&Servers6);
+    }
+    if (Status != ERROR_SUCCESS)
+        goto Done;
+
+    Total = Servers4.Count + Servers6.Count;
+    Required = FIELD_OFFSET(DNS_ADDR_ARRAY, AddrArray[Total]);
+    if (!Output || *OutputLength < Required)
+    {
+        *OutputLength = Required;
+        Status = Output ? ERROR_MORE_DATA : ERROR_SUCCESS;
+        goto Done;
+    }
+
+    RtlZeroMemory(Output, Required);
+    Output->MaxCount = Output->AddrCount = Total;
+    Output->Family = Family;
+    for (Index = 0; Index < Servers6.Count; ++Index)
+    {
+        PSOCKADDR_IN6 Address = (PSOCKADDR_IN6)Output->AddrArray[Index].MaxSa;
+
+        Address->sin6_family = AF_INET6;
+        Address->sin6_addr = Servers6.Addresses[Index];
+        Address->sin6_scope_id = Servers6.ScopeIds[Index];
+        Output->AddrArray[Index].Data.DnsAddrUserDword[0] = sizeof(*Address);
+    }
+    for (Index = 0; Index < Servers4.Count; ++Index)
+    {
+        PSOCKADDR_IN Address = (PSOCKADDR_IN)Output->AddrArray[Servers6.Count + Index].MaxSa;
+
+        Address->sin_family = AF_INET;
+        Address->sin_addr = Servers4.Addresses[Index];
+        Output->AddrArray[Servers6.Count + Index].Data.DnsAddrUserDword[0] = sizeof(*Address);
+    }
+    *OutputLength = Required;
+
+Done:
+    HeapFree(GetProcessHeap(), 0, Servers4.Addresses);
+    HeapFree(GetProcessHeap(), 0, Servers6.Addresses);
+    HeapFree(GetProcessHeap(), 0, Servers6.ScopeIds);
+    return Status;
+}
+
+static DNS_STATUS
+QuerySearchList(PCWSTR AdapterName, PVOID Buffer, PDWORD BufferLength)
+{
+    WCHAR List[1024];
+    PWSTR Context = NULL, Token, Tokens[32], Output = Buffer;
+    DWORD Needed = sizeof(WCHAR), ValueSize = sizeof(List), Type, Count = 0, Index;
+    HKEY Key;
+
+    if (!BufferLength)
+        return ERROR_INVALID_PARAMETER;
+
+    List[0] = UNICODE_NULL;
+    if (AdapterName)
+    {
+        QueryIpv6Suffixes(AdapterName, List, ARRAYSIZE(List));
+    }
+    else if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters", 0,
+                           KEY_READ, &Key) == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW(Key, L"SearchList", NULL, &Type, (PBYTE)List, &ValueSize) != ERROR_SUCCESS ||
+            Type != REG_SZ)
+            List[0] = UNICODE_NULL;
+        List[ARRAYSIZE(List) - 1] = UNICODE_NULL;
+        RegCloseKey(Key);
+    }
+
+    for (Token = wcstok_s(List, L", ", &Context); Token && Count < ARRAYSIZE(Tokens);
+         Token = wcstok_s(NULL, L", ", &Context))
+    {
+        for (Index = 0; Index < Count && _wcsicmp(Tokens[Index], Token); Index++);
+        if (Index < Count)
+            continue;
+        Tokens[Count++] = Token;
+        Needed += (DWORD)(wcslen(Token) + 1) * sizeof(WCHAR);
+    }
+
+    if (!Buffer || *BufferLength < Needed)
+    {
+        *BufferLength = Needed;
+        return Buffer ? ERROR_MORE_DATA : ERROR_SUCCESS;
+    }
+    *BufferLength = Needed;
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        SIZE_T Length = wcslen(Tokens[Index]) + 1;
+
+        RtlCopyMemory(Output, Tokens[Index], Length * sizeof(WCHAR));
+        Output += Length;
+    }
+    *Output = UNICODE_NULL;
+    return ERROR_SUCCESS;
+}
+
 DNS_STATUS WINAPI
 DnsQueryConfig(DNS_CONFIG_TYPE Config,
                DWORD Flag,
@@ -498,8 +1075,22 @@ DnsQueryConfig(DNS_CONFIG_TYPE Config,
                PVOID pBuffer,
                PDWORD pBufferLength)
 {
+    UNREFERENCED_PARAMETER(Flag);
+    UNREFERENCED_PARAMETER(pReserved);
+
+    if (Config == DnsConfigDnsServerList)
+        return QueryDnsServerList(pwsAdapterName, pBuffer, pBufferLength);
+    if (Config == DnsConfigDnsServersUnspec)
+        return QueryDnsServerAddrArray(pwsAdapterName, AF_UNSPEC, pBuffer, pBufferLength);
+    if (Config == DnsConfigDnsServersIpv4)
+        return QueryDnsServerAddrArray(pwsAdapterName, AF_INET, pBuffer, pBufferLength);
+    if (Config == DnsConfigDnsServersIpv6)
+        return QueryDnsServerAddrArray(pwsAdapterName, AF_INET6, pBuffer, pBufferLength);
+    if (Config == DnsConfigSearchList)
+        return QuerySearchList(pwsAdapterName, pBuffer, pBufferLength);
+
     UNIMPLEMENTED;
-    return ERROR_OUTOFMEMORY;
+    return ERROR_INVALID_PARAMETER;
 }
 
 DNS_STATUS WINAPI

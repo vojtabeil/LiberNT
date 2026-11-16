@@ -6,6 +6,7 @@ HKLM,"SOFTWARE\Classes",,0x00000010
 
 ; Default key
 HKCR,"*","AlwaysShowExt",0x00000000,""
+HKCR,"*","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated"
 HKCR,"SystemFileAssociations",,0x00000010
 
 ; Open With List
@@ -24,23 +25,40 @@ HKCR,"Unknown\shell\openas\command","",0x00020000,"%SystemRoot%\system32\rundll3
 
 ; Folders
 HKCR,"Folder","",0x00000000,"Folder"
+HKCR,"Folder","FullDetails",0x00000000,"prop:System.PropGroup.Description;System.ItemNameDisplay;System.ItemTypeText;System.Size"
+HKCR,"Folder","TileInfo",0x00000000,"prop:System.Title"
 ;HKCR,"Folder\DefaultIcon","",0x00000000,"%SystemRoot%\system32\shell32.dll,-4"
 HKCR,"Folder\shell\open","BrowserFlags",0x00010001,"0x00000010"
 HKCR,"Folder\shell\open","ExplorerFlags",0x00010001,"0x00000012"
 HKCR,"Folder\shell\open\command","",0x00000000,"explorer.exe ""%1"""
+HKCR,"Folder\shell\open\command","DelegateExecute",0x00000000,"{11dbb47c-a525-400b-9e80-a54615a090c0}"
 HKCR,"Folder\shell\explore","BrowserFlags",0x00010001,"0x00000022"
 HKCR,"Folder\shell\explore","ExplorerFlags",0x00010001,"0x00000021"
 HKCR,"Folder\shell\explore\command","",0x00000000,"explorer.exe /e,""%1"""
+HKCR,"Folder\shell\explore\command","DelegateExecute",0x00000000,"{11dbb47c-a525-400b-9e80-a54615a090c0}"
+HKCR,"AllFilesystemObjects","ConflictPrompt",0x00000000,"prop:System.ItemTypeText;System.Size;System.DateModified;System.DateCreated"
+HKCR,"AllFilesystemObjects","ExtendedTileInfo",0x00000000,"prop:System.ItemTypeText;System.Size;System.DateModified;System.OfflineAvailability"
+HKCR,"AllFilesystemObjects","FullDetails",0x00000000,"prop:System.PropGroup.FileSystem;System.ItemNameDisplay;System.ItemTypeText;System.ItemFolderPathDisplay;System.Size;System.DateCreated;System.DateModified;System.FileAttributes;*System.StorageProviderState;*System.OfflineAvailability;*System.OfflineStatus;*System.SharedWith;*System.FileOwner;*System.ComputerName"
+HKCR,"AllFilesystemObjects","InfoTip",0x00000000,"prop:System.ItemTypeText;System.Size;System.DateModified"
+HKCR,"AllFilesystemObjects","PreviewDetails",0x00000000,"prop:System.DateModified;System.Size;System.DateCreated;*System.StorageProviderState;*System.OfflineAvailability;*System.OfflineStatus;*System.SharedWith"
+HKCR,"AllFilesystemObjects","PreviewTitle",0x00000000,"prop:System.ItemNameDisplay;System.ItemTypeText"
+HKCR,"AllFilesystemObjects","QuickTip",0x00000000,"prop:System.ItemTypeText;System.Size;System.DateModified"
+HKCR,"AllFilesystemObjects","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated"
+HKCR,"AllFilesystemObjects","TileInfo",0x00000000,"prop:System.ItemTypeText;System.Size;System.DateModified"
 
 ; Directory
 HKCR,"Directory","",0x00000000,"File Folder"
 ;HKCR,"Directory\DefaultIcon","",0x00000000,"%SystemRoot%\system32\shell32.dll,-4"
 HKCR,"Directory","AlwaysShowExt",0x00000000,""
 HKCR,"Directory","NoRecentDocs",0x00000000,""
+HKCR,"Directory","FullDetails",0x00000000,"prop:System.PropGroup.Description;System.DateCreated;System.FileCount;System.TotalFileSize"
+HKCR,"Directory","InfoTip",0x00000000,"prop:System.Comment;System.DateCreated"
+HKCR,"Directory","PreviewDetails",0x00000000,"prop:System.DateModified;*System.SharedWith;*System.StorageProviderState;*System.OfflineAvailability;*System.OfflineStatus"
+HKCR,"Directory","PreviewTitle",0x00000000,"prop:System.ItemNameDisplay;System.ItemTypeText"
 HKCR,"Directory\shell\cmd","",0x00020000,"@%SystemRoot%\system32\shell32.dll,-306"
 ; Uncomment 'Extended' key to restore default (Shift-Right-Click) display of 'Command Prompt here'. (See CORE-16519.)
 ; HKCR,"Directory\shell\cmd","Extended",0x00000000,""
-HKCR,"Directory\shell\cmd\command","",0x00000000,"cmd.exe /s /k pushd ""%V"""
+HKCR,"Directory\shell\cmd\command","",0x00000000,"terminal.exe -d ""%V\."""
 
 ; Drive
 HKCR,"Drive","",0x00000000,"Drive"
@@ -48,7 +66,7 @@ HKCR,"Drive","",0x00000000,"Drive"
 HKCR,"Drive\shell\cmd","",0x00020000,"@%SystemRoot%\system32\shell32.dll,-306"
 ; Uncomment 'Extended' key to restore default (Shift-Right-Click) display of 'Command Prompt here'. (See CORE-16519.)
 ; HKCR,"Drive\shell\cmd","Extended",0x00000000,""
-HKCR,"Drive\shell\cmd\command","",0x00000000,"cmd.exe /s /k pushd ""%V"""
+HKCR,"Drive\shell\cmd\command","",0x00000000,"terminal.exe -d ""%V\."""
 
 ; Clipboard Element
 HKCR,".clp","",0x00000000,"clpfile"
@@ -93,12 +111,13 @@ HKCR,"anifile\DefaultIcon","",0x00000000,"%1"
 
 ; ReactOS Batch Files
 HKCR,".bat","",0x00000000,"batfile"
-HKCR,"batfile","",0x00000000,"ReactOS Batch File"
+HKCR,"batfile","",0x00000000,"LiberNT Batch File"
 HKCR,"batfile","EditFlags",0x00010001,0x00000010
 HKCR,"batfile","FriendlyTypeName",0x00020000,"@%SystemRoot%\system32\shell32.dll,-201"
 HKCR,"batfile\DefaultIcon","",0x00020000,"%SystemRoot%\system32\shell32.dll,-153"
 HKCR,"batfile\shell\edit\command","",0x00020000,"%SystemRoot%\system32\notepad.exe ""%1"""
 HKCR,"batfile\shell\open\command","",0x00000000,"""%1"" %*"
+HKCR,"batfile\shell\runas\command","",0x00020000,"%SystemRoot%\System32\cmd.exe /C ""%1"" %*"
 HKCR,"batfile\shellex\DropHandler","",0x00000000,"{86C86720-42A0-1069-A2E8-08002B30309D}"
 
 ; Certificate
@@ -110,12 +129,13 @@ HKCR,"cerfile\shell\open\command","",0x00020000,"%SystemRoot%\system32\rundll32.
 
 ; ReactOS Command Script Files
 HKCR,".cmd","",0x00000000,"cmdfile"
-HKCR,"cmdfile","",0x00000000,"ReactOS Command Script"
+HKCR,"cmdfile","",0x00000000,"LiberNT Command Script"
 HKCR,"cmdfile","EditFlags",0x00010001,0x00000010
 HKCR,"cmdfile","FriendlyTypeName",0x00020000,"@%SystemRoot%\system32\shell32.dll,-202"
 HKCR,"cmdfile\DefaultIcon","",0x00020000,"%SystemRoot%\system32\shell32.dll,-153"
 HKCR,"cmdfile\shell\edit\command","",0x00020000,"%SystemRoot%\system32\notepad.exe ""%1"""
 HKCR,"cmdfile\shell\open\command","",0x00000000,"""%1"" %*"
+HKCR,"cmdfile\shell\runas\command","",0x00020000,"%SystemRoot%\System32\cmd.exe /C ""%1"" %*"
 HKCR,"cmdfile\shellex\DropHandler","",0x00000000,"{86C86720-42A0-1069-A2E8-08002B30309D}"
 
 ; DOS Applications
@@ -274,6 +294,7 @@ HKCR,".html","Content Type",0x00000000,"text/html"
 HKCR,".html","PerceivedType",0x00000000,"text"
 HKCR,"htmlfile","",0x00000000,"HTML Document"
 HKCR,"htmlfile","FriendlyTypeName",0x00020000,"@%SystemRoot%\system32\mshtml.dll,-7501"
+HKCR,"CLSID\{25336920-03F9-11CF-8FD0-00AA00686F13}\BrowseInPlace","",0x00000000,""
 HKCR,"htmlfile\DefaultIcon","",0x00020000,"%SystemRoot%\system32\ieframe.dll,0"
 HKCR,"htmlfile\shell\open\command","",0x00020000,"""%ProgramFiles%\Internet Explorer\iexplore.exe"" ""%1"""
 
@@ -317,7 +338,7 @@ HKCR,".jfif","",0x00000000,"jpegfile"
 HKCR,".jfif","Content Type",0x00000000,"image/jpeg"
 HKCR,".jfif","PerceivedType",0x00000000,"image"
 HKCR,"jpegfile","",0x00000000,"JPEG Image"
-HKCR,"jpegfile","FriendlyTypeName",0x00020000,"@%SystemRoot%\system32\shimgvw.dll,-303"
+HKCR,"jpegfile","FriendlyTypeName",0x00020000,"@%SystemRoot%\system32\shell32.dll,-30596"
 HKCR,"jpegfile\DefaultIcon","",0x00020000,"%SystemRoot%\system32\shimgvw.dll,0"
 HKCR,"jpegfile\shell\open\command","",0x00020000,"rundll32.exe %SystemRoot%\system32\shimgvw.dll,ImageView_Fullscreen %1"
 HKCR,"jpegfile\shell\edit\command","",0x00020000,"%SystemRoot%\system32\mspaint.exe ""%1"""
@@ -342,7 +363,7 @@ HKCR,".png","",0x00000000,"pngfile"
 HKCR,".png","Content Type",0x00000000,"image/png"
 HKCR,".png","PerceivedType",0x00000000,"image"
 HKCR,"pngfile","",0x00000000,"PNG Image"
-HKCR,"pngfile","FriendlyTypeName",0x00020000,"@%SystemRoot%\system32\shimgvw.dll,-305"
+HKCR,"pngfile","FriendlyTypeName",0x00020000,"@%SystemRoot%\system32\shell32.dll,-30598"
 HKCR,"pngfile\DefaultIcon","",0x00020000,"%SystemRoot%\system32\shimgvw.dll,2"
 HKCR,"pngfile\shell\open\command","",0x00020000,"rundll32.exe %SystemRoot%\system32\shimgvw.dll,ImageView_Fullscreen %1"
 HKCR,"pngfile\shell\edit\command","",0x00020000,"%SystemRoot%\system32\mspaint.exe ""%1"""
@@ -383,7 +404,7 @@ HKCR,"inffile","FriendlyTypeName",0x00020000,"@%SystemRoot%\system32\setupapi.dl
 HKCR,"inffile\DefaultIcon","",0x00020000,"%SystemRoot%\system32\shell32.dll,-151"
 HKCR,"inffile\shell\open\command","",0x00000000,"notepad.exe ""%1"""
 HKCR,"inffile\shell\Install","",0x00000000,%INSTALL%
-HKCR,"inffile\shell\Install\command","",0x00020000,"%SystemRoot%\system32\rundll32.exe setupapi,InstallHinfSection DefaultInstall 132 %1"
+HKCR,"inffile\shell\Install\command","",0x00020000,"%SystemRoot%\system32\InfDefaultInstall.exe ""%1"""
 
 ; Show icons for shortcuts in shell views (lnkfile is handled specially in shell32)
 ; Don't display extension for shortcuts
@@ -399,7 +420,6 @@ HKCR,"lnkfile\CLSID","",0x00000000,"{00021401-0000-0000-C000-000000000046}"
 HKCR,"lnkfile\shellex\IconHandler","",0x00000000,"{00021401-0000-0000-C000-000000000046}"
 HKCR,"lnkfile\shellex\DropHandler","",0x00000000,"{00021401-0000-0000-C000-000000000046}"
 HKCR,"lnkfile\shellex\ContextMenuHandlers\{00021401-0000-0000-C000-000000000046}","",0x00000000,""
-HKCR,"lnkfile\shellex\PropertySheetHandlers\Shellink Property Page", "", 0x00000000, "{00021401-0000-0000-C000-000000000046}"
 
 ; Text Documents
 HKCR,".log","",0x00000000,"txtfile"
@@ -446,22 +466,22 @@ HKCR,"mscfile\shell\open\command","",0x00020000,"%SystemRoot%\system32\mmc.exe "
 
 ; MSI files
 HKCR,".msi","",0x00000000,"Msi.Package"
-HKCR,"Msi.Package","",0x00000000,"ReactOS Installer Package"
+HKCR,"Msi.Package","",0x00000000,"LiberNT Installer Package"
 HKCR,"Msi.Package","FriendlyTypeName",0x00020000,"@%SystemRoot%\system32\msi.dll,-34"
 HKCR,"Msi.Package\DefaultIcon","",0x00000000,"msiexec.exe"
 HKCR,"Msi.Package\shell\Open","",0x00000000,"&Install"
 HKCR,"Msi.Package\shell\Open","MUIVerb",0x00020000,"@%SystemRoot%\system32\msi.dll,-36"
-HKCR,"Msi.Package\shell\Open\command","",0x00020000,"%SystemRoot%\system32\msiexec.exe /i ""%1"""
+HKCR,"Msi.Package\shell\Open\command","",0x00020000,"""%SystemRoot%\system32\msiexec.exe"" /i ""%1"" %*"
 HKCR,"Msi.Package\shell\Repair","",0x00000000,"Re&pair"
 HKCR,"Msi.Package\shell\Repair","MUIVerb",0x00020000,"@%SystemRoot%\system32\msi.dll,-37"
-HKCR,"Msi.Package\shell\Repair\command","",0x00020000,"%SystemRoot%\system32\msiexec.exe /f ""%1"""
+HKCR,"Msi.Package\shell\Repair\command","",0x00020000,"""%SystemRoot%\system32\msiexec.exe"" /f ""%1"" %*"
 HKCR,"Msi.Package\shell\Uninstall","",0x00000000,"&Uninstall"
 HKCR,"Msi.Package\shell\Uninstall","MUIVerb",0x00020000,"@%SystemRoot%\system32\msi.dll,-38"
-HKCR,"Msi.Package\shell\Uninstall\command","",0x00020000,"%SystemRoot%\system32\msiexec.exe /x ""%1"""
+HKCR,"Msi.Package\shell\Uninstall\command","",0x00020000,"""%SystemRoot%\system32\msiexec.exe"" /x ""%1"" %*"
 
 ; MSP files
 HKCR,".msp","",0x00000000,"Msi.Patch"
-HKCR,"Msi.Patch","",0x00000000,"ReactOS Installer Patch"
+HKCR,"Msi.Patch","",0x00000000,"LiberNT Installer Patch"
 HKCR,"Msi.Patch","FriendlyTypeName",0x00020000,"@%SystemRoot%\system32\msi.dll,-35"
 HKCR,"Msi.Patch\DefaultIcon","",0x00000000,"msiexec.exe"
 HKCR,"Msi.Patch\shell\Open","",0x00000000,"&Apply Patch"
@@ -481,6 +501,7 @@ HKCR,"piffile","",0x00000000,"NT VDM Program Information File"
 HKCR,"piffile","EditFlags",0x00010001,0x00000001
 HKCR,"piffile","FriendlyTypeName",0x00020000,"@%SystemRoot%\system32\shell32.dll,-216"
 HKCR,"piffile","IsShortcut",0x00000000,"yes"
+HKCR,"piffile\shell\open\command","",0x00000000,"""%1"" %*"
 HKCR,"piffile","NeverShowExt",0x00000000,""
 
 ; Registration Entries
@@ -582,6 +603,29 @@ HKCR,"AVIFile","",0x00000000,%AVIFILE%
 HKCR,"AVIFile\DefaultIcon","",0x00020000,"%SystemRoot%\system32\shell32.dll,-224"
 HKCR,"AVIFile\shell\open\command","",0x00020000,"%SystemRoot%\system32\mplay32.exe ""%1"""
 
+; Windows Media file types
+HKCR,".mp3","",0x00000000,"WMP11.AssocFile.MP3"
+HKCR,".mp3","Content Type",0x00000000,"audio/mpeg"
+HKCR,".mp3","PerceivedType",0x00000000,"audio"
+HKCR,"WMP11.AssocFile.MP3","",0x00000000,%MP3FILE%
+HKCR,"WMP11.AssocFile.MP3\DefaultIcon","",0x00020000,"%SystemRoot%\system32\shell32.dll,-225"
+HKCR,"WMP11.AssocFile.MP3\shell\open\command","",0x00020000,"%SystemRoot%\system32\mplay32.exe ""%1"""
+HKCR,".wma","",0x00000000,"WMP11.AssocFile.WMA"
+HKCR,".wma","Content Type",0x00000000,"audio/x-ms-wma"
+HKCR,".wma","PerceivedType",0x00000000,"audio"
+HKCR,"WMP11.AssocFile.WMA","",0x00000000,%WMAFILE%
+HKCR,"WMP11.AssocFile.WMA\DefaultIcon","",0x00020000,"%SystemRoot%\system32\shell32.dll,-225"
+HKCR,"WMP11.AssocFile.WMA\shell\open\command","",0x00020000,"%SystemRoot%\system32\mplay32.exe ""%1"""
+HKCR,".mp4","",0x00000000,"WMP11.AssocFile.MP4"
+HKCR,".mp4","Content Type",0x00000000,"video/mp4"
+HKCR,".mp4","PerceivedType",0x00000000,"video"
+HKCR,"WMP11.AssocFile.MP4","",0x00000000,%MP4FILE%
+HKCR,"WMP11.AssocFile.MP4\DefaultIcon","",0x00020000,"%SystemRoot%\system32\shell32.dll,-224"
+HKCR,"WMP11.AssocFile.MP4\shell\open\command","",0x00020000,"%SystemRoot%\system32\mplay32.exe ""%1"""
+
+; Binary files
+HKCR,".bin","NoOpen",0x00000000,""
+
 ; WSH
 HKCR,".wsf","",0x00000000,"WSFFile"
 HKCR,".wsf","PerceivedType",0x00000000,"text"
@@ -616,6 +660,33 @@ HKCR,"CLSID\{42071713-76d4-11d1-8b24-00a0c9068ff3}\InProcServer32","ThreadingMod
 HKCR,"CLSID\{A907657F-6FDF-11D0-8EFB-00C04FD912B2}","",0x00000000,"TCP/IP Configuration Notify Object"
 HKCR,"CLSID\{A907657F-6FDF-11D0-8EFB-00C04FD912B2}\InProcServer32","",0x00000000,"netcfgx.dll"
 HKCR,"CLSID\{A907657F-6FDF-11D0-8EFB-00C04FD912B2}\InProcServer32","ThreadingModel",0x00000000,"Both"
+
+HKCR,"CLSID\{5B035261-40F9-11D1-AAEC-00805FC1270E}","",0x00000000,"Network Configuration Component Object"
+HKCR,"CLSID\{5B035261-40F9-11D1-AAEC-00805FC1270E}\InProcServer32","",0x00020000,"%SystemRoot%\system32\netsetupshim.dll"
+HKCR,"CLSID\{5B035261-40F9-11D1-AAEC-00805FC1270E}\InProcServer32","ThreadingModel",0x00000000,"Both"
+
+HKCR,"CLSID\{0002E005-0000-0000-C000-000000000046}","",0x00000000,"Component Categories Manager"
+HKCR,"CLSID\{0002E005-0000-0000-C000-000000000046}\InProcServer32","",0x00000000,"combase.dll"
+HKCR,"CLSID\{0002E005-0000-0000-C000-000000000046}\InProcServer32","ThreadingModel",0x00000000,"Both"
+
+; For dinput.dll and dinput8.dll
+HKCR,"CLSID\{25E609E0-B259-11CF-BFC7-444553540000}","",0x00000000,"DirectInput Object"
+HKCR,"CLSID\{25E609E0-B259-11CF-BFC7-444553540000}\InProcServer32","",0x00020000,"%SystemRoot%\system32\dinput.dll"
+HKCR,"CLSID\{25E609E0-B259-11CF-BFC7-444553540000}\InProcServer32","ThreadingModel",0x00000000,"Both"
+HKCR,"CLSID\{25E609E1-B259-11CF-BFC7-444553540000}","",0x00000000,"DirectInputDevice Object"
+HKCR,"CLSID\{25E609E1-B259-11CF-BFC7-444553540000}\InProcServer32","",0x00020000,"%SystemRoot%\system32\dinput.dll"
+HKCR,"CLSID\{25E609E1-B259-11CF-BFC7-444553540000}\InProcServer32","ThreadingModel",0x00000000,"Both"
+HKCR,"CLSID\{25E609E4-B259-11CF-BFC7-444553540000}","",0x00000000,"DirectInput8 Object"
+HKCR,"CLSID\{25E609E4-B259-11CF-BFC7-444553540000}\InProcServer32","",0x00020000,"%SystemRoot%\system32\dinput8.dll"
+HKCR,"CLSID\{25E609E4-B259-11CF-BFC7-444553540000}\InProcServer32","ThreadingModel",0x00000000,"Both"
+HKCR,"CLSID\{25E609E5-B259-11CF-BFC7-444553540000}","",0x00000000,"DirectInputDevice8 Object"
+HKCR,"CLSID\{25E609E5-B259-11CF-BFC7-444553540000}\InProcServer32","",0x00020000,"%SystemRoot%\system32\dinput8.dll"
+HKCR,"CLSID\{25E609E5-B259-11CF-BFC7-444553540000}\InProcServer32","ThreadingModel",0x00000000,"Both"
+
+; For mmdevapi.dll
+HKCR,"CLSID\{BCDE0395-E52F-467C-8E3D-C4579291692E}","",0x00000000,"MMDeviceEnumerator class"
+HKCR,"CLSID\{BCDE0395-E52F-467C-8E3D-C4579291692E}\InProcServer32","",0x00020000,"%SystemRoot%\system32\mmdevapi.dll"
+HKCR,"CLSID\{BCDE0395-E52F-467C-8E3D-C4579291692E}\InProcServer32","ThreadingModel",0x00000000,"Both"
 
 ; For dxdiagn.dll
 HKCR,"CLSID\{A65B8071-3BFE-4213-9A5B-491DA4461CA7}","",0x00000000,"DxDiagProvider Class"
@@ -799,7 +870,29 @@ HKCR,"MIME\Database\Rfc1766","043D",0x00000000,"ji;Yiddish"
 HKCR,"MIME\Database\Rfc1766","0435",0x00000000,"zu;Zulu"
 
 ; SystemFileAssociations
+HKCR,"SystemFileAssociations\.avci","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.avcs","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.avif","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.avifs","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.dng","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.heic","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.heics","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.heif","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.heifs","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.hif","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.jfif","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.jpe","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.jpeg","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.jpg","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.jxl","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.jxr","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.png","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.tif","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.tiff","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.wdp","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
+HKCR,"SystemFileAssociations\.webp","SetDefaultsFor",0x00000000,"prop:System.Author;System.Document.DateCreated;System.Photo.DateTaken"
 HKCR,"SystemFileAssociations\.txt","PerceivedType",0x00000000,"text"
+HKCR,"SystemFileAssociations\image\ShellEx\{e357fccd-a995-4576-b01f-234630154e96}","",0x00000000,"{C7657C4A-9F68-40fa-A4DF-96BC08EB3551}"
 HKCR,"SystemFileAssociations\text\DefaultIcon","",0x00020000,"%SystemRoot%\system32\shell32.dll,-152"
 HKCR,"SystemFileAssociations\text\OpenWithList\notepad.exe","",0x00000000,""
 HKCR,"SystemFileAssociations\text\OpenWithList\wordpad.exe","",0x00000000,""
@@ -828,11 +921,14 @@ WAVFILE="Wave Sound"
 MIDFILE="MIDI Sequence"
 CDAFILE="CD Audio Track"
 AVIFILE="Video Clip"
+MP3FILE="MP3 Format Sound"
+WMAFILE="Windows Media Audio file"
+MP4FILE="MP4 Video"
 
 ;; Misc file types without friendly (localized in .dll resources) name
 CSSFILE="Cascading Style Sheet"
 MSCFILE="Management Console Document"
-SCFFILE="ReactOS Explorer Command"
+SCFFILE="LiberNT Explorer Command"
 WMZFILE="Compressed Enhanced Metafile"
 WSFFILE="Windows Script File"
 
@@ -866,6 +962,9 @@ CPLFILE_OPENWITH="Mit der Systemsteuerung öffnen"
 ;MIDFILE="MIDI Sequence"
 ;CDAFILE="CD Audio Track"
 ;AVIFILE="Video Clip"
+MP3FILE="MP3-Formatsound"
+WMAFILE="Windows Media-Audiodatei"
+MP4FILE="MP4-Video"
 
 ;; Misc file types without friendly (localized in .dll resources) name
 ;CSSFILE="Cascading Style Sheet"
@@ -902,10 +1001,13 @@ WAVFILE="Archivo de audio"
 MIDFILE="Secuencia MIDI"
 CDAFILE="Pista de audio CD"
 AVIFILE="Secuencia de vídeo"
+MP3FILE="Sonido en formato MP3"
+WMAFILE="Archivo de audio de Windows Media"
+MP4FILE="Vídeo MP4"
 
 ;; Misc file types without friendly (localized in .dll resources) name
 CSSFILE="Hoja de estilos en cascada"
-SCFFILE="Órden del explorador de ReactOS"
+SCFFILE="Órden del explorador de LiberNT"
 WMZFILE="Metarchivo mejorado comprimido"
 
 ;; For .reg files, right-click menu
@@ -938,10 +1040,13 @@ WAVFILE="Son Wave"
 MIDFILE="Séquence MIDI"
 CDAFILE="Piste de CD Audio"
 AVIFILE="Clip Vidéo"
+MP3FILE="Son au format MP3"
+WMAFILE="Fichier audio Windows Media"
+MP4FILE="Vidéo MP4"
 
 ;; Misc file types without friendly (localized in .dll resources) name
 CSSFILE="Fichier CSS"
-SCFFILE="Commande de l'explorateur ReactOS"
+SCFFILE="Commande de l'explorateur LiberNT"
 ;WMZFILE="Compressed Enhanced Metafile"
 
 ;; For .reg files, right-click menu
@@ -974,6 +1079,9 @@ WAVFILE="Audio wave"
 MIDFILE="Sequenza MIDI"
 CDAFILE="Traccia Audio CD"
 AVIFILE="Filmato video"
+MP3FILE="Suono in formato MP3"
+WMAFILE="File audio Windows Media"
+MP4FILE="Video MP4"
 
 ;; Misc file types without friendly (localized in .dll resources) name
 ;CSSFILE="Cascading Style Sheet"
@@ -1010,10 +1118,13 @@ WAVFILE="Dźwięk typu wave"
 MIDFILE="Sekwencja MIDI"
 CDAFILE="Ścieżka CD audio"
 AVIFILE="Arkusz stylu kaskadowego"
+MP3FILE="Dźwięk w formacie MP3"
+WMAFILE="Plik audio Windows Media"
+MP4FILE="Wideo MP4"
 
 ;; Misc file types without friendly (localized in .dll resources) name
 ;CSSFILE="Cascading Style Sheet"
-SCFFILE="Polecenie Eksploratora ReactOS"
+SCFFILE="Polecenie Eksploratora LiberNT"
 WMZFILE="Skompresowany metaplik"
 
 ;; For .reg files, right-click menu
@@ -1047,10 +1158,13 @@ WAVFILE="Ficheiro de audio"
 MIDFILE="Sequência MIDI"
 CDAFILE="Pista de audio CD"
 AVIFILE="Sequência de vídeo"
+MP3FILE="Som em formato MP3"
+WMAFILE="Ficheiro de áudio Windows Media"
+MP4FILE="Vídeo MP4"
 
 ;; Misc file types without friendly (localized in .dll resources) name
 CSSFILE="Folha de estilos em cascada"
-SCFFILE="Comando do Explorador ReactOS"
+SCFFILE="Comando do Explorador LiberNT"
 WMZFILE="Metarquivo aprimorado compactado"
 
 ;; For .reg files, right-click menu
@@ -1084,10 +1198,13 @@ WAVFILE="Fișier audio Wave"
 MIDFILE="Secvență audio MIDI"
 CDAFILE="Pistă de CD audio"
 AVIFILE="Fișier video"
+MP3FILE="Sunet în format MP3"
+WMAFILE="Fișier audio Windows Media"
+MP4FILE="Video MP4"
 
 ;; Misc file types without friendly (localized in .dll resources) name
 CSSFILE="Foaie de stiluri în cascadă"
-SCFFILE="Comandă de Explorator ReactOS"
+SCFFILE="Comandă de Explorator LiberNT"
 WMZFILE="Metafișier îmbunătățit comprimat"
 
 ;; For .reg files, right-click menu
@@ -1120,10 +1237,13 @@ WAVFILE="Файл аудио Wave"
 MIDFILE="Файл MIDI"
 CDAFILE="CD аудиодорожка"
 AVIFILE="Видеозапись"
+MP3FILE="Звук в формате MP3"
+WMAFILE="Звуковой файл Windows Media"
+MP4FILE="Видео MP4"
 
 ;; Misc file types without friendly (localized in .dll resources) name
 CSSFILE="Каскадная таблица стилей"
-SCFFILE="Команда проводника ReactOS"
+SCFFILE="Команда проводника LiberNT"
 WMZFILE="Сжатый расширенный метафайл"
 
 ;; For .reg files, right-click menu
@@ -1156,10 +1276,13 @@ WAVFILE="WAVE 音訊"
 MIDFILE="MIDI 編曲"
 CDAFILE="CD 曲目"
 AVIFILE="視訊短片"
+MP3FILE="MP3 格式音效"
+WMAFILE="Windows Media 音訊檔"
+MP4FILE="MP4 視訊"
 
 ;; Misc file types without friendly (localized in .dll resources) name
 CSSFILE="階層式樣式表"
-SCFFILE="ReactOS Explorer 命令"
+SCFFILE="LiberNT Explorer 命令"
 ;WMZFILE="Compressed Enhanced Metafile"
 
 ;; For .reg files, right-click menu
@@ -1192,6 +1315,9 @@ CPLFILE_OPENWITH="Denetim Masası'yla Aç"
 ;MIDFILE="MIDI Dizisi"
 ;CDAFILE="CD Ses Parçası"
 ;AVIFILE="Video Klibi"
+MP3FILE="MP3 Biçimli Ses"
+WMAFILE="Windows Media Ses Dosyası"
+MP4FILE="MP4 Video"
 
 ;; Misc file types without friendly (localized in .dll resources) name
 ;CSSFILE="Basamaklı Stil Şablonu"
@@ -1228,10 +1354,13 @@ WAVFILE="WAVE 音訊"
 MIDFILE="MIDI 編曲"
 CDAFILE="CD 曲目"
 AVIFILE="視訊短片"
+MP3FILE="MP3 格式音效"
+WMAFILE="Windows Media 音訊檔"
+MP4FILE="MP4 視訊"
 
 ;; Misc file types without friendly (localized in .dll resources) name
 CSSFILE="階層式樣式表"
-SCFFILE="ReactOS Explorer 命令"
+SCFFILE="LiberNT Explorer 命令"
 ;WMZFILE="Compressed Enhanced Metafile"
 
 ;; For .reg files, right-click menu
@@ -1265,10 +1394,13 @@ WAVFILE="Wave 音声"
 MIDFILE="MIDI シーケンス"
 CDAFILE="CD 音声トラック"
 AVIFILE="ビデオ クリップ"
+MP3FILE="MP3 形式サウンド"
+WMAFILE="Windows Media オーディオ ファイル"
+MP4FILE="MP4 ビデオ"
 
 ;; Misc file types without friendly (localized in .dll resources) name
 CSSFILE="カスケード スタイル シート"
-SCFFILE="ReactOS エクスプローラ コマンド"
+SCFFILE="LiberNT エクスプローラ コマンド"
 WMZFILE="圧縮済み拡張メタファイル"
 
 ;; For .reg files, right-click menu
@@ -1301,10 +1433,13 @@ WAVFILE="波形声音"
 MIDFILE="MIDI 序列"
 CDAFILE="CD 音频曲目"
 AVIFILE="视频剪辑"
+MP3FILE="MP3 格式声音"
+WMAFILE="Windows Media 音频文件"
+MP4FILE="MP4 视频"
 
 ;; Misc file types without friendly (localized in .dll resources) name
 CSSFILE="层叠样式表文档"
-SCFFILE="ReactOS Explorer Command"
+SCFFILE="LiberNT Explorer Command"
 ;WMZFILE="Compressed Enhanced Metafile"
 
 ;; For .reg files, right-click menu

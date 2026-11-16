@@ -1,0 +1,3 @@
+/* ReactOS build resources for the Wine GStreamer adapter. */
+
+1 WINE_REGISTRY "../winegstreamer.rgs"

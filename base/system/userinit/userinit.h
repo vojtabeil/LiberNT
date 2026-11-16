@@ -19,10 +19,13 @@
 #include <winnls.h>
 #include <winuser.h>
 #include <undocuser.h>
+#include <powrprof.h>
 
 #include <strsafe.h>
 
 #include <ndk/exfuncs.h>
+
+#include <reactos/desktopready.h>
 
 #include <wine/debug.h>
 WINE_DEFAULT_DEBUG_CHANNEL(userinit);
@@ -30,45 +33,15 @@ WINE_DEFAULT_DEBUG_CHANNEL(userinit);
 #include "resource.h"
 
 
-typedef enum
-{
-    LOCALEPAGE,
-    STARTPAGE,
-    DONE
-} PAGESTATE;
-
-typedef enum
-{
-    SHELL,
-    INSTALLER,
-    REBOOT
-} RUN;
-
-typedef struct _IMGINFO
-{
-    HBITMAP hBitmap;
-    INT cxSource;
-    INT cySource;
-    INT iPlanes;
-    INT iBits;
-} IMGINFO, *PIMGINFO;
-
-typedef struct
-{
-    PAGESTATE NextPage;
-    RUN Run;
-    IMGINFO ImageInfo;
-    struct _LIVECD_UNATTEND* Unattend;
-} STATE, *PSTATE;
-
-
 extern HINSTANCE hInstance;
 
-BOOL
-IsMiniNT(VOID);
+LONG
+ReadRegSzKey(
+    IN HKEY hKey,
+    IN LPCWSTR pszKey,
+    OUT LPWSTR *pValue);
 
-VOID
-RunLiveCD(
-    PSTATE State);
+BOOL
+IsLiveCD(VOID);
 
 #endif /* __USERINIT_H__ */

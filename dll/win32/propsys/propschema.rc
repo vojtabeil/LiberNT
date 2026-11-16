@@ -1,0 +1,19 @@
+/*
+ * PROJECT:     LiberNT Property System
+ * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
+ * PURPOSE:     Property schema display strings
+ * COPYRIGHT:   Copyright 2026 Ahmed ARIF <arif.ing@outlook.com>
+ */
+
+#include <windef.h>
+#include <winuser.h>
+
+#pragma code_page(65001)
+
+#include "lang/en-US.rc"
+#ifdef LANGUAGE_JA_JP
+#include "lang/ja-JP.rc"
+#endif
+#ifdef LANGUAGE_ZH_CN
+#include "lang/zh-CN.rc"
+#endif

@@ -32,6 +32,30 @@ target_compile_definitions(iodeviceobject_drv PRIVATE KMT_STANDALONE_DRIVER)
 add_rostests_file(TARGET iodeviceobject_drv)
 
 #
+# IoAddDeviceUnload
+#
+add_library(ioadddeviceunload_drv MODULE IoAddDeviceUnload_drv.c)
+set_module_type(ioadddeviceunload_drv kernelmodedriver)
+add_importlibs(ioadddeviceunload_drv ntoskrnl hal)
+add_rostests_file(TARGET ioadddeviceunload_drv)
+
+#
+# IoFilterRequirements
+#
+add_library(iofilterrequirements_drv MODULE IoFilterRequirements_drv.c)
+set_module_type(iofilterrequirements_drv kernelmodedriver)
+add_importlibs(iofilterrequirements_drv ntoskrnl hal)
+add_rostests_file(TARGET iofilterrequirements_drv)
+
+#
+# IoRemoveChild
+#
+add_library(ioremovechild_drv MODULE IoRemoveChild_drv.c)
+set_module_type(ioremovechild_drv kernelmodedriver)
+add_importlibs(ioremovechild_drv ntoskrnl hal)
+add_rostests_file(TARGET ioremovechild_drv)
+
+#
 # IoHelper
 #
 list(APPEND IOHELPER_DRV_SOURCE

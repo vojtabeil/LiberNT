@@ -1382,17 +1382,27 @@ HRESULT __RPC_STUB IEnumMoniker_Next_Stub(
 BOOL CALLBACK IRunnableObject_IsRunning_Proxy(
     IRunnableObject* This)
 {
+#ifdef __REACTOS__
+    TRACE("(%p)\n", This);
+    return IRunnableObject_RemoteIsRunning_Proxy(This) == S_OK;
+#else
     BOOL rv;
     FIXME(":stub\n");
     memset(&rv, 0, sizeof rv);
     return rv;
+#endif
 }
 
 HRESULT __RPC_STUB IRunnableObject_IsRunning_Stub(
     IRunnableObject* This)
 {
+#ifdef __REACTOS__
+    TRACE("(%p)\n", This);
+    return IRunnableObject_IsRunning(This) ? S_OK : S_FALSE;
+#else
     FIXME(":stub\n");
     return E_NOTIMPL;
+#endif
 }
 
 HRESULT CALLBACK IMoniker_BindToObject_Proxy(
@@ -1602,6 +1612,60 @@ HRESULT __RPC_STUB IEnumSTATSTG_Next_Stub(
     if (hr == S_OK) *pceltFetched = celt;
     return hr;
 }
+
+#ifdef __REACTOS__
+HRESULT CALLBACK IEnumSTATPROPSTG_Next_Proxy(
+    IEnumSTATPROPSTG* This,
+    ULONG celt,
+    STATPROPSTG *rgelt,
+    ULONG *pceltFetched)
+{
+    ULONG fetched;
+    TRACE("%p, %lu, %p, %p.\n", This, celt, rgelt, pceltFetched);
+    if (!pceltFetched) pceltFetched = &fetched;
+    return IEnumSTATPROPSTG_RemoteNext_Proxy(This, celt, rgelt, pceltFetched);
+}
+
+HRESULT __RPC_STUB IEnumSTATPROPSTG_Next_Stub(
+    IEnumSTATPROPSTG* This,
+    ULONG celt,
+    STATPROPSTG *rgelt,
+    ULONG *pceltFetched)
+{
+    HRESULT hr;
+    TRACE("%p, %lu, %p, %p.\n", This, celt, rgelt, pceltFetched);
+    *pceltFetched = 0;
+    hr = IEnumSTATPROPSTG_Next(This, celt, rgelt, pceltFetched);
+    if (hr == S_OK) *pceltFetched = celt;
+    return hr;
+}
+
+HRESULT CALLBACK IEnumSTATPROPSETSTG_Next_Proxy(
+    IEnumSTATPROPSETSTG* This,
+    ULONG celt,
+    STATPROPSETSTG *rgelt,
+    ULONG *pceltFetched)
+{
+    ULONG fetched;
+    TRACE("%p, %lu, %p, %p.\n", This, celt, rgelt, pceltFetched);
+    if (!pceltFetched) pceltFetched = &fetched;
+    return IEnumSTATPROPSETSTG_RemoteNext_Proxy(This, celt, rgelt, pceltFetched);
+}
+
+HRESULT __RPC_STUB IEnumSTATPROPSETSTG_Next_Stub(
+    IEnumSTATPROPSETSTG* This,
+    ULONG celt,
+    STATPROPSETSTG *rgelt,
+    ULONG *pceltFetched)
+{
+    HRESULT hr;
+    TRACE("%p, %lu, %p, %p.\n", This, celt, rgelt, pceltFetched);
+    *pceltFetched = 0;
+    hr = IEnumSTATPROPSETSTG_Next(This, celt, rgelt, pceltFetched);
+    if (hr == S_OK) *pceltFetched = celt;
+    return hr;
+}
+#endif
 
 HRESULT CALLBACK IStorage_OpenStream_Proxy(
     IStorage* This,

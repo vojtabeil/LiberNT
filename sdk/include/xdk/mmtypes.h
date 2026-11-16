@@ -14,6 +14,9 @@ typedef ULONG NODE_REQUIREMENT;
 #define MM_ALLOCATE_NO_WAIT                      0x00000008
 #define MM_ALLOCATE_PREFER_CONTIGUOUS            0x00000010
 #define MM_ALLOCATE_REQUIRE_CONTIGUOUS_CHUNKS    0x00000020
+#define MM_ALLOCATE_FAST_LARGE_PAGES             0x00000040
+#define MM_ALLOCATE_TRIM_IF_NECESSARY            0x00000080
+#define MM_ALLOCATE_AND_HOT_REMOVE               0x00000100
 
 #define MDL_MAPPED_TO_SYSTEM_VA     0x0001
 #define MDL_PAGES_LOCKED            0x0002
@@ -76,6 +79,16 @@ typedef ULONG NODE_REQUIREMENT;
 #define PAGE_GUARD            0x100
 #define PAGE_NOCACHE          0x200
 #define PAGE_WRITECOMBINE     0x400
+#define PAGE_GRAPHICS_NOACCESS           0x0800
+#define PAGE_GRAPHICS_READONLY           0x1000
+#define PAGE_GRAPHICS_READWRITE          0x2000
+#define PAGE_GRAPHICS_EXECUTE            0x4000
+#define PAGE_GRAPHICS_EXECUTE_READ       0x8000
+#define PAGE_GRAPHICS_EXECUTE_READWRITE 0x10000
+#define PAGE_GRAPHICS_COHERENT          0x20000
+#define PAGE_GRAPHICS_NOCACHE           0x40000
+#define PAGE_TARGETS_NO_UPDATE 0x40000000
+#define PAGE_TARGETS_INVALID  0x40000000
 
 #define MEM_COMMIT           0x1000
 #define MEM_RESERVE          0x2000
@@ -141,6 +154,9 @@ typedef enum _MM_PAGE_PRIORITY {
   HighPagePriority = 32
 } MM_PAGE_PRIORITY;
 
+#define MdlMappingNoWrite   0x80000000
+#define MdlMappingNoExecute 0x40000000
+
 typedef enum _MM_SYSTEM_SIZE {
   MmSmallSystem,
   MmMediumSystem,
@@ -152,6 +168,11 @@ __CREATE_NTOS_DATA_IMPORT_ALIAS(Mm64BitPhysicalAddress)
 extern PBOOLEAN Mm64BitPhysicalAddress;
 #endif
 extern NTKERNELAPI PVOID MmBadPointer;
+
+typedef struct _MM_PHYSICAL_ADDRESS_LIST {
+  PHYSICAL_ADDRESS PhysicalAddress;
+  SIZE_T NumberOfBytes;
+} MM_PHYSICAL_ADDRESS_LIST, *PMM_PHYSICAL_ADDRESS_LIST;
 
 $endif (_WDMDDK_)
 $if (_NTDDK_)
@@ -175,6 +196,51 @@ typedef enum _MM_ROTATE_DIRECTION {
   MmMaximumRotateDirection
 } MM_ROTATE_DIRECTION, *PMM_ROTATE_DIRECTION;
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+typedef struct _PREFETCH_VIRTUAL_ADDRESS_ENTRY {
+  PVOID VirtualAddress;
+  SIZE_T NumberOfBytes;
+} PREFETCH_VIRTUAL_ADDRESS_ENTRY, *PPREFETCH_VIRTUAL_ADDRESS_ENTRY;
+
+typedef enum _PREFETCH_VIRTUAL_ADDRESS_PRIORITY_TYPE {
+  PrefetchPagePriorityDefault,
+  PrefetchPagePriorityLow,
+  PrefetchPagePriorityUseThreadDefault,
+  PrefetchPagePriorityReserved
+} PREFETCH_VIRTUAL_ADDRESS_PRIORITY_TYPE, *PPREFETCH_VIRTUAL_ADDRESS_PRIORITY_TYPE;
+
+typedef union _PREFETCH_VIRTUAL_ADDRESS_FLAGS {
+  struct {
+    ULONG ConsumeOnlySamePriorityOrLowerPages : 1;
+    ULONG PagePriority : 2;
+    ULONG MustBeZero : 29;
+  } Flags;
+  ULONG AllFlags;
+} PREFETCH_VIRTUAL_ADDRESS_FLAGS, *PPREFETCH_VIRTUAL_ADDRESS_FLAGS;
+
+typedef struct _PREFETCH_VIRTUAL_ADDRESS_LIST {
+  ULONG Version;
+  PREFETCH_VIRTUAL_ADDRESS_FLAGS u1;
+  HANDLE AddressSpaceHandle;
+  ULONG_PTR NumberOfEntries;
+  PPREFETCH_VIRTUAL_ADDRESS_ENTRY VirtualAddresses;
+} PREFETCH_VIRTUAL_ADDRESS_LIST, *PPREFETCH_VIRTUAL_ADDRESS_LIST;
+
+#define PREFETCH_VIRTUAL_ADDRESS_LIST_VERSION_1 1
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_WINBLUE)
+typedef struct _MM_COPY_ADDRESS {
+  _ANONYMOUS_UNION union {
+    PVOID VirtualAddress;
+    PHYSICAL_ADDRESS PhysicalAddress;
+  } DUMMYUNIONNAME;
+} MM_COPY_ADDRESS, *PMMCOPY_ADDRESS;
+
+#define MM_COPY_MEMORY_PHYSICAL 0x1
+#define MM_COPY_MEMORY_VIRTUAL  0x2
+#endif
+
 $endif (_NTDDK_)
 $if (_NTIFS_)
 typedef enum _MMFLUSH_TYPE {
@@ -195,11 +261,14 @@ typedef union _MM_PREFETCH_FLAGS {
   struct {
     ULONG Priority : SYSTEM_PAGE_PRIORITY_BITS;
     ULONG RepurposePriority : SYSTEM_PAGE_PRIORITY_BITS;
+    ULONG PriorityProtection : 1;
+    ULONG MustBeZero : 2;
+    ULONG CannotBeUsedAsFlags : 23;
   } Flags;
   ULONG AllFlags;
 } MM_PREFETCH_FLAGS, *PMM_PREFETCH_FLAGS;
 
-#define MM_PREFETCH_FLAGS_MASK ((1 << (2*SYSTEM_PAGE_PRIORITY_BITS)) - 1)
+#define MM_PREFETCH_FLAGS_MASK ((1 << (2*SYSTEM_PAGE_PRIORITY_BITS+1)) - 1)
 
 #endif /* (NTDDI_VERSION >= NTDDI_WINXP) */
 
@@ -252,4 +321,3 @@ typedef union _MM_PREFETCH_FLAGS {
                                         HEAP_CREATE_ENABLE_TRACING    |   \
                                         HEAP_CREATE_ENABLE_EXECUTE)
 $endif (_NTIFS_)
-

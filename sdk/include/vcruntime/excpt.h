@@ -57,7 +57,7 @@ typedef enum _EXCEPTION_DISPOSITION
     _Inout_ struct _DISPATCHER_CONTEXT *_DispatcherContext,
     _In_ unsigned __int64 _GlobalPointer);
 
-#elif defined(__x86_64) || defined(_M_ARM) || defined(_M_ARM64)
+#elif defined(__x86_64) || defined(_M_ARM) || defined(_M_ARM64) || defined(_M_RISCV64)
 
   struct _EXCEPTION_RECORD;
   struct _CONTEXT;
@@ -74,7 +74,7 @@ typedef enum _EXCEPTION_DISPOSITION
 
 #endif
 
-#if (defined(_MSC_VER) || (defined(__clang__) && defined(__SEH__))) && !defined(_exception_code)
+#if !defined(_exception_code)
   unsigned long __cdecl _exception_code(void);
   void *__cdecl _exception_info(void);
   int __cdecl _abnormal_termination(void);

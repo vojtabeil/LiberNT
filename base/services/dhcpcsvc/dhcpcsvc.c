@@ -229,6 +229,16 @@ MapRequestResultData(
     LPBYTE Ptr;
     ULONG i;
 
+    if (Results->ResultsCount != 0 && (Results->Results == NULL || Results->Data == NULL))
+        return ERROR_INVALID_DATA;
+
+    for (i = 0; i < Results->ResultsCount; i++)
+    {
+        if (Results->Results[i].DataOffset > Results->DataSize ||
+            Results->Results[i].DataSize > Results->DataSize - Results->Results[i].DataOffset)
+            return ERROR_INVALID_DATA;
+    }
+
     if (Results->DataSize > *pSize)
     {
         *pSize = Results->DataSize;
@@ -243,6 +253,9 @@ MapRequestResultData(
                           Results->Results[i].IsVendor);
         if (Param)
         {
+            if (Results->Results[i].DataSize > *pSize - (DWORD)(Ptr - Buffer))
+                return ERROR_INVALID_DATA;
+
             CopyMemory(Ptr,
                        &Results->Data[Results->Results[i].DataOffset],
                        Results->Results[i].DataSize);
@@ -304,7 +317,7 @@ APIENTRY
 DhcpAcquireParameters(
     _In_ PWSTR AdapterName)
 {
-    DWORD ret;
+    DWORD ret = 0;
 
     DPRINT("DhcpAcquireParameters(%S)\n", AdapterName);
 
@@ -336,7 +349,7 @@ APIENTRY
 DhcpAcquireParametersByBroadcast(
     _In_ PWSTR AdapterName)
 {
-    DWORD ret;
+    DWORD ret = 0;
 
     DPRINT("DhcpAcquireParametersByBroadcast(%S)\n", AdapterName);
 
@@ -411,7 +424,7 @@ APIENTRY
 DhcpFallbackRefreshParams(
     _In_ PWSTR AdapterName)
 {
-    DWORD ret;
+    DWORD ret = 0;
 
     DPRINT("DhcpFallbackRefreshParams(%S)\n", AdapterName);
 
@@ -607,7 +620,7 @@ DhcpNotifyConfigChangeEx(
 
         RpcTryExcept
         {
-            ret = Server_EnableDhcp(ServerName, AdapterName, TRUE);
+            ret = Client_EnableDhcp(ServerName, AdapterName, TRUE);
         }
         RpcExcept(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -619,7 +632,7 @@ DhcpNotifyConfigChangeEx(
     {
         RpcTryExcept
         {
-            ret = Server_EnableDhcp(ServerName, AdapterName, FALSE);
+            ret = Client_EnableDhcp(ServerName, AdapterName, FALSE);
         }
         RpcExcept(EXCEPTION_EXECUTE_HANDLER)
         {
@@ -672,7 +685,7 @@ APIENTRY
 DhcpReleaseParameters(
     _In_ PWSTR AdapterName)
 {
-    DWORD ret;
+    DWORD ret = 0;
 
     DPRINT("DhcpReleaseParameters(%S)\n", AdapterName);
 
@@ -698,7 +711,7 @@ DWORD
 APIENTRY
 DhcpRemoveDNSRegistrations(VOID)
 {
-    DWORD ret;
+    DWORD ret = 0;
 
     DPRINT("DhcpRemoveDNSRegistrations()\n");
 
@@ -810,7 +823,7 @@ DhcpStaticRefreshParams(DWORD AdapterIndex,
                         DWORD Address,
                         DWORD Netmask)
 {
-    DWORD ret;
+    DWORD ret = 0;
 
     DPRINT("DhcpStaticRefreshParams()\n");
 
@@ -900,6 +913,7 @@ ServiceMain(DWORD argc, LPWSTR* argv)
 {
     HANDLE hPipeThread = INVALID_HANDLE_VALUE;
     HANDLE hDiscoveryThread = INVALID_HANDLE_VALUE;
+    HANDLE hDhcp6Thread = INVALID_HANDLE_VALUE;
     DWORD ret;
 
     ServiceStatusHandle = RegisterServiceCtrlHandlerExW(ServiceName,
@@ -965,6 +979,8 @@ ServiceMain(DWORD argc, LPWSTR* argv)
         return;
     }
 
+    hDhcp6Thread = StartDhcp6Client(hStopEvent);
+
     DH_DbgPrint(MID_TRACE,("DHCP Service Started\n"));
 
     UpdateServiceStatus(SERVICE_RUNNING);
@@ -993,6 +1009,12 @@ ServiceMain(DWORD argc, LPWSTR* argv)
         DPRINT("Waiting for discovery thread\n");
         ret = WaitForSingleObject(hDiscoveryThread, 5000);
         DPRINT("Done %lx\n", ret);
+    }
+
+    if (hDhcp6Thread != INVALID_HANDLE_VALUE)
+    {
+        WaitForSingleObject(hDhcp6Thread, 5000);
+        CloseHandle(hDhcp6Thread);
     }
 
     DPRINT("Closing events!\n");

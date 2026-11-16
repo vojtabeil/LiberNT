@@ -29,6 +29,36 @@ Author:
 
 #ifndef NTOS_MODE_USER
 
+#if defined(_M_ARM64) || defined(__aarch64__)
+typedef struct _HAL_ARM64_TIMER_CONFIG
+{
+    ULONG Vector;
+    BOOLEAN UseVirtual;
+    KINTERRUPT_MODE Mode;
+} HAL_ARM64_TIMER_CONFIG, *PHAL_ARM64_TIMER_CONFIG;
+
+NTHALAPI
+BOOLEAN
+NTAPI
+HalQueryArm64TimerConfig(
+    _Out_ PHAL_ARM64_TIMER_CONFIG Config);
+
+typedef enum _IPI_TYPE
+{
+    IpiAffinity = 0,
+    IpiAllButSelf,
+    IpiAll
+} IPI_TYPE;
+
+NTHALAPI
+NTSTATUS
+NTAPI
+HalRequestIpiSpecifyVector(
+    _In_ IPI_TYPE IpiType,
+    _In_opt_ PKAFFINITY_EX Affinity,
+    _In_ ULONG Vector);
+#endif
+
 //
 // Private HAL Callbacks
 //
@@ -345,6 +375,10 @@ NTAPI
 HalSendNMI(
     _In_ KAFFINITY TargetSet);
 
+#endif // _M_AMD64
+
+#ifdef _WIN64
+
 NTHALAPI
 VOID
 NTAPI
@@ -352,14 +386,22 @@ HalSendSoftwareInterrupt(
     _In_ KAFFINITY TargetSet,
     _In_ KIRQL Irql);
 
-#endif // _M_AMD64
+#endif // _WIN64
 
+#if defined(_M_ARM64) || defined(__aarch64__)
 NTHALAPI
 VOID
 NTAPI
 HalRequestIpi(
-    _In_ KAFFINITY TargetSet
-);
+    _In_ IPI_TYPE IpiType,
+    _In_opt_ PKAFFINITY_EX Affinity);
+#else
+NTHALAPI
+VOID
+NTAPI
+HalRequestIpi(
+    _In_ KAFFINITY TargetSet);
+#endif
 
 NTHALAPI
 VOID
@@ -390,6 +432,28 @@ HalAdjustResourceList(
 //
 // Environment Functions
 //
+NTHALAPI
+NTSTATUS
+NTAPI
+HalGetEnvironmentVariableEx(
+    _In_ PWSTR VariableName,
+    _In_ LPCGUID VendorGuid,
+    _Out_writes_bytes_opt_(*ValueLength) PVOID Value,
+    _Inout_ PULONG ValueLength,
+    _Out_opt_ PULONG Attributes
+);
+
+NTHALAPI
+NTSTATUS
+NTAPI
+HalSetEnvironmentVariableEx(
+    _In_ PWSTR VariableName,
+    _In_ LPCGUID VendorGuid,
+    _In_reads_bytes_(ValueLength) PVOID Value,
+    _In_ ULONG ValueLength,
+    _In_ ULONG Attributes
+);
+
 #ifdef _ARC_
 NTHALAPI
 ARC_STATUS

@@ -132,8 +132,27 @@ void TestRedirection(void)
             }
             else
             {
+                WCHAR Expected[MAX_PATH];
+
+                if (wcsncmp(Tests[i].ExpectedSubString, L"\\winsxs\\x86_", 12) == 0)
+                {
+#if defined(_M_AMD64)
+                    wcscpy(Expected, L"\\winsxs\\amd64_");
+#elif defined(_M_ARM64)
+                    wcscpy(Expected, L"\\winsxs\\arm64_");
+#elif defined(_M_RISCV64)
+                    wcscpy(Expected, L"\\winsxs\\riscv64_");
+#else
+                    wcscpy(Expected, L"\\winsxs\\x86_");
+#endif
+                    wcscat(Expected, &Tests[i].ExpectedSubString[12]);
+                }
+                else
+                {
+                    wcscpy(Expected, Tests[i].ExpectedSubString);
+                }
                 RtlDowncaseUnicodeString(&DynamicString, &DynamicString, FALSE);
-                ok(wcsstr(DynamicString.Buffer, Tests[i].ExpectedSubString) != 0, "%d: Expected string %S in %S\n", Tests[i].testline, Tests[i].ExpectedSubString, DynamicString.Buffer);
+                ok(wcsstr(DynamicString.Buffer, Expected) != 0, "%d: Expected string %S in %S\n", Tests[i].testline, Expected, DynamicString.Buffer);
             }
         }
     }
@@ -242,7 +261,7 @@ void TestBuffers()
     ok(DynamicString.Length >0 , "\n");
     ok(DynamicString.MaximumLength == DynamicString.Length + sizeof(WCHAR) , "\n");
     if (DynamicString.Buffer && DynamicString.Length)
-        ok(wcslen(DynamicString.Buffer) * sizeof(WCHAR) == DynamicString.Length, "got %d and %d\n", wcslen(DynamicString.Buffer)  * sizeof(WCHAR) , DynamicString.Length);
+        ok(wcslen(DynamicString.Buffer) * sizeof(WCHAR) == DynamicString.Length, "got %Iu and %d\n", wcslen(DynamicString.Buffer)  * sizeof(WCHAR) , DynamicString.Length);
     else
         ok(DynamicString.Buffer != NULL, "Expected non NULL buffer\n");
     ok(StringUsed == &DynamicString, "\n");
@@ -294,7 +313,7 @@ void TestBuffers()
     ok(StaticString.Length >0 , "\n");
     ok(StaticString.MaximumLength == sizeof(buffer) , "\n");
     if (StaticString.Buffer && StaticString.Length)
-        ok(wcslen(StaticString.Buffer) * sizeof(WCHAR) == StaticString.Length, "got %d and %d\n", wcslen(StaticString.Buffer)  * sizeof(WCHAR) , StaticString.Length);
+        ok(wcslen(StaticString.Buffer) * sizeof(WCHAR) == StaticString.Length, "got %Iu and %d\n", wcslen(StaticString.Buffer)  * sizeof(WCHAR) , StaticString.Length);
     else
         ok(StaticString.Length != 0, "Expected non 0 lenght\n");
     ok(StringUsed == &StaticString, "\n");
@@ -327,7 +346,7 @@ void TestBuffers()
     ok(StaticString.Length >0 , "\n");
     ok(StaticString.MaximumLength == sizeof(buffer) , "\n");
     if (StaticString.Buffer && StaticString.Length)
-        ok(wcslen(StaticString.Buffer) * sizeof(WCHAR) == StaticString.Length, "got %d and %d\n", wcslen(StaticString.Buffer)  * sizeof(WCHAR) , StaticString.Length);
+        ok(wcslen(StaticString.Buffer) * sizeof(WCHAR) == StaticString.Length, "got %Iu and %d\n", wcslen(StaticString.Buffer)  * sizeof(WCHAR) , StaticString.Length);
     else
         ok(StaticString.Length != 0, "Expected non 0 lenght\n");
     ok(DynamicString.Buffer == NULL, "\n");
@@ -357,7 +376,7 @@ void TestBuffers()
     ok(DynamicString.Length >0 , "\n");
     ok(DynamicString.MaximumLength == DynamicString.Length + sizeof(WCHAR) , "\n");
     if (DynamicString.Buffer && DynamicString.Length)
-        ok(wcslen(DynamicString.Buffer) * sizeof(WCHAR) == DynamicString.Length, "got %d and %d\n", wcslen(DynamicString.Buffer)  * sizeof(WCHAR) , DynamicString.Length);
+        ok(wcslen(DynamicString.Buffer) * sizeof(WCHAR) == DynamicString.Length, "got %Iu and %d\n", wcslen(DynamicString.Buffer)  * sizeof(WCHAR) , DynamicString.Length);
     else
         ok(DynamicString.Length != 0, "Expected non 0 lenght\n");
 

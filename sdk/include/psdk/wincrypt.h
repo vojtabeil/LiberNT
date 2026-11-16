@@ -30,9 +30,7 @@ extern "C" {
 #endif
 
 #include <bcrypt.h>
-#ifndef __REACTOS__
 #include <ncrypt.h>
-#endif
 
 #ifndef WINADVAPI
 #ifdef _ADVAPI32_
@@ -225,9 +223,12 @@ typedef struct _CRYPT_KEY_PROV_INFO {
 } CRYPT_KEY_PROV_INFO, *PCRYPT_KEY_PROV_INFO;
 
 typedef struct _CERT_KEY_CONTEXT {
-    DWORD      cbSize;
-    HCRYPTPROV hCryptProv;
-    DWORD      dwKeySpec;
+    DWORD cbSize;
+    union {
+        HCRYPTPROV        hCryptProv;
+        NCRYPT_KEY_HANDLE hNCryptKey;
+    } DUMMYUNIONNAME;
+    DWORD dwKeySpec;
 } CERT_KEY_CONTEXT, *PCERT_KEY_CONTEXT;
 
 typedef struct _CERT_PUBLIC_KEY_INFO {
@@ -324,7 +325,7 @@ typedef struct _CERT_ECC_SIGNATURE {
 
 typedef struct _CERT_POLICY_ID {
     DWORD  cCertPolicyElementId;
-    LPSTR *rgbszCertPolicyElementId;
+    LPSTR *rgpszCertPolicyElementId;
 } CERT_POLICY_ID, *PCERT_POLICY_ID;
 
 typedef struct _CERT_KEY_USAGE_RESTRICTION_INFO {
@@ -893,6 +894,8 @@ typedef struct _CMSG_SIGNER_INFO {
 #define CMSG_VERIFY_SIGNER_CHAIN  3
 #define CMSG_VERIFY_SIGNER_NULL   4
 
+#define CMSG_VERIFY_COUNTER_SIGN_ENABLE_STRONG_FLAG 0x00000001
+
 typedef struct _CERT_REVOCATION_CRL_INFO {
     DWORD         cbSize;
     PCCRL_CONTEXT pBaseCrlContext;
@@ -1100,9 +1103,9 @@ typedef struct _CERT_CHAIN_POLICY_STATUS {
 #define CERT_CHAIN_POLICY_IGNORE_ROOT_REV_UNKNOWN_FLAG          0x00000800
 
 #define CERT_CHAIN_POLICY_IGNORE_ALL_REV_UNKNOWN_FLAGS ( \
- CERT_CHAIN_POLICY_IGNORE_END_REV_UNKNOWN_FLAG \
- CERT_CHAIN_POLICY_IGNORE_CTL_SIGNER_REV_UNKNOWN_FLAG \
- CERT_CHAIN_POLICY_IGNORE_CA_REV_UNKNOWN_FLAG \
+ CERT_CHAIN_POLICY_IGNORE_END_REV_UNKNOWN_FLAG | \
+ CERT_CHAIN_POLICY_IGNORE_CTL_SIGNER_REV_UNKNOWN_FLAG | \
+ CERT_CHAIN_POLICY_IGNORE_CA_REV_UNKNOWN_FLAG | \
  CERT_CHAIN_POLICY_IGNORE_ROOT_REV_UNKNOWN_FLAG )
 
 #define CERT_CHAIN_POLICY_IGNORE_PEER_TRUST_FLAG                 0x00001000
@@ -1957,6 +1960,9 @@ typedef const CERT_CRL_CONTEXT_PAIR *PCCERT_CRL_CONTEXT_PAIR;
 #define CRYPT_OID_INFO_ALGID_KEY 3
 #define CRYPT_OID_INFO_SIGN_KEY  4
 
+#define CRYPT_OID_INFO_PUBKEY_ENCRYPT_KEY_FLAG 0x40000000
+#define CRYPT_OID_INFO_PUBKEY_SIGN_KEY_FLAG    0x80000000
+
 /* Algorithm IDs */
 
 #define GET_ALG_CLASS(x)                (x & (7 << 13))
@@ -2238,6 +2244,7 @@ static const WCHAR MS_ENH_RSA_AES_PROV_XP_W[] = { 'M','i','c','r','o','s','o','f
 /* Key Specs*/
 #define AT_KEYEXCHANGE          1
 #define AT_SIGNATURE            2
+#define CERT_NCRYPT_KEY_SPEC    0xffffffff
 
 /* Provider Types */
 #define PROV_RSA_FULL             1
@@ -2970,6 +2977,8 @@ static const WCHAR CERT_PHYSICAL_STORE_AUTH_ROOT_NAME[] =
 #define CERT_STORE_CTRL_AUTO_RESYNC   4
 #define CERT_STORE_CTRL_CANCEL_NOTIFY 5
 
+#define CERT_STORE_CTRL_INHIBIT_DUPLICATE_HANDLE_FLAG 0x1
+
 #define CERT_STORE_CTRL_COMMIT_FORCE_FLAG 0x1
 #define CERT_STORE_CTRL_COMMIT_CLEAR_FLAG 0x2
 
@@ -3191,6 +3200,8 @@ typedef struct _CTL_FIND_SUBJECT_PARA
 #define szOID_RSA_messageDigest             "1.2.840.113549.1.9.4"
 #define szOID_RSA_signingTime               "1.2.840.113549.1.9.5"
 #define szOID_RSA_counterSign               "1.2.840.113549.1.9.6"
+#define szOID_TIMESTAMP_TOKEN               "1.2.840.113549.1.9.16.1.4"
+#define szOID_RFC3161_counterSign           "1.3.6.1.4.1.311.3.3.1"
 #define szOID_RSA_challengePwd              "1.2.840.113549.1.9.7"
 #define szOID_RSA_unstructAddr              "1.2.840.113549.1.9.9"
 #define szOID_RSA_extCertAttrs              "1.2.840.113549.1.9.9"
@@ -3762,6 +3773,10 @@ typedef struct _CTL_FIND_SUBJECT_PARA
 #define CRYPT_ACQUIRE_USE_PROV_INFO_FLAG 0x00000002
 #define CRYPT_ACQUIRE_COMPARE_KEY_FLAG   0x00000004
 #define CRYPT_ACQUIRE_SILENT_FLAG        0x00000040
+#define CRYPT_ACQUIRE_NCRYPT_KEY_FLAGS_MASK  0x00070000
+#define CRYPT_ACQUIRE_ALLOW_NCRYPT_KEY_FLAG  0x00010000
+#define CRYPT_ACQUIRE_PREFER_NCRYPT_KEY_FLAG 0x00020000
+#define CRYPT_ACQUIRE_ONLY_NCRYPT_KEY_FLAG   0x00040000
 
 /* flags for CryptFindCertificateKeyProvInfo */
 #define CRYPT_FIND_USER_KEYSET_FLAG    0x00000001
@@ -3793,7 +3808,8 @@ typedef struct _CERT_CHAIN_ENGINE_CONFIG
     DWORD       MaximumCachedCertificates;
     DWORD       CycleDetectionModulus;
     HCERTSTORE  hExclusiveRoot;
-    HCERTSTORE  hExclusiveRootTrustedPeople;
+    HCERTSTORE  hExclusiveTrustedPeople;
+    DWORD       dwExclusiveFlags;
 } CERT_CHAIN_ENGINE_CONFIG, *PCERT_CHAIN_ENGINE_CONFIG;
 
 /* message-related definitions */
@@ -4087,6 +4103,8 @@ typedef struct _CMSG_CTRL_VERIFY_SIGNATURE_EX_PARA {
 #define CMSG_VERIFY_SIGNER_CHAIN  3
 #define CMSG_VERIFY_SIGNER_NULL   4
 
+#define CMSG_VERIFY_COUNTER_SIGN_ENABLE_STRONG_FLAG 0x00000001
+
 #define CMSG_TYPE_PARAM                  1
 #define CMSG_CONTENT_PARAM               2
 #define CMSG_BARE_CONTENT_PARAM          3
@@ -4259,8 +4277,17 @@ typedef struct _CERT_STRONG_SIGN_PARA {
     } DUMMYUNIONNAME;
 } CERT_STRONG_SIGN_PARA, *PCERT_STRONG_SIGN_PARA;
 
+#define CERT_STRONG_SIGN_ECDSA_ALGORITHM L"ECDSA"
+
 #define CERT_STRONG_SIGN_SERIALIZED_INFO_CHOICE  1
 #define CERT_STRONG_SIGN_OID_INFO_CHOICE         2
+
+#define szOID_CERT_STRONG_SIGN_OS_PREFIX  "1.3.6.1.4.1.311.72.1."
+#define szOID_CERT_STRONG_SIGN_OS_1       "1.3.6.1.4.1.311.72.1.1"
+#define szOID_CERT_STRONG_SIGN_OS_CURRENT szOID_CERT_STRONG_SIGN_OS_1
+#define szOID_CERT_STRONG_KEY_OS_PREFIX   "1.3.6.1.4.1.311.72.2."
+#define szOID_CERT_STRONG_KEY_OS_1        "1.3.6.1.4.1.311.72.2.1"
+#define szOID_CERT_STRONG_KEY_OS_CURRENT  szOID_CERT_STRONG_KEY_OS_1
 
 #define CERT_STRONG_SIGN_ENABLE_CRL_CHECK       0x1
 #define CERT_STRONG_SIGN_ENABLE_OCSP_CHECK      0x2
@@ -5568,6 +5595,19 @@ CryptHashCertificate(
   _Out_writes_bytes_to_opt_(*pcbComputedHash, *pcbComputedHash) BYTE *pbComputedHash,
   _Inout_ DWORD *pcbComputedHash);
 
+WINCRYPT32API
+_Success_(return != FALSE)
+BOOL
+WINAPI
+CryptHashCertificate2(
+  _In_ LPCWSTR pwszCNGHashAlgid,
+  _In_ DWORD dwFlags,
+  _Reserved_ void *pvReserved,
+  _In_reads_bytes_opt_(cbEncoded) const BYTE *pbEncoded,
+  _In_ DWORD cbEncoded,
+  _Out_writes_bytes_to_opt_(*pcbComputedHash, *pcbComputedHash) BYTE *pbComputedHash,
+  _Inout_ DWORD *pcbComputedHash);
+
 BOOL
 WINAPI
 CryptHashPublicKeyInfo(
@@ -5836,6 +5876,20 @@ BOOL WINAPI CryptProtectData( DATA_BLOB* pDataIn, LPCWSTR szDataDescr,
 BOOL WINAPI CryptUnprotectData( DATA_BLOB* pDataIn, LPWSTR* ppszDataDescr,
  DATA_BLOB* pOptionalEntropy, PVOID pvReserved,
  CRYPTPROTECT_PROMPTSTRUCT* pPromptStruct, DWORD dwFlags, DATA_BLOB* pDataOut );
+
+BOOL
+WINAPI
+CryptProtectMemory(
+  _Inout_ LPVOID pDataIn,
+  _In_ DWORD cbDataIn,
+  _In_ DWORD dwFlags);
+
+BOOL
+WINAPI
+CryptUnprotectMemory(
+  _Inout_ LPVOID pDataIn,
+  _In_ DWORD cbDataIn,
+  _In_ DWORD dwFlags);
 
 DWORD
 WINAPI

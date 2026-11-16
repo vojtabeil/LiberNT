@@ -27,9 +27,9 @@ RtlValidSid(IN PSID Sid_)
     _SEH2_TRY
     {
         /* Validate the revision and subauthority count */
-        if ((Sid) &&
-            (((Sid->Revision & 0xF) != SID_REVISION) ||
-             (Sid->SubAuthorityCount > SID_MAX_SUB_AUTHORITIES)))
+        if (!Sid ||
+            ((Sid->Revision & 0xF) != SID_REVISION) ||
+            (Sid->SubAuthorityCount > SID_MAX_SUB_AUTHORITIES))
         {
             /* It's not, fail */
             _SEH2_YIELD(return FALSE);
@@ -71,6 +71,9 @@ RtlInitializeSid(IN PSID Sid_,
 {
     PISID Sid = Sid_;
     PAGED_CODE_RTL();
+
+    if (SubAuthorityCount > SID_MAX_SUB_AUTHORITIES)
+        return STATUS_INVALID_PARAMETER;
 
     /* Fill out the header */
     Sid->Revision = SID_REVISION;
@@ -139,7 +142,7 @@ RtlEqualSid(IN PSID Sid1_,
     if (*(PUSHORT)&Sid1->Revision != *(PUSHORT)&Sid2->Revision) return FALSE;
 
     /* Get the length and compare it the long way */
-    return RtlEqualMemory(Sid1, Sid2, RtlLengthSid(Sid1));
+    return (RtlCompareMemory(Sid1, Sid2, RtlLengthSid(Sid1)) == RtlLengthSid(Sid1)) ? TRUE : FALSE;
 }
 
 /*
@@ -300,6 +303,7 @@ RtlAllocateAndInitializeSid(IN PSID_IDENTIFIER_AUTHORITY IdentifierAuthority,
                             OUT PSID *Sid)
 {
     PISID pSid;
+    PULONG SubAuthority;
     PAGED_CODE_RTL();
 
     /* SIDs can only have up to 8 subauthorities */
@@ -313,19 +317,20 @@ RtlAllocateAndInitializeSid(IN PSID_IDENTIFIER_AUTHORITY IdentifierAuthority,
     pSid->Revision = SID_REVISION;
     pSid->SubAuthorityCount = SubAuthorityCount;
     pSid->IdentifierAuthority = *IdentifierAuthority;
+    SubAuthority = (PULONG)((ULONG_PTR)pSid + FIELD_OFFSET(SID, SubAuthority));
 
     /* Iteraratively drop into each successive lower count */
     switch (SubAuthorityCount)
     {
         /* And copy the needed subahority */
-        case 8: pSid->SubAuthority[7] = SubAuthority7;
-        case 7: pSid->SubAuthority[6] = SubAuthority6;
-        case 6: pSid->SubAuthority[5] = SubAuthority5;
-        case 5: pSid->SubAuthority[4] = SubAuthority4;
-        case 4: pSid->SubAuthority[3] = SubAuthority3;
-        case 3: pSid->SubAuthority[2] = SubAuthority2;
-        case 2: pSid->SubAuthority[1] = SubAuthority1;
-        case 1: pSid->SubAuthority[0] = SubAuthority0;
+        case 8: SubAuthority[7] = SubAuthority7;
+        case 7: SubAuthority[6] = SubAuthority6;
+        case 6: SubAuthority[5] = SubAuthority5;
+        case 5: SubAuthority[4] = SubAuthority4;
+        case 4: SubAuthority[3] = SubAuthority3;
+        case 3: SubAuthority[2] = SubAuthority2;
+        case 2: SubAuthority[1] = SubAuthority1;
+        case 1: SubAuthority[0] = SubAuthority0;
         default: break;
     }
 
@@ -404,18 +409,112 @@ RtlConvertSidToUnicodeString(IN PUNICODE_STRING String,
     return STATUS_SUCCESS;
 }
 
-/*
- * @unimplemented
- */
-NTSTATUS
-NTAPI
-RtlCreateServiceSid(
-    _In_ PUNICODE_STRING ServiceName,
-    _Out_writes_bytes_opt_(*ServiceSidLength) PSID ServiceSid,
-    _Inout_ PULONG ServiceSidLength)
+/* EOF */
+
+static
+BOOLEAN
+RtlpIsAppPackageAuthority(
+    _In_ PSID Sid)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    static const SID_IDENTIFIER_AUTHORITY PackageAuthority = {SECURITY_APP_PACKAGE_AUTHORITY};
+    return RtlValidSid(Sid) &&
+           RtlEqualMemory(RtlIdentifierAuthoritySid(Sid), &PackageAuthority, sizeof(PackageAuthority));
 }
 
-/* EOF */
+BOOLEAN
+NTAPI
+RtlIsCapabilitySid(
+    _In_ PSID Sid)
+{
+    return RtlpIsAppPackageAuthority(Sid) &&
+           *RtlSubAuthorityCountSid(Sid) >= 2 &&
+           *RtlSubAuthoritySid(Sid, 0) == SECURITY_CAPABILITY_BASE_RID;
+}
+
+NTSTATUS
+NTAPI
+RtlGetAppContainerSidType(
+    _In_ PSID AppContainerSid,
+    _Out_ PULONG AppContainerSidType)
+{
+    UCHAR Count;
+
+    if (!AppContainerSidType)
+        return STATUS_INVALID_PARAMETER;
+    *AppContainerSidType = NotAppContainerSidType;
+    if (!RtlValidSid(AppContainerSid))
+        return STATUS_INVALID_SID;
+    if (!RtlpIsAppPackageAuthority(AppContainerSid) ||
+        *RtlSubAuthoritySid(AppContainerSid, 0) != SECURITY_APP_PACKAGE_BASE_RID)
+    {
+        return STATUS_NOT_APPCONTAINER;
+    }
+
+    Count = *RtlSubAuthorityCountSid(AppContainerSid);
+    if (Count == SECURITY_APP_PACKAGE_RID_COUNT)
+        *AppContainerSidType = ParentAppContainerSidType;
+    else if (Count == SECURITY_CHILD_PACKAGE_RID_COUNT)
+        *AppContainerSidType = ChildAppContainerSidType;
+    else
+    {
+        *AppContainerSidType = InvalidAppContainerSidType;
+        return STATUS_NOT_APPCONTAINER;
+    }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+RtlGetAppContainerParent(
+    _In_ PSID AppContainerSid,
+    _Out_ PSID *AppContainerSidParent)
+{
+    ULONG Type;
+    NTSTATUS Status;
+    PSID Parent;
+    ULONG Index;
+
+    if (!AppContainerSidParent)
+        return STATUS_INVALID_PARAMETER;
+    *AppContainerSidParent = NULL;
+
+    Status = RtlGetAppContainerSidType(AppContainerSid, &Type);
+    if (!NT_SUCCESS(Status)) return Status;
+    if (Type != ChildAppContainerSidType)
+        return STATUS_INVALID_PARAMETER;
+
+    Parent = RtlpAllocateMemory(RtlLengthRequiredSid(SECURITY_APP_PACKAGE_RID_COUNT), TAG_SID);
+    if (!Parent)
+        return STATUS_NO_MEMORY;
+
+    RtlInitializeSid(Parent, RtlIdentifierAuthoritySid(AppContainerSid), SECURITY_APP_PACKAGE_RID_COUNT);
+    for (Index = 0; Index < SECURITY_APP_PACKAGE_RID_COUNT; Index++)
+        *RtlSubAuthoritySid(Parent, Index) = *RtlSubAuthoritySid(AppContainerSid, Index);
+
+    *AppContainerSidParent = Parent;
+    return STATUS_SUCCESS;
+}
+
+BOOLEAN
+NTAPI
+RtlIsParentOfChildAppContainer(
+    _In_ PSID ParentAppContainerSid,
+    _In_ PSID ChildAppContainerSid)
+{
+    ULONG ParentType, ChildType, Index;
+    NTSTATUS Status;
+
+    Status = RtlGetAppContainerSidType(ParentAppContainerSid, &ParentType);
+    if (!NT_SUCCESS(Status)) return FALSE;
+    Status = RtlGetAppContainerSidType(ChildAppContainerSid, &ChildType);
+    if (!NT_SUCCESS(Status)) return FALSE;
+    if (ParentType != ParentAppContainerSidType || ChildType != ChildAppContainerSidType)
+        return FALSE;
+
+    for (Index = 0; Index < SECURITY_APP_PACKAGE_RID_COUNT; Index++)
+    {
+        if (*RtlSubAuthoritySid(ParentAppContainerSid, Index) != *RtlSubAuthoritySid(ChildAppContainerSid, Index))
+            return FALSE;
+    }
+    return TRUE;
+}

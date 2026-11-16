@@ -22,7 +22,7 @@
 
 #include <winreg.h>
 
-TCHAR g_Text[MAX_TEXT_LENGTH + 1] = _T("ReactOS Rocks!");
+TCHAR g_Text[MAX_TEXT_LENGTH + 1] = _T("LiberNT Rocks!");
 
 VOID LoadSettings(VOID)
 {
@@ -33,6 +33,7 @@ VOID LoadSettings(VOID)
 		_T(""), 0, KEY_READ, NULL, &hkey, NULL) == ERROR_SUCCESS)
     {
         RegQueryValueEx(hkey, _T("DisplayString"), NULL, NULL, (LPBYTE)g_Text, &len);
+        g_Text[MAX_TEXT_LENGTH] = 0;
         RegCloseKey(hkey);
     }
 }

@@ -43,7 +43,7 @@ template<class T> static HRESULT CreateFolderFromNameSpace(T Dir, Folder **ppsdf
     if (FAILED(hr))
         return -1; // Special return value so we know to skip
 
-    VARIANT vDir = { VT_I4 };
+    VARIANT vDir = { { { VT_I4 } } };
     V_I4(&vDir) = (UINT)(SIZE_T)Dir;
     if (!IS_INTRESOURCE((SIZE_T)Dir))
     {
@@ -165,7 +165,7 @@ static void TestFolderItem()
         ok(hr == S_OK && V_I4(&v) == GetFileSize(buf), "Size");
 
         hr = psdfi->QueryInterface(IID_PPV_ARG(FolderItem2, &psdfi2));
-        if ((ok(SUCCEEDED(hr), "QI FolderItem2\n", buf), SUCCEEDED(hr)))
+        if ((ok(SUCCEEDED(hr), "QI FolderItem2\n"), SUCCEEDED(hr)))
         {
             hr = psdfi2->ExtendedProperty((BSTR)L"Size", &v);
             if ((ok(SUCCEEDED(hr), "ExtendedProperty failed\n"), SUCCEEDED(hr)))

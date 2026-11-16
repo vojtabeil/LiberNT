@@ -22,7 +22,7 @@
 #define __ImageBase __MINGW_LSYMBOL(_image_base__)
 #endif
 /* This symbol is defined by the linker.  */
-extern IMAGE_DOS_HEADER __ImageBase;
+extern IMAGE_DOS_HEADER __ImageBase[];
 #endif
 
 #pragma pack(push,1)
@@ -46,13 +46,19 @@ extern void __cdecl _fpreset (void);
 EXCEPTION_DISPOSITION __mingw_SEH_error_handler(struct _EXCEPTION_RECORD *, void *, struct _CONTEXT *, void *);
 
 #define MAX_PDATA_ENTRIES 32
+#if !defined(__aarch64__) && !defined(_M_ARM64) && !defined(_M_RISCV64)
 static RUNTIME_FUNCTION emu_pdata[MAX_PDATA_ENTRIES];
 static UNWIND_INFO emu_xdata[MAX_PDATA_ENTRIES];
+#endif
 
 int
 __mingw_init_ehandler (void)
 {
   static int was_here = 0;
+#if defined(__aarch64__) || defined(_M_ARM64) || defined(_M_RISCV64)
+  if (!was_here) was_here = 1;
+  return was_here;
+#else
   size_t e = 0;
   PIMAGE_SECTION_HEADER pSec;
   PBYTE _ImageBase = _GetPEImageBase ();
@@ -88,6 +94,7 @@ __mingw_init_ehandler (void)
   if (e != 0)
     RtlAddFunctionTable (emu_pdata, e, (DWORD64)_ImageBase);
   return 1;
+#endif
 }
 
 extern void __cdecl _fpreset (void);
@@ -169,11 +176,13 @@ __mingw_SEH_error_handler (struct _EXCEPTION_RECORD* ExceptionRecord,
 	  action = 0; // EXCEPTION_CONTINUE_EXECUTION;
 	}
       break;
+#ifndef __REACTOS__
     case EXCEPTION_DATATYPE_MISALIGNMENT:
+    case EXCEPTION_INVALID_HANDLE:
+#endif
     case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
     case EXCEPTION_FLT_STACK_CHECK:
     case EXCEPTION_INT_OVERFLOW:
-    case EXCEPTION_INVALID_HANDLE:
     /*case EXCEPTION_POSSIBLE_DEADLOCK: */
       action = 0; // EXCEPTION_CONTINUE_EXECUTION;
       break;
@@ -273,11 +282,13 @@ _gnu_exception_handler (EXCEPTION_POINTERS *exception_data)
 	}
       break;
 #ifdef _WIN64
+#ifndef __REACTOS__
     case EXCEPTION_DATATYPE_MISALIGNMENT:
+    case EXCEPTION_INVALID_HANDLE:
+#endif
     case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
     case EXCEPTION_FLT_STACK_CHECK:
     case EXCEPTION_INT_OVERFLOW:
-    case EXCEPTION_INVALID_HANDLE:
     /*case EXCEPTION_POSSIBLE_DEADLOCK: */
       action = EXCEPTION_CONTINUE_EXECUTION;
       break;

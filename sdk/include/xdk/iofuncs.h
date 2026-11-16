@@ -38,7 +38,7 @@ $if (_WDMDDK_)
     } \
 }
 
-#if !defined(_M_AMD64)
+#if !defined(_M_AMD64) || defined(_M_ARM64EC)
 NTHALAPI
 VOID
 NTAPI
@@ -81,11 +81,12 @@ NTAPI
 READ_PORT_USHORT(
   IN PUSHORT Port);
 
+#if !defined(_M_ARM64) && !defined(_M_ARM64EC) && !defined(_M_RISCV64)
 NTKERNELAPI
 VOID
 NTAPI
 READ_REGISTER_BUFFER_UCHAR(
-  IN PUCHAR Register,
+  IN volatile UCHAR *Register,
   IN PUCHAR Buffer,
   IN ULONG Count);
 
@@ -93,7 +94,7 @@ NTKERNELAPI
 VOID
 NTAPI
 READ_REGISTER_BUFFER_ULONG(
-  IN PULONG Register,
+  IN volatile ULONG *Register,
   IN PULONG Buffer,
   IN ULONG Count);
 
@@ -101,7 +102,7 @@ NTKERNELAPI
 VOID
 NTAPI
 READ_REGISTER_BUFFER_USHORT(
-  IN PUSHORT Register,
+  IN volatile USHORT *Register,
   IN PUSHORT Buffer,
   IN ULONG Count);
 
@@ -109,19 +110,20 @@ NTKERNELAPI
 UCHAR
 NTAPI
 READ_REGISTER_UCHAR(
-  IN PUCHAR Register);
+  IN volatile UCHAR *Register);
 
 NTKERNELAPI
 ULONG
 NTAPI
 READ_REGISTER_ULONG(
-  IN PULONG Register);
+  IN volatile ULONG *Register);
 
 NTKERNELAPI
 USHORT
 NTAPI
 READ_REGISTER_USHORT(
-  IN PUSHORT Register);
+  IN volatile USHORT *Register);
+#endif
 
 NTHALAPI
 VOID
@@ -168,11 +170,12 @@ WRITE_PORT_USHORT(
   IN PUSHORT Port,
   IN USHORT Value);
 
+#if !defined(_M_ARM64) && !defined(_M_ARM64EC) && !defined(_M_RISCV64)
 NTKERNELAPI
 VOID
 NTAPI
 WRITE_REGISTER_BUFFER_UCHAR(
-  IN PUCHAR Register,
+  IN volatile UCHAR *Register,
   IN PUCHAR Buffer,
   IN ULONG Count);
 
@@ -180,7 +183,7 @@ NTKERNELAPI
 VOID
 NTAPI
 WRITE_REGISTER_BUFFER_ULONG(
-  IN PULONG Register,
+  IN volatile ULONG *Register,
   IN PULONG Buffer,
   IN ULONG Count);
 
@@ -188,7 +191,7 @@ NTKERNELAPI
 VOID
 NTAPI
 WRITE_REGISTER_BUFFER_USHORT(
-  IN PUSHORT Register,
+  IN volatile USHORT *Register,
   IN PUSHORT Buffer,
   IN ULONG Count);
 
@@ -196,22 +199,610 @@ NTKERNELAPI
 VOID
 NTAPI
 WRITE_REGISTER_UCHAR(
-  IN PUCHAR Register,
+  IN volatile UCHAR *Register,
   IN UCHAR Value);
 
 NTKERNELAPI
 VOID
 NTAPI
 WRITE_REGISTER_ULONG(
-  IN PULONG Register,
+  IN volatile ULONG *Register,
   IN ULONG Value);
 
 NTKERNELAPI
 VOID
 NTAPI
 WRITE_REGISTER_USHORT(
-  IN PUSHORT Register,
+  IN volatile USHORT *Register,
   IN USHORT Value);
+#endif
+
+#if (defined(_M_ARM64) || defined(_M_ARM64EC)) && !defined(NO_PORT_MACROS)
+#if defined(_MSC_VER) && !defined(__clang__)
+#define _ARM64_REGISTER_LOAD_BARRIER() __dsb(_ARM64_BARRIER_LD)
+#define _ARM64_REGISTER_STORE_BARRIER() __dsb(_ARM64_BARRIER_ST)
+#else
+#define _ARM64_REGISTER_LOAD_BARRIER() __asm__ __volatile__("dsb ld" ::: "memory")
+#define _ARM64_REGISTER_STORE_BARRIER() __asm__ __volatile__("dsb st" ::: "memory")
+#endif
+
+FORCEINLINE
+UCHAR
+READ_REGISTER_NOFENCE_UCHAR(
+  IN volatile UCHAR *Register)
+{
+  Register = (volatile UCHAR *)ReadPointerNoFence((PVOID const volatile *)&Register);
+  return ReadUCharNoFence(Register);
+}
+
+FORCEINLINE
+USHORT
+READ_REGISTER_NOFENCE_USHORT(
+  IN volatile USHORT *Register)
+{
+  Register = (volatile USHORT *)ReadPointerNoFence((PVOID const volatile *)&Register);
+  return ReadUShortNoFence(Register);
+}
+
+FORCEINLINE
+ULONG
+READ_REGISTER_NOFENCE_ULONG(
+  IN volatile ULONG *Register)
+{
+  Register = (volatile ULONG *)ReadPointerNoFence((PVOID const volatile *)&Register);
+  return ReadULongNoFence(Register);
+}
+
+FORCEINLINE
+ULONG64
+READ_REGISTER_NOFENCE_ULONG64(
+  IN volatile ULONG64 *Register)
+{
+  Register = (volatile ULONG64 *)ReadPointerNoFence((PVOID const volatile *)&Register);
+  return ReadULong64NoFence(Register);
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_NOFENCE_BUFFER_UCHAR(
+  IN volatile UCHAR *Register,
+  OUT PUCHAR Buffer,
+  IN ULONG Count)
+{
+  while (Count--)
+  {
+    Register = (volatile UCHAR *)ReadPointerNoFence((PVOID const volatile *)&Register);
+    *Buffer++ = ReadUCharNoFence(Register++);
+  }
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_NOFENCE_BUFFER_USHORT(
+  IN volatile USHORT *Register,
+  OUT PUSHORT Buffer,
+  IN ULONG Count)
+{
+  while (Count--)
+  {
+    Register = (volatile USHORT *)ReadPointerNoFence((PVOID const volatile *)&Register);
+    *Buffer++ = ReadUShortNoFence(Register++);
+  }
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_NOFENCE_BUFFER_ULONG(
+  IN volatile ULONG *Register,
+  OUT PULONG Buffer,
+  IN ULONG Count)
+{
+  while (Count--)
+  {
+    Register = (volatile ULONG *)ReadPointerNoFence((PVOID const volatile *)&Register);
+    *Buffer++ = ReadULongNoFence(Register++);
+  }
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_NOFENCE_BUFFER_ULONG64(
+  IN volatile ULONG64 *Register,
+  OUT PULONG64 Buffer,
+  IN ULONG Count)
+{
+  while (Count--)
+  {
+    Register = (volatile ULONG64 *)ReadPointerNoFence((PVOID const volatile *)&Register);
+    *Buffer++ = ReadULong64NoFence(Register++);
+  }
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_NOFENCE_UCHAR(
+  OUT volatile UCHAR *Register,
+  IN UCHAR Value)
+{
+  Register = (volatile UCHAR *)ReadPointerNoFence((PVOID const volatile *)&Register);
+  WriteUCharNoFence(Register, Value);
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_NOFENCE_USHORT(
+  OUT volatile USHORT *Register,
+  IN USHORT Value)
+{
+  Register = (volatile USHORT *)ReadPointerNoFence((PVOID const volatile *)&Register);
+  WriteUShortNoFence(Register, Value);
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_NOFENCE_ULONG(
+  OUT volatile ULONG *Register,
+  IN ULONG Value)
+{
+  Register = (volatile ULONG *)ReadPointerNoFence((PVOID const volatile *)&Register);
+  WriteULongNoFence(Register, Value);
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_NOFENCE_ULONG64(
+  OUT volatile ULONG64 *Register,
+  IN ULONG64 Value)
+{
+  Register = (volatile ULONG64 *)ReadPointerNoFence((PVOID const volatile *)&Register);
+  WriteULong64NoFence(Register, Value);
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_NOFENCE_BUFFER_UCHAR(
+  OUT volatile UCHAR *Register,
+  IN PUCHAR Buffer,
+  IN ULONG Count)
+{
+  while (Count--)
+  {
+    Register = (volatile UCHAR *)ReadPointerNoFence((PVOID const volatile *)&Register);
+    WriteUCharNoFence(Register++, *Buffer++);
+  }
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_NOFENCE_BUFFER_USHORT(
+  OUT volatile USHORT *Register,
+  IN PUSHORT Buffer,
+  IN ULONG Count)
+{
+  while (Count--)
+  {
+    Register = (volatile USHORT *)ReadPointerNoFence((PVOID const volatile *)&Register);
+    WriteUShortNoFence(Register++, *Buffer++);
+  }
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_NOFENCE_BUFFER_ULONG(
+  OUT volatile ULONG *Register,
+  IN PULONG Buffer,
+  IN ULONG Count)
+{
+  while (Count--)
+  {
+    Register = (volatile ULONG *)ReadPointerNoFence((PVOID const volatile *)&Register);
+    WriteULongNoFence(Register++, *Buffer++);
+  }
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_NOFENCE_BUFFER_ULONG64(
+  OUT volatile ULONG64 *Register,
+  IN PULONG64 Buffer,
+  IN ULONG Count)
+{
+  while (Count--)
+  {
+    Register = (volatile ULONG64 *)ReadPointerNoFence((PVOID const volatile *)&Register);
+    WriteULong64NoFence(Register++, *Buffer++);
+  }
+}
+
+FORCEINLINE
+UCHAR
+READ_REGISTER_UCHAR(
+  IN volatile UCHAR *Register)
+{
+  UCHAR Value = *(volatile UCHAR * const)Register;
+  _ARM64_REGISTER_LOAD_BARRIER();
+  return Value;
+}
+
+FORCEINLINE
+USHORT
+READ_REGISTER_USHORT(
+  IN volatile USHORT *Register)
+{
+  USHORT Value = *(volatile USHORT * const)Register;
+  _ARM64_REGISTER_LOAD_BARRIER();
+  return Value;
+}
+
+FORCEINLINE
+ULONG
+READ_REGISTER_ULONG(
+  IN volatile ULONG *Register)
+{
+  ULONG Value = *(volatile ULONG * const)Register;
+  _ARM64_REGISTER_LOAD_BARRIER();
+  return Value;
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_BUFFER_UCHAR(
+  IN volatile UCHAR *Register,
+  IN PUCHAR Buffer,
+  IN ULONG Count)
+{
+  volatile const UCHAR *Src = (volatile const UCHAR *)Register;
+  while (Count--)
+    *Buffer++ = *Src;
+  _ARM64_REGISTER_LOAD_BARRIER();
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_BUFFER_USHORT(
+  IN volatile USHORT *Register,
+  IN PUSHORT Buffer,
+  IN ULONG Count)
+{
+  volatile const USHORT *Src = (volatile const USHORT *)Register;
+  while (Count--)
+    *Buffer++ = *Src;
+  _ARM64_REGISTER_LOAD_BARRIER();
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_BUFFER_ULONG(
+  IN volatile ULONG *Register,
+  IN PULONG Buffer,
+  IN ULONG Count)
+{
+  volatile const ULONG *Src = (volatile const ULONG *)Register;
+  while (Count--)
+    *Buffer++ = *Src;
+  _ARM64_REGISTER_LOAD_BARRIER();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_UCHAR(
+  IN volatile UCHAR *Register,
+  IN UCHAR Value)
+{
+  *(volatile UCHAR *)Register = Value;
+  _ARM64_REGISTER_STORE_BARRIER();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_USHORT(
+  IN volatile USHORT *Register,
+  IN USHORT Value)
+{
+  *(volatile USHORT *)Register = Value;
+  _ARM64_REGISTER_STORE_BARRIER();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_ULONG(
+  IN volatile ULONG *Register,
+  IN ULONG Value)
+{
+  *(volatile ULONG *)Register = Value;
+  _ARM64_REGISTER_STORE_BARRIER();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_BUFFER_UCHAR(
+  IN volatile UCHAR *Register,
+  IN PUCHAR Buffer,
+  IN ULONG Count)
+{
+  volatile UCHAR *Dst = (volatile UCHAR *)Register;
+  while (Count--)
+    *Dst = *Buffer++;
+  _ARM64_REGISTER_STORE_BARRIER();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_BUFFER_USHORT(
+  IN volatile USHORT *Register,
+  IN PUSHORT Buffer,
+  IN ULONG Count)
+{
+  volatile USHORT *Dst = (volatile USHORT *)Register;
+  while (Count--)
+    *Dst = *Buffer++;
+  _ARM64_REGISTER_STORE_BARRIER();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_BUFFER_ULONG(
+  IN volatile ULONG *Register,
+  IN PULONG Buffer,
+  IN ULONG Count)
+{
+  volatile ULONG *Dst = (volatile ULONG *)Register;
+  while (Count--)
+    *Dst = *Buffer++;
+  _ARM64_REGISTER_STORE_BARRIER();
+}
+
+FORCEINLINE
+ULONG64
+READ_REGISTER_ULONG64(
+  IN volatile ULONG64 *Register)
+{
+  ULONG64 Value = *(volatile ULONG64 * const)Register;
+  _ARM64_REGISTER_LOAD_BARRIER();
+  return Value;
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_BUFFER_ULONG64(
+  IN volatile ULONG64 *Register,
+  IN PULONG64 Buffer,
+  IN ULONG Count)
+{
+  volatile const ULONG64 *Src = (volatile const ULONG64 *)Register;
+  while (Count--)
+    *Buffer++ = *Src;
+  _ARM64_REGISTER_LOAD_BARRIER();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_ULONG64(
+  IN volatile ULONG64 *Register,
+  IN ULONG64 Value)
+{
+  *(volatile ULONG64 *)Register = Value;
+  _ARM64_REGISTER_STORE_BARRIER();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_BUFFER_ULONG64(
+  IN volatile ULONG64 *Register,
+  IN PULONG64 Buffer,
+  IN ULONG Count)
+{
+  volatile ULONG64 *Dst = (volatile ULONG64 *)Register;
+  while (Count--)
+    *Dst = *Buffer++;
+  _ARM64_REGISTER_STORE_BARRIER();
+}
+#endif
+
+#if defined(_M_RISCV64) && !defined(NO_PORT_MACROS)
+/* Order each register access against all memory and I/O accesses around it. */
+#define _RISCV64_REGISTER_FENCE() __asm__ __volatile__("fence iorw, iorw" ::: "memory")
+
+FORCEINLINE
+UCHAR
+READ_REGISTER_UCHAR(
+  IN volatile UCHAR *Register)
+{
+  UCHAR Value;
+
+  _RISCV64_REGISTER_FENCE();
+  Value = *Register;
+  _RISCV64_REGISTER_FENCE();
+  return Value;
+}
+
+FORCEINLINE
+USHORT
+READ_REGISTER_USHORT(
+  IN volatile USHORT *Register)
+{
+  USHORT Value;
+
+  _RISCV64_REGISTER_FENCE();
+  Value = *Register;
+  _RISCV64_REGISTER_FENCE();
+  return Value;
+}
+
+FORCEINLINE
+ULONG
+READ_REGISTER_ULONG(
+  IN volatile ULONG *Register)
+{
+  ULONG Value;
+
+  _RISCV64_REGISTER_FENCE();
+  Value = *Register;
+  _RISCV64_REGISTER_FENCE();
+  return Value;
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_BUFFER_UCHAR(
+  IN volatile UCHAR *Register,
+  OUT PUCHAR Buffer,
+  IN ULONG Count)
+{
+  _RISCV64_REGISTER_FENCE();
+  while (Count--)
+    *Buffer++ = *Register;
+  _RISCV64_REGISTER_FENCE();
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_BUFFER_USHORT(
+  IN volatile USHORT *Register,
+  OUT PUSHORT Buffer,
+  IN ULONG Count)
+{
+  _RISCV64_REGISTER_FENCE();
+  while (Count--)
+    *Buffer++ = *Register;
+  _RISCV64_REGISTER_FENCE();
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_BUFFER_ULONG(
+  IN volatile ULONG *Register,
+  OUT PULONG Buffer,
+  IN ULONG Count)
+{
+  _RISCV64_REGISTER_FENCE();
+  while (Count--)
+    *Buffer++ = *Register;
+  _RISCV64_REGISTER_FENCE();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_UCHAR(
+  IN volatile UCHAR *Register,
+  IN UCHAR Value)
+{
+  _RISCV64_REGISTER_FENCE();
+  *Register = Value;
+  _RISCV64_REGISTER_FENCE();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_USHORT(
+  IN volatile USHORT *Register,
+  IN USHORT Value)
+{
+  _RISCV64_REGISTER_FENCE();
+  *Register = Value;
+  _RISCV64_REGISTER_FENCE();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_ULONG(
+  IN volatile ULONG *Register,
+  IN ULONG Value)
+{
+  _RISCV64_REGISTER_FENCE();
+  *Register = Value;
+  _RISCV64_REGISTER_FENCE();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_BUFFER_UCHAR(
+  IN volatile UCHAR *Register,
+  IN PUCHAR Buffer,
+  IN ULONG Count)
+{
+  _RISCV64_REGISTER_FENCE();
+  while (Count--)
+    *Register = *Buffer++;
+  _RISCV64_REGISTER_FENCE();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_BUFFER_USHORT(
+  IN volatile USHORT *Register,
+  IN PUSHORT Buffer,
+  IN ULONG Count)
+{
+  _RISCV64_REGISTER_FENCE();
+  while (Count--)
+    *Register = *Buffer++;
+  _RISCV64_REGISTER_FENCE();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_BUFFER_ULONG(
+  IN volatile ULONG *Register,
+  IN PULONG Buffer,
+  IN ULONG Count)
+{
+  _RISCV64_REGISTER_FENCE();
+  while (Count--)
+    *Register = *Buffer++;
+  _RISCV64_REGISTER_FENCE();
+}
+
+FORCEINLINE
+ULONG64
+READ_REGISTER_ULONG64(
+  IN volatile ULONG64 *Register)
+{
+  ULONG64 Value;
+
+  _RISCV64_REGISTER_FENCE();
+  Value = *Register;
+  _RISCV64_REGISTER_FENCE();
+  return Value;
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_BUFFER_ULONG64(
+  IN volatile ULONG64 *Register,
+  OUT PULONG64 Buffer,
+  IN ULONG Count)
+{
+  _RISCV64_REGISTER_FENCE();
+  while (Count--)
+    *Buffer++ = *Register;
+  _RISCV64_REGISTER_FENCE();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_ULONG64(
+  IN volatile ULONG64 *Register,
+  IN ULONG64 Value)
+{
+  _RISCV64_REGISTER_FENCE();
+  *Register = Value;
+  _RISCV64_REGISTER_FENCE();
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_BUFFER_ULONG64(
+  IN volatile ULONG64 *Register,
+  IN PULONG64 Buffer,
+  IN ULONG Count)
+{
+  _RISCV64_REGISTER_FENCE();
+  while (Count--)
+    *Register = *Buffer++;
+  _RISCV64_REGISTER_FENCE();
+}
+#endif
 
 #else
 
@@ -272,31 +863,31 @@ READ_PORT_USHORT(
 FORCEINLINE
 VOID
 READ_REGISTER_BUFFER_UCHAR(
-  IN PUCHAR Register,
+  IN volatile UCHAR *Register,
   IN PUCHAR Buffer,
   IN ULONG Count)
 {
-  __movsb(Register, Buffer, Count);
+  __movsb(Buffer, (const UCHAR *)Register, Count);
 }
 
 FORCEINLINE
 VOID
 READ_REGISTER_BUFFER_ULONG(
-  IN PULONG Register,
+  IN volatile ULONG *Register,
   IN PULONG Buffer,
   IN ULONG Count)
 {
-  __movsd(Register, Buffer, Count);
+  __movsd(Buffer, (const ULONG *)Register, Count);
 }
 
 FORCEINLINE
 VOID
 READ_REGISTER_BUFFER_USHORT(
-  IN PUSHORT Register,
+  IN volatile USHORT *Register,
   IN PUSHORT Buffer,
   IN ULONG Count)
 {
-  __movsw(Register, Buffer, Count);
+  __movsw(Buffer, (const USHORT *)Register, Count);
 }
 
 FORCEINLINE
@@ -304,7 +895,13 @@ UCHAR
 READ_REGISTER_UCHAR(
   IN volatile UCHAR *Register)
 {
+#if defined(__GNUC__)
+  UCHAR Value;
+  __asm__ __volatile__("movb %1, %0" : "=q"(Value) : "m"(*Register) : "memory");
+  return Value;
+#else
   return *Register;
+#endif
 }
 
 FORCEINLINE
@@ -312,7 +909,13 @@ ULONG
 READ_REGISTER_ULONG(
   IN volatile ULONG *Register)
 {
+#if defined(__GNUC__)
+  ULONG Value;
+  __asm__ __volatile__("movl %1, %0" : "=r"(Value) : "m"(*Register) : "memory");
+  return Value;
+#else
   return *Register;
+#endif
 }
 
 FORCEINLINE
@@ -320,7 +923,13 @@ USHORT
 READ_REGISTER_USHORT(
   IN volatile USHORT *Register)
 {
+#if defined(__GNUC__)
+  USHORT Value;
+  __asm__ __volatile__("movw %1, %0" : "=r"(Value) : "m"(*Register) : "memory");
+  return Value;
+#else
   return *Register;
+#endif
 }
 
 FORCEINLINE
@@ -383,37 +992,34 @@ WRITE_PORT_USHORT(
 FORCEINLINE
 VOID
 WRITE_REGISTER_BUFFER_UCHAR(
-  IN PUCHAR Register,
+  IN volatile UCHAR *Register,
   IN PUCHAR Buffer,
   IN ULONG Count)
 {
-  LONG Synch;
-  __movsb(Register, Buffer, Count);
-  InterlockedOr(&Synch, 1);
+  __movsb((UCHAR *)Register, Buffer, Count);
+  KeMemoryBarrier();
 }
 
 FORCEINLINE
 VOID
 WRITE_REGISTER_BUFFER_ULONG(
-  IN PULONG Register,
+  IN volatile ULONG *Register,
   IN PULONG Buffer,
   IN ULONG Count)
 {
-  LONG Synch;
-  __movsd(Register, Buffer, Count);
-  InterlockedOr(&Synch, 1);
+  __movsd((ULONG *)Register, Buffer, Count);
+  KeMemoryBarrier();
 }
 
 FORCEINLINE
 VOID
 WRITE_REGISTER_BUFFER_USHORT(
-  IN PUSHORT Register,
+  IN volatile USHORT *Register,
   IN PUSHORT Buffer,
   IN ULONG Count)
 {
-  LONG Synch;
-  __movsw(Register, Buffer, Count);
-  InterlockedOr(&Synch, 1);
+  __movsw((USHORT *)Register, Buffer, Count);
+  KeMemoryBarrier();
 }
 
 FORCEINLINE
@@ -423,7 +1029,11 @@ WRITE_REGISTER_UCHAR(
   IN UCHAR Value)
 {
   LONG Synch;
+#if defined(__GNUC__)
+  __asm__ __volatile__("movb %1, %0" : "=m"(*Register) : "q"(Value) : "memory");
+#else
   *Register = Value;
+#endif
   InterlockedOr(&Synch, 1);
 }
 
@@ -434,7 +1044,11 @@ WRITE_REGISTER_ULONG(
   IN ULONG Value)
 {
   LONG Synch;
+#if defined(__GNUC__)
+  __asm__ __volatile__("movl %1, %0" : "=m"(*Register) : "r"(Value) : "memory");
+#else
   *Register = Value;
+#endif
   InterlockedOr(&Synch, 1);
 }
 
@@ -445,9 +1059,67 @@ WRITE_REGISTER_USHORT(
   IN USHORT Value)
 {
   LONG Sync;
+#if defined(__GNUC__)
+  __asm__ __volatile__("movw %1, %0" : "=m"(*Register) : "r"(Value) : "memory");
+#else
   *Register = Value;
+#endif
   InterlockedOr(&Sync, 1);
 }
+
+#if defined(_WIN64)
+
+FORCEINLINE
+ULONG64
+READ_REGISTER_ULONG64(
+  IN volatile ULONG64 *Register)
+{
+#if defined(__GNUC__)
+  ULONG64 Value;
+  __asm__ __volatile__("movq %1, %0" : "=r"(Value) : "m"(*Register) : "memory");
+  return Value;
+#else
+  return *Register;
+#endif
+}
+
+FORCEINLINE
+VOID
+READ_REGISTER_BUFFER_ULONG64(
+  IN volatile ULONG64 *Register,
+  IN PULONG64 Buffer,
+  IN ULONG Count)
+{
+  __movsq(Buffer, (const ULONG64 *)Register, Count);
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_ULONG64(
+  IN volatile ULONG64 *Register,
+  IN ULONG64 Value)
+{
+  LONG Synch;
+#if defined(__GNUC__)
+  __asm__ __volatile__("movq %1, %0" : "=m"(*Register) : "r"(Value) : "memory");
+#else
+  *Register = Value;
+#endif
+  InterlockedOr(&Synch, 1);
+}
+
+FORCEINLINE
+VOID
+WRITE_REGISTER_BUFFER_ULONG64(
+  IN volatile ULONG64 *Register,
+  IN PULONG64 Buffer,
+  IN ULONG Count)
+{
+  __movsq((ULONG64 *)Register, Buffer, Count);
+  KeMemoryBarrier();
+}
+#endif
+
 #endif
 
 #if defined(USE_DMA_MACROS) && !defined(_NTHAL_) && \
@@ -574,6 +1246,7 @@ IoInitializeDriverCreateContext(
 {
   RtlZeroMemory(DriverContext, sizeof(IO_DRIVER_CREATE_CONTEXT));
   DriverContext->Size = sizeof(IO_DRIVER_CREATE_CONTEXT);
+  DriverContext->SiloContext = IO_USE_AMBIENT_SILO;
 }
 
 $endif (_NTDDK_)
@@ -1018,6 +1691,25 @@ IoGetDmaAdapter(
   _Out_ _When_(return!=0, _Kernel_IoGetDmaAdapter_ _At_(*NumberOfMapRegisters, _Must_inspect_result_))
     PULONG NumberOfMapRegisters);
 
+_Must_inspect_result_
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoGetIommuInterface(
+  _In_ ULONG Version,
+  _Out_ PDMA_IOMMU_INTERFACE InterfaceOut);
+
+_Must_inspect_result_
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoGetIommuInterfaceEx(
+  _In_ ULONG Version,
+  _In_ ULONGLONG Flags,
+  _Out_ PDMA_IOMMU_INTERFACE_EX InterfaceOut);
+
 __drv_aliasesMem
 _IRQL_requires_max_(DISPATCH_LEVEL)
 NTKERNELAPI
@@ -1126,6 +1818,47 @@ IoOpenDeviceRegistryKey(
   _In_ ACCESS_MASK DesiredAccess,
   _Out_ PHANDLE DevInstRegKey);
 
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS4)
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoOpenDriverRegistryKey(
+  _In_ PDRIVER_OBJECT DriverObject,
+  _In_ DRIVER_REGKEY_TYPE RegKeyType,
+  _In_ ACCESS_MASK DesiredAccess,
+  _In_ ULONG Flags,
+  _Out_ PHANDLE DriverRegKey);
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoGetDriverDirectory(
+  _In_ PDRIVER_OBJECT DriverObject,
+  _In_ DRIVER_DIRECTORY_TYPE DirectoryType,
+  _In_ ULONG Flags,
+  _Out_ PHANDLE DriverDirectoryHandle);
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+_IRQL_requires_max_(DISPATCH_LEVEL)
+NTKERNELAPI
+VOID
+NTAPI
+IoReportInterruptActive(
+  _In_ PIO_REPORT_INTERRUPT_ACTIVE_STATE_PARAMETERS Parameters);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+NTKERNELAPI
+VOID
+NTAPI
+IoReportInterruptInactive(
+  _In_ PIO_REPORT_INTERRUPT_ACTIVE_STATE_PARAMETERS Parameters);
+#endif
+
 _IRQL_requires_max_(PASSIVE_LEVEL)
 _Must_inspect_result_
 NTKERNELAPI
@@ -1229,6 +1962,15 @@ NTAPI
 IoReuseIrp(
   _Inout_ PIRP Irp,
   _In_ NTSTATUS Status);
+
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS1)
+_IRQL_requires_max_(DISPATCH_LEVEL)
+NTKERNELAPI
+VOID
+NTAPI
+IoCleanupIrp(
+  _Inout_ PIRP Irp);
+#endif
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
 _Must_inspect_result_
@@ -1386,6 +2128,23 @@ IoSetTopLevelIrp(
 
 $endif (_WDMDDK_)
 $if (_NTDDK_)
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+_Must_inspect_result_
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoVolumeDeviceToGuidPath(
+  _In_ PVOID VolumeDeviceObject,
+  _Out_ PUNICODE_STRING GuidPath);
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoVolumeDeviceToGuid(
+  _In_ PVOID VolumeDeviceObject,
+  _Out_ GUID *Guid);
+#endif
+
 #if !(defined(USE_DMA_MACROS) && (defined(_NTDDK_) || defined(_NTDRIVER_)) || defined(_WDM_INCLUDED_))
 _IRQL_requires_max_(DISPATCH_LEVEL)
 _IRQL_requires_min_(DISPATCH_LEVEL)
@@ -1923,6 +2682,15 @@ IoForwardIrpSynchronously(
 
 #define IoForwardAndCatchIrp IoForwardIrpSynchronously
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoSynchronousCallDriver(
+  _In_ PDEVICE_OBJECT DeviceObject,
+  _In_ PIRP Irp);
+#endif
+
 NTKERNELAPI
 VOID
 NTAPI
@@ -2163,6 +2931,55 @@ IoAttachDeviceToDeviceStackSafe(
   _In_ PDEVICE_OBJECT TargetDevice,
   _Outptr_ PDEVICE_OBJECT *AttachedToDeviceObject);
 
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoGetActivityIdIrp(
+  _In_ PIRP Irp,
+  _Out_ LPGUID Guid);
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoSetActivityIdIrp(
+  _Inout_ PIRP Irp,
+  _In_opt_ LPCGUID Guid);
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoPropagateActivityIdToThread(
+  _In_ PIRP Irp,
+  _Out_ LPGUID PropagatedId,
+  _Outptr_ LPCGUID *OriginalId);
+
+NTKERNELAPI
+LPCGUID
+NTAPI
+IoSetActivityIdThread(
+  _In_ LPCGUID ActivityId);
+
+NTKERNELAPI
+VOID
+NTAPI
+IoClearActivityIdThread(
+  _In_ LPCGUID OriginalId);
+
+NTKERNELAPI
+LPCGUID
+NTAPI
+IoGetActivityIdThread(
+  VOID);
+
+NTKERNELAPI
+VOID
+NTAPI
+IoTransferActivityId(
+  _In_ LPCGUID ActivityId,
+  _In_ LPCGUID RelatedActivityId);
+#endif
+
 $endif (_NTDDK_)
 $if (_NTIFS_)
 
@@ -2221,6 +3038,24 @@ NTAPI
 IoValidateDeviceIoControlAccess(
   _In_ PIRP Irp,
   _In_ ULONG RequiredAccess);
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+_IRQL_requires_same_
+_IRQL_requires_(PASSIVE_LEVEL)
+_Must_inspect_result_
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoCreateSystemThread(
+  _Inout_ PVOID IoObject,
+  _Out_ PHANDLE ThreadHandle,
+  _In_ ULONG DesiredAccess,
+  _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+  _In_opt_ HANDLE ProcessHandle,
+  _Out_opt_ PCLIENT_ID ClientId,
+  _In_ PKSTART_ROUTINE StartRoutine,
+  _In_opt_ PVOID StartContext);
 #endif
 
 $endif (_WDMDDK_)
@@ -2505,6 +3340,15 @@ IoInitializePriorityInfo(
     PriorityInfo->IoPriority = IoPriorityNormal;
     PriorityInfo->PagePriority = 0;
 }
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoRetrievePriorityInfo(
+    _In_opt_ PIRP Irp,
+    _In_opt_ PFILE_OBJECT FileObject,
+    _In_opt_ PETHREAD Thread,
+    _Inout_ PIO_PRIORITY_INFO PriorityInfo);
 $endif (_NTIFS_)
 #endif /* (NTDDI_VERSION >= NTDDI_VISTA) */
 
@@ -2599,6 +3443,15 @@ IoReplaceFileObjectName(
   _In_reads_bytes_(FileNameLength) PWSTR NewFileName,
   _In_ USHORT FileNameLength);
 $endif (_NTIFS_)
+$if (_NTDDK_)
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoReportRootDevice(
+  _In_ PDRIVER_OBJECT DriverObject);
+
+$endif (_NTDDK_)
 #endif /* (NTDDI_VERSION >= NTDDI_WIN7) */
 
 #if (NTDDI_VERSION >= NTDDI_WIN8)
@@ -2608,6 +3461,7 @@ _IRQL_requires_max_(PASSIVE_LEVEL)
 _Must_inspect_result_
 NTKRNLVISTAAPI
 NTSTATUS
+NTAPI
 IoSetDeviceInterfacePropertyData(
   _In_ PUNICODE_STRING SymbolicLinkName,
   _In_ CONST DEVPROPKEY *PropertyKey,
@@ -2621,6 +3475,7 @@ _IRQL_requires_max_(PASSIVE_LEVEL)
 _Must_inspect_result_
 NTKERNELAPI
 NTSTATUS
+NTAPI
 IoGetDeviceInterfacePropertyData (
   _In_ PUNICODE_STRING SymbolicLinkName,
   _In_ CONST DEVPROPKEY *PropertyKey,
@@ -2635,12 +3490,24 @@ $if (_NTDDK_)
 
 NTKRNLVISTAAPI
 VOID
+NTAPI
 IoSetMasterIrpStatus(
   _Inout_ PIRP MasterIrp,
   _In_ NTSTATUS Status);
 $endif (_NTDDK_)
 
 #endif /* (NTDDI_VERSION >= NTDDI_WIN8) */
+
+#if (NTDDI_VERSION >= NTDDI_WINBLUE)
+$if (_NTDDK_)
+NTKERNELAPI
+NTSTATUS
+NTAPI
+IoQueryFullDriverPath(
+  _In_ PDRIVER_OBJECT DriverObject,
+  _Out_ PUNICODE_STRING FullPath);
+$endif (_NTDDK_)
+#endif /* (NTDDI_VERSION >= NTDDI_WINBLUE) */
 
 $if (_WDMDDK_)
 #if defined(_WIN64)

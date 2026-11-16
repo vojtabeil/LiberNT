@@ -27,6 +27,7 @@
 #include "winternl.h"
 #include <psapi.h>
 #include "wine/test.h"
+#include "native_machine.h"
 
 static DWORD (WINAPI *pGetDllDirectoryA)(DWORD,LPSTR);
 static DWORD (WINAPI *pGetDllDirectoryW)(DWORD,LPWSTR);
@@ -74,17 +75,7 @@ static const struct
     {
         IMAGE_NT_SIGNATURE, /* Signature */
         {
-#if defined __i386__
-            IMAGE_FILE_MACHINE_I386, /* Machine */
-#elif defined __x86_64__
-            IMAGE_FILE_MACHINE_AMD64, /* Machine */
-#elif defined __arm__
-            IMAGE_FILE_MACHINE_ARMNT, /* Machine */
-#elif defined __aarch64__
-            IMAGE_FILE_MACHINE_ARM64, /* Machine */
-#else
-# error You must specify the machine type
-#endif
+            WINETEST_IMAGE_FILE_MACHINE, /* Machine */
             1, /* NumberOfSections */
             0, /* TimeDateStamp */
             0, /* PointerToSymbolTable */
@@ -807,8 +798,12 @@ static void test_LoadLibraryEx_search_flags(void)
         ok( GetLastError() == ERROR_MOD_NOT_FOUND, "wrong error %lu\n", GetLastError() );
         SetLastError( 0xdeadbeef );
         mod = LoadLibraryExA( "ext-ms-win-ras-rasapi32-l1-1-0.dll", NULL, LOAD_LIBRARY_SEARCH_APPLICATION_DIR );
+#ifdef __REACTOS__
+        ok( !!mod, "rasapi32 not loaded %lu\n", GetLastError() );
+#else
         todo_wine /* rasapi32 doesn't have interesting dependencies on wine */
         ok( !mod, "rasapi32 loaded\n" );
+#endif
         if (mod) FreeLibrary( mod );
         else ok( GetLastError() == ERROR_MOD_NOT_FOUND, "wrong error %lu\n", GetLastError() );
         mod = LoadLibraryA( "ext-ms-win-ras-rasapi32-l1-1-0.dll" );
@@ -1342,10 +1337,11 @@ static void check_refcount( HMODULE mod, unsigned int refcount )
         ret = FreeLibrary( mod );
 #ifdef __REACTOS__
         ok( ret || broken( refcount == ~0u && GetLastError() == ERROR_MOD_NOT_FOUND && (i == 2) ) /* Win8 */ || broken( refcount == 2 && GetLastError() == ERROR_MOD_NOT_FOUND && i == 1 ) /* WS03 */,
+            "Refcount test failed, i %u, error %lu, refcount %u.\n", i, GetLastError(), refcount );
 #else
         ok( ret || broken( refcount == ~0u && GetLastError() == ERROR_MOD_NOT_FOUND && i == 2 ) /* Win8 */,
-#endif
             "Refcount test failed, i %u, error %lu.\n", i, GetLastError(), refcount );
+#endif
         if (!ret) return;
     }
     if (refcount != ~0u)

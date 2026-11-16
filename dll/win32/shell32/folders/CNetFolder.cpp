@@ -234,6 +234,11 @@ static HRESULT CALLBACK CNetFolderBackgroundMenuCB(IShellFolder *psf, HWND hwnd,
  * CNetFolder
  */
 
+HRESULT WINAPI CNetFolder::CallBack(IShellFolder *psf, HWND hwndOwner, IDataObject *pdtobj, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    return CNetFolderBackgroundMenuCB(psf, hwndOwner, pdtobj, uMsg, wParam, lParam);
+}
+
 CNetFolder::CNetFolder()
 {
     pidlRoot = NULL;
@@ -251,13 +256,13 @@ CNetFolder::~CNetFolder()
 HRESULT WINAPI CNetFolder::ParseDisplayName(HWND hwndOwner, LPBC pbcReserved, LPOLESTR lpszDisplayName,
         DWORD *pchEaten, PIDLIST_RELATIVE *ppidl, DWORD *pdwAttributes)
 {
-    HRESULT hr = E_UNEXPECTED;
+    HRESULT hr = E_INVALIDARG;
 #ifdef HACKY_UNC_PATHS
     /* FIXME: the code below is an ugly hack */
 
     /* Can we use a CFSFolder on that path? */
     DWORD attrs = GetFileAttributes(lpszDisplayName);
-    if ((attrs & FILE_ATTRIBUTE_DIRECTORY))
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY))
     {
         if (pchEaten)
             *pchEaten = 0;        /* strange but like the original */
@@ -279,8 +284,6 @@ HRESULT WINAPI CNetFolder::ParseDisplayName(HWND hwndOwner, LPBC pbcReserved, LP
           pchEaten, ppidl, pdwAttributes);
 
     *ppidl = 0;
-    if (pchEaten)
-        *pchEaten = 0;        /* strange but like the original */
 
     TRACE("(%p)->(-- ret=0x%08x)\n", this, hr);
 
@@ -357,8 +360,7 @@ HRESULT WINAPI CNetFolder::CreateViewObject(HWND hwndOwner, REFIID riid, LPVOID 
     }
     else if (IsEqualIID(riid, IID_IContextMenu))
     {
-        hr = CDefFolderMenu_Create2(pidlRoot, hwndOwner, 0, NULL, this, CNetFolderBackgroundMenuCB,
-                                    0, NULL, (IContextMenu**)ppvOut);
+        hr = E_NOINTERFACE;
     }
     else if (IsEqualIID(riid, IID_IShellView))
     {
@@ -518,13 +520,7 @@ HRESULT WINAPI CNetFolder::EnumSearches(IEnumExtraSearch ** ppenum)
 HRESULT WINAPI CNetFolder::GetDefaultColumn (DWORD dwRes, ULONG *pSort, ULONG *pDisplay)
 {
     TRACE("(%p)\n", this);
-
-    if (pSort)
-        *pSort = 0;
-    if (pDisplay)
-        *pDisplay = 0;
-
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 HRESULT WINAPI CNetFolder::GetDefaultColumnState(UINT iColumn, SHCOLSTATEF *pcsFlags)

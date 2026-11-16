@@ -60,25 +60,17 @@ extern PPROCESSOR_IDENTITY HalpProcessorIdentity;
  */
 FORCEINLINE
 VOID
-ApicRequestGlobalInterrupt(
+ApicRequestGlobalInterruptLevel(
     _In_ UCHAR DestinationProcessor,
     _In_ UCHAR Vector,
     _In_ APIC_MT MessageType,
     _In_ APIC_TGM TriggerMode,
-    _In_ APIC_DSH DestinationShortHand)
+    _In_ APIC_DSH DestinationShortHand,
+    _In_ ULONG Level)
 {
     ULONG Flags;
     APIC_INTERRUPT_COMMAND_REGISTER Icr;
-
-    /* Disable interrupts so that we can change IRR without being interrupted */
-    Flags = __readeflags();
-    _disable();
-
-    /* Wait for the APIC to be idle */
-    do
-    {
-        Icr.Long0 = ApicRead(APIC_ICR0);
-    } while (Icr.DeliveryStatus);
+    APIC_INTERRUPT_COMMAND_REGISTER IcrStatus;
 
     /* Setup the command register */
     Icr.LongLong = 0;
@@ -86,21 +78,78 @@ ApicRequestGlobalInterrupt(
     Icr.MessageType = MessageType;
     Icr.DestinationMode = APIC_DM_Physical;
     Icr.DeliveryStatus = 0;
-    Icr.Level = 0;
+    Icr.Level = Level;
     Icr.TriggerMode = TriggerMode;
     Icr.RemoteReadStatus = 0;
     Icr.DestinationShortHand = DestinationShortHand;
     Icr.Destination = DestinationProcessor;
 
-    /* Write the low dword last to send the interrupt */
-    ApicWrite(APIC_ICR1, Icr.Long1);
-    ApicWrite(APIC_ICR0, Icr.Long0);
+    if (HalpApicHvMsrs && MessageType == APIC_MT_Fixed)
+    {
+        __writemsr(HV_X64_MSR_ICR, Icr.LongLong);
+        return;
+    }
+
+    /* Disable interrupts so that we can change IRR without being interrupted */
+    Flags = __readeflags();
+    _disable();
+
+    if (HalpX2ApicMode)
+    {
+        /* One register, written whole, and no delivery status to wait on. */
+        Icr.Long1 = (ULONG)DestinationProcessor;
+        __writemsr(MSR_X2APIC_ICR, Icr.LongLong);
+    }
+    else
+    {
+        do
+        {
+            IcrStatus.Long0 = ApicRead(APIC_ICR0);
+        } while (IcrStatus.DeliveryStatus);
+
+        /* A shorthand names the destinations itself, so the destination
+         * register is not read and writing it only costs a local APIC
+         * access. */
+        if (DestinationShortHand == APIC_DSH_Destination)
+            ApicWrite(APIC_ICR1, Icr.Long1);
+
+        /* Write the low dword last to send the interrupt */
+        ApicWrite(APIC_ICR0, Icr.Long0);
+
+        /* An interrupt is left to the local APIC to deliver: the next sender
+         * waits for the delivery status above. Startup and init hand-offs are
+         * sequenced by the caller, so those are waited for here. */
+        if (MessageType != APIC_MT_Fixed)
+        {
+            do
+            {
+                IcrStatus.Long0 = ApicRead(APIC_ICR0);
+            } while (IcrStatus.DeliveryStatus);
+        }
+    }
 
     /* Finally, restore the original interrupt state */
     if (Flags & EFLAGS_INTERRUPT_MASK)
     {
         _enable();
     }
+}
+
+FORCEINLINE
+VOID
+ApicRequestGlobalInterrupt(
+    _In_ UCHAR DestinationProcessor,
+    _In_ UCHAR Vector,
+    _In_ APIC_MT MessageType,
+    _In_ APIC_TGM TriggerMode,
+    _In_ APIC_DSH DestinationShortHand)
+{
+    ApicRequestGlobalInterruptLevel(DestinationProcessor,
+                                    Vector,
+                                    MessageType,
+                                    TriggerMode,
+                                    DestinationShortHand,
+                                    1);
 }
 
 
@@ -111,23 +160,36 @@ ApicStartApplicationProcessor(
     _In_ ULONG NTProcessorNumber,
     _In_ PHYSICAL_ADDRESS StartupLoc)
 {
+    UCHAR LapicId, StartupVector;
+
     ASSERT(StartupLoc.HighPart == 0);
     ASSERT((StartupLoc.QuadPart & 0xFFF) == 0);
     ASSERT((StartupLoc.QuadPart & 0xFFF00FFF) == 0);
 
-    /* Init IPI */
-    ApicRequestGlobalInterrupt(HalpProcessorIdentity[NTProcessorNumber].LapicId, 0,
-        APIC_MT_INIT, APIC_TGM_Edge, APIC_DSH_Destination);
+    /* Intel MP spec 1.4 B.4: INIT (level, deassert), 10 ms, STARTUP twice */
+    LapicId = HalpProcessorIdentity[NTProcessorNumber].LapicId;
+    StartupVector = (UCHAR)((StartupLoc.LowPart) >> 12);
 
-    /* De-Assert Init IPI */
-    ApicRequestGlobalInterrupt(HalpProcessorIdentity[NTProcessorNumber].LapicId, 0,
-        APIC_MT_INIT, APIC_TGM_Level, APIC_DSH_Destination);
+    ApicRequestGlobalInterruptLevel(LapicId, 0,
+        APIC_MT_INIT, APIC_TGM_Level, APIC_DSH_Destination, 1);
 
-    /* Stall execution for a bit to give APIC time: MPS Spec - B.4 */
+    KeStallExecutionProcessor(10000);
+
+    /* Extended mode has no level de-assert; the assert above is the reset. */
+    if (!HalpX2ApicMode)
+    {
+        ApicRequestGlobalInterruptLevel(LapicId, 0,
+            APIC_MT_INIT, APIC_TGM_Level, APIC_DSH_Destination, 0);
+
+        KeStallExecutionProcessor(200);
+    }
+
+    ApicRequestGlobalInterrupt(LapicId, StartupVector,
+        APIC_MT_Startup, APIC_TGM_Edge, APIC_DSH_Destination);
+
     KeStallExecutionProcessor(200);
 
-    /* Startup IPI */
-    ApicRequestGlobalInterrupt(HalpProcessorIdentity[NTProcessorNumber].LapicId, (StartupLoc.LowPart) >> 12,
+    ApicRequestGlobalInterrupt(LapicId, StartupVector,
         APIC_MT_Startup, APIC_TGM_Edge, APIC_DSH_Destination);
 }
 
@@ -148,6 +210,29 @@ HalpBroadcastIpiSpecifyVector(
     APIC_DSH DestinationShortHand = IncludeSelf ?
         APIC_DSH_AllIncludingSelf : APIC_DSH_AllExcludingSelf;
 
+    /* Extended mode names each processor: the command register carries a
+     * whole identifier there, which is what the mode is for. */
+    if (HalpX2ApicMode)
+    {
+        KAFFINITY Remaining = HalpActiveProcessors;
+        KAFFINITY Self = KeGetCurrentPrcb()->SetMember;
+        ULONG ProcessorIndex;
+
+        if (!IncludeSelf)
+            Remaining &= ~Self;
+        while (Remaining != 0)
+        {
+            NT_VERIFY(BitScanForwardAffinity(&ProcessorIndex, Remaining) != 0);
+            Remaining &= ~AFFINITY_MASK(ProcessorIndex);
+            ApicRequestGlobalInterrupt(HalpProcessorIdentity[ProcessorIndex].LapicId,
+                                       Vector,
+                                       APIC_MT_Fixed,
+                                       APIC_TGM_Edge,
+                                       APIC_DSH_Destination);
+        }
+        return;
+    }
+
     /* Request the interrupt targeted at all processors */
     ApicRequestGlobalInterrupt(0, // Ignored
                                Vector,
@@ -166,7 +251,7 @@ HalpBroadcastIpiSpecifyVector(
  */
 VOID
 NTAPI
-HalRequestIpiSpecifyVector(
+HalpRequestIpiSpecifyVector(
     _In_ KAFFINITY TargetSet,
     _In_ UCHAR Vector)
 {
@@ -224,7 +309,7 @@ HalpRequestIpi(
     _In_ KAFFINITY TargetSet)
 {
     /* Request the IPI vector */
-    HalRequestIpiSpecifyVector(TargetSet, APIC_IPI_VECTOR);
+    HalpRequestIpiSpecifyVector(TargetSet, APIC_IPI_VECTOR);
 }
 
 #ifdef _M_AMD64
@@ -259,7 +344,7 @@ HalpSendSoftwareInterrupt(
     }
 
     /* Request the IPI with the specified vector */
-    HalRequestIpiSpecifyVector(TargetSet, Vector);
+    HalpRequestIpiSpecifyVector(TargetSet, Vector);
 }
 
 /*!

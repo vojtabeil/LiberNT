@@ -13,6 +13,7 @@ void
 Test_ThreadPriorityClass(void)
 {
     NTSTATUS Status;
+    BOOLEAN WasEnabled;
     KPRIORITY *Priority;
 
     Priority = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(KPRIORITY));
@@ -86,10 +87,12 @@ Test_ThreadPriorityClass(void)
      * we don't have privileges to do so.
     */
     *Priority = LOW_REALTIME_PRIORITY;
+    RtlAdjustPrivilege(SE_INC_BASE_PRIORITY_PRIVILEGE, FALSE, FALSE, &WasEnabled);
     Status = NtSetInformationThread(GetCurrentThread(),
                                     ThreadPriority,
                                     Priority,
                                     sizeof(KPRIORITY));
+    RtlAdjustPrivilege(SE_INC_BASE_PRIORITY_PRIVILEGE, WasEnabled, FALSE, &WasEnabled);
     ok_hex(Status, STATUS_PRIVILEGE_NOT_HELD);
 
     HeapFree(GetProcessHeap(), 0, Priority);
@@ -127,8 +130,158 @@ Test_ThreadSetAlignmentProbe(void)
     }
 }
 
+static
+void
+Test_ThreadNameInformation(void)
+{
+    NTSTATUS Status;
+    THREAD_NAME_INFORMATION NameInfo;
+    UCHAR Buffer[sizeof(THREAD_NAME_INFORMATION) + 256 * sizeof(WCHAR)];
+    PTHREAD_NAME_INFORMATION QueryInfo = (PTHREAD_NAME_INFORMATION)Buffer;
+    ULONG ReturnLength;
+    static const WCHAR TestName[] = L"TestThreadName";
+    static const WCHAR TestName2[] = L"UpdatedName";
+
+    /* Set a thread name */
+    RtlInitUnicodeString(&NameInfo.ThreadName, TestName);
+    Status = NtSetInformationThread(GetCurrentThread(),
+                                    ThreadNameInformation,
+                                    &NameInfo,
+                                    sizeof(NameInfo));
+    ok_hex(Status, STATUS_SUCCESS);
+
+    /* Query it back */
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    Status = NtQueryInformationThread(GetCurrentThread(),
+                                      ThreadNameInformation,
+                                      Buffer,
+                                      sizeof(Buffer),
+                                      &ReturnLength);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok_long(QueryInfo->ThreadName.Length, (ULONG)(wcslen(TestName) * sizeof(WCHAR)));
+    ok(QueryInfo->ThreadName.Buffer != NULL, "Expected non-NULL buffer\n");
+    if (QueryInfo->ThreadName.Buffer)
+    {
+        ok(wcsncmp(QueryInfo->ThreadName.Buffer, TestName,
+                   QueryInfo->ThreadName.Length / sizeof(WCHAR)) == 0,
+           "Thread name mismatch: got '%.*ls'\n",
+           QueryInfo->ThreadName.Length / (int)sizeof(WCHAR),
+           QueryInfo->ThreadName.Buffer);
+    }
+
+    /* Update the name */
+    RtlInitUnicodeString(&NameInfo.ThreadName, TestName2);
+    Status = NtSetInformationThread(GetCurrentThread(),
+                                    ThreadNameInformation,
+                                    &NameInfo,
+                                    sizeof(NameInfo));
+    ok_hex(Status, STATUS_SUCCESS);
+
+    /* Query the updated name */
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    Status = NtQueryInformationThread(GetCurrentThread(),
+                                      ThreadNameInformation,
+                                      Buffer,
+                                      sizeof(Buffer),
+                                      &ReturnLength);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok_long(QueryInfo->ThreadName.Length, (ULONG)(wcslen(TestName2) * sizeof(WCHAR)));
+    if (QueryInfo->ThreadName.Buffer)
+    {
+        ok(wcsncmp(QueryInfo->ThreadName.Buffer, TestName2,
+                   QueryInfo->ThreadName.Length / sizeof(WCHAR)) == 0,
+           "Updated name mismatch\n");
+    }
+
+    /* Clear the name by setting empty string */
+    RtlInitUnicodeString(&NameInfo.ThreadName, NULL);
+    Status = NtSetInformationThread(GetCurrentThread(),
+                                    ThreadNameInformation,
+                                    &NameInfo,
+                                    sizeof(NameInfo));
+    ok_hex(Status, STATUS_SUCCESS);
+
+    /* Query - should be empty */
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    Status = NtQueryInformationThread(GetCurrentThread(),
+                                      ThreadNameInformation,
+                                      Buffer,
+                                      sizeof(Buffer),
+                                      &ReturnLength);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok_long(QueryInfo->ThreadName.Length, 0);
+
+    /* Query with too-small buffer should fail with STATUS_BUFFER_TOO_SMALL */
+    RtlInitUnicodeString(&NameInfo.ThreadName, TestName);
+    Status = NtSetInformationThread(GetCurrentThread(),
+                                    ThreadNameInformation,
+                                    &NameInfo,
+                                    sizeof(NameInfo));
+    ok_hex(Status, STATUS_SUCCESS);
+
+    Status = NtQueryInformationThread(GetCurrentThread(),
+                                      ThreadNameInformation,
+                                      Buffer,
+                                      sizeof(THREAD_NAME_INFORMATION) - 1,
+                                      &ReturnLength);
+    ok_hex(Status, STATUS_BUFFER_TOO_SMALL);
+    ok_long(ReturnLength, (ULONG)(sizeof(THREAD_NAME_INFORMATION) + wcslen(TestName) * sizeof(WCHAR)));
+
+    /* Clean up */
+    RtlInitUnicodeString(&NameInfo.ThreadName, NULL);
+    NtSetInformationThread(GetCurrentThread(),
+                           ThreadNameInformation,
+                           &NameInfo,
+                           sizeof(NameInfo));
+}
+
+static
+void
+Test_ThreadAffinityMask(void)
+{
+    SYSTEM_BASIC_INFORMATION System;
+    PROCESS_BASIC_INFORMATION Process;
+    THREAD_BASIC_INFORMATION Thread;
+    KAFFINITY Original, Mask;
+    NTSTATUS Status;
+
+    Status = NtQuerySystemInformation(SystemBasicInformation, &System, sizeof(System), NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessBasicInformation, &Process, sizeof(Process), NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    Status = NtQueryInformationThread(NtCurrentThread(), ThreadBasicInformation, &Thread, sizeof(Thread), NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    ok(Process.AffinityMask == System.ActiveProcessorsAffinityMask,
+       "Process affinity %Ix, active processors %Ix\n",
+       (size_t)Process.AffinityMask, (size_t)System.ActiveProcessorsAffinityMask);
+    Original = Thread.AffinityMask;
+
+    Mask = ~(KAFFINITY)0;
+    Status = NtSetInformationThread(NtCurrentThread(), ThreadAffinityMask, &Mask, sizeof(Mask));
+    ok_hex(Status, STATUS_SUCCESS);
+    Status = NtQueryInformationThread(NtCurrentThread(), ThreadBasicInformation, &Thread, sizeof(Thread), NULL);
+    ok_hex(Status, STATUS_SUCCESS);
+    ok(Thread.AffinityMask == Process.AffinityMask,
+       "Thread affinity %Ix, process affinity %Ix\n", (size_t)Thread.AffinityMask, (size_t)Process.AffinityMask);
+
+    Mask = ~System.ActiveProcessorsAffinityMask;
+    if (Mask != 0)
+    {
+        Status = NtSetInformationThread(NtCurrentThread(), ThreadAffinityMask, &Mask, sizeof(Mask));
+        ok_hex(Status, STATUS_INVALID_PARAMETER);
+    }
+
+    Status = NtSetInformationThread(NtCurrentThread(), ThreadAffinityMask, &Original, sizeof(Original));
+    ok_hex(Status, STATUS_SUCCESS);
+}
+
 START_TEST(NtSetInformationThread)
 {
     Test_ThreadPriorityClass();
     Test_ThreadSetAlignmentProbe();
+    Test_ThreadNameInformation();
+    Test_ThreadAffinityMask();
 }

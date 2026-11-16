@@ -18,11 +18,14 @@
  */
 #define COBJMACROS
 #include "objbase.h"
+#include "ctxtcall.h"
+#include "comsvcs.h"
 #include "initguid.h"
 #include "roapi.h"
 #include "roparameterizediid.h"
 #include "roerrorapi.h"
 #include "winstring.h"
+#include "errhandlingapi.h"
 
 #include "combase_private.h"
 
@@ -124,7 +127,7 @@ HRESULT WINAPI RoInitialize(RO_INIT_TYPE type)
 {
     switch (type) {
     case RO_INIT_SINGLETHREADED:
-        return CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+        return CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     default:
         FIXME("type %d\n", type);
     case RO_INIT_MULTITHREADED:
@@ -150,11 +153,16 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID 
     WCHAR *library;
     HMODULE module;
     HRESULT hr;
+#ifdef __REACTOS__
+    BOOL tracked = FALSE;
+#endif
 
-    FIXME("(%s, %s, %p): semi-stub\n", debugstr_hstring(classid), debugstr_guid(iid), class_factory);
+    TRACE("(%s, %s, %p)\n", debugstr_hstring(classid), debugstr_guid(iid), class_factory);
 
     if (!iid || !class_factory)
         return E_INVALIDARG;
+
+    *class_factory = NULL;
 
     if (FAILED(hr = ensure_mta()))
         return hr;
@@ -182,16 +190,48 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID 
 
     TRACE("Found library %s for class %s\n", debugstr_w(library), debugstr_hstring(classid));
 
+#ifdef __REACTOS__
+    {
+        struct apartment *apt;
+
+        if ((apt = apartment_get_current_or_mta()))
+        {
+            tracked = SUCCEEDED(apartment_track_dll(apt, library));
+            apartment_release(apt);
+        }
+    }
+#endif
+
     hr = pDllGetActivationFactory(classid, &factory);
+#ifdef __REACTOS__
+    if (SUCCEEDED(hr))
+    {
+        ACTCTX_SECTION_KEYED_DATA data;
+        TrustLevel trust_level;
+
+        data.cbSize = sizeof(data);
+        if (FindActCtxSectionStringW(0, NULL, ACTIVATION_CONTEXT_SECTION_WINRT_ACTIVATABLE_CLASSES,
+                                     WindowsGetStringRawBuffer(classid, NULL), &data) &&
+            FAILED(hr = IActivationFactory_GetTrustLevel(factory, &trust_level)))
+            IActivationFactory_Release(factory);
+    }
+#endif
     if (SUCCEEDED(hr))
     {
         hr = IActivationFactory_QueryInterface(factory, iid, class_factory);
         if (SUCCEEDED(hr))
         {
             TRACE("Created interface %p\n", *class_factory);
+#ifdef __REACTOS__
+            if (!tracked)
+#endif
             module = NULL;
         }
         IActivationFactory_Release(factory);
+    }
+    else
+    {
+        ERR("Class %s not found in %s, hr %#lx.\n", wine_dbgstr_hstring(classid), debugstr_w(library), hr);
     }
 
 done:
@@ -240,6 +280,8 @@ struct agile_reference
     IStream *marshal_stream;
     CRITICAL_SECTION cs;
     IUnknown *obj;
+    BOOLEAN is_agile;
+    IUnknown *ctx;
     LONG ref;
 };
 
@@ -318,25 +360,64 @@ static ULONG WINAPI agile_ref_Release(IAgileReference *iface)
     return ref;
 }
 
+struct marshal_context_params
+{
+    struct agile_reference *impl;
+    REFIID iid;
+};
+
+static HRESULT WINAPI marshal_object_in_context(ComCallData *arg)
+{
+    struct marshal_context_params *params = (struct marshal_context_params *)arg;
+    HRESULT hr;
+
+    hr = marshal_object_in_agile_reference(params->impl, params->iid, params->impl->obj);
+#ifndef __REACTOS__
+    IUnknown_Release(params->impl->obj);
+    params->impl->obj = NULL;
+#endif
+    return hr;
+}
+
 static HRESULT WINAPI agile_ref_Resolve(IAgileReference *iface, REFIID riid, void **obj)
 {
     struct agile_reference *impl = impl_from_IAgileReference(iface);
     LARGE_INTEGER zero = {0};
+    void *cur_ctx;
     HRESULT hr;
 
     TRACE("(%p, %s, %p)\n", iface, debugstr_guid(riid), obj);
 
+    if (impl->is_agile)
+        return IUnknown_QueryInterface(impl->obj, riid, obj);
+
+    if (FAILED(hr = CoGetContextToken((ULONG_PTR *)&cur_ctx)))
+        return hr;
+#ifdef __REACTOS__
+    if (impl->option == AGILEREFERENCE_DELAYEDMARSHAL && cur_ctx == impl->ctx)
+        return IUnknown_QueryInterface(impl->obj, riid, obj);
+#endif
+
     EnterCriticalSection(&impl->cs);
     if (impl->option == AGILEREFERENCE_DELAYEDMARSHAL && impl->marshal_stream == NULL)
     {
-        if (FAILED(hr = marshal_object_in_agile_reference(impl, riid, impl->obj)))
+        struct marshal_context_params params = { impl, riid };
+        IContextCallback *ctx;
+
+        if (FAILED(hr = IUnknown_QueryInterface(impl->ctx, &IID_IContextCallback, (void **)&ctx)))
         {
             LeaveCriticalSection(&impl->cs);
             return hr;
         }
 
-        IUnknown_Release(impl->obj);
-        impl->obj = NULL;
+        hr = IContextCallback_ContextCallback(ctx, marshal_object_in_context, (ComCallData *)&params,
+                                              &IID_IContextCallback, 5, NULL);
+        IContextCallback_Release(ctx);
+        if (FAILED(hr))
+        {
+            LeaveCriticalSection(&impl->cs);
+            return hr;
+        }
     }
 
     if (SUCCEEDED(hr = IStream_Seek(impl->marshal_stream, zero, STREAM_SEEK_SET, NULL)))
@@ -354,14 +435,25 @@ static const IAgileReferenceVtbl agile_ref_vtbl =
     agile_ref_Resolve,
 };
 
+static BOOL object_has_interface(IUnknown *obj, REFIID iid)
+{
+    IUnknown *unk;
+    HRESULT hr;
+
+    hr = IUnknown_QueryInterface(obj, iid, (void **)&unk);
+    if (SUCCEEDED(hr))
+        IUnknown_Release(unk);
+    return SUCCEEDED(hr);
+}
+
 /***********************************************************************
  *      RoGetAgileReference (combase.@)
  */
 HRESULT WINAPI RoGetAgileReference(enum AgileReferenceOptions option, REFIID riid, IUnknown *obj,
                                    IAgileReference **agile_reference)
 {
+    struct apartment *apt;
     struct agile_reference *impl;
-    IUnknown *unknown;
     HRESULT hr;
 
     TRACE("(%d, %s, %p, %p).\n", option, debugstr_guid(riid), obj, agile_reference);
@@ -369,23 +461,18 @@ HRESULT WINAPI RoGetAgileReference(enum AgileReferenceOptions option, REFIID rii
     if (option != AGILEREFERENCE_DEFAULT && option != AGILEREFERENCE_DELAYEDMARSHAL)
         return E_INVALIDARG;
 
-    if (!InternalIsProcessInitialized())
+    if (!(apt = apartment_get_current_or_mta()))
     {
         ERR("Apartment not initialized\n");
         return CO_E_NOTINITIALIZED;
     }
+    rpc_start_remoting(apt);
+    apartment_release(apt);
 
-    hr = IUnknown_QueryInterface(obj, riid, (void **)&unknown);
-    if (FAILED(hr))
+    if (!object_has_interface(obj, riid))
         return E_NOINTERFACE;
-    IUnknown_Release(unknown);
-
-    hr = IUnknown_QueryInterface(obj, &IID_INoMarshal, (void **)&unknown);
-    if (SUCCEEDED(hr))
-    {
-        IUnknown_Release(unknown);
+    if (object_has_interface(obj, &IID_INoMarshal))
         return CO_E_NOT_SUPPORTED;
-    }
 
     impl = calloc(1, sizeof(*impl));
     if (!impl)
@@ -393,9 +480,20 @@ HRESULT WINAPI RoGetAgileReference(enum AgileReferenceOptions option, REFIID rii
 
     impl->IAgileReference_iface.lpVtbl = &agile_ref_vtbl;
     impl->option = option;
+    impl->is_agile = object_has_interface(obj, &IID_IAgileObject);
     impl->ref = 1;
+    if (FAILED(hr = CoGetContextToken((ULONG_PTR *)&impl->ctx)))
+    {
+        free( impl );
+        return hr;
+    }
 
-    if (option == AGILEREFERENCE_DEFAULT)
+    if (option == AGILEREFERENCE_DELAYEDMARSHAL || impl->is_agile)
+    {
+        impl->obj = obj;
+        IUnknown_AddRef(impl->obj);
+    }
+    else if (option == AGILEREFERENCE_DEFAULT)
     {
         if (FAILED(hr = marshal_object_in_agile_reference(impl, riid, obj)))
         {
@@ -403,16 +501,20 @@ HRESULT WINAPI RoGetAgileReference(enum AgileReferenceOptions option, REFIID rii
             return hr;
         }
     }
-    else if (option == AGILEREFERENCE_DELAYEDMARSHAL)
-    {
-        impl->obj = obj;
-        IUnknown_AddRef(impl->obj);
-    }
 
     InitializeCriticalSection(&impl->cs);
 
     *agile_reference = &impl->IAgileReference_iface;
     return S_OK;
+}
+
+/***********************************************************************
+ *      RoFailFastWithErrorContextInternal2 (combase.@)
+ */
+void WINAPI RoFailFastWithErrorContextInternal2(HRESULT error, ULONG exception_count, /* PSTOWED_EXCEPTION_INFORMATION_V2 */void *information)
+{
+    FIXME("%#lx, %lu, %p stub.\n", error, exception_count, information);
+    RaiseFailFastException(NULL, NULL, 0);
 }
 
 /***********************************************************************
@@ -517,6 +619,15 @@ BOOL WINAPI RoOriginateErrorW(HRESULT error, UINT max_len, const WCHAR *message)
 }
 
 /***********************************************************************
+ *      RoReportUnhandledError (combase.@)
+ */
+HRESULT WINAPI RoReportUnhandledError(IRestrictedErrorInfo *info)
+{
+    FIXME("(%p): stub\n", info);
+    return S_OK;
+}
+
+/***********************************************************************
  *      RoSetErrorReportingFlags (combase.@)
  */
 HRESULT WINAPI RoSetErrorReportingFlags(UINT32 flags)
@@ -524,6 +635,56 @@ HRESULT WINAPI RoSetErrorReportingFlags(UINT32 flags)
     FIXME("(%08x): stub\n", flags);
     return S_OK;
 }
+
+/***********************************************************************
+ *      RoGetErrorReportingFlags (combase.@)
+ */
+HRESULT WINAPI RoGetErrorReportingFlags(UINT32 *flags)
+{
+    FIXME("(%p): stub\n", flags);
+
+    if (!flags)
+        return E_POINTER;
+
+    *flags = RO_ERROR_REPORTING_USESETERRORINFO;
+    return S_OK;
+}
+
+BOOL WINAPI IsErrorPropagationEnabled(void)
+{
+    FIXME("(): stub\n");
+    return FALSE;
+}
+
+HRESULT WINAPI RoGetMatchingRestrictedErrorInfo(HRESULT error, IRestrictedErrorInfo **info)
+{
+    FIXME("(%#lx, %p): stub\n", error, info);
+
+    if (!info)
+        return E_POINTER;
+
+    *info = NULL;
+    return E_NOTIMPL;
+}
+
+HRESULT WINAPI RoReportFailedDelegate(IUnknown *delegate, IRestrictedErrorInfo *info)
+{
+    FIXME("(%p, %p): stub\n", delegate, info);
+    return S_OK;
+}
+
+BOOL WINAPI RoTransformError(HRESULT old_error, HRESULT new_error, HSTRING message)
+{
+    FIXME("%#lx, %#lx, %s: stub\n", old_error, new_error, debugstr_hstring(message));
+    return FALSE;
+}
+
+BOOL WINAPI RoTransformErrorW(HRESULT old_error, HRESULT new_error, UINT max_len, const WCHAR *message)
+{
+    FIXME("%#lx, %#lx, %u, %p: stub\n", old_error, new_error, max_len, message);
+    return FALSE;
+}
+
 
 /***********************************************************************
  *      CleanupTlsOleState (combase.@)
@@ -541,4 +702,13 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
     FIXME("(%s, %p): stub\n", debugstr_hstring(classid), factory);
 
     return REGDB_E_CLASSNOTREG;
+}
+
+/***********************************************************************
+ *      RoFailFastWithErrorContext (combase.@)
+ */
+void WINAPI RoFailFastWithErrorContext(HRESULT hr)
+{
+    FIXME("(0x%08lx)\n", hr);
+    RaiseFailFastException(NULL, NULL, 0);
 }

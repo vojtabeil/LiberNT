@@ -13,7 +13,7 @@
 LANGUAGE LANG_NEUTRAL, SUBLANG_NEUTRAL
 
 #define REACTOS_VERSION_DLL
-#define REACTOS_STR_FILE_DESCRIPTION  "ReactOS msutb.dll"
+#define REACTOS_STR_FILE_DESCRIPTION  "LiberNT msutb.dll"
 #define REACTOS_STR_INTERNAL_NAME     "msutb"
 #define REACTOS_STR_ORIGINAL_FILENAME "msutb.dll"
 #include <reactos/version.rc>
@@ -31,6 +31,9 @@ IDB_BITMAP155 BITMAP "res/Bitmap-155.bmp"
 #ifdef LANGUAGE_EN_US
     #include "lang/en-US.rc"
 #endif
+#ifdef LANGUAGE_JA_JP
+    #include "lang/ja-JP.rc"
+#endif
 #ifdef LANGUAGE_PT_PT
     #include "lang/pt-PT.rc"
 #endif
@@ -39,4 +42,7 @@ IDB_BITMAP155 BITMAP "res/Bitmap-155.bmp"
 #endif
 #ifdef LANGUAGE_RU_RU
     #include "lang/ru-RU.rc"
+#endif
+#ifdef LANGUAGE_ZH_CN
+    #include "lang/zh-CN.rc"
 #endif

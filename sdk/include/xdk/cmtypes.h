@@ -18,6 +18,17 @@ typedef int CM_RESOURCE_TYPE;
 #define CmResourceTypeDevicePrivate     129
 #define CmResourceTypePcCardConfig      130
 #define CmResourceTypeMfCardConfig      131
+#define CmResourceTypeConnection        132
+
+#define CM_RESOURCE_CONNECTION_CLASS_GPIO       0x01
+#define CM_RESOURCE_CONNECTION_CLASS_SERIAL     0x02
+#define CM_RESOURCE_CONNECTION_CLASS_FUNCTION_CONFIG 0x03
+
+#define CM_RESOURCE_CONNECTION_TYPE_GPIO_IO     0x02
+#define CM_RESOURCE_CONNECTION_TYPE_SERIAL_I2C  0x01
+#define CM_RESOURCE_CONNECTION_TYPE_SERIAL_SPI  0x02
+#define CM_RESOURCE_CONNECTION_TYPE_SERIAL_UART 0x03
+#define CM_RESOURCE_CONNECTION_TYPE_FUNCTION_CONFIG 0x01
 
 /* KEY_VALUE_Xxx.Type */
 #define REG_NONE                           0
@@ -123,6 +134,7 @@ typedef int CM_RESOURCE_TYPE;
 #define REG_NOTIFY_CHANGE_ATTRIBUTES    (0x00000002L)
 #define REG_NOTIFY_CHANGE_LAST_SET      (0x00000004L)
 #define REG_NOTIFY_CHANGE_SECURITY      (0x00000008L)
+#define REG_NOTIFY_THREAD_AGNOSTIC      (0x10000000L)
 
 #define REG_LEGAL_CHANGE_FILTER                 \
                 (REG_NOTIFY_CHANGE_NAME          |\
@@ -130,7 +142,7 @@ typedef int CM_RESOURCE_TYPE;
                  REG_NOTIFY_CHANGE_LAST_SET      |\
                  REG_NOTIFY_CHANGE_SECURITY)
 
-#include <pshpack4.h>
+#pragma pack(push, 4)
 typedef struct _CM_PARTIAL_RESOURCE_DESCRIPTOR {
   UCHAR Type;
   UCHAR ShareDisposition;
@@ -190,6 +202,14 @@ typedef struct _CM_PARTIAL_RESOURCE_DESCRIPTOR {
       ULONG Reserved1;
     } Dma;
     struct {
+      ULONG Channel;
+      ULONG RequestLine;
+      UCHAR TransferWidth;
+      UCHAR Reserved1;
+      UCHAR Reserved2;
+      UCHAR Reserved3;
+    } DmaV3;
+    struct {
       ULONG Data[3];
     } DevicePrivate;
     struct {
@@ -216,9 +236,17 @@ typedef struct _CM_PARTIAL_RESOURCE_DESCRIPTOR {
       ULONG Length64;
     } Memory64;
 #endif
+    struct {
+      UCHAR Class;
+      UCHAR Type;
+      UCHAR Reserved1;
+      UCHAR Reserved2;
+      ULONG IdLowPart;
+      ULONG IdHighPart;
+    } Connection;
   } u;
 } CM_PARTIAL_RESOURCE_DESCRIPTOR, *PCM_PARTIAL_RESOURCE_DESCRIPTOR;
-#include <poppack.h>
+#pragma pack(pop)
 
 /* CM_PARTIAL_RESOURCE_DESCRIPTOR.Type */
 #define CmResourceTypeNull                0
@@ -234,6 +262,7 @@ typedef struct _CM_PARTIAL_RESOURCE_DESCRIPTOR {
 #define CmResourceTypeDevicePrivate       129
 #define CmResourceTypePcCardConfig        130
 #define CmResourceTypeMfCardConfig        131
+#define CmResourceTypeConnection          132
 
 /* CM_PARTIAL_RESOURCE_DESCRIPTOR.ShareDisposition */
 typedef enum _CM_SHARE_DISPOSITION {
@@ -328,6 +357,7 @@ typedef enum _INTERFACE_TYPE {
   PNPISABus,
   PNPBus,
   Vmcs,
+  ACPIBus,
   MaximumInterfaceType
 } INTERFACE_TYPE, *PINTERFACE_TYPE;
 
@@ -367,7 +397,7 @@ typedef struct _PNP_BUS_INFORMATION {
   ULONG BusNumber;
 } PNP_BUS_INFORMATION, *PPNP_BUS_INFORMATION;
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 typedef struct _CM_INT13_DRIVE_PARAMETER {
   USHORT DriveSelect;
@@ -409,7 +439,7 @@ typedef struct _CM_PNP_BIOS_INSTALLATION_CHECK {
   ULONG ProtectedModeDataBaseAddress;
 } CM_PNP_BIOS_INSTALLATION_CHECK, *PCM_PNP_BIOS_INSTALLATION_CHECK;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 typedef struct _CM_DISK_GEOMETRY_DEVICE_DATA {
   ULONG BytesPerSector;
@@ -1011,10 +1041,22 @@ typedef enum _CM_ERROR_CONTROL_TYPE {
 #define CM_SERVICE_NETWORK_BOOT_LOAD      0x00000001
 #define CM_SERVICE_VIRTUAL_DISK_BOOT_LOAD 0x00000002
 #define CM_SERVICE_USB_DISK_BOOT_LOAD     0x00000004
+#define CM_SERVICE_SD_DISK_BOOT_LOAD      0x00000008
+#define CM_SERVICE_USB3_DISK_BOOT_LOAD    0x00000010
+#define CM_SERVICE_MEASURED_BOOT_LOAD     0x00000020
+#define CM_SERVICE_VERIFIER_BOOT_LOAD     0x00000040
+#define CM_SERVICE_WINPE_BOOT_LOAD        0x00000080
+#define CM_SERVICE_RAM_DISK_BOOT_LOAD     0x00000100
 
 #define CM_SERVICE_VALID_PROMOTION_MASK (CM_SERVICE_NETWORK_BOOT_LOAD |       \
                                          CM_SERVICE_VIRTUAL_DISK_BOOT_LOAD |  \
-                                         CM_SERVICE_USB_DISK_BOOT_LOAD)
+                                         CM_SERVICE_USB_DISK_BOOT_LOAD |      \
+                                         CM_SERVICE_SD_DISK_BOOT_LOAD |       \
+                                         CM_SERVICE_USB3_DISK_BOOT_LOAD |     \
+                                         CM_SERVICE_MEASURED_BOOT_LOAD |      \
+                                         CM_SERVICE_VERIFIER_BOOT_LOAD |      \
+                                         CM_SERVICE_WINPE_BOOT_LOAD |         \
+                                         CM_SERVICE_RAM_DISK_BOOT_LOAD)
 
 $endif (_WDMDDK_)
 $if (_NTDDK_)

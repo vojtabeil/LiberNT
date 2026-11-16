@@ -134,6 +134,7 @@ typedef struct {
     HWND hwndEdit;
     HWND hwndList;
     HWND hwndContainer;
+    HWND hwndSearchBtn;
 } SearchTab;
 
 typedef struct {
@@ -168,6 +169,17 @@ struct wintype_stringsA {
     char *pszCustomTabs;
 };
 
+struct HHInfo;
+
+typedef struct WebBrowserEvents2Impl
+{
+    IDispatch WebBrowserEvents2Impl_iface;
+
+    struct HHInfo *info;
+    LONG ref;
+    DWORD cookie;
+} WebBrowserEvents2Impl;
+
 typedef struct {
     IOleClientSite IOleClientSite_iface;
     IOleInPlaceSite IOleInPlaceSite_iface;
@@ -179,6 +191,8 @@ typedef struct {
     IOleObject *ole_obj;
     IWebBrowser2 *web_browser;
     HWND hwndWindow;
+
+    WebBrowserEvents2Impl *WebBrowser_events_sink;
 } WebBrowserContainer;
 
 typedef struct {
@@ -228,9 +242,6 @@ WCHAR *GetDocumentTitle(CHMInfo*,LPCWSTR);
 extern struct list window_list;
 HHInfo *CreateHelpViewer(HHInfo*,LPCWSTR,HWND);
 void ReleaseHelpViewer(HHInfo*);
-#ifdef __REACTOS__
-LPWSTR HH_LoadString(DWORD dwID);
-#endif
 BOOL NavigateToUrl(HHInfo*,LPCWSTR);
 BOOL NavigateToChm(HHInfo*,LPCWSTR,LPCWSTR);
 void MergeChmProperties(HH_WINTYPEW*,HHInfo*,BOOL);
@@ -264,6 +275,10 @@ static inline LPWSTR strdupnAtoW(LPCSTR str, LONG lenA)
 
     len = MultiByteToWideChar(CP_ACP, 0, str, lenA, NULL, 0)+1; /* +1 for null pad */
     ret = malloc(len * sizeof(WCHAR));
+#ifdef __REACTOS__
+    if (!ret)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     MultiByteToWideChar(CP_ACP, 0, str, lenA, ret, len);
     ret[len-1] = 0;
 

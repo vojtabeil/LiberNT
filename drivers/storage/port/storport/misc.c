@@ -50,6 +50,10 @@ GetBusInterface(
         return PCIBus;
     else if (RtlCompareMemory(&Guid, &GUID_BUS_TYPE_ISAPNP, sizeof(GUID)) == sizeof(GUID))
         return PNPISABus;
+    else if (RtlCompareMemory(&Guid, &GUID_BUS_TYPE_INTERNAL, sizeof(GUID)) == sizeof(GUID))
+        return Internal;
+    else if (RtlCompareMemory(&Guid, &GUID_BUS_TYPE_ACPI, sizeof(GUID)) == sizeof(GUID))
+        return ACPIBus;
 
     return InterfaceTypeUndefined;
 }
@@ -63,7 +67,7 @@ GetResourceListSize(
     PCM_FULL_RESOURCE_DESCRIPTOR Descriptor;
     ULONG Size;
 
-    DPRINT1("GetResourceListSize(%p)\n", ResourceList);
+    DPRINT("GetResourceListSize(%p)\n", ResourceList);
 
     Size = sizeof(CM_RESOURCE_LIST);
     if (ResourceList->Count == 0)
@@ -72,17 +76,17 @@ GetResourceListSize(
         return Size;
     }
 
-    DPRINT1("ResourceList->Count: %lu\n", ResourceList->Count);
+    DPRINT("ResourceList->Count: %lu\n", ResourceList->Count);
 
     Descriptor = &ResourceList->List[0];
 
-    DPRINT1("PartialResourceList->Count: %lu\n", Descriptor->PartialResourceList.Count);
+    DPRINT("PartialResourceList->Count: %lu\n", Descriptor->PartialResourceList.Count);
 
     /* Add the size of the partial descriptors */
     if (Descriptor->PartialResourceList.Count > 1)
         Size += (Descriptor->PartialResourceList.Count - 1) * sizeof(CM_PARTIAL_RESOURCE_DESCRIPTOR);
 
-    DPRINT1("Size: 0x%lx (%u)\n", Size, Size);
+    DPRINT("Size: 0x%lx (%u)\n", Size, Size);
     return Size;
 }
 
@@ -95,7 +99,7 @@ CopyResourceList(
     PCM_RESOURCE_LIST Destination;
     ULONG Size;
 
-    DPRINT1("CopyResourceList(%lu %p)\n",
+    DPRINT("CopyResourceList(%lu %p)\n",
             PoolType, Source);
 
     /* Get the size of the resource list */
@@ -168,6 +172,89 @@ QueryBusInterface(
 }
 
 
+VOID
+PortAdjustUsageCount(
+    _Inout_ PPORT_USAGE_COUNTS Usage,
+    _In_ PIO_STACK_LOCATION Stack)
+{
+    volatile LONG *Counter;
+
+    ASSERT(Stack->MajorFunction == IRP_MJ_PNP && Stack->MinorFunction == IRP_MN_DEVICE_USAGE_NOTIFICATION);
+
+    switch (Stack->Parameters.UsageNotification.Type)
+    {
+        case DeviceUsageTypePaging:
+            Counter = &Usage->PagingFiles;
+            break;
+
+        case DeviceUsageTypeHibernation:
+            Counter = &Usage->HibernationFiles;
+            break;
+
+        case DeviceUsageTypeDumpFile:
+            Counter = &Usage->DumpFiles;
+            break;
+
+        default:
+            return;
+    }
+
+    IoAdjustPagingPathCount(Counter, Stack->Parameters.UsageNotification.InPath);
+    ASSERT(*Counter >= 0);
+}
+
+
+BOOLEAN
+PortIsInUsagePath(
+    _In_ PPORT_USAGE_COUNTS Usage)
+{
+    return (BOOLEAN)(Usage->PagingFiles != 0 || Usage->HibernationFiles != 0 || Usage->DumpFiles != 0);
+}
+
+
+NTSTATUS
+PortSendDeviceUsageNotification(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ DEVICE_USAGE_NOTIFICATION_TYPE Type,
+    _In_ BOOLEAN InPath)
+{
+    PDEVICE_OBJECT TopOfStack;
+    IO_STATUS_BLOCK IoStatus;
+    PIO_STACK_LOCATION Stack;
+    NTSTATUS Status;
+    KEVENT Event;
+    PIRP Irp;
+
+    ASSERT(KeGetCurrentIrql() == PASSIVE_LEVEL);
+
+    TopOfStack = IoGetAttachedDeviceReference(DeviceObject);
+    KeInitializeEvent(&Event, NotificationEvent, FALSE);
+    Irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP, TopOfStack, NULL, 0, NULL, &Event, &IoStatus);
+    if (Irp == NULL)
+    {
+        ObDereferenceObject(TopOfStack);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Stack = IoGetNextIrpStackLocation(Irp);
+    Stack->MajorFunction = IRP_MJ_PNP;
+    Stack->MinorFunction = IRP_MN_DEVICE_USAGE_NOTIFICATION;
+    Stack->Parameters.UsageNotification.InPath = InPath;
+    Stack->Parameters.UsageNotification.Type = Type;
+    Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+
+    Status = IoCallDriver(TopOfStack, Irp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+        Status = IoStatus.Status;
+    }
+
+    ObDereferenceObject(TopOfStack);
+    return Status;
+}
+
+
 BOOLEAN
 TranslateResourceListAddress(
     PFDO_DEVICE_EXTENSION DeviceExtension,
@@ -182,7 +269,7 @@ TranslateResourceListAddress(
     PCM_PARTIAL_RESOURCE_DESCRIPTOR PartialDescriptorA, PartialDescriptorT;
     INT i, j;
 
-    DPRINT1("TranslateResourceListAddress(%p)\n", DeviceExtension);
+    DPRINT("TranslateResourceListAddress(%p)\n", DeviceExtension);
 
     FullDescriptorA = DeviceExtension->AllocatedResources->List;
     FullDescriptorT = DeviceExtension->TranslatedResources->List;
@@ -196,7 +283,7 @@ TranslateResourceListAddress(
             switch (PartialDescriptorA->Type)
             {
                 case CmResourceTypePort:
-                    DPRINT1("Port: 0x%I64x (0x%lx)\n",
+                    DPRINT("Port: 0x%I64x (0x%lx)\n",
                             PartialDescriptorA->u.Port.Start.QuadPart,
                             PartialDescriptorA->u.Port.Length);
                     if (InIoSpace &&
@@ -210,7 +297,7 @@ TranslateResourceListAddress(
                     break;
 
                 case CmResourceTypeMemory:
-                    DPRINT1("Memory: 0x%I64x (0x%lx)\n",
+                    DPRINT("Memory: 0x%I64x (0x%lx)\n",
                             PartialDescriptorA->u.Memory.Start.QuadPart,
                             PartialDescriptorA->u.Memory.Length);
                     if (!InIoSpace &&
@@ -250,7 +337,7 @@ GetResourceListInterrupt(
     PCM_PARTIAL_RESOURCE_DESCRIPTOR PartialDescriptor;
     INT i, j;
 
-    DPRINT1("GetResourceListInterrupt(%p)\n",
+    DPRINT("GetResourceListInterrupt(%p)\n",
             DeviceExtension);
 
     FullDescriptor = DeviceExtension->TranslatedResources->List;
@@ -263,7 +350,7 @@ GetResourceListInterrupt(
             switch (PartialDescriptor->Type)
             {
                 case CmResourceTypeInterrupt:
-                    DPRINT1("Interrupt: Level %lu  Vector %lu\n",
+                    DPRINT("Interrupt: Level %lu  Vector %lu\n",
                             PartialDescriptor->u.Interrupt.Level,
                             PartialDescriptor->u.Interrupt.Vector);
 
@@ -296,7 +383,7 @@ AllocateAddressMapping(
 {
     PMAPPED_ADDRESS Mapping;
 
-    DPRINT1("AllocateAddressMapping()\n");
+    DPRINT("AllocateAddressMapping()\n");
 
     Mapping = ExAllocatePoolWithTag(NonPagedPool,
                                     sizeof(MAPPED_ADDRESS),

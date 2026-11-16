@@ -95,7 +95,8 @@ RtlpCheckIntegerAtom(
     DPRINT("RtlpCheckIntegerAtom(AtomName '%S' AtomValue %p)\n",
            AtomName, AtomValue);
 
-    if (!((ULONG_PTR)AtomName & 0xFFFF0000))
+    /* Integer atoms have no set bits above the low 16 on every ABI. */
+    if (((ULONG_PTR)AtomName & ~(ULONG_PTR)0xFFFF) == 0)
     {
         LoValue = (USHORT)((ULONG_PTR)AtomName & 0xFFFF);
 
@@ -175,6 +176,7 @@ RtlCreateAtomTable(
 
     /* initialize atom table */
     Table->Signature = 'motA';
+    Table->Flags = 0;
     Table->NumberOfBuckets = TableSize;
 
     Status = RtlpInitAtomTableLock(Table);
@@ -193,6 +195,73 @@ RtlCreateAtomTable(
 
     *AtomTable = Table;
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+RtlCreateAtomTableEx(
+    _In_ ULONG TableSize,
+    _In_ ULONG Flags,
+    _Inout_ PRTL_ATOM_TABLE *AtomTable)
+{
+    PRTL_ATOM_TABLE PreviousTable;
+    NTSTATUS Status;
+
+    PreviousTable = *AtomTable;
+    Status = RtlCreateAtomTable(TableSize, AtomTable);
+    if (NT_SUCCESS(Status) && (PreviousTable == NULL) && (*AtomTable != NULL))
+        (*AtomTable)->Flags = Flags;
+
+    return Status;
+}
+
+BOOLEAN
+NTAPI
+RtlGetIntegerAtom(
+    _In_ PCWSTR AtomName,
+    _Out_opt_ PRTL_ATOM Atom)
+{
+    UNICODE_STRING NumberString;
+    ULONG Value;
+    PCWSTR Cursor;
+
+    if (((ULONG_PTR)AtomName & ~(ULONG_PTR)0xFFFF) == 0)
+    {
+        Value = (ULONG)(ULONG_PTR)AtomName;
+        if (Value >= 0xC000)
+            return FALSE;
+        if (Value == 0)
+            Value = 0xC000;
+    }
+    else
+    {
+        if ((AtomName == NULL) || (*AtomName != L'#'))
+            return FALSE;
+
+        Cursor = AtomName + 1;
+        if (*Cursor == UNICODE_NULL)
+            return FALSE;
+
+        while (*Cursor != UNICODE_NULL)
+        {
+            if ((*Cursor < L'0') || (*Cursor > L'9'))
+                return FALSE;
+            ++Cursor;
+        }
+
+        NumberString.Buffer = (PWCHAR)(AtomName + 1);
+        NumberString.Length = (USHORT)((Cursor - AtomName - 1) * sizeof(WCHAR));
+        NumberString.MaximumLength = NumberString.Length;
+        if (!NT_SUCCESS(RtlUnicodeStringToInteger(&NumberString, 10, &Value)))
+            return FALSE;
+
+        if ((Value == 0) || (Value >= 0xC000))
+            Value = 0xC000;
+    }
+
+    if (Atom != NULL)
+        *Atom = (RTL_ATOM)Value;
+    return TRUE;
 }
 
 
@@ -305,10 +374,13 @@ RtlEmptyAtomTable(
 /*
  * @implemented
  */
-NTSTATUS NTAPI
-RtlAddAtomToAtomTable(IN PRTL_ATOM_TABLE AtomTable,
-                      IN PWSTR AtomName,
-                      OUT PRTL_ATOM Atom)
+static
+NTSTATUS
+RtlpAddAtomToAtomTable(
+    _In_ PRTL_ATOM_TABLE AtomTable,
+    _In_ PWSTR AtomName,
+    _Out_opt_ PRTL_ATOM Atom,
+    _In_ ULONG Flags)
 {
     USHORT AtomValue;
     PRTL_ATOM_TABLE_ENTRY *HashLink;
@@ -378,7 +450,7 @@ RtlAddAtomToAtomTable(IN PRTL_ATOM_TABLE AtomTable,
             {
                 Entry->HashLink = NULL;
                 Entry->ReferenceCount = 1;
-                Entry->Flags = 0x0;
+                Entry->Flags = (UCHAR)(Flags & 2);
 
                 Entry->NameLength = (UCHAR)AtomNameLen;
                 RtlCopyMemory(Entry->Name,
@@ -416,6 +488,30 @@ end:
     RtlpUnlockAtomTable(AtomTable);
 
     return Status;
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
+RtlAddAtomToAtomTable(
+    _In_ PRTL_ATOM_TABLE AtomTable,
+    _In_ PWSTR AtomName,
+    _Out_opt_ PRTL_ATOM Atom)
+{
+    return RtlpAddAtomToAtomTable(AtomTable, AtomName, Atom, 0);
+}
+
+NTSTATUS
+NTAPI
+RtlAddAtomToAtomTableEx(
+    _In_ PRTL_ATOM_TABLE AtomTable,
+    _In_ PWSTR AtomName,
+    _Out_opt_ PRTL_ATOM Atom,
+    _In_ ULONG Flags)
+{
+    return RtlpAddAtomToAtomTable(AtomTable, AtomName, Atom, Flags);
 }
 
 
@@ -649,7 +745,7 @@ RtlQueryAtomInAtomTable(
 
         if (PinCount != NULL)
         {
-            *PinCount = ((Entry->Flags & RTL_ATOM_IS_PINNED) != 0);
+            *PinCount = Entry->Flags;
         }
 
         if (NULL != NameLength)
@@ -747,4 +843,3 @@ RtlQueryAtomListInAtomTable(
 
     return Status;
 }
-

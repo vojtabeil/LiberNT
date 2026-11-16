@@ -10,6 +10,7 @@
 #define UNICODE
 #include <apitest.h>
 #include <shlobj.h>
+#include <shdeprecated.h>
 #include <atlbase.h>
 #include <tchar.h>      //
 #include <atlcom.h>     // These 3 includes only exist here to make gcc happy about (unused) templates..
@@ -22,6 +23,19 @@ ULONG DbgPrint(PCH Format,...);
 #include <shellutils.h>
 #include <shlwapi.h>
 #include <strsafe.h>
+
+static PCWSTR
+SysDrivePath(PCWSTR Tail)
+{
+    static WCHAR s_Buffer[4][MAX_PATH];
+    static UINT s_Index;
+    PWSTR Buffer = s_Buffer[s_Index++ % _countof(s_Buffer)];
+
+    GetWindowsDirectoryW(Buffer, MAX_PATH);
+    Buffer[2] = UNICODE_NULL;
+    StringCchCatW(Buffer, MAX_PATH, Tail);
+    return Buffer;
+}
 
 static bool g_ShowHidden;
 static DWORD g_WinVersion;
@@ -113,7 +127,6 @@ test_ExpectFolders_imp(CComPtr<IEnumString>& EnumStr, LPITEMIDLIST pidlTarget, c
 
     WCHAR Buffer[512];
     CComHeapPtr<ITEMIDLIST> pidl;
-    INT Count = 0;
     while (spEnumIDList->Next(1, &pidl, NULL) == S_OK)
     {
         CComHeapPtr<WCHAR> DisplayName;
@@ -133,7 +146,6 @@ test_ExpectFolders_imp(CComPtr<IEnumString>& EnumStr, LPITEMIDLIST pidlTarget, c
         winetest_ok(!wcscmp(Buffer, Result), "Expected %s, got %s\n", wine_dbgstr_w(Buffer), wine_dbgstr_w(Result));
 
         pidl.Free();
-        Count++;
     }
     if (options & CheckLast)
     {
@@ -410,26 +422,26 @@ test_ACListISF_CURRENTDIR2()
     ok_hr(hr = ACList->SetOptions(ACLO_CURRENTDIR), S_OK);
     test_at_end(EnumStr);
 
-    CreateDirectoryW(L"C:\\BROWSEUI-1", NULL);
-    CreateDirectoryW(L"C:\\BROWSEUI-1\\TEST1", NULL);
-    CreateDirectoryW(L"C:\\BROWSEUI-1\\TEST2", NULL);
-    CreateDirectoryW(L"C:\\BROWSEUI-1\\TEST1\\TEST3", NULL);
-    CreateDirectoryW(L"C:\\BROWSEUI-2", NULL);
-    CreateDirectoryW(L"C:\\BROWSEUI-2\\TEST1", NULL);
-    CreateDirectoryW(L"C:\\BROWSEUI-2\\TEST2", NULL);
-    CreateDirectoryW(L"C:\\BROWSEUI-2\\TEST1\\TEST4", NULL);
+    CreateDirectoryW(SysDrivePath(L"\\BROWSEUI-1"), NULL);
+    CreateDirectoryW(SysDrivePath(L"\\BROWSEUI-1\\TEST1"), NULL);
+    CreateDirectoryW(SysDrivePath(L"\\BROWSEUI-1\\TEST2"), NULL);
+    CreateDirectoryW(SysDrivePath(L"\\BROWSEUI-1\\TEST1\\TEST3"), NULL);
+    CreateDirectoryW(SysDrivePath(L"\\BROWSEUI-2"), NULL);
+    CreateDirectoryW(SysDrivePath(L"\\BROWSEUI-2\\TEST1"), NULL);
+    CreateDirectoryW(SysDrivePath(L"\\BROWSEUI-2\\TEST2"), NULL);
+    CreateDirectoryW(SysDrivePath(L"\\BROWSEUI-2\\TEST1\\TEST4"), NULL);
 
-    ok_hr(hr = CurrentWorkingDir->SetDirectory(L"C:\\BROWSEUI-1\\TEST1"), S_OK);
+    ok_hr(hr = CurrentWorkingDir->SetDirectory(SysDrivePath(L"\\BROWSEUI-1\\TEST1")), S_OK);
     test_at_end(EnumStr);
 
-    ok_hr(hr = ACList->Expand(L"C:\\BROWSEUI-2\\TEST1\\"), S_OK);
+    ok_hr(hr = ACList->Expand(SysDrivePath(L"\\BROWSEUI-2\\TEST1\\")), S_OK);
 
     LPWSTR psz;
     ULONG cGot;
 
     hr = EnumStr->Next(1, &psz, &cGot);
     ok_hr(hr, S_OK);
-    ok_wstr(psz, L"C:\\BROWSEUI-2\\TEST1\\TEST4");
+    ok_wstr(psz, SysDrivePath(L"\\BROWSEUI-2\\TEST1\\TEST4"));
     CoTaskMemFree(psz);
 
     hr = EnumStr->Next(1, &psz, &cGot);
@@ -439,11 +451,11 @@ test_ACListISF_CURRENTDIR2()
 
     test_at_end(EnumStr);
 
-    ok_hr(hr = ACList->Expand(L"C:\\BROWSEUI-1\\TEST1\\"), S_OK);
+    ok_hr(hr = ACList->Expand(SysDrivePath(L"\\BROWSEUI-1\\TEST1\\")), S_OK);
 
     hr = EnumStr->Next(1, &psz, &cGot);
     ok_hr(hr, S_OK);
-    ok_wstr(psz, L"C:\\BROWSEUI-1\\TEST1\\TEST3");
+    ok_wstr(psz, SysDrivePath(L"\\BROWSEUI-1\\TEST1\\TEST3"));
     CoTaskMemFree(psz);
 
     hr = EnumStr->Next(1, &psz, &cGot);
@@ -453,7 +465,7 @@ test_ACListISF_CURRENTDIR2()
 
     test_at_end(EnumStr);
 
-    ok_hr(hr = CurrentWorkingDir->SetDirectory(L"C:\\BROWSEUI-2\\TEST1"), S_OK);
+    ok_hr(hr = CurrentWorkingDir->SetDirectory(SysDrivePath(L"\\BROWSEUI-2\\TEST1")), S_OK);
     test_at_end(EnumStr);
 
     ok_hr(hr = ACList->Expand(L"..\\TEST1\\"), S_OK);
@@ -484,14 +496,14 @@ test_ACListISF_CURRENTDIR2()
 
     test_at_end(EnumStr);
 
-    RemoveDirectoryW(L"C:\\BROWSEUI-1\\TEST1\\TEST3");
-    RemoveDirectoryW(L"C:\\BROWSEUI-1\\TEST1");
-    RemoveDirectoryW(L"C:\\BROWSEUI-1\\TEST2");
-    RemoveDirectoryW(L"C:\\BROWSEUI-1");
-    RemoveDirectoryW(L"C:\\BROWSEUI-2\\TEST1\\TEST4");
-    RemoveDirectoryW(L"C:\\BROWSEUI-2\\TEST1");
-    RemoveDirectoryW(L"C:\\BROWSEUI-2\\TEST2");
-    RemoveDirectoryW(L"C:\\BROWSEUI-2");
+    RemoveDirectoryW(SysDrivePath(L"\\BROWSEUI-1\\TEST1\\TEST3"));
+    RemoveDirectoryW(SysDrivePath(L"\\BROWSEUI-1\\TEST1"));
+    RemoveDirectoryW(SysDrivePath(L"\\BROWSEUI-1\\TEST2"));
+    RemoveDirectoryW(SysDrivePath(L"\\BROWSEUI-1"));
+    RemoveDirectoryW(SysDrivePath(L"\\BROWSEUI-2\\TEST1\\TEST4"));
+    RemoveDirectoryW(SysDrivePath(L"\\BROWSEUI-2\\TEST1"));
+    RemoveDirectoryW(SysDrivePath(L"\\BROWSEUI-2\\TEST2"));
+    RemoveDirectoryW(SysDrivePath(L"\\BROWSEUI-2"));
 }
 
 static void
@@ -731,6 +743,36 @@ START_TEST(ACListISF)
     {
         skip("CoInitialize failed\n");
         return;
+    }
+
+    {
+        CComPtr<IACList2> list;
+        HRESULT hr = CoCreateInstance(CLSID_ACListISF, NULL, CLSCTX_INPROC_SERVER,
+                                      IID_IACList2, (void **)&list);
+        ok(hr == S_OK, "create for detach: %lx\n", hr);
+        if (list)
+        {
+            CComPtr<IShellService> service;
+            hr = list->QueryInterface(IID_IShellService, (void **)&service);
+            if (GetNTVersion() >= _WIN32_WINNT_WIN7)
+                ok(hr == E_NOINTERFACE, "shell service: %lx\n", hr);
+            else
+                ok(hr == S_OK, "shell service: %lx\n", hr);
+            if (service)
+            {
+                hr = service->SetOwner(NULL);
+                ok(hr == S_OK, "detach owner: %lx\n", hr);
+            }
+            CComPtr<IEnumString> enumeration;
+            list->QueryInterface(IID_IEnumString, (void **)&enumeration);
+            list->SetOptions(ACLO_CURRENTDIR);
+            if (enumeration)
+            {
+                hr = enumeration->Reset();
+                ok(SUCCEEDED(hr), "reset without browser owner: %lx\n", hr);
+                test_at_end(enumeration);
+            }
+        }
     }
 
     test_ACListISF_NONE();

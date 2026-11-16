@@ -7,22 +7,16 @@
 
 #include "../win32nt.h"
 
-ULONG gMonitorCount = 0;
-HDC ghdcMonitor = 0;
-RECT grcMonitor = {0};
+static ULONG gMonitorCount;
+static HMONITOR ghMonitor;
+static HDC ghdcMonitor;
+static RECT grcMonitor;
+static LPARAM gData;
+static BOOL gContinue;
 
+static
 BOOL
-NTAPI
-NtUserEnumDisplayMonitors1(
-    HDC hDC,
-    LPCRECT lprcClip,
-    MONITORENUMPROC lpfnEnum,
-    LPARAM dwData)
-{
-    return (INT)Syscall(L"NtUserEnumDisplayMonitors", 4, &hDC);
-}
-
-BOOL CALLBACK
+CALLBACK
 MonitorEnumProc(
     HMONITOR hMonitor,
     HDC hdcMonitor,
@@ -32,26 +26,35 @@ MonitorEnumProc(
     gMonitorCount++;
     if (gMonitorCount == 1)
     {
+        ghMonitor = hMonitor;
         ghdcMonitor = hdcMonitor;
         grcMonitor = *lprcMonitor;
+        gData = dwData;
     }
-    return TRUE;
+    return gContinue;
 }
 
 START_TEST(NtUserEnumDisplayMonitors)
 {
+    MONITORINFO Info;
     BOOL ret;
 
-    // WILL crash!
-//  TEST(NtUserEnumDisplayMonitors1(NULL, NULL, NULL, 0) == 0);
+    gMonitorCount = 0;
+    gContinue = TRUE;
+    ret = NtUserEnumDisplayMonitors(NULL, NULL, MonitorEnumProc, 0x1234);
+    ok_int(ret, TRUE);
+    ok(gMonitorCount > 0, "gMonitorCount is %lu\n", gMonitorCount);
+    ok_ptr(ghdcMonitor, NULL);
+    ok_long((LONG)gData, 0x1234);
 
-    ret = NtUserEnumDisplayMonitors(0, NULL, MonitorEnumProc, 0);
-    TEST(ret == TRUE);
-    TEST(gMonitorCount > 0);
-    TEST(ghdcMonitor == 0);
-    TEST(grcMonitor.left == 0);
-    TEST(grcMonitor.right > 0);
-    TEST(grcMonitor.top == 0);
-    TEST(grcMonitor.bottom > 0);
+    Info.cbSize = sizeof(Info);
+    ok(GetMonitorInfoW(ghMonitor, &Info), "GetMonitorInfoW(%p) failed\n", ghMonitor);
+    ok((Info.dwFlags & MONITORINFOF_PRIMARY) != 0, "The first monitor is not the primary one\n");
+    ok(EqualRect(&Info.rcMonitor, &grcMonitor), "Monitor rectangle mismatch\n");
 
+    gMonitorCount = 0;
+    gContinue = FALSE;
+    ret = NtUserEnumDisplayMonitors(NULL, NULL, MonitorEnumProc, 0);
+    ok_int(ret, FALSE);
+    ok_long(gMonitorCount, 1);
 }

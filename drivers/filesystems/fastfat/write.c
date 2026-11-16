@@ -33,7 +33,7 @@ Abstract:
 //
 
 #define CollectWriteStats(VCB,OPEN_TYPE,BYTE_COUNT) {                                        \
-    PFILESYSTEM_STATISTICS Stats = &(VCB)->Statistics[KeGetCurrentProcessorNumber() % FatData.NumberProcessors].Common; \
+    PFILESYSTEM_STATISTICS Stats = &(VCB)->Statistics[KeGetCurrentProcessorIndex() % FatData.NumberProcessors].Common; \
     if (((OPEN_TYPE) == UserFileOpen)) {                                                     \
         Stats->UserFileWrites += 1;                                                          \
         Stats->UserFileWriteBytes += (ULONG)(BYTE_COUNT);                                    \
@@ -104,7 +104,7 @@ Return Value:
 
 {
     PFCB Fcb;
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
     PIRP_CONTEXT IrpContext = NULL;
 
     BOOLEAN ModWriter = FALSE;
@@ -221,7 +221,7 @@ _Requires_lock_held_(_Global_critical_region_)
 NTSTATUS
 FatCommonWrite (
     IN PIRP_CONTEXT IrpContext,
-    IN PIRP Irp
+    IN PIRP _SEH2_VOLATILE Irp
     )
 
 /*++
@@ -254,26 +254,27 @@ Return Value:
     VBO StartingVbo;
     ULONG ByteCount;
     ULONG FileSize = 0;
-    ULONG InitialFileSize = 0;
-    ULONG InitialValidDataLength = 0;
+    ULONG _SEH2_VOLATILE InitialFileSize = 0;
+    ULONG _SEH2_VOLATILE InitialValidDataLength = 0;
 
     PIO_STACK_LOCATION IrpSp;
     PFILE_OBJECT FileObject;
     TYPE_OF_OPEN TypeOfOpen;
 
-    BOOLEAN PostIrp = FALSE;
+    BOOLEAN _SEH2_VOLATILE PostIrp = FALSE;
     BOOLEAN OplockPostIrp = FALSE;
-    BOOLEAN ExtendingFile = FALSE;
-    BOOLEAN FcbOrDcbAcquired = FALSE;
+    /* These values drive rollback and resource cleanup in the finally block. */
+    BOOLEAN _SEH2_VOLATILE ExtendingFile = FALSE;
+    BOOLEAN _SEH2_VOLATILE FcbOrDcbAcquired = FALSE;
     BOOLEAN SwitchBackToAsync = FALSE;
     BOOLEAN CalledByLazyWriter = FALSE;
-    BOOLEAN ExtendingValidData = FALSE;
+    BOOLEAN _SEH2_VOLATILE ExtendingValidData = FALSE;
     BOOLEAN FcbAcquiredExclusive = FALSE;
     BOOLEAN FcbCanDemoteToShared = FALSE;
     BOOLEAN WriteFileSizeToDirent = FALSE;
     BOOLEAN RecursiveWriteThrough = FALSE;
-    BOOLEAN UnwindOutstandingAsync = FALSE;
-    BOOLEAN PagingIoResourceAcquired = FALSE;
+    BOOLEAN _SEH2_VOLATILE UnwindOutstandingAsync = FALSE;
+    BOOLEAN _SEH2_VOLATILE PagingIoResourceAcquired = FALSE;
     BOOLEAN SuccessfulPurge = FALSE;
 
     BOOLEAN SynchronousIo;
@@ -281,7 +282,7 @@ Return Value:
     BOOLEAN PagingIo;
     BOOLEAN NonCachedIo;
     BOOLEAN Wait;
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE Status = STATUS_SUCCESS;
 
     FAT_IO_CONTEXT StackFatIoContext;
 
@@ -790,7 +791,7 @@ Return Value:
             //  Keep track of meta-data disk ios.
             //
 
-            Vcb->Statistics[KeGetCurrentProcessorNumber() % FatData.NumberProcessors].Common.MetaDataDiskWrites += Vcb->Bpb.Fats;
+            Vcb->Statistics[KeGetCurrentProcessorIndex() % FatData.NumberProcessors].Common.MetaDataDiskWrites += Vcb->Bpb.Fats;
 
             _SEH2_TRY {
 

@@ -386,7 +386,7 @@ typedef struct tagME_InStream ME_InStream;
 typedef struct tagME_TextEditor
 {
 #ifdef __REACTOS__
-  HWND hWnd, hwndParent;
+  HWND hWnd;
 #endif
   ITextHost2 *texthost;
   unsigned int bEmulateVersion10 : 1;
@@ -395,7 +395,8 @@ typedef struct tagME_TextEditor
   ME_TextBuffer *pBuffer;
   ME_Cursor *pCursors;
 #ifdef __REACTOS__
-  DWORD styleFlags;
+  DWORD edit_style;
+  WORD bidi_effects;
 #endif
   DWORD props;
   DWORD scrollbars;
@@ -414,6 +415,8 @@ typedef struct tagME_TextEditor
   int nUndoLimit;
   ME_UndoMode nUndoMode;
   ME_UndoControlState undo_ctl_state;
+  BOOL empty_undo_result;
+  BOOL empty_redo_result;
   int nParagraphs;
   LONG nLastSelStart, nLastSelEnd;
   ME_Paragraph *last_sel_start_para, *last_sel_end_para;
@@ -494,6 +497,7 @@ struct text_services
     struct text_selection *text_selection;
     struct list rangelist;
     struct list clientsites;
+    HANDLE file;
     char spare[256]; /* for bug #12179 */
 };
 

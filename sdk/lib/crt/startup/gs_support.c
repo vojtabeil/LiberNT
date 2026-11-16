@@ -29,7 +29,13 @@
 
 typedef LONG NTSTATUS;	/* same as in ntdef.h / winternl.h */
 
+#ifdef __REACTOS__
+#ifndef UNW_FLAG_NHANDLER
 #define UNW_FLAG_NHANDLER 0x0
+#endif
+#else
+#define UNW_FLAG_NHANDLER 0x0
+#endif
 
 typedef union
 {
@@ -38,12 +44,23 @@ typedef union
 } FT;
 
 #ifndef _MSC_VER
+#if defined(_WIN64) && !defined(_M_ARM64) && !defined(__aarch64__) && !defined(_M_RISCV64)
+NTSYSAPI PRUNTIME_FUNCTION WINAPI RtlLookupFunctionEntry(ULONG_PTR, ULONG_PTR*, PUNWIND_HISTORY_TABLE);
+NTSYSAPI PEXCEPTION_ROUTINE WINAPI RtlVirtualUnwind(ULONG, ULONG_PTR, ULONG_PTR, PRUNTIME_FUNCTION, CONTEXT*, void**, ULONG_PTR*, PKNONVOLATILE_CONTEXT_POINTERS);
+#endif
+/* Report with a captured context where this code knows the context layout. */
+#if defined(_M_IX86) || defined(__i386__) || defined(_M_AMD64) || defined(__x86_64__) || \
+    defined(_M_ARM) || defined(__arm__) || defined(_M_ARM64) || defined(__aarch64__)
+#define GS_REPORT_WITH_CONTEXT
+#endif
+#ifdef GS_REPORT_WITH_CONTEXT
 static EXCEPTION_RECORD GS_ExceptionRecord;
 static CONTEXT GS_ContextRecord;
 
 static const EXCEPTION_POINTERS GS_ExceptionPointers = {
   &GS_ExceptionRecord,&GS_ContextRecord
 };
+#endif
 #endif
 
 DECLSPEC_SELECTANY UINT_PTR __security_cookie = DEFAULT_SECURITY_COOKIE;
@@ -95,21 +112,19 @@ __security_init_cookie (void)
 }
 
 
-#if defined(__GNUC__) /* wrap msvc intrinsics onto gcc builtins */
-#undef  _ReturnAddress
-#undef  _AddressOfReturnAddress
-#define _ReturnAddress()		__builtin_return_address(0)
-#define _AddressOfReturnAddress()	__builtin_frame_address (0)
-#endif /* __GNUC__ */
-
 __declspec(noreturn) void __cdecl __report_gsfailure (ULONG_PTR);
 
 #ifndef _MSC_VER
 __declspec(noreturn) void __cdecl
 __report_gsfailure (ULONG_PTR StackCookie)
 {
+#ifndef GS_REPORT_WITH_CONTEXT
+  (void)StackCookie;
+  __fastfail(FAST_FAIL_STACK_COOKIE_CHECK_FAILURE);
+#else
   volatile UINT_PTR cookie[2] __MINGW_ATTRIB_UNUSED;
 #ifdef _WIN64
+#if !defined(_M_ARM64) && !defined(__aarch64__)
   ULONG64 controlPC, imgBase, establisherFrame;
   PRUNTIME_FUNCTION fctEntry;
   PVOID hndData;
@@ -123,11 +138,17 @@ __report_gsfailure (ULONG_PTR StackCookie)
 			&GS_ContextRecord, &hndData, &establisherFrame, NULL);
     }
   else
+#endif /* !_M_ARM64 */
 #endif /* _WIN64 */
     {
 #ifdef _WIN64
+#if defined(_M_ARM64) || defined(__aarch64__)
+      GS_ContextRecord.Pc = (ULONGLONG) _ReturnAddress();
+      GS_ContextRecord.Sp = (ULONGLONG) _AddressOfReturnAddress() + 8;
+#else
       GS_ContextRecord.Rip = (ULONGLONG) _ReturnAddress();
       GS_ContextRecord.Rsp = (ULONGLONG) _AddressOfReturnAddress() + 8;
+#endif
 #else
       GS_ContextRecord.Eip = (DWORD) _ReturnAddress();
       GS_ContextRecord.Esp = (DWORD) _AddressOfReturnAddress() + 4;
@@ -135,8 +156,13 @@ __report_gsfailure (ULONG_PTR StackCookie)
     }
 
 #ifdef _WIN64
+#if defined(_M_ARM64) || defined(__aarch64__)
+  GS_ExceptionRecord.ExceptionAddress = (PVOID) GS_ContextRecord.Pc;
+  GS_ContextRecord.X0 = StackCookie;
+#else
   GS_ExceptionRecord.ExceptionAddress = (PVOID) GS_ContextRecord.Rip;
   GS_ContextRecord.Rcx = StackCookie;
+#endif
 #else
   GS_ExceptionRecord.ExceptionAddress = (PVOID) GS_ContextRecord.Eip;
   GS_ContextRecord.Ecx = StackCookie;
@@ -149,5 +175,6 @@ __report_gsfailure (ULONG_PTR StackCookie)
   UnhandledExceptionFilter ((EXCEPTION_POINTERS *) &GS_ExceptionPointers);
   TerminateProcess (GetCurrentProcess (), STATUS_STACK_BUFFER_OVERRUN);
   abort();
+#endif
 }
 #endif /* !_MSC_VER */

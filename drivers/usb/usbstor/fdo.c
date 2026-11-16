@@ -104,10 +104,29 @@ USBSTOR_FdoHandleRemoveDevice(
 {
     NTSTATUS Status;
     ULONG Index;
+    PPDO_DEVICE_EXTENSION PDODeviceExtension;
 
     DPRINT("Handling FDO removal %p\n", DeviceObject);
 
-    // FIXME: wait for devices finished processing
+    for (Index = 0; Index < USB_MAXCHILDREN; Index++)
+    {
+        if (DeviceExtension->ChildPDO[Index] != NULL)
+        {
+            PDODeviceExtension = DeviceExtension->ChildPDO[Index]->DeviceExtension;
+            USBSTOR_PdoStopRequests(PDODeviceExtension, Irp);
+            PDODeviceExtension->PDODeviceObject = NULL;
+        }
+    }
+
+    if (DeviceExtension->IrpPendingCount != 0 || DeviceExtension->ActiveSrb != NULL)
+        USBSTOR_QueueWaitForPendingRequests(DeviceObject);
+
+    KeCancelTimer(&DeviceExtension->RequestTimer);
+    KeRemoveQueueDpc(&DeviceExtension->RequestTimerDpc);
+    ASSERT(DeviceExtension->RequestTimerIrp == NULL);
+    ASSERT(DeviceExtension->DeferredCompletionIrp == NULL);
+    ASSERT(DeviceExtension->RequestTimerDpcRunning == FALSE);
+
     for (Index = 0; Index < USB_MAXCHILDREN; Index++)
     {
         if (DeviceExtension->ChildPDO[Index] != NULL)
@@ -128,6 +147,13 @@ USBSTOR_FdoHandleRemoveDevice(
         IoFreeWorkItem(DeviceExtension->ResetDeviceWorkItem);
     if (DeviceExtension->SerialNumber)
         ExFreePoolWithTag(DeviceExtension->SerialNumber, USB_STOR_TAG);
+    if (DeviceExtension->UsbdHandle)
+        USBD_CloseHandle(DeviceExtension->UsbdHandle);
+    DeviceExtension->UsbdHandle = NULL;
+    if (DeviceExtension->CurrentIrpContext.CbwAllocation)
+        ExFreePoolWithTag(DeviceExtension->CurrentIrpContext.CbwAllocation, USB_STOR_TAG);
+    if (DeviceExtension->CurrentIrpContext.CswAllocation)
+        ExFreePoolWithTag(DeviceExtension->CurrentIrpContext.CswAllocation, USB_STOR_TAG);
 
     // Send the IRP down the stack
     IoSkipCurrentIrpStackLocation(Irp);
@@ -152,6 +178,7 @@ USBSTOR_FdoHandleStartDevice(
     NTSTATUS Status;
     UCHAR Index = 0;
     PIO_WORKITEM WorkItem;
+    USHORT Streams;
 
     // forward irp to lower device
     if (!IoForwardIrpSynchronously(DeviceExtension->LowerDeviceObject, Irp))
@@ -179,6 +206,22 @@ USBSTOR_FdoHandleStartDevice(
 
     // initialize irp queue
     USBSTOR_QueueInitialize(DeviceExtension);
+
+    if (!DeviceExtension->UsbdHandle)
+    {
+        Status = USBD_CreateHandle(DeviceObject, DeviceExtension->LowerDeviceObject, USBD_CLIENT_CONTRACT_VERSION_602,
+                                   USB_STOR_TAG, &DeviceExtension->UsbdHandle);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("USBSTOR_FdoHandleStartDevice failed to register with the USB stack %x\n", Status);
+            return Status;
+        }
+    }
+    DeviceExtension->MaxTransferLength = NT_SUCCESS(USBD_QueryUsbCapability(DeviceExtension->UsbdHandle,
+                                                                            &GUID_USB_CAPABILITY_STATIC_STREAMS,
+                                                                            sizeof(Streams), (PUCHAR)&Streams,
+                                                                            NULL)) ?
+                                         USBSTOR_USB3_MAX_TRANSFER_LENGTH : USBSTOR_USB2_MAX_TRANSFER_LENGTH;
 
     // first get device & configuration & string descriptor
     Status = USBSTOR_GetDescriptors(DeviceObject);
@@ -266,8 +309,6 @@ USBSTOR_FdoHandleStartDevice(
     }
 #endif
 
-    //IoStartTimer(DeviceObject);
-
     DPRINT("USBSTOR_FdoHandleStartDevice FDO is initialized\n");
     return STATUS_SUCCESS;
 }
@@ -304,7 +345,6 @@ USBSTOR_FdoHandlePnp(
         case IRP_MN_STOP_DEVICE:
         {
             DPRINT1("USBSTOR_FdoHandlePnp: IRP_MN_STOP_DEVICE unimplemented\n");
-            IoStopTimer(DeviceObject);
             Irp->IoStatus.Status = STATUS_SUCCESS;
 
             // forward irp to next device object

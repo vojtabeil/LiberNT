@@ -6,7 +6,71 @@
 
 #include <kmt_test.h>
 
+KMT_TESTFUNC Test_CddDisplay;
 KMT_TESTFUNC Test_CmSecurity;
+KMT_TESTFUNC Test_DxgkDeviceWork;
+KMT_TESTFUNC Test_DxgkHotPlugWork;
+KMT_TESTFUNC Test_DxgkChildDescriptor;
+KMT_TESTFUNC Test_DxgkPostDisplayHandoff;
+KMT_TESTFUNC Test_DxgkPresentUserSource;
+KMT_TESTFUNC Test_MonitorBrightnessKey;
+KMT_TESTFUNC Test_DxgkGpuVaAddress;
+KMT_TESTFUNC Test_DxgkGpuVaPageTable;
+KMT_TESTFUNC Test_DxgkGpuVaPte;
+KMT_TESTFUNC Test_DxgkFenceOrdering;
+KMT_TESTFUNC Test_DxgkMonitoredFence;
+KMT_TESTFUNC Test_DxgkPeriodicFence;
+KMT_TESTFUNC Test_DxgkPagingOperation;
+KMT_TESTFUNC Test_DxgkPagingMultipass;
+KMT_TESTFUNC Test_DxgkResidencyBudget;
+KMT_TESTFUNC Test_DxgkResidencyReference;
+KMT_TESTFUNC Test_DxgkOfferReclaim;
+KMT_TESTFUNC Test_DxgkAllocationList;
+KMT_TESTFUNC Test_DxgkPatchLocation;
+KMT_TESTFUNC Test_DxgkDmaRing;
+KMT_TESTFUNC Test_DxgkVidPnTopology;
+KMT_TESTFUNC Test_DxgkVidPnModeSet;
+KMT_TESTFUNC Test_DxgkFlipQueue;
+KMT_TESTFUNC Test_DxgkHandleTable;
+KMT_TESTFUNC Test_DxgkAdapterCaps;
+KMT_TESTFUNC Test_DxgkNodeAffinity;
+KMT_TESTFUNC Test_DxgkNodeStatistics;
+KMT_TESTFUNC Test_DxgkTdrPolicy;
+KMT_TESTFUNC Test_DxgkFenceConcurrency;
+KMT_TESTFUNC Test_DxgkGpuFaultPolicy;
+KMT_TESTFUNC Test_DxgkKeyedMutex;
+KMT_TESTFUNC Test_DxgkCoreConcurrency;
+KMT_TESTFUNC Test_DxgkContextSync;
+KMT_TESTFUNC Test_DxgkPresentQueue;
+KMT_TESTFUNC Test_DxgkVsyncPower;
+KMT_TESTFUNC Test_Rpi5Vc4Pointer;
+KMT_TESTFUNC Test_DxgkSyncWait;
+KMT_TESTFUNC Test_DxgkTrackedWork;
+KMT_TESTFUNC Test_DxgkVidMmWorkerDrain;
+KMT_TESTFUNC Test_DxgkrnlPublicExports;
+KMT_TESTFUNC Test_Dxgmms2ContextStream;
+KMT_TESTFUNC Test_Dxgmms2Scheduler;
+KMT_TESTFUNC Test_Dxgmms2Timeline;
+KMT_TESTFUNC Test_Dxgmms2VidMm;
+#ifdef KMT_DXGK_WDDM_ABI
+KMT_TESTFUNC Test_DxgkWddmAbi;
+#endif
+#ifdef KMT_KUBSAN
+KMT_TESTFUNC Test_KubsanHandlers;
+#endif
+#ifdef KMT_SOFTGPU_GPUVA_ISOLATION
+KMT_TESTFUNC Test_SoftGpuGpuVaIsolation;
+#endif
+#ifdef KMT_SOFTGPU_2D_POLICY
+KMT_TESTFUNC Test_SoftGpu2DPolicy;
+#endif
+#ifdef KMT_SOFTGPU_VIDPN_POLICY
+KMT_TESTFUNC Test_SoftGpuVidPnPolicy;
+#endif
+#ifdef KMT_SOFTGPU_VSYNC_POLICY
+KMT_TESTFUNC Test_SoftGpuSlabHandoff;
+KMT_TESTFUNC Test_SoftGpuVsyncPolicy;
+#endif
 KMT_TESTFUNC Test_Example;
 KMT_TESTFUNC Test_ExCallback;
 KMT_TESTFUNC Test_ExDoubleList;
@@ -14,52 +78,297 @@ KMT_TESTFUNC Test_ExFastMutex;
 KMT_TESTFUNC Test_ExHardError;
 KMT_TESTFUNC Test_ExHardErrorInteractive;
 KMT_TESTFUNC Test_ExInterlocked;
+KMT_TESTFUNC Test_ExPoolBench;
+KMT_TESTFUNC Test_ExPool2;
 KMT_TESTFUNC Test_ExPools;
+KMT_TESTFUNC Test_ExCallbackExtra;
+KMT_TESTFUNC Test_ExFastMutexExtra;
+KMT_TESTFUNC Test_ExLookaside;
+KMT_TESTFUNC Test_ExPoolExtra;
 KMT_TESTFUNC Test_ExPushLock;
+KMT_TESTFUNC Test_ExResourceExtra;
+KMT_TESTFUNC Test_ExTimerExtra;
+KMT_TESTFUNC Test_ExTimerInvalidAttributes;
+KMT_TESTFUNC Test_ExTimerCombinedAttributes;
+KMT_TESTFUNC Test_ExTimeZone;
+KMT_TESTFUNC Test_ExHeadless;
+KMT_TESTFUNC Test_ExLicenseDif;
+KMT_TESTFUNC Test_IoArbiter;
+KMT_TESTFUNC Test_IoLargeMemoryResource;
+KMT_TESTFUNC Test_IoCancelKM;
+KMT_TESTFUNC Test_IoCloseIrqlKM;
+KMT_TESTFUNC Test_PsProcessInfo;
+KMT_TESTFUNC Test_PsEnergy;
+KMT_TESTFUNC Test_PsTls;
+KMT_TESTFUNC Test_KeDpcWatchdog;
+KMT_TESTFUNC Test_IoDevicePropertyData;
+KMT_TESTFUNC Test_KseShim;
+KMT_TESTFUNC Test_KseDeviceData;
+KMT_TESTFUNC Test_PsPropertyThread;
+KMT_TESTFUNC Test_PsPropertyJob;
+KMT_TESTFUNC Test_PsPropertyThreadExit;
+KMT_TESTFUNC Test_PsPropertyDispatch;
+KMT_TESTFUNC Test_PsModern;
+KMT_TESTFUNC Test_PsModernIdentity;
+KMT_TESTFUNC Test_PsModernPolicy;
+KMT_TESTFUNC Test_PsModernPriority;
+KMT_TESTFUNC Test_PsWin32kPriorityFloor;
+KMT_TESTFUNC Test_PsWin32kPriorityFloorScheduling;
+KMT_TESTFUNC Test_PsThreadPriorityBoost;
+KMT_TESTFUNC Test_PsUnEstablishWin32Callouts;
+KMT_TESTFUNC Test_PsWddmFault;
+KMT_TESTFUNC Test_PsWddmWindow;
+KMT_TESTFUNC Test_RtlStringSupportKM;
+#ifdef KMT_SMP_TESTS
+KMT_TESTFUNC Test_KeArm64Apc;
+KMT_TESTFUNC Test_KeArm64Dispatcher;
+KMT_TESTFUNC Test_KeArm64WakePlacement;
+KMT_TESTFUNC Test_KeArm64Interrupt;
+KMT_TESTFUNC Test_KeArm64IpiBroadcast;
+KMT_TESTFUNC Test_KeArm64ProcessorChange;
+KMT_TESTFUNC Test_KeArm64Numa;
+KMT_TESTFUNC Test_KeArm64DpcImportance;
+KMT_TESTFUNC Test_KeArm64Smp;
+KMT_TESTFUNC Test_KeArm64Smt;
+KMT_TESTFUNC Test_KeArm64SubNodeSched;
+KMT_TESTFUNC Test_KeArm64ThreadProcess;
+KMT_TESTFUNC Test_KeArm64AffinityEx;
+KMT_TESTFUNC Test_KeArm64SpinLock;
+#endif
+#ifdef KMT_WIN11_TESTS
+KMT_TESTFUNC Test_Win11NewKM;
+KMT_TESTFUNC Test_MmWin11KM;
+KMT_TESTFUNC Test_MmMdlWin11KM;
+KMT_TESTFUNC Test_MmPoolWin11KM;
+KMT_TESTFUNC Test_MmSectionWin11KM;
+KMT_TESTFUNC Test_MmPteWin11KM;
+#endif
 KMT_TESTFUNC Test_ExResource;
+KMT_TESTFUNC Test_ExResourceDeleteHeld;
+KMT_TESTFUNC Test_ExResourceBoost;
+KMT_TESTFUNC Test_ExResourceBoostOwnerPointer;
+KMT_TESTFUNC Test_ExRundown;
 KMT_TESTFUNC Test_ExSequencedList;
 KMT_TESTFUNC Test_ExSingleList;
+KMT_TESTFUNC Test_ExSystemInformation;
+KMT_TESTFUNC Test_ExSystemTimeCallback;
 KMT_TESTFUNC Test_ExTimer;
 KMT_TESTFUNC Test_ExUuid;
+KMT_TESTFUNC Test_CcLazyWriter;
 KMT_TESTFUNC Test_FsRtlDissect;
 KMT_TESTFUNC Test_FsRtlExpression;
 KMT_TESTFUNC Test_FsRtlLegal;
 KMT_TESTFUNC Test_FsRtlMcb;
+KMT_TESTFUNC Test_FsRtlPerFileObjectContext;
+KMT_TESTFUNC Test_FsRtlQueryFileLock;
 KMT_TESTFUNC Test_FsRtlRemoveDotsFromPath;
 KMT_TESTFUNC Test_FsRtlTunnel;
 #if defined(_M_IX86) || defined(_M_AMD64)
+KMT_TESTFUNC Test_HalBusData;
+KMT_TESTFUNC Test_HalMessageState;
 KMT_TESTFUNC Test_HalPortIo;
 #endif
+KMT_TESTFUNC Test_HalDmaAlignment;
+KMT_TESTFUNC Test_HalRealTimeClock;
 KMT_TESTFUNC Test_HalSystemInfo;
+KMT_TESTFUNC Test_IoContainerId;
+KMT_TESTFUNC Test_IoDriverKeyOpen;
+KMT_TESTFUNC Test_IoDriverSection;
+KMT_TESTFUNC Test_IoGetRequestorProcess;
+KMT_TESTFUNC Test_IoCreateDeviceSecure;
+KMT_TESTFUNC Test_IoDeleteDeviceName;
+KMT_TESTFUNC Test_IoReadPartitionTable;
+KMT_TESTFUNC Test_IoPciMessageEnable;
+KMT_TESTFUNC Test_IoPagingIrpRetire;
 KMT_TESTFUNC Test_IoCreateFile;
+KMT_TESTFUNC Test_IoCreateFileAccessCheck;
+KMT_TESTFUNC Test_IoCreateSystemThread;
+KMT_TESTFUNC Test_IoCustomTargetEventReport;
 KMT_TESTFUNC Test_IoDeviceInterface;
+KMT_TESTFUNC Test_IoDeviceTextProperties;
+KMT_TESTFUNC Test_IoDeviceSecurity;
 KMT_TESTFUNC Test_IoEvent;
+KMT_TESTFUNC Test_IoInterfaceOrderCheck;
+KMT_TESTFUNC Test_IoResourceSearch;
+KMT_TESTFUNC Test_IoMessageInterruptClaim;
+KMT_TESTFUNC Test_IoCreateDriverContext;
+KMT_TESTFUNC Test_PciLineInterrupt;
+KMT_TESTFUNC Test_IoStorageDumpPath;
+KMT_TESTFUNC Test_IoWmiAcpi;
+KMT_TESTFUNC Test_ZwWriteFileAppend;
 KMT_TESTFUNC Test_IoFilesystem;
 KMT_TESTFUNC Test_IoInterrupt;
+KMT_TESTFUNC Test_IoIommu;
+KMT_TESTFUNC Test_InbvVirtualFrameBuffer;
 KMT_TESTFUNC Test_IoIrp;
+KMT_TESTFUNC Test_IoWaitCompletionPacket;
+KMT_TESTFUNC Test_ExWorkItem;
+KMT_TESTFUNC Test_ExWddm;
+KMT_TESTFUNC Test_ExWddmAvl;
+KMT_TESTFUNC Test_ExWddmEnergy;
+KMT_TESTFUNC Test_ExWddmFault;
+KMT_TESTFUNC Test_ExWddmInbv;
+#ifdef KMT_KSR_APISET
+KMT_TESTFUNC Test_ExWddmKsr;
+KMT_TESTFUNC Test_ExWddmKsrLoad;
+#endif
+KMT_TESTFUNC Test_ExWddmPower;
+KMT_TESTFUNC Test_ExWddmPoFx;
+KMT_TESTFUNC Test_ExWddmPlatform;
+KMT_TESTFUNC Test_ExWddmProviders;
+KMT_TESTFUNC Test_ExWddmRotate;
+KMT_TESTFUNC Test_ExWddmRotateValid;
+KMT_TESTFUNC Test_ExWddmRtl;
+KMT_TESTFUNC Test_ExWddmTls;
+KMT_TESTFUNC Test_ExWddmWindow;
 KMT_TESTFUNC Test_IoMdl;
+KMT_TESTFUNC Test_IoModern;
+KMT_TESTFUNC Test_IoDeviceNumaNode;
+KMT_TESTFUNC Test_IoReportRootDevice;
+#if defined(_M_IX86) || defined(_M_AMD64)
+KMT_TESTFUNC Test_IoTimerKM;
+#endif
 KMT_TESTFUNC Test_IoVolume;
+KMT_TESTFUNC Test_KdBootLog;
+KMT_TESTFUNC Test_KdBreakContinue;
+KMT_TESTFUNC Test_KdTimeSlipEvent;
+KMT_TESTFUNC Test_KdbSchedulerCommands;
+KMT_TESTFUNC Test_KdbDeviceCommands;
+KMT_TESTFUNC Test_KdbCliCommands;
+KMT_TESTFUNC Test_KdbObjectCommands;
+KMT_TESTFUNC Test_KdbMemoryCommands;
+KMT_TESTFUNC Test_KdbContextCommands;
+KMT_TESTFUNC Test_KdbLocks;
+KMT_TESTFUNC Test_KdbThreadApc;
+KMT_TESTFUNC Test_KdChangeOption;
+KMT_TESTFUNC Test_KdbSystemBreak;
+KMT_TESTFUNC Test_KdShutdownCrash;
+KMT_TESTFUNC Test_KdDebuggerPresent;
+KMT_TESTFUNC Test_KdPrintComponent;
+KMT_TESTFUNC Test_KdPrintStatus;
 KMT_TESTFUNC Test_KdSystemDebugControl;
+KMT_TESTFUNC Test_KdUsbNetRules;
+KMT_TESTFUNC Test_KsecBcrypt;
+KMT_TESTFUNC Test_KeWddmExports;
 KMT_TESTFUNC Test_KeApc;
+KMT_TESTFUNC Test_KeApcInject;
+KMT_TESTFUNC Test_KeApcScheduling;
+KMT_TESTFUNC Test_KeApcQueueTransitions;
+KMT_TESTFUNC Test_KeDpcQueueTransitions;
+#ifdef _M_AMD64
+KMT_TESTFUNC Test_KeSwitchReaper;
+KMT_TESTFUNC Test_KeXState;
+KMT_TESTFUNC Test_KeSwitchSelfWake;
+KMT_TESTFUNC Test_KeTrapDebugRegisters;
+KMT_TESTFUNC Test_KeTrapFilterX87;
+KMT_TESTFUNC Test_KeStandbySteal;
+#endif
+KMT_TESTFUNC Test_KeDeferredReady;
+KMT_TESTFUNC Test_KeIdleSteal;
+KMT_TESTFUNC Test_KeCacheInvalidation;
+KMT_TESTFUNC Test_KeClockKeepAlive;
+KMT_TESTFUNC Test_KeClockWatchdog;
+KMT_TESTFUNC Test_KeModern;
+#ifdef _M_ARM64
+KMT_TESTFUNC Test_HalArm64Ipi;
+KMT_TESTFUNC Test_HalArm64Layout;
+KMT_TESTFUNC Test_HalArm64Stage1;
+KMT_TESTFUNC Test_HalArm64Stage2;
+KMT_TESTFUNC Test_HalArm64Stage3;
+KMT_TESTFUNC Test_HalArm64Stage4;
+KMT_TESTFUNC Test_HalArm64Stage5;
+KMT_TESTFUNC Test_KdArm64Layout;
+KMT_TESTFUNC Test_KeArm64;
+KMT_TESTFUNC Test_KeArm64PmrMigration;
+KMT_TESTFUNC Test_KeArm64Frames;
+KMT_TESTFUNC Test_KeArm64Intrinsics;
+KMT_TESTFUNC Test_KeArm64IpiPreemption;
+KMT_TESTFUNC Test_KeArm64Irql;
+KMT_TESTFUNC Test_KeArm64LoaderCache;
+KMT_TESTFUNC Test_KeArm64PcrPrcb;
+KMT_TESTFUNC Test_KeArm64Profile;
+KMT_TESTFUNC Test_RtlArm64Context;
+KMT_TESTFUNC Test_RtlArm64UnwindLayout;
+KMT_TESTFUNC Test_KeArm64DpcIpi;
+#endif
 KMT_TESTFUNC Test_KeDeviceQueue;
 KMT_TESTFUNC Test_KeDpc;
+KMT_TESTFUNC Test_KeDpcFlush;
+KMT_TESTFUNC Test_KeDpcReadyThread;
+KMT_TESTFUNC Test_KeDpcRemove;
 KMT_TESTFUNC Test_KeEvent;
+KMT_TESTFUNC Test_KeExpandKernelStack;
 KMT_TESTFUNC Test_KeFloatPointState;
 KMT_TESTFUNC Test_KeGuardedMutex;
+KMT_TESTFUNC Test_CmBootFlush;
+KMT_TESTFUNC Test_CmCallbacks;
+KMT_TESTFUNC Test_CmTransactions;
+KMT_TESTFUNC Test_CmKeyKM;
+KMT_TESTFUNC Test_EtwRegisterKM;
+KMT_TESTFUNC Test_EtwSessionKM;
+KMT_TESTFUNC Test_EtwSessionIrqlKM;
+KMT_TESTFUNC Test_PcwKM;
+KMT_TESTFUNC Test_WmiEventKM;
+KMT_TESTFUNC Test_IoBuildIoctlKM;
+KMT_TESTFUNC Test_IoCsqKM;
+KMT_TESTFUNC Test_IoNullDeviceKM;
+KMT_TESTFUNC Test_ZwDuplicateKM;
+KMT_TESTFUNC Test_ZwFileKM;
+KMT_TESTFUNC Test_KeIpiKM;
 KMT_TESTFUNC Test_KeIrql;
 KMT_TESTFUNC Test_KeMutex;
+KMT_TESTFUNC Test_KeAffinityKM;
+KMT_TESTFUNC Test_KeBugCheckCbKM;
+KMT_TESTFUNC Test_KeBugCheckStop;
+KMT_TESTFUNC Test_KeBadInstructionPointer;
+KMT_TESTFUNC Test_KeKernelStackOverflow;
+KMT_TESTFUNC Test_KeSystemThreadException;
+KMT_TESTFUNC Test_KeUnhandledException;
+KMT_TESTFUNC Test_KePcr;
+KMT_TESTFUNC Test_RtlImageKM;
+KMT_TESTFUNC Test_RtlRandomKM;
+KMT_TESTFUNC Test_ZwSystemInfoKM;
+KMT_TESTFUNC Test_KeQueue;
+KMT_TESTFUNC Test_KeSemaphore;
+KMT_TESTFUNC Test_KeProcessStackCount;
+KMT_TESTFUNC Test_KeQueryBasePriority;
 KMT_TESTFUNC Test_KeProcessor;
+KMT_TESTFUNC Test_KePriorityRaise;
+KMT_TESTFUNC Test_KeQuantumEnd;
 KMT_TESTFUNC Test_KeSpinLock;
+KMT_TESTFUNC Test_KeThreadedDpc;
+KMT_TESTFUNC Test_KeTime;
+KMT_TESTFUNC Test_KeTimer2KM;
+KMT_TESTFUNC Test_MmSecureKM;
 KMT_TESTFUNC Test_KeTimer;
+KMT_TESTFUNC Test_KeWaitMultiple;
 KMT_TESTFUNC Test_KernelType;
+KMT_TESTFUNC Test_MmAllocateContiguousNode;
+KMT_TESTFUNC Test_MmContiguousCacheTypes;
 KMT_TESTFUNC Test_MmMdl;
+KMT_TESTFUNC Test_MmMdlDispatch;
+KMT_TESTFUNC Test_MmLargePages;
 KMT_TESTFUNC Test_MmSection;
+KMT_TESTFUNC Test_MmSystemViewCache;
+KMT_TESTFUNC Test_MmWddmRanges;
+KMT_TESTFUNC Test_MmPhysicalAddressRace;
+KMT_TESTFUNC Test_MmWddmRotate;
+KMT_TESTFUNC Test_MmWddmRotateValid;
 KMT_TESTFUNC Test_MmReservedMapping;
+KMT_TESTFUNC Test_MmSelfMap;
+KMT_TESTFUNC Test_MmUserLayout;
+KMT_TESTFUNC Test_MmLoaderBlock;
+KMT_TESTFUNC Test_NdisIfProvider;
+KMT_TESTFUNC Test_NdisRwLock;
+KMT_TESTFUNC Test_NdisProcessorGroup;
+KMT_TESTFUNC Test_NdisLegacyHelpers;
+KMT_TESTFUNC Test_NdisMiniportCharacteristics;
 KMT_TESTFUNC Test_NpfsConnect;
 KMT_TESTFUNC Test_NpfsCreate;
 KMT_TESTFUNC Test_NpfsFileInfo;
 KMT_TESTFUNC Test_NpfsReadWrite;
 KMT_TESTFUNC Test_NpfsVolumeInfo;
+KMT_TESTFUNC Test_ObCallbacks;
 KMT_TESTFUNC Test_ObHandle;
 KMT_TESTFUNC Test_ObQuery;
 KMT_TESTFUNC Test_ObReference;
@@ -69,20 +378,87 @@ KMT_TESTFUNC Test_ObType;
 KMT_TESTFUNC Test_ObTypeClean;
 KMT_TESTFUNC Test_ObTypeNoClean;
 KMT_TESTFUNC Test_ObTypes;
+KMT_TESTFUNC Test_PoDisplayStateOff;
+KMT_TESTFUNC Test_PoDisplayStateOn;
+KMT_TESTFUNC Test_PoPowerButton;
+KMT_TESTFUNC Test_PoSettingSession;
+KMT_TESTFUNC Test_PoSetSystemState;
+KMT_TESTFUNC Test_PoSleepInformation;
+KMT_TESTFUNC Test_PoBatteryState;
+KMT_TESTFUNC Test_PoFxState;
+KMT_TESTFUNC Test_PoPowerLimit;
+KMT_TESTFUNC Test_TmTransactions;
+KMT_TESTFUNC Test_PoPowerSettings;
+KMT_TESTFUNC Test_PoLockConsoleOnWake;
+KMT_TESTFUNC Test_PoProcessorStateHandler;
+KMT_TESTFUNC Test_PoKernelPowerRequest;
 KMT_TESTFUNC Test_PsNotify;
 KMT_TESTFUNC Test_PsQuota;
+KMT_TESTFUNC Test_PsGetVersion;
+KMT_TESTFUNC Test_PsSystemThread;
+KMT_TESTFUNC Test_PsPico;
+KMT_TESTFUNC Test_PsJobCommit;
+KMT_TESTFUNC Test_SeAccessCheckKM;
 KMT_TESTFUNC Test_SeInheritance;
 KMT_TESTFUNC Test_SeLogonSession;
+KMT_TESTFUNC Test_SeSddl;
+KMT_TESTFUNC Test_SeSddlListOrder;
 KMT_TESTFUNC Test_SeQueryInfoToken;
 KMT_TESTFUNC Test_SeTokenFiltering;
+KMT_TESTFUNC Test_SePrimaryTokenRelease;
+KMT_TESTFUNC Test_SeAccessState;
 KMT_TESTFUNC Test_RtlAvlTree;
+KMT_TESTFUNC Test_RtlAtomEx;
 KMT_TESTFUNC Test_RtlCaptureContext;
 KMT_TESTFUNC Test_RtlException;
+KMT_TESTFUNC Test_RtlGetVersion;
 KMT_TESTFUNC Test_RtlIntSafe;
 KMT_TESTFUNC Test_RtlIsValidOemCharacter;
+KMT_TESTFUNC Test_MmDriverMemory;
+KMT_TESTFUNC Test_MmMemoryNotification;
+KMT_TESTFUNC Test_MmMapReserve;
+KMT_TESTFUNC Test_MmPhysical;
+KMT_TESTFUNC Test_MmPrefetchPages;
+KMT_TESTFUNC Test_MmPrivatePages;
+KMT_TESTFUNC Test_IoSafeBootPolicy;
+KMT_TESTFUNC Test_IoStackKM;
+KMT_TESTFUNC Test_IoActivityId;
+KMT_TESTFUNC Test_IoAcpiCmosRegion;
+KMT_TESTFUNC Test_IoI8042Sync;
+KMT_TESTFUNC Test_IoAcpiIoctl;
+KMT_TESTFUNC Test_IoErrorLogEntry;
+KMT_TESTFUNC Test_IoPciPdoPnp;
+KMT_TESTFUNC Test_IoRamdiskPnp;
+KMT_TESTFUNC Test_IoPciD3Cold;
+KMT_TESTFUNC Test_IoPciDeviceReset;
+KMT_TESTFUNC Test_IoPciExpressInterfaces;
+KMT_TESTFUNC Test_IoPciEnumeration;
+KMT_TESTFUNC Test_IoPciRom;
+KMT_TESTFUNC Test_IoStackLimits;
+KMT_TESTFUNC Test_IoVpb;
+KMT_TESTFUNC Test_SmcLib;
+KMT_TESTFUNC Test_SmcLibRemove;
+KMT_TESTFUNC Test_KeCriticalRegionKM;
+KMT_TESTFUNC Test_ObOpenByPointer;
+KMT_TESTFUNC Test_ObSdCache;
+KMT_TESTFUNC Test_ObSecurityMethod;
+KMT_TESTFUNC Test_ObSecurityDescKM;
+KMT_TESTFUNC Test_PsNotifyKM;
+KMT_TESTFUNC Test_RtlBitmapKM;
+KMT_TESTFUNC Test_RtlBitmapEx;
+KMT_TESTFUNC Test_RtlGuidKM;
+KMT_TESTFUNC Test_RtlHashTableKM;
+KMT_TESTFUNC Test_RtlTimeKM;
+KMT_TESTFUNC Test_RtlGenericTableKM;
+KMT_TESTFUNC Test_RtlTableElementKM;
 KMT_TESTFUNC Test_RtlMemory;
 KMT_TESTFUNC Test_RtlRangeList;
+KMT_TESTFUNC Test_RtlCmResource;
+KMT_TESTFUNC Test_RtlCompareAltitudesKM;
+KMT_TESTFUNC Test_RtlDirectoryEnumKM;
+KMT_TESTFUNC Test_RtlPrefixTableKM;
 KMT_TESTFUNC Test_RtlRegistry;
+KMT_TESTFUNC Test_RtlSehUnwind;
 KMT_TESTFUNC Test_RtlSplayTree;
 KMT_TESTFUNC Test_RtlStack;
 KMT_TESTFUNC Test_RtlStrSafe;
@@ -94,86 +470,464 @@ KMT_TESTFUNC Test_ZwWaitForMultipleObjects;
 
 const KMT_TEST TestList[] =
 {
+    { "CddDisplay",                         Test_CddDisplay },
     { "CmSecurity",                         Test_CmSecurity },
+    { "DxgkDeviceWork",                    Test_DxgkDeviceWork },
+    { "DxgkHotPlugWork",                   Test_DxgkHotPlugWork },
+    { "DxgkChildDescriptor",               Test_DxgkChildDescriptor },
+    { "DxgkPostDisplayHandoff",            Test_DxgkPostDisplayHandoff },
+    { "DxgkPresentUserSource",             Test_DxgkPresentUserSource },
+    { "DxgkGpuVaAddress",                   Test_DxgkGpuVaAddress },
+    { "DxgkGpuVaPageTable",                 Test_DxgkGpuVaPageTable },
+    { "DxgkGpuVaPte",                       Test_DxgkGpuVaPte },
+    { "DxgkFenceOrdering",                  Test_DxgkFenceOrdering },
+    { "DxgkMonitoredFence",                 Test_DxgkMonitoredFence },
+    { "DxgkPeriodicFence",                  Test_DxgkPeriodicFence },
+    { "DxgkPagingOperation",                Test_DxgkPagingOperation },
+    { "DxgkPagingMultipass",                Test_DxgkPagingMultipass },
+    { "DxgkResidencyBudget",                Test_DxgkResidencyBudget },
+    { "DxgkResidencyReference",             Test_DxgkResidencyReference },
+    { "DxgkOfferReclaim",                   Test_DxgkOfferReclaim },
+    { "DxgkAllocationList",                 Test_DxgkAllocationList },
+    { "DxgkPatchLocation",                  Test_DxgkPatchLocation },
+    { "DxgkDmaRing",                        Test_DxgkDmaRing },
+    { "DxgkVidPnTopology",                  Test_DxgkVidPnTopology },
+    { "DxgkVidPnModeSet",                   Test_DxgkVidPnModeSet },
+    { "DxgkFlipQueue",                      Test_DxgkFlipQueue },
+    { "DxgkHandleTable",                    Test_DxgkHandleTable },
+    { "DxgkAdapterCaps",                    Test_DxgkAdapterCaps },
+    { "DxgkNodeAffinity",                   Test_DxgkNodeAffinity },
+    { "DxgkNodeStatistics",                 Test_DxgkNodeStatistics },
+    { "DxgkTdrPolicy",                      Test_DxgkTdrPolicy },
+    { "DxgkFenceConcurrency",               Test_DxgkFenceConcurrency },
+    { "DxgkGpuFaultPolicy",                 Test_DxgkGpuFaultPolicy },
+    { "DxgkKeyedMutex",                     Test_DxgkKeyedMutex },
+    { "DxgkCoreConcurrency",                Test_DxgkCoreConcurrency },
+    { "DxgkContextSync",                   Test_DxgkContextSync },
+    { "DxgkPresentQueue",                  Test_DxgkPresentQueue },
+    { "DxgkVsyncPower",                    Test_DxgkVsyncPower },
+    { "Rpi5Vc4Pointer",                    Test_Rpi5Vc4Pointer },
+    { "DxgkSyncWait",                      Test_DxgkSyncWait },
+    { "DxgkTrackedWork",                   Test_DxgkTrackedWork },
+    { "DxgkVidMmWorkerDrain",              Test_DxgkVidMmWorkerDrain },
+    { "DxgkrnlPublicExports",              Test_DxgkrnlPublicExports },
+    { "Dxgmms2ContextStream",              Test_Dxgmms2ContextStream },
+    { "Dxgmms2Scheduler",                  Test_Dxgmms2Scheduler },
+    { "Dxgmms2Timeline",                   Test_Dxgmms2Timeline },
+    { "Dxgmms2VidMm",                      Test_Dxgmms2VidMm },
+#ifdef KMT_DXGK_WDDM_ABI
+    { "DxgkWddmAbi",                       Test_DxgkWddmAbi },
+#endif
+#ifdef KMT_KUBSAN
+    { "KubsanHandlers",                    Test_KubsanHandlers },
+#endif
+#ifdef KMT_SOFTGPU_GPUVA_ISOLATION
+    { "SoftGpuGpuVaIsolation",             Test_SoftGpuGpuVaIsolation },
+#endif
+#ifdef KMT_SOFTGPU_2D_POLICY
+    { "SoftGpu2DPolicy",                    Test_SoftGpu2DPolicy },
+#endif
+#ifdef KMT_SOFTGPU_VIDPN_POLICY
+    { "SoftGpuVidPnPolicy",                Test_SoftGpuVidPnPolicy },
+#endif
+#ifdef KMT_SOFTGPU_VSYNC_POLICY
+    { "SoftGpuSlabHandoff",                Test_SoftGpuSlabHandoff },
+    { "SoftGpuVsyncPolicy",                Test_SoftGpuVsyncPolicy },
+#endif
     { "ExCallback",                         Test_ExCallback },
     { "ExDoubleList",                       Test_ExDoubleList },
     { "ExFastMutex",                        Test_ExFastMutex },
     { "ExHardError",                        Test_ExHardError },
+    /* Keep the UI-driven variant available by name, but out of automated runs. */
     { "-ExHardErrorInteractive",            Test_ExHardErrorInteractive },
     { "ExInterlocked",                      Test_ExInterlocked },
+    { "-ExPoolBench",                       Test_ExPoolBench },
+    { "ExPool2",                            Test_ExPool2 },
     { "ExPools",                            Test_ExPools },
+    { "ExLookaside",                        Test_ExLookaside },
+    { "ExCallbackExtra",                    Test_ExCallbackExtra },
+    { "ExFastMutexExtra",                   Test_ExFastMutexExtra },
+    { "ExPoolExtra",                        Test_ExPoolExtra },
     { "ExPushLock",                         Test_ExPushLock },
+    { "ExResourceExtra",                    Test_ExResourceExtra },
+    { "ExTimerExtra",                       Test_ExTimerExtra },
+    { "-ExTimerInvalidAttributes",           Test_ExTimerInvalidAttributes },
+    { "-ExTimerCombinedAttributes",          Test_ExTimerCombinedAttributes },
+    { "ExTimeZone",                         Test_ExTimeZone },
+    { "ExHeadless",                         Test_ExHeadless },
+    { "ExLicenseDif",                       Test_ExLicenseDif },
     { "ExResource",                         Test_ExResource },
+    { "ExResourceDeleteHeld",               Test_ExResourceDeleteHeld },
+    { "ExResourceBoost",                    Test_ExResourceBoost },
+    { "ExResourceBoostOwnerPointer",        Test_ExResourceBoostOwnerPointer },
+    { "ExRundown",                          Test_ExRundown },
     { "ExSequencedList",                    Test_ExSequencedList },
     { "ExSingleList",                       Test_ExSingleList },
-    { "-ExTimer",                           Test_ExTimer },
+    { "ExSystemInformation",                Test_ExSystemInformation },
+    { "ExSystemTimeCallback",               Test_ExSystemTimeCallback },
+    { "ExTimer",                            Test_ExTimer },
     { "ExUuid",                             Test_ExUuid },
-    { "Example",                            Test_Example },
+    { "CcLazyWriter",                       Test_CcLazyWriter },
+    /* This deliberately exercises failure reporting and is not a parity test. */
+    { "-Example",                           Test_Example },
     { "FsRtlDissect",                       Test_FsRtlDissect },
     { "FsRtlExpression",                    Test_FsRtlExpression },
     { "FsRtlLegal",                         Test_FsRtlLegal },
     { "FsRtlMcb",                           Test_FsRtlMcb },
+    { "FsRtlPerFileObjectContext",          Test_FsRtlPerFileObjectContext },
+    { "FsRtlQueryFileLock",                 Test_FsRtlQueryFileLock },
     { "FsRtlRemoveDotsFromPath",            Test_FsRtlRemoveDotsFromPath },
     { "FsRtlTunnel",                        Test_FsRtlTunnel },
 #if defined(_M_IX86) || defined(_M_AMD64)
+    { "HalBusData",                         Test_HalBusData },
+    { "-HalMessageState",                   Test_HalMessageState },
     { "HalPortIo",                          Test_HalPortIo },
 #endif
+    { "HalDmaAlignment",                    Test_HalDmaAlignment },
+    { "HalRealTimeClock",                   Test_HalRealTimeClock },
     { "HalSystemInfo",                      Test_HalSystemInfo },
+    { "IoContainerId",                      Test_IoContainerId },
+    { "-IoDriverKeyOpen",                   Test_IoDriverKeyOpen },
+    { "IoDriverSection",                    Test_IoDriverSection },
+    { "IoGetRequestorProcess",              Test_IoGetRequestorProcess },
+    { "IoCreateDeviceSecure",               Test_IoCreateDeviceSecure },
+    { "IoDeleteDeviceName",                 Test_IoDeleteDeviceName },
+    { "IoReadPartitionTable",               Test_IoReadPartitionTable },
     { "IoCreateFile",                       Test_IoCreateFile },
+    { "IoCreateFileAccessCheck",            Test_IoCreateFileAccessCheck },
+    { "IoCreateSystemThread",               Test_IoCreateSystemThread },
+    { "IoWmiAcpi",                          Test_IoWmiAcpi },
+    { "ZwWriteFileAppend",                  Test_ZwWriteFileAppend },
+    { "-IoCustomTargetEventReport",         Test_IoCustomTargetEventReport },
     { "IoDeviceInterface",                  Test_IoDeviceInterface },
+    { "IoDeviceTextProperties",             Test_IoDeviceTextProperties },
+    { "IoDeviceSecurity",                   Test_IoDeviceSecurity },
     { "IoEvent",                            Test_IoEvent },
+    { "-IoInterfaceOrderCheck",             Test_IoInterfaceOrderCheck },
+    { "IoResourceSearch",                   Test_IoResourceSearch },
+    { "IoMessageInterruptClaim",            Test_IoMessageInterruptClaim },
+    { "IoCreateDriverContext",              Test_IoCreateDriverContext },
+    { "PciLineInterrupt",                   Test_PciLineInterrupt },
+    { "IoStorageDumpPath",            Test_IoStorageDumpPath },
     { "IoFilesystem",                       Test_IoFilesystem },
     { "IoInterrupt",                        Test_IoInterrupt },
+    { "IoIommu",                            Test_IoIommu },
+    { "InbvVirtualFrameBuffer",              Test_InbvVirtualFrameBuffer },
     { "IoIrp",                              Test_IoIrp },
+    { "IoWaitCompletionPacket",             Test_IoWaitCompletionPacket },
+    { "ExWorkItem",                         Test_ExWorkItem },
+    { "ExWddm",                            Test_ExWddm },
+    { "ExWddmAvl",                         Test_ExWddmAvl },
+    { "ExWddmEnergy",                      Test_ExWddmEnergy },
+    { "ExWddmFault",                       Test_ExWddmFault },
+    { "ExWddmInbv",                        Test_ExWddmInbv },
+#ifdef KMT_KSR_APISET
+    { "ExWddmKsr",                         Test_ExWddmKsr },
+    { "ExWddmKsrLoad",                     Test_ExWddmKsrLoad },
+#endif
+    { "ExWddmPower",                       Test_ExWddmPower },
+    { "ExWddmPoFx",                        Test_ExWddmPoFx },
+    { "ExWddmPlatform",                    Test_ExWddmPlatform },
+    { "ExWddmProviders",                   Test_ExWddmProviders },
+    { "ExWddmRotate",                      Test_ExWddmRotate },
+    { "ExWddmRotateValid",                 Test_ExWddmRotateValid },
+    { "ExWddmRtl",                         Test_ExWddmRtl },
+    { "ExWddmTls",                         Test_ExWddmTls },
+    { "ExWddmWindow",                      Test_ExWddmWindow },
+    { "IoArbiter",                          Test_IoArbiter },
+    { "IoLargeMemoryResource",              Test_IoLargeMemoryResource },
+    { "IoCancelKM",                         Test_IoCancelKM },
+    { "IoCloseIrqlKM",                      Test_IoCloseIrqlKM },
+    { "CmBootFlush",                        Test_CmBootFlush },
+    { "CmCallbacks",                        Test_CmCallbacks },
+    { "CmTransactions",                     Test_CmTransactions },
+    { "CmKeyKM",                            Test_CmKeyKM },
+    { "EtwRegisterKM",                      Test_EtwRegisterKM },
+    { "EtwSessionKM",                       Test_EtwSessionKM },
+    { "EtwSessionIrqlKM",                   Test_EtwSessionIrqlKM },
+    { "PcwKM",                              Test_PcwKM },
+    { "WmiEventKM",                         Test_WmiEventKM },
+    { "IoBuildIoctlKM",                     Test_IoBuildIoctlKM },
+    { "IoCsqKM",                            Test_IoCsqKM },
+    { "IoNullDeviceKM",                     Test_IoNullDeviceKM },
     { "IoMdl",                              Test_IoMdl },
+    { "IoModern",                           Test_IoModern },
+    { "IoActivityId",                       Test_IoActivityId },
+    { "IoAcpiCmosRegion",                   Test_IoAcpiCmosRegion },
+    { "IoI8042Sync",                        Test_IoI8042Sync },
+    { "IoAcpiIoctl",                        Test_IoAcpiIoctl },
+    { "IoErrorLogEntry",                    Test_IoErrorLogEntry },
+    { "IoPciPdoPnp",                        Test_IoPciPdoPnp },
+    { "IoRamdiskPnp",                       Test_IoRamdiskPnp },
+    { "IoPciD3Cold",                        Test_IoPciD3Cold },
+    { "IoPciDeviceReset",                   Test_IoPciDeviceReset },
+    { "IoPciExpressInterfaces",             Test_IoPciExpressInterfaces },
+    { "IoPciEnumeration",                   Test_IoPciEnumeration },
+    { "IoPciRom",                           Test_IoPciRom },
+    { "IoPciMessageEnable",                 Test_IoPciMessageEnable },
+    { "IoPagingIrpRetire",                  Test_IoPagingIrpRetire },
+    { "IoStackLimits",                      Test_IoStackLimits },
+    { "IoVpb",                              Test_IoVpb },
+    { "SmcLib",                             Test_SmcLib },
+    { "SmcLibRemove",                       Test_SmcLibRemove },
+    { "IoDeviceNumaNode",                    Test_IoDeviceNumaNode },
+    { "IoReportRootDevice",                 Test_IoReportRootDevice },
     { "IoVolume",                           Test_IoVolume },
+    { "KdBootLog",                          Test_KdBootLog },
+    { "-KdBreakContinue",                   Test_KdBreakContinue },
+    { "-KdTimeSlipEvent",                   Test_KdTimeSlipEvent },
+    { "-KdbSchedulerCommands",              Test_KdbSchedulerCommands },
+    { "-KdbSystemBreak",                    Test_KdbSystemBreak },
+    { "-KdShutdownCrash",                   Test_KdShutdownCrash },
+    { "-KdbDeviceCommands",                 Test_KdbDeviceCommands },
+    { "-KdbCliCommands",                    Test_KdbCliCommands },
+    { "-KdbObjectCommands",                 Test_KdbObjectCommands },
+    { "-KdbMemoryCommands",                 Test_KdbMemoryCommands },
+    { "-KdbContextCommands",                Test_KdbContextCommands },
+    { "-KdbLocks",                          Test_KdbLocks },
+    { "-KdbThreadApc",                      Test_KdbThreadApc },
+    { "KdChangeOption",                     Test_KdChangeOption },
+    { "KdDebuggerPresent",                  Test_KdDebuggerPresent },
+    { "KdPrintComponent",                   Test_KdPrintComponent },
+    { "KdPrintStatus",                      Test_KdPrintStatus },
     { "KdSystemDebugControl",               Test_KdSystemDebugControl },
+    { "KdUsbNetRules",                      Test_KdUsbNetRules },
+    { "KsecBcrypt",                         Test_KsecBcrypt },
+    { "KeWddmExports",                      Test_KeWddmExports },
     { "KeApc",                              Test_KeApc },
+    { "KeApcInject",                        Test_KeApcInject },
+    { "KeApcScheduling",                    Test_KeApcScheduling },
+    { "KeApcQueueTransitions",              Test_KeApcQueueTransitions },
+    { "KeDpcQueueTransitions",              Test_KeDpcQueueTransitions },
+#ifdef _M_AMD64
+    { "KeSwitchReaper",                     Test_KeSwitchReaper },
+    { "KeXState",                           Test_KeXState },
+    { "KeSwitchSelfWake",                   Test_KeSwitchSelfWake },
+    { "KeTrapDebugRegisters",               Test_KeTrapDebugRegisters },
+    { "KeTrapFilterX87",                    Test_KeTrapFilterX87 },
+    { "KeStandbySteal",                     Test_KeStandbySteal },
+#endif
+    { "KeDeferredReady",                    Test_KeDeferredReady },
+    { "KeIdleSteal",                        Test_KeIdleSteal },
+    { "KeCacheInvalidation",                Test_KeCacheInvalidation },
+    { "KeClockKeepAlive",                   Test_KeClockKeepAlive },
+    { "-KeClockWatchdog",                   Test_KeClockWatchdog },
+    { "KeModern",                           Test_KeModern },
+#ifdef _M_ARM64
+    { "HalArm64Ipi",                        Test_HalArm64Ipi },
+    { "HalArm64Layout",                     Test_HalArm64Layout },
+    { "HalArm64Stage1",                     Test_HalArm64Stage1 },
+    { "HalArm64Stage2",                     Test_HalArm64Stage2 },
+    { "HalArm64Stage3",                     Test_HalArm64Stage3 },
+    { "HalArm64Stage4",                     Test_HalArm64Stage4 },
+    { "HalArm64Stage5",                     Test_HalArm64Stage5 },
+    { "KdArm64Layout",                      Test_KdArm64Layout },
+    { "KeArm64",                            Test_KeArm64 },
+    { "KeArm64PmrMigration",                Test_KeArm64PmrMigration },
+    { "KeArm64Frames",                      Test_KeArm64Frames },
+    { "KeArm64Intrinsics",                  Test_KeArm64Intrinsics },
+    { "KeArm64Irql",                        Test_KeArm64Irql },
+    { "KeArm64LoaderCache",                 Test_KeArm64LoaderCache },
+    { "KeArm64PcrPrcb",                     Test_KeArm64PcrPrcb },
+    { "KeArm64Profile",                     Test_KeArm64Profile },
+    { "KeArm64IpiPreemption",               Test_KeArm64IpiPreemption },
+    { "RtlArm64Context",                    Test_RtlArm64Context },
+    { "RtlArm64UnwindLayout",               Test_RtlArm64UnwindLayout },
+    { "KeArm64DpcIpi",                      Test_KeArm64DpcIpi },
+#endif
+#if defined(_M_IX86) || defined(_M_AMD64)
+    { "IoSafeBootPolicy",                   Test_IoSafeBootPolicy },
+    { "IoStackKM",                          Test_IoStackKM },
+    { "IoTimerKM",                          Test_IoTimerKM },
+#endif
+    { "KeAffinityKM",                       Test_KeAffinityKM },
+    { "KeBugCheckCbKM",                     Test_KeBugCheckCbKM },
+    { "-KeBugCheckStop",                    Test_KeBugCheckStop },
+    { "-KeBadInstructionPointer",           Test_KeBadInstructionPointer },
+    { "-KeKernelStackOverflow",             Test_KeKernelStackOverflow },
+    { "-KeSystemThreadException",           Test_KeSystemThreadException },
+    { "-KeUnhandledException",              Test_KeUnhandledException },
+    { "KeCriticalRegionKM",                 Test_KeCriticalRegionKM },
     { "KeDeviceQueue",                      Test_KeDeviceQueue },
     { "KeDpc",                              Test_KeDpc },
+    { "KeDpcFlush",                         Test_KeDpcFlush },
+    { "KeDpcReadyThread",                   Test_KeDpcReadyThread },
+    { "KeDpcRemove",                        Test_KeDpcRemove },
     { "KeEvent",                            Test_KeEvent },
+    { "KeExpandKernelStack",                Test_KeExpandKernelStack },
     { "KeFloatPointState",                  Test_KeFloatPointState },
     { "KeGuardedMutex",                     Test_KeGuardedMutex },
     { "KeIrql",                             Test_KeIrql },
+    { "KeIpiKM",                            Test_KeIpiKM },
     { "KeMutex",                            Test_KeMutex },
-    { "-KeProcessor",                       Test_KeProcessor },
+    { "KePcr",                              Test_KePcr },
+    { "KeQueue",                            Test_KeQueue },
+    { "KeProcessStackCount",                Test_KeProcessStackCount },
+    { "KeQueryBasePriority",                Test_KeQueryBasePriority },
+    { "KeProcessor",                        Test_KeProcessor },
+    { "KePriorityRaise",                    Test_KePriorityRaise },
+    { "KeQuantumEnd",                       Test_KeQuantumEnd },
+    { "KeSemaphore",                        Test_KeSemaphore },
     { "KeSpinLock",                         Test_KeSpinLock },
+    { "KeThreadedDpc",                      Test_KeThreadedDpc },
+    { "KeTime",                             Test_KeTime },
     { "KeTimer",                            Test_KeTimer },
-    { "-KernelType",                        Test_KernelType },
+    { "KeTimer2KM",                         Test_KeTimer2KM },
+    { "KeWaitMultiple",                     Test_KeWaitMultiple },
+    { "KernelType",                         Test_KernelType },
+    { "MmAllocateContiguousNode",           Test_MmAllocateContiguousNode },
+    { "MmContiguousCacheTypes",             Test_MmContiguousCacheTypes },
     { "MmMdl",                              Test_MmMdl },
+    { "MmMdlDispatch",                      Test_MmMdlDispatch },
+    { "MmLargePages",                       Test_MmLargePages },
+    { "MmSecureKM",                         Test_MmSecureKM },
     { "MmSection",                          Test_MmSection },
+    { "MmSystemViewCache",                  Test_MmSystemViewCache },
+    { "MmWddmRanges",                       Test_MmWddmRanges },
+    { "MmPhysicalAddressRace",              Test_MmPhysicalAddressRace },
+    { "MmWddmRotate",                       Test_MmWddmRotate },
+    { "MmWddmRotateValid",                  Test_MmWddmRotateValid },
+    { "MmMapReserve",                       Test_MmMapReserve },
+    { "MmDriverMemory",                     Test_MmDriverMemory },
+    { "MmMemoryNotification",               Test_MmMemoryNotification },
+    { "MmPhysical",                         Test_MmPhysical },
+    { "MmPrefetchPages",                    Test_MmPrefetchPages },
+    { "MmPrivatePages",                     Test_MmPrivatePages },
     { "MmReservedMapping",                  Test_MmReservedMapping },
+    { "MmSelfMap",                          Test_MmSelfMap },
+    { "MmUserLayout",                       Test_MmUserLayout },
+    { "MmLoaderBlock",                      Test_MmLoaderBlock },
+    { "MonitorBrightnessKey",               Test_MonitorBrightnessKey },
+    { "NdisIfProvider",                     Test_NdisIfProvider },
+    { "NdisRwLock",                         Test_NdisRwLock },
+    { "NdisProcessorGroup",                 Test_NdisProcessorGroup },
+    { "NdisLegacyHelpers",                  Test_NdisLegacyHelpers },
+    { "NdisMiniportCharacteristics",        Test_NdisMiniportCharacteristics },
     { "NpfsConnect",                        Test_NpfsConnect },
     { "NpfsCreate",                         Test_NpfsCreate },
     { "NpfsFileInfo",                       Test_NpfsFileInfo },
     { "NpfsReadWrite",                      Test_NpfsReadWrite },
     { "NpfsVolumeInfo",                     Test_NpfsVolumeInfo },
+    { "ObCallbacks",                        Test_ObCallbacks },
     { "ObHandle",                           Test_ObHandle },
+    { "ObOpenByPointer",                    Test_ObOpenByPointer },
     { "ObQuery",                            Test_ObQuery },
     { "ObReference",                        Test_ObReference },
+    { "ObSdCache",                          Test_ObSdCache },
     { "ObSecurity",                         Test_ObSecurity },
+    { "ObSecurityDescKM",                   Test_ObSecurityDescKM },
+    { "ObSecurityMethod",                   Test_ObSecurityMethod },
     { "ObSymbolicLink",                     Test_ObSymbolicLink },
     { "ObType",                             Test_ObType },
-    { "-ObTypeClean",                       Test_ObTypeClean },
-    { "-ObTypeNoClean",                     Test_ObTypeNoClean },
+    { "ObTypeClean",                        Test_ObTypeClean },
+    { "ObTypeNoClean",                      Test_ObTypeNoClean },
     { "ObTypes",                            Test_ObTypes },
+    { "-PoDisplayStateOff",                 Test_PoDisplayStateOff },
+    { "-PoDisplayStateOn",                  Test_PoDisplayStateOn },
+    { "-PoPowerButton",                     Test_PoPowerButton },
+    { "-PoSettingSession",                  Test_PoSettingSession },
+    { "PoSetSystemState",                   Test_PoSetSystemState },
+    { "-PoSleepInformation",                Test_PoSleepInformation },
+    { "PoBatteryState",                     Test_PoBatteryState },
+    { "PoFxState",                          Test_PoFxState },
+    { "PoPowerLimit",                       Test_PoPowerLimit },
+    { "TmTransactions",                     Test_TmTransactions },
+    { "PoPowerSettings",                    Test_PoPowerSettings },
+    { "PoLockConsoleOnWake",                Test_PoLockConsoleOnWake },
+    { "-PoProcessorStateHandler",           Test_PoProcessorStateHandler },
+    { "PoKernelPowerRequest",               Test_PoKernelPowerRequest },
     { "PsNotify",                           Test_PsNotify },
+    { "PsEnergy",                           Test_PsEnergy },
+    { "PsTls",                              Test_PsTls },
+    { "KeDpcWatchdog",                      Test_KeDpcWatchdog },
+    { "IoDevicePropertyData",               Test_IoDevicePropertyData },
+    { "KseShim",                            Test_KseShim },
+    { "KseDeviceData",                      Test_KseDeviceData },
+    { "PsPropertyThread",                   Test_PsPropertyThread },
+    { "PsPropertyJob",                      Test_PsPropertyJob },
+    { "PsPropertyThreadExit",               Test_PsPropertyThreadExit },
+    { "PsPropertyDispatch",                 Test_PsPropertyDispatch },
+    { "PsModern",                           Test_PsModern },
+    { "PsModernIdentity",                   Test_PsModernIdentity },
+    { "PsModernPolicy",                     Test_PsModernPolicy },
+    { "PsModernPriority",                   Test_PsModernPriority },
+    { "PsWin32kPriorityFloor",               Test_PsWin32kPriorityFloor },
+    { "PsWin32kPriorityFloorScheduling",     Test_PsWin32kPriorityFloorScheduling },
+    { "PsThreadPriorityBoost",              Test_PsThreadPriorityBoost },
+    { "PsUnEstablishWin32Callouts",         Test_PsUnEstablishWin32Callouts },
+    { "PsWddmFault",                        Test_PsWddmFault },
+    { "PsWddmWindow",                       Test_PsWddmWindow },
     { "PsQuota",                            Test_PsQuota },
+    { "SeAccessCheckKM",                    Test_SeAccessCheckKM },
     { "RtlAvlTreeKM",                       Test_RtlAvlTree },
+    { "RtlAtomEx",                          Test_RtlAtomEx },
     { "RtlExceptionKM",                     Test_RtlException },
+    { "RtlGetVersion",                      Test_RtlGetVersion },
     { "RtlIntSafeKM",                       Test_RtlIntSafe },
     { "RtlIsValidOemCharacter",             Test_RtlIsValidOemCharacter },
+    { "PsProcessInfo",                      Test_PsProcessInfo },
+    { "PsNotifyKM",                         Test_PsNotifyKM },
+    { "PsGetVersion",                       Test_PsGetVersion },
+    { "PsSystemThread",                     Test_PsSystemThread },
+    { "PsPico",                             Test_PsPico },
+    { "PsJobCommit",                        Test_PsJobCommit },
+    { "RtlBitmapKM",                        Test_RtlBitmapKM },
+    { "RtlBitmapEx",                        Test_RtlBitmapEx },
+    { "RtlGenericTableKM",                  Test_RtlGenericTableKM },
+    { "RtlTableElementKM",                  Test_RtlTableElementKM },
+    { "RtlGuidKM",                          Test_RtlGuidKM },
+    { "RtlImageKM",                         Test_RtlImageKM },
+    { "RtlRandomKM",                        Test_RtlRandomKM },
+    { "ZwDuplicateKM",                      Test_ZwDuplicateKM },
+    { "ZwFileKM",                           Test_ZwFileKM },
+    { "ZwSystemInfoKM",                     Test_ZwSystemInfoKM },
+    { "RtlHashTableKM",                     Test_RtlHashTableKM },
     { "RtlMemoryKM",                        Test_RtlMemory },
     { "RtlRangeList",                       Test_RtlRangeList },
+    { "RtlCmResource",                      Test_RtlCmResource },
+    { "RtlCompareAltitudesKM",              Test_RtlCompareAltitudesKM },
+    { "RtlDirectoryEnumKM",                 Test_RtlDirectoryEnumKM },
+    { "RtlPrefixTableKM",                   Test_RtlPrefixTableKM },
     { "RtlRegistryKM",                      Test_RtlRegistry },
+    { "RtlTimeKM",                          Test_RtlTimeKM },
+    { "RtlStringSupportKM",                 Test_RtlStringSupportKM },
+#ifdef KMT_SMP_TESTS
+    { "KeArm64Apc",                         Test_KeArm64Apc },
+    { "KeArm64Dispatcher",                  Test_KeArm64Dispatcher },
+    { "KeArm64WakePlacement",               Test_KeArm64WakePlacement },
+    { "KeArm64Interrupt",                   Test_KeArm64Interrupt },
+    { "KeArm64ProcessorChange",              Test_KeArm64ProcessorChange },
+    { "KeArm64IpiBroadcast",                Test_KeArm64IpiBroadcast },
+    { "KeArm64Numa",                        Test_KeArm64Numa },
+    { "KeArm64DpcImportance",               Test_KeArm64DpcImportance },
+    { "KeArm64Smp",                         Test_KeArm64Smp },
+    { "KeArm64Smt",                         Test_KeArm64Smt },
+    { "KeArm64SubNodeSched",                Test_KeArm64SubNodeSched },
+    { "KeArm64ThreadProcess",               Test_KeArm64ThreadProcess },
+    { "KeArm64AffinityEx",                  Test_KeArm64AffinityEx },
+    { "KeArm64SpinLock",                    Test_KeArm64SpinLock },
+#endif
+#ifdef KMT_WIN11_TESTS
+    { "Win11NewKM",                         Test_Win11NewKM },
+    { "MmWin11KM",                          Test_MmWin11KM },
+    { "MmMdlWin11KM",                       Test_MmMdlWin11KM },
+    { "MmPoolWin11KM",                      Test_MmPoolWin11KM },
+    { "MmSectionWin11KM",                   Test_MmSectionWin11KM },
+    { "MmPteWin11KM",                       Test_MmPteWin11KM },
+#endif
+    { "RtlSehUnwindKM",                     Test_RtlSehUnwind },
     { "RtlSplayTreeKM",                     Test_RtlSplayTree },
     { "RtlStackKM",                         Test_RtlStack },
     { "RtlStrSafeKM",                       Test_RtlStrSafe },
     { "RtlUnicodeStringKM",                 Test_RtlUnicodeString },
     { "SeInheritance",                      Test_SeInheritance },
     { "SeLogonSession",                     Test_SeLogonSession },
+    { "SeSddl",                             Test_SeSddl },
+    { "SeSddlListOrder",                    Test_SeSddlListOrder },
     { "SeQueryInfoToken",                   Test_SeQueryInfoToken },
     { "SeTokenFiltering",                   Test_SeTokenFiltering },
+    { "SePrimaryTokenRelease",              Test_SePrimaryTokenRelease },
+    { "SeAccessState",                      Test_SeAccessState },
     { "ZwAllocateVirtualMemory",            Test_ZwAllocateVirtualMemory },
     { "ZwCreateSection",                    Test_ZwCreateSection },
     { "ZwMapViewOfSection",                 Test_ZwMapViewOfSection },

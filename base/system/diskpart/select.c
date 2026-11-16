@@ -115,6 +115,67 @@ SelectDisk(
 }
 
 
+VOID
+SelectVolumeEntry(
+    _In_ PVOLENTRY VolumeEntry)
+{
+    PDISKENTRY DiskEntry;
+    PPARTENTRY PartEntry;
+
+    CurrentVolume = VolumeEntry;
+
+    if (VolumeEntry->pExtents == NULL ||
+        VolumeEntry->pExtents->NumberOfDiskExtents != 1)
+        return;
+
+    DiskEntry = GetDiskForVolume(VolumeEntry);
+    PartEntry = GetPartitionForVolume(VolumeEntry);
+    if (DiskEntry == NULL || PartEntry == NULL)
+        return;
+
+    CurrentDisk = DiskEntry;
+    CurrentPartition = PartEntry;
+}
+
+
+static
+ULONG
+GetPartitionListNumber(
+    _In_ PPARTENTRY SelectedEntry)
+{
+    PLIST_ENTRY Entry;
+    PPARTENTRY PartEntry;
+    ULONG PartNumber = 1;
+
+    for (Entry = CurrentDisk->PrimaryPartListHead.Flink; Entry != &CurrentDisk->PrimaryPartListHead; Entry = Entry->Flink)
+    {
+        PartEntry = CONTAINING_RECORD(Entry, PARTENTRY, ListEntry);
+        if (CurrentDisk->PartitionStyle == PARTITION_STYLE_GPT ?
+            IsEqualGUID(&PartEntry->Gpt.PartitionType, &PARTITION_ENTRY_UNUSED_GUID) :
+            PartEntry->Mbr.PartitionType == PARTITION_ENTRY_UNUSED)
+            continue;
+        if (PartEntry == SelectedEntry)
+            return PartNumber;
+        PartNumber++;
+    }
+
+    if (CurrentDisk->PartitionStyle == PARTITION_STYLE_MBR)
+    {
+        for (Entry = CurrentDisk->LogicalPartListHead.Flink; Entry != &CurrentDisk->LogicalPartListHead; Entry = Entry->Flink)
+        {
+            PartEntry = CONTAINING_RECORD(Entry, PARTENTRY, ListEntry);
+            if (PartEntry->Mbr.PartitionType == PARTITION_ENTRY_UNUSED)
+                continue;
+            if (PartEntry == SelectedEntry)
+                return PartNumber;
+            PartNumber++;
+        }
+    }
+
+    return 0;
+}
+
+
 EXIT_CODE
 SelectPartition(
     _In_ INT argc,
@@ -144,7 +205,7 @@ SelectPartition(
         if (CurrentPartition == NULL)
             ConResPuts(StdOut, IDS_SELECT_NO_PARTITION);
         else
-            ConResPrintf(StdOut, IDS_SELECT_PARTITION, CurrentPartition);
+            ConResPrintf(StdOut, IDS_SELECT_PARTITION, GetPartitionListNumber(CurrentPartition));
         return EXIT_SUCCESS;
     }
 
@@ -173,6 +234,7 @@ SelectPartition(
                 if (PartNumber == ulValue)
                 {
                     CurrentPartition = PartEntry;
+                    CurrentVolume = GetVolumeFromPartition(PartEntry);
                     ConResPrintf(StdOut, IDS_SELECT_PARTITION, PartNumber);
                     return EXIT_SUCCESS;
                 }
@@ -193,6 +255,7 @@ SelectPartition(
                 if (PartNumber == ulValue)
                 {
                     CurrentPartition = PartEntry;
+                    CurrentVolume = GetVolumeFromPartition(PartEntry);
                     ConResPrintf(StdOut, IDS_SELECT_PARTITION, PartNumber);
                     return EXIT_SUCCESS;
                 }
@@ -214,6 +277,7 @@ SelectPartition(
                 if (PartNumber == ulValue)
                 {
                     CurrentPartition = PartEntry;
+                    CurrentVolume = GetVolumeFromPartition(PartEntry);
                     ConResPrintf(StdOut, IDS_SELECT_PARTITION, PartNumber);
                     return EXIT_SUCCESS;
                 }
@@ -249,10 +313,32 @@ SelectVolume(
 
     if (argc == 2)
     {
-        if (CurrentDisk == NULL)
+        if (CurrentVolume == NULL)
             ConResPuts(StdOut, IDS_SELECT_NO_VOLUME);
         else
             ConResPrintf(StdOut, IDS_SELECT_VOLUME, CurrentVolume->VolumeNumber);
+        return EXIT_SUCCESS;
+    }
+
+    if (iswalpha(argv[2][0]) &&
+        (argv[2][1] == UNICODE_NULL ||
+         (argv[2][1] == L':' && argv[2][2] == UNICODE_NULL)))
+    {
+        CurrentVolume = NULL;
+
+        for (Entry = VolumeListHead.Flink; Entry != &VolumeListHead; Entry = Entry->Flink)
+        {
+            VolumeEntry = CONTAINING_RECORD(Entry, VOLENTRY, ListEntry);
+
+            if (towupper(VolumeEntry->DriveLetter) == towupper(argv[2][0]))
+            {
+                SelectVolumeEntry(VolumeEntry);
+                ConResPrintf(StdOut, IDS_SELECT_VOLUME, CurrentVolume->VolumeNumber);
+                return EXIT_SUCCESS;
+            }
+        }
+
+        ConResPuts(StdErr, IDS_SELECT_VOLUME_INVALID);
         return EXIT_SUCCESS;
     }
 
@@ -278,9 +364,9 @@ SelectVolume(
 
         if (VolumeEntry->VolumeNumber == ulValue)
         {
-            CurrentVolume = VolumeEntry;
+            SelectVolumeEntry(VolumeEntry);
             ConResPrintf(StdOut, IDS_SELECT_VOLUME, CurrentVolume->VolumeNumber);
-            return TRUE;
+            return EXIT_SUCCESS;
         }
 
         Entry = Entry->Flink;

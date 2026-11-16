@@ -12,9 +12,11 @@
 
 typedef struct _PERFDATA
 {
-	WCHAR				ImageName[MAX_PATH + _countof(L" *32") - 1];
+	WCHAR				ImageName[MAX_PATH + _countof(L" *x64") - 1];
+	USHORT				ImageMachine;
 	HANDLE				ProcessId;
 	WCHAR				UserName[MAX_PATH];
+	BOOL				IsCurrentUser;
 	ULONG				SessionId;
 	ULONG				CPUUsage;
 	LARGE_INTEGER		CPUTime;
@@ -54,10 +56,14 @@ ULONG	PerfDataGetProcessIndex(ULONG pid);
 ULONG	PerfDataGetProcessCount(void);
 ULONG	PerfDataGetProcessorUsage(void);
 ULONG	PerfDataGetProcessorSystemUsage(void);
+ULONG	PerfDataGetProcessorCount(void);
+ULONG	PerfDataGetProcessorUsagePerCpu(ULONG Cpu);
+ULONG	PerfDataGetProcessorKernelUsagePerCpu(ULONG Cpu);
 
 BOOL	PerfDataGetImageName(ULONG Index, LPWSTR lpImageName, ULONG nMaxCount);
 ULONG	PerfDataGetProcessId(ULONG Index);
 BOOL	PerfDataGetUserName(ULONG Index, LPWSTR lpUserName, ULONG nMaxCount);
+BOOL	PerfDataIsCurrentUserProcess(ULONG Index);
 
 BOOL	PerfDataGetCommandLine(ULONG Index, LPWSTR lpCommandLine, ULONG nMaxCount);
 void	PerfDataDeallocCommandLineCache();

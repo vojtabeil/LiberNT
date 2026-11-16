@@ -14,6 +14,7 @@ extern "C" {
 #define WLAN_API_VERSION_2_0 0x00000002
 
 #define WLAN_MAX_PHY_INDEX 64
+#define WLAN_MAX_PHY_TYPE_NUMBER              8
 #define WLAN_MAX_NAME_LENGTH 256
 
 #define WLAN_AVAILABLE_NETWORK_INCLUDE_ALL_ADHOC_PROFILES         0x00000001
@@ -70,6 +71,10 @@ typedef enum _WLAN_SECURABLE_OBJECT {
     wlan_secure_add_new_per_user_profiles,
     wlan_secure_media_streaming_mode_enabled,
     wlan_secure_current_operation_mode,
+    wlan_secure_get_plaintext_key,
+    wlan_secure_hosted_network_elevated_access,
+    wlan_secure_virtual_station_extensibility,
+    wlan_secure_wfd_elevated_access,
     WLAN_SECURABLE_OBJECT_COUNT
 } WLAN_SECURABLE_OBJECT, *PWLAN_SECURABLE_OBJECT;
 
@@ -186,7 +191,7 @@ typedef struct _WLAN_INTERFACE_CAPABILITY {
     DWORD dwMaxDesiredSsidListSize;
     DWORD dwMaxDesiredBssidListSize;
     DWORD dwNumberOfSupportedPhys;
-    /* enum32 */ long dot11PhyTypes[WLAN_MAX_PHY_INDEX];
+    DOT11_PHY_TYPE dot11PhyTypes[WLAN_MAX_PHY_INDEX];
 } WLAN_INTERFACE_CAPABILITY, *PWLAN_INTERFACE_CAPABILITY;
 
 typedef struct _WLAN_PHY_RADIO_STATE {
@@ -252,6 +257,67 @@ typedef struct _WLAN_AVAILABLE_NETWORK_LIST {
 #endif
 } WLAN_AVAILABLE_NETWORK_LIST ,*PWLAN_AVAILABLE_NETWORK_LIST;
 
+typedef struct _WLAN_RATE_SET {
+    ULONG uRateSetLength;
+    USHORT usRateSet[DOT11_RATE_SET_MAX_LENGTH];
+} WLAN_RATE_SET, *PWLAN_RATE_SET;
+
+typedef struct _WLAN_BSS_ENTRY {
+    DOT11_SSID dot11Ssid;
+    ULONG uPhyId;
+    DOT11_MAC_ADDRESS dot11Bssid;
+    DOT11_BSS_TYPE dot11BssType;
+    DOT11_PHY_TYPE dot11BssPhyType;
+    LONG lRssi;
+    ULONG uLinkQuality;
+    BOOLEAN bInRegDomain;
+    USHORT usBeaconPeriod;
+    ULONGLONG ullTimestamp;
+    ULONGLONG ullHostTimestamp;
+    USHORT usCapabilityInformation;
+    ULONG  ulChCenterFrequency;
+    WLAN_RATE_SET wlanRateSet;
+    ULONG ulIeOffset;
+    ULONG ulIeSize;
+} WLAN_BSS_ENTRY, *PWLAN_BSS_ENTRY;
+
+typedef struct _WLAN_BSS_LIST {
+    DWORD dwTotalSize;
+    DWORD dwNumberOfItems;
+    WLAN_BSS_ENTRY wlanBssEntries[1];
+} WLAN_BSS_LIST, *PWLAN_BSS_LIST;
+
+typedef struct _WLAN_ASSOCIATION_ATTRIBUTES {
+    DOT11_SSID dot11Ssid;
+    DOT11_BSS_TYPE dot11BssType;
+    DOT11_MAC_ADDRESS dot11Bssid;
+    DOT11_PHY_TYPE dot11PhyType;
+    ULONG uDot11PhyIndex;
+    WLAN_SIGNAL_QUALITY wlanSignalQuality;
+    ULONG ulRxRate;
+    ULONG ulTxRate;
+} WLAN_ASSOCIATION_ATTRIBUTES, *PWLAN_ASSOCIATION_ATTRIBUTES;
+
+typedef struct _WLAN_SECURITY_ATTRIBUTES {
+    BOOL bSecurityEnabled;
+    BOOL bOneXEnabled;
+    DOT11_AUTH_ALGORITHM dot11AuthAlgorithm;
+    DOT11_CIPHER_ALGORITHM dot11CipherAlgorithm;
+} WLAN_SECURITY_ATTRIBUTES, *PWLAN_SECURITY_ATTRIBUTES;
+
+typedef struct _WLAN_CONNECTION_ATTRIBUTES {
+    WLAN_INTERFACE_STATE isState;
+    WLAN_CONNECTION_MODE wlanConnectionMode;
+    WCHAR strProfileName[WLAN_MAX_NAME_LENGTH];
+    WLAN_ASSOCIATION_ATTRIBUTES wlanAssociationAttributes;
+    WLAN_SECURITY_ATTRIBUTES wlanSecurityAttributes;
+} WLAN_CONNECTION_ATTRIBUTES, *PWLAN_CONNECTION_ATTRIBUTES;
+
+typedef struct _WLAN_AUTH_CIPHER_PAIR_LIST {
+    DWORD dwNumberOfItems;
+    DOT11_AUTH_CIPHER_PAIR pAuthCipherPairList[1];
+} WLAN_AUTH_CIPHER_PAIR_LIST, *PWLAN_AUTH_CIPHER_PAIR_LIST;
+
 typedef struct _WLAN_CONNECTION_PARAMETERS {
     WLAN_CONNECTION_MODE wlanConnectionMode;
 #if defined(__midl) || defined(__WIDL__)
@@ -269,6 +335,119 @@ typedef L2_NOTIFICATION_DATA WLAN_NOTIFICATION_DATA, *PWLAN_NOTIFICATION_DATA;
 
 typedef void (__stdcall *WLAN_NOTIFICATION_CALLBACK) (PWLAN_NOTIFICATION_DATA, PVOID);
 
+/* flags for connection notifications */
+#define WLAN_CONNECTION_NOTIFICATION_ADHOC_NETWORK_FORMED    0x00000001
+#define WLAN_CONNECTION_NOTIFICATION_CONSOLE_USER_PROFILE    0x00000004
+
+typedef struct _WLAN_CONNECTION_NOTIFICATION_DATA {
+    WLAN_CONNECTION_MODE wlanConnectionMode;
+    WCHAR strProfileName[WLAN_MAX_NAME_LENGTH];
+    DOT11_SSID dot11Ssid;
+    DOT11_BSS_TYPE dot11BssType;
+    BOOL bSecurityEnabled;
+    WLAN_REASON_CODE wlanReasonCode;
+    DWORD dwFlags;
+    WCHAR strProfileXml[1];
+} WLAN_CONNECTION_NOTIFICATION_DATA, *PWLAN_CONNECTION_NOTIFICATION_DATA;
+
+typedef struct _WLAN_MSM_NOTIFICATION_DATA {
+    WLAN_CONNECTION_MODE wlanConnectionMode;
+    WCHAR strProfileName[WLAN_MAX_NAME_LENGTH];
+    DOT11_SSID dot11Ssid;
+    DOT11_BSS_TYPE dot11BssType;
+    DOT11_MAC_ADDRESS dot11MacAddr;
+    BOOL bSecurityEnabled;
+    BOOL bFirstPeer;
+    BOOL bLastPeer;
+    WLAN_REASON_CODE wlanReasonCode;
+} WLAN_MSM_NOTIFICATION_DATA, *PWLAN_MSM_NOTIFICATION_DATA;
+
+/* Notification source masks; values match L2_NOTIFICATION_SOURCE_*. */
+#define WLAN_NOTIFICATION_SOURCE_NONE         0x00000000
+#define WLAN_NOTIFICATION_SOURCE_ALL          0x0000FFFF
+#define WLAN_NOTIFICATION_SOURCE_ACM          0x00000008
+#define WLAN_NOTIFICATION_SOURCE_MSM          0x00000010
+#define WLAN_NOTIFICATION_SOURCE_SECURITY     0x00000020
+#define WLAN_NOTIFICATION_SOURCE_IHV          0x00000040
+#define WLAN_NOTIFICATION_SOURCE_HNWK         0x00000080
+#define WLAN_NOTIFICATION_SOURCE_ONEX         0x00000004
+
+/* == L2_REASON_CODE_SUCCESS */
+#define WLAN_REASON_CODE_SUCCESS              0
+#define WLAN_REASON_CODE_UNKNOWN              L2_REASON_CODE_UNKNOWN
+#define WLAN_REASON_CODE_RANGE_SIZE           L2_REASON_CODE_GROUP_SIZE
+#define WLAN_REASON_CODE_BASE                 L2_REASON_CODE_DOT11_AC_BASE
+#define WLAN_REASON_CODE_AC_BASE              L2_REASON_CODE_DOT11_AC_BASE
+#define WLAN_REASON_CODE_AC_CONNECT_BASE      (WLAN_REASON_CODE_AC_BASE + WLAN_REASON_CODE_RANGE_SIZE / 2)
+#define WLAN_REASON_CODE_MSM_BASE             L2_REASON_CODE_DOT11_MSM_BASE
+#define WLAN_REASON_CODE_MSM_CONNECT_BASE     (WLAN_REASON_CODE_MSM_BASE + WLAN_REASON_CODE_RANGE_SIZE / 2)
+#define WLAN_REASON_CODE_CONNECT_CALL_FAIL    (WLAN_REASON_CODE_AC_CONNECT_BASE + 9)
+#define WLAN_REASON_CODE_NETWORK_NOT_AVAILABLE (WLAN_REASON_CODE_AC_CONNECT_BASE + 11)
+#define WLAN_REASON_CODE_ASSOCIATION_FAILURE  (WLAN_REASON_CODE_MSM_CONNECT_BASE + 2)
+#define WLAN_REASON_CODE_MSMSEC_BASE          L2_REASON_CODE_DOT11_SECURITY_BASE
+#define WLAN_REASON_CODE_MSMSEC_CONNECT_BASE  (WLAN_REASON_CODE_MSMSEC_BASE + WLAN_REASON_CODE_RANGE_SIZE / 2)
+#define WLAN_REASON_CODE_MSMSEC_KEY_START_TIMEOUT   (WLAN_REASON_CODE_MSMSEC_CONNECT_BASE + 4)
+#define WLAN_REASON_CODE_MSMSEC_KEY_SUCCESS_TIMEOUT (WLAN_REASON_CODE_MSMSEC_CONNECT_BASE + 5)
+
+/* ACM notification codes (begin at L2_NOTIFICATION_CODE_PUBLIC_BEGIN == 0). */
+#if defined(__midl) || defined(__WIDL__)
+typedef [v1_enum] enum _WLAN_NOTIFICATION_ACM {
+#else
+typedef enum _WLAN_NOTIFICATION_ACM {
+#endif
+    wlan_notification_acm_start = 0,
+    wlan_notification_acm_autoconf_enabled,
+    wlan_notification_acm_autoconf_disabled,
+    wlan_notification_acm_background_scan_enabled,
+    wlan_notification_acm_background_scan_disabled,
+    wlan_notification_acm_bss_type_change,
+    wlan_notification_acm_power_setting_change,
+    wlan_notification_acm_scan_complete,
+    wlan_notification_acm_scan_fail,
+    wlan_notification_acm_connection_start,
+    wlan_notification_acm_connection_complete,
+    wlan_notification_acm_connection_attempt_fail,
+    wlan_notification_acm_filter_list_change,
+    wlan_notification_acm_interface_arrival,
+    wlan_notification_acm_interface_removal,
+    wlan_notification_acm_profile_change,
+    wlan_notification_acm_profile_name_change,
+    wlan_notification_acm_profiles_exhausted,
+    wlan_notification_acm_network_not_available,
+    wlan_notification_acm_network_available,
+    wlan_notification_acm_disconnecting,
+    wlan_notification_acm_disconnected,
+    wlan_notification_acm_adhoc_network_state_change,
+    wlan_notification_acm_profile_unblocked,
+    wlan_notification_acm_screen_power_change,
+    wlan_notification_acm_profile_blocked,
+    wlan_notification_acm_scan_list_refresh,
+    wlan_notification_acm_operational_state_change,
+    wlan_notification_acm_end
+} WLAN_NOTIFICATION_ACM;
+typedef WLAN_NOTIFICATION_ACM *PWLAN_NOTIFICATION_ACM;
+
+typedef enum _WLAN_NOTIFICATION_MSM {
+    wlan_notification_msm_start = 0,
+    wlan_notification_msm_associating,
+    wlan_notification_msm_associated,
+    wlan_notification_msm_authenticating,
+    wlan_notification_msm_connected,
+    wlan_notification_msm_roaming_start,
+    wlan_notification_msm_roaming_end,
+    wlan_notification_msm_radio_state_change,
+    wlan_notification_msm_signal_quality_change,
+    wlan_notification_msm_disassociating,
+    wlan_notification_msm_disconnected,
+    wlan_notification_msm_peer_join,
+    wlan_notification_msm_peer_leave,
+    wlan_notification_msm_adapter_removal,
+    wlan_notification_msm_adapter_operation_mode_change,
+    wlan_notification_msm_link_degraded,
+    wlan_notification_msm_link_improved,
+    wlan_notification_msm_end
+} WLAN_NOTIFICATION_MSM, *PWLAN_NOTIFICATION_MSM;
+
 /* Functions */
 #if !defined(__midl) && !defined(__WIDL__)
 PVOID WINAPI WlanAllocateMemory(DWORD dwSize);
@@ -279,6 +458,7 @@ DWORD WINAPI WlanConnect(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid,
 DWORD WINAPI WlanDisconnect(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, PVOID pReserved);
 DWORD WINAPI WlanEnumInterfaces(IN HANDLE hClientHandle, PVOID pReserved, OUT PWLAN_INTERFACE_INFO_LIST *ppInterfaceList);
 DWORD WINAPI WlanGetAvailableNetworkList(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN DWORD dwFlags, PVOID pReserved, OUT PWLAN_AVAILABLE_NETWORK_LIST *ppAvailableNetworkList);
+DWORD WINAPI WlanGetNetworkBssList(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN const PDOT11_SSID pDot11Ssid, IN DOT11_BSS_TYPE dot11BssType, IN BOOL bSecurityEnabled, PVOID pReserved, OUT PWLAN_BSS_LIST *ppWlanBssList);
 DWORD WINAPI WlanGetInterfaceCapability(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, PVOID pReserved, OUT PWLAN_INTERFACE_CAPABILITY *ppCapability);
 DWORD WINAPI WlanDeleteProfile(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN LPCWSTR strProfileName, PVOID pReserved);
 DWORD WINAPI WlanGetProfile(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN LPCWSTR strProfileName, PVOID pReserved, OUT LPWSTR *pstrProfileXml, DWORD *pdwFlags, PDWORD pdwGrantedAccess);
@@ -286,7 +466,49 @@ DWORD WINAPI WlanGetProfileCustomUserData(IN HANDLE hClientHandle, IN const GUID
 DWORD WINAPI WlanGetProfileList(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, PVOID pReserved, OUT PWLAN_PROFILE_INFO_LIST *ppProfileList);
 DWORD WINAPI WlanIhvControl(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN WLAN_IHV_CONTROL_TYPE Type, IN DWORD dwInBufferSize, IN PVOID pInBuffer, IN DWORD dwOutBufferSize, PVOID pOutBuffer, OUT PDWORD pdwBytesReturned);
 DWORD WINAPI WlanQueryInterface(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN WLAN_INTF_OPCODE OpCode, PVOID pReserved, OUT PDWORD pdwDataSize, OUT PVOID *ppData, WLAN_OPCODE_VALUE_TYPE *pWlanOpcodeValueType);
+DWORD WINAPI WlanSetInterface(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN WLAN_INTF_OPCODE OpCode, IN DWORD dwDataSize, IN const VOID *pData, PVOID pReserved);
 DWORD WINAPI WlanReasonCodeToString(IN DWORD dwReasonCode, IN DWORD dwBufferSize, IN PWCHAR pStringBuffer, PVOID pReserved);
+typedef struct _WLAN_AVAILABLE_NETWORK_V2 {
+    WCHAR strProfileName[WLAN_MAX_NAME_LENGTH];
+    DOT11_SSID dot11Ssid;
+    DOT11_BSS_TYPE dot11BssType;
+    ULONG uNumberOfBssids;
+    BOOL bNetworkConnectable;
+    WLAN_REASON_CODE wlanNotConnectableReason;
+    ULONG uNumberOfPhyTypes;
+    DOT11_PHY_TYPE dot11PhyTypes[WLAN_MAX_PHY_TYPE_NUMBER];
+    BOOL bMorePhyTypes;
+    WLAN_SIGNAL_QUALITY wlanSignalQuality;
+    BOOL bSecurityEnabled;
+    DOT11_AUTH_ALGORITHM dot11DefaultAuthAlgorithm;
+    DOT11_CIPHER_ALGORITHM dot11DefaultCipherAlgorithm;
+    DWORD dwFlags;
+    DOT11_ACCESSNETWORKOPTIONS AccessNetworkOptions;
+    DOT11_HESSID dot11HESSID;
+    DOT11_VENUEINFO VenueInfo;
+    DWORD dwReserved;
+} WLAN_AVAILABLE_NETWORK_V2, *PWLAN_AVAILABLE_NETWORK_V2;
+
+typedef struct _WLAN_AVAILABLE_NETWORK_LIST_V2 {
+    DWORD dwNumberOfItems;
+    DWORD dwIndex;
+    WLAN_AVAILABLE_NETWORK_V2 Network[1];
+} WLAN_AVAILABLE_NETWORK_LIST_V2, *PWLAN_AVAILABLE_NETWORK_LIST_V2;
+
+typedef struct _WLAN_CONNECTION_PARAMETERS_V2 {
+    WLAN_CONNECTION_MODE wlanConnectionMode;
+    LPCWSTR strProfile;
+    PDOT11_SSID pDot11Ssid;
+    PDOT11_HESSID pDot11Hessid;
+    PDOT11_BSSID_LIST pDesiredBssidList;
+    DOT11_BSS_TYPE dot11BssType;
+    DWORD dwFlags;
+    PDOT11_ACCESSNETWORKOPTIONS pDot11AccessNetworkOptions;
+} WLAN_CONNECTION_PARAMETERS_V2, *PWLAN_CONNECTION_PARAMETERS_V2;
+
+DWORD WINAPI WlanConnect2(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN const PWLAN_CONNECTION_PARAMETERS_V2 pConnectionParameters, PVOID pReserved);
+DWORD WINAPI WlanGetAvailableNetworkList2(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN DWORD dwFlags, PVOID pReserved, OUT PWLAN_AVAILABLE_NETWORK_LIST_V2 *ppAvailableNetworkList);
+
 DWORD WINAPI WlanRegisterNotification(IN HANDLE hClientHandle,IN DWORD dwNotifSource, IN BOOL bIgnoreDuplicate, WLAN_NOTIFICATION_CALLBACK funcCallback, PVOID pCallbackContext, PVOID pReserved, PDWORD pdwPrevNotifSource);
 DWORD WINAPI WlanRenameProfile(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN LPCWSTR strOldProfileName, IN LPCWSTR strNewProfileName, PVOID pReserved);
 DWORD WINAPI WlanSetProfile(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN DWORD dwFlags, IN LPCWSTR strProfileXml, LPCWSTR strAllUserProfileSecurity, IN BOOL bOverwrite, PVOID pReserved, OUT DWORD *pdwReasonCode);
@@ -294,6 +516,7 @@ DWORD WINAPI WlanSetProfileCustomUserData(IN HANDLE hClientHandle, IN const GUID
 DWORD WINAPI WlanSetProfileEapUserData(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN LPCWSTR strProfileName, IN EAP_METHOD_TYPE eapType, IN DWORD dwFlags, IN DWORD dwEapUserDataSize, IN const LPBYTE pbEapUserData, PVOID pReserved);
 DWORD WINAPI WlanSetProfileList(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, DWORD dwItems, IN LPCWSTR *strProfileNames, PVOID pReserved);
 DWORD WINAPI WlanSetSecuritySettings(IN HANDLE hClientHandle, IN WLAN_SECURABLE_OBJECT SecurableObject, IN LPCWSTR strModifiedSDDL);
+DWORD WINAPI WlanGetSecuritySettings(IN HANDLE hClientHandle, IN WLAN_SECURABLE_OBJECT SecurableObject, OUT WLAN_OPCODE_VALUE_TYPE *pValueType OPTIONAL, OUT LPWSTR *pstrCurrentSDDL, OUT PDWORD pdwGrantedAccess);
 DWORD WINAPI WlanScan(IN HANDLE hClientHandle, IN const GUID *pInterfaceGuid, IN PDOT11_SSID pDot11Ssid, IN PWLAN_RAW_DATA pIeData, PVOID pReserved);
 #endif
 

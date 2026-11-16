@@ -30,6 +30,7 @@ typedef struct _DEVINSTDATA
 {
 	HFONT hTitleFont;
 	BOOL bUpdate;
+	BOOL bInstalled;
 	PBYTE buffer;
 	DWORD requiredSize;
 	DWORD regDataType;
@@ -65,6 +66,12 @@ BOOL
 CheckBestDriver(
     _In_ PDEVINSTDATA DevInstData,
     _In_ PCWSTR pszDir);
+
+BOOL
+NewDevSetFailedInstall(
+    IN HDEVINFO DeviceInfoSet,
+    IN PSP_DEVINFO_DATA DevInfoData OPTIONAL,
+    IN BOOLEAN Set);
 
 /* wizard.c */
 BOOL

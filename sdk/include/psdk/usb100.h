@@ -26,7 +26,7 @@
 extern "C" {
 #endif
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 #define BMREQUEST_HOST_TO_DEVICE          0
 #define BMREQUEST_DEVICE_TO_HOST          1
@@ -75,6 +75,8 @@ extern "C" {
 #define USB_ENDPOINT_DIRECTION_OUT(x) (!((x) & USB_ENDPOINT_DIRECTION_MASK))
 #define USB_ENDPOINT_DIRECTION_IN(x) ((x) & USB_ENDPOINT_DIRECTION_MASK)
 
+#define USB_ENDPOINT_ADDRESS_MASK         0x0F
+
 #define USB_REQUEST_GET_STATUS            0x00
 #define USB_REQUEST_CLEAR_FEATURE         0x01
 #define USB_REQUEST_SET_FEATURE           0x03
@@ -101,6 +103,11 @@ extern "C" {
 
 #define USB_FEATURE_ENDPOINT_STALL        0x0000
 #define USB_FEATURE_REMOTE_WAKEUP         0x0001
+#define USB_FEATURE_TEST_MODE             0x02
+#define USB_FEATURE_FUNCTION_SUSPEND      0x00
+#define USB_FEATURE_U1_ENABLE             0x30
+#define USB_FEATURE_U2_ENABLE             0x31
+#define USB_FEATURE_LTM_ENABLE            0x32
 
 #define USB_FEATURE_INTERFACE_POWER_D0    0x0002
 #define USB_FEATURE_INTERFACE_POWER_D1    0x0003
@@ -216,7 +223,7 @@ typedef struct _USB_INTERFACE_POWER_DESCRIPTOR {
   USHORT TransitionTimeFromD3;
 } USB_INTERFACE_POWER_DESCRIPTOR, *PUSB_INTERFACE_POWER_DESCRIPTOR;
 
-#include <poppack.h>
+#pragma pack(pop)
 
 #ifdef __cplusplus
 }

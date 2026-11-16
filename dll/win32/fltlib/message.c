@@ -31,59 +31,55 @@ FilterConnectCommunicationPort(_In_ LPCWSTR lpPortName,
 {
     OBJECT_ATTRIBUTES ObjectAttributes;
     IO_STATUS_BLOCK IoStatusBlock;
+    PFILE_FULL_EA_INFORMATION EaBuffer;
     PFILTER_PORT_DATA PortData;
     UNICODE_STRING DeviceName;
     UNICODE_STRING PortName;
     HANDLE FileHandle;
-    SIZE_T PortNameSize;
+    SIZE_T EaValueLength;
     SIZE_T BufferSize;
-    PCHAR Ptr;
+    ULONG CreateOptions;
     NTSTATUS Status;
     HRESULT hr;
 
     *hPort = INVALID_HANDLE_VALUE;
 
-    /* Sanity check */
-    if (lpContext && wSizeOfContext == 0)
+    if ((lpContext == NULL) != (wSizeOfContext == 0) || (dwOptions & ~FLT_PORT_VALID_OPTIONS))
     {
         return E_INVALIDARG;
     }
 
-    /* Get the length of the port name */
-    PortNameSize = wcslen(lpPortName) * sizeof(WCHAR);
-
-    /* Calculate and allocate the size of the required buffer */
-    BufferSize = sizeof(FILTER_PORT_DATA) + PortNameSize + wSizeOfContext;
-    PortData = RtlAllocateHeap(GetProcessHeap(), 0, BufferSize);
-    if (PortData == NULL) return E_OUTOFMEMORY;
-
-    /* Clear out the buffer and find the end of the fixed struct */
-    RtlZeroMemory(PortData, BufferSize);
-    Ptr = (PCHAR)(PortData + 1);
-
-    PortData->Size = BufferSize;
-    PortData->Options = dwOptions;
-
-    /* Setup the port name */
-    RtlInitUnicodeString(&PortName, lpPortName);
-    PortData->PortName.Buffer = (PWCH)Ptr;
-    PortData->PortName.MaximumLength = PortNameSize;
-    RtlCopyUnicodeString(&PortData->PortName, &PortName);
-    Ptr += PortData->PortName.Length;
-
-    /* Check if we were given a context */
-    if (lpContext)
+    Status = RtlInitUnicodeStringEx(&PortName, lpPortName);
+    if (!NT_SUCCESS(Status) || PortName.Length == 0)
     {
-        /* Add that into the buffer too */
-        PortData->Context = Ptr;
-        RtlCopyMemory(PortData->Context, lpContext, wSizeOfContext);
+        return E_INVALIDARG;
     }
+
+    EaValueLength = FIELD_OFFSET(FILTER_PORT_DATA, PortName) + PortName.Length + wSizeOfContext;
+    if (EaValueLength > MAXUSHORT)
+    {
+        return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+    }
+
+    BufferSize = FIELD_OFFSET(FILE_FULL_EA_INFORMATION, EaName) + FLT_PORT_EA_NAME_LENGTH + 1 + EaValueLength;
+    EaBuffer = RtlAllocateHeap(GetProcessHeap(), HEAP_ZERO_MEMORY, BufferSize);
+    if (EaBuffer == NULL) return E_OUTOFMEMORY;
+
+    EaBuffer->EaNameLength = FLT_PORT_EA_NAME_LENGTH;
+    EaBuffer->EaValueLength = (USHORT)EaValueLength;
+    RtlCopyMemory(EaBuffer->EaName, FLT_PORT_EA_NAME, FLT_PORT_EA_NAME_LENGTH + 1);
+
+    PortData = (PFILTER_PORT_DATA)&EaBuffer->EaName[FLT_PORT_EA_NAME_LENGTH + 1];
+    PortData->PortNameLength = PortName.Length;
+    PortData->ContextSize = wSizeOfContext;
+    RtlCopyMemory(PortData->PortName, PortName.Buffer, PortName.Length);
+    if (wSizeOfContext) RtlCopyMemory((PUCHAR)PortData->PortName + PortName.Length, lpContext, wSizeOfContext);
 
     /* Initialize the object attributes */
     RtlInitUnicodeString(&DeviceName, L"\\Global??\\FltMgrMsg");
     InitializeObjectAttributes(&ObjectAttributes,
                                &DeviceName,
-                               OBJ_EXCLUSIVE | OBJ_CASE_INSENSITIVE,
+                               OBJ_CASE_INSENSITIVE,
                                NULL,
                                NULL);
 
@@ -98,7 +94,7 @@ FilterConnectCommunicationPort(_In_ LPCWSTR lpPortName,
         }
     }
 
-    /* Now get a handle to the device */
+    CreateOptions = (dwOptions & FLT_PORT_FLAG_SYNC_HANDLE) ? FILE_SYNCHRONOUS_IO_NONALERT : 0;
     Status = NtCreateFile(&FileHandle,
                           SYNCHRONIZE | FILE_READ_DATA | FILE_WRITE_DATA,
                           &ObjectAttributes,
@@ -106,10 +102,10 @@ FilterConnectCommunicationPort(_In_ LPCWSTR lpPortName,
                           0,
                           0,
                           0,
-                          FILE_OPEN_IF,
-                          0,
-                          PortData,
-                          BufferSize);
+                          FILE_OPEN,
+                          CreateOptions,
+                          EaBuffer,
+                          (ULONG)BufferSize);
     if (NT_SUCCESS(Status))
     {
         *hPort = FileHandle;
@@ -121,8 +117,47 @@ FilterConnectCommunicationPort(_In_ LPCWSTR lpPortName,
     }
 
     /* Cleanup and return */
-    RtlFreeHeap(GetProcessHeap(), 0, PortData);
+    RtlFreeHeap(GetProcessHeap(), 0, EaBuffer);
     return hr;
+}
+
+static
+NTSTATUS
+PortIoctl(_In_ HANDLE hPort,
+          _In_ ULONG IoControlCode,
+          _In_reads_bytes_opt_(InSize) PVOID InBuffer,
+          _In_ ULONG InSize,
+          _Out_writes_bytes_opt_(OutSize) PVOID OutBuffer,
+          _In_ ULONG OutSize,
+          _Out_opt_ PULONG_PTR Information)
+{
+    IO_STATUS_BLOCK IoStatusBlock;
+    NTSTATUS Status;
+
+    Status = NtDeviceIoControlFile(hPort,
+                                   NULL,
+                                   NULL,
+                                   NULL,
+                                   &IoStatusBlock,
+                                   IoControlCode,
+                                   InBuffer,
+                                   InSize,
+                                   OutBuffer,
+                                   OutSize);
+    if (Status == STATUS_PENDING)
+    {
+        Status = NtWaitForSingleObject(hPort, FALSE, NULL);
+        if (NT_SUCCESS(Status))
+        {
+            Status = IoStatusBlock.Status;
+        }
+    }
+
+    if (Information != NULL)
+    {
+        *Information = NT_ERROR(Status) ? 0 : IoStatusBlock.Information;
+    }
+    return Status;
 }
 
 _Must_inspect_result_
@@ -135,13 +170,18 @@ FilterSendMessage(_In_ HANDLE hPort,
                   _In_ DWORD dwOutBufferSize,
                   _Out_ LPDWORD lpBytesReturned)
 {
-    UNREFERENCED_PARAMETER(hPort);
-    UNREFERENCED_PARAMETER(lpInBuffer);
-    UNREFERENCED_PARAMETER(dwInBufferSize);
-    UNREFERENCED_PARAMETER(lpOutBuffer);
-    UNREFERENCED_PARAMETER(dwOutBufferSize);
-    UNREFERENCED_PARAMETER(lpBytesReturned);
-    return E_NOTIMPL;
+    ULONG_PTR Information;
+    NTSTATUS Status;
+
+    Status = PortIoctl(hPort,
+                       IOCTL_FILTER_SEND_MESSAGE,
+                       lpInBuffer,
+                       dwInBufferSize,
+                       lpOutBuffer,
+                       dwOutBufferSize,
+                       &Information);
+    *lpBytesReturned = (DWORD)Information;
+    return NtStatusToHResult(Status);
 }
 
 _Must_inspect_result_
@@ -152,11 +192,36 @@ FilterGetMessage(_In_ HANDLE hPort,
                  _In_ DWORD dwMessageBufferSize,
                  _Inout_opt_ LPOVERLAPPED lpOverlapped)
 {
-    UNREFERENCED_PARAMETER(hPort);
-    UNREFERENCED_PARAMETER(lpMessageBuffer);
-    UNREFERENCED_PARAMETER(dwMessageBufferSize);
-    UNREFERENCED_PARAMETER(lpOverlapped);
-    return E_NOTIMPL;
+    NTSTATUS Status;
+
+    if (lpOverlapped == NULL)
+    {
+        Status = PortIoctl(hPort,
+                           IOCTL_FILTER_GET_MESSAGE,
+                           NULL,
+                           0,
+                           lpMessageBuffer,
+                           dwMessageBufferSize,
+                           NULL);
+        return NtStatusToHResult(Status);
+    }
+
+    lpOverlapped->Internal = STATUS_PENDING;
+    Status = NtDeviceIoControlFile(hPort,
+                                   lpOverlapped->hEvent,
+                                   NULL,
+                                   ((ULONG_PTR)lpOverlapped->hEvent & 1) ? NULL : lpOverlapped,
+                                   (PIO_STATUS_BLOCK)lpOverlapped,
+                                   IOCTL_FILTER_GET_MESSAGE,
+                                   NULL,
+                                   0,
+                                   lpMessageBuffer,
+                                   dwMessageBufferSize);
+    if (Status == STATUS_PENDING)
+    {
+        return HRESULT_FROM_WIN32(ERROR_IO_PENDING);
+    }
+    return NtStatusToHResult(Status);
 }
 
 _Must_inspect_result_
@@ -166,8 +231,14 @@ FilterReplyMessage(_In_ HANDLE hPort,
                    _In_reads_bytes_(dwReplyBufferSize) PFILTER_REPLY_HEADER lpReplyBuffer,
                    _In_ DWORD dwReplyBufferSize)
 {
-    UNREFERENCED_PARAMETER(hPort);
-    UNREFERENCED_PARAMETER(lpReplyBuffer);
-    UNREFERENCED_PARAMETER(dwReplyBufferSize);
-    return E_NOTIMPL;
+    NTSTATUS Status;
+
+    Status = PortIoctl(hPort,
+                       IOCTL_FILTER_REPLY_MESSAGE,
+                       lpReplyBuffer,
+                       dwReplyBufferSize,
+                       NULL,
+                       0,
+                       NULL);
+    return NtStatusToHResult(Status);
 }

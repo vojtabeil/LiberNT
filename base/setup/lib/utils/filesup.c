@@ -11,6 +11,7 @@
 #include "precomp.h"
 #include "filesup.h"
 #include <pseh/pseh2.h>
+#include <ndk/umfuncs.h> // Ldr* functions
 
 #define NDEBUG
 #include <debug.h>
@@ -234,7 +235,7 @@ SetupCopyFile(
     FILE_STANDARD_INFORMATION FileStandard;
     FILE_BASIC_INFORMATION FileBasic;
     ULONG RegionSize;
-    HANDLE SourceFileSection;
+    HANDLE SourceFileSection = NULL;
     PVOID SourceFileMap = NULL;
     SIZE_T SourceSectionSize = 0;
     LARGE_INTEGER ByteOffset;
@@ -280,33 +281,36 @@ SetupCopyFile(
         goto closesrc;
     }
 
-    Status = NtCreateSection(&SourceFileSection,
-                             SECTION_MAP_READ,
-                             NULL,
-                             NULL,
-                             PAGE_READONLY,
-                             SEC_COMMIT,
-                             FileHandleSource);
-    if (!NT_SUCCESS(Status))
+    if (FileStandard.EndOfFile.QuadPart != 0)
     {
-        DPRINT1("NtCreateSection failed: %x, %S\n", Status, SourceFileName);
-        goto closesrc;
-    }
+        Status = NtCreateSection(&SourceFileSection,
+                                 SECTION_MAP_READ,
+                                 NULL,
+                                 NULL,
+                                 PAGE_READONLY,
+                                 SEC_COMMIT,
+                                 FileHandleSource);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("NtCreateSection failed: %x, %S\n", Status, SourceFileName);
+            goto closesrc;
+        }
 
-    Status = NtMapViewOfSection(SourceFileSection,
-                                NtCurrentProcess(),
-                                &SourceFileMap,
-                                0,
-                                0,
-                                NULL,
-                                &SourceSectionSize,
-                                ViewUnmap,
-                                0,
-                                PAGE_READONLY);
-    if (!NT_SUCCESS(Status))
-    {
-        DPRINT1("NtMapViewOfSection failed: %x, %S\n", Status, SourceFileName);
-        goto closesrcsec;
+        Status = NtMapViewOfSection(SourceFileSection,
+                                    NtCurrentProcess(),
+                                    &SourceFileMap,
+                                    0,
+                                    0,
+                                    NULL,
+                                    &SourceSectionSize,
+                                    ViewUnmap,
+                                    0,
+                                    PAGE_READONLY);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("NtMapViewOfSection failed: %x, %S\n", Status, SourceFileName);
+            goto closesrcsec;
+        }
     }
 
     RtlInitUnicodeString(&FileName, DestinationFileName);
@@ -326,7 +330,8 @@ SetupCopyFile(
                           FailIfExists ? FILE_CREATE : FILE_OVERWRITE_IF,
                           FILE_NO_INTERMEDIATE_BUFFERING |
                           FILE_SEQUENTIAL_ONLY |
-                          FILE_SYNCHRONOUS_IO_NONALERT,
+                          FILE_SYNCHRONOUS_IO_NONALERT |
+                          FILE_OPEN_FOR_BACKUP_INTENT,
                           NULL,
                           0);
     if (!NT_SUCCESS(Status))
@@ -350,7 +355,8 @@ SetupCopyFile(
                                   FILE_OPEN,
                                   FILE_NO_INTERMEDIATE_BUFFERING |
                                   FILE_SEQUENTIAL_ONLY |
-                                  FILE_SYNCHRONOUS_IO_NONALERT,
+                                  FILE_SYNCHRONOUS_IO_NONALERT |
+                                  FILE_OPEN_FOR_BACKUP_INTENT,
                                   NULL,
                                   0);
             /* Fail for real if we cannot open it that way */
@@ -385,7 +391,8 @@ SetupCopyFile(
                                   FILE_OVERWRITE_IF,
                                   FILE_NO_INTERMEDIATE_BUFFERING |
                                   FILE_SEQUENTIAL_ONLY |
-                                  FILE_SYNCHRONOUS_IO_NONALERT,
+                                  FILE_SYNCHRONOUS_IO_NONALERT |
+                                  FILE_OPEN_FOR_BACKUP_INTENT,
                                   NULL,
                                   0);
         }
@@ -398,23 +405,26 @@ SetupCopyFile(
         }
     }
 
-    RegionSize = (ULONG)PAGE_ROUND_UP(FileStandard.EndOfFile.u.LowPart);
-    IoStatusBlock.Status = 0;
-    ByteOffset.QuadPart = 0ULL;
-    Status = NtWriteFile(FileHandleDest,
-                         NULL,
-                         NULL,
-                         NULL,
-                         &IoStatusBlock,
-                         SourceFileMap,
-                         RegionSize,
-                         &ByteOffset,
-                         NULL);
-    if (!NT_SUCCESS(Status))
+    if (SourceFileMap)
     {
-        DPRINT1("NtWriteFile failed: %x:%x, iosb: %p src: %p, size: %x\n",
-                Status, IoStatusBlock.Status, &IoStatusBlock, SourceFileMap, RegionSize);
-        goto closedest;
+        RegionSize = (ULONG)PAGE_ROUND_UP(FileStandard.EndOfFile.u.LowPart);
+        IoStatusBlock.Status = 0;
+        ByteOffset.QuadPart = 0ULL;
+        Status = NtWriteFile(FileHandleDest,
+                             NULL,
+                             NULL,
+                             NULL,
+                             &IoStatusBlock,
+                             SourceFileMap,
+                             RegionSize,
+                             &ByteOffset,
+                             NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("NtWriteFile failed: %x:%x, iosb: %p src: %p, size: %x\n",
+                    Status, IoStatusBlock.Status, &IoStatusBlock, SourceFileMap, RegionSize);
+            goto closedest;
+        }
     }
 
     /* Copy file date/time from source file */
@@ -444,10 +454,12 @@ closedest:
     NtClose(FileHandleDest);
 
 unmapsrcsec:
-    NtUnmapViewOfSection(NtCurrentProcess(), SourceFileMap);
+    if (SourceFileMap)
+        NtUnmapViewOfSection(NtCurrentProcess(), SourceFileMap);
 
 closesrcsec:
-    NtClose(SourceFileSection);
+    if (SourceFileSection)
+        NtClose(SourceFileSection);
 
 closesrc:
     NtClose(FileHandleSource);
@@ -465,7 +477,7 @@ SetupMoveFile(
     IN PCWSTR NewFileName,
     IN ULONG Flags)
 {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
     IO_STATUS_BLOCK IoStatusBlock;
     OBJECT_ATTRIBUTES ObjectAttributes;
     PFILE_RENAME_INFORMATION RenameInfo;
@@ -1071,6 +1083,88 @@ UnMapFile(
     }
 
     return Success;
+}
+
+static UCHAR
+GetWin32DriveTypeOfDriveNumber(
+    _In_ USHORT DriveNumber)
+{
+    PROCESS_DEVICEMAP_INFORMATION DeviceMap;
+    NTSTATUS Status;
+
+    Status = NtQueryInformationProcess(NtCurrentProcess(),
+                                       ProcessDeviceMap,
+                                       &DeviceMap.Query,
+                                       sizeof(DeviceMap.Query),
+                                       NULL);
+    if (NT_SUCCESS(Status) && (DeviceMap.Query.DriveMap & (1 << DriveNumber)) != 0)
+    {
+        UCHAR Type = DeviceMap.Query.DriveType[DriveNumber];
+        if (Type <= DRIVE_RAMDISK)
+            return Type;
+    }
+    return DRIVE_UNKNOWN;
+}
+
+UCHAR
+GetNtDevicePathOfDriveNumber(
+    _In_ USHORT DriveNumber,
+    _Out_ PUNICODE_STRING DevicePath)
+{
+    WCHAR szDosDevPath[] = {'\\','?','?','\\', 'A'+DriveNumber,':', UNICODE_NULL};
+    UCHAR Type;
+    ULONG (WINAPI *pfnQueryDosDeviceW)(PCWSTR, PWSTR, ULONG) = NULL;
+    HANDLE hKernel32;
+    HANDLE DeviceHandle;
+    UNICODE_STRING String;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    NTSTATUS Status;
+
+    /* Retrieve the drive type; if we fail, bail out early */
+    Type = GetWin32DriveTypeOfDriveNumber(DriveNumber);
+    if (Type <= DRIVE_NO_ROOT_DIR)
+        return Type;
+
+    /* Lookup the drive. Use Win32 directly if available so we match UAC, etc. */
+    RtlInitUnicodeString(&String, L"kernel32");
+    Status = LdrGetDllHandle(NULL, NULL, &String, &hKernel32);
+    if (NT_SUCCESS(Status))
+    {
+        ANSI_STRING AnsiString = RTL_CONSTANT_STRING("QueryDosDeviceW");
+        Status = LdrGetProcedureAddress(hKernel32, &AnsiString, 0, (PVOID*)&pfnQueryDosDeviceW);
+    }
+    if (NT_SUCCESS(Status))
+    {
+        /* "+ 4" to start at the drive letter itself */
+        ULONG cch = pfnQueryDosDeviceW(szDosDevPath + 4, DevicePath->Buffer,
+                                       DevicePath->MaximumLength / sizeof(WCHAR));
+        if (cch)
+        {
+            DevicePath->Length = (cch - 1) * sizeof(WCHAR);
+            return Type;
+        }
+    }
+
+    /* Retrieve the DOS device symlink target */
+    RtlInitUnicodeString(&String, szDosDevPath);
+    InitializeObjectAttributes(&ObjectAttributes, &String, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenSymbolicLinkObject(&DeviceHandle, SYMBOLIC_LINK_QUERY, &ObjectAttributes);
+    if (NT_SUCCESS(Status))
+    {
+        ULONG ReturnLength;
+        Status = NtQuerySymbolicLinkObject(DeviceHandle, DevicePath, &ReturnLength);
+        NtClose(DeviceHandle);
+        if (NT_SUCCESS(Status))
+        {
+            if (DevicePath->Length < DevicePath->MaximumLength)
+                DevicePath->Buffer[DevicePath->Length / sizeof(WCHAR)] = UNICODE_NULL;
+            else
+                Status = STATUS_BUFFER_TOO_SMALL;
+        }
+    }
+
+    /* Return the drive type if success, or unknown if failure */
+    return (NT_SUCCESS(Status) ? Type : DRIVE_UNKNOWN);
 }
 
 /* EOF */

@@ -92,6 +92,7 @@ HalInitializeBios(
         if (!Mdl)
         {
             ASSERT(FALSE);
+            return;
         }
 
         /* Get pointer to the pfn array */
@@ -140,6 +141,11 @@ HalInitializeBios(
         /* Map the MDL to system space */
         x86BiosMemoryMapping = MmGetSystemAddressForMdlSafe(Mdl, HighPagePriority);
         ASSERT(x86BiosMemoryMapping);
+        if (!x86BiosMemoryMapping)
+        {
+            IoFreeMdl(Mdl);
+            return;
+        }
 
         DPRINT1("*x86BiosMemoryMapping: %p, %p\n",
                 *(PVOID*)x86BiosMemoryMapping, *(PVOID*)(x86BiosMemoryMapping + 8));
@@ -185,7 +191,7 @@ x86BiosFreeBuffer(
     _In_ USHORT Offset)
 {
     /* Check if the system is initialized and if the address matches */
-    if (!x86BiosIsInitialized || (Segment != 0x2000) || (Offset != 0))
+    if (!x86BiosIsInitialized || (Segment != x86BiosBufferPhysical / 16) || (Offset != 0))
     {
         /* Something was wrong, fail */
         return STATUS_INVALID_PARAMETER;
@@ -505,7 +511,7 @@ BOOLEAN
 NTAPI
 HalpBiosDisplayReset(VOID)
 {
-    X86_BIOS_REGISTERS Registers;
+    X86_BIOS_REGISTERS Registers = {0};
     ULONG OldEflags;
     BOOLEAN Success;
 

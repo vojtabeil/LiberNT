@@ -66,6 +66,17 @@ static CRITICAL_SECTION_DEBUG queues_critsect_debug =
 };
 static CRITICAL_SECTION queues_section = { &queues_critsect_debug, -1, 0, 0, 0, 0 };
 
+static CRITICAL_SECTION async_result_cache_section;
+static CRITICAL_SECTION_DEBUG async_result_cache_critsect_debug =
+{
+    0, 0, &async_result_cache_section,
+    { &async_result_cache_critsect_debug.ProcessLocksList, &async_result_cache_critsect_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": async_result_cache_section") }
+};
+static CRITICAL_SECTION async_result_cache_section = { &async_result_cache_critsect_debug, -1, 0, 0, 0, 0 };
+struct list async_result_cache = LIST_INIT(async_result_cache);
+
+static LONG startup_count;
 static LONG platform_lock;
 static CO_MTA_USAGE_COOKIE mta_cookie;
 
@@ -158,6 +169,11 @@ static const TP_CALLBACK_PRIORITY priorities[] =
     TP_CALLBACK_PRIORITY_LOW,
 };
 
+/* Vista exposes the version 1 callback environment. Version 3 adds callback
+ * priorities on Windows 7, but RTWorkQ can still use the Vista environment
+ * when the compatibility tree is built for an NT 6.0 target. */
+typedef TP_CALLBACK_ENVIRON RTWQ_CALLBACK_ENVIRON;
+
 struct queue;
 struct queue_desc;
 
@@ -180,7 +196,7 @@ struct queue
     IRtwqAsyncCallback IRtwqAsyncCallback_iface;
     const struct queue_ops *ops;
     TP_POOL *pool;
-    TP_CALLBACK_ENVIRON_V3 envs[ARRAY_SIZE(priorities)];
+    RTWQ_CALLBACK_ENVIRON envs[ARRAY_SIZE(priorities)];
     CRITICAL_SECTION cs;
     struct list pending_items;
     DWORD id;
@@ -296,8 +312,15 @@ static struct queue system_queues[SYS_QUEUE_COUNT];
 
 static struct queue *get_system_queue(DWORD queue_id)
 {
+    if (RTWQ_CALLBACK_QUEUE_PRIVATE_MASK & queue_id)
+        return NULL;
+
     switch (queue_id)
     {
+        default:
+            /* Use standard queue for undefined system queue id's. */
+            queue_id = RTWQ_CALLBACK_QUEUE_STANDARD;
+            /* fall through */
         case RTWQ_CALLBACK_QUEUE_STANDARD:
         case RTWQ_CALLBACK_QUEUE_RT:
         case RTWQ_CALLBACK_QUEUE_IO:
@@ -305,8 +328,6 @@ static struct queue *get_system_queue(DWORD queue_id)
         case RTWQ_CALLBACK_QUEUE_MULTITHREADED:
         case RTWQ_CALLBACK_QUEUE_LONG_FUNCTION:
             return &system_queues[queue_id - 1];
-        default:
-            return NULL;
     }
 }
 
@@ -318,22 +339,30 @@ static void CALLBACK standard_queue_cleanup_callback(void *object_data, void *gr
 
 static HRESULT pool_queue_init(const struct queue_desc *desc, struct queue *queue)
 {
-    TP_CALLBACK_ENVIRON_V3 env;
+    RTWQ_CALLBACK_ENVIRON env;
     unsigned int max_thread, i;
 
     queue->pool = CreateThreadpool(NULL);
 
     memset(&env, 0, sizeof(env));
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN7)
     env.Version = 3;
     env.Size = sizeof(env);
+#else
+    env.Version = 1;
+#endif
     env.Pool = queue->pool;
     env.CleanupGroup = CreateThreadpoolCleanupGroup();
     env.CleanupGroupCancelCallback = standard_queue_cleanup_callback;
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN7)
     env.CallbackPriority = TP_CALLBACK_PRIORITY_NORMAL;
+#endif
     for (i = 0; i < ARRAY_SIZE(queue->envs); ++i)
     {
         queue->envs[i] = env;
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN7)
         queue->envs[i].CallbackPriority = priorities[i];
+#endif
     }
     list_init(&queue->pending_items);
     InitializeCriticalSection(&queue->cs);
@@ -354,7 +383,7 @@ static BOOL pool_queue_shutdown(struct queue *queue)
     if (!queue->pool)
         return FALSE;
 
-    CloseThreadpoolCleanupGroupMembers(queue->envs[0].CleanupGroup, TRUE, NULL);
+    CloseThreadpoolCleanupGroupMembers(queue->envs[0].CleanupGroup, FALSE, NULL);
     CloseThreadpool(queue->pool);
     queue->pool = NULL;
 
@@ -380,7 +409,7 @@ static void CALLBACK standard_queue_worker(TP_CALLBACK_INSTANCE *instance, void 
 static void pool_queue_submit(struct queue *queue, struct work_item *item)
 {
     TP_CALLBACK_PRIORITY callback_priority;
-    TP_CALLBACK_ENVIRON_V3 env;
+    RTWQ_CALLBACK_ENVIRON env;
 
     if (item->priority == 0)
         callback_priority = TP_CALLBACK_PRIORITY_NORMAL;
@@ -593,6 +622,10 @@ static struct work_item * alloc_work_item(struct queue *queue, LONG priority, IR
     struct work_item *item;
 
     item = calloc(1, sizeof(*item));
+#ifdef __REACTOS__
+    if (!item)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     item->IUnknown_iface.lpVtbl = &work_item_vtbl;
     item->result = result;
@@ -954,7 +987,7 @@ static HRESULT alloc_user_queue(const struct queue_desc *desc, DWORD *queue_id)
 
     *queue_id = RTWQ_CALLBACK_QUEUE_UNDEFINED;
 
-    if (platform_lock <= 0)
+    if (startup_count <= 0 || platform_lock <= 0)
         return RTWQ_E_SHUTDOWN;
 
     if (!(queue = calloc(1, sizeof(*queue))))
@@ -995,11 +1028,74 @@ struct async_result
     LONG refcount;
     IUnknown *object;
     IUnknown *state;
+    struct list entry;
 };
 
 static struct async_result *impl_from_IRtwqAsyncResult(IRtwqAsyncResult *iface)
 {
     return CONTAINING_RECORD(iface, struct async_result, result.AsyncResult);
+}
+
+static void free_async_result(struct async_result *result)
+{
+    free(result);
+    RtwqUnlockPlatform();
+}
+
+/* Async result cache. The main reason for caching is to match the behaviour in Windows.
+ * The platform is locked for each async result created and not unlocked until shutdown.
+ * This is consistent with caching of async results, which is probably done to avoid
+ * frequent heap allocations. It's unclear how much is gained from that here, but there
+ * is probably some benefit. Robustness against use-after-free is not likely to be a
+ * major reason because Windows seems to pop the most recently released object for the
+ * next allocation, as is done here, instead of popping from the tail. */
+
+static BOOL async_result_cache_push(struct async_result *result)
+{
+    BOOL pushed;
+
+    EnterCriticalSection(&async_result_cache_section);
+    if ((pushed = startup_count > 0))
+        list_add_head(&async_result_cache, &result->entry);
+    LeaveCriticalSection(&async_result_cache_section);
+
+    return pushed;
+}
+
+static struct async_result *async_result_cache_pop(void)
+{
+    struct async_result *result;
+    struct list *head;
+
+    EnterCriticalSection(&async_result_cache_section);
+
+    if ((head = list_head(&async_result_cache)))
+        list_remove(head);
+
+    LeaveCriticalSection(&async_result_cache_section);
+
+    if (!head)
+        return NULL;
+
+    result = LIST_ENTRY(head, struct async_result, entry);
+    memset(&result->result, 0, sizeof(result->result));
+
+    return result;
+}
+
+static void async_result_cache_clear(void)
+{
+    struct async_result *cur, *cur2;
+
+    EnterCriticalSection(&async_result_cache_section);
+
+    LIST_FOR_EACH_ENTRY_SAFE(cur, cur2, &async_result_cache, struct async_result, entry)
+    {
+        list_remove(&cur->entry);
+        free_async_result(cur);
+    }
+
+    LeaveCriticalSection(&async_result_cache_section);
 }
 
 static HRESULT WINAPI async_result_QueryInterface(IRtwqAsyncResult *iface, REFIID riid, void **obj)
@@ -1046,9 +1142,9 @@ static ULONG WINAPI async_result_Release(IRtwqAsyncResult *iface)
             IUnknown_Release(result->state);
         if (result->result.hEvent)
             CloseHandle(result->result.hEvent);
-        free(result);
 
-        RtwqUnlockPlatform();
+        if (!async_result_cache_push(result))
+            free_async_result(result);
     }
 
     return refcount;
@@ -1132,10 +1228,12 @@ static HRESULT create_async_result(IUnknown *object, IRtwqAsyncCallback *callbac
     if (!out)
         return E_INVALIDARG;
 
-    if (!(result = calloc(1, sizeof(*result))))
-        return E_OUTOFMEMORY;
-
-    RtwqLockPlatform();
+    if (!(result = async_result_cache_pop()))
+    {
+        if (!(result = calloc(1, sizeof(*result))))
+            return E_OUTOFMEMORY;
+        RtwqLockPlatform();
+    }
 
     result->result.AsyncResult.lpVtbl = &async_result_vtbl;
     result->refcount = 1;
@@ -1206,8 +1304,9 @@ static void init_system_queues(void)
 
 HRESULT WINAPI RtwqStartup(void)
 {
-    if (InterlockedIncrement(&platform_lock) == 1)
+    if (InterlockedIncrement(&startup_count) == 1)
     {
+        RtwqLockPlatform();
         init_system_queues();
     }
 
@@ -1234,12 +1333,14 @@ static void shutdown_system_queues(void)
 
 HRESULT WINAPI RtwqShutdown(void)
 {
-    if (platform_lock <= 0)
+    if (startup_count <= 0)
         return S_OK;
 
-    if (InterlockedExchangeAdd(&platform_lock, -1) == 1)
+    if (InterlockedExchangeAdd(&startup_count, -1) == 1)
     {
         shutdown_system_queues();
+        async_result_cache_clear();
+        RtwqUnlockPlatform();
     }
 
     return S_OK;

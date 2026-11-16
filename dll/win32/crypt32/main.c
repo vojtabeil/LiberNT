@@ -27,6 +27,9 @@
 #include "wincrypt.h"
 #include "winreg.h"
 #include "winuser.h"
+#ifdef __REACTOS__
+#include "ntsecapi.h"
+#endif
 #include "i_cryptasn1tls.h"
 #include "crypt32_private.h"
 #include "wine/debug.h"
@@ -220,7 +223,11 @@ HCRYPTPROV WINAPI DECLSPEC_HOTPATCH I_CryptGetDefaultCryptProv(ALG_ID algid)
 
     defprov = CRYPT_GetDefaultProvider();
 
+#ifdef __REACTOS__
+    if (algid && algid != CALG_NO_SIGN && !is_supported_algid(defprov, algid))
+#else
     if (algid && !is_supported_algid(defprov, algid))
+#endif
     {
         DWORD i = 0, type, size;
 
@@ -308,6 +315,47 @@ ASN1encoding_t WINAPI I_CryptGetAsn1Encoder(HCRYPTASN1MODULE x)
     return NULL;
 }
 
+#ifdef __REACTOS__
+BOOL WINAPI CryptProtectMemory(void *data, DWORD len, DWORD flags)
+{
+    NTSTATUS status;
+
+    TRACE("(%p %lu %08lx)\n", data, len, flags);
+
+    if (len % CRYPTPROTECTMEMORY_BLOCK_SIZE)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    status = RtlEncryptMemory(data, len, flags);
+    if (status)
+    {
+        SetLastError(RtlNtStatusToDosError(status));
+        return FALSE;
+    }
+    return TRUE;
+}
+
+BOOL WINAPI CryptUnprotectMemory(void *data, DWORD len, DWORD flags)
+{
+    NTSTATUS status;
+
+    TRACE("(%p %lu %08lx)\n", data, len, flags);
+
+    if (len % CRYPTPROTECTMEMORY_BLOCK_SIZE)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    status = RtlDecryptMemory(data, len, flags);
+    if (status)
+    {
+        SetLastError(RtlNtStatusToDosError(status));
+        return FALSE;
+    }
+    return TRUE;
+}
+#else
 BOOL WINAPI CryptProtectMemory(void *data, DWORD len, DWORD flags)
 {
     static int fixme_once;
@@ -321,3 +369,4 @@ BOOL WINAPI CryptUnprotectMemory(void *data, DWORD len, DWORD flags)
     if (!fixme_once++) FIXME("(%p %lu %08lx): stub\n", data, len, flags);
     return TRUE;
 }
+#endif

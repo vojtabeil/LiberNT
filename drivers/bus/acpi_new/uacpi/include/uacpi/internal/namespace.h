@@ -24,6 +24,8 @@
  */
 #define UACPI_NAMESPACE_NODE_FLAG_TEMPORARY (1u << 2)
 
+#define UACPI_NAMESPACE_NODE_PREDEFINED (1u << 31)
+
 typedef struct uacpi_namespace_node {
     struct uacpi_shareable shareable;
     uacpi_object_name name;

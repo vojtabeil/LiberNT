@@ -30,9 +30,12 @@
 
 #include <tlhelp32.h>
 
-/* Redefine NTDDI_VERSION to 2K3 SP1 to get correct NDK definitions */
-#undef NTDDI_VERSION
-#define NTDDI_VERSION NTDDI_WS03SP1
+/* NTDDI_VERSION is set globally from REACTOS_TARGET_NT — do not override here.
+ * Forcing WS03SP1 caused SYSTEM_PERFORMANCE_INFORMATION (and other NDK structs)
+ * to be the pre-Vista size, while ntoskrnl/HAL/win32k all use the configured
+ * NTDDI level. The size mismatch made NtQuerySystemInformation reject calls
+ * from kernel32 (e.g. GlobalMemoryStatusEx → "RAM not shown" in System
+ * Properties on NT6.1). Same root-cause fix as win32ss/pch.h. */
 
 #define NTOS_MODE_USER
 #include <ndk/cmfuncs.h>
@@ -47,6 +50,7 @@
 #include <ndk/psfuncs.h>
 #include <ndk/rtlfuncs.h>
 #include <ndk/setypes.h>
+#include <ndk/sefuncs.h>
 #include <ndk/umfuncs.h>
 
 #include <ntstrsafe.h>
@@ -55,8 +59,6 @@
 #include <csr/csr.h>
 #include <win/base.h>
 #include <win/basemsg.h>
-#include <win/console.h>
-#include <win/conmsg.h>
 #include <win/vdm.h>
 
 /* DDK Driver Headers */

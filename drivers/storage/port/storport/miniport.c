@@ -26,7 +26,7 @@ InitializeConfiguration(
     PCONFIGURATION_INFORMATION ConfigInfo;
     ULONG i;
 
-    DPRINT1("InitializeConfiguration(%p %p %lu %lu)\n",
+    DPRINT("InitializeConfiguration(%p %p %lu %lu)\n",
             PortConfig, InitData, BusNumber, SlotNumber);
 
     /* Get the configurration information */
@@ -62,14 +62,27 @@ InitializeConfiguration(
     PortConfig->RealModeInitialized = FALSE;
     PortConfig->BufferAccessScsiPortControlled = TRUE;
     PortConfig->MaximumNumberOfTargets = SCSI_MAXIMUM_TARGETS_PER_BUS;
+    PortConfig->SrbType = (InitData->SrbTypeFlags & SRB_TYPE_FLAG_STORAGE_REQUEST_BLOCK) ? SRB_TYPE_STORAGE_REQUEST_BLOCK : SRB_TYPE_SCSI_REQUEST_BLOCK;
+    PortConfig->AddressType = (InitData->AddressTypeFlags & ADDRESS_TYPE_FLAG_BTL8) ? STOR_ADDRESS_TYPE_BTL8 : STOR_ADDRESS_TYPE_UNKNOWN;
 
     PortConfig->SpecificLuExtensionSize = InitData->SpecificLuExtensionSize;
     PortConfig->SrbExtensionSize = InitData->SrbExtensionSize;
     PortConfig->MaximumNumberOfLogicalUnits = SCSI_MAXIMUM_LOGICAL_UNITS;
     PortConfig->WmiDataProvider = TRUE;
 
+    /*
+     * Win8+ miniports read these before deciding whether the adapter is
+     * usable. Advertise 64-bit DMA and per-message interrupt synchronization
+     * so message-signaled miniports such as stornvme can start.
+     */
+    PortConfig->Dma64BitAddresses = SCSI_DMA64_SYSTEM_SUPPORTED;
+    PortConfig->DmaAddressWidth = 64;
+    PortConfig->InterruptSynchronizationMode = InterruptSynchronizeAll;
+    PortConfig->SynchronizationModel = StorSynchronizeFullDuplex;
+    PortConfig->MaxNumberOfIO = SP_UNINITIALIZED_VALUE;
+
     PortConfig->NumberOfAccessRanges = InitData->NumberOfAccessRanges;
-    DPRINT1("NumberOfAccessRanges: %lu\n", PortConfig->NumberOfAccessRanges);
+    DPRINT("NumberOfAccessRanges: %lu\n", PortConfig->NumberOfAccessRanges);
     if (PortConfig->NumberOfAccessRanges != 0)
     {
         PortConfig->AccessRanges = ExAllocatePoolWithTag(NonPagedPool,
@@ -105,7 +118,7 @@ AssignResourcesToConfiguration(
     INT i, j;
     ULONG RangeNumber = 0, Interrupt = 0, Dma = 0;
 
-    DPRINT1("AssignResourceToConfiguration(%p %p %lu)\n",
+    DPRINT("AssignResourceToConfiguration(%p %p %lu)\n",
             PortConfiguration, ResourceList, NumberOfAccessRanges);
 
     FullDescriptor = &ResourceList->List[0];
@@ -120,7 +133,7 @@ AssignResourcesToConfiguration(
             switch (PartialDescriptor->Type)
             {
                 case CmResourceTypePort:
-                    DPRINT1("Port: 0x%I64x (0x%lx)\n",
+                    DPRINT("Port: 0x%I64x (0x%lx)\n",
                             PartialDescriptor->u.Port.Start.QuadPart,
                             PartialDescriptor->u.Port.Length);
                     if (RangeNumber < NumberOfAccessRanges)
@@ -134,7 +147,7 @@ AssignResourcesToConfiguration(
                     break;
 
                 case CmResourceTypeMemory:
-                    DPRINT1("Memory: 0x%I64x (0x%lx)\n",
+                    DPRINT("Memory: 0x%I64x (0x%lx)\n",
                             PartialDescriptor->u.Memory.Start.QuadPart,
                             PartialDescriptor->u.Memory.Length);
                     if (RangeNumber < NumberOfAccessRanges)
@@ -148,7 +161,7 @@ AssignResourcesToConfiguration(
                     break;
 
                 case CmResourceTypeInterrupt:
-                    DPRINT1("Interrupt: Level %lu  Vector %lu\n",
+                    DPRINT("Interrupt: Level %lu  Vector %lu\n",
                             PartialDescriptor->u.Interrupt.Level,
                             PartialDescriptor->u.Interrupt.Vector);
                     if (Interrupt == 0)
@@ -220,7 +233,7 @@ AssignResourcesToConfiguration(
                     break;
 
                 default:
-                    DPRINT1("Other: %u\n", PartialDescriptor->Type);
+                    DPRINT("Other: %u\n", PartialDescriptor->Type);
                     break;
             }
         }
@@ -242,42 +255,74 @@ MiniportInitialize(
     ULONG Size;
     NTSTATUS Status;
 
-    DPRINT1("MiniportInitialize(%p %p %p)\n",
+    DPRINT("MiniportInitialize(%p %p %p)\n",
             Miniport, DeviceExtension, InitData);
 
-    Miniport->DeviceExtension = DeviceExtension;
-    Miniport->InitData = InitData;
+    if (!Miniport->MiniportExtension)
+    {
+        Miniport->DeviceExtension = DeviceExtension;
+        Miniport->InitData = InitData;
 
-    /* Calculate the miniport device extension size */
-    Size = sizeof(MINIPORT_DEVICE_EXTENSION) +
-           Miniport->InitData->DeviceExtensionSize;
+        /* Calculate the miniport device extension size */
+        Size = sizeof(MINIPORT_DEVICE_EXTENSION) + Miniport->InitData->DeviceExtensionSize;
 
-    /* Allocate and initialize the miniport device extension */
-    MiniportExtension = ExAllocatePoolWithTag(NonPagedPool,
-                                              Size,
-                                              TAG_MINIPORT_DATA);
-    if (MiniportExtension == NULL)
-        return STATUS_NO_MEMORY;
+        /* Allocate and initialize the persistent miniport device extension */
+        MiniportExtension = ExAllocatePoolWithTag(NonPagedPool, Size, TAG_MINIPORT_DATA);
+        if (MiniportExtension == NULL)
+            return STATUS_NO_MEMORY;
 
-    RtlZeroMemory(MiniportExtension, Size);
+        RtlZeroMemory(MiniportExtension, Size);
 
-    MiniportExtension->Miniport = Miniport;
-    Miniport->MiniportExtension = MiniportExtension;
+        MiniportExtension->Miniport = Miniport;
+        Miniport->MiniportExtension = MiniportExtension;
 
-    /* Initialize the port configuration */
-    Status = InitializeConfiguration(&Miniport->PortConfig,
-                                     InitData,
-                                     DeviceExtension->BusNumber,
-                                     DeviceExtension->SlotNumber);
-    if (!NT_SUCCESS(Status))
-        return Status;
+        /* Initialize the port configuration before resource filtering. */
+        Status = InitializeConfiguration(&Miniport->PortConfig, InitData, DeviceExtension->BusNumber, DeviceExtension->SlotNumber);
+        if (!NT_SUCCESS(Status))
+            return Status;
+    }
 
     /* Assign the resources to the port configuration */
-    AssignResourcesToConfiguration(&Miniport->PortConfig,
-                                   DeviceExtension->AllocatedResources,
-                                   InitData->NumberOfAccessRanges);
+    if (DeviceExtension->AllocatedResources)
+        AssignResourcesToConfiguration(&Miniport->PortConfig, DeviceExtension->AllocatedResources, InitData->NumberOfAccessRanges);
 
     return STATUS_SUCCESS;
+}
+
+
+NTSTATUS
+MiniportAdapterControlPreFind(
+    _In_ PMINIPORT Miniport,
+    _Inout_ PIO_RESOURCE_REQUIREMENTS_LIST RequirementsList)
+{
+    PSCSI_SUPPORTED_CONTROL_TYPE_LIST SupportedTypes;
+    STOR_FILTER_RESOURCE_REQUIREMENTS FilterRequirements;
+    SCSI_ADAPTER_CONTROL_STATUS ControlStatus;
+    ULONG SupportedTypesSize;
+    PBOOLEAN SupportedList;
+
+    if (!(Miniport->InitData->FeatureSupport & STOR_FEATURE_ADAPTER_CONTROL_PRE_FINDADAPTER) || !Miniport->InitData->HwAdapterControl)
+        return STATUS_SUCCESS;
+
+    SupportedTypesSize = FIELD_OFFSET(SCSI_SUPPORTED_CONTROL_TYPE_LIST, SupportedTypeList) + ScsiAdapterControlMax * sizeof(BOOLEAN);
+    SupportedTypes = ExAllocatePoolWithTag(NonPagedPool, SupportedTypesSize, TAG_MINIPORT_DATA);
+    if (!SupportedTypes)
+        return STATUS_NO_MEMORY;
+
+    RtlZeroMemory(SupportedTypes, SupportedTypesSize);
+    SupportedTypes->MaxControlType = ScsiAdapterControlMax;
+    SupportedList = SupportedTypes->SupportedTypeList;
+    ControlStatus = Miniport->InitData->HwAdapterControl(&Miniport->MiniportExtension->HwDeviceExtension, ScsiQuerySupportedControlTypes, SupportedTypes);
+    if (ControlStatus == ScsiAdapterControlSuccess && SupportedList[ScsiAdapterFilterResourceRequirements])
+    {
+        FilterRequirements.Version = STOR_FILTER_RESOURCE_REQUIREMENTS_V1;
+        FilterRequirements.Size = sizeof(FilterRequirements);
+        FilterRequirements.IoResourceRequirementsList = RequirementsList;
+        ControlStatus = Miniport->InitData->HwAdapterControl(&Miniport->MiniportExtension->HwDeviceExtension, ScsiAdapterFilterResourceRequirements, &FilterRequirements);
+    }
+    ExFreePoolWithTag(SupportedTypes, TAG_MINIPORT_DATA);
+
+    return (ControlStatus == ScsiAdapterControlSuccess) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 
 
@@ -289,16 +334,19 @@ MiniportFindAdapter(
     ULONG Result;
     NTSTATUS Status;
 
-    DPRINT1("MiniportFindAdapter(%p)\n", Miniport);
+    DPRINT("MiniportFindAdapter(%p)\n", Miniport);
 
     /* Call the miniport HwFindAdapter routine */
-    Result = Miniport->InitData->HwFindAdapter(&Miniport->MiniportExtension->HwDeviceExtension,
+    Miniport->DeviceExtension->AdapterBusType = BusTypeUnknown;
+    Miniport->DeviceExtension->InFindAdapter = TRUE;
+    Result = ((PHW_FIND_ADAPTER)Miniport->InitData->HwFindAdapter)(&Miniport->MiniportExtension->HwDeviceExtension,
                                                NULL,
                                                NULL,
                                                NULL,
                                                &Miniport->PortConfig,
                                                &Reserved);
-    DPRINT1("HwFindAdapter() returned %lu\n", Result);
+    Miniport->DeviceExtension->InFindAdapter = FALSE;
+    DPRINT("HwFindAdapter() returned %lu\n", Result);
 
     /* Convert the result to a status code */
     switch (Result)
@@ -309,7 +357,7 @@ MiniportFindAdapter(
             break;
 
         case SP_RETURN_FOUND:
-            DPRINT1("SP_RETURN_FOUND\n");
+            DPRINT("SP_RETURN_FOUND\n");
             Status = STATUS_SUCCESS;
             break;
 
@@ -339,15 +387,113 @@ MiniportHwInitialize(
 {
     BOOLEAN Result;
 
-    DPRINT1("MiniportHwInitialize(%p)\n", Miniport);
+    DPRINT("MiniportHwInitialize(%p)\n", Miniport);
 
     /* Call the miniport HwInitialize routine */
     Result = Miniport->InitData->HwInitialize(&Miniport->MiniportExtension->HwDeviceExtension);
-    DPRINT1("HwInitialize() returned %u\n", Result);
+    DPRINT("HwInitialize() returned %u\n", Result);
 
     return Result ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 
+
+VOID
+MiniportQuerySupportedControlTypes(
+    _In_ PMINIPORT Miniport)
+{
+    ULONG Buffer[(FIELD_OFFSET(SCSI_SUPPORTED_CONTROL_TYPE_LIST, SupportedTypeList) +
+                  ScsiAdapterQueryFruId * sizeof(BOOLEAN) + sizeof(ULONG) - 1) / sizeof(ULONG)];
+    PSCSI_SUPPORTED_CONTROL_TYPE_LIST List = (PSCSI_SUPPORTED_CONTROL_TYPE_LIST)Buffer;
+    ULONG Type;
+
+    Miniport->SupportedControlTypes = 0;
+    if (Miniport->InitData->HwAdapterControl == NULL)
+        return;
+
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    List->MaxControlType = ScsiAdapterQueryFruId;
+    if (Miniport->InitData->HwAdapterControl(&Miniport->MiniportExtension->HwDeviceExtension,
+                                             ScsiQuerySupportedControlTypes,
+                                             List) != ScsiAdapterControlSuccess)
+        return;
+
+    for (Type = 0; Type < ScsiAdapterQueryFruId; Type++)
+    {
+        if (List->SupportedTypeList[Type])
+            Miniport->SupportedControlTypes |= 1UL << Type;
+    }
+}
+
+SCSI_ADAPTER_CONTROL_STATUS
+MiniportAdapterControl(
+    _In_ PMINIPORT Miniport,
+    _In_ SCSI_ADAPTER_CONTROL_TYPE ControlType,
+    _In_opt_ PVOID Parameters)
+{
+    if ((Miniport->MiniportExtension == NULL) ||
+        (Miniport->InitData == NULL) ||
+        (Miniport->InitData->HwAdapterControl == NULL) ||
+        (ControlType >= ScsiAdapterQueryFruId) ||
+        !(Miniport->SupportedControlTypes & (1UL << ControlType)))
+        return ScsiAdapterControlUnsuccessful;
+
+    return Miniport->InitData->HwAdapterControl(&Miniport->MiniportExtension->HwDeviceExtension,
+                                                ControlType,
+                                                Parameters);
+}
+
+VOID
+MiniportQuerySupportedUnitControlTypes(
+    _In_ PMINIPORT Miniport)
+{
+    ULONG Buffer[(FIELD_OFFSET(SCSI_SUPPORTED_CONTROL_TYPE_LIST, SupportedTypeList) +
+                  ScsiUnitControlMax * sizeof(BOOLEAN) + sizeof(ULONG) - 1) / sizeof(ULONG)];
+    PSCSI_SUPPORTED_CONTROL_TYPE_LIST List = (PSCSI_SUPPORTED_CONTROL_TYPE_LIST)Buffer;
+    ULONG Type;
+
+    Miniport->SupportedUnitControlTypes = 0;
+    if (Miniport->InitData->HwUnitControl == NULL)
+        return;
+
+    RtlZeroMemory(Buffer, sizeof(Buffer));
+    List->MaxControlType = ScsiUnitControlMax;
+    if (Miniport->InitData->HwUnitControl(&Miniport->MiniportExtension->HwDeviceExtension,
+                                          ScsiQuerySupportedUnitControlTypes,
+                                          List) != ScsiUnitControlSuccess)
+        return;
+
+    for (Type = 0; Type < ScsiUnitControlMax; Type++)
+    {
+        if (List->SupportedTypeList[Type])
+            Miniport->SupportedUnitControlTypes |= 1UL << Type;
+    }
+}
+
+SCSI_UNIT_CONTROL_STATUS
+MiniportUnitControl(
+    _In_ PMINIPORT Miniport,
+    _In_ SCSI_UNIT_CONTROL_TYPE ControlType,
+    _In_opt_ PVOID Parameters)
+{
+    if ((Miniport->MiniportExtension == NULL) ||
+        (Miniport->InitData == NULL) ||
+        (Miniport->InitData->HwUnitControl == NULL) ||
+        (ControlType >= ScsiUnitControlMax) ||
+        !(Miniport->SupportedUnitControlTypes & (1UL << ControlType)))
+        return ScsiUnitControlUnsuccessful;
+
+    return Miniport->InitData->HwUnitControl(&Miniport->MiniportExtension->HwDeviceExtension,
+                                             ControlType,
+                                             Parameters);
+}
+
+BOOLEAN
+MiniportHwMSInterrupt(
+    _In_ PMINIPORT Miniport,
+    _In_ ULONG MessageId)
+{
+    return Miniport->PortConfig.HwMSInterruptRoutine(&Miniport->MiniportExtension->HwDeviceExtension, MessageId);
+}
 
 BOOLEAN
 MiniportHwInterrupt(
@@ -355,12 +501,28 @@ MiniportHwInterrupt(
 {
     BOOLEAN Result;
 
-    DPRINT1("MiniportHwInterrupt(%p)\n",
-            Miniport);
+    DPRINT("MiniportHwInterrupt(%p)\n", Miniport);
 
     Result = Miniport->InitData->HwInterrupt(&Miniport->MiniportExtension->HwDeviceExtension);
-    DPRINT1("HwInterrupt() returned %u\n", Result);
+    DPRINT("HwInterrupt() returned %u\n", Result);
 
+    return Result;
+}
+
+
+BOOLEAN
+MiniportBuildIo(
+    _In_ PMINIPORT Miniport,
+    _In_ PSCSI_REQUEST_BLOCK Srb)
+{
+    BOOLEAN Result;
+
+    if (Miniport->InitData->HwBuildIo == NULL)
+        return TRUE;
+
+    DPRINT("StorPort: HwBuildIo request %p function 0x%02x length %u status 0x%02x\n", Srb, Srb->Function, Srb->Length, Srb->SrbStatus);
+    Result = Miniport->InitData->HwBuildIo(&Miniport->MiniportExtension->HwDeviceExtension, Srb);
+    DPRINT("StorPort: HwBuildIo returned %u\n", Result);
     return Result;
 }
 
@@ -370,13 +532,28 @@ MiniportStartIo(
     _In_ PMINIPORT Miniport,
     _In_ PSCSI_REQUEST_BLOCK Srb)
 {
+    STOR_LOCK_HANDLE LockHandle;
+    BOOLEAN Serialize;
     BOOLEAN Result;
 
-    DPRINT1("MiniportHwStartIo(%p %p)\n",
-            Miniport, Srb);
+    DPRINT("StorPort: HwStartIo request %p function 0x%02x length %u status 0x%02x\n", Srb, Srb->Function, Srb->Length, Srb->SrbStatus);
 
+    if (Miniport->DeviceExtension->DumpMode)
+        return Miniport->InitData->HwStartIo(&Miniport->MiniportExtension->HwDeviceExtension, Srb);
+
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+    Serialize = PortStartIoSerialized(Miniport->DeviceExtension);
+    if (Serialize)
+        PortAcquireSpinLock(Miniport->DeviceExtension, StartIoLock, NULL, &LockHandle);
+    else
+        ExAcquireSpinLockSharedAtDpcLevel(&Miniport->DeviceExtension->ChannelLock);
+    PortFdoStartRequestIo(Miniport->DeviceExtension, Srb);
     Result = Miniport->InitData->HwStartIo(&Miniport->MiniportExtension->HwDeviceExtension, Srb);
-    DPRINT1("HwStartIo() returned %u\n", Result);
+    if (Serialize)
+        PortReleaseSpinLock(Miniport->DeviceExtension, &LockHandle);
+    else
+        ExReleaseSpinLockSharedFromDpcLevel(&Miniport->DeviceExtension->ChannelLock);
+    DPRINT("StorPort: HwStartIo returned %u, status 0x%02x\n", Result, Srb->SrbStatus);
 
     return Result;
 }

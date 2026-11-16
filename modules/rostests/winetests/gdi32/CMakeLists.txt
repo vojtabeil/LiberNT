@@ -1,5 +1,5 @@
 
-remove_definitions(-DWINVER=0x502 -D_WIN32_IE=0x600 -D_WIN32_WINNT=0x502)
+remove_definitions(-DWINVER=${REACTOS_TARGET_NT} -D_WIN32_WINNT=${REACTOS_TARGET_NT})
 remove_definitions(-DDXGKDDI_INTERFACE_VERSION=0x1052)
 
 include_directories(BEFORE ${REACTOS_SOURCE_DIR}/sdk/include/wine)
@@ -49,3 +49,7 @@ endif()
 
 #add_pch(gdi32_winetest precomp.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET gdi32_winetest)
+
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(gdi32_winetest PRIVATE -Wno-pragma-pack)
+endif()

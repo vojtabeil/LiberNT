@@ -21,13 +21,13 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <assert.h>
-#include <stdlib.h>
-#include <stdio.h>
-#include <math.h>
-#include <limits.h>
-#include <locale.h>
-#include <float.h>
+#include "include/assert.h"
+#include "include/stdlib.h"
+#include "include/stdio.h"
+#include "include/math.h"
+#include "include/limits.h"
+#include "include/locale.h"
+#include "include/float.h"
 #include "msvcrt.h"
 #include "bnum.h"
 #include "winnls.h"
@@ -44,6 +44,12 @@ WINE_DEFAULT_DEBUG_CHANNEL(msvcrt);
 #endif
 #endif
 #endif
+
+struct MSVCRT__LDOUBLE
+{
+    ULONGLONG m;
+    unsigned short exp;
+};
 
 /*********************************************************************
  *		_mbsdup (MSVCRT.@)
@@ -483,29 +489,23 @@ int fpnum_double(struct fpnum *fp, double *d)
 
 #define LDBL_EXP_BITS 15
 #define LDBL_MANT_BITS 64
-#ifdef __REACTOS__
-int fpnum_ldouble(struct fpnum *fp, WINE_BROKEN_LDOUBLE *d)
-#else
-int fpnum_ldouble(struct fpnum *fp, MSVCRT__LDOUBLE *d)
-#endif
+int fpnum_ldouble(struct fpnum *fp, struct MSVCRT__LDOUBLE *d)
 {
     if (fp->mod == FP_VAL_INFINITY)
     {
-        d->x80[0] = 0;
-        d->x80[1] = 0x80000000;
-        d->x80[2] = (1 << LDBL_EXP_BITS) - 1;
+        d->m = 0x8000000000000000ull;
+        d->exp = (1 << LDBL_EXP_BITS) - 1;
         if (fp->sign == -1)
-            d->x80[2] |= 1 << LDBL_EXP_BITS;
+            d->exp |= 1 << LDBL_EXP_BITS;
         return 0;
     }
 
     if (fp->mod == FP_VAL_NAN)
     {
-        d->x80[0] = ~0;
-        d->x80[1] = ~0;
-        d->x80[2] = (1 << LDBL_EXP_BITS) - 1;
+        d->m = ~0ull;
+        d->exp = (1 << LDBL_EXP_BITS) - 1;
         if (fp->sign == -1)
-            d->x80[2] |= 1 << LDBL_EXP_BITS;
+            d->exp |= 1 << LDBL_EXP_BITS;
         return 0;
     }
 
@@ -513,31 +513,28 @@ int fpnum_ldouble(struct fpnum *fp, MSVCRT__LDOUBLE *d)
             fp->m, fp->exp, fp->mod);
     if (!fp->m)
     {
-        d->x80[0] = 0;
-        d->x80[1] = 0;
-        d->x80[2] = 0;
+        d->m = 0;
+        d->exp = 0;
         if (fp->sign == -1)
-            d->x80[2] |= 1 << LDBL_EXP_BITS;
+            d->exp |= 1 << LDBL_EXP_BITS;
         return 0;
     }
 
     /* make sure that we don't overflow modifying exponent */
     if (fp->exp > 1<<LDBL_EXP_BITS)
     {
-        d->x80[0] = 0;
-        d->x80[1] = 0x80000000;
-        d->x80[2] = (1 << LDBL_EXP_BITS) - 1;
+        d->m = 0x8000000000000000ull;
+        d->exp = (1 << LDBL_EXP_BITS) - 1;
         if (fp->sign == -1)
-            d->x80[2] |= 1 << LDBL_EXP_BITS;
+            d->exp |= 1 << LDBL_EXP_BITS;
         return ERANGE;
     }
     if (fp->exp < -(1<<LDBL_EXP_BITS))
     {
-        d->x80[0] = 0;
-        d->x80[1] = 0;
-        d->x80[2] = 0;
+        d->m = 0;
+        d->exp = 0;
         if (fp->sign == -1)
-            d->x80[2] |= 1 << LDBL_EXP_BITS;
+            d->exp |= 1 << LDBL_EXP_BITS;
         return ERANGE;
     }
     fp->exp += LDBL_MANT_BITS - 1;
@@ -586,28 +583,25 @@ int fpnum_ldouble(struct fpnum *fp, MSVCRT__LDOUBLE *d)
 
     if (fp->exp >= (1<<LDBL_EXP_BITS)-1)
     {
-        d->x80[0] = 0;
-        d->x80[1] = 0x80000000;
-        d->x80[2] = (1 << LDBL_EXP_BITS) - 1;
+        d->m = 0x8000000000000000ull;
+        d->exp = (1 << LDBL_EXP_BITS) - 1;
         if (fp->sign == -1)
-            d->x80[2] |= 1 << LDBL_EXP_BITS;
+            d->exp |= 1 << LDBL_EXP_BITS;
         return ERANGE;
     }
     if (!fp->m || fp->exp < 0)
     {
-        d->x80[0] = 0;
-        d->x80[1] = 0;
-        d->x80[2] = 0;
+        d->m = 0;
+        d->exp = 0;
         if (fp->sign == -1)
-            d->x80[2] |= 1 << LDBL_EXP_BITS;
+            d->exp |= 1 << LDBL_EXP_BITS;
         return ERANGE;
     }
 
-    d->x80[0] = fp->m;
-    d->x80[1] = fp->m >> 32;
-    d->x80[2] = fp->exp;
+    d->m = fp->m;
+    d->exp = fp->exp;
     if (fp->sign == -1)
-        d->x80[2] |= 1 << LDBL_EXP_BITS;
+        d->exp |= 1 << LDBL_EXP_BITS;
     return 0;
 }
 
@@ -1337,12 +1331,14 @@ int __cdecl strncpy_s( char *dst, size_t elem, const char *src, size_t count )
 /*********************************************************************
  *      strcpy (MSVCRT.@)
  */
+#ifndef MSVCRT_ARCH_STRCPY
 char* CDECL strcpy(char *dst, const char *src)
 {
     char *ret = dst;
     while ((*dst++ = *src++));
     return ret;
 }
+#endif
 
 /*********************************************************************
  *      strcpy_s (MSVCRT.@)
@@ -1522,19 +1518,16 @@ size_t CDECL strxfrm( char *dest, const char *src, size_t len )
 /********************************************************************
  *		__STRINGTOLD_L (MSVCR80.@)
  */
-#ifdef __REACTOS__
-int CDECL __STRINGTOLD_L( MSVCRT__LDOUBLE *value_, char **endptr,
-#else
-int CDECL __STRINGTOLD_L( MSVCRT__LDOUBLE *value, char **endptr,
-#endif
+int CDECL __STRINGTOLD_L( _LDOUBLE *value, char **endptr,
         const char *str, int flags, _locale_t locale )
 {
-#ifdef __REACTOS__
-    WINE_BROKEN_LDOUBLE value[1];
-#endif
+    struct MSVCRT__LDOUBLE *d = (struct MSVCRT__LDOUBLE *)value;
     pthreadlocinfo locinfo;
     const char *beg, *p;
     int err, ret = 0;
+#ifdef __REACTOS__
+    int parsed_exp;
+#endif
     struct fpnum fp;
 
     if (flags) FIXME("flags not supported: %x\n", flags);
@@ -1550,13 +1543,17 @@ int CDECL __STRINGTOLD_L( MSVCRT__LDOUBLE *value, char **endptr,
     beg = p;
 
     fp = fpnum_parse(strtod_str_get, strtod_str_unget, &p, locinfo, TRUE);
+#ifdef __REACTOS__
+    parsed_exp = fp.exp;
+#endif
     if (endptr) *endptr = (p == beg ? (char*)str : (char*)p);
     if (p == beg) ret = 4;
 
-    err = fpnum_ldouble(&fp, value);
-    if (err) ret = (value->x80[2] & 0x7fff ? 2 : 1);
+    err = fpnum_ldouble(&fp, d);
 #ifdef __REACTOS__
-    memcpy(value_, value, sizeof(*value_));
+    if (err) ret = (d->exp & 0x7fff ? 2 : parsed_exp == INT_MIN ? 1 : 0);
+#else
+    if (err) ret = (d->exp & 0x7fff ? 2 : 1);
 #endif
     return ret;
 }
@@ -1564,7 +1561,7 @@ int CDECL __STRINGTOLD_L( MSVCRT__LDOUBLE *value, char **endptr,
 /********************************************************************
  *              __STRINGTOLD (MSVCRT.@)
  */
-int CDECL __STRINGTOLD( MSVCRT__LDOUBLE *value, char **endptr, const char *str, int flags )
+int CDECL __STRINGTOLD( _LDOUBLE *value, char **endptr, const char *str, int flags )
 {
     return __STRINGTOLD_L( value, endptr, str, flags, NULL );
 }
@@ -1572,7 +1569,7 @@ int CDECL __STRINGTOLD( MSVCRT__LDOUBLE *value, char **endptr, const char *str, 
 /********************************************************************
  *              _atoldbl_l (MSVCRT.@)
  */
-int CDECL _atoldbl_l( MSVCRT__LDOUBLE *value, char *str, _locale_t locale )
+int CDECL _atoldbl_l( _LDOUBLE *value, char *str, _locale_t locale )
 {
     char *endptr;
     switch(__STRINGTOLD_L( value, &endptr, str, 0, locale ))
@@ -1588,18 +1585,20 @@ int CDECL _atoldbl_l( MSVCRT__LDOUBLE *value, char *str, _locale_t locale )
  */
 int CDECL _atoldbl(_LDOUBLE *value, char *str)
 {
-    return _atoldbl_l( (MSVCRT__LDOUBLE*)value, str, NULL );
+    return _atoldbl_l( value, str, NULL );
 }
 
 /*********************************************************************
  *              strlen (MSVCRT.@)
  */
+#ifndef MSVCRT_ARCH_STRLEN
 size_t __cdecl strlen(const char *str)
 {
     const char *s = str;
     while (*s) s++;
     return s - str;
 }
+#endif
 
 /******************************************************************
  *              strnlen (MSVCRT.@)
@@ -2674,6 +2673,56 @@ struct _I10_OUTPUT_DATA {
     char str[I10_OUTPUT_MAX_PREC+1]; /* add space for '\0' */
 };
 
+#ifdef __REACTOS__
+/* Writes count significant digits of a finite non-zero value, returns the digits before the point */
+static int i10_digits(const struct MSVCRT__LDOUBLE *ld, char *digits, int count)
+{
+    BYTE bnum_data[FIELD_OFFSET(struct bnum, data) + BNUM_PREC80 * sizeof(DWORD)];
+    struct bnum *b = (struct bnum *)bnum_data;
+    int exp = (ld->exp & 0x7fff) - 0x3fff - 63;
+    char limb[LIMB_DIGITS + 1];
+    int i, len, top;
+
+    b->b = 0;
+    b->e = 3;
+    b->size = BNUM_PREC80;
+    b->data[0] = ld->m % LIMB_MAX;
+    b->data[1] = ld->m / LIMB_MAX % LIMB_MAX;
+    b->data[2] = ld->m / LIMB_MAX / LIMB_MAX;
+    while (b->e > 1 && !b->data[bnum_idx(b, b->e - 1)])
+        b->e--;
+
+    while (exp > 0)
+    {
+        int shift = exp > 29 ? 29 : exp;
+
+        bnum_lshift(b, shift);
+        exp -= shift;
+    }
+    while (exp < 0)
+    {
+        int shift = -exp > 9 ? 9 : -exp;
+
+        bnum_rshift(b, shift);
+        exp += shift;
+    }
+
+    top = sprintf(limb, "%lu", b->data[bnum_idx(b, b->e - 1)]);
+    len = min(top, count);
+    memcpy(digits, limb, len);
+    for (i = b->e - 2; i >= b->b && len < count; i--)
+    {
+        int part = min(LIMB_DIGITS, count - len);
+
+        sprintf(limb, "%09lu", b->data[bnum_idx(b, i)]);
+        memcpy(digits + len, limb, part);
+        len += part;
+    }
+    memset(digits + len, '0', count - len);
+    return top + LIMB_DIGITS * (b->e - 1);
+}
+#endif
+
 /*********************************************************************
  *              $I10_OUTPUT (MSVCRT.@)
  * ld80 - long double (Intel 80 bit FP in 12 bytes) to be printed to data
@@ -2689,37 +2738,30 @@ struct _I10_OUTPUT_DATA {
  *      Native sets last byte of data->str to '0' or '9', I don't know what
  *      it means. Current implementation sets it always to '0'.
  */
-#ifdef __REACTOS__
-int CDECL I10_OUTPUT(MSVCRT__LDOUBLE ld80_, int prec, int flag, struct _I10_OUTPUT_DATA *data)
-#else
-int CDECL I10_OUTPUT(MSVCRT__LDOUBLE ld80, int prec, int flag, struct _I10_OUTPUT_DATA *data)
-#endif
+int CDECL I10_OUTPUT(_LDOUBLE ld80, int prec, int flag, struct _I10_OUTPUT_DATA *data)
 {
-#ifdef __REACTOS__
-    WINE_BROKEN_LDOUBLE ld80 = { 0 };
-    memcpy(&ld80, &ld80_, sizeof(ld80_));
-#endif
+    struct MSVCRT__LDOUBLE *ld = (struct MSVCRT__LDOUBLE *)&ld80;
     struct fpnum num;
     double d;
     char format[8];
     char buf[I10_OUTPUT_MAX_PREC+9]; /* 9 = strlen("0.e+0000") + '\0' */
     char *p;
 
-    if ((ld80.x80[2] & 0x7fff) == 0x7fff)
+    if ((ld->exp & 0x7fff) == 0x7fff)
     {
-        if (ld80.x80[0] == 0 && ld80.x80[1] == 0x80000000)
+        if (ld->m == 0x8000000000000000ull)
             strcpy( data->str, "1#INF" );
         else
-            strcpy( data->str, (ld80.x80[1] & 0x40000000) ? "1#QNAN" : "1#SNAN" );
+            strcpy( data->str, (ld->m & 0x4000000000000000ull) ? "1#QNAN" : "1#SNAN" );
         data->pos = 1;
-        data->sign = (ld80.x80[2] & 0x8000) ? '-' : ' ';
+        data->sign = (ld->exp & 0x8000) ? '-' : ' ';
         data->len = strlen(data->str);
         return 0;
     }
 
-    num.sign = (ld80.x80[2] & 0x8000) ? -1 : 1;
-    num.exp  = (ld80.x80[2] & 0x7fff) - 0x3fff - 63;
-    num.m    = ld80.x80[0] | ((ULONGLONG)ld80.x80[1] << 32);
+    num.sign = (ld->exp & 0x8000) ? -1 : 1;
+    num.exp  = (ld->exp & 0x7fff) - 0x3fff - 63;
+    num.m    = ld->m;
     num.mod  = FP_ROUND_EVEN;
     fpnum_double( &num, &d );
     TRACE("(%lf %d %x %p)\n", d, prec, flag, data);
@@ -2748,8 +2790,39 @@ int CDECL I10_OUTPUT(MSVCRT__LDOUBLE ld80, int prec, int flag, struct _I10_OUTPU
 
     sprintf(format, "%%.%dle", prec);
     sprintf(buf, format, d);
-
     buf[1] = buf[0];
+
+#ifdef __REACTOS__
+    if(d) {
+        char digits[I10_OUTPUT_MAX_PREC+1];
+        int i;
+
+        data->pos = i10_digits(ld, digits, prec+2);
+        if(digits[prec+1] >= '5') {
+            for(i = prec; i >= 0 && digits[i] == '9'; i--)
+                digits[i] = '0';
+            if(i >= 0)
+                digits[i]++;
+            else {
+                digits[0] = '1';
+                data->pos++;
+            }
+        }
+
+        for(i = prec; i > 0 && digits[i] == '0'; i--);
+        data->len = i+1;
+
+        memcpy(data->str, digits, data->len);
+        data->str[data->len] = '\0';
+
+        /* FIXME: native sets the final trailing byte to '0' or '9'; we keep the sprintf digit, so the trailing-'9' cases stay todo_wine */
+        if(prec+1 > data->len)
+            memcpy(data->str+data->len+1, buf+data->len+1, prec+1-data->len);
+
+        return 1;
+    }
+#endif
+
     data->pos = atoi(buf+prec+3);
     if(buf[1] != '0')
         data->pos++;
@@ -2804,6 +2877,7 @@ static inline int memcmp_blocks(const void *ptr1, const void *ptr2, size_t size)
 /*********************************************************************
  *                  memcmp (MSVCRT.@)
  */
+#ifndef MSVCRT_ARCH_MEMCMP
 int __cdecl memcmp(const void *ptr1, const void *ptr2, size_t n)
 {
     const unsigned char *p1 = ptr1, *p2 = ptr2;
@@ -2824,6 +2898,7 @@ int __cdecl memcmp(const void *ptr1, const void *ptr2, size_t n)
 
     return memcmp_blocks(p1, p2, n);
 }
+#endif
 
 #ifndef __REACTOS__
 #if defined(__i386__) || (defined(__x86_64__) && !defined(__arm64ec__))
@@ -3199,10 +3274,12 @@ void * __cdecl memmove(void *dst, const void *src, size_t n)
 /*********************************************************************
  *                  memcpy   (MSVCRT.@)
  */
+#ifndef MSVCRT_ARCH_MEMCPY
 void * __cdecl memcpy(void *dst, const void *src, size_t n)
 {
     return memmove(dst, src, n);
 }
+#endif
 
 /*********************************************************************
  *                  _memccpy   (MSVCRT.@)
@@ -3232,6 +3309,7 @@ static inline void memset_aligned_32(unsigned char *d, uint64_t v, size_t n)
 /*********************************************************************
  *		    memset (MSVCRT.@)
  */
+#ifndef MSVCRT_ARCH_MEMSET
 void *__cdecl memset(void *dst, int c, size_t n)
 {
     typedef uint64_t DECLSPEC_ALIGN(1) unaligned_ui64;
@@ -3284,10 +3362,12 @@ void *__cdecl memset(void *dst, int c, size_t n)
     }
     return dst;
 }
+#endif
 
 /*********************************************************************
  *		    strchr (MSVCRT.@)
  */
+#ifndef MSVCRT_ARCH_STRCHR
 char* __cdecl strchr(const char *str, int c)
 {
     do
@@ -3296,16 +3376,19 @@ char* __cdecl strchr(const char *str, int c)
     } while (*str++);
     return NULL;
 }
+#endif
 
 /*********************************************************************
  *                  strrchr (MSVCRT.@)
  */
+#ifndef MSVCRT_ARCH_STRRCHR
 char* __cdecl strrchr(const char *str, int c)
 {
     char *ret = NULL;
     do { if (*str == (char)c) ret = (char*)str; } while (*str++);
     return ret;
 }
+#endif
 
 /*********************************************************************
  *                  memchr   (MSVCRT.@)
@@ -3321,6 +3404,7 @@ void* __cdecl memchr(const void *ptr, int c, size_t n)
 /*********************************************************************
  *                  strcmp (MSVCRT.@)
  */
+#ifndef MSVCRT_ARCH_STRCMP
 int __cdecl strcmp(const char *str1, const char *str2)
 {
     while (*str1 && *str1 == *str2) { str1++; str2++; }
@@ -3328,6 +3412,7 @@ int __cdecl strcmp(const char *str1, const char *str2)
     if ((unsigned char)*str1 < (unsigned char)*str2) return -1;
     return 0;
 }
+#endif
 
 /*********************************************************************
  *                  strncmp   (MSVCRT.@)

@@ -216,6 +216,11 @@ static DWORD calc_arg_size(MIDL_STUB_MESSAGE *pStubMsg, PFORMAT_STRING pFormat)
         size = *(const WORD *)(pFormat + 8 + pStubMsg->CorrDespIncrement + offset);
         break;
     }
+#ifdef __REACTOS__
+    case FC_SYSTEM_HANDLE:
+        size = sizeof(HANDLE);
+        break;
+#endif
     default:
         FIXME("Unhandled type %02x\n", *pFormat);
         /* fallthrough */
@@ -481,6 +486,37 @@ static size_t basetype_arg_size( unsigned char fc )
     }
 }
 
+#if defined(__REACTOS__) && defined(__riscv) && (__riscv_xlen == 64)
+static void riscv64_widen_basetype( unsigned char fc, LONG_PTR *slot )
+{
+    switch (fc)
+    {
+    case FC_SMALL:
+        *slot = *(signed char *)slot;
+        break;
+    case FC_BYTE:
+    case FC_CHAR:
+    case FC_USMALL:
+        *slot = *(unsigned char *)slot;
+        break;
+    case FC_SHORT:
+        *slot = *(short *)slot;
+        break;
+    case FC_USHORT:
+    case FC_WCHAR:
+        *slot = *(unsigned short *)slot;
+        break;
+    case FC_LONG:
+    case FC_ULONG:
+    case FC_ENUM16:
+    case FC_ENUM32:
+    case FC_ERROR_STATUS_T:
+        *slot = *(int *)slot;
+        break;
+    }
+}
+
+#endif
 void client_do_args( PMIDL_STUB_MESSAGE pStubMsg, PFORMAT_STRING pFormat, enum stubless_phase phase,
                      BOOLEAN fpu_args, unsigned short number_of_params, unsigned char *pRetVal )
 {
@@ -512,13 +548,10 @@ void client_do_args( PMIDL_STUB_MESSAGE pStubMsg, PFORMAT_STRING pFormat, enum s
         switch (phase)
         {
         case STUBLESS_INITOUT:
-            if (*(unsigned char **)pArg)
-            {
-                if (param_needs_alloc(params[i].attr))
-                    memset( *(unsigned char **)pArg, 0, calc_arg_size( pStubMsg, pTypeFormat ));
-                else if (param_is_out_basetype(params[i].attr))
-                    memset( *(unsigned char **)pArg, 0, basetype_arg_size( params[i].u.type_format_char ));
-            }
+            if (param_needs_alloc(params[i].attr) && *(unsigned char **)pArg)
+                memset( *(unsigned char **)pArg, 0, calc_arg_size( pStubMsg, pTypeFormat ));
+            else if (param_is_out_basetype(params[i].attr) && *(unsigned char **)pArg)
+                memset( *(unsigned char **)pArg, 0, basetype_arg_size( params[i].u.type_format_char ));
             break;
         case STUBLESS_CALCSIZE:
             if (params[i].attr.IsSimpleRef && !*(unsigned char **)pArg)
@@ -533,6 +566,10 @@ void client_do_args( PMIDL_STUB_MESSAGE pStubMsg, PFORMAT_STRING pFormat, enum s
             {
                 if (params[i].attr.IsReturn && pRetVal) pArg = pRetVal;
                 call_unmarshaller(pStubMsg, &pArg, &params[i], 0);
+#if defined(__REACTOS__) && defined(__riscv) && (__riscv_xlen == 64)
+                if (params[i].attr.IsReturn && pRetVal && params[i].attr.IsBasetype)
+                    riscv64_widen_basetype( params[i].u.type_format_char, (LONG_PTR *)pRetVal );
+#endif
             }
             break;
         case STUBLESS_FREE:
@@ -921,6 +958,9 @@ LONG_PTR WINAPI NdrpClientCall2( PMIDL_STUB_DESC pStubDesc, PFORMAT_STRING pForm
     }
     else
     {
+#ifdef __REACTOS__
+        stubMsg.StubDesc = pStubDesc;
+#endif
         pFormat = convert_old_args( &stubMsg, pFormat, stack_size,
                                     pProcHeader->Oi_flags & Oi_OBJECT_PROC,
                                     old_args, sizeof(old_args), &number_of_params );
@@ -994,8 +1034,8 @@ LONG_PTR WINAPI NdrpClientCall2( PMIDL_STUB_DESC pStubDesc, PFORMAT_STRING pForm
 #ifdef __aarch64__
 __ASM_GLOBAL_FUNC( NdrClientCall2,
                    "stp x29, x30, [sp, #-0x40]!\n\t"
-                   ".seh_save_fplr_x 0x40\n\t"
-                   ".seh_endprologue\n\t"
+                   __ASM_SEH(".seh_save_fplr_x 0x40\n\t")
+                   __ASM_SEH(".seh_endprologue\n\t")
                    "stp x2, x3, [sp, #0x10]\n\t"
                    "stp x4, x5, [sp, #0x20]\n\t"
                    "stp x6, x7, [sp, #0x30]\n\t"
@@ -1062,6 +1102,45 @@ __ASM_GLOBAL_FUNC( NdrClientCall2,
                    __ASM_CFI(".cfi_def_cfa %esp,4\n\t")
                    __ASM_CFI(".cfi_same_value %ebp\n\t")
                    "ret" )
+#elif defined(__riscv) && (__riscv_xlen == 64)
+/* a2-a7 are the first six variadic slots; the remaining slots begin at the
+ * incoming SP. Keep the two regions adjacent for NDR's Win64 offset table. */
+__ASM_GLOBAL_FUNC( NdrClientCall2,
+                   "addi sp,sp,-64\n\t"
+                   __ASM_SEH(".seh_set_cfa x2, 64\n\t")
+                   "sd ra,8(sp)\n\t"
+                   __ASM_SEH(".seh_save_gpr x1, -56\n\t")
+                   "sd a2,16(sp)\n\t"
+                   "sd a3,24(sp)\n\t"
+                   "sd a4,32(sp)\n\t"
+                   "sd a5,40(sp)\n\t"
+                   "sd a6,48(sp)\n\t"
+                   "sd a7,56(sp)\n\t"
+                   __ASM_SEH(".seh_endprologue\n\t")
+                   "addi a2,sp,16\n\t"
+                   "li a3,0\n\t" /* variadic float is promoted to double */
+                   "call NdrpClientCall2\n\t"
+                   __ASM_SEH(".seh_startepilogue\n\t")
+                   "ld ra,8(sp)\n\t"
+                   __ASM_SEH(".seh_same_gpr x1\n\t")
+                   "addi sp,sp,64\n\t"
+                   __ASM_SEH(".seh_set_cfa x2, 0\n\t")
+                   "ret\n\t"
+                   __ASM_SEH(".seh_endepilogue") )
+#elif defined(__powerpc__) && !defined(__powerpc64__)
+/* NT PowerPC va_list addresses the contiguous parameter-word image. Let the
+ * compiler home the registers and handle the hidden aggregate-result pointer
+ * for CLIENT_CALL_RETURN; that pointer is not part of the NDR argument image. */
+CLIENT_CALL_RETURN RPC_VAR_ENTRY NdrClientCall2( PMIDL_STUB_DESC desc, PFORMAT_STRING fmt, ... )
+{
+    CLIENT_CALL_RETURN result;
+    va_list args;
+
+    va_start( args, fmt );
+    result.Simple = NdrpClientCall2( desc, fmt, (void **)args, FALSE );
+    va_end( args );
+    return result;
+}
 #endif
 
 #if defined(__aarch64__) || defined(__arm__)
@@ -1099,6 +1178,59 @@ static void **args_regs_to_stack( void **regs, void **fpu_regs, const NDR_PROC_P
 }
 #endif
 
+#if defined(__riscv) && (__riscv_xlen == 64)
+/* WIDL's RISC-V Oi extension maps each logical 64-bit slot to a0-a7 or a
+ * compact stack slot. In the soft-float LP64 ABI there is no FP register map. */
+static void **riscv64_args_regs_to_stack(void **regs,
+                                         const NDR_PROC_PARTIAL_OIF_HEADER *header)
+{
+    const NDR_PROC_HEADER_EXTS *ext = (const NDR_PROC_HEADER_EXTS *)(header + 1);
+    const unsigned char *data;
+    unsigned int count, size, pos, i;
+    void **stack;
+
+    if (ext->Size < sizeof(*ext) + 3) RpcRaiseException(RPC_X_BAD_STUB_DATA);
+    data = (const unsigned char *)(ext + 1);
+    count = data[0] | data[1] << 8;
+    size = data[2];
+    if (!count || count > 8191 || size > ext->Size - sizeof(*ext) - 3)
+        RpcRaiseException(RPC_X_BAD_STUB_DATA);
+    data += 3;
+    if (!(stack = calloc(count, sizeof(*stack)))) RpcRaiseException(RPC_X_NO_MEMORY);
+
+    for (i = pos = 0; i < size && pos < count; i++, pos++)
+    {
+        unsigned char code = data[i];
+        unsigned int repeat = 1;
+        if (code == 0x9d)
+        {
+            if (i + 3 >= size) goto invalid;
+            code = data[i + 1];
+            repeat = data[i + 2] | data[i + 3] << 8;
+            i += 3;
+            if (!repeat || repeat > count - pos) goto invalid;
+        }
+        while (repeat--)
+        {
+            if (code >= 0x80 && code < 0x88)
+                stack[pos] = regs[code - 0x80];
+            else if (code >= 0xa0 && (int)pos + (signed char)code >= 0 &&
+                     (unsigned int)((int)pos + (signed char)code) < count)
+                stack[pos] = regs[8 + pos + (signed char)code];
+            else if (code != 0x9f)
+                goto invalid;
+            pos++;
+        }
+        pos--;
+    }
+    if (pos != count) goto invalid;
+    return stack;
+invalid:
+    free(stack);
+    RpcRaiseException(RPC_X_BAD_STUB_DATA);
+}
+#endif
+
 extern LONG_PTR __cdecl call_server_func(SERVER_ROUTINE func, unsigned char * args, unsigned int stack_size,
                                          const NDR_PROC_PARTIAL_OIF_HEADER *header);
 
@@ -1126,8 +1258,10 @@ LONG_PTR WINAPI ndr_stubless_client_call( unsigned int index, void **args, void 
 #ifdef __x86_64__
                 unsigned short fpu_mask = *(unsigned short *)(ext + 1);
                 for (int i = 0; i < 4; i++, fpu_mask >>= 2) if (fpu_mask & 3) args[i] = fpu_regs[i];
-#else
+#elif defined(__aarch64__) || defined(__arm__)
                 stack_top = args_regs_to_stack( args, fpu_regs, hdr );
+#elif defined(__riscv) && (__riscv_xlen == 64)
+                stack_top = riscv64_args_regs_to_stack(args, hdr);
 #endif
             }
         }
@@ -1207,6 +1341,11 @@ static LONG_PTR *stub_do_args(MIDL_STUB_MESSAGE *pStubMsg,
 
             if (params[i].attr.IsIn)
                 call_unmarshaller(pStubMsg, &pArg, &params[i], 0);
+#if defined(__REACTOS__) && defined(__riscv) && (__riscv_xlen == 64)
+            if (params[i].attr.IsIn && params[i].attr.IsBasetype && !params[i].attr.IsSimpleRef)
+                riscv64_widen_basetype( params[i].u.type_format_char,
+                                        (LONG_PTR *)(pStubMsg->StackTop + params[i].stack_offset) );
+#endif
             break;
         case STUBLESS_CALCSIZE:
             if (params[i].attr.IsOut || params[i].attr.IsReturn)
@@ -1326,7 +1465,6 @@ LONG WINAPI NdrStubCall2(
                 break;
             }
         case FC_BIND_GENERIC: /* explicit generic */
-            BindingHandleOffset = ((NDR_EHD_GENERIC*)pFormat)->offset;
             pFormat += sizeof(NDR_EHD_GENERIC);
             break;
         case FC_BIND_CONTEXT: /* explicit context */
@@ -1836,8 +1974,8 @@ cleanup:
 #ifdef __aarch64__
 __ASM_GLOBAL_FUNC( NdrAsyncClientCall,
                    "stp x29, x30, [sp, #-0x40]!\n\t"
-                   ".seh_save_fplr_x 0x40\n\t"
-                   ".seh_endprologue\n\t"
+                   __ASM_SEH(".seh_save_fplr_x 0x40\n\t")
+                   __ASM_SEH(".seh_endprologue\n\t")
                    "stp x2, x3, [sp, #0x10]\n\t"
                    "stp x4, x5, [sp, #0x20]\n\t"
                    "stp x6, x7, [sp, #0x30]\n\t"
@@ -1904,6 +2042,55 @@ __ASM_GLOBAL_FUNC( NdrAsyncClientCall,
                    __ASM_CFI(".cfi_def_cfa %esp,4\n\t")
                    __ASM_CFI(".cfi_same_value %ebp\n\t")
                    "ret" )
+#elif defined(__riscv) && (__riscv_xlen == 64)
+__ASM_GLOBAL_FUNC( NdrAsyncClientCall,
+                   "addi sp,sp,-64\n\t"
+                   __ASM_SEH(".seh_set_cfa x2, 64\n\t")
+                   "sd ra,8(sp)\n\t"
+                   __ASM_SEH(".seh_save_gpr x1, -56\n\t")
+                   "sd a2,16(sp)\n\t"
+                   "sd a3,24(sp)\n\t"
+                   "sd a4,32(sp)\n\t"
+                   "sd a5,40(sp)\n\t"
+                   "sd a6,48(sp)\n\t"
+                   "sd a7,56(sp)\n\t"
+                   __ASM_SEH(".seh_endprologue\n\t")
+                   "addi a2,sp,16\n\t"
+                   "call ndr_async_client_call\n\t"
+                   __ASM_SEH(".seh_startepilogue\n\t")
+                   "ld ra,8(sp)\n\t"
+                   __ASM_SEH(".seh_same_gpr x1\n\t")
+                   "addi sp,sp,64\n\t"
+                   __ASM_SEH(".seh_set_cfa x2, 0\n\t")
+                   "ret\n\t"
+                   __ASM_SEH(".seh_endepilogue") )
+#elif defined(__powerpc__) && !defined(__powerpc64__)
+/* The variadic arguments follow desc and fmt in the homed register image at
+ * 32(r1), contiguous with the stack arguments at 56(r1). */
+__asm__( ".text\n\t"
+         ".p2align 2\n\t"
+         ".globl ..NdrAsyncClientCall\n"
+         "..NdrAsyncClientCall:\n\t"
+         "stw 3,24(1)\n\tstw 4,28(1)\n\tstw 5,32(1)\n\tstw 6,36(1)\n\t"
+         "stw 7,40(1)\n\tstw 8,44(1)\n\tstw 9,48(1)\n\tstw 10,52(1)\n\t"
+         "mflr 0\n\t"
+         "stw 0,8(1)\n\t"
+         "stwu 1,-64(1)\n\t"
+         "stw 2,4(1)\n\t"
+         "addi 5,1,64+32\n\t"
+         "bl ..ndr_async_client_call\n\t"
+         "lwz 2,4(1)\n\t"
+         "addi 1,1,64\n\t"
+         "lwz 0,8(1)\n\t"
+         "mtlr 0\n\t"
+         "blr\n\t"
+         ".section .rdata,\"dr\"\n\t"
+         ".p2align 2\n\t"
+         ".globl NdrAsyncClientCall\n"
+         "NdrAsyncClientCall:\n\t"
+         ".long ..NdrAsyncClientCall\n\t"
+         ".long .toc\n\t"
+         ".text" );
 #endif
 
 RPCRTAPI LONG RPC_ENTRY NdrAsyncStubCall(struct IRpcStubBuffer* pThis,
@@ -2215,8 +2402,8 @@ LONG_PTR CDECL ndr64_client_call( MIDL_STUBLESS_PROXY_INFO *info,
 #ifdef __aarch64__
 __ASM_GLOBAL_FUNC( NdrClientCall3,
                    "stp x29, x30, [sp, #-0x40]!\n\t"
-                   ".seh_save_fplr_x 0x40\n\t"
-                   ".seh_endprologue\n\t"
+                   __ASM_SEH(".seh_save_fplr_x 0x40\n\t")
+                   __ASM_SEH(".seh_endprologue\n\t")
                    "str x3, [sp, #0x18]\n\t"
                    "stp x4, x5, [sp, #0x20]\n\t"
                    "stp x6, x7, [sp, #0x30]\n\t"
@@ -2250,6 +2437,27 @@ __ASM_GLOBAL_FUNC( NdrClientCall3,
                    "addq $0x28,%rsp\n\t"
                    __ASM_CFI(".cfi_adjust_cfa_offset -0x28\n\t")
                    "ret" )
+#elif defined(__riscv) && (__riscv_xlen == 64)
+__ASM_GLOBAL_FUNC( NdrClientCall3,
+                   "addi sp,sp,-64\n\t"
+                   __ASM_SEH(".seh_set_cfa x2, 64\n\t")
+                   "sd ra,16(sp)\n\t"
+                   __ASM_SEH(".seh_save_gpr x1, -48\n\t")
+                   "sd a3,24(sp)\n\t"
+                   "sd a4,32(sp)\n\t"
+                   "sd a5,40(sp)\n\t"
+                   "sd a6,48(sp)\n\t"
+                   "sd a7,56(sp)\n\t"
+                   __ASM_SEH(".seh_endprologue\n\t")
+                   "addi a3,sp,24\n\t"
+                   "call ndr64_client_call\n\t"
+                   __ASM_SEH(".seh_startepilogue\n\t")
+                   "ld ra,16(sp)\n\t"
+                   __ASM_SEH(".seh_same_gpr x1\n\t")
+                   "addi sp,sp,64\n\t"
+                   __ASM_SEH(".seh_set_cfa x2, 0\n\t")
+                   "ret\n\t"
+                   __ASM_SEH(".seh_endepilogue") )
 #endif
 
 LONG_PTR CDECL ndr64_async_client_call( MIDL_STUBLESS_PROXY_INFO *info,
@@ -2284,8 +2492,8 @@ LONG_PTR CDECL ndr64_async_client_call( MIDL_STUBLESS_PROXY_INFO *info,
 #ifdef __aarch64__
 __ASM_GLOBAL_FUNC( Ndr64AsyncClientCall,
                    "stp x29, x30, [sp, #-0x40]!\n\t"
-                   ".seh_save_fplr_x 0x40\n\t"
-                   ".seh_endprologue\n\t"
+                   __ASM_SEH(".seh_save_fplr_x 0x40\n\t")
+                   __ASM_SEH(".seh_endprologue\n\t")
                    "str x3, [sp, #0x18]\n\t"
                    "stp x4, x5, [sp, #0x20]\n\t"
                    "stp x6, x7, [sp, #0x30]\n\t"
@@ -2322,4 +2530,26 @@ __ASM_GLOBAL_FUNC( Ndr64AsyncClientCall,
                    "addq $0x28,%rsp\n\t"
                    __ASM_CFI(".cfi_adjust_cfa_offset -0x28\n\t")
                    "ret" )
+#elif defined(__riscv) && (__riscv_xlen == 64)
+__ASM_GLOBAL_FUNC( Ndr64AsyncClientCall,
+                   "addi sp,sp,-64\n\t"
+                   __ASM_SEH(".seh_set_cfa x2, 64\n\t")
+                   "sd ra,16(sp)\n\t"
+                   __ASM_SEH(".seh_save_gpr x1, -48\n\t")
+                   "sd a3,24(sp)\n\t"
+                   "sd a4,32(sp)\n\t"
+                   "sd a5,40(sp)\n\t"
+                   "sd a6,48(sp)\n\t"
+                   "sd a7,56(sp)\n\t"
+                   __ASM_SEH(".seh_endprologue\n\t")
+                   "addi a3,sp,24\n\t"
+                   "li a4,0\n\t"
+                   "call ndr64_async_client_call\n\t"
+                   __ASM_SEH(".seh_startepilogue\n\t")
+                   "ld ra,16(sp)\n\t"
+                   __ASM_SEH(".seh_same_gpr x1\n\t")
+                   "addi sp,sp,64\n\t"
+                   __ASM_SEH(".seh_set_cfa x2, 0\n\t")
+                   "ret\n\t"
+                   __ASM_SEH(".seh_endepilogue") )
 #endif

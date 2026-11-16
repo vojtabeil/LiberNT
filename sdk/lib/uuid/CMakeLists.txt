@@ -29,7 +29,9 @@ list(APPEND IDL_SOURCES
     ctxtcall.idl
 #    cxq_cust.idl
 #    dbgprop.idl
+    d3d9on12.idl
     dimm.idl
+    directmanipulation.idl
     dispex.idl
 #    dlmgridl.idl
     docobj.idl
@@ -54,7 +56,7 @@ list(APPEND IDL_SOURCES
 #    iaspolcy.idl
 #    iedial.idl
 #    iextag.idl
-#    imapi.idl
+    imapi.idl
 #    imguitil.idl
 #    immact.idl
 #    indexsrc.idl
@@ -80,15 +82,18 @@ list(APPEND IDL_SOURCES
 #    netcfgp.idl
 #    netcfgx.idl
     netcon.idl
+    netlistmgr.idl
 #    netconp.idl
 #    netfwv6.idl
 #    netfwv6clsid
 #    netmon.idl
+    notificationactivationcallback.idl
 #    netprov.idl
     oaidl.idl
     objidl.idl
     objidlbase.idl
     objsafe.idl
+    objectarray.idl
     ocidl.idl
     ocmm.idl
     oleacc.idl
@@ -100,6 +105,8 @@ list(APPEND IDL_SOURCES
     perhist.idl
 #    prgsnk.idl
     propidl.idl
+    portabledeviceapi.idl
+    portabledevicetypes.idl
 #    query.idl
 #    ratingsp.idl
 #    recalc.idl
@@ -113,7 +120,7 @@ list(APPEND IDL_SOURCES
 #    shappmgr.idl
     shdeprecated.idl
 #    shgina.idl
-#    shimgdata.idl
+    shimgdata.idl
     shldisp.idl
     shobjidl.idl
 #    sifmt.idl
@@ -126,9 +133,13 @@ list(APPEND IDL_SOURCES
 #    tapi3.idl
 #    tapi3if.idl
 #    termmgr.idl
+    structuredquery.idl
+    structuredquerycondition.idl
     textstor.idl
+    thumbcache.idl
 #    tlog.idl
     tlogstg.idl
+    transact.idl
 #    trkadm.idl
 #    trkcom.idl
     unknwn.idl
@@ -167,12 +178,13 @@ list(APPEND IDL_SOURCES
     propsys.idl
     pstore.idl
     richole.idl
+    sensorsapi.idl
     strmif.idl
+    taskschd.idl
     tom.idl
     tuner.idl
     vmr9.idl
     wia_xp.idl
-    wincodec.idl
     xmldom.idl
     xmldso.idl
     ctfutb.idl
@@ -198,10 +210,13 @@ endforeach()
 
 list(APPEND SOURCE
     cguid_i.c
+    d2d.c
 #    bthguid.c
 #    cluscfgguids.c
     cmdtreeiid.c
     ctffunc_g.c
+    devpkey.c
+    fwpguid.c
 #    ctfspui_g.c
 #    hnclsid.c
     ieguids.c
@@ -210,18 +225,21 @@ list(APPEND SOURCE
 #    ncclsid.c
 #    ndisguid.c
     netfwv6clsid.c
+    npi_moduleid.c
 #    oledbdat.c
 #    oledbdepiid.c
 #    oledbiid.c
 #    oledbnewiid.c
 #    qosguid.c
+    propkey.c
     shguids.c
 #    tapi3iid.c
 #    vcguids.c
     wdmguids.c
     otherguids.c
     undoc.c
+    wincodec.c
 )
 
 add_library(uuid ${SOURCE})
-add_dependencies(uuid psdk)
+add_dependencies(uuid psdk xdk bugcodes)

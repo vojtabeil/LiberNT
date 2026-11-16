@@ -1,19 +1,36 @@
 
 list(APPEND SOURCE
+    BufferedRecv.c
+    BusyLoopback.c
+    CloseCompletion.c
+    MulticastInterface.c
+    ReuseDelivery.c
+    addresslistsort.c
+    afunix.c
     bind.c
+    broadcast.c
     close.c
+    connect_any.c
+    connect_select.c
+    dualstack.c
+    dualstack_mapped.c
     getaddrinfo.c
     gethostname.c
     getnameinfo.c
     getservbyname.c
     getservbyport.c
     helpers.c
+    loopback_pingpong.c
     ioctlsocket.c
     nonblocking.c
     nostartup.c
     open_osfhandle.c
+    pollable_event.c
     recv.c
     send.c
+    sendto_neighbor.c
+    udp_queue.c
+    udp_quic.c
     WSAAsync.c
     WSAIoctl.c
     WSARecv.c
@@ -28,6 +45,6 @@ add_executable(ws2_32_apitest
 
 target_link_libraries(ws2_32_apitest wine ${PSEH_LIB})
 set_module_type(ws2_32_apitest win32cui)
-add_importlibs(ws2_32_apitest advapi32 iphlpapi ws2_32 msvcrt kernel32 ntdll)
+add_importlibs(ws2_32_apitest advapi32 iphlpapi user32 ws2_32 msvcrt kernel32 ntdll)
 add_pch(ws2_32_apitest ws2_32.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET ws2_32_apitest)

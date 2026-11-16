@@ -50,7 +50,7 @@ VOID RemoveEntityByContext(PVOID Context)
 
    TcpipAcquireSpinLock(&EntityListLock, &OldIrql);
 
-   for (i = 0; i < EntityCount; i++) {
+   for (i = 0; i < EntityCount; ) {
 	if( EntityList[i].context == Context ) {
 	    if( i != EntityCount - 1 ) {
 		memcpy( &EntityList[i],
@@ -59,6 +59,8 @@ VOID RemoveEntityByContext(PVOID Context)
 	    } else {
 		EntityCount--;
 	    }
+	} else {
+	    i++;
 	}
     }
 
@@ -162,9 +164,7 @@ TDI_STATUS InfoTdiQueryListEntities(PNDIS_BUFFER Buffer,
     if (BufSize < Size || !Buffer)
     {
 	TcpipReleaseSpinLock( &EntityListLock, OldIrql );
-	/* The buffer is too small to contain requested data, but we return
-         * success anyway, as we did everything we wanted. */
-	return TDI_SUCCESS;
+	return TDI_BUFFER_TOO_SMALL;
     }
 
     /* Return entity list -- Copy only the TDIEntityID parts. */
@@ -362,13 +362,11 @@ TDI_STATUS InfoTdiQueryInformationEx(
                  else
                      return TDI_INVALID_PARAMETER;
 
-#if 0
               case IP_INTFC_INFO_ID:
                  if (ID->toi_type != INFO_TYPE_PROVIDER)
                      return TDI_INVALID_PARAMETER;
 
                  return InfoTdiQueryGetIFInfo(Context, Buffer, BufferSize);
-#endif
 
               default:
                  return TDI_INVALID_REQUEST;
@@ -415,7 +413,7 @@ TDI_STATUS InfoTdiSetInformationEx
                     PADDRESS_FILE AddressFile = GetContext(ID->toi_entity);
                     if (AddressFile == NULL)
                         return TDI_INVALID_PARAMETER;
-                    return SetConnectionInfo(ID, AddressFile->Connection, Buffer, BufferSize);
+                    return SetConnectionInfo(ID, AddressFile, Buffer, BufferSize);
                 }
                 case INFO_TYPE_PROVIDER:
                 {
@@ -435,6 +433,11 @@ TDI_STATUS InfoTdiSetInformationEx
                                 || ID->toi_entity.tei_entity == CO_NL_ENTITY)
                                 if ((EntityListContext = GetContext(ID->toi_entity)))
                                     return InfoTdiSetRoute(EntityListContext, Buffer, BufferSize);
+                                else
+                                    return TDI_INVALID_PARAMETER;
+                            else if (ID->toi_entity.tei_entity == CO_TL_ENTITY)
+                                if ((EntityListContext = GetContext(ID->toi_entity)))
+                                    return InfoTdiSetConnectionTcp(EntityListContext, Buffer, BufferSize);
                                 else
                                     return TDI_INVALID_PARAMETER;
                             else

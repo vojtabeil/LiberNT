@@ -1,7 +1,4 @@
 
-remove_definitions(-D_WIN32_WINNT=0x502)
-add_definitions(-D_WIN32_WINNT=0x600)
-
 include_directories(
     ${REACTOS_SOURCE_DIR}/sdk/include/reactos/libs/zlib
     ${REACTOS_SOURCE_DIR}/sdk/lib/3rdparty/zlib/contrib)
@@ -19,11 +16,16 @@ list(APPEND SOURCE
     CFolderViewCB.cpp
     CSendToZip.cpp
     CZipCreator.cpp
+    CZipDataObject.cpp
     CZipEnumerator.hpp
     CZipEnumerator.cpp
     CZipExtract.cpp
     CZipFolder.hpp
     CZipFolder.cpp
+    CZipFolderDropHandler.hpp
+    CZipFolderDropHandler.cpp
+    CZipRightDragHandler.hpp
+    CZipRightDragHandler.cpp
     CZipPassword.cpp
     Debug.cpp
     zipfldr.spec
@@ -42,4 +44,3 @@ set_target_cpp_properties(zipfldr WITH_EXCEPTIONS)
 add_importlibs(zipfldr oleaut32 ole32 shlwapi comctl32 shell32 user32 advapi32 msvcrt kernel32 ntdll)
 add_pch(zipfldr precomp.h SOURCE)
 add_cd_file(TARGET zipfldr DESTINATION reactos/system32 FOR all)
-

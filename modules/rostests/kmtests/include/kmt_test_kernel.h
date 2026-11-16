@@ -47,6 +47,74 @@ PCSTR KmtMajorFunctionNames[] =
     "Pnp/PnpPower"
 };
 
+NTSTATUS
+KmtMapResultBuffer(
+    IN PDEVICE_OBJECT DeviceObject,
+    OUT PMDL *Mdl,
+    OUT PKMT_RESULTBUFFER *Buffer)
+{
+    PKMT_DEVICE_EXTENSION DeviceExtension = DeviceObject->DeviceExtension;
+    PMDL BufferMdl = NULL;
+    NTSTATUS Status = STATUS_DEVICE_NOT_READY;
+
+    *Mdl = NULL;
+    *Buffer = NULL;
+
+    /* The main handle may close before a standalone driver's cleanup runs.
+     * Pin the pages independently before the owner's mapping can disappear. */
+    ExAcquireFastMutex(&DeviceExtension->ResultBufferLock);
+    if (DeviceExtension->Mdl && DeviceExtension->ResultBuffer)
+    {
+        BufferMdl = IoAllocateMdl(DeviceExtension->ResultBuffer,
+                                 MmGetMdlByteCount(DeviceExtension->Mdl),
+                                 FALSE, FALSE, NULL);
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        if (BufferMdl)
+        {
+            _SEH2_TRY
+            {
+                MmProbeAndLockPages(BufferMdl, KernelMode, IoModifyAccess);
+                Status = STATUS_SUCCESS;
+            }
+            _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+            {
+                Status = _SEH2_GetExceptionCode();
+            }
+            _SEH2_END;
+        }
+    }
+    ExReleaseFastMutex(&DeviceExtension->ResultBufferLock);
+
+    if (NT_SUCCESS(Status))
+    {
+        *Buffer = MmGetSystemAddressForMdlSafe(BufferMdl, NormalPagePriority);
+        if (!*Buffer)
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    if (!NT_SUCCESS(Status))
+    {
+        if (BufferMdl)
+        {
+            if (BufferMdl->MdlFlags & MDL_PAGES_LOCKED)
+                MmUnlockPages(BufferMdl);
+            IoFreeMdl(BufferMdl);
+        }
+        return Status;
+    }
+
+    *Mdl = BufferMdl;
+    return STATUS_SUCCESS;
+}
+
+VOID
+KmtUnmapResultBuffer(
+    IN PMDL Mdl)
+{
+    MmUnlockPages(Mdl);
+    IoFreeMdl(Mdl);
+}
+
 VOID KmtSetIrql(IN KIRQL NewIrql)
 {
     KIRQL Irql = KeGetCurrentIrql();
@@ -60,77 +128,26 @@ BOOLEAN KmtAreInterruptsEnabled(VOID)
 {
 #if defined(_M_IX86) || defined(_M_AMD64)
     return (__readeflags() & EFLAGS_INTERRUPT_MASK) != 0;
+#elif defined(_M_PPC)
+    ULONG Msr;
+    __asm__ __volatile__("mfmsr %0" : "=r"(Msr));
+    return (Msr & MSR_EE) != 0;
+#elif defined(_M_ARM64)
+#ifdef _MSC_VER
+    return (_ReadStatusReg(ARM64_SYSREG(3, 3, 4, 2, 1)) & 0x80) == 0;
+#else
+    ULONG64 Daif;
+    __asm__ __volatile__("mrs %0, daif" : "=r"(Daif));
+    return (Daif & 0x80) == 0;
+#endif
+#elif defined(_M_RISCV64)
+    ULONG_PTR Status;
+    __asm__ __volatile__("csrr %0, sstatus" : "=r"(Status));
+    return (Status & 2) != 0;
 #else
 #pragma message(__FILE__ ": warning : 'KmtAreInterruptsEnabled()' is UNIMPLEMENTED for this architecture")
-    // HACK: trivial stub. Used by ok_bool_true(KmtAreInterruptsEnabled(), ...).
     return FALSE;
 #endif
-}
-
-typedef struct _POOL_HEADER
-{
-    union
-    {
-        struct
-        {
-#ifdef _M_AMD64
-            USHORT PreviousSize:8;
-            USHORT PoolIndex:8;
-            USHORT BlockSize:8;
-            USHORT PoolType:8;
-#else
-            USHORT PreviousSize:9;
-            USHORT PoolIndex:7;
-            USHORT BlockSize:9;
-            USHORT PoolType:7;
-#endif
-        };
-        ULONG Ulong1;
-    };
-#ifdef _M_AMD64
-    ULONG PoolTag;
-#endif
-    union
-    {
-#ifdef _M_AMD64
-        PEPROCESS ProcessBilled;
-#else
-        ULONG PoolTag;
-#endif
-        struct
-        {
-            USHORT AllocatorBackTraceIndex;
-            USHORT PoolTagHash;
-        };
-    };
-} POOL_HEADER, *PPOOL_HEADER;
-
-ULONG KmtGetPoolTag(PVOID Memory)
-{
-    PPOOL_HEADER Header;
-
-    /* it's not so easy for allocations of PAGE_SIZE */
-    if (((ULONG_PTR)Memory & (PAGE_SIZE - 1)) == 0)
-        return 'TooL';
-
-    Header = Memory;
-    Header--;
-
-    return Header->PoolTag;
-}
-
-USHORT KmtGetPoolType(PVOID Memory)
-{
-    PPOOL_HEADER Header;
-
-    /* it's not so easy for allocations of PAGE_SIZE */
-    if (((ULONG_PTR)Memory & (PAGE_SIZE - 1)) == 0)
-        return 0;
-
-    Header = Memory;
-    Header--;
-
-    return Header->PoolType;
 }
 
 PVOID KmtGetSystemRoutineAddress(IN PCWSTR RoutineName)

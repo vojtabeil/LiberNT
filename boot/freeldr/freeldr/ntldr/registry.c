@@ -65,6 +65,21 @@ CmpFree(
     FrLdrHeapFree(Ptr, 0);
 }
 
+BOOLEAN
+NTAPI
+CmpFileFlush(
+    IN PHHIVE RegistryHive,
+    IN ULONG FileType,
+    IN PLARGE_INTEGER FileOffset,
+    IN ULONG Length)
+{
+    UNREFERENCED_PARAMETER(RegistryHive);
+    UNREFERENCED_PARAMETER(FileType);
+    UNREFERENCED_PARAMETER(FileOffset);
+    UNREFERENCED_PARAMETER(Length);
+    return FALSE;
+}
+
 /**
  * @brief
  * Initializes a flat hive descriptor for the
@@ -109,8 +124,6 @@ RegInitializeHive(
                           ChunkBase,
                           CmpAllocate,
                           CmpFree,
-                          NULL,
-                          NULL,
                           NULL,
                           NULL,
                           1,
@@ -171,7 +184,8 @@ RegLoadHiveLog(
     _In_ PCSTR DirectoryPath,
     _In_ ULONG LogFileOffset,
     _In_ PCSTR LogName,
-    _Out_ PVOID *LogData)
+    _Out_ PVOID *LogData,
+    _Out_opt_ PULONG LogSize)
 {
     ARC_STATUS Status;
     ULONG LogId;
@@ -247,8 +261,54 @@ RegLoadHiveLog(
     }
 
     *LogData = LogDataVirtual;
+    if (LogSize)
+        *LogSize = BytesRead;
     ArcClose(LogId);
     return TRUE;
+}
+
+static
+BOOLEAN
+RegRecoverHiveFromLog(
+    _Inout_ PVOID *ChunkBase,
+    _Inout_ PULONG ChunkSize,
+    _In_ PCSTR DirectoryPath,
+    _In_ PCSTR LogName)
+{
+    CHAR FullLogFileName[MAX_PATH];
+    PVOID LogData, NewChunk;
+    ULONG LogSize, Required, NewSize;
+
+    RtlStringCbCopyA(FullLogFileName, sizeof(FullLogFileName), LogName);
+    RtlStringCbCatA(FullLogFileName, sizeof(FullLogFileName), ".LOG1");
+    if (!RegLoadHiveLog(DirectoryPath, 0, FullLogFileName, &LogData, &LogSize))
+        return FALSE;
+
+    LogData = VaToPa(LogData);
+    if (!HvpApplyIncrementalLog(*ChunkBase, 0, LogData, LogSize, FALSE, NULL, &Required))
+    {
+        ERR("%s has no log entries for the hive\n", FullLogFileName);
+        return FALSE;
+    }
+
+    NewSize = HBLOCK_SIZE + Required;
+    if (NewSize > *ChunkSize)
+    {
+        NewChunk = MmAllocateMemoryWithType(MM_SIZE_TO_PAGES(NewSize) << MM_PAGE_SHIFT,
+                                            LoaderRegistryData);
+        if (!NewChunk)
+        {
+            ERR("Failed to allocate memory for the recovered hive\n");
+            return FALSE;
+        }
+        RtlCopyMemory(NewChunk, *ChunkBase, *ChunkSize);
+        RtlZeroMemory((PUCHAR)NewChunk + *ChunkSize, NewSize - *ChunkSize);
+        *ChunkBase = NewChunk;
+        *ChunkSize = NewSize;
+    }
+
+    WARN("Recovering the hive from %s\n", FullLogFileName);
+    return HvpApplyIncrementalLog(*ChunkBase, Required, LogData, LogSize, TRUE, NULL, &Required);
 }
 
 /**
@@ -288,7 +348,7 @@ RegRecoverHeaderHive(
     /* Build the complete path of the hive log */
     RtlStringCbCopyA(FullLogFileName, sizeof(FullLogFileName), LogName);
     RtlStringCbCatA(FullLogFileName, sizeof(FullLogFileName), ".LOG");
-    Success = RegLoadHiveLog(DirectoryPath, 0, FullLogFileName, &LogData);
+    Success = RegLoadHiveLog(DirectoryPath, 0, FullLogFileName, &LogData, NULL);
     if (!Success)
     {
         ERR("Failed to read the hive log\n");
@@ -364,7 +424,7 @@ RegRecoverDataHive(
     /* Build the complete path of the hive log */
     RtlStringCbCopyA(FullLogFileName, sizeof(FullLogFileName), LogName);
     RtlStringCbCatA(FullLogFileName, sizeof(FullLogFileName), ".LOG");
-    Success = RegLoadHiveLog(DirectoryPath, HV_LOG_HEADER_SIZE, FullLogFileName, &LogData);
+    Success = RegLoadHiveLog(DirectoryPath, HV_LOG_HEADER_SIZE, FullLogFileName, &LogData, NULL);
     if (!Success)
     {
         ERR("Failed to read the hive log\n");
@@ -434,46 +494,57 @@ RegRecoverDataHive(
  */
 BOOLEAN
 RegImportBinaryHive(
-    _In_ PVOID ChunkBase,
-    _In_ ULONG ChunkSize,
+    _Inout_ PVOID *ChunkBase,
+    _Inout_ PULONG ChunkSize,
     _In_ PCSTR SearchPath,
     _In_ BOOLEAN LoadAlternate)
 {
     BOOLEAN Success;
+    PHBASE_BLOCK BaseBlock;
     PCM_KEY_NODE KeyNode;
 
-    TRACE("RegImportBinaryHive(%p, 0x%lx)\n", ChunkBase, ChunkSize);
+    TRACE("RegImportBinaryHive(%p, 0x%lx)\n", *ChunkBase, *ChunkSize);
 
     /* Assume that we don't need boot recover, unless we have to */
-    ((PHBASE_BLOCK)ChunkBase)->BootRecover = HBOOT_NO_BOOT_RECOVER;
+    ((PHBASE_BLOCK)*ChunkBase)->BootRecover = HBOOT_NO_BOOT_RECOVER;
+
+    BaseBlock = (PHBASE_BLOCK)*ChunkBase;
+    if (BaseBlock->Sequence1 != BaseBlock->Sequence2 &&
+        RegRecoverHiveFromLog(ChunkBase, ChunkSize, SearchPath, "SYSTEM"))
+    {
+        ((PHBASE_BLOCK)*ChunkBase)->BootRecover = HBOOT_BOOT_RECOVERED_BY_HIVE_LOG;
+    }
 
     /* Allocate and initialize the hive */
     CmSystemHive = FrLdrTempAlloc(sizeof(CMHIVE), 'eviH');
-    Success = RegInitializeHive(CmSystemHive, ChunkBase, LoadAlternate);
+    Success = RegInitializeHive(CmSystemHive, *ChunkBase, LoadAlternate);
     if (!Success)
     {
         /* Free the buffer and retry again */
         FrLdrTempFree(CmSystemHive, 'eviH');
         CmSystemHive = NULL;
 
-        if (!RegRecoverHeaderHive(ChunkBase, SearchPath, "SYSTEM"))
+        if (!RegRecoverHiveFromLog(ChunkBase, ChunkSize, SearchPath, "SYSTEM"))
         {
-            ERR("Failed to recover the hive header block\n");
-            return FALSE;
-        }
+            if (!RegRecoverHeaderHive(*ChunkBase, SearchPath, "SYSTEM"))
+            {
+                ERR("Failed to recover the hive header block\n");
+                return FALSE;
+            }
 
-        if (!RegRecoverDataHive(ChunkBase, SearchPath, "SYSTEM"))
-        {
-            ERR("Failed to recover the hive data\n");
-            return FALSE;
+            if (!RegRecoverDataHive(*ChunkBase, SearchPath, "SYSTEM"))
+            {
+                ERR("Failed to recover the hive data\n");
+                return FALSE;
+            }
         }
 
         /* Now retry initializing the hive again */
         CmSystemHive = FrLdrTempAlloc(sizeof(CMHIVE), 'eviH');
-        Success = RegInitializeHive(CmSystemHive, ChunkBase, LoadAlternate);
+        Success = RegInitializeHive(CmSystemHive, *ChunkBase, LoadAlternate);
         if (!Success)
         {
-            ERR("Corrupted hive (despite recovery) %p\n", ChunkBase);
+            ERR("Corrupted hive (despite recovery) %p\n", *ChunkBase);
             FrLdrTempFree(CmSystemHive, 'eviH');
             return FALSE;
         }
@@ -482,7 +553,7 @@ RegImportBinaryHive(
          * Acknowledge the kernel we recovered the SYSTEM hive
          * on our side by applying log data.
          */
-        ((PHBASE_BLOCK)ChunkBase)->BootRecover = HBOOT_BOOT_RECOVERED_BY_HIVE_LOG;
+        ((PHBASE_BLOCK)*ChunkBase)->BootRecover = HBOOT_BOOT_RECOVERED_BY_HIVE_LOG;
     }
 
     /* Save the root key node */
@@ -847,6 +918,54 @@ RegQueryValue(
 
     HvReleaseCell(Hive, CellIndex);
 
+    return ERROR_SUCCESS;
+}
+
+LONG
+RegSetValueDword(
+    _In_ HKEY Key,
+    _In_z_ PCWSTR ValueName,
+    _In_ ULONG Data)
+{
+    PHHIVE Hive = GET_HHIVE_FROM_HKEY(Key);
+    PCM_KEY_NODE KeyNode;
+    PCM_KEY_VALUE ValueCell;
+    HCELL_INDEX CellIndex;
+    UNICODE_STRING ValueNameString;
+    ULONG ExistingLength;
+    BOOLEAN IsSmall;
+
+    KeyNode = GET_CM_KEY_NODE(Hive, Key);
+    ASSERT(KeyNode);
+    ASSERT(KeyNode->Signature == CM_KEY_NODE_SIGNATURE);
+
+    RtlInitUnicodeString(&ValueNameString, ValueName);
+    CellIndex = CmpFindValueByName(Hive, KeyNode, &ValueNameString);
+    HvReleaseCell(Hive, HKEY_TO_HCI(Key));
+    if (CellIndex == HCELL_NIL)
+        return ERROR_FILE_NOT_FOUND;
+
+    ValueCell = (PCM_KEY_VALUE)HvGetCell(Hive, CellIndex);
+    ASSERT(ValueCell != NULL);
+
+    IsSmall = CmpIsKeyValueSmall(&ExistingLength, ValueCell->DataLength);
+    if (!IsSmall || ExistingLength < sizeof(ULONG))
+    {
+        HvReleaseCell(Hive, CellIndex);
+        return ERROR_INVALID_PARAMETER;
+    }
+
+    ValueCell->Type = REG_DWORD;
+    ValueCell->DataLength = CM_KEY_VALUE_SPECIAL_SIZE + sizeof(ULONG);
+    *((PULONG)&ValueCell->Data) = Data;
+
+    if (!Hive->ReadOnly)
+    {
+        HvMarkCellDirty(Hive, CellIndex, FALSE);
+        HvMarkCellDirty(Hive, HKEY_TO_HCI(Key), FALSE);
+    }
+
+    HvReleaseCell(Hive, CellIndex);
     return ERROR_SUCCESS;
 }
 

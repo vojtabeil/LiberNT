@@ -71,6 +71,34 @@ static void PrintThread(FILE* output, DumpData& data, DWORD tid, ThreadData& thr
                  ctx.R0, ctx.R1, ctx.R2, ctx.R3, ctx.R4, ctx.R5, ctx.R6);
         xfprintf(output, "r7:%p r8:%p r9:%p r10:%p r11:%p r12:%p" NEWLINE,
                  ctx.R7, ctx.R8, ctx.R9, ctx.R10, ctx.R11, ctx.R12);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+        xfprintf(output, "pc:%p lr:%p sp:%p fp:%p cpsr:%p" NEWLINE,
+                 ctx.Pc, ctx.Lr, ctx.Sp, ctx.Fp, ctx.Cpsr);
+#elif defined(_M_RISCV64)
+        xfprintf(output, "ra:%p sp:%p gp:%p tp:%p t0:%p t1:%p t2:%p" NEWLINE,
+                 (PVOID)(ULONG_PTR)ctx.Ra, (PVOID)(ULONG_PTR)ctx.Sp,
+                 (PVOID)(ULONG_PTR)ctx.Gp, (PVOID)(ULONG_PTR)ctx.Tp,
+                 (PVOID)(ULONG_PTR)ctx.T0, (PVOID)(ULONG_PTR)ctx.T1,
+                 (PVOID)(ULONG_PTR)ctx.T2);
+        xfprintf(output, "s0:%p s1:%p a0:%p a1:%p a2:%p a3:%p a4:%p a5:%p" NEWLINE,
+                 (PVOID)(ULONG_PTR)ctx.S0, (PVOID)(ULONG_PTR)ctx.S1,
+                 (PVOID)(ULONG_PTR)ctx.A0, (PVOID)(ULONG_PTR)ctx.A1,
+                 (PVOID)(ULONG_PTR)ctx.A2, (PVOID)(ULONG_PTR)ctx.A3,
+                 (PVOID)(ULONG_PTR)ctx.A4, (PVOID)(ULONG_PTR)ctx.A5);
+        xfprintf(output, "a6:%p a7:%p s2:%p s3:%p s4:%p s5:%p s6:%p s7:%p" NEWLINE,
+                 (PVOID)(ULONG_PTR)ctx.A6, (PVOID)(ULONG_PTR)ctx.A7,
+                 (PVOID)(ULONG_PTR)ctx.S2, (PVOID)(ULONG_PTR)ctx.S3,
+                 (PVOID)(ULONG_PTR)ctx.S4, (PVOID)(ULONG_PTR)ctx.S5,
+                 (PVOID)(ULONG_PTR)ctx.S6, (PVOID)(ULONG_PTR)ctx.S7);
+        xfprintf(output, "s8:%p s9:%p s10:%p s11:%p t3:%p t4:%p t5:%p t6:%p" NEWLINE,
+                 (PVOID)(ULONG_PTR)ctx.S8, (PVOID)(ULONG_PTR)ctx.S9,
+                 (PVOID)(ULONG_PTR)ctx.S10, (PVOID)(ULONG_PTR)ctx.S11,
+                 (PVOID)(ULONG_PTR)ctx.T3, (PVOID)(ULONG_PTR)ctx.T4,
+                 (PVOID)(ULONG_PTR)ctx.T5, (PVOID)(ULONG_PTR)ctx.T6);
+#elif defined(_M_PPC)
+        for (int n = 0; n < 32; ++n)
+            xfprintf(output, "r%d:%p%s", n, (PVOID)(&ctx.Gpr0)[n], ((n % 8) == 7) ? NEWLINE : " ");
+        xfprintf(output, "cr:%p xer:%p" NEWLINE, (PVOID)ctx.Cr, (PVOID)ctx.Xer);
 #else
 #error Unknown architecture
 #endif
@@ -87,14 +115,25 @@ static void PrintThread(FILE* output, DumpData& data, DWORD tid, ThreadData& thr
 #elif defined(_M_ARM)
         xfprintf(output, "sp:%p lr:%p pc:%p cpsr:%p" NEWLINE,
                  ctx.Sp, ctx.Lr, ctx.Pc, ctx.Cpsr);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+        xfprintf(output, "sp:%p fp:%p lr:%p pc:%p" NEWLINE,
+                 ctx.Sp, ctx.Fp, ctx.Lr, ctx.Pc);
+#elif defined(_M_RISCV64)
+        xfprintf(output, "sp:%p fp:%p ra:%p pc:%p" NEWLINE,
+                 (PVOID)(ULONG_PTR)ctx.Sp, (PVOID)(ULONG_PTR)ctx.S0,
+                 (PVOID)(ULONG_PTR)ctx.Ra, (PVOID)(ULONG_PTR)ctx.Pc);
+#elif defined(_M_PPC)
+        xfprintf(output, "iar:%p msr:%p lr:%p ctr:%p sp:%p" NEWLINE,
+                 (PVOID)ctx.Iar, (PVOID)ctx.Msr, (PVOID)ctx.Lr, (PVOID)ctx.Ctr, (PVOID)ctx.Gpr1);
 #else
 #error Unknown architecture
 #endif
     }
 
+#ifdef CONTEXT_DEBUG_REGISTERS
     if ((ctx.ContextFlags & CONTEXT_DEBUG_REGISTERS) == CONTEXT_DEBUG_REGISTERS)
     {
-#if defined(_M_IX86) || defined(_M_AMD64)
+#if defined(_M_IX86) || defined(_M_AMD64) || defined(_M_PPC)
         xfprintf(output, "dr0:%p dr1:%p dr2:%p dr3:%p dr6:%p dr7:%p" NEWLINE,
                  ctx.Dr0, ctx.Dr1, ctx.Dr2, ctx.Dr3, ctx.Dr6, ctx.Dr7);
 #elif defined(_M_ARM)
@@ -107,10 +146,13 @@ static void PrintThread(FILE* output, DumpData& data, DWORD tid, ThreadData& thr
             xfprintf(output, "Wvr%d:%p%s", n, ctx.Wvr[n], ((n + 1) == ARM_MAX_WATCHPOINTS) ? NEWLINE : " ");
         for (int n = 0; n < ARM_MAX_WATCHPOINTS; ++n)
             xfprintf(output, "Wcr%d:%p%s", n, ctx.Wcr[n], ((n + 1) == ARM_MAX_WATCHPOINTS) ? NEWLINE : " ");
+#elif defined(_M_ARM64) || defined(__aarch64__)
+        /* ARM64 doesn't have Wvr/Wcr in CONTEXT */
 #else
 #error Unknown architecture
 #endif
     }
+#endif
 
     PrintStackBacktrace(output, data, thread);
 }
@@ -305,7 +347,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, INT)
         }
         else if (!wcscmp(arg, L"-?"))
         {
-            MessageBoxA(NULL, szUsage, "ReactOS Crash Reporter", MB_OK);
+            MessageBoxA(NULL, szUsage, "LiberNT Crash Reporter", MB_OK);
             return abort(output, 0);
         }
         else if (!wcscmp(arg, L"/?"))
@@ -317,7 +359,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, INT)
 
     if (!pid)
     {
-        MessageBoxA(NULL, szUsage, "ReactOS Crash Reporter", MB_OK);
+        MessageBoxA(NULL, szUsage, "LiberNT Crash Reporter", MB_OK);
         return abort(stdout, 0);
     }
 
@@ -332,7 +374,7 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR cmdLine, INT)
         if (res != ERROR_SUCCESS && res != ERROR_ALREADY_EXISTS)
         {
             xfprintf(stdout, "Could not create output directory, not writing dump\n");
-            MessageBoxA(NULL, "Could not create directory to write crash report.", "ReactOS Crash Reporter", MB_ICONERROR | MB_OK);
+            MessageBoxA(NULL, "Could not create directory to write crash report.", "LiberNT Crash Reporter", MB_ICONERROR | MB_OK);
             return abort(stdout, 0);
         }
     }

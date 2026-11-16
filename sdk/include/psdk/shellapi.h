@@ -10,10 +10,16 @@ extern "C" {
 #endif
 
 #if !defined(_WIN64)
-#include <pshpack1.h>
+#pragma pack(push, 1)
 #endif
 
+#ifndef WINSHELLAPI
+#ifdef _SHELL32_
+#define WINSHELLAPI
+#else
 #define WINSHELLAPI DECLSPEC_IMPORT
+#endif
+#endif
 #define ABE_LEFT	0
 #define ABE_TOP	1
 #define ABE_RIGHT	2
@@ -155,6 +161,7 @@ extern "C" {
 #define FOF_WANTNUKEWARNING        0x4000  /* during delete operation, warn if delete instead
                                               of recycling (even if FOF_NOCONFIRMATION) */
 #define FOF_NORECURSEREPARSE       0x8000  /* don't do recursion into reparse points */
+#define FOF_NO_UI                  (FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_NOCONFIRMMKDIR)
 
 #define PO_DELETE 19
 #define PO_RENAME 20
@@ -192,6 +199,10 @@ extern "C" {
 #else
 #define SHIL_LAST         SHIL_SYSSMALL
 #endif
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_WINXP)
+HRESULT WINAPI SHGetImageList(_In_ int iImageList, _In_ REFIID riid, _Outptr_ void **ppvObj);
 #endif
 
 typedef struct _SHCREATEPROCESSINFOW
@@ -283,6 +294,13 @@ typedef struct _NOTIFYICONDATAW {
 	HICON hBalloonIcon;
 #endif
 } NOTIFYICONDATAW,*PNOTIFYICONDATAW;
+
+typedef struct _NOTIFYICONIDENTIFIER {
+    DWORD cbSize;
+    HWND hWnd;
+    UINT uID;
+    GUID guidItem;
+} NOTIFYICONIDENTIFIER, *PNOTIFYICONIDENTIFIER;
 
 #define NOTIFYICONDATAA_V1_SIZE FIELD_OFFSET(NOTIFYICONDATAA, szTip[64])
 #define NOTIFYICONDATAW_V1_SIZE FIELD_OFFSET(NOTIFYICONDATAW, szTip[64])
@@ -513,6 +531,9 @@ SHAppBarMessage(
 
 BOOL WINAPI Shell_NotifyIconA(_In_ DWORD, _In_ PNOTIFYICONDATAA);
 BOOL WINAPI Shell_NotifyIconW(_In_ DWORD, _In_ PNOTIFYICONDATAW);
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+HRESULT WINAPI Shell_NotifyIconGetRect(_In_ const NOTIFYICONIDENTIFIER*, _Out_ RECT*);
+#endif
 
 int
 WINAPI
@@ -698,6 +719,47 @@ SHSetLocalizedName(
     _In_ PCWSTR pszResModule,
     _In_ INT idsRes);
 
+HRESULT WINAPI SHRemoveLocalizedName(_In_ PCWSTR pszPath);
+
+HRESULT WINAPI
+SHGetLocalizedName(
+    _In_ PCWSTR pszPath,
+    _Out_writes_(cch) PWSTR pszResModule,
+    _In_ UINT cch,
+    _Out_ int *pidsRes);
+
+HRESULT WINAPI SHGetDriveMedia(_In_ PCWSTR pszDrive, _Out_ DWORD *pdwMediaContent);
+
+typedef enum ASSOCCLASS
+{
+    ASSOCCLASS_SHELL_KEY = 0,
+    ASSOCCLASS_PROGID_KEY,
+    ASSOCCLASS_PROGID_STR,
+    ASSOCCLASS_CLSID_KEY,
+    ASSOCCLASS_CLSID_STR,
+    ASSOCCLASS_APP_KEY,
+    ASSOCCLASS_APP_STR,
+    ASSOCCLASS_SYSTEM_STR,
+    ASSOCCLASS_FOLDER,
+    ASSOCCLASS_STAR,
+    ASSOCCLASS_FIXED_PROGID_STR,
+    ASSOCCLASS_PROTOCOL_STR,
+} ASSOCCLASS;
+
+typedef struct ASSOCIATIONELEMENT
+{
+    ASSOCCLASS ac;
+    HKEY hkClass;
+    PCWSTR pszClass;
+} ASSOCIATIONELEMENT;
+
+HRESULT WINAPI
+AssocCreateForClasses(
+    _In_reads_(cClasses) const ASSOCIATIONELEMENT *rgClasses,
+    ULONG cClasses,
+    _In_ REFIID riid,
+    _COM_Outptr_ void **ppv);
+
 #ifdef UNICODE
 #define NOTIFYICONDATA_V1_SIZE NOTIFYICONDATAW_V1_SIZE
 #define NOTIFYICONDATA_V2_SIZE NOTIFYICONDATAW_V2_SIZE
@@ -757,6 +819,39 @@ typedef LPSHNAMEMAPPINGA LPSHNAMEMAPPING;
 
 #if (NTDDI_VERSION >= NTDDI_VISTA)
 
+#if !defined(_WIN64)
+#pragma pack(pop)
+#endif
+
+#define WC_NETADDRESS L"msctls_netaddress"
+
+WINSHELLAPI BOOL WINAPI InitNetworkAddressControl(VOID);
+
+#define NCM_GETADDRESS      (WM_USER + 1)
+#define NCM_SETALLOWTYPE    (WM_USER + 2)
+#define NCM_GETALLOWTYPE    (WM_USER + 3)
+#define NCM_DISPLAYERRORTIP (WM_USER + 4)
+
+typedef struct tagNC_ADDRESS
+{
+    struct NET_ADDRESS_INFO_ *pAddrInfo;
+    USHORT PortNumber;
+    BYTE PrefixLength;
+} NC_ADDRESS, *PNC_ADDRESS;
+
+#define NetAddr_GetAddress(hwnd, address) \
+    ((HRESULT)SNDMSG((hwnd), NCM_GETADDRESS, 0, (LPARAM)(address)))
+#define NetAddr_SetAllowType(hwnd, mask) \
+    ((HRESULT)SNDMSG((hwnd), NCM_SETALLOWTYPE, (WPARAM)(mask), 0))
+#define NetAddr_GetAllowType(hwnd) \
+    ((DWORD)SNDMSG((hwnd), NCM_GETALLOWTYPE, 0, 0))
+#define NetAddr_DisplayErrorTip(hwnd) \
+    ((HRESULT)SNDMSG((hwnd), NCM_DISPLAYERRORTIP, 0, 0))
+
+#if !defined(_WIN64)
+#pragma pack(push, 1)
+#endif
+
 typedef struct _SHSTOCKICONINFO {
   DWORD cbSize;
   HICON hIcon;
@@ -766,6 +861,20 @@ typedef struct _SHSTOCKICONINFO {
 } SHSTOCKICONINFO;
 
 #define SHGSI_ICONLOCATION 0
+
+typedef enum
+{
+    QUNS_NOT_PRESENT             = 1,
+    QUNS_BUSY                    = 2,
+    QUNS_RUNNING_D3D_FULL_SCREEN = 3,
+    QUNS_PRESENTATION_MODE       = 4,
+    QUNS_ACCEPTS_NOTIFICATIONS   = 5,
+    QUNS_QUIET_TIME              = 6,
+    QUNS_APP                     = 7
+} QUERY_USER_NOTIFICATION_STATE;
+
+WINSHELLAPI HRESULT WINAPI SHQueryUserNotificationState(QUERY_USER_NOTIFICATION_STATE*);
+WINSHELLAPI HRESULT WINAPI SHGetPropertyStoreForWindow(HWND, REFIID, void **);
 
 typedef enum SHSTOCKICONID
 {
@@ -777,12 +886,12 @@ typedef enum SHSTOCKICONID
   SIID_FOLDEROPEN,
   SIID_DRIVE525,
   SIID_DRIVE35,
-  SIID_DRIVERREMOVE,
-  SIID_DRIVERFIXED,
-  SIID_DRIVERNET,
-  SIID_DRIVERNETDISABLE,
-  SIID_DRIVERCD,
-  SIID_DRIVERRAM,
+  SIID_DRIVEREMOVE,
+  SIID_DRIVEFIXED,
+  SIID_DRIVENET,
+  SIID_DRIVENETDISABLED,
+  SIID_DRIVECD,
+  SIID_DRIVERAM,
   SIID_WORLD,
   /* Missing: 14 */
   SIID_SERVER = 15,
@@ -874,26 +983,18 @@ typedef enum SHSTOCKICONID
   SIID_MAX_ICONS = 175
 } SHSTOCKICONID;
 
-typedef enum
-{
-  QUNS_NOT_PRESENT = 1,
-  QUNS_BUSY = 2,
-  QUNS_RUNNING_D3D_FULL_SCREEN = 3,
-  QUNS_PRESENTATION_MODE = 4,
-  QUNS_ACCEPTS_NOTIFICATIONS = 5,
-  QUNS_QUIET_TIME = 6,
-  QUNS_APP = 7
-} QUERY_USER_NOTIFICATION_STATE;
+#define SHGSI_SYSICONINDEX SHGFI_SYSICONINDEX
+#define SHGSI_LINKOVERLAY SHGFI_LINKOVERLAY
+#define SHGSI_SELECTED SHGFI_SELECTED
+#define SHGSI_LARGEICON SHGFI_LARGEICON
+#define SHGSI_SHELLICONSIZE SHGFI_SHELLICONSIZE
 
-HRESULT
-WINAPI
-SHQueryUserNotificationState(
-  _Out_ QUERY_USER_NOTIFICATION_STATE *pquns);
+HRESULT WINAPI SHGetStockIconInfo(SHSTOCKICONID siid, UINT uFlags, _Inout_ SHSTOCKICONINFO *psii);
 
 #endif /* (NTDDI_VERSION >= NTDDI_VISTA) */
 
 #if !defined(_WIN64)
-#include <poppack.h>
+#pragma pack(pop)
 #endif
 
 #ifdef _MSC_VER

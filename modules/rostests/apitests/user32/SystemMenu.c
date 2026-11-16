@@ -13,9 +13,6 @@
 #define WND_PARENT_ID  1
 #define WND_POPUP_ID   2
 
-static BOOL (WINAPI *pGetCurrentActCtx)(HANDLE *);
-static BOOL (WINAPI *pQueryActCtxW)(DWORD, HANDLE, void *, ULONG, void *, SIZE_T, SIZE_T *);
-
 static BOOL test_DestroyWindow_flag;
 static HWINEVENTHOOK hEvent_hook;
 static HHOOK hKBD_hook;
@@ -304,14 +301,14 @@ static void ok_sequence_(const struct message *expected_list, const char *contex
                         if (strcmp(winetest_platform, "wine"))
                             dump++;
                         ok_( file, line) (FALSE,
-                            "%s: %u: in msg 0x%04x expecting wParam 0x%x got 0x%x\n",
+                            "%s: %u: in msg 0x%04x expecting wParam 0x%Ix got 0x%Ix\n",
                             context, count, expected->message, expected->wParam, actual->wParam);
                     }
                 }
                 else
                 {
                     ok_( file, line)(((expected->wParam ^ actual->wParam) & ~expected->wp_mask) == 0,
-                                     "%s: %u: in msg 0x%04x expecting wParam 0x%x got 0x%x\n",
+                                     "%s: %u: in msg 0x%04x expecting wParam 0x%Ix got 0x%Ix\n",
                                      context, count, expected->message, expected->wParam, actual->wParam);
                     if ((expected->wParam ^ actual->wParam) & ~expected->wp_mask)
                         dump++;
@@ -328,14 +325,14 @@ static void ok_sequence_(const struct message *expected_list, const char *contex
                         if (strcmp(winetest_platform, "wine"))
                             dump++;
                         ok_( file, line) (FALSE,
-                            "%s: %u: in msg 0x%04x expecting lParam 0x%lx got 0x%lx\n",
+                            "%s: %u: in msg 0x%04x expecting lParam 0x%Ix got 0x%Ix\n",
                             context, count, expected->message, expected->lParam, actual->lParam);
                     }
                 }
                 else
                 {
                     ok_( file, line)(((expected->lParam ^ actual->lParam) & ~expected->lp_mask) == 0,
-                                     "%s: %u: in msg 0x%04x expecting lParam 0x%lx got 0x%lx\n",
+                                     "%s: %u: in msg 0x%04x expecting lParam 0x%Ix got 0x%Ix\n",
                                      context, count, expected->message, expected->lParam, actual->lParam);
                     if ((expected->lParam ^ actual->lParam) & ~expected->lp_mask)
                         dump++;
@@ -726,19 +723,8 @@ static void test_menu_messages(void)
     DestroyWindow(hwnd);
 }
 
-static void init_funcs(void)
-{
-    HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-
-#define X(f) p##f = (void*)GetProcAddress(hKernel32, #f)
-    X(GetCurrentActCtx);
-    X(QueryActCtxW);
-#undef X
-}
-
 static void init_tests()
 {
-    init_funcs();
 
     InitializeCriticalSection(&sequence_cs);
     init_procs();

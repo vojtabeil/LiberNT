@@ -58,9 +58,7 @@ C_ASSERT(SEH3_REGISTRATION_FRAME_Ebx == FIELD_OFFSET(SEH3$_REGISTRATION_FRAME, E
 C_ASSERT(SEH3_REGISTRATION_FRAME_Esi == FIELD_OFFSET(SEH3$_REGISTRATION_FRAME, Esi));
 C_ASSERT(SEH3_REGISTRATION_FRAME_Edi == FIELD_OFFSET(SEH3$_REGISTRATION_FRAME, Edi));
 #endif
-#ifdef __clang__
 C_ASSERT(SEH3_REGISTRATION_FRAME_ReturnAddress == FIELD_OFFSET(SEH3$_REGISTRATION_FRAME, ReturnAddress));
-#endif
 C_ASSERT(SEH3_SCOPE_TABLE_Filter == FIELD_OFFSET(SEH3$_SCOPE_TABLE, Filter));
 C_ASSERT(SEH3_SCOPE_TABLE_Target == FIELD_OFFSET(SEH3$_SCOPE_TABLE, Target));
 
@@ -96,10 +94,12 @@ _SEH3$_Unregister(
         }
 
         /* Loop to find the frame that links the target frame */
-        while (CurrentFrame->Next != Frame)
+        while (CurrentFrame != (PVOID)-1 && CurrentFrame->Next != Frame)
         {
             CurrentFrame = CurrentFrame->Next;
         }
+
+        if (CurrentFrame == (PVOID)-1) return;
 
         /* Remove the frame from the linked list */
         CurrentFrame->Next = Frame->Next;
@@ -112,6 +112,10 @@ _SEH3$_Unregister(
         {
             CurrentFrame = CurrentFrame->Next;
         }
+
+        /* The except handler unregisters a frame before jumping to its __except block, the auto cleanup does it again */
+        if (CurrentFrame->EndOfChain == Frame->Next)
+            return;
 
         /* Make sure the head frame points to our frame */
         ASSERT(CurrentFrame->EndOfChain == Frame);
@@ -176,7 +180,7 @@ _SEH3$_InvokeFilter(
     else if (HandlerType == _SEH3$_CPP_HANDLER)
     {
         /* Call the embedded filter function */
-        return _SEH3$_InvokeEmbeddedFilter(RegistrationFrame);
+        return _SEH3$_InvokeEmbeddedFilterFromRegistration(RegistrationFrame);
     }
     else if (HandlerType == _SEH3$_CLANG_HANDLER)
     {
@@ -196,6 +200,10 @@ __attribute__((regparm(1)))
 _SEH3$_C_AutoCleanup(
     volatile SEH3$_REGISTRATION_FRAME *Frame)
 {
+    /* A __finally that ran inline on a normal exit has already left its frame */
+    if (Frame->ScopeTable == NULL)
+        return;
+
     _SEH3$_Unregister(Frame);
 
     /* Check for __finally frames */
@@ -214,6 +222,10 @@ __attribute__((regparm(1)))
 _SEH3$_CPP_AutoCleanup(
     volatile SEH3$_REGISTRATION_FRAME *Frame)
 {
+    /* A __finally that ran inline on a normal exit has already left its frame */
+    if (Frame->ScopeTable == NULL)
+        return;
+
     if (Frame->Handler)
         _SEH3$_UnregisterFrame(Frame);
     else
@@ -275,9 +287,9 @@ _SEH3$_JumpToTarget(
             "movl 24(%%ecx), %%esp\n\t"
             "movl 28(%%ecx), %%ebp\n\t"
 
-            "movl 36(%%ecx), %%ebx\n\t"
-            "movl 40(%%ecx), %%esi\n\t"
-            "movl 44(%%ecx), %%edi\n\t"
+            "movl 40(%%ecx), %%ebx\n\t"
+            "movl 44(%%ecx), %%esi\n\t"
+            "movl 48(%%ecx), %%edi\n\t"
 
             /* Stack pointer is 4 off from the call to __SEH3$_RegisterFrame */
             "addl $4, %%esp\n\t"
@@ -295,15 +307,18 @@ _SEH3$_JumpToTarget(
             "movl 24(%%ecx), %%esp\n\t"
             "movl 28(%%ecx), %%ebp\n\t"
 
+            "movl 40(%%ecx), %%ebx\n\t"
+            "movl 44(%%ecx), %%esi\n\t"
+            "movl 48(%%ecx), %%edi\n\t"
+
             /* Stack pointer is 4 off from the call to __SEH3$_RegisterFrame */
             "addl $4, %%esp\n\t"
 
-            /* Jump into the exception handler */
-            "jmp *%[Target]"
+            /* Resume at the registration, which takes the edge to the handler */
+            "movl $2, %%eax\n\t"
+            "jmp *52(%%ecx)"
             : :
-            "c" (RegistrationFrame),
-            "a" (RegistrationFrame->ScopeTable),
-             [Target] "m" (RegistrationFrame->ScopeTable->Target)
+            "c" (RegistrationFrame)
         );
 #endif
 

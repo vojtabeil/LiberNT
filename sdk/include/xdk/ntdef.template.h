@@ -24,9 +24,7 @@
 
 /* Dependencies */
 #include <ctype.h>
-$if(0)
-//#include <winapifamily.h>
-$endif()
+#include <winapifamily.h>
 #include <basetsd.h>
 #include <guiddef.h>
 #include <excpt.h>
@@ -179,6 +177,8 @@ typedef struct _STRING {
 typedef CONST STRING* PCOEM_STRING;
 typedef STRING CANSI_STRING;
 typedef PSTRING PCANSI_STRING;
+typedef STRING UTF8_STRING;
+typedef PSTRING PUTF8_STRING;
 
 typedef struct _STRING32 {
   USHORT   Length;
@@ -299,7 +299,9 @@ typedef CONST OBJECT_ATTRIBUTES64 *PCOBJECT_ATTRIBUTES64;
 #define OBJ_OPENLINK            0x00000100L
 #define OBJ_KERNEL_HANDLE       0x00000200L
 #define OBJ_FORCE_ACCESS_CHECK  0x00000400L
-#define OBJ_VALID_ATTRIBUTES    0x000007F2L
+#define OBJ_IGNORE_IMPERSONATED_DEVICEMAP 0x00000800L
+#define OBJ_DONT_REPARSE        0x00001000L
+#define OBJ_VALID_ATTRIBUTES    0x00001FF2L
 
 /* Helper Macro */
 #define InitializeObjectAttributes(p,n,a,r,s) { \
@@ -345,6 +347,18 @@ typedef struct _RTL_BALANCED_NODE
         ULONG_PTR ParentValue;
     } DUMMYUNIONNAME2;
 } RTL_BALANCED_NODE, *PRTL_BALANCED_NODE;
+#ifndef _RTL_RB_TREE_DEFINED
+#define _RTL_RB_TREE_DEFINED
+typedef struct _RTL_RB_TREE
+{
+    PRTL_BALANCED_NODE Root;
+    _ANONYMOUS_UNION union
+    {
+        UCHAR Encoded : 1;
+        PRTL_BALANCED_NODE Min;
+    } DUMMYUNIONNAME;
+} RTL_RB_TREE, *PRTL_RB_TREE;
+#endif
 #ifdef _MSC_VER
  #pragma warning(pop)
 #endif /* _MSC_VER */
@@ -373,7 +387,10 @@ typedef enum _TIMER_TYPE {
 
 typedef enum _WAIT_TYPE {
   WaitAll,
-  WaitAny
+  WaitAny,
+  WaitNotification,
+  WaitDequeue,
+  WaitDpc
 } WAIT_TYPE;
 
 #ifndef MIDL_PASS

@@ -33,6 +33,15 @@ typedef struct _COMMON_DEVICE_DATA
     DEVICE_POWER_STATE  DevicePowerState;
 } COMMON_DEVICE_DATA, *PCOMMON_DEVICE_DATA;
 
+typedef struct _ACPI_NOTIFICATION_ENTRY
+{
+    LIST_ENTRY ListEntry;
+    PDEVICE_NOTIFY_CALLBACK Callback;
+    PVOID Context;
+} ACPI_NOTIFICATION_ENTRY, *PACPI_NOTIFICATION_ENTRY;
+
+#define ACPI_NOTIFY_TAG 'nIcA'
+
 typedef struct _PDO_DEVICE_DATA
 {
     COMMON_DEVICE_DATA Common;
@@ -47,6 +56,39 @@ typedef struct _PDO_DEVICE_DATA
     LIST_ENTRY  Link;
     ULONG       InterfaceRefCount;
     UNICODE_STRING InterfaceName;
+    ULONG CachedBusNumber;
+    BOOLEAN HasCachedBusNumber;
+    BOOLEAN HasPciRootBusRange;
+    BOOLEAN HasPciRootSegment;
+    ULONG PciRootSegment;
+    ULONG PciRootMinBus;
+    ULONG PciRootMaxBus;
+    /* Cached PCI root window information (from _CRS) */
+#define ACPI_PCI_MAX_WINDOWS 8
+    ULONG PciRootIoWindowCount;
+    struct { ULONGLONG Start; ULONGLONG End; } PciRootIoWindows[ACPI_PCI_MAX_WINDOWS];
+    BOOLEAN Reported;
+    PDEVICE_OBJECT ParentPciRoot;
+    LIST_ENTRY NotificationList;
+    KSPIN_LOCK NotificationLock;
+    ULONG NotificationRegistrationCount;
+    BOOLEAN NotificationHandlersInstalled;
+#define ACPI_GPIO_INT_MAX 64
+    ULONG GpioIntCount;
+    struct { ULONG ResourceIndex; ULONG PinIndex; ULONG Gsiv; } GpioInts[ACPI_GPIO_INT_MAX];
+    BOOLEAN PciRootLogged;
+    volatile LONG ThermalStamp;
+    UCHAR ThermalCoolingPolicy;
+    UCHAR ThermalPassiveLimit;
+    UCHAR ThermalActiveLevel;
+    BOOLEAN ThermalNotificationRegistered;
+    LIST_ENTRY ThermalRequestList;
+    FAST_MUTEX ThermalRequestMutex;
+    IO_CSQ ThermalCsq;
+    LIST_ENTRY ThermalPendingIrpList;
+    KSPIN_LOCK ThermalPendingIrpLock;
+    EX_RUNDOWN_REF ThermalWorkRundown;
+    volatile LONG ThermalStopping;
 
 } PDO_DEVICE_DATA, *PPDO_DEVICE_DATA;
 
@@ -71,6 +113,19 @@ typedef struct _FDO_DEVICE_DATA
 
     // A synchronization for access to the device extension.
     FAST_MUTEX      Mutex;
+
+    // Device interface for PCI ACPI services
+    // Registered when FDO starts, allows PCI driver to send IOCTLs
+    UNICODE_STRING  PciInterfaceName;
+    BOOLEAN         PciInterfaceRegistered;
+    BOOLEAN         PciInterfaceEnabled;
+
+    // Device interface for ACPI system table services
+    UNICODE_STRING  SystemInterfaceName;
+    BOOLEAN         SystemInterfaceRegistered;
+    BOOLEAN         SystemInterfaceEnabled;
+
+    PVOID           ControllerNotificationEntries[2];
 
 } FDO_DEVICE_DATA, *PFDO_DEVICE_DATA;
 
@@ -99,6 +154,46 @@ NTAPI
 Bus_PDO_EvalMethod(
     _In_ PPDO_DEVICE_DATA DeviceData,
     _Inout_ PIRP Irp);
+
+NTSTATUS
+NTAPI
+Bus_PDO_EvalMethodEx(
+    _In_ PPDO_DEVICE_DATA DeviceData,
+    _Inout_ PIRP Irp);
+
+NTSTATUS
+NTAPI
+Bus_PDO_EnumChildren(
+    _In_ PPDO_DEVICE_DATA DeviceData,
+    _Inout_ PIRP Irp);
+
+NTSTATUS
+NTAPI
+AcpiEvalMethodForPciDeviceIoctl(
+    _In_ PFDO_DEVICE_DATA FdoData,
+    _Inout_ PIRP Irp);
+
+NTSTATUS
+NTAPI
+AcpiEnumChildrenForPciDeviceIoctl(
+    _In_ PFDO_DEVICE_DATA FdoData,
+    _Inout_ PIRP Irp);
+
+NTSTATUS
+NTAPI
+AcpiEvalMethodForPciChildIoctl(
+    _In_ PFDO_DEVICE_DATA FdoData,
+    _Inout_ PIRP Irp);
+
+NTSTATUS
+NTAPI
+AcpiEvalMethodForDisplayChildIoctl(
+    _In_ PPDO_DEVICE_DATA PdoData,
+    _Inout_ PIRP Irp);
+
+NTSTATUS
+NTAPI
+AcpiSetPowerForPciDeviceIoctl(_In_ PFDO_DEVICE_DATA FdoData, _Inout_ PIRP Irp);
 
 NTSTATUS
 NTAPI
@@ -156,6 +251,42 @@ Bus_DestroyPdo (
     PPDO_DEVICE_DATA    PdoData
     );
 
+VOID
+AcpiInterfaceResetNotifications(
+    PPDO_DEVICE_DATA DeviceData
+    );
+
+NTSTATUS NTAPI AcpiInterfaceNotificationsRegister(PDEVICE_OBJECT Context, PDEVICE_NOTIFY_CALLBACK NotificationHandler, PVOID NotificationContext);
+VOID NTAPI AcpiInterfaceNotificationsUnregister(PDEVICE_OBJECT Context, PDEVICE_NOTIFY_CALLBACK NotificationHandler);
+
+BOOLEAN AcpiHardwareIdContains(PPDO_DEVICE_DATA DeviceData, PCWSTR HardwareId);
+ACPI_STATUS BuspGetCurrentResources(_In_ ACPI_HANDLE Handle, _Inout_ ACPI_BUFFER *Buffer);
+ACPI_STATUS BuspGetPossibleResources(_In_ ACPI_HANDLE Handle, _Inout_ ACPI_BUFFER *Buffer);
+ACPI_STATUS BuspSetCurrentResources(_In_ ACPI_HANDLE Handle, _In_ ACPI_BUFFER *Buffer);
+ACPI_STATUS BuspGetIrqRoutingTable(_In_ ACPI_HANDLE Handle, _Inout_ ACPI_BUFFER *Buffer);
+ACPI_STATUS BuspWalkResources(_In_ ACPI_HANDLE Handle, _In_ char *Name, _In_ ACPI_WALK_RESOURCE_CALLBACK Callback, _In_opt_ void *Context);
+struct acpi_device;
+
+VOID AcpiWakeInitialize(VOID);
+VOID AcpiWakeProbeDevice(struct acpi_device *Device);
+VOID AcpiWakeRemoveDevice(struct acpi_device *Device);
+VOID AcpiWakeQueryCapabilities(struct acpi_device *Device, PDEVICE_CAPABILITIES Capabilities);
+NTSTATUS AcpiWakeQueueIrp(PPDO_DEVICE_DATA PdoData, PIRP Irp);
+VOID AcpiWakeSignal(ACPI_HANDLE Handle);
+VOID AcpiPciSlotNotify(ACPI_HANDLE Handle, UINT32 Value);
+VOID AcpiWakeCancelDevice(ACPI_HANDLE Handle);
+VOID AcpiWakeCheckSources(VOID);
+VOID AcpiWakePrepareSleep(SYSTEM_POWER_STATE SystemState);
+VOID AcpiWakeFinishSleep(VOID);
+NTSTATUS AcpiQueryWakeForPciDeviceIoctl(PIRP Irp);
+NTSTATUS AcpiQueryD3ColdForPciDeviceIoctl(PIRP Irp);
+NTSTATUS AcpiWaitWakeForPciDeviceIoctl(PIRP Irp);
+VOID AcpiThermalInitialize(PPDO_DEVICE_DATA DeviceData);
+NTSTATUS AcpiThermalStart(PPDO_DEVICE_DATA DeviceData);
+VOID AcpiThermalStop(PPDO_DEVICE_DATA DeviceData);
+NTSTATUS AcpiThermalSetPower(ACPI_HANDLE Handle, BOOLEAN Engaged);
+NTSTATUS AcpiThermalDeviceControl(PPDO_DEVICE_DATA DeviceData, PIRP Irp);
+
 
 NTSTATUS
 Bus_FDO_PnP (
@@ -171,6 +302,10 @@ Bus_StartFdo (
       PFDO_DEVICE_DATA            FdoData,
       PIRP   Irp );
 
+BOOLEAN
+BuspAreConnectionControllersReady(
+    PPDO_DEVICE_DATA DeviceData);
+
 PCHAR
 DbgDeviceIDString(
     BUS_QUERY_ID_TYPE Type
@@ -180,6 +315,11 @@ PCHAR
 DbgDeviceRelationString(
      DEVICE_RELATION_TYPE Type
     );
+
+extern BOOLEAN AcpiPmHalSleep;
+
+VOID
+AcpiPmRegisterWithHal(VOID);
 
 NTSTATUS
 Bus_FDO_Power (
@@ -253,6 +393,16 @@ NTSTATUS
 Bus_PDO_QueryDeviceRelations(
      PPDO_DEVICE_DATA     DeviceData,
       PIRP   Irp );
+
+NTSTATUS
+Bus_QueryChildRelations(
+    _In_ PFDO_DEVICE_DATA FdoData,
+    _In_opt_ PDEVICE_OBJECT ParentPciRoot,
+    _Inout_ PIRP Irp);
+
+BOOLEAN
+BuspIsPciRootDevice(
+    _In_ PPDO_DEVICE_DATA DeviceData);
 
 NTSTATUS
 Bus_PDO_QueryBusInformation(

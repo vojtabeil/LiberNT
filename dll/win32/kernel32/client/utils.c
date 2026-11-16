@@ -10,6 +10,7 @@
 /* INCLUDES ******************************************************************/
 
 #include <k32.h>
+#include <winsafer.h>
 #ifdef _M_IX86
 #include "i386/ketypes.h"
 #elif defined _M_AMD64
@@ -59,15 +60,238 @@ BasepAnsiStringToUnicodeSize(IN PANSI_STRING String)
     return RtlAnsiStringToUnicodeSize(String);
 }
 
-HANDLE
-WINAPI
-BaseGetNamedObjectDirectory(VOID)
+static
+NTSTATUS
+NTAPI
+BasepQueryEnvironmentMaximumSize(
+    _In_ const VOID *Environment,
+    _Out_ PSIZE_T MaximumSize)
 {
+    MEMORY_BASIC_INFORMATION MemoryInfo;
+    ULONG_PTR BaseAddress, EnvironmentAddress;
+    NTSTATUS Status;
+    SIZE_T Offset;
+
+    if (!Environment || !MaximumSize)
+        return STATUS_INVALID_PARAMETER;
+
+    Status = NtQueryVirtualMemory(NtCurrentProcess(),
+                                  (PVOID)Environment,
+                                  MemoryBasicInformation,
+                                  &MemoryInfo,
+                                  sizeof(MemoryInfo),
+                                  NULL);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    BaseAddress = (ULONG_PTR)MemoryInfo.BaseAddress;
+    EnvironmentAddress = (ULONG_PTR)Environment;
+    if (EnvironmentAddress < BaseAddress)
+        return STATUS_INVALID_PARAMETER;
+
+    Offset = EnvironmentAddress - BaseAddress;
+    if (Offset >= MemoryInfo.RegionSize)
+        return STATUS_INVALID_PARAMETER;
+
+    *MaximumSize = MemoryInfo.RegionSize - Offset;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+BasepQueryEnvironmentSizeA(
+    _In_ PCSTR Environment,
+    _Out_ PSIZE_T EnvironmentSize)
+{
+    SIZE_T MaximumSize, Index;
+    NTSTATUS Status;
+    BOOLEAN Found = FALSE;
+
+    Status = BasepQueryEnvironmentMaximumSize(Environment, &MaximumSize);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (MaximumSize < 2 * sizeof(CHAR))
+        return STATUS_INVALID_PARAMETER;
+
+    __TRY
+    {
+        for (Index = 0; Index + 1 < MaximumSize; ++Index)
+        {
+            if (Environment[Index] == ANSI_NULL &&
+                Environment[Index + 1] == ANSI_NULL)
+            {
+                *EnvironmentSize = (Index + 2) * sizeof(CHAR);
+                Found = TRUE;
+                break;
+            }
+        }
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        Status = STATUS_ACCESS_VIOLATION;
+    }
+    __ENDTRY;
+
+    if (Found)
+        return STATUS_SUCCESS;
+
+    return NT_SUCCESS(Status) ? STATUS_INVALID_PARAMETER : Status;
+}
+
+NTSTATUS
+NTAPI
+BasepQueryEnvironmentSizeW(
+    _In_ PCWSTR Environment,
+    _Out_ PSIZE_T EnvironmentSize)
+{
+    SIZE_T MaximumSize, MaximumLength, Index;
+    NTSTATUS Status;
+    BOOLEAN Found = FALSE;
+
+    Status = BasepQueryEnvironmentMaximumSize(Environment, &MaximumSize);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    MaximumLength = MaximumSize / sizeof(WCHAR);
+    if (MaximumLength < 2)
+        return STATUS_INVALID_PARAMETER;
+
+    __TRY
+    {
+        for (Index = 0; Index + 1 < MaximumLength; ++Index)
+        {
+            if (Environment[Index] == UNICODE_NULL &&
+                Environment[Index + 1] == UNICODE_NULL)
+            {
+                *EnvironmentSize = (Index + 2) * sizeof(WCHAR);
+                Found = TRUE;
+                break;
+            }
+        }
+    }
+    __EXCEPT_PAGE_FAULT
+    {
+        Status = STATUS_ACCESS_VIOLATION;
+    }
+    __ENDTRY;
+
+    if (Found)
+        return STATUS_SUCCESS;
+
+    return NT_SUCCESS(Status) ? STATUS_INVALID_PARAMETER : Status;
+}
+
+static
+BOOL
+BasepOpenAppContainerObjectDirectory(
+    _Out_ PHANDLE Directory)
+{
+    HANDLE Token;
+    ULONG IsAppContainer = 0;
+    ULONG Length;
+    UCHAR Buffer[sizeof(PSID) + SECURITY_MAX_SID_SIZE];
+    PSID PackageSid;
+    UNICODE_STRING SidString, DirectoryName, SessionString;
+    WCHAR NameBuffer[256], SessionBuffer[16];
     OBJECT_ATTRIBUTES ObjectAttributes;
     NTSTATUS Status;
+
+    *Directory = NULL;
+    Status = NtOpenProcessToken(NtCurrentProcess(), TOKEN_QUERY, &Token);
+    if (!NT_SUCCESS(Status)) return FALSE;
+
+    Status = NtQueryInformationToken(Token, TokenIsAppContainer, &IsAppContainer, sizeof(IsAppContainer), &Length);
+    if (!NT_SUCCESS(Status) || !IsAppContainer)
+    {
+        NtClose(Token);
+        return FALSE;
+    }
+
+    Status = NtQueryInformationToken(Token, TokenAppContainerSid, Buffer, sizeof(Buffer), &Length);
+    NtClose(Token);
+    if (!NT_SUCCESS(Status)) return FALSE;
+    PackageSid = *(PSID*)Buffer;
+    if (!PackageSid) return FALSE;
+
+    Status = RtlConvertSidToUnicodeString(&SidString, PackageSid, TRUE);
+    if (!NT_SUCCESS(Status)) return FALSE;
+
+    RtlInitEmptyUnicodeString(&SessionString, SessionBuffer, sizeof(SessionBuffer));
+    RtlInitEmptyUnicodeString(&DirectoryName, NameBuffer, sizeof(NameBuffer) - sizeof(UNICODE_NULL));
+    Status = RtlAppendUnicodeToString(&DirectoryName, L"\\Sessions\\");
+    if (NT_SUCCESS(Status)) Status = RtlIntegerToUnicodeString(NtCurrentPeb()->SessionId, 10, &SessionString);
+    if (NT_SUCCESS(Status)) Status = RtlAppendUnicodeStringToString(&DirectoryName, &SessionString);
+    if (NT_SUCCESS(Status)) Status = RtlAppendUnicodeToString(&DirectoryName, L"\\AppContainerNamedObjects\\");
+    if (NT_SUCCESS(Status)) Status = RtlAppendUnicodeStringToString(&DirectoryName, &SidString);
+    RtlFreeUnicodeString(&SidString);
+    if (!NT_SUCCESS(Status)) return FALSE;
+    NameBuffer[DirectoryName.Length / sizeof(WCHAR)] = UNICODE_NULL;
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &DirectoryName,
+                               OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               NULL);
+    Status = NtOpenDirectoryObject(Directory,
+                                   DIRECTORY_QUERY | DIRECTORY_TRAVERSE |
+                                   DIRECTORY_CREATE_OBJECT | DIRECTORY_CREATE_SUBDIRECTORY,
+                                   &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("BasepOpenAppContainerObjectDirectory: %wZ failed 0x%lx\n", &DirectoryName, Status);
+    return NT_SUCCESS(Status);
+}
+
+static
+BOOLEAN
+BasepOpenIsolatedObjectDirectory(
+    _Out_ PHANDLE Directory)
+{
+    UCHAR Buffer[sizeof(TOKEN_BNO_ISOLATION_INFORMATION) + 256 * sizeof(WCHAR)];
+    PTOKEN_BNO_ISOLATION_INFORMATION Isolation = (PTOKEN_BNO_ISOLATION_INFORMATION)Buffer;
+    UNICODE_STRING Prefix, Name;
+    WCHAR NameBuffer[384];
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Token;
+    ULONG Length;
+    NTSTATUS Status;
+
+    *Directory = NULL;
+    Status = NtOpenProcessToken(NtCurrentProcess(), TOKEN_QUERY, &Token);
+    if (!NT_SUCCESS(Status)) return FALSE;
+
+    Status = NtQueryInformationToken(Token, TokenBnoIsolation, Isolation, sizeof(Buffer), &Length);
+    NtClose(Token);
+    if (!NT_SUCCESS(Status) || !Isolation->IsolationEnabled || !Isolation->IsolationPrefix)
+        return FALSE;
+
+    RtlInitUnicodeString(&Prefix, Isolation->IsolationPrefix);
+    RtlInitEmptyUnicodeString(&Name, NameBuffer, sizeof(NameBuffer) - sizeof(UNICODE_NULL));
+    Status = RtlAppendUnicodeStringToString(&Name, &BaseStaticServerData->NamedObjectDirectory);
+    if (NT_SUCCESS(Status)) Status = RtlAppendUnicodeToString(&Name, L"\\");
+    if (NT_SUCCESS(Status)) Status = RtlAppendUnicodeStringToString(&Name, &Prefix);
+    if (!NT_SUCCESS(Status)) return FALSE;
+    NameBuffer[Name.Length / sizeof(WCHAR)] = UNICODE_NULL;
+
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE | OBJ_OPENIF, NULL, NULL);
+    Status = NtCreateDirectoryObject(Directory,
+                                     DIRECTORY_QUERY | DIRECTORY_TRAVERSE |
+                                     DIRECTORY_CREATE_OBJECT | DIRECTORY_CREATE_SUBDIRECTORY,
+                                     &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+        DPRINT1("BasepOpenIsolatedObjectDirectory: %wZ failed 0x%lx\n", &Name, Status);
+    return NT_SUCCESS(Status);
+}
+
+NTSTATUS
+WINAPI
+BaseGetNamedObjectDirectory(OUT PHANDLE DirectoryHandle)
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    NTSTATUS Status = STATUS_SUCCESS;
     HANDLE DirHandle, BnoHandle, Token, NewToken;
 
-    if (BaseNamedObjectDirectory) return BaseNamedObjectDirectory;
+    *DirectoryHandle = BaseNamedObjectDirectory;
+    if (BaseNamedObjectDirectory) return STATUS_SUCCESS;
 
     if (NtCurrentTeb()->IsImpersonating)
     {
@@ -75,7 +299,7 @@ BaseGetNamedObjectDirectory(VOID)
                                    TOKEN_IMPERSONATE,
                                    TRUE,
                                    &Token);
-        if (!NT_SUCCESS(Status)) return BaseNamedObjectDirectory;
+        if (!NT_SUCCESS(Status)) return Status;
 
         NewToken = NULL;
         Status = NtSetInformationThread(NtCurrentThread(),
@@ -85,7 +309,7 @@ BaseGetNamedObjectDirectory(VOID)
         if (!NT_SUCCESS (Status))
         {
             NtClose(Token);
-            return BaseNamedObjectDirectory;
+            return Status;
         }
     }
     else
@@ -95,6 +319,18 @@ BaseGetNamedObjectDirectory(VOID)
 
     RtlAcquirePebLock();
     if (BaseNamedObjectDirectory) goto Quickie;
+
+    if (BasepOpenAppContainerObjectDirectory(&BnoHandle))
+    {
+        BaseNamedObjectDirectory = BnoHandle;
+        goto Quickie;
+    }
+
+    if (BasepOpenIsolatedObjectDirectory(&BnoHandle))
+    {
+        BaseNamedObjectDirectory = BnoHandle;
+        goto Quickie;
+    }
 
     InitializeObjectAttributes(&ObjectAttributes,
                                &BaseStaticServerData->NamedObjectDirectory,
@@ -149,7 +385,18 @@ Quickie:
         NtClose(Token);
     }
 
-    return BaseNamedObjectDirectory;
+    *DirectoryHandle = BaseNamedObjectDirectory;
+    return Status;
+}
+
+HANDLE
+WINAPI
+BasepGetNamedObjectDirectory(VOID)
+{
+    HANDLE DirectoryHandle;
+
+    BaseGetNamedObjectDirectory(&DirectoryHandle);
+    return DirectoryHandle;
 }
 
 VOID
@@ -328,7 +575,7 @@ BaseFormatObjectAttributes(OUT POBJECT_ATTRIBUTES ObjectAttributes,
     if (ObjectName)
     {
         Attributes |= OBJ_OPENIF;
-        RootDirectory = BaseGetNamedObjectDirectory();
+        RootDirectory = BasepGetNamedObjectDirectory();
     }
     else
     {
@@ -341,6 +588,8 @@ BaseFormatObjectAttributes(OUT POBJECT_ATTRIBUTES ObjectAttributes,
                                Attributes,
                                RootDirectory,
                                SecurityDescriptor);
+    if (ObjectName)
+        BasepAdjustObjectAttributesForPrivateNamespace(ObjectAttributes);
     DPRINT("Attributes: %lx, RootDirectory: %p, SecurityDescriptor: %p\n",
             Attributes, RootDirectory, SecurityDescriptor);
     return ObjectAttributes;
@@ -434,11 +683,12 @@ BaseCreateStack(
     /* Update the stack position */
     Stack += StackReserve - StackCommit;
 
-    /* Check if we can add a guard page */
-    if (StackReserve >= StackCommit + PageSize)
+    /* Reserve the complete guard region below the committed stack. */
+    GuardPageSize = MM_USER_STACK_GUARD_PAGES * PageSize;
+    if (StackReserve >= StackCommit + GuardPageSize)
     {
-        Stack -= PageSize;
-        StackCommit += PageSize;
+        Stack -= GuardPageSize;
+        StackCommit += GuardPageSize;
         UseGuard = TRUE;
     }
     else
@@ -467,7 +717,6 @@ BaseCreateStack(
     /* Create a guard page if needed */
     if (UseGuard)
     {
-        GuardPageSize = PageSize;
         Status = NtProtectVirtualMemory(hProcess,
                                         (PVOID*)&Stack,
                                         &GuardPageSize,
@@ -505,6 +754,13 @@ BaseFreeThreadStack(
                         &Dummy,
                         MEM_RELEASE);
 }
+
+NTSYSAPI
+VOID
+NTAPI
+RtlUserThreadStart(
+    _In_ PTHREAD_START_ROUTINE StartAddress,
+    _In_ PVOID Parameter);
 
 /*
  * Creates the Initial Context for a Thread or Fiber
@@ -549,7 +805,8 @@ BaseInitializeContext(IN PCONTEXT Context,
     if (ContextType == 1)
     {
         /* For Threads */
-        Context->Eip = (ULONG)BaseThreadStartupThunk;
+        Context->Esp -= 3 * sizeof(PVOID);
+        Context->Eip = (ULONG)RtlUserThreadStart;
     }
     else if (ContextType == 2)
     {
@@ -576,9 +833,49 @@ BaseInitializeContext(IN PCONTEXT Context,
     else
     {
         /* For first thread in a Process */
-        Context->Eip = (ULONG)BaseProcessStartThunk;
+        Context->Esp -= 3 * sizeof(PVOID);
+        Context->Eip = (ULONG)RtlUserThreadStart;
     }
 
+#elif defined(_M_ARM64EC)
+    DPRINT("BaseInitializeContext: %p\n", Context);
+    ASSERT(((ULONG_PTR)StackAddress & 15) == 0);
+
+    RtlZeroMemory(Context, sizeof(*Context));
+
+    if (ContextType == 2) /* For Fibers */
+    {
+        PARM64EC_NT_CONTEXT EcContext = (PARM64EC_NT_CONTEXT)Context;
+
+        /* Fiber save/restore uses the public x64-compatible hybrid layout. */
+        EcContext->X0 = (ULONG_PTR)StartAddress;
+        EcContext->X1 = (ULONG_PTR)Parameter;
+        EcContext->Sp = (ULONG_PTR)StackAddress;
+        EcContext->Lr = (ULONG_PTR)ExitThread;
+        EcContext->Pc = (ULONG_PTR)BaseFiberStartup;
+        EcContext->ContextFlags = CONTEXT_FULL;
+    }
+    else
+    {
+        PARM64_NT_CONTEXT ArmContext = (PARM64_NT_CONTEXT)Context;
+
+        /* NtCreateThread consumes the native ARM64 context layout. */
+        C_ASSERT(sizeof(ARM64_NT_CONTEXT) <= sizeof(CONTEXT));
+        ArmContext->X0 = (ULONG_PTR)StartAddress;
+        ArmContext->X1 = (ULONG_PTR)Parameter;
+        ArmContext->Sp = (ULONG_PTR)StackAddress;
+        ArmContext->Lr = (ULONG_PTR)ExitThread;
+        if (ContextType == 1)
+        {
+            ArmContext->Pc = (ULONG_PTR)BaseThreadStartup;
+        }
+        else
+        {
+            ArmContext->Pc = (ULONG_PTR)RtlUserThreadStart;
+            ArmContext->Lr = 0;
+        }
+        ArmContext->ContextFlags = CONTEXT_ARM64_FULL;
+    }
 #elif defined(_M_AMD64)
     DPRINT("BaseInitializeContext: %p\n", Context);
     ASSERT(((ULONG_PTR)StackAddress & 15) == 0);
@@ -603,22 +900,107 @@ BaseInitializeContext(IN PCONTEXT Context,
 
     /* Set MXCSR */
     Context->MxCsr = INITIAL_MXCSR;
+    Context->FltSave.ControlWord = INITIAL_FPCSR;
 
     if (ContextType == 1)      /* For Threads */
     {
-        Context->Rip = (ULONG_PTR)BaseThreadStartup;
+        Context->Rip = (ULONG_PTR)RtlUserThreadStart;
     }
     else if (ContextType == 2) /* For Fibers */
     {
         Context->Rip = (ULONG_PTR)BaseFiberStartup;
+        Context->Rsp -= 5 * sizeof(PVOID);
     }
     else                       /* For first thread in a Process */
     {
-        Context->Rip = (ULONG_PTR)BaseProcessStartup;
+        Context->Rip = (ULONG_PTR)RtlUserThreadStart;
     }
 
     /* Set the Context Flags */
     Context->ContextFlags = CONTEXT_FULL;
+#elif defined(_M_ARM64)
+    DPRINT("BaseInitializeContext: %p\n", Context);
+    ASSERT(((ULONG_PTR)StackAddress & 15) == 0);
+
+    RtlZeroMemory(Context, sizeof(*Context));
+
+    Context->X0 = (ULONG_PTR)StartAddress;
+    Context->X1 = (ULONG_PTR)Parameter;
+    Context->Sp = (ULONG_PTR)StackAddress;
+    Context->Lr = (ULONG_PTR)ExitThread;
+
+    if (ContextType == 1)      /* For Threads */
+    {
+        Context->Pc = (ULONG_PTR)RtlUserThreadStart;
+        Context->Lr = 0;
+    }
+    else if (ContextType == 2) /* For Fibers */
+    {
+        Context->Pc = (ULONG_PTR)BaseFiberStartup;
+    }
+    else                       /* For first thread in a Process */
+    {
+        Context->Pc = (ULONG_PTR)RtlUserThreadStart;
+        Context->Lr = 0;
+    }
+
+    Context->ContextFlags = CONTEXT_FULL;
+#elif defined(_M_RISCV64)
+    DPRINT("BaseInitializeContext: %p\n", Context);
+    ASSERT(((ULONG_PTR)StackAddress & 15) == 0);
+
+    RtlZeroMemory(Context, sizeof(*Context));
+
+    /* Enter the shared C startup routines using the native argument bank.
+     * The kernel installs the new thread's TEB in tp, not the creator's. */
+    Context->A0 = (ULONG_PTR)StartAddress;
+    Context->A1 = (ULONG_PTR)Parameter;
+    Context->Sp = (ULONG_PTR)StackAddress;
+    Context->Ra = (ULONG_PTR)ExitThread;
+
+    if (ContextType == 1)      /* For Threads */
+    {
+        Context->Pc = (ULONG_PTR)RtlUserThreadStart;
+        Context->Ra = 0;
+    }
+    else if (ContextType == 2) /* For Fibers */
+    {
+        Context->Pc = (ULONG_PTR)BaseFiberStartup;
+    }
+    else                       /* For first thread in a Process */
+    {
+        Context->Pc = (ULONG_PTR)RtlUserThreadStart;
+        Context->Ra = 0;
+    }
+
+    Context->ContextFlags = CONTEXT_FULL;
+#elif defined(_M_PPC)
+    {
+        /* Windows NT PowerPC function pointers address {code, TOC}
+         * descriptors: enter the routine at its code with its TOC. */
+        typedef struct { ULONG_PTR EntryPoint; ULONG_PTR Toc; } FUNCTION_DESCRIPTOR;
+        const FUNCTION_DESCRIPTOR *Routine;
+
+        DPRINT("BaseInitializeContext: %p\n", Context);
+
+        RtlZeroMemory(Context, sizeof(*Context));
+
+        if (ContextType == 1)      /* For Threads */
+            Routine = (const FUNCTION_DESCRIPTOR *)BaseThreadStartup;
+        else if (ContextType == 2) /* For Fibers */
+            Routine = (const FUNCTION_DESCRIPTOR *)BaseFiberStartup;
+        else                       /* For first thread in a Process */
+            Routine = (const FUNCTION_DESCRIPTOR *)BaseProcessStartup;
+
+        Context->Gpr3 = (ULONG_PTR)StartAddress;
+        Context->Gpr4 = (ULONG_PTR)Parameter;
+        /* Leave the callee's 24-byte frame header inside the stack. */
+        Context->Gpr1 = ALIGN_DOWN_BY((ULONG_PTR)StackAddress, 16) - 32;
+        Context->Lr = ((const FUNCTION_DESCRIPTOR *)ExitThread)->EntryPoint;
+        Context->Iar = Routine->EntryPoint;
+        Context->Gpr2 = Routine->Toc;
+        Context->ContextFlags = CONTEXT_FULL;
+    }
 #elif defined(_M_ARM)
     DPRINT("BaseInitializeContext: %p\n", Context);
 
@@ -915,9 +1297,132 @@ BaseMarkFileForDelete(IN HANDLE FileHandle,
                          FileDispositionInformation);
 }
 
-/*
- * @unimplemented
- */
+typedef BOOL (WINAPI *PSAFER_IDENTIFY_LEVEL)(DWORD, PSAFER_CODE_PROPERTIES, SAFER_LEVEL_HANDLE *, PVOID);
+typedef BOOL (WINAPI *PSAFER_GET_LEVEL_INFORMATION)(SAFER_LEVEL_HANDLE, SAFER_OBJECT_INFO_CLASS, PVOID, DWORD, PDWORD);
+typedef BOOL (WINAPI *PSAFER_COMPUTE_TOKEN_FROM_LEVEL)(SAFER_LEVEL_HANDLE, HANDLE, PHANDLE, DWORD, PVOID);
+typedef BOOL (WINAPI *PSAFER_RECORD_EVENT_LOG_ENTRY)(SAFER_LEVEL_HANDLE, PCWSTR, PVOID);
+typedef BOOL (WINAPI *PSAFER_CLOSE_LEVEL)(SAFER_LEVEL_HANDLE);
+
+static RTL_RUN_ONCE BasepSaferOnce = RTL_RUN_ONCE_INIT;
+static PSAFER_IDENTIFY_LEVEL pSaferIdentifyLevel;
+static PSAFER_GET_LEVEL_INFORMATION pSaferGetLevelInformation;
+static PSAFER_COMPUTE_TOKEN_FROM_LEVEL pSaferComputeTokenFromLevel;
+static PSAFER_RECORD_EVENT_LOG_ENTRY pSaferRecordEventLogEntry;
+static PSAFER_CLOSE_LEVEL pSaferCloseLevel;
+
+static ULONG
+NTAPI
+BasepLoadSaferApi(PRTL_RUN_ONCE RunOnce, PVOID Parameter, PVOID *Context)
+{
+    UNICODE_STRING Advapi = RTL_CONSTANT_STRING(L"advapi32.dll");
+    ANSI_STRING Identify = RTL_CONSTANT_STRING("SaferIdentifyLevel");
+    ANSI_STRING GetInfo = RTL_CONSTANT_STRING("SaferGetLevelInformation");
+    ANSI_STRING Compute = RTL_CONSTANT_STRING("SaferComputeTokenFromLevel");
+    ANSI_STRING Record = RTL_CONSTANT_STRING("SaferRecordEventLogEntry");
+    ANSI_STRING Close = RTL_CONSTANT_STRING("SaferCloseLevel");
+    PVOID Module;
+
+    if (!NT_SUCCESS(LdrLoadDll(NULL, NULL, &Advapi, &Module)))
+        return TRUE;
+
+    if (!NT_SUCCESS(LdrGetProcedureAddress(Module, &Identify, 0, (PVOID *)&pSaferIdentifyLevel)) ||
+        !NT_SUCCESS(LdrGetProcedureAddress(Module, &GetInfo, 0, (PVOID *)&pSaferGetLevelInformation)) ||
+        !NT_SUCCESS(LdrGetProcedureAddress(Module, &Compute, 0, (PVOID *)&pSaferComputeTokenFromLevel)) ||
+        !NT_SUCCESS(LdrGetProcedureAddress(Module, &Record, 0, (PVOID *)&pSaferRecordEventLogEntry)) ||
+        !NT_SUCCESS(LdrGetProcedureAddress(Module, &Close, 0, (PVOID *)&pSaferCloseLevel)))
+    {
+        pSaferIdentifyLevel = NULL;
+    }
+
+    return TRUE;
+}
+
+static ULONG
+BasepQuerySaferTransparentEnabled(HANDLE RootDirectory, PCWSTR KeyPath)
+{
+    UNICODE_STRING KeyName, ValueName = RTL_CONSTANT_STRING(L"TransparentEnabled");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UCHAR Buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Info = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    ULONG ResultLength, Value = 0;
+    HANDLE KeyHandle;
+    NTSTATUS Status;
+
+    RtlInitUnicodeString(&KeyName, KeyPath);
+    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE, RootDirectory, NULL);
+    if (!NT_SUCCESS(NtOpenKey(&KeyHandle, KEY_QUERY_VALUE, &ObjectAttributes)))
+        return 0;
+
+    Status = NtQueryValueKey(KeyHandle, &ValueName, KeyValuePartialInformation, Buffer, sizeof(Buffer), &ResultLength);
+    if (NT_SUCCESS(Status) && Info->Type == REG_DWORD && Info->DataLength == sizeof(ULONG))
+        RtlCopyMemory(&Value, Info->Data, sizeof(ULONG));
+
+    NtClose(KeyHandle);
+    return Value;
+}
+
+/* TODO: TransparentEnabled 2 (all software files) does not make the loader check DLLs against the policy */
+static BOOLEAN
+BasepIsSaferEnforced(VOID)
+{
+    HANDLE UserKey;
+    ULONG Value;
+
+    Value = BasepQuerySaferTransparentEnabled(NULL,
+        L"\\Registry\\Machine\\Software\\Policies\\Microsoft\\Windows\\Safer\\CodeIdentifiers");
+    if (Value)
+        return TRUE;
+
+    if (!NT_SUCCESS(RtlOpenCurrentUser(KEY_READ, &UserKey)))
+        return FALSE;
+
+    Value = BasepQuerySaferTransparentEnabled(UserKey, L"Software\\Policies\\Microsoft\\Windows\\Safer\\CodeIdentifiers");
+    NtClose(UserKey);
+    return Value != 0;
+}
+
+static NTSTATUS
+BasepEvaluateSaferLevel(IN HANDLE Token,
+                        IN LPWSTR ApplicationName,
+                        IN HANDLE FileHandle,
+                        OUT PHANDLE NewToken)
+{
+    SAFER_CODE_PROPERTIES_V2 Properties;
+    SAFER_LEVEL_HANDLE Level;
+    DWORD LevelId, Size;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    RtlZeroMemory(&Properties, sizeof(Properties));
+    Properties.cbSize = sizeof(Properties);
+    Properties.dwCheckFlags = SAFER_CRITERIA_IMAGEPATH | SAFER_CRITERIA_IMAGEHASH | SAFER_CRITERIA_AUTHENTICODE;
+    Properties.ImagePath = ApplicationName;
+    Properties.hImageFileHandle = FileHandle;
+
+    if (!pSaferIdentifyLevel(1, (PSAFER_CODE_PROPERTIES)&Properties, &Level, NULL))
+        return STATUS_UNSUCCESSFUL;
+
+    if (!pSaferGetLevelInformation(Level, SaferObjectLevelId, &LevelId, sizeof(LevelId), &Size))
+    {
+        Status = STATUS_UNSUCCESSFUL;
+    }
+    else if (LevelId == SAFER_LEVELID_DISALLOWED)
+    {
+        pSaferRecordEventLogEntry(Level, ApplicationName, NULL);
+        Status = (NTSTATUS)0xFFFFFFFF;
+    }
+    else if (LevelId != SAFER_LEVELID_FULLYTRUSTED)
+    {
+        if (!pSaferComputeTokenFromLevel(Level, Token, NewToken, SAFER_TOKEN_NULL_IF_EQUAL, NULL))
+        {
+            *NewToken = NULL;
+            Status = STATUS_ACCESS_DENIED;
+        }
+    }
+
+    pSaferCloseLevel(Level);
+    return Status;
+}
+
 NTSTATUS
 WINAPI
 BasepCheckWinSaferRestrictions(IN HANDLE UserToken,
@@ -927,30 +1432,47 @@ BasepCheckWinSaferRestrictions(IN HANDLE UserToken,
                                OUT PHANDLE NewToken,
                                OUT PHANDLE JobHandle)
 {
+    HANDLE Token = UserToken, ProcessToken = NULL;
+    ULONG Inert = FALSE, Length;
     NTSTATUS Status;
 
-    /* Validate that there's a name */
-    if ((ApplicationName) && *(ApplicationName))
+    if (!ApplicationName || !*ApplicationName)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!InJob || !NewToken || !JobHandle)
+        return STATUS_ACCESS_VIOLATION;
+
+    *InJob = FALSE;
+    *NewToken = NULL;
+    *JobHandle = NULL;
+
+    if (!BasepIsSaferEnforced())
+        return STATUS_SUCCESS;
+
+    if (!Token)
     {
-        /* Validate that the required output parameters are there */
-        if ((InJob) && (NewToken) && (JobHandle))
-        {
-            /* Do the work (one day...) */
-            DPRINT("BasepCheckWinSaferRestrictions is UNIMPLEMENTED\n");
-            Status = STATUS_SUCCESS;
-        }
-        else
-        {
-            /* Act as if SEH hit this */
-            Status = STATUS_ACCESS_VIOLATION;
-        }
+        Status = NtOpenProcessToken(NtCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &ProcessToken);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        Token = ProcessToken;
+    }
+
+    Status = NtQueryInformationToken(Token, TokenSandBoxInert, &Inert, sizeof(Inert), &Length);
+    if (!NT_SUCCESS(Status) || !Inert)
+    {
+        RtlRunOnceExecuteOnce(&BasepSaferOnce, BasepLoadSaferApi, NULL, NULL);
+        /* TODO: no job object is created for the SAFER_POLICY_JOBID_* identity flags */
+        Status = pSaferIdentifyLevel ?
+                 BasepEvaluateSaferLevel(Token, ApplicationName, FileHandle, NewToken) :
+                 STATUS_SUCCESS;
     }
     else
     {
-        /* Input is invalid */
-        Status = STATUS_INVALID_PARAMETER;
+        Status = STATUS_SUCCESS;
     }
 
-    /* Return the status */
+    if (ProcessToken)
+        NtClose(ProcessToken);
+
     return Status;
 }

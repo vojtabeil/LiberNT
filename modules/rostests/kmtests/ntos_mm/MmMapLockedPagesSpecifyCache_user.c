@@ -25,6 +25,7 @@
     QueryBuffer.Buffer = NULL;                                 \
     QueryBuffer.Cached = UseCache;                             \
     QueryBuffer.Status = STATUS_SUCCESS;                       \
+    QueryBuffer.MappingFlags = 0;                              \
 }
 
 #define FILL_READ_BUFFER(QueryBuffer, ReadBuffer)               \
@@ -41,6 +42,124 @@
             Buffer[i] = ReadBuffer.Pattern;                     \
         }                                                       \
     }                                                           \
+}
+
+static VOID
+TestQueryMapping(PVOID Address, SIZE_T Length, ULONG Protection)
+{
+    MEMORY_BASIC_INFORMATION Information;
+    SIZE_T ReturnedLength = 0;
+    NTSTATUS Status;
+
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), Address,
+                                   MemoryBasicInformation, &Information,
+                                   sizeof(Information), &ReturnedLength);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    ok_eq_size(ReturnedLength, sizeof(Information));
+    ok_eq_pointer(Information.BaseAddress, (PVOID)PAGE_ROUND_DOWN(Address));
+    ok_eq_pointer(Information.AllocationBase, (PVOID)PAGE_ROUND_DOWN(Address));
+    ok_eq_size(Information.RegionSize,
+               PAGE_ROUND_UP(Length + ((ULONG_PTR)Address & (PAGE_SIZE - 1))));
+    ok_eq_hex(Information.State, MEM_COMMIT);
+    ok_eq_hex(Information.Type, MEM_PRIVATE);
+    ok_eq_hex(Information.Protect & 0xff, Protection);
+    ok_eq_hex(Information.AllocationProtect & 0xff, Protection);
+    trace("MDL query: size=%Iu state=%lx protect=%lx allocation=%lx type=%lx\n",
+          Information.RegionSize, Information.State, Information.Protect,
+          Information.AllocationProtect, Information.Type);
+}
+
+static NTSTATUS
+TestUnmapAddress(PVOID Address, NTSTATUS ExpectedStatus, ULONG State, ULONG Type)
+{
+    MEMORY_BASIC_INFORMATION Information;
+    NTSTATUS Status, QueryStatus;
+
+    Status = NtUnmapViewOfSection(NtCurrentProcess(), Address);
+    ok_eq_hex(Status, ExpectedStatus);
+    QueryStatus = NtQueryVirtualMemory(NtCurrentProcess(), Address,
+                                        MemoryBasicInformation, &Information,
+                                        sizeof(Information), NULL);
+    ok_eq_hex(QueryStatus, STATUS_SUCCESS);
+    if (NT_SUCCESS(QueryStatus))
+    {
+        ok_eq_hex(Information.State, State);
+        ok_eq_hex(Information.Type, Type);
+    }
+    return Status;
+}
+
+static VOID
+TestUnmapControls(VOID)
+{
+    PVOID Address;
+    HANDLE Section;
+    NTSTATUS Status;
+
+    Address = VirtualAlloc(NULL, 2 * PAGE_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    ok(Address != NULL, "Cannot allocate private unmap control: %lu\n", GetLastError());
+    if (Address != NULL)
+    {
+        TestUnmapAddress((PUCHAR)Address + PAGE_SIZE, STATUS_NOT_MAPPED_VIEW, MEM_COMMIT, MEM_PRIVATE);
+        ok(VirtualFree(Address, 0, MEM_RELEASE), "Cannot release private control\n");
+        TestUnmapAddress(Address, STATUS_NOT_MAPPED_VIEW, MEM_FREE, 0);
+    }
+
+    Section = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, 2 * PAGE_SIZE, NULL);
+    ok(Section != NULL, "Cannot create section control: %lu\n", GetLastError());
+    if (Section == NULL)
+        return;
+    Address = MapViewOfFile(Section, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, 0);
+    ok(Address != NULL, "Cannot map section control: %lu\n", GetLastError());
+    if (Address != NULL)
+    {
+        Status = TestUnmapAddress((PUCHAR)Address + PAGE_SIZE, STATUS_SUCCESS, MEM_FREE, 0);
+        if (!NT_SUCCESS(Status))
+            UnmapViewOfFile(Address);
+    }
+    CloseHandle(Section);
+}
+
+static VOID
+TestFreeUserLimit(PVOID Address, ULONG_PTR HighestAddress)
+{
+    MEMORY_BASIC_INFORMATION Information;
+    NTSTATUS Status;
+
+    Status = NtQueryVirtualMemory(NtCurrentProcess(), Address,
+                                   MemoryBasicInformation, &Information,
+                                   sizeof(Information), NULL);
+    if ((ULONG_PTR)Address > HighestAddress)
+    {
+        ok_eq_hex(Status, STATUS_INVALID_PARAMETER);
+        return;
+    }
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+    ok_eq_pointer(Information.BaseAddress, (PVOID)PAGE_ROUND_DOWN(Address));
+    ok_eq_pointer(Information.AllocationBase, NULL);
+    ok_eq_hex(Information.AllocationProtect, 0);
+    ok_eq_hex(Information.State, MEM_FREE);
+    ok_eq_hex(Information.Type, 0);
+    ok_eq_hex(Information.Protect, PAGE_NOACCESS);
+    ok(Information.RegionSize != 0 &&
+       Information.RegionSize <= HighestAddress + 1 - PAGE_ROUND_DOWN(Address),
+       "Information.RegionSize = %Iu, limit %Iu\n", Information.RegionSize,
+       HighestAddress + 1 - PAGE_ROUND_DOWN(Address));
+    if (Information.RegionSize < HighestAddress + 1 - PAGE_ROUND_DOWN(Address))
+    {
+        PVOID Next = (PUCHAR)Information.BaseAddress + Information.RegionSize;
+
+        Status = NtQueryVirtualMemory(NtCurrentProcess(), Next,
+                                       MemoryBasicInformation, &Information,
+                                       sizeof(Information), NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+            ok(Information.State != MEM_FREE, "Free region at %p does not reach the user limit\n", Next);
+    }
 }
 
 #define CHECK_ALLOC(MappedBuffer, BufferLength)                 \
@@ -71,9 +190,74 @@
                                  &Size,                         \
                                  MEM_RELEASE);                  \
     ok_eq_hex(Status, STATUS_UNABLE_TO_DELETE_SECTION);         \
-    Status = NtUnmapViewOfSection(NtCurrentProcess(),           \
-                                  MappedBuffer);                \
-    ok_eq_hex(Status, STATUS_NOT_MAPPED_VIEW);                  \
+    TestUnmapAddress(MappedBuffer, STATUS_INVALID_PAGE_PROTECTION, MEM_COMMIT, MEM_PRIVATE); \
+    TestUnmapAddress((PUCHAR)MappedBuffer + BufferLength - 1, STATUS_INVALID_PAGE_PROTECTION, MEM_COMMIT, MEM_PRIVATE); \
+}
+
+static VOID
+TestProcessExitMappings(VOID)
+{
+    static const ULONG Sizes[] = {PAGE_SIZE, 1024 * 1024, 4 * 1024 * 1024};
+    WCHAR Image[MAX_PATH];
+    ULONG Index;
+
+    if (!GetModuleFileNameW(NULL, Image, ARRAYSIZE(Image)))
+    {
+        ok(0, "Could not obtain the child executable path: %lu\n", GetLastError());
+        return;
+    }
+    for (Index = 0; Index < ARRAYSIZE(Sizes); ++Index)
+    {
+        STARTUPINFOW Startup = {sizeof(Startup)};
+        PROCESS_INFORMATION Child;
+        EXIT_BUFFER Request = {0};
+        DWORD Length = sizeof(Request);
+        DWORD Error;
+        DWORD Wait;
+        BOOL Created;
+        ULONG Value = 0;
+        SIZE_T Read;
+
+        /* The child never executes user code or a driver cleanup callback. */
+        Created = CreateProcessW(Image, NULL, NULL, NULL, FALSE,
+                                 CREATE_SUSPENDED, NULL, NULL, &Startup, &Child);
+        ok(Created, "Could not create the suspended child: %lu\n", GetLastError());
+        if (!Created)
+            return;
+        Request.Process = Child.hProcess;
+        Request.Length = Sizes[Index];
+        Request.Pattern = WRITE_PATTERN;
+        Error = KmtSendBufferToDriver(IOCTL_MAP_EXIT_BUFFER, &Request,
+                                     sizeof(Request), &Length);
+        ok_eq_ulong(Error, ERROR_SUCCESS);
+        if (Error == ERROR_SUCCESS)
+        {
+            ok(Request.Address != NULL, "No mapping returned for the child\n");
+            ok(ReadProcessMemory(Child.hProcess, Request.Address, &Value,
+                                 sizeof(Value), &Read), "Cannot read child mapping: %lu\n", GetLastError());
+            ok_eq_ulong(Value, WRITE_PATTERN);
+            Value = 0;
+            ok(ReadProcessMemory(Child.hProcess,
+                                 (PUCHAR)Request.Address + Request.Length - sizeof(Value),
+                                 &Value, sizeof(Value), &Read),
+               "Cannot read the end of the child mapping: %lu\n", GetLastError());
+            ok_eq_ulong(Value, WRITE_PATTERN);
+        }
+        ok(TerminateProcess(Child.hProcess, 0), "Cannot terminate child: %lu\n", GetLastError());
+        Wait = WaitForSingleObject(Child.hProcess, 10000);
+        ok_eq_ulong(Wait, WAIT_OBJECT_0);
+        if (Wait == WAIT_OBJECT_0 && Error == ERROR_SUCCESS)
+        {
+            Length = sizeof(Request);
+            Error = KmtSendBufferToDriver(IOCTL_CHECK_EXIT_BUFFER, &Request,
+                                         sizeof(Request), &Length);
+            ok_eq_ulong(Error, ERROR_SUCCESS);
+        }
+        CloseHandle(Child.hThread);
+        CloseHandle(Child.hProcess);
+        if (Wait != WAIT_OBJECT_0 || Error != ERROR_SUCCESS)
+            return;
+    }
 }
 
 START_TEST(MmMapLockedPagesSpecifyCache)
@@ -88,6 +272,7 @@ START_TEST(MmMapLockedPagesSpecifyCache)
     ULONG_PTR HighestAddress;
     DWORD Error;
 
+    TestUnmapControls();
     Error = KmtLoadAndOpenDriver(L"MmMapLockedPagesSpecifyCache", FALSE);
     ok_eq_int(Error, ERROR_SUCCESS);
     if (Error)
@@ -100,6 +285,7 @@ START_TEST(MmMapLockedPagesSpecifyCache)
     ok(KmtSendBufferToDriver(IOCTL_QUERY_BUFFER, &QueryBuffer, sizeof(QUERY_BUFFER), &Length) == ERROR_SUCCESS, "\n");
     ok_eq_int(QueryBuffer.Length, BufferLength);
     ok(QueryBuffer.Buffer != NULL, "Buffer is NULL\n");
+    TestQueryMapping(QueryBuffer.Buffer, BufferLength, PAGE_READWRITE);
     CHECK_ALLOC(QueryBuffer.Buffer, BufferLength);
 
     Length = 0;
@@ -116,6 +302,24 @@ START_TEST(MmMapLockedPagesSpecifyCache)
     Length = 0;
     FILL_READ_BUFFER(QueryBuffer, ReadBuffer);
     ok(KmtSendBufferToDriver(IOCTL_READ_BUFFER, &ReadBuffer, sizeof(READ_BUFFER), &Length) == ERROR_SUCCESS, "\n");
+
+    // read-only, non-executable user mapping
+    Length = sizeof(QUERY_BUFFER);
+    FILL_QUERY_BUFFER(QueryBuffer, BufferLength, TRUE);
+    QueryBuffer.MappingFlags = TEST_MDL_MAPPING_NO_WRITE | TEST_MDL_MAPPING_NO_EXECUTE;
+    ok(KmtSendBufferToDriver(IOCTL_QUERY_BUFFER, &QueryBuffer, sizeof(QUERY_BUFFER), &Length) == ERROR_SUCCESS, "\n");
+    ok_eq_int(QueryBuffer.Length, BufferLength);
+    ok(QueryBuffer.Buffer != NULL, "Buffer is NULL\n");
+    TestQueryMapping(QueryBuffer.Buffer, BufferLength, PAGE_READONLY);
+    CHECK_ALLOC(QueryBuffer.Buffer, BufferLength);
+    KmtStartSeh()
+    *(volatile ULONG *)QueryBuffer.Buffer;
+    KmtEndSeh(STATUS_SUCCESS);
+    KmtStartSeh()
+    *(volatile ULONG *)QueryBuffer.Buffer = WRITE_PATTERN;
+    KmtEndSeh(STATUS_ACCESS_VIOLATION);
+    Length = 0;
+    ok(KmtSendBufferToDriver(IOCTL_CLEAN, NULL, 0, &Length) == ERROR_SUCCESS, "\n");
 
     // 1 page
     SET_BUFFER_LENGTH(BufferLength, 4096);
@@ -246,38 +450,110 @@ START_TEST(MmMapLockedPagesSpecifyCache)
                                       sizeof(BasicInfo),
                                       NULL);
     ok_eq_hex(Status, STATUS_SUCCESS);
-    trace("MaximumUserModeAddress: %lx\n", BasicInfo.MaximumUserModeAddress);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    trace("MaximumUserModeAddress: %p\n", (PVOID)BasicInfo.MaximumUserModeAddress);
     HighestAddress = ALIGN_DOWN_BY(BasicInfo.MaximumUserModeAddress, PAGE_SIZE);
 
-    // near MmHighestUserAddress
-    SET_BUFFER_LENGTH(BufferLength, 4096);
-    FILL_QUERY_BUFFER(QueryBuffer, BufferLength, FALSE);
-    QueryBuffer.Buffer = (PVOID)(HighestAddress - 15 * PAGE_SIZE); // 7ffe0000
-    QueryBuffer.Status = STATUS_INVALID_ADDRESS;
-    trace("QueryBuffer.Buffer %p\n", QueryBuffer.Buffer);
-    Length = sizeof(QUERY_BUFFER);
-    ok(KmtSendBufferToDriver(IOCTL_QUERY_BUFFER, &QueryBuffer, sizeof(QUERY_BUFFER), &Length) == ERROR_SUCCESS, "\n");
-    ok_eq_int(QueryBuffer.Length, BufferLength);
-    ok(QueryBuffer.Buffer == NULL, "Buffer is %p\n", QueryBuffer.Buffer);
+    /* Explicit driver mappings can use the final pages below the user limit. */
+    {
+        static const struct
+        {
+            LONG PagesBelowHighest;
+            USHORT Pages;
+            USHORT Offset;
+            NTSTATUS Status;
+        } Cases[] =
+        {
+            {16, 1, 0, STATUS_SUCCESS},
+            {15, 1, 0, STATUS_SUCCESS},
+            {1, 1, 0, STATUS_SUCCESS},
+            {0, 1, 0, STATUS_SUCCESS},
+            {0, 2, 0, STATUS_CONFLICTING_ADDRESSES},
+            {-1, 1, 0, STATUS_CONFLICTING_ADDRESSES},
+            {14, 15, 0, STATUS_SUCCESS},
+            {13, 15, 0, STATUS_CONFLICTING_ADDRESSES},
+            {15, 1, PAGE_SIZE / 2, STATUS_INVALID_ADDRESS},
+        };
+        ULONG Index;
 
-    Length = 0;
-    ok(KmtSendBufferToDriver(IOCTL_CLEAN, NULL, 0, &Length) == ERROR_SUCCESS, "\n");
+        C_ASSERT(15 * PAGE_SIZE <= MAXUSHORT);
+        for (Index = 0; Index < ARRAYSIZE(Cases); ++Index)
+        {
+            MEMORY_BASIC_INFORMATION BeforeInfo, AfterInfo;
+            NTSTATUS ExpectedStatus = Cases[Index].Status;
+            BOOLEAN Occupied = FALSE;
+            PVOID Requested = (PVOID)(HighestAddress -
+                (LONG_PTR)Cases[Index].PagesBelowHighest * PAGE_SIZE + Cases[Index].Offset);
 
-    // far enough away from MmHighestUserAddress
-    SET_BUFFER_LENGTH(BufferLength, 4096);
-    FILL_QUERY_BUFFER(QueryBuffer, BufferLength, FALSE);
-    QueryBuffer.Buffer = (PVOID)(HighestAddress - 16 * PAGE_SIZE); // 7ffdf000
-    QueryBuffer.Status = -1;
-    trace("QueryBuffer.Buffer %p\n", QueryBuffer.Buffer);
-    Length = sizeof(QUERY_BUFFER);
-    ok(KmtSendBufferToDriver(IOCTL_QUERY_BUFFER, &QueryBuffer, sizeof(QUERY_BUFFER), &Length) == ERROR_SUCCESS, "\n");
-    ok_eq_int(QueryBuffer.Length, BufferLength);
-    ok(QueryBuffer.Status == STATUS_SUCCESS ||
-       QueryBuffer.Status == STATUS_CONFLICTING_ADDRESSES, "Status = %lx\n", QueryBuffer.Status);
+            /* The last ordinary VAD page can already contain the PEB or TEB. */
+            if ((ULONG_PTR)Requested <= BasicInfo.MaximumUserModeAddress)
+            {
+                Status = NtQueryVirtualMemory(NtCurrentProcess(), Requested,
+                                             MemoryBasicInformation, &BeforeInfo,
+                                             sizeof(BeforeInfo), NULL);
+                ok_eq_hex(Status, STATUS_SUCCESS);
+                if (!NT_SUCCESS(Status))
+                    break;
+                Occupied = BeforeInfo.State != MEM_FREE;
+                if (Occupied && NT_SUCCESS(ExpectedStatus))
+                    ExpectedStatus = STATUS_CONFLICTING_ADDRESSES;
+            }
+            if (!Occupied)
+                TestFreeUserLimit(Requested, BasicInfo.MaximumUserModeAddress);
+            BufferLength = Cases[Index].Pages * PAGE_SIZE;
+            FILL_QUERY_BUFFER(QueryBuffer, BufferLength, FALSE);
+            QueryBuffer.Buffer = Requested;
+            QueryBuffer.Status = ExpectedStatus;
+            Length = sizeof(QUERY_BUFFER);
+            Error = KmtSendBufferToDriver(IOCTL_QUERY_BUFFER, &QueryBuffer, sizeof(QueryBuffer), &Length);
+            ok_eq_ulong(Error, ERROR_SUCCESS);
+            if (Error != ERROR_SUCCESS)
+                break;
+            ok_eq_hex(QueryBuffer.Status, ExpectedStatus);
+            ok_eq_int(QueryBuffer.Length, BufferLength);
+            if (NT_SUCCESS(QueryBuffer.Status))
+            {
+                ok_eq_pointer(QueryBuffer.Buffer, Requested);
+                TestQueryMapping(QueryBuffer.Buffer, BufferLength, PAGE_READWRITE);
+                TestUnmapAddress(QueryBuffer.Buffer, STATUS_INVALID_PAGE_PROTECTION, MEM_COMMIT, MEM_PRIVATE);
+                KmtStartSeh()
+                *(volatile UCHAR *)QueryBuffer.Buffer;
+                *((volatile UCHAR *)QueryBuffer.Buffer + BufferLength - 1);
+                KmtEndSeh(STATUS_SUCCESS);
+            }
+            else
+            {
+                ok_eq_pointer(QueryBuffer.Buffer, NULL);
+            }
+            Length = 0;
+            Error = KmtSendBufferToDriver(IOCTL_CLEAN, NULL, 0, &Length);
+            ok_eq_ulong(Error, ERROR_SUCCESS);
+            if (Occupied)
+            {
+                Status = NtQueryVirtualMemory(NtCurrentProcess(), Requested,
+                                             MemoryBasicInformation, &AfterInfo,
+                                             sizeof(AfterInfo), NULL);
+                ok_eq_hex(Status, STATUS_SUCCESS);
+                if (NT_SUCCESS(Status))
+                {
+                    ok_eq_pointer(AfterInfo.BaseAddress, BeforeInfo.BaseAddress);
+                    ok_eq_pointer(AfterInfo.AllocationBase, BeforeInfo.AllocationBase);
+                    ok_eq_hex(AfterInfo.AllocationProtect, BeforeInfo.AllocationProtect);
+                    ok_eq_size(AfterInfo.RegionSize, BeforeInfo.RegionSize);
+                    ok_eq_hex(AfterInfo.State, BeforeInfo.State);
+                    ok_eq_hex(AfterInfo.Protect, BeforeInfo.Protect);
+                    ok_eq_hex(AfterInfo.Type, BeforeInfo.Type);
+                }
+            }
+            else
+                TestFreeUserLimit(Requested, BasicInfo.MaximumUserModeAddress);
+        }
+    }
 
-    Length = 0;
-    ok(KmtSendBufferToDriver(IOCTL_CLEAN, NULL, 0, &Length) == ERROR_SUCCESS, "\n");
+    TestProcessExitMappings();
 
+Cleanup:
     KmtCloseDriver();
     KmtUnloadDriver();
 }

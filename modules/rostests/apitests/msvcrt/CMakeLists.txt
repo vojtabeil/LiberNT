@@ -7,7 +7,6 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
 endif()
 
 list(APPEND SOURCE_CRT_TESTS
-    ../crt/fpcontrol.c
     ../crt/_finite.c
     ../crt/_isnan.c
     ../crt/_mbsnbcat.c
@@ -39,6 +38,7 @@ list(APPEND SOURCE_CRT_TESTS
     ../crt/exp.c
     ../crt/fabs.c
     ../crt/floor.c
+    ../crt/fmod.c
     ../crt/log.c
     ../crt/log10.c
     ../crt/mbstowcs.c
@@ -62,12 +62,17 @@ list(APPEND SOURCE_CRT_TESTS
 
 if(ARCH STREQUAL "i386")
     list(APPEND SOURCE_CRT_TESTS
+        ../crt/fpcontrol.c)
+    list(APPEND SOURCE_CRT_TESTS
         ../crt/__getmainargs.c # FIXME: Moved here because it doesn't work on x64
+        libm_sse2_precise.c
     )
     list(APPEND ASM_SOURCE_CRT_TESTS
         ../crt/i386/setjmp_helper.s
     )
 elseif(ARCH STREQUAL "amd64")
+    list(APPEND SOURCE_CRT_TESTS
+        ../crt/fpcontrol.c)
     list(APPEND ASM_SOURCE_CRT_TESTS
         ../crt/amd64/setjmp_helper.s
     )
@@ -84,6 +89,7 @@ list(APPEND SOURCE
     ${SOURCE_CRT_TESTS}
     ${crt_asm}
     CommandLine.c
+    ExitFlush.c
     ieee.c
     popen.c
     splitpath.c

@@ -29,7 +29,6 @@
 #include <fslib/vfatlib.h>
 #include <fslib/vfatxlib.h>
 #include <fslib/ntfslib.h>
-#include <fslib/btrfslib.h>
 #include <fslib/ext2lib.h>
 #include <fslib/cdfslib.h>
 
@@ -50,7 +49,6 @@ FILESYSTEM_CHKDSK FileSystems[] =
     { L"FAT32", VfatChkdsk },
     { L"FATX" , VfatxChkdsk },
     { L"NTFS", NtfsChkdsk },
-    { L"BTRFS", BtrfsChkdsk },
     { L"EXT2", Ext2Chkdsk },
     { L"EXT3", Ext2Chkdsk },
     { L"EXT4", Ext2Chkdsk },
@@ -419,7 +417,6 @@ CheckVolume(
     }
 
     DPRINT1("AUTOCHK: Checking %wZ\n", &VolumePathU);
-    PrintString("Verifying the file system on %S\r\n", DisplayName);
 
     /* Get the file system */
     Status = GetFileSystem(&VolumePathU,
@@ -431,8 +428,6 @@ CheckVolume(
         PrintString("  Unable to detect the file system of volume %S\r\n", DisplayName);
         goto Quit;
     }
-
-    PrintString("  The file system type is %S.\r\n\r\n", FileSystem);
 
     /* Find a suitable file system provider */
     for (Count = 0; Count < RTL_NUMBER_OF(FileSystems); ++Count)

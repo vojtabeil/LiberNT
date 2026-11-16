@@ -184,6 +184,10 @@ static unsigned int type_memsize(ITypeInfo *typeinfo, TYPEDESC *desc, unsigned i
     case VT_PTR:
     case VT_UNKNOWN:
     case VT_DISPATCH:
+#ifdef __REACTOS__
+    case VT_LPSTR:
+    case VT_LPWSTR:
+#endif
         size = align = sizeof(void *);
         break;
     case VT_VARIANT:
@@ -777,7 +781,12 @@ static size_t write_pointer_tfs(ITypeInfo *typeinfo, unsigned char *str,
         ref = write_type_tfs(typeinfo, str, len, desc, FALSE, FALSE);
 
         if (onstack) flags |= FC_ALLOCED_ON_STACK;
+#ifdef __REACTOS__
+        if (desc->vt == VT_PTR || desc->vt == VT_UNKNOWN || desc->vt == VT_DISPATCH ||
+            desc->vt == VT_LPSTR || desc->vt == VT_LPWSTR)
+#else
         if (desc->vt == VT_PTR || desc->vt == VT_UNKNOWN || desc->vt == VT_DISPATCH)
+#endif
             flags |= FC_POINTER_DEREF;
 
         off = *len;
@@ -809,6 +818,16 @@ static size_t write_type_tfs(ITypeInfo *typeinfo, unsigned char *str,
         return write_pointer_tfs(typeinfo, str, len, desc->lptdesc, toplevel, onstack);
     case VT_CARRAY:
         return write_array_tfs(typeinfo, str, len, desc->lpadesc);
+#ifdef __REACTOS__
+    case VT_LPSTR:
+    case VT_LPWSTR:
+        off = *len;
+        WRITE_CHAR(str, *len, toplevel ? FC_RP : FC_UP);
+        WRITE_CHAR(str, *len, FC_SIMPLE_POINTER);
+        WRITE_CHAR(str, *len, desc->vt == VT_LPWSTR ? FC_C_WSTRING : FC_C_CSTRING);
+        WRITE_CHAR(str, *len, FC_PAD);
+        break;
+#endif
     case VT_USERDEFINED:
         ITypeInfo_GetRefTypeInfo(typeinfo, desc->hreftype, &refinfo);
         ITypeInfo_GetTypeAttr(refinfo, &attr);
@@ -892,7 +911,7 @@ static unsigned int get_stack_size(ITypeInfo *typeinfo, TYPEDESC *desc, unsigned
     {
 #ifdef __x86_64__
         byval = (size == 1 || size == 2 || size == 4 || size == 8);
-#elif defined __aarch64__
+#elif defined __aarch64__ || (defined(__riscv) && (__riscv_xlen == 64))
         byval = (size <= 16);
 #endif
     }
@@ -942,6 +961,13 @@ static HRESULT get_param_pointer_info(ITypeInfo *typeinfo, TYPEDESC *tdesc, int 
         *server_size = type_memsize(typeinfo, tdesc, NULL);
         *tfs_tdesc = tdesc;
         break;
+#ifdef __REACTOS__
+    case VT_LPSTR:
+    case VT_LPWSTR:
+        *flags |= MustFree;
+        *server_size = sizeof(void *);
+        break;
+#endif
     case VT_USERDEFINED:
         ITypeInfo_GetRefTypeInfo(typeinfo, tdesc->hreftype, &refinfo);
         ITypeInfo_GetTypeAttr(refinfo, &attr);
@@ -1019,6 +1045,10 @@ static HRESULT get_param_info(ITypeInfo *typeinfo, TYPEDESC *tdesc, int is_in,
     case VT_UNKNOWN:
     case VT_DISPATCH:
     case VT_CARRAY:
+#ifdef __REACTOS__
+    case VT_LPSTR:
+    case VT_LPWSTR:
+#endif
         *flags |= MustFree;
         break;
     case VT_PTR:
@@ -1118,7 +1148,7 @@ static HRESULT write_param_fs(ITypeInfo *typeinfo, unsigned char *type,
     return hr;
 }
 
-#if defined __arm__ || defined __aarch64__
+#if defined __arm__ || defined __aarch64__ || (defined(__riscv) && (__riscv_xlen == 64))
 
 /* replace consecutive params code by a repeat sequence: 0x9d code<1> repeat_count<2> */
 static unsigned int compress_params_array( unsigned char *params, unsigned int count )
@@ -1147,6 +1177,10 @@ static unsigned int fill_params_array( ITypeInfo *typeinfo, FUNCDESC *desc,
     unsigned int reg_count = 0, float_count = 0, double_count = 0, stack_pos = 0, offset = 0;
     unsigned int i, size, pos, align;
 
+#if defined(__riscv) && (__riscv_xlen == 64)
+    (void)double_count;
+#endif
+
     memset( params, 0x9f /* padding */, count );
 
     /* This pointer */
@@ -1161,15 +1195,19 @@ static unsigned int fill_params_array( ITypeInfo *typeinfo, FUNCDESC *desc,
         offset = ROUND_SIZE( offset, align );
         pos = offset / pointer_size;
 
-#ifdef __aarch64__
+#if defined(__aarch64__) || (defined(__riscv) && (__riscv_xlen == 64))
         switch (basetype)
         {
         case FC_FLOAT:
         case FC_DOUBLE:
+#ifdef __aarch64__
             if (double_count >= 8) break;
             params[pos] = 0x88 + double_count++;
             offset += size;
             continue;
+#endif
+            /* RISC-V lp64 passes scalar FP values in integer slots. */
+            /* fall through */
 
         default:
             reg_count = ROUND_SIZE( reg_count, align / pointer_size );
@@ -1234,7 +1272,7 @@ static unsigned int fill_params_array( ITypeInfo *typeinfo, FUNCDESC *desc,
     return count;
 }
 
-#endif  /* __arm__ || __aarch64__ */
+#endif  /* __arm__ || __aarch64__ || __riscv */
 
 static void write_proc_func_header(ITypeInfo *typeinfo, FUNCDESC *desc,
         WORD proc_idx, unsigned char *proc, size_t *proclen)
@@ -1259,7 +1297,7 @@ static void write_proc_func_header(ITypeInfo *typeinfo, FUNCDESC *desc,
     WRITE_CHAR (proc, *proclen, 0x47);  /* HasExtensions | HasReturn | ClientMustSize | ServerMustSize */
     WRITE_CHAR (proc, *proclen, desc->cParams + 1); /* incl. return value */
 
-#ifdef __i386__
+#if defined(__i386__) || (defined(__powerpc__) && !defined(__powerpc64__))
     WRITE_CHAR (proc, *proclen, 8);  /* extension size */
     WRITE_CHAR (proc, *proclen, 1);  /* HasNewCorrDesc */
     WRITE_SHORT(proc, *proclen, 0);  /* ClientCorrHint */
@@ -1286,6 +1324,10 @@ static void write_proc_func_header(ITypeInfo *typeinfo, FUNCDESC *desc,
     {
         unsigned int len, count = stack_size / sizeof(void *);
         unsigned char *params = malloc( count );
+#ifdef __REACTOS__
+        if (!params)
+            RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
         count = fill_params_array( typeinfo, desc, params, count );
         len = compress_params_array( params, count );
@@ -1402,11 +1444,15 @@ static HRESULT get_iface_info(ITypeInfo *typeinfo, WORD *funcs, WORD *parentfunc
 {
     ITypeInfo *parentinfo;
     TYPEATTR *typeattr;
+#ifndef __REACTOS__
     ITypeLib *typelib;
     TLIBATTR *libattr;
+#endif
     TYPEKIND typekind;
     HREFTYPE reftype;
+#ifndef __REACTOS__
     SYSKIND syskind;
+#endif
     HRESULT hr;
 
     /* Dual interfaces report their size to be sizeof(IDispatchVtbl) and their
@@ -1430,6 +1476,7 @@ static HRESULT get_iface_info(ITypeInfo *typeinfo, WORD *funcs, WORD *parentfunc
     else
         ITypeInfo_AddRef(*real_typeinfo = typeinfo);
 
+#ifndef __REACTOS__
     hr = ITypeInfo_GetContainingTypeLib(*real_typeinfo, &typelib, NULL);
     if (FAILED(hr))
         goto err;
@@ -1443,12 +1490,17 @@ static HRESULT get_iface_info(ITypeInfo *typeinfo, WORD *funcs, WORD *parentfunc
     syskind = libattr->syskind;
     ITypeLib_ReleaseTLibAttr(typelib, libattr);
     ITypeLib_Release(typelib);
+#endif
 
     hr = ITypeInfo_GetTypeAttr(*real_typeinfo, &typeattr);
     if (FAILED(hr))
         goto err;
     *funcs = typeattr->cFuncs;
+#ifdef __REACTOS__
+    *parentfuncs = typeattr->cbSizeVft / sizeof(void *) - *funcs;
+#else
     *parentfuncs = typeattr->cbSizeVft / (syskind == SYS_WIN64 ? 8 : 4) - *funcs;
+#endif
     ITypeInfo_ReleaseTypeAttr(*real_typeinfo, typeattr);
 
     hr = ITypeInfo_GetRefTypeOfImplType(*real_typeinfo, 0, &reftype);
@@ -1525,8 +1577,85 @@ static const IRpcProxyBufferVtbl typelib_proxy_vtbl =
     StdProxy_Disconnect,
 };
 
+#ifdef __REACTOS__
+HRESULT WINAPI CreateProxyFromTypeInfo(ITypeInfo *typeinfo, IUnknown *outer,
+        REFIID iid, IRpcProxyBuffer **proxy_buffer, void **out);
+HRESULT WINAPI CreateStubFromTypeInfo(ITypeInfo *typeinfo, REFIID iid,
+        IUnknown *server, IRpcStubBuffer **stub_buffer);
+
+static HRESULT get_parent_typeinfo(ITypeInfo *typeinfo, ITypeInfo **parent)
+{
+    ITypeInfo *real_typeinfo;
+    TYPEATTR *typeattr;
+    TYPEKIND typekind;
+    HREFTYPE reftype;
+    HRESULT hr;
+
+    hr = ITypeInfo_GetTypeAttr(typeinfo, &typeattr);
+    if (FAILED(hr))
+        return hr;
+    typekind = typeattr->typekind;
+    ITypeInfo_ReleaseTypeAttr(typeinfo, typeattr);
+
+    if (typekind == TKIND_DISPATCH)
+    {
+        hr = ITypeInfo_GetRefTypeOfImplType(typeinfo, -1, &reftype);
+        if (FAILED(hr))
+            return hr;
+        hr = ITypeInfo_GetRefTypeInfo(typeinfo, reftype, &real_typeinfo);
+        if (FAILED(hr))
+            return hr;
+    }
+    else
+        ITypeInfo_AddRef(real_typeinfo = typeinfo);
+
+    hr = ITypeInfo_GetRefTypeOfImplType(real_typeinfo, 0, &reftype);
+    if (SUCCEEDED(hr))
+        hr = ITypeInfo_GetRefTypeInfo(real_typeinfo, reftype, parent);
+    ITypeInfo_Release(real_typeinfo);
+    return hr;
+}
+
+static HRESULT create_parent_proxy(ITypeInfo *typeinfo, const GUID *parentiid,
+        IRpcProxyBuffer **proxy_buffer, void **out)
+{
+    ITypeInfo *parent;
+    HRESULT hr;
+
+    hr = create_proxy(parentiid, NULL, proxy_buffer, out);
+    if (hr != REGDB_E_IIDNOTREG)
+        return hr;
+
+    if (FAILED(get_parent_typeinfo(typeinfo, &parent)))
+        return hr;
+    hr = CreateProxyFromTypeInfo(parent, NULL, parentiid, proxy_buffer, out);
+    ITypeInfo_Release(parent);
+    return hr;
+}
+
+static HRESULT create_parent_stub(ITypeInfo *typeinfo, const GUID *parentiid,
+        IUnknown *server, IRpcStubBuffer **stub_buffer)
+{
+    ITypeInfo *parent;
+    HRESULT hr;
+
+    hr = create_stub(parentiid, server, stub_buffer);
+    if (hr != REGDB_E_IIDNOTREG)
+        return hr;
+
+    if (FAILED(get_parent_typeinfo(typeinfo, &parent)))
+        return hr;
+    hr = CreateStubFromTypeInfo(parent, parentiid, server, stub_buffer);
+    ITypeInfo_Release(parent);
+    return hr;
+}
+
+static HRESULT typelib_proxy_init(struct typelib_proxy *proxy, IUnknown *outer,
+        ITypeInfo *typeinfo, ULONG count, const GUID *parentiid, IRpcProxyBuffer **proxy_buffer, void **out)
+#else
 static HRESULT typelib_proxy_init(struct typelib_proxy *proxy, IUnknown *outer,
         ULONG count, const GUID *parentiid, IRpcProxyBuffer **proxy_buffer, void **out)
+#endif
 {
     if (!fill_stubless_table((IUnknownVtbl *)proxy->proxy_vtbl->Vtbl, count))
         return E_OUTOFMEMORY;
@@ -1541,8 +1670,13 @@ static HRESULT typelib_proxy_init(struct typelib_proxy *proxy, IUnknown *outer,
 
     if (!IsEqualGUID(parentiid, &IID_IUnknown))
     {
+#ifdef __REACTOS__
+        HRESULT hr = create_parent_proxy(typeinfo, parentiid, &proxy->proxy.base_proxy,
+                (void **)&proxy->proxy.base_object);
+#else
         HRESULT hr = create_proxy(parentiid, NULL, &proxy->proxy.base_proxy,
                 (void **)&proxy->proxy.base_object);
+#endif
         if (FAILED(hr)) return hr;
     }
 
@@ -1605,7 +1739,11 @@ HRESULT WINAPI CreateProxyFromTypeInfo(ITypeInfo *typeinfo, IUnknown *outer,
     }
     proxy->proxy_info.FormatStringOffset = &proxy->offset_table[-3];
 
+#ifdef __REACTOS__
+    hr = typelib_proxy_init(proxy, outer, typeinfo, funcs + parentfuncs, &parentiid, proxy_buffer, out);
+#else
     hr = typelib_proxy_init(proxy, outer, funcs + parentfuncs, &parentiid, proxy_buffer, out);
+#endif
     if (FAILED(hr))
     {
         free((void *)proxy->stub_desc.pFormatTypes);
@@ -1657,8 +1795,13 @@ static ULONG WINAPI typelib_stub_Release(IRpcStubBuffer *iface)
     return refcount;
 }
 
+#ifdef __REACTOS__
+static HRESULT typelib_stub_init(struct typelib_stub *stub, IUnknown *server,
+        ITypeInfo *typeinfo, const GUID *parentiid, IRpcStubBuffer **stub_buffer)
+#else
 static HRESULT typelib_stub_init(struct typelib_stub *stub, IUnknown *server,
         const GUID *parentiid, IRpcStubBuffer **stub_buffer)
+#endif
 {
     HRESULT hr;
 
@@ -1675,7 +1818,11 @@ static HRESULT typelib_stub_init(struct typelib_stub *stub, IUnknown *server,
     if (!IsEqualGUID(parentiid, &IID_IUnknown))
     {
         stub->stub.base_obj.lpVtbl = get_delegating_vtbl(stub->stub_vtbl.header.DispatchTableCount);
+#ifdef __REACTOS__
+        hr = create_parent_stub(typeinfo, parentiid, (IUnknown *)&stub->stub.base_obj, &stub->stub.base_stub);
+#else
         hr = create_stub(parentiid, &stub->stub.base_obj, &stub->stub.base_stub);
+#endif
         if (FAILED(hr))
         {
             IUnknown_Release(stub->stub.stub_buffer.pvServerObject);
@@ -1745,7 +1892,11 @@ HRESULT WINAPI CreateStubFromTypeInfo(ITypeInfo *typeinfo, REFIID iid,
         stub->stub_vtbl.Vtbl = CStdStubBuffer_Vtbl;
     stub->stub_vtbl.Vtbl.Release = typelib_stub_Release;
 
+#ifdef __REACTOS__
+    hr = typelib_stub_init(stub, server, typeinfo, &parentiid, stub_buffer);
+#else
     hr = typelib_stub_init(stub, server, &parentiid, stub_buffer);
+#endif
     if (FAILED(hr))
     {
         free((void *)stub->stub_desc.pFormatTypes);

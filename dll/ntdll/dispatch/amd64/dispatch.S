@@ -19,20 +19,29 @@ EXTERN RtlRaiseStatus:PROC
 
 .data
 
-Wow64PrepareForException:
+PUBLIC LdrpWow64PrepareForException
+LdrpWow64PrepareForException:
     .quad 0
 
 .code
 
 PUBLIC LdrInitializeThunk
 .PROC LdrInitializeThunk
-    mov rbp, 0
-    .setframe rbp, 0
+    sub rsp, HEX(38)
+    .allocstack HEX(38)
     .endprolog
 
-    /* First parameter is the APC context */
-    mov rcx, r9
-    jmp LdrpInit
+    mov [rsp + HEX(20)], rcx
+    xor r8d, r8d
+    call LdrpInit
+
+    mov rcx, [rsp + HEX(20)]
+    mov dl, 1
+    call NtContinue
+
+    mov ecx, eax
+    call RtlRaiseStatus
+    nop
 
 .ENDP
 
@@ -85,9 +94,25 @@ PUBLIC KiUserApcDispatcher
 
 PUBLIC KiRaiseUserExceptionDispatcher
 .PROC KiRaiseUserExceptionDispatcher
-    .endprolog
-    int 3
+    sub rsp, EXCEPTION_RECORD_LENGTH + HEX(20)
+    .ALLOCSTACK EXCEPTION_RECORD_LENGTH + HEX(20)
+    .ENDPROLOG
 
+    mov rax, gs:[TeSelf]
+    mov eax, [rax + TeExceptionCode]
+    mov [rsp + HEX(20) + ErExceptionCode], eax
+    mov dword ptr [rsp + HEX(20) + ErExceptionFlags], 0
+    mov qword ptr [rsp + HEX(20) + ErExceptionRecord], 0
+    mov rax, [rsp + EXCEPTION_RECORD_LENGTH + HEX(20)]
+    mov [rsp + HEX(20) + ErExceptionAddress], rax
+    mov dword ptr [rsp + HEX(20) + ErNumberParameters], 0
+
+    lea rcx, [rsp + HEX(20)]
+    call RtlRaiseException
+
+    mov eax, [rsp + HEX(20) + ErExceptionCode]
+    add rsp, EXCEPTION_RECORD_LENGTH + HEX(20)
+    ret
 .ENDP
 
 PUBLIC KiUserCallbackDispatcher
@@ -194,26 +219,26 @@ PUBLIC KiUserExceptionDispatcher
     .PUSHFRAME
 
     /* This is for the alignment, EXCEPTION_RECORD and CONTEXT */
-    .ALLOCSTACK 8 + EXCEPTION_RECORD_LENGTH + CONTEXT_FRAME_LENGTH
+    .ALLOCSTACK UesMachineFrame
     .ENDPROLOG
 
     /* Clear direction flag */
     cld
 
     /* Check the WOW64 callback */
-    mov rax, qword ptr Wow64PrepareForException[rip]
+    mov rax, qword ptr LdrpWow64PrepareForException[rip]
     test rax, rax
     jz .NoWow64
 
     /* Prepare for WOW64 exception dispatching */
-    lea rcx, [rsp + CONTEXT_FRAME_LENGTH] /* ExceptionRecord */
+    lea rcx, [rsp + UesExceptionRecord] /* ExceptionRecord */
     lea rdx, [rsp] /* ContextRecord */
     call rax
 
 .NoWow64:
 
     /* Dispatch the exception */
-    lea rcx, [rsp + CONTEXT_FRAME_LENGTH] /* ExceptionRecord */
+    lea rcx, [rsp + UesExceptionRecord] /* ExceptionRecord */
     lea rdx, [rsp] /* ContextRecord */
     call RtlDispatchException
 
@@ -232,13 +257,13 @@ PUBLIC KiUserExceptionDispatcher
 RaiseException:
 
     /* Raise the exception */
-    lea rcx, [rsp + CONTEXT_FRAME_LENGTH] /* ExceptionRecord */
+    lea rcx, [rsp + UesExceptionRecord] /* ExceptionRecord */
     lea rdx, [rsp] /* ContextRecord */
     xor r8, r8
     call ZwRaiseException
 
 Exit:
-    lea rcx, [rsp + CONTEXT_FRAME_LENGTH] /* ExceptionRecord */
+    lea rcx, [rsp + UesExceptionRecord] /* ExceptionRecord */
     mov rdx, rax
     call KiUserExceptionDispatcherNested
     ret
@@ -274,4 +299,3 @@ Exit:
 .ENDP
 
 END
-

@@ -216,7 +216,7 @@
 216 stdcall -noname SHAnsiToUnicodeCP(long str ptr long)
 217 stdcall -noname SHUnicodeToAnsi(wstr ptr ptr)
 218 stdcall -noname SHUnicodeToAnsiCP(long wstr ptr long)
-219 stdcall -noname QISearch(long long long long)
+219 stdcall QISearch(long long long long)
 220 stdcall -noname SHSetDefaultDialogFont(ptr long)
 221 stdcall -noname SHRemoveDefaultDialogFont(ptr)
 222 stdcall -noname SHGlobalCounterCreate(long)
@@ -378,14 +378,14 @@
 378 stdcall -noname MLLoadLibraryW(wstr long long)
 379 stub -noname Shell_GetCachedImageIndexWrapW
 380 stub -noname Shell_GetCachedImageIndexWrapA
-381 stdcall -noname AssocCopyVerbs(ptr ptr)
+381 stub -noname AssocCopyVerbs
 382 stdcall -noname ZoneComputePaneSize(ptr)
 383 stub -noname ZoneConfigureW
 384 stdcall -noname SHRestrictedMessageBox(ptr)
 385 stub -noname SHLoadRawAccelerators
 386 stub -noname SHQueryRawAccelerator
 387 stub -noname SHQueryRawAcceleratorMsg
-388 varargs -noname ShellMessageBoxWrapW(ptr ptr wstr wstr long)
+388 varargs ShellMessageBoxW(long long wstr wstr long)
 389 stdcall -noname GetSaveFileNameWrapW(ptr)
 390 stdcall -noname WNetRestoreConnectionWrapW(long wstr)
 391 stdcall -noname WNetGetLastErrorWrapW(ptr ptr long ptr long)
@@ -404,10 +404,10 @@
 404 stdcall -noname IShellFolder_EnumObjects(ptr ptr long ptr) SHIShellFolder_EnumObjects
 405 stdcall -noname MLBuildResURLA(str ptr long str ptr long)
 406 stdcall -noname MLBuildResURLW(wstr ptr long wstr ptr long)
-407 stdcall -noname AssocMakeProgid(ptr ptr ptr ptr)
-408 stdcall -noname AssocMakeShell(ptr ptr ptr ptr)
-409 stdcall -noname AssocMakeApplicationByKeyW(ptr ptr ptr)
-410 stdcall -noname AssocMakeApplicationByKeyA(ptr ptr ptr)
+407 stub -noname AssocMakeProgid
+408 stub -noname AssocMakeShell
+409 stub -noname AssocMakeApplicationByKeyW
+410 stub -noname AssocMakeApplicationByKeyA
 411 stub -noname AssocMakeFileExtsToApplicationW
 412 stub -noname AssocMakeFileExtsToApplicationA
 413 stdcall -noname SHGetMachineInfo(long)
@@ -434,7 +434,7 @@
 434 stdcall -noname SendMessageTimeoutWrapW(long long long long long long ptr) user32.SendMessageTimeoutW
 435 stdcall -noname CLSIDFromProgIDWrap(wstr ptr) ole32.CLSIDFromProgID
 436 stdcall -noname CLSIDFromStringWrap(wstr ptr)
-437 stdcall -noname IsOS(long)
+437 stdcall -ordinal IsOS(long)
 438 stdcall -noname SHLoadRegUIStringA(ptr str ptr long)
 439 stdcall -noname SHLoadRegUIStringW(ptr wstr ptr long)
 440 stdcall -noname SHGetWebFolderFilePathA(str ptr long)
@@ -544,7 +544,7 @@
 548 stdcall -noname SHAreIconsEqual(ptr ptr)
 549 stdcall -noname SHCoCreateInstanceAC(ptr ptr long ptr ptr)
 550 stub -noname GetTemplateInfoFromHandle
-551 stdcall -noname IShellFolder_CompareIDs(ptr ptr ptr ptr)
+551 stdcall -noname -version=0x501-0x502 IShellFolder_CompareIDs(ptr ptr ptr ptr)
 552 stdcall -noname -version=0x501-0x502 SHEvaluateSystemCommandTemplate(wstr ptr ptr ptr)
 553 stdcall IsInternetESCEnabled()
 554 stdcall -noname -stub SHGetAllAccessSA()
@@ -563,6 +563,7 @@
 
 571 stdcall -noname -version=0x600+ SHInvokeCommandWithFlagsAndSite(ptr ptr ptr ptr long str)
 
+635 stdcall -noname -version=0x602+ ShlwapiOrdinal635(ptr ptr ptr ptr)
 639 stdcall -noname -version=0x600+ SHInvokeCommandOnContextMenuEx(ptr ptr ptr long long str wstr)
 
 @ stdcall AssocCreate(int128 ptr ptr)
@@ -772,6 +773,7 @@
 @ stdcall SHSkipJunction(ptr ptr)
 @ stdcall SHStrDupA(str ptr)
 @ stdcall SHStrDupW(wstr ptr)
+@ varargs ShellMessageBoxA(long long str str long)
 @ stdcall StrCSpnA(str str) kernelbase_ros.StrCSpnA
 @ stdcall StrCSpnIA(str str) kernelbase_ros.StrCSpnIA
 @ stdcall StrCSpnIW(wstr wstr) kernelbase_ros.StrCSpnIW
@@ -868,4 +870,3 @@
 @ varargs wnsprintfW(ptr long wstr)
 @ stdcall wvnsprintfA(ptr long str ptr)
 @ stdcall wvnsprintfW(ptr long wstr ptr)
-

@@ -39,6 +39,7 @@ interface INetConnection : IUnknown
         NCCF_ALLOW_DUPLICATION  = 0x0002,
         NCCF_ALLOW_REMOVAL      = 0x0004,
         NCCF_ALLOW_RENAME       = 0x0008,
+        NCCF_SHOW_ICON          = 0x0010,
         NCCF_INCOMING_ONLY      = 0x0020,
         NCCF_OUTGOING_ONLY      = 0x0040,
         NCCF_BRANDED            = 0x0080,
@@ -108,6 +109,9 @@ interface INetConnection : IUnknown
         CLSID             clsidUiObject;
     } NETCON_PROPERTIES;
 
+cpp_quote("VOID WINAPI NcFreeNetconProperties(NETCON_PROPERTIES *pProps);")
+cpp_quote("BOOL WINAPI NcIsValidConnectionName(PCWSTR pszwName);")
+
     HRESULT Connect();
 
     HRESULT Disconnect();
@@ -123,6 +127,64 @@ interface INetConnection : IUnknown
     HRESULT GetUiObjectClassId([out, ref] CLSID *pclsid);
 
     HRESULT Rename([in, string] LPCWSTR pszwNewName);
+}
+
+[
+    object,
+    uuid(c08956a0-1cd3-11d1-b1c5-00805fc1270e),
+    pointer_default(unique)
+]
+interface IEnumNetConnection : IUnknown
+{
+    HRESULT Next(
+            [in] ULONG celt,
+            [out, size_is(celt), length_is(*pceltFetched)] INetConnection **rgelt,
+            [out] ULONG *pceltFetched);
+
+    HRESULT Skip([in] ULONG celt);
+
+    HRESULT Reset();
+
+    HRESULT Clone([out] IEnumNetConnection **ppenum);
+}
+
+[
+    object,
+    uuid(c08956a2-1cd3-11d1-b1c5-00805fc1270e),
+    pointer_default(unique)
+]
+interface INetConnectionManager : IUnknown
+{
+    typedef enum tagNETCONMGR_ENUM_FLAGS
+    {
+        NCME_DEFAULT = 0x0,
+        NCME_HIDDEN  = 0x1,
+    } NETCONMGR_ENUM_FLAGS;
+
+    HRESULT EnumConnections(
+            [in] NETCONMGR_ENUM_FLAGS Flags,
+            [out] IEnumNetConnection **ppEnum);
+}
+
+[
+    object,
+    uuid(c08956a3-1cd3-11d1-b1c5-00805fc1270e),
+    pointer_default(unique)
+]
+interface INetConnectionConnectUi : IUnknown
+{
+    typedef enum tagNETCONUI_CONNECT_FLAGS
+    {
+        NCUC_DEFAULT        = 0x0000,
+        NCUC_NO_UI          = 0x0001,
+        NCUC_ENABLE_DISABLE = 0x0002
+    } NETCONUI_CONNECT_FLAGS;
+
+    HRESULT SetConnection([in] INetConnection *pCon);
+
+    HRESULT Connect([in] HWND hwndParent, [in] DWORD dwFlags);
+
+    HRESULT Disconnect([in] HWND hwndParent, [in] DWORD dwFlags);
 }
 
 [

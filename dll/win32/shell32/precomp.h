@@ -50,19 +50,7 @@
 #undef ShellExecute
 #include <undocshell.h>
 
-/*
- * For versions < Vista+, redefine ShellMessageBoxW to ShellMessageBoxWrapW
- * (this is needed to avoid a linker error). On Vista+ onwards, shell32.ShellMessageBoxW
- * redirects to shlwapi.ShellMessageBoxW so the #define should not be needed.
- *
- * However our shell32 is built with _WIN32_WINNT set to 0x600 (Vista+),
- * yet its exports (especially regarding ShellMessageBoxA/W) are Win2003
- * compatible. So the #define is still needed, and the check be disabled.
- */
-// #if (_WIN32_WINNT < 0x0600)
-#define ShellMessageBoxW ShellMessageBoxWrapW
-// #endif
-
+/* Vista and later forward ShellMessageBoxA/W to their SHLWAPI implementations. */
 #include <browseui_undoc.h>
 
 #include <shellutils.h>
@@ -77,14 +65,11 @@
 #include "CEnumIDListBase.h"
 #include "shfldr.h"
 #include "CShellItem.h"
-#include "CShellItemArray.h"
-#include "CSimpleShellItemArray.h"
 #include "CShellLink.h"
 #include "CFolderItemVerbs.h"
 #include "CFolderItems.h"
 #include "CFolder.h"
 #include "CShellDispatch.h"
-#include "CShellLibrary.h"
 #include "CDropTargetHelper.h"
 #include "CFolderOptions.h"
 #include "folders/CFSFolder.h"
@@ -94,8 +79,6 @@
 #include "folders/CMyDocsFolder.h"
 #include "folders/CNetFolder.h"
 #include "folders/CFontsFolder.h"
-#include "folders/CPrinterFolder.h"
-#include "folders/CAdminToolsFolder.h"
 #include "folders/CRecycleBin.h"
 #include "folders/CRecycleBinFolderViewCB.h"
 #include "droptargets/CexeDropHandler.h"
@@ -105,6 +88,11 @@
 #include "CSendToMenu.h"
 #include "CCopyMoveToMenu.h"
 #include "CCopyAsPathMenu.h"
+#include "CStartMenuPin.h"
+#include "CEnumerableObjectCollection.h"
+#include "CDestinationList.h"
+#include "CAutomaticDestinations.h"
+#include "CTextPreviewHandler.h"
 #include "dialogs/filedefext.h"
 #include "dialogs/drvdefext.h"
 #include "CQueryAssociations.h"
@@ -113,8 +101,20 @@
 #include "shellmenu/CMenuSite.h"
 #include "shellmenu/CMergedFolder.h"
 #include "shellmenu/shellmenu.h"
-#include "CUserEventTimer.h"
 #include "CUserNotification.h"
+#include <oleacc.h>
+#include <shdeprecated.h>
+#include "shellmenu/CTrackShellMenu.h"
+#include "autocomplete/ACLCustomMRU.h"
+#include "autocomplete/aclhistory.h"
+#include "autocomplete/aclistisf.h"
+#include "autocomplete/aclmulti.h"
+#include "autocomplete/CAutoComplete.h"
+#include "bandproxy.h"
+#include "regtreeoptions.h"
+#include "CUserAssist.h"
+#include "COperationsProgressDialog.h"
+#include "CISFBand.h"
 #include "dialogs/folder_options.h"
 #include "shelldesktop/CChangeNotifyServer.h"
 #include "utils.h"
@@ -138,6 +138,8 @@ extern const GUID SHELL32_AdvtShortcutComponent;
 
 #define SHV_CHANGE_NOTIFY   (WM_USER + 0x1111)
 #define SHV_UPDATESTATUSBAR (WM_USER + 0x1112)
+#define SHV_FILL_LIST       (WM_USER + 0x1113)
+#define SHV_ARRANGE_COMPUTER (WM_USER + 0x1114)
 
 extern inline
 BOOL
@@ -166,7 +168,7 @@ AddPropSheetPage(HPROPSHEETPAGE hPage, LPFNSVADDPROPSHEETPAGE pfnAddPage, LPARAM
     return E_FAIL;
 }
 
-template<class T> static UINT CALLBACK
+template<class T> UINT CALLBACK
 PropSheetPageLifetimeCallback(HWND hWnd, UINT uMsg, PROPSHEETPAGEW *pPSP)
 {
     if (uMsg == PSPCB_RELEASE)
@@ -176,14 +178,18 @@ PropSheetPageLifetimeCallback(HWND hWnd, UINT uMsg, PROPSHEETPAGEW *pPSP)
 
 HRESULT
 SHELL32_ShowPropertiesDialog(IDataObject *pdtobj);
-HRESULT
+EXTERN_C HRESULT
 SHELL32_ShowFilesystemItemPropertiesDialogAsync(IDataObject *pDO);
-HRESULT
+EXTERN_C HRESULT
 SHELL32_ShowFilesystemItemsPropertiesDialogAsync(HWND hOwner, IDataObject *pDO);
-HRESULT
+EXTERN_C HRESULT
 SHELL32_ShowShellExtensionProperties(const CLSID *pClsid, IDataObject *pDO);
-HRESULT
+EXTERN_C HRESULT
 SHELL_ShowItemIDListProperties(LPCITEMIDLIST pidl);
+HRESULT
+SHELL32_AddShellLinkPropPage(PCWSTR pszLinkPath, LPFNADDPROPSHEETPAGE pfnAddPage, LPARAM lParam);
+EXTERN_C BOOL
+IsDriveFloppyW(LPCWSTR pszDriveRoot);
 
 typedef HDSA HDCMA; // DynamicContextMenuArray
 typedef struct _DCMENTRY
@@ -356,7 +362,15 @@ typedef enum _FILEOPCALLBACKEVENT {
 } FILEOPCALLBACKEVENT;
 typedef HRESULT (CALLBACK *FILEOPCALLBACK)(FILEOPCALLBACKEVENT Event, LPCWSTR Source, LPCWSTR Destination,
                                            UINT Attributes, HRESULT hr, void *CallerData);
-int SHELL32_FileOperation(LPSHFILEOPSTRUCTW lpFileOp, FILEOPCALLBACK Callback, void *CallerData);
-HRESULT SHELL_SingleFileOperation(HWND hWnd, UINT Op, PCWSTR Src, PCWSTR Dest, UINT Flags, PWSTR *ppNewName);
+struct FILEOP_PROGRESS
+{
+    IOperationsProgressDialog *Dialog;
+    ULONGLONG TotalBytes, TotalItems, CompletedBytes, CompletedItems;
+};
+int SHELL32_FileOperation(LPSHFILEOPSTRUCTW lpFileOp, FILEOPCALLBACK Callback, void *CallerData, FILEOP_PROGRESS *Progress = NULL);
+HRESULT SHELL32_CountFileOperation(PCWSTR Path, ULONGLONG *Bytes, ULONGLONG *Items, IOperationsProgressDialog *Dialog = NULL);
+EXTERN_C HRESULT SHELL_SingleFileOperation(HWND hWnd, UINT Op, PCWSTR Src, PCWSTR Dest, UINT Flags, PWSTR *ppNewName);
+
+#include "CFileOperation.h"
 
 #endif /* _PRECOMP_H__ */

@@ -1,0 +1,7 @@
+@ stdcall -arch=win64 KsrClaimPersistedMemory(ptr int64 ptr long long ptr)
+@ stdcall -arch=win64 KsrQueryMetadata(ptr int64 ptr long ptr)
+@ stdcall -arch=win64 KsrFreePersistedMemory(ptr long)
+@ stdcall -arch=win64 KsrPersistMemoryWithMetadata(ptr ptr long ptr long ptr)
+@ stdcall -arch=win64 KsrGetFirmwareInformation(ptr)
+@ stdcall -arch=win64 KsrEnumeratePersistedMemory(ptr ptr ptr)
+@ stdcall -arch=win64 KsrMdlToMemoryRuns(ptr ptr long ptr)

@@ -9,8 +9,8 @@
 #ifndef _INC_TIME // include guard for 3rd party interop
 #define _INC_TIME
 
-#include <corecrt.h>
-#include <corecrt_wtime.h>
+#include "corecrt.h"
+#include "corecrt_wtime.h"
 
 #pragma warning(push)
 #pragma warning(disable: _UCRT_DISABLED_WARNINGS)
@@ -41,7 +41,8 @@ struct _timespec64
     long       tv_nsec;
 };
 
-#ifndef _CRT_NO_TIME_T
+#if !defined _CRT_NO_TIME_T && !defined _TIMESPEC_DEFINED
+    #define _TIMESPEC_DEFINED
     struct timespec
     {
         time_t tv_sec;  // Seconds - >= 0

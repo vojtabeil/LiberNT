@@ -23,7 +23,6 @@
 #include <string.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winerror.h"
@@ -33,10 +32,24 @@
 
 #include "kernelbase.h"
 #include "wine/debug.h"
-#include "wine/heap.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(security);
 
+#ifdef __REACTOS__
+NTSYSAPI NTSTATUS NTAPI NtAccessCheckByType(PSECURITY_DESCRIPTOR, PSID, HANDLE, ACCESS_MASK,
+                                         POBJECT_TYPE_LIST, ULONG, PGENERIC_MAPPING,
+                                         PPRIVILEGE_SET, PULONG, PACCESS_MASK, PNTSTATUS);
+NTSYSAPI NTSTATUS NTAPI NtAccessCheckByTypeResultList(PSECURITY_DESCRIPTOR, PSID, HANDLE, ACCESS_MASK,
+                                                   POBJECT_TYPE_LIST, ULONG, PGENERIC_MAPPING,
+                                                   PPRIVILEGE_SET, PULONG, PACCESS_MASK, PNTSTATUS);
+NTSYSAPI NTSTATUS NTAPI NtDeleteObjectAuditAlarm(PUNICODE_STRING, PVOID, BOOLEAN);
+NTSYSAPI NTSTATUS NTAPI RtlSetInformationAcl(PACL, PVOID, ULONG, ACL_INFORMATION_CLASS);
+
+#endif
+NTSYSAPI NTSTATUS WINAPI RtlSetSecurityObject(SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+                                             PSECURITY_DESCRIPTOR *, PGENERIC_MAPPING, HANDLE);
+NTSYSAPI NTSTATUS WINAPI RtlSetSecurityObjectEx(SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+                                               PSECURITY_DESCRIPTOR *, ULONG, PGENERIC_MAPPING, HANDLE);
 
 /******************************************************************************
  * SID functions
@@ -114,6 +127,31 @@ static const WELLKNOWNSID WellKnownSids[] =
     { WinHighLabelSid, { SID_REVISION, 1, { SECURITY_MANDATORY_LABEL_AUTHORITY}, { SECURITY_MANDATORY_HIGH_RID } } },
     { WinSystemLabelSid, { SID_REVISION, 1, { SECURITY_MANDATORY_LABEL_AUTHORITY}, { SECURITY_MANDATORY_SYSTEM_RID } } },
     { WinBuiltinAnyPackageSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_APP_PACKAGE_BASE_RID, SECURITY_BUILTIN_PACKAGE_ANY_PACKAGE } } },
+#ifdef __REACTOS__
+    { WinBuiltinIUsersSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_IUSERS } } },
+    { WinIUserSid, { SID_REVISION, 1, { SECURITY_NT_AUTHORITY }, { SECURITY_IUSER_RID } } },
+    { WinBuiltinCryptoOperatorsSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_CRYPTO_OPERATORS } } },
+    { WinUntrustedLabelSid, { SID_REVISION, 1, { SECURITY_MANDATORY_LABEL_AUTHORITY }, { SECURITY_MANDATORY_UNTRUSTED_RID } } },
+    { WinWriteRestrictedCodeSid, { SID_REVISION, 1, { SECURITY_NT_AUTHORITY }, { SECURITY_WRITE_RESTRICTED_CODE_RID } } },
+    { WinEnterpriseReadonlyControllersSid, { SID_REVISION, 1, { SECURITY_NT_AUTHORITY }, { SECURITY_ENTERPRISE_READONLY_CONTROLLERS_RID } } },
+    { WinBuiltinEventLogReadersGroup, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_EVENT_LOG_READERS_GROUP } } },
+    { WinBuiltinCertSvcDComAccessGroup, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_CERTSVC_DCOM_ACCESS_GROUP } } },
+    { WinMediumPlusLabelSid, { SID_REVISION, 1, { SECURITY_MANDATORY_LABEL_AUTHORITY }, { SECURITY_MANDATORY_MEDIUM_RID + 0x100 } } },
+    { WinConsoleLogonSid, { SID_REVISION, 1, { SECURITY_LOCAL_SID_AUTHORITY }, { SECURITY_LOCAL_LOGON_RID } } },
+    { WinThisOrganizationCertificateSid, { SID_REVISION, 2, { SECURITY_NT_AUTHORITY }, { SECURITY_CRED_TYPE_BASE_RID, SECURITY_CRED_TYPE_THIS_ORG_CERT_RID } } },
+    { WinCapabilityInternetClientSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_CAPABILITY_BASE_RID, SECURITY_CAPABILITY_INTERNET_CLIENT } } },
+    { WinCapabilityInternetClientServerSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_CAPABILITY_BASE_RID, SECURITY_CAPABILITY_INTERNET_CLIENT_SERVER } } },
+    { WinCapabilityPrivateNetworkClientServerSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_CAPABILITY_BASE_RID, SECURITY_CAPABILITY_PRIVATE_NETWORK_CLIENT_SERVER } } },
+    { WinCapabilityPicturesLibrarySid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_CAPABILITY_BASE_RID, SECURITY_CAPABILITY_PICTURES_LIBRARY } } },
+    { WinCapabilityVideosLibrarySid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_CAPABILITY_BASE_RID, SECURITY_CAPABILITY_VIDEOS_LIBRARY } } },
+    { WinCapabilityMusicLibrarySid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_CAPABILITY_BASE_RID, SECURITY_CAPABILITY_MUSIC_LIBRARY } } },
+    { WinCapabilityDocumentsLibrarySid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_CAPABILITY_BASE_RID, SECURITY_CAPABILITY_DOCUMENTS_LIBRARY } } },
+    { WinCapabilitySharedUserCertificatesSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_CAPABILITY_BASE_RID, SECURITY_CAPABILITY_SHARED_USER_CERTIFICATES } } },
+    { WinCapabilityEnterpriseAuthenticationSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_CAPABILITY_BASE_RID, SECURITY_CAPABILITY_ENTERPRISE_AUTHENTICATION } } },
+    { WinCapabilityRemovableStorageSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_CAPABILITY_BASE_RID, SECURITY_CAPABILITY_REMOVABLE_STORAGE } } },
+    { WinCapabilityAppointmentsSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_CAPABILITY_BASE_RID, SECURITY_CAPABILITY_APPOINTMENTS } } },
+    { WinCapabilityContactsSid, { SID_REVISION, 2, { SECURITY_APP_PACKAGE_AUTHORITY }, { SECURITY_CAPABILITY_BASE_RID, SECURITY_CAPABILITY_CONTACTS } } },
+#endif
 };
 
 /* these SIDs must be constructed as relative to some domain - only the RID is well-known */
@@ -138,6 +176,12 @@ static const WELLKNOWNRID WellKnownRids[] =
     { WinAccountEnterpriseAdminsSid, DOMAIN_GROUP_RID_ENTERPRISE_ADMINS },
     { WinAccountPolicyAdminsSid,     DOMAIN_GROUP_RID_POLICY_ADMINS },
     { WinAccountRasAndIasServersSid, DOMAIN_ALIAS_RID_RAS_SERVERS },
+#ifdef __REACTOS__
+    { WinCacheablePrincipalsGroupSid, DOMAIN_ALIAS_RID_CACHEABLE_PRINCIPALS_GROUP },
+    { WinNonCacheablePrincipalsGroupSid, DOMAIN_ALIAS_RID_NON_CACHEABLE_PRINCIPALS_GROUP },
+    { WinAccountReadonlyControllersSid, DOMAIN_GROUP_RID_READONLY_CONTROLLERS },
+    { WinNewEnterpriseReadonlyControllersSid, DOMAIN_GROUP_RID_ENTERPRISE_READONLY_DOMAIN_CONTROLLERS },
+#endif
 };
 
 static NTSTATUS open_file( LPCWSTR name, DWORD access, HANDLE *file )
@@ -148,12 +192,8 @@ static NTSTATUS open_file( LPCWSTR name, DWORD access, HANDLE *file )
     NTSTATUS status;
 
     if ((status = RtlDosPathNameToNtPathName_U_WithStatus( name, &file_nameW, NULL, NULL ))) return status;
-    attr.Length = sizeof(attr);
-    attr.RootDirectory = 0;
-    attr.Attributes = OBJ_CASE_INSENSITIVE;
-    attr.ObjectName = &file_nameW;
-    attr.SecurityDescriptor = NULL;
-    status = NtCreateFile( file, access|SYNCHRONIZE, &attr, &io, NULL, FILE_FLAG_BACKUP_SEMANTICS,
+    InitializeObjectAttributes( &attr, &file_nameW, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = NtCreateFile( file, access|SYNCHRONIZE, &attr, &io, NULL, 0,
                            FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, FILE_OPEN,
                            FILE_OPEN_FOR_BACKUP_INTENT, NULL, 0 );
     RtlFreeUnicodeString( &file_nameW );
@@ -164,48 +204,45 @@ static const char *debugstr_sid( PSID sid )
 {
     int auth;
     SID * psid = sid;
+    DWORD *subauth;
 
     if (psid == NULL) return "(null)";
-
     auth = psid->IdentifierAuthority.Value[5] +
         (psid->IdentifierAuthority.Value[4] << 8) +
         (psid->IdentifierAuthority.Value[3] << 16) +
         (psid->IdentifierAuthority.Value[2] << 24);
 
-    switch (psid->SubAuthorityCount) {
-    case 0:
+    if (!psid->SubAuthorityCount)
         return wine_dbg_sprintf("S-%d-%d", psid->Revision, auth);
+    subauth = GetSidSubAuthority( sid, 0 );
+
+    switch (psid->SubAuthorityCount) {
     case 1:
         return wine_dbg_sprintf("S-%d-%d-%lu", psid->Revision, auth,
-                                psid->SubAuthority[0]);
+                                subauth[0]);
     case 2:
         return wine_dbg_sprintf("S-%d-%d-%lu-%lu", psid->Revision, auth,
-                                psid->SubAuthority[0], psid->SubAuthority[1]);
+                                subauth[0], subauth[1]);
     case 3:
         return wine_dbg_sprintf("S-%d-%d-%lu-%lu-%lu", psid->Revision, auth,
-                                psid->SubAuthority[0], psid->SubAuthority[1], psid->SubAuthority[2]);
+                                subauth[0], subauth[1], subauth[2]);
     case 4:
         return wine_dbg_sprintf("S-%d-%d-%lu-%lu-%lu-%lu", psid->Revision, auth,
-                                psid->SubAuthority[0], psid->SubAuthority[1], psid->SubAuthority[2],
-                                psid->SubAuthority[3]);
+                                subauth[0], subauth[1], subauth[2], subauth[3]);
     case 5:
         return wine_dbg_sprintf("S-%d-%d-%lu-%lu-%lu-%lu-%lu", psid->Revision, auth,
-                                psid->SubAuthority[0], psid->SubAuthority[1], psid->SubAuthority[2],
-                                psid->SubAuthority[3], psid->SubAuthority[4]);
+                                subauth[0], subauth[1], subauth[2], subauth[3], subauth[4]);
     case 6:
         return wine_dbg_sprintf("S-%d-%d-%lu-%lu-%lu-%lu-%lu-%lu", psid->Revision, auth,
-                                psid->SubAuthority[3], psid->SubAuthority[1], psid->SubAuthority[2],
-                                psid->SubAuthority[0], psid->SubAuthority[4], psid->SubAuthority[5]);
+                                subauth[0], subauth[1], subauth[2], subauth[3], subauth[4], subauth[5]);
     case 7:
         return wine_dbg_sprintf("S-%d-%d-%lu-%lu-%lu-%lu-%lu-%lu-%lu", psid->Revision, auth,
-                                psid->SubAuthority[0], psid->SubAuthority[1], psid->SubAuthority[2],
-                                psid->SubAuthority[3], psid->SubAuthority[4], psid->SubAuthority[5],
-                                psid->SubAuthority[6]);
+                                subauth[0], subauth[1], subauth[2], subauth[3], subauth[4], subauth[5],
+                                subauth[6]);
     case 8:
         return wine_dbg_sprintf("S-%d-%d-%lu-%lu-%lu-%lu-%lu-%lu-%lu-%lu", psid->Revision, auth,
-                                psid->SubAuthority[0], psid->SubAuthority[1], psid->SubAuthority[2],
-                                psid->SubAuthority[3], psid->SubAuthority[4], psid->SubAuthority[5],
-                                psid->SubAuthority[6], psid->SubAuthority[7]);
+                                subauth[0], subauth[1], subauth[2], subauth[3], subauth[4], subauth[5],
+                                subauth[6], subauth[7]);
     }
     return "(too-big)";
 }
@@ -234,7 +271,11 @@ BOOL WINAPI AllocateLocallyUniqueId( PLUID luid )
  */
 BOOL WINAPI CopySid( DWORD len, PSID dest, PSID source )
 {
+#ifdef __REACTOS__
+    return set_ntstatus( RtlCopySid( len, dest, source ));
+#else
     return RtlCopySid( len, dest, source );
+#endif
 }
 
 /******************************************************************************
@@ -387,7 +428,11 @@ BOOL WINAPI GetWindowsAccountDomainSid( PSID sid, PSID domain_sid, DWORD *size )
 
     if (*GetSidSubAuthorityCount( sid ) < 4)
     {
+#ifdef __REACTOS__
+        SetLastError( ERROR_NON_ACCOUNT_SID );
+#else
         SetLastError( ERROR_INVALID_SID );
+#endif
         return FALSE;
     }
 
@@ -511,6 +556,28 @@ BOOL WINAPI IsWellKnownSid( PSID sid, WELL_KNOWN_SID_TYPE type )
             if (EqualSid(sid, (PSID)&WellKnownSids[i].Sid.Revision))
                 return TRUE;
 
+#ifdef __REACTOS__
+    if (type == WinLogonIdsSid && IsValidSid(sid) &&
+        *GetSidSubAuthorityCount(sid) == SECURITY_LOGON_IDS_RID_COUNT)
+    {
+        static const SID_IDENTIFIER_AUTHORITY nt_authority = { SECURITY_NT_AUTHORITY };
+
+        return !memcmp(GetSidIdentifierAuthority(sid), &nt_authority, sizeof(nt_authority)) &&
+               *GetSidSubAuthority(sid, 0) == SECURITY_LOGON_IDS_RID;
+    }
+
+    if (IsValidSid(sid) && *GetSidSubAuthorityCount(sid) == 5)
+    {
+        static const SID_IDENTIFIER_AUTHORITY authority = { SECURITY_NT_AUTHORITY };
+
+        if (!memcmp(GetSidIdentifierAuthority(sid), &authority, sizeof(authority)) &&
+            *GetSidSubAuthority(sid, 0) == SECURITY_NT_NON_UNIQUE)
+            for (i = 0; i < ARRAY_SIZE(WellKnownRids); ++i)
+                if (WellKnownRids[i].Type == type)
+                    return *GetSidSubAuthority(sid, 4) == WellKnownRids[i].Rid;
+    }
+#endif
+
     return FALSE;
 }
 
@@ -592,7 +659,7 @@ BOOL WINAPI CheckTokenMembership( HANDLE token, PSID sid_to_check, PBOOL is_memb
     if (!ret && GetLastError() != ERROR_INSUFFICIENT_BUFFER)
         goto exit;
 
-    token_groups = heap_alloc(size);
+    token_groups = HeapAlloc(GetProcessHeap(), 0, size);
     if (!token_groups)
     {
         ret = FALSE;
@@ -618,7 +685,7 @@ BOOL WINAPI CheckTokenMembership( HANDLE token, PSID sid_to_check, PBOOL is_memb
     }
 
 exit:
-    heap_free(token_groups);
+    HeapFree(GetProcessHeap(), 0, token_groups);
     if (thread_token != NULL) CloseHandle(thread_token);
     return ret;
 }
@@ -641,21 +708,27 @@ BOOL WINAPI CreateRestrictedToken( HANDLE token, DWORD flags,
 
     if (disable_sid_count)
     {
-        if (!(nt_disable_sids = heap_alloc( offsetof( TOKEN_GROUPS, Groups[disable_sid_count] ) ))) goto out;
+        if (!(nt_disable_sids = HeapAlloc( GetProcessHeap(), 0,
+                                           offsetof( TOKEN_GROUPS, Groups[disable_sid_count] ) )))
+            goto out;
         nt_disable_sids->GroupCount = disable_sid_count;
         memcpy( nt_disable_sids->Groups, disable_sids, disable_sid_count * sizeof(*disable_sids) );
     }
 
     if (delete_priv_count)
     {
-        if (!(nt_privs = heap_alloc( offsetof( TOKEN_PRIVILEGES, Privileges[delete_priv_count] ) ))) goto out;
+        if (!(nt_privs = HeapAlloc( GetProcessHeap(), 0,
+                                    offsetof( TOKEN_PRIVILEGES, Privileges[delete_priv_count] ) )))
+            goto out;
         nt_privs->PrivilegeCount = delete_priv_count;
         memcpy( nt_privs->Privileges, delete_privs, delete_priv_count * sizeof(*delete_privs) );
     }
 
     if (restrict_sid_count)
     {
-        if (!(nt_restrict_sids = heap_alloc( offsetof( TOKEN_GROUPS, Groups[restrict_sid_count] ) ))) goto out;
+        if (!(nt_restrict_sids = HeapAlloc( GetProcessHeap(), 0,
+                                            offsetof( TOKEN_GROUPS, Groups[restrict_sid_count] ) )))
+            goto out;
         nt_restrict_sids->GroupCount = restrict_sid_count;
         memcpy( nt_restrict_sids->Groups, restrict_sids, restrict_sid_count * sizeof(*restrict_sids) );
     }
@@ -663,9 +736,9 @@ BOOL WINAPI CreateRestrictedToken( HANDLE token, DWORD flags,
     status = NtFilterToken(token, flags, nt_disable_sids, nt_privs, nt_restrict_sids, ret);
 
 out:
-    heap_free(nt_disable_sids);
-    heap_free(nt_privs);
-    heap_free(nt_restrict_sids);
+    HeapFree(GetProcessHeap(), 0, nt_disable_sids);
+    HeapFree(GetProcessHeap(), 0, nt_privs);
+    HeapFree(GetProcessHeap(), 0, nt_restrict_sids);
     return set_ntstatus( status );
 }
 
@@ -748,6 +821,9 @@ BOOL WINAPI ImpersonateLoggedOnUser( HANDLE token )
     BOOL ret;
     HANDLE dup;
     TOKEN_TYPE type;
+#ifdef __REACTOS__
+    TRACE( "(%p)\n", token );
+#else
     static BOOL warn = TRUE;
 
     if (warn)
@@ -755,6 +831,7 @@ BOOL WINAPI ImpersonateLoggedOnUser( HANDLE token )
         FIXME( "(%p)\n", token );
         warn = FALSE;
     }
+#endif
     if (!GetTokenInformation( token, TokenType, &type, sizeof(type), &size )) return FALSE;
 
     if (type == TokenPrimary)
@@ -802,7 +879,7 @@ BOOL WINAPI IsTokenRestricted( HANDLE token )
     status = NtQueryInformationToken(token, TokenRestrictedSids, NULL, 0, &size);
     if (status != STATUS_BUFFER_TOO_SMALL) return set_ntstatus(status);
 
-    groups = heap_alloc(size);
+    groups = HeapAlloc(GetProcessHeap(), 0, size);
     if (!groups)
     {
         SetLastError(ERROR_OUTOFMEMORY);
@@ -812,12 +889,12 @@ BOOL WINAPI IsTokenRestricted( HANDLE token )
     status = NtQueryInformationToken(token, TokenRestrictedSids, groups, size, &size);
     if (status != STATUS_SUCCESS)
     {
-        heap_free(groups);
+        HeapFree(GetProcessHeap(), 0, groups);
         return set_ntstatus(status);
     }
 
     restricted = groups->GroupCount > 0;
-    heap_free(groups);
+    HeapFree(GetProcessHeap(), 0, groups);
 
     return restricted;
 }
@@ -906,19 +983,14 @@ BOOL WINAPI SetTokenInformation( HANDLE token, TOKEN_INFORMATION_CLASS class, LP
 BOOL WINAPI ConvertToAutoInheritPrivateObjectSecurity( PSECURITY_DESCRIPTOR parent,
                                                        PSECURITY_DESCRIPTOR current,
                                                        PSECURITY_DESCRIPTOR *descr,
+#ifdef __REACTOS__
+                                                       GUID *type, BOOLEAN is_dir,
+#else
                                                        GUID *type, BOOL is_dir,
+#endif
                                                        PGENERIC_MAPPING mapping )
 {
     return set_ntstatus( RtlConvertToAutoInheritSecurityObject( parent, current, descr, type, is_dir, mapping ));
-}
-
-/******************************************************************************
- * CreateBoundaryDescriptorW    (kernelbase.@)
- */
-HANDLE WINAPI CreateBoundaryDescriptorW( LPCWSTR name, ULONG flags )
-{
-    FIXME("%s %lu - stub\n", debugstr_w(name), flags);
-    return NULL;
 }
 
 /******************************************************************************
@@ -1139,7 +1211,7 @@ BOOL WINAPI MakeAbsoluteSD ( PSECURITY_DESCRIPTOR rel_descr, PSECURITY_DESCRIPTO
 BOOL WINAPI MakeSelfRelativeSD( PSECURITY_DESCRIPTOR abs_descr, PSECURITY_DESCRIPTOR rel_descr,
                                 LPDWORD len )
 {
-    return set_ntstatus( RtlMakeSelfRelativeSD( abs_descr, rel_descr, len ));
+    return set_ntstatus( RtlAbsoluteToSelfRelativeSD( abs_descr, rel_descr, len ));
 }
 
 /******************************************************************************
@@ -1153,7 +1225,11 @@ BOOL WINAPI SetFileSecurityW( LPCWSTR name, SECURITY_INFORMATION info, PSECURITY
 
     TRACE( "(%s, 0x%lx, %p)\n", debugstr_w(name), info, descr );
 
+#ifdef __REACTOS__
+    if (info & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) access |= WRITE_OWNER;
+#else
     if (info & (OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION)) access |= WRITE_OWNER;
+#endif
     if (info & SACL_SECURITY_INFORMATION) access |= ACCESS_SYSTEM_SECURITY;
     if (info & DACL_SECURITY_INFORMATION) access |= WRITE_DAC;
 
@@ -1180,8 +1256,7 @@ BOOL WINAPI SetPrivateObjectSecurity( SECURITY_INFORMATION info, PSECURITY_DESCR
                                       PSECURITY_DESCRIPTOR *obj_descr, PGENERIC_MAPPING mapping,
                                       HANDLE token )
 {
-    FIXME( "0x%08lx %p %p %p %p - stub\n", info, descr, obj_descr, mapping, token );
-    return TRUE;
+    return set_ntstatus( RtlSetSecurityObject( info, descr, obj_descr, mapping, token ));
 }
 
 /*************************************************************************
@@ -1191,8 +1266,7 @@ BOOL WINAPI SetPrivateObjectSecurityEx( SECURITY_INFORMATION info, PSECURITY_DES
                                         PSECURITY_DESCRIPTOR *obj_descr, ULONG flags,
                                         PGENERIC_MAPPING mapping, HANDLE token )
 {
-    FIXME( "0x%08lx %p %p %lu %p %p - stub\n", info, descr, obj_descr, flags, mapping, token );
-    return TRUE;
+    return set_ntstatus( RtlSetSecurityObjectEx( info, descr, obj_descr, flags, mapping, token ));
 }
 
 /******************************************************************************
@@ -1263,10 +1337,30 @@ BOOL WINAPI AccessCheckAndAuditAlarmW( LPCWSTR subsystem, LPVOID id, LPWSTR type
                                        PGENERIC_MAPPING mapping, BOOL creation,
                                        LPDWORD granted, LPBOOL status, LPBOOL on_close )
 {
-    FIXME( "stub (%s,%p,%s,%s,%p,%08lx,%p,%x,%p,%p,%p)\n", debugstr_w(subsystem),
+    UNICODE_STRING subsystem_str, type_str, name_str;
+    ACCESS_MASK granted_access;
+    NTSTATUS access_status;
+    BOOLEAN generate_on_close;
+    BOOL ret;
+
+    TRACE( "(%s,%p,%s,%s,%p,%08lx,%p,%x,%p,%p,%p)\n", debugstr_w(subsystem),
            id, debugstr_w(type_name), debugstr_w(name), descr, access, mapping,
            creation, granted, status, on_close );
-    return TRUE;
+
+    RtlInitUnicodeString( &subsystem_str, subsystem );
+    RtlInitUnicodeString( &type_str, type_name );
+    RtlInitUnicodeString( &name_str, name );
+
+    ret = set_ntstatus( NtAccessCheckAndAuditAlarm( &subsystem_str, id, &type_str, &name_str, descr,
+                                                    access, mapping, creation != FALSE, &granted_access,
+                                                    &access_status, &generate_on_close ));
+    if (ret)
+    {
+        *granted = granted_access;
+        *status = set_ntstatus( access_status );
+        *on_close = generate_on_close;
+    }
+    return ret;
 }
 
 /******************************************************************************
@@ -1276,9 +1370,32 @@ BOOL WINAPI AccessCheckByType( PSECURITY_DESCRIPTOR descr, PSID sid, HANDLE toke
                                POBJECT_TYPE_LIST types, DWORD types_len, PGENERIC_MAPPING mapping,
                                PPRIVILEGE_SET priv, LPDWORD priv_len, LPDWORD granted, LPBOOL status )
 {
+#ifdef __REACTOS__
+    NTSTATUS access_status;
+    BOOL ret = set_ntstatus( NtAccessCheckByType( descr, sid, token, access, types, types_len,
+                                                mapping, priv, priv_len, granted, &access_status ));
+    if (ret) *status = set_ntstatus( access_status );
+    return ret;
+}
+
+BOOL WINAPI AccessCheckByTypeResultList( PSECURITY_DESCRIPTOR descr, PSID sid, HANDLE token, DWORD access,
+                                          POBJECT_TYPE_LIST types, DWORD types_len, PGENERIC_MAPPING mapping,
+                                          PPRIVILEGE_SET priv, LPDWORD priv_len, LPDWORD granted, LPDWORD status )
+{
+    DWORD i;
+    BOOL ret = set_ntstatus( NtAccessCheckByTypeResultList( descr, sid, token, access, types, types_len,
+                                                         mapping, priv, priv_len, granted, (PNTSTATUS)status ));
+    if (ret)
+    {
+        for (i = 0; i < types_len; ++i)
+            status[i] = RtlNtStatusToDosError( (NTSTATUS)status[i] );
+    }
+    return ret;
+#else
     FIXME("stub\n");
     *status = TRUE;
     return !*status;
+#endif
 }
 
 /******************************************************************************
@@ -1452,8 +1569,12 @@ void WINAPI MapGenericMask( PDWORD access, PGENERIC_MAPPING mapping )
  */
 BOOL WINAPI ObjectCloseAuditAlarmW( LPCWSTR subsystem, LPVOID id, BOOL on_close )
 {
-    FIXME( "stub (%s,%p,%x)\n", debugstr_w(subsystem), id, on_close );
-    return TRUE;
+    UNICODE_STRING subsystem_str;
+
+    TRACE( "(%s,%p,%x)\n", debugstr_w(subsystem), id, on_close );
+
+    RtlInitUnicodeString( &subsystem_str, subsystem );
+    return set_ntstatus( NtCloseObjectAuditAlarm( &subsystem_str, id, on_close != FALSE ));
 }
 
 /******************************************************************************
@@ -1461,8 +1582,12 @@ BOOL WINAPI ObjectCloseAuditAlarmW( LPCWSTR subsystem, LPVOID id, BOOL on_close 
  */
 BOOL WINAPI ObjectDeleteAuditAlarmW( LPCWSTR subsystem, LPVOID id, BOOL on_close )
 {
-    FIXME( "stub (%s,%p,%x)\n", debugstr_w(subsystem), id, on_close );
-    return TRUE;
+    UNICODE_STRING subsystem_str;
+
+    TRACE( "(%s,%p,%x)\n", debugstr_w(subsystem), id, on_close );
+
+    RtlInitUnicodeString( &subsystem_str, subsystem );
+    return set_ntstatus( NtDeleteObjectAuditAlarm( &subsystem_str, id, on_close != FALSE ));
 }
 
 /******************************************************************************
@@ -1473,10 +1598,23 @@ BOOL WINAPI ObjectOpenAuditAlarmW( LPCWSTR subsystem, LPVOID id, LPWSTR type, LP
                                    DWORD granted, PPRIVILEGE_SET privs, BOOL creation,
                                    BOOL access, LPBOOL on_close )
 {
-    FIXME( "stub (%s,%p,%s,%s,%p,%p,0x%08lx,0x%08lx,%p,%x,%x,%p)\n", debugstr_w(subsystem),
+    UNICODE_STRING subsystem_str, type_str, name_str;
+    BOOLEAN generate_on_close;
+    BOOL ret;
+
+    TRACE( "(%s,%p,%s,%s,%p,%p,0x%08lx,0x%08lx,%p,%x,%x,%p)\n", debugstr_w(subsystem),
            id, debugstr_w(type), debugstr_w(name), descr, token, desired, granted,
            privs, creation, access, on_close );
-    return TRUE;
+
+    RtlInitUnicodeString( &subsystem_str, subsystem );
+    RtlInitUnicodeString( &type_str, type );
+    RtlInitUnicodeString( &name_str, name );
+
+    ret = set_ntstatus( NtOpenObjectAuditAlarm( &subsystem_str, id, &type_str, &name_str, descr, token,
+                                                desired, granted, privs, creation != FALSE,
+                                                access != FALSE, &generate_on_close ));
+    if (ret) *on_close = generate_on_close;
+    return ret;
 }
 
 /******************************************************************************
@@ -1485,8 +1623,13 @@ BOOL WINAPI ObjectOpenAuditAlarmW( LPCWSTR subsystem, LPVOID id, LPWSTR type, LP
 BOOL WINAPI ObjectPrivilegeAuditAlarmW( LPCWSTR subsystem, LPVOID id, HANDLE token,
                                         DWORD desired, PPRIVILEGE_SET privs, BOOL granted )
 {
-    FIXME( "stub (%s,%p,%p,0x%08lx,%p,%x)\n", debugstr_w(subsystem), id, token, desired, privs, granted );
-    return TRUE;
+    UNICODE_STRING subsystem_str;
+
+    TRACE( "(%s,%p,%p,0x%08lx,%p,%x)\n", debugstr_w(subsystem), id, token, desired, privs, granted );
+
+    RtlInitUnicodeString( &subsystem_str, subsystem );
+    return set_ntstatus( NtPrivilegeObjectAuditAlarm( &subsystem_str, id, token, desired, privs,
+                                                      granted != FALSE ));
 }
 
 /******************************************************************************
@@ -1495,8 +1638,14 @@ BOOL WINAPI ObjectPrivilegeAuditAlarmW( LPCWSTR subsystem, LPVOID id, HANDLE tok
 BOOL WINAPI PrivilegedServiceAuditAlarmW( LPCWSTR subsystem, LPCWSTR service, HANDLE token,
                                           PPRIVILEGE_SET privs, BOOL granted )
 {
-    FIXME( "stub %s,%s,%p,%p,%x)\n", debugstr_w(subsystem), debugstr_w(service), token, privs, granted );
-    return TRUE;
+    UNICODE_STRING subsystem_str, service_str;
+
+    TRACE( "(%s,%s,%p,%p,%x)\n", debugstr_w(subsystem), debugstr_w(service), token, privs, granted );
+
+    RtlInitUnicodeString( &subsystem_str, subsystem );
+    RtlInitUnicodeString( &service_str, service );
+    return set_ntstatus( NtPrivilegedServiceAuditAlarm( &subsystem_str, &service_str, token, privs,
+                                                        granted != FALSE ));
 }
 
 /******************************************************************************
@@ -1504,8 +1653,9 @@ BOOL WINAPI PrivilegedServiceAuditAlarmW( LPCWSTR subsystem, LPCWSTR service, HA
  */
 BOOL WINAPI SetAclInformation( PACL acl, LPVOID info, DWORD len, ACL_INFORMATION_CLASS class )
 {
-    FIXME( "%p %p 0x%08lx 0x%08x - stub\n", acl, info, len, class );
-    return TRUE;
+    TRACE( "%p %p 0x%08lx 0x%08x\n", acl, info, len, class );
+
+    return set_ntstatus( RtlSetInformationAcl( acl, info, len, class ));
 }
 
 /******************************************************************************
@@ -1515,4 +1665,54 @@ BOOL WINAPI SetCachedSigningLevel( PHANDLE source, ULONG count, ULONG flags, HAN
 {
     FIXME( "%p %lu %lu %p - stub\n", source, count, flags, file );
     return TRUE;
+}
+
+/******************************************************************************
+ * DeriveCapabilitySidsFromName    (kernelbase.@)
+ */
+BOOL WINAPI DeriveCapabilitySidsFromName( const WCHAR *cap_name, PSID **cap_group_sids, DWORD *cap_group_sid_count,
+                                          PSID **cap_sids, DWORD *cap_sid_count )
+{
+    NTSTATUS status = STATUS_NO_MEMORY;
+    UNICODE_STRING name_us;
+    DWORD size;
+
+    TRACE( "cap_name %s, cap_group_sids %p, cap_group_sid_count %p, cap_sids %p, cap_sid_count %p.\n",
+           debugstr_w(cap_name), cap_group_sids, cap_group_sid_count, cap_sids, cap_sid_count );
+
+    *cap_group_sid_count = 1;
+    *cap_sid_count = 1;
+    *cap_group_sids = NULL;
+    *cap_sids = NULL;
+
+    if (!(*cap_group_sids = RtlAllocateHeap( GetProcessHeap(), HEAP_ZERO_MEMORY, *cap_group_sid_count * sizeof(**cap_group_sids) )))
+        goto done;
+    if (!(*cap_sids = RtlAllocateHeap( GetProcessHeap(), HEAP_ZERO_MEMORY, *cap_sid_count * sizeof(**cap_sids) )))
+        goto done;
+
+    /* There is no obvious way to query returned subauthority count for RtlDeriveCapabilitySidsFromName,
+     * so let's reserve a bit more. */
+    size = RtlLengthRequiredSid( 16 );
+    if (!(**cap_group_sids = RtlAllocateHeap( GetProcessHeap(), 0, size ))) goto done;
+    if (!(**cap_sids = RtlAllocateHeap( GetProcessHeap(), 0, size ))) goto done;
+    RtlInitUnicodeString( &name_us, cap_name );
+#if defined(__REACTOS__) && (DLL_EXPORT_VERSION < 0x0a00)
+    status = STATUS_NOT_IMPLEMENTED;
+#else
+    status = RtlDeriveCapabilitySidsFromName( &name_us, **cap_group_sids, **cap_sids );
+#endif
+
+done:
+    if (!status) return TRUE;
+    if (*cap_group_sids)
+    {
+        RtlFreeHeap( GetProcessHeap(), 0, **cap_group_sids );
+        RtlFreeHeap( GetProcessHeap(), 0, *cap_group_sids );
+    }
+    if (*cap_sids)
+    {
+        RtlFreeHeap( GetProcessHeap(), 0, **cap_sids );
+        RtlFreeHeap( GetProcessHeap(), 0, *cap_sids );
+    }
+    return set_ntstatus( status );
 }

@@ -9,7 +9,7 @@
 /* INCLUDES *****************************************************************/
 
 #include <rtl.h>
-#include <../../ntoskrnl/include/internal/se.h>
+#include <../../ntos/include/internal/se.h>
 #define NDEBUG
 #include <debug.h>
 
@@ -449,6 +449,29 @@ RtlAddAuditAccessAce(IN PACL Acl,
  */
 NTSTATUS
 NTAPI
+RtlAddMandatoryAce(IN OUT PACL Acl,
+                   IN ULONG Revision,
+                   IN ULONG Flags,
+                   IN ULONG MandatoryFlags,
+                   IN UCHAR AceType,
+                   IN PSID LabelSid)
+{
+    SID_IDENTIFIER_AUTHORITY MandatoryAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+    PAGED_CODE_RTL();
+
+    if (AceType != SYSTEM_MANDATORY_LABEL_ACE_TYPE) return STATUS_INVALID_PARAMETER;
+    if (MandatoryFlags & ~SYSTEM_MANDATORY_LABEL_VALID_MASK) return STATUS_INVALID_PARAMETER;
+    if (!LabelSid || !RtlValidSid(LabelSid)) return STATUS_INVALID_SID;
+    if (!RtlEqualMemory(RtlIdentifierAuthoritySid(LabelSid), &MandatoryAuthority, sizeof(MandatoryAuthority))) return STATUS_INVALID_PARAMETER;
+
+    return RtlpAddKnownAce(Acl, Revision, Flags, MandatoryFlags, LabelSid, AceType);
+}
+
+/*
+ * @implemented
+ */
+NTSTATUS
+NTAPI
 RtlAddAuditAccessAceEx(IN PACL Acl,
                        IN ULONG Revision,
                        IN ULONG Flags,
@@ -631,7 +654,7 @@ RtlAddAce(IN PACL Acl,
 
     /* Update the header and return */
     Acl->AceCount += NewAceCount;
-    Acl->AclRevision = (UCHAR)min(Acl->AclRevision, AclRevision);
+    Acl->AclRevision = (UCHAR)max(Acl->AclRevision, AclRevision);
     return STATUS_SUCCESS;
 }
 
@@ -933,7 +956,9 @@ RtlValidAcl(IN PACL Acl)
                 }
             }
             else if (Ace->AceType == ACCESS_ALLOWED_OBJECT_ACE_TYPE ||
-                     Ace->AceType == ACCESS_DENIED_OBJECT_ACE_TYPE)
+                     Ace->AceType == ACCESS_DENIED_OBJECT_ACE_TYPE ||
+                     Ace->AceType == SYSTEM_AUDIT_OBJECT_ACE_TYPE ||
+                     Ace->AceType == SYSTEM_ALARM_OBJECT_ACE_TYPE)
             {
                 /* Object ACEs are supported starting with Revision 4 */
                 if (Acl->AclRevision < ACL_REVISION4)
@@ -971,6 +996,14 @@ RtlValidAcl(IN PACL Acl)
                     GuidSize += sizeof(GUID);
                 }
 
+                RequiredObjectAceSize = FIELD_OFFSET(ACCESS_ALLOWED_OBJECT_ACE, ObjectType) +
+                                        GuidSize + FIELD_OFFSET(SID, SubAuthority);
+                if (Ace->AceSize < RequiredObjectAceSize)
+                {
+                    DPRINT1("LiberNT: Object ACE is too small for its GUIDs and SID header\n");
+                    _SEH2_YIELD(return FALSE);
+                }
+
                 /* Check if the SID revision is valid */
                 Sid = (PISID)((ULONG_PTR)&((PKNOWN_OBJECT_ACE)Ace)->SidStart + GuidSize);
                 if (Sid->Revision != SID_REVISION)
@@ -993,15 +1026,6 @@ RtlValidAcl(IN PACL Acl)
                     DPRINT1("Too small Object ACE size: AceSize %u RequiredSize %u\n", Ace->AceSize, RequiredObjectAceSize);
                     _SEH2_YIELD(return FALSE);
                 }
-            }
-            else if (Ace->AceType == ACCESS_ALLOWED_COMPOUND_ACE_TYPE)
-            {
-                DPRINT1("Unsupported ACE in ReactOS, assuming valid\n");
-            }
-            else if ((Ace->AceType >= ACCESS_MIN_MS_OBJECT_ACE_TYPE) &&
-                     (Ace->AceType <= ACCESS_MAX_MS_OBJECT_ACE_TYPE))
-            {
-                DPRINT1("Unsupported ACE in ReactOS, assuming valid\n");
             }
             else
             {

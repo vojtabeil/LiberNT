@@ -49,14 +49,14 @@
 
 #define ETH_ALEN 6
 #define ETHER_ADDR_LEN  ETH_ALEN
-#include <pshpack1.h>
+#pragma pack(push, 1)
 struct ether_header
 {
   u_int8_t  ether_dhost[ETH_ALEN];      /* destination eth addr */
   u_int8_t  ether_shost[ETH_ALEN];      /* source ether addr    */
   u_int16_t ether_type;                 /* packet type ID field */
 };
-#include <poppack.h>
+#pragma pack(pop)
 
 struct ip
   {
@@ -220,6 +220,8 @@ struct client_state {
 	u_int16_t		  secs;
 	time_t			  first_sending;
 	time_t			  interval;
+	unsigned int		  discover_cycle;
+	unsigned int		  request_sends;
 	struct string_list	 *medium;
 	struct dhcp_packet	  packet;
 	int			  packet_length;
@@ -230,6 +232,7 @@ struct client_state {
 struct interface_info {
 	struct interface_info	*next;
 	struct hardware		 hw_address;
+	u_int8_t		 client_id[1 + sizeof(((struct hardware *)0)->haddr)];
 	struct in_addr		 primary_address;
 	char			 name[IFNAMSIZ];
 	int			 rfdesc;
@@ -248,6 +251,7 @@ struct interface_info {
 struct timeout {
 	struct timeout	*next;
 	time_t		 when;
+	ULONGLONG	 when_ms;
 	void		 (*func)(void *);
 	void		*what;
 };
@@ -357,6 +361,7 @@ void reinitialize_interfaces(void);
 void dispatch(HANDLE hStopEvent);
 void got_one(struct protocol *);
 void add_timeout(time_t, void (*)(void *), void *);
+void add_timeout_ms(ULONGLONG, void (*)(void *), void *);
 void cancel_timeout(void (*)(void *), void *);
 void add_protocol(char *, int, void (*)(struct protocol *), void *);
 void remove_protocol(struct protocol *);
@@ -406,6 +411,7 @@ void dhcpack(struct packet *);
 void dhcpnak(struct packet *);
 
 void send_discover(void *);
+void discover_panic(void *);
 void send_request(void *);
 void send_decline(void *);
 void send_release(void *);

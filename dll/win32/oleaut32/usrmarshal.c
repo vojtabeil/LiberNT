@@ -335,7 +335,11 @@ static unsigned char* interface_user_marshal(ULONG *pFlags, unsigned char *Buffe
   }
   else
   {
+#ifdef __REACTOS__
+      *(DWORD*)Buffer = (DWORD)(DWORD_PTR)punk + 1;
+#else
       *(DWORD*)Buffer = (DWORD_PTR)punk;
+#endif
       Buffer += sizeof(DWORD);
   }
 
@@ -355,7 +359,16 @@ static unsigned char *interface_user_unmarshal(ULONG *pFlags, unsigned char *Buf
   Buffer += sizeof(DWORD);
 
   if(!ptr)
+  {
+#ifdef __REACTOS__
+      if (*ppunk)
+      {
+          IUnknown_Release(*ppunk);
+          *ppunk = NULL;
+      }
+#endif
       return Buffer;
+  }
 
   return WdtpInterfacePointer_UserUnmarshal(pFlags, Buffer, ppunk, riid);
 }
@@ -400,15 +413,9 @@ unsigned char * WINAPI VARIANT_UserMarshal(ULONG *pFlags, unsigned char *Buffer,
     header->clSize = 0; /* fixed up at the end */
     header->rpcReserved = 0;
     header->vt = V_VT(pvar);
-#ifdef __REACTOS__
-    header->wReserved1 = pvar->n1.n2.wReserved1;
-    header->wReserved2 = pvar->n1.n2.wReserved2;
-    header->wReserved3 = pvar->n1.n2.wReserved3;
-#else
     header->wReserved1 = pvar->wReserved1;
     header->wReserved2 = pvar->wReserved2;
     header->wReserved3 = pvar->wReserved3;
-#endif
     header->switch_is = V_VT(pvar);
     if(header->switch_is & VT_ARRAY)
         header->switch_is &= ~VT_TYPEMASK;
@@ -572,15 +579,9 @@ unsigned char * WINAPI VARIANT_UserUnmarshal(ULONG *pFlags, unsigned char *Buffe
     }
 
     V_VT(pvar) = header->vt;
-#ifdef __REACTOS__
-    pvar->n1.n2.wReserved1 = header->wReserved1;
-    pvar->n1.n2.wReserved2 = header->wReserved2;
-    pvar->n1.n2.wReserved3 = header->wReserved3;
-#else
     pvar->wReserved1 = header->wReserved1;
     pvar->wReserved2 = header->wReserved2;
     pvar->wReserved3 = header->wReserved3;
-#endif
 
     if(header->vt & VT_ARRAY)
     {
@@ -818,6 +819,9 @@ ULONG WINAPI LPSAFEARRAY_UserSize(ULONG *pFlags, ULONG StartingSize, LPSAFEARRAY
             {
                 BSTR* lpBstr;
 
+#ifdef __REACTOS__
+                size += ulCellCount * sizeof(ULONG);
+#endif
                 for (lpBstr = psa->pvData; ulCellCount; ulCellCount--, lpBstr++)
                     size = BSTR_UserSize(pFlags, size, lpBstr);
 
@@ -846,6 +850,9 @@ ULONG WINAPI LPSAFEARRAY_UserSize(ULONG *pFlags, ULONG StartingSize, LPSAFEARRAY
             {
                 VARIANT* lpVariant;
 
+#ifdef __REACTOS__
+                size += ulCellCount * sizeof(ULONG);
+#endif
                 for (lpVariant = psa->pvData; ulCellCount; ulCellCount--, lpVariant++)
                     size = VARIANT_UserSize(pFlags, size, lpVariant);
 
@@ -953,6 +960,13 @@ unsigned char * WINAPI LPSAFEARRAY_UserMarshal(ULONG *pFlags, unsigned char *Buf
                 {
                     BSTR* lpBstr;
 
+#ifdef __REACTOS__
+                    for (i = 0; i < ulCellCount; i++)
+                    {
+                        *(ULONG *)Buffer = i + 1;
+                        Buffer += sizeof(ULONG);
+                    }
+#endif
                     for (lpBstr = psa->pvData; ulCellCount; ulCellCount--, lpBstr++)
                         Buffer = BSTR_UserMarshal(pFlags, Buffer, lpBstr);
 
@@ -981,6 +995,13 @@ unsigned char * WINAPI LPSAFEARRAY_UserMarshal(ULONG *pFlags, unsigned char *Buf
                 {
                     VARIANT* lpVariant;
 
+#ifdef __REACTOS__
+                    for (i = 0; i < ulCellCount; i++)
+                    {
+                        *(ULONG *)Buffer = i + 1;
+                        Buffer += sizeof(ULONG);
+                    }
+#endif
                     for (lpVariant = psa->pvData; ulCellCount; ulCellCount--, lpVariant++)
                         Buffer = VARIANT_UserMarshal(pFlags, Buffer, lpVariant);
 
@@ -1143,9 +1164,18 @@ unsigned char * WINAPI LPSAFEARRAY_UserUnmarshal(ULONG *pFlags, unsigned char *B
             case SF_BSTR:
             {
                 BSTR* lpBstr;
+#ifdef __REACTOS__
+                const ULONG *ids = (const ULONG *)Buffer;
+
+                Buffer += cell_count * sizeof(ULONG);
+                for (lpBstr = (*ppsa)->pvData; cell_count; cell_count--, lpBstr++, ids++)
+                    if (*ids)
+                        Buffer = BSTR_UserUnmarshal(pFlags, Buffer, lpBstr);
+#else
 
                 for (lpBstr = (*ppsa)->pvData; cell_count; cell_count--, lpBstr++)
                     Buffer = BSTR_UserUnmarshal(pFlags, Buffer, lpBstr);
+#endif
 
                 break;
             }
@@ -1171,9 +1201,18 @@ unsigned char * WINAPI LPSAFEARRAY_UserUnmarshal(ULONG *pFlags, unsigned char *B
             case SF_VARIANT:
             {
                 VARIANT* lpVariant;
+#ifdef __REACTOS__
+                const ULONG *ids = (const ULONG *)Buffer;
+
+                Buffer += cell_count * sizeof(ULONG);
+                for (lpVariant = (*ppsa)->pvData; cell_count; cell_count--, lpVariant++, ids++)
+                    if (*ids)
+                        Buffer = VARIANT_UserUnmarshal(pFlags, Buffer, lpVariant);
+#else
 
                 for (lpVariant = (*ppsa)->pvData; cell_count; cell_count--, lpVariant++)
                     Buffer = VARIANT_UserUnmarshal(pFlags, Buffer, lpVariant);
+#endif
 
                 break;
             }

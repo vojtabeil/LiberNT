@@ -179,6 +179,7 @@ HRSRC WINAPI FindResourceW( HINSTANCE hModule, LPCWSTR name, LPCWSTR type )
 }
 
 
+#ifndef __REACTOS__
 /**********************************************************************
  *	EnumResourceTypesA	(KERNEL32.@)
  */
@@ -524,6 +525,7 @@ done:
     if (status != STATUS_SUCCESS) SetLastError( RtlNtStatusToDosError(status) );
     return ret;
 }
+#endif
 
 
 /**********************************************************************
@@ -583,6 +585,7 @@ DWORD WINAPI SizeofResource( HINSTANCE hModule, HRSRC hRsrc )
 
 typedef struct
 {
+    void *unknown[6];
     LPWSTR pFileName;
     BOOL bDeleteExistingResources;
     struct list root;

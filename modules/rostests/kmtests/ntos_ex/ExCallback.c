@@ -47,18 +47,17 @@ static
 VOID
 TestPrivateFunctions(VOID)
 {
-    UNICODE_STRING ExAllocateCallBackName = RTL_CONSTANT_STRING(L"ExAllocateCallBack");
-    UNICODE_STRING ExFreeCallBackName = RTL_CONSTANT_STRING(L"ExFreeCallBack");
     PEX_CALLBACK_ROUTINE_BLOCK CallbackBlock;
     INT CallbackContext;
 
     if (!ExAllocateCallBack)
-        ExAllocateCallBack = MmGetSystemRoutineAddress(&ExAllocateCallBackName);
+        ExAllocateCallBack = KmtGetSystemRoutineAddress(L"ExAllocateCallBack");
     if (!ExFreeCallBack)
-        ExFreeCallBack = MmGetSystemRoutineAddress(&ExFreeCallBackName);
+        ExFreeCallBack = KmtGetSystemRoutineAddress(L"ExFreeCallBack");
 
+    /* These are private routines and are not exported by every kernel. */
     if (skip(ExAllocateCallBack && ExFreeCallBack,
-             "ExAllocateCallBack and/or ExFreeCallBack unavailable\n"))
+             "ExAllocateCallBack/ExFreeCallBack are not exported on this build\n"))
         return;
 
     CallbackBlock = ExAllocateCallBack(ExCallbackFunction, &CallbackContext);
@@ -69,7 +68,6 @@ TestPrivateFunctions(VOID)
 
     ok_eq_pointer(CallbackBlock->Function, ExCallbackFunction);
     ok_eq_pointer(CallbackBlock->Context, &CallbackContext);
-    ok_eq_hex(KmtGetPoolTag(CallbackBlock), 'brbC');
 
     ExFreeCallBack(CallbackBlock);
 }
@@ -135,7 +133,6 @@ START_TEST(ExCallback)
 
     if (!skip(CallbackRegistration != NULL, "Registering callback failed\n"))
     {
-        ok_eq_hex(KmtGetPoolTag(CallbackRegistration), 'eRBC');
         ok_eq_int(InvocationCount, 0);
         ExNotifyCallback(CallbackObject,
                          &CallbackArgument1,

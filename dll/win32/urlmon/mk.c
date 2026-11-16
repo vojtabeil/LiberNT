@@ -294,6 +294,10 @@ static HRESULT WINAPI MkProtocol_StartEx(IInternetProtocolEx *iface, IUri *pUri,
 
     len = lstrlenW(path);
     display_name = malloc((len + 1) * sizeof(WCHAR));
+#ifdef __REACTOS__
+    if (!display_name)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     memcpy(display_name, path, (len+1)*sizeof(WCHAR));
 
     progid[colon_ptr-progid] = 0; /* overwrite ':' with NULL terminator */
@@ -339,6 +343,14 @@ static HRESULT WINAPI MkProtocol_StartEx(IInternetProtocolEx *iface, IUri *pUri,
         return report_result(pOIProtSink, hres, ERROR_INVALID_PARAMETER);
     }
 
+#ifdef __REACTOS__
+    if(SUCCEEDED(IUri_GetRawUri(pUri, &path))) {
+        if((colon_ptr = wcschr(path, ':')) && (colon_ptr = wcschr(colon_ptr+1, ':')))
+            IInternetProtocolSink_ReportProgress(pOIProtSink, BINDSTATUS_CACHEFILENAMEAVAILABLE, colon_ptr+1);
+        SysFreeString(path);
+    }
+
+#endif
     IInternetProtocolSink_ReportData(pOIProtSink,
             BSCF_FIRSTDATANOTIFICATION | BSCF_LASTDATANOTIFICATION,
             statstg.cbSize.u.LowPart, statstg.cbSize.u.LowPart);
@@ -371,6 +383,10 @@ HRESULT MkProtocol_Construct(IUnknown *outer, void **ppv)
     URLMON_LockModule();
 
     ret = malloc(sizeof(MkProtocol));
+#ifdef __REACTOS__
+    if (!ret)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     ret->IUnknown_inner.lpVtbl = &MkProtocolUnkVtbl;
     ret->IInternetProtocolEx_iface.lpVtbl = &MkProtocolVtbl;

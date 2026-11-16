@@ -6,7 +6,8 @@
 #ifndef _INC_SETJMP
 #define _INC_SETJMP
 
-#include <vcruntime.h>
+#include "vcruntime.h"
+#include "intrin_target.h"
 
 #pragma pack(push,_CRT_PACKING)
 
@@ -95,7 +96,7 @@ extern "C" {
 
   } _JUMP_BUFFER;
 
-#elif defined(__x86_64)
+#elif _VCRT_AMD64_CODEGEN || _VCRT_GNU_AMD64_CODEGEN || defined(_M_ARM64EC) || defined(__arm64ec__)
 
   typedef _CRT_ALIGN(16) struct _SETJMP_FLOAT128 {
     unsigned __int64 Part[2];
@@ -152,7 +153,7 @@ extern "C" {
     unsigned long long D[8]; // D8-D15 VFP/NEON regs
   } _JUMP_BUFFER;
 
-#elif defined(_M_ARM64)
+#elif _VCRT_ARM64_CODEGEN
 
 #define _JBLEN 24
 #define _JBTYPE unsigned __int64
@@ -178,6 +179,75 @@ typedef struct __JUMP_BUFFER {
     double D[8];
   } _JUMP_BUFFER;
 
+#elif defined(_M_RISCV64)
+
+/* ReactOS RV64 integer-call ABI: sp and s0-s11 are nonvolatile.
+ * Save caller-clobbered ra as the return continuation. Floating-point
+ * registers are caller-saved under this calling convention. */
+#define _JBLEN 16
+#define _JBTYPE unsigned __int64
+
+typedef struct __JUMP_BUFFER {
+    unsigned __int64 Frame;
+    unsigned __int64 Ra;
+    unsigned __int64 Sp;
+    unsigned __int64 S[12];
+    unsigned __int64 Reserved;
+} _JUMP_BUFFER;
+
+#elif defined(_M_PPC)
+
+/* Windows NT PowerPC layout: f14-f31, r1, r2 (TOC), r13 (TEB) and r14-r31
+ * are nonvolatile, together with the condition register fields. Iar holds
+ * the continuation (the return address of the setjmp call). */
+#define _JBLEN 64
+#define _JBTYPE double
+
+typedef struct __JUMP_BUFFER {
+    double Fpr14;
+    double Fpr15;
+    double Fpr16;
+    double Fpr17;
+    double Fpr18;
+    double Fpr19;
+    double Fpr20;
+    double Fpr21;
+    double Fpr22;
+    double Fpr23;
+    double Fpr24;
+    double Fpr25;
+    double Fpr26;
+    double Fpr27;
+    double Fpr28;
+    double Fpr29;
+    double Fpr30;
+    double Fpr31;
+    unsigned long Gpr1;
+    unsigned long Gpr2;
+    unsigned long Gpr13;
+    unsigned long Gpr14;
+    unsigned long Gpr15;
+    unsigned long Gpr16;
+    unsigned long Gpr17;
+    unsigned long Gpr18;
+    unsigned long Gpr19;
+    unsigned long Gpr20;
+    unsigned long Gpr21;
+    unsigned long Gpr22;
+    unsigned long Gpr23;
+    unsigned long Gpr24;
+    unsigned long Gpr25;
+    unsigned long Gpr26;
+    unsigned long Gpr27;
+    unsigned long Gpr28;
+    unsigned long Gpr29;
+    unsigned long Gpr30;
+    unsigned long Gpr31;
+    unsigned long Cr;
+    unsigned long Iar;
+    unsigned long Type;
+} _JUMP_BUFFER;
+
 #else
 
 #error Define Setjmp for this architecture!
@@ -189,15 +259,23 @@ typedef struct __JUMP_BUFFER {
 #define _JMP_BUF_DEFINED
 #endif
 
-#ifdef USE_MINGW_SETJMP_TWO_ARGS
-#ifndef _INC_SETJMPEX
-#if defined(__x86_64)
+#if _VCRT_CLANG_INTRINSICS && ((_VCRT_GNU_AMD64_CODEGEN && defined(USE_MINGW_SETJMP_TWO_ARGS)) || \
+                               _VCRT_ARM64_CODEGEN)
+  /* Clang treats _setjmp as a 1-arg builtin on Win64. Route declarations and
+   * macro expansion through the intrinsic aliases exported by the CRT. */
+#define _setjmp __intrinsic_setjmp
+#define _setjmpex __intrinsic_setjmpex
+#endif
+
+#if defined(USE_MINGW_SETJMP_TWO_ARGS) && (_VCRT_GNU_X86_CODEGEN || defined(_X86_))
+#if _VCRT_GNU_AMD64_CODEGEN
 # define mingw_getsp() \
   ({ void* value; __asm__ __volatile__("movq %%rsp, %[value]" : [value] "=r" (value)); value; })
-#elif defined(_X86_)
+#elif defined(_X86_) || defined(__i386__)
 # define mingw_getsp() \
   ({ void* value; __asm__ __volatile__("movl %%esp, %[value]" : [value] "=r" (value)); value; })
 #endif
+#ifndef _INC_SETJMPEX
 #define setjmp(BUF) _setjmp((BUF),mingw_getsp())
   int __MINGW_NOTHROW __cdecl _setjmp(jmp_buf _Buf,void *_Ctx);
 #else /* _INC_SETJMPEX */
@@ -206,12 +284,24 @@ typedef struct __JUMP_BUFFER {
 #define setjmpex(BUF) _setjmpex((BUF),mingw_getsp())
   int __MINGW_NOTHROW __cdecl _setjmpex(jmp_buf _Buf,void *_Ctx);
 #endif /* _INC_SETJMPEX */
-#else /* !USE_MINGW_SETJMP_TWO_ARGS */
+#elif _VCRT_ARM64_CODEGEN && (defined(__clang__) || defined(__GNUC__))
+/* longjmp unwinds to the frame recorded here, so it must be the stack pointer
+ * on entry to the caller - the establisher frame the unwinder reports. */
+#ifndef _INC_SETJMPEX
+#define setjmp(BUF) _setjmp((BUF),__builtin_sponentry())
+  int __MINGW_NOTHROW __cdecl _setjmp(jmp_buf _Buf,void *_Frame);
+#else /* _INC_SETJMPEX */
+#undef setjmp
+#define setjmp(BUF) _setjmpex((BUF),__builtin_sponentry())
+#define setjmpex(BUF) _setjmpex((BUF),__builtin_sponentry())
+  int __MINGW_NOTHROW __cdecl _setjmpex(jmp_buf _Buf,void *_Frame);
+#endif /* _INC_SETJMPEX */
+#else /* !USE_MINGW_SETJMP_TWO_ARGS || !x86 */
 #ifndef _INC_SETJMPEX
 #define setjmp _setjmp
 #endif
   int __MINGW_NOTHROW __cdecl setjmp(jmp_buf _Buf);
-#endif /* !USE_MINGW_SETJMP_TWO_ARGS */
+#endif /* !USE_MINGW_SETJMP_TWO_ARGS || !x86 */
 
   __declspec(noreturn) __MINGW_NOTHROW void __cdecl ms_longjmp(jmp_buf _Buf,int _Value)/* throw(...)*/;
   __declspec(noreturn) __MINGW_NOTHROW void __cdecl longjmp(jmp_buf _Buf,int _Value);

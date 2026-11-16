@@ -10,6 +10,14 @@
  */
 double sinh(double x)
 {
+ if (x != x)
+ {
+     unsigned long long u64 = *(unsigned long long *)&x;
+
+     u64 |= 0x0008000000000000ULL;
+     return *(double *)&u64;
+ }
+
  if(x >= 0.0)
  {
    const double epos = exp(x);

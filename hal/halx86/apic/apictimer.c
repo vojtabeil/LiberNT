@@ -14,6 +14,7 @@
 #include <debug.h>
 
 extern LARGE_INTEGER HalpCpuClockFrequency;
+extern BOOLEAN HalpApicTimerClock;
 
 /* HAL profiling variables */
 BOOLEAN HalIsProfiling = FALSE;
@@ -66,6 +67,10 @@ FASTCALL
 HalpProfileInterruptHandler(_In_ PKTRAP_FRAME TrapFrame)
 {
     KeProfileInterruptWithSource(TrapFrame, ProfileTime);
+
+    /* End it here: the trap's own ending writes the memory window, which
+     * extended mode does not answer. */
+    HalpSendEOI();
 }
 
 
@@ -91,6 +96,10 @@ HalStartProfileInterrupt(IN KPROFILE_SOURCE ProfileSource)
         /* OK, we are profiling now */
         HalIsProfiling = TRUE;
 
+        /* FIXME: with the local APIC timer as the clock, samples come at the clock rate, not at the profile interval */
+        if (HalpApicTimerClock)
+            return;
+
         /* Set interrupt interval */
         ApicWrite(APIC_TICR, KeGetPcr()->HalReserved[HAL_PROFILING_INTERVAL]);
 
@@ -114,6 +123,8 @@ HalStopProfileInterrupt(IN KPROFILE_SOURCE ProfileSource)
     {
         /* We are not profiling */
         HalIsProfiling = FALSE;
+        if (HalpApicTimerClock)
+            return;
 
         /* Mask interrupt */
         LvtEntry.Long = 0;
@@ -153,7 +164,8 @@ HalSetProfileInterval(IN ULONG_PTR Interval)
     KeGetPcr()->HalReserved[HAL_PROFILING_INTERVAL] = (ULONG)TimerInterval;
 
     /* And set it */
-    ApicWrite(APIC_TICR, (ULONG)TimerInterval);
+    if (!HalpApicTimerClock)
+        ApicWrite(APIC_TICR, (ULONG)TimerInterval);
 
     return Interval;
 }

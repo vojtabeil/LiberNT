@@ -72,7 +72,8 @@ extern char **environ;
 #  define O_BINARY 0
 # endif
 # ifndef __int64
-#   if defined(__x86_64__) || defined(__aarch64__) || defined(__powerpc64__)
+#   if defined(__x86_64__) || defined(__aarch64__) || defined(__powerpc64__) || \
+       (defined(__riscv) && (__riscv_xlen == 64))
 #     define __int64 long
 #   else
 #     define __int64 long long
@@ -97,7 +98,7 @@ extern char **environ;
 
 struct target
 {
-    enum { CPU_i386, CPU_x86_64, CPU_ARM, CPU_ARM64, CPU_ARM64EC } cpu;
+    enum { CPU_i386, CPU_x86_64, CPU_ARM, CPU_ARM64, CPU_ARM64EC, CPU_RISCV64, CPU_POWERPC } cpu;
 
     enum
     {
@@ -180,6 +181,10 @@ struct strarray
 
 static const struct strarray empty_strarray;
 
+#define STRARRAY_FOR_EACH(cursor,array) \
+    for (const char **__p = (array)->str, *cursor = NULL; \
+         __p - (array)->str < (array)->count && (cursor = *__p, 1); __p++)
+
 static inline void strarray_add( struct strarray *array, const char *str )
 {
     if (array->count == array->size)
@@ -198,17 +203,17 @@ static inline void strarray_addall( struct strarray *array, struct strarray adde
     for (i = 0; i < added.count; i++) strarray_add( array, added.str[i] );
 }
 
-static inline int strarray_exists( const struct strarray *array, const char *str )
+static inline int strarray_exists( struct strarray array, const char *str )
 {
     unsigned int i;
 
-    for (i = 0; i < array->count; i++) if (!strcmp( array->str[i], str )) return 1;
+    for (i = 0; i < array.count; i++) if (!strcmp( array.str[i], str )) return 1;
     return 0;
 }
 
 static inline void strarray_add_uniq( struct strarray *array, const char *str )
 {
-    if (!strarray_exists( array, str )) strarray_add( array, str );
+    if (!strarray_exists( *array, str )) strarray_add( array, str );
 }
 
 static inline void strarray_addall_uniq( struct strarray *array, struct strarray added )
@@ -495,6 +500,10 @@ static inline struct target get_default_target(void)
     target.cpu = CPU_ARM;
 #elif defined(__aarch64__)
     target.cpu = CPU_ARM64;
+#elif defined(__riscv) && __riscv_xlen == 64
+    target.cpu = CPU_RISCV64;
+#elif defined(__powerpc__) && !defined(__powerpc64__)
+    target.cpu = CPU_POWERPC;
 #else
 #error Unsupported CPU
 #endif
@@ -530,6 +539,8 @@ static inline unsigned int get_target_ptr_size( struct target target )
         [CPU_ARM]       = 4,
         [CPU_ARM64]     = 8,
         [CPU_ARM64EC]   = 8,
+        [CPU_RISCV64]   = 8,
+        [CPU_POWERPC]   = 4,
     };
     return sizes[target.cpu];
 }
@@ -551,6 +562,9 @@ static inline void set_target_ptr_size( struct target *target, unsigned int size
     case CPU_ARM64:
     case CPU_ARM64EC:
         if (size == 4) target->cpu = CPU_ARM;
+        break;
+    case CPU_RISCV64:
+    case CPU_POWERPC:
         break;
     }
 }
@@ -575,6 +589,9 @@ static inline int get_cpu_from_name( const char *name )
         { "arm64ec",   CPU_ARM64EC },
         { "arm64",     CPU_ARM64 },
         { "arm",       CPU_ARM },
+        { "riscv64",   CPU_RISCV64 },
+        { "powerpc",   CPU_POWERPC },
+        { "ppc",       CPU_POWERPC },
     };
     unsigned int i;
 
@@ -622,6 +639,8 @@ static inline const char *get_arch_dir( struct target target )
         [CPU_ARM]     = "arm",
         [CPU_ARM64]   = "aarch64",
         [CPU_ARM64EC] = "aarch64",
+        [CPU_RISCV64] = "riscv64",
+        [CPU_POWERPC] = "powerpc",
     };
 
     if (!cpu_names[target.cpu]) return "";

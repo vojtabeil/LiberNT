@@ -253,7 +253,7 @@ Arguments:
 }
 
 
-__inline
+static __inline
 TRACK_MODE_TYPE
 CdFileTrackMode (
     _In_ PFCB Fcb
@@ -3837,7 +3837,7 @@ Return Value:
 
     ULONG BytesToCopy;
 
-    UCHAR LocalBuffer[FIELD_OFFSET( RAW_DIRENT, FileId ) + 12];
+    RAW_PATH_ISO LocalPath;
 
     PAGED_CODE();
 
@@ -3857,9 +3857,9 @@ Return Value:
         //  Store a pseudo path entry in our local buffer.
         //
 
-        RawPath = (PRAW_PATH_ISO) LocalBuffer;
+        RawPath = &LocalPath;
 
-        RtlZeroMemory( RawPath, sizeof( LocalBuffer ));
+        RtlZeroMemory( RawPath, sizeof( LocalPath ));
 
         RawPath->DirIdLen = 1;
         RawPath->ParentNum = 1;

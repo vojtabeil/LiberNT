@@ -64,12 +64,14 @@
 
 #ifdef __i386__
 #define ARCH "x86"
-#elif defined __aarch64__ || defined__arm64ec__
+#elif defined __aarch64__ || defined __arm64ec__
 #define ARCH "arm64"
 #elif defined __x86_64__
 #define ARCH "amd64"
 #elif defined __arm__
 #define ARCH "arm"
+#elif defined(__REACTOS__) && defined(__riscv) && (__riscv_xlen == 64)
+#define ARCH "riscv64"
 #else
 #define ARCH "none"
 #endif
@@ -1380,6 +1382,8 @@ static int WINAPI int_func( int a0, int a1, int a2, int a3, int a4 )
     ok( a1 == -1, "wrong arg1 %x\n", a1 );
 #ifdef __arm__  /* parameters are extended on arm */
     ok( a2 == 1234, "wrong arg2 %x\n", a2 );
+#elif defined(__REACTOS__) && defined(__riscv) && (__riscv_xlen == 64)
+    ok( a2 == 1234, "wrong arg2 %x\n", a2 );
 #else
     ok( a2 == (0x55550000 | 1234), "wrong arg2 %x\n", a2 );
 #endif
@@ -1464,6 +1468,22 @@ static VARIANT WINAPI variant_func2(VARIANT v1, VARIANT v2)
 }
 
 #ifdef __aarch64__
+static VARIANT WINAPI inst_func2(void *inst, VARIANT v1, VARIANT v2)
+{
+    VARIANT ret;
+
+    ok( (*(void ***)inst)[3] == inst_func2, "wrong ptr %p\n", inst );
+
+    ok(V_VT(&v1) == VT_I4, "unexpected %d\n", V_VT(&v1));
+    ok(V_I4(&v1) == 2, "unexpected %ld\n", V_I4(&v1));
+    ok(V_VT(&v2) == VT_BSTR, "unexpected %d\n", V_VT(&v2));
+    ok(lstrcmpW(V_BSTR(&v2), testW) == 0, "unexpected %s\n", wine_dbgstr_w(V_BSTR(&v2)));
+
+    V_VT(&ret) = VT_UI4;
+    V_I4(&ret) = 4321;
+    return ret;
+}
+#elif defined(__REACTOS__) && defined(__riscv) && (__riscv_xlen == 64)
 static VARIANT WINAPI inst_func2(void *inst, VARIANT v1, VARIANT v2)
 {
     VARIANT ret;
@@ -4623,22 +4643,14 @@ static void test_dump_typelib(const WCHAR *name)
             help_ctx, MAKELONG(attr->wMinorVerNum, attr->wMajorVerNum),
             attr->cbSizeVft/sizeof(void*), attr->cFuncs, attr->cVars);
 
-#ifdef __REACTOS__
-        printf("  /*#custdata*/ %d, %s\n", cust_data.cCustData, cust_data.cCustData ? "{" : "{{0}},");
-#else
         printf("  /*#custdata*/ %d, %s\n", cust_data.cCustData, cust_data.cCustData ? "{" : "{},");
-#endif
         for (c = 0; c < cust_data.cCustData; ++c) {
             printf("    %s,\n", dump_custdata_info(&cust_data.prgCustData[c]));
         }
         if (cust_data.cCustData) printf("  },\n");
         ClearCustData(&cust_data);
 
-#ifdef __REACTOS__
-        printf("  { /* funcs */%s", attr->cFuncs ? "\n" : " {0}},\n");
-#else
         printf("  { /* funcs */%s", attr->cFuncs ? "\n" : " },\n");
-#endif
         while (1)
         {
             FUNCDESC *desc;
@@ -4657,11 +4669,7 @@ static void test_dump_typelib(const WCHAR *name)
                 desc->cParams, desc->cParamsOpt, desc->oVft/sizeof(void*), desc->cScodes, dump_func_flags(desc->wFuncFlags));
             printf("      {%s, %s, %s}, /* ret */\n", map_value(desc->elemdescFunc.tdesc.vt, vt_map),
                 map_value(get_href_type(info, &desc->elemdescFunc.tdesc), tkind_map), dump_param_flags(U(desc->elemdescFunc).paramdesc.wParamFlags));
-#ifdef __REACTOS__
-            printf("      /*#custdata*/ %d, %s\n", cust_data.cCustData, cust_data.cCustData ? "{" : "{{0}},");
-#else
             printf("      /*#custdata*/ %d, %s\n", cust_data.cCustData, cust_data.cCustData ? "{" : "{},");
-#endif
             for (c = 0; c < cust_data.cCustData; ++c) {
                 printf("        %s,\n", dump_custdata_info(&cust_data.prgCustData[c]));
             }
@@ -4703,11 +4711,7 @@ static void test_dump_typelib(const WCHAR *name)
         }
         if (attr->cFuncs) printf("  },\n");
 
-#ifdef __REACTOS__
-        printf("  { /* vars */%s", attr->cVars ? "\n" : " {0}},\n");
-#else
         printf("  { /* vars */%s", attr->cVars ? "\n" : " },\n");
-#endif
         while (1)
         {
             VARDESC *desc;
@@ -4727,18 +4731,10 @@ static void test_dump_typelib(const WCHAR *name)
             } else if (desc->varkind == VAR_CONST) {
                 printf("      { .varValue = %s },\n", dump_variant_info(desc->DUMMYUNIONNAME.lpvarValue));
             } else {
-#ifdef __REACTOS__
-                printf("      { /* DUMMYUNIONNAME unused*/ 0},\n");
-#else
                 printf("      { /* DUMMYUNIONNAME unused*/ },\n");
-#endif
             }
 
-#ifdef __REACTOS__
-            printf("      /*#custdata*/ %d, %s\n", cust_data.cCustData, cust_data.cCustData ? "{" : "{{0}},");
-#else
             printf("      /*#custdata*/ %d, %s\n", cust_data.cCustData, cust_data.cCustData ? "{" : "{},");
-#endif
             for (c = 0; c < cust_data.cCustData; ++c) {
                 printf("        %s,\n", dump_custdata_info(&cust_data.prgCustData[c]));
             }
@@ -4860,13 +4856,13 @@ static const type_info info[] = {
   "{b14b6bb5-904e-4ff9-b247-bd361f7a0001}",
   /*kind*/ TKIND_RECORD, /*flags*/ 0, /*align*/ TYPE_ALIGNMENT(struct g), /*size*/ sizeof(struct g),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 1,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "g1", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 0 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -4876,13 +4872,13 @@ static const type_info info[] = {
   "{b14b6bb5-904e-4ff9-b247-bd361f7a0002}",
   /*kind*/ TKIND_INTERFACE, /*flags*/ 0, /*align*/ TYPE_ALIGNMENT(test_iface*), /*size*/ sizeof(test_iface*),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 4, /*#func*/ 1, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
+  /*#custdata*/ 0, {},
   { /* funcs */
     {
       /*id*/ 0x60010000, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 3, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FIN},
         {-1, 0, 0}
@@ -4894,20 +4890,20 @@ static const type_info info[] = {
       },
     },
   },
-  { /* vars */ {0}},
+  { /* vars */ },
 },
 {
   "parent_iface",
   "{b14b6bb5-904e-4ff9-b247-bd361f7aa001}",
   /*kind*/ TKIND_INTERFACE, /*flags*/ 0, /*align*/ TYPE_ALIGNMENT(parent_iface*), /*size*/ sizeof(parent_iface*),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 4, /*#func*/ 1, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
+  /*#custdata*/ 0, {},
   { /* funcs */
     {
       /*id*/ 0x60010000, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 3, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FOUT|PARAMFLAG_FRETVAL},
         {-1, 0, 0}
@@ -4919,20 +4915,20 @@ static const type_info info[] = {
       },
     },
   },
-  { /* vars */ {0}},
+  { /* vars */ },
 },
 {
   "child_iface",
   "{b14b6bb5-904e-4ff9-b247-bd361f7aa002}",
   /*kind*/ TKIND_INTERFACE, /*flags*/ 0, /*align*/ TYPE_ALIGNMENT(child_iface*), /*size*/ sizeof(child_iface*),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 5, /*#func*/ 1, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
+  /*#custdata*/ 0, {},
   { /* funcs */
     {
       /*id*/ 0x60020000, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 4, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -4942,20 +4938,20 @@ static const type_info info[] = {
       },
     },
   },
-  { /* vars */ {0}},
+  { /* vars */ },
 },
 {
   "_n",
   "{016fe2ec-b2c8-45f8-b23b-39e53a753903}",
   /*kind*/ TKIND_RECORD, /*flags*/ 0, /*align*/ TYPE_ALIGNMENT(struct _n), /*size*/ sizeof(struct _n),
   /*helpctx*/ 0x0003, /*version*/ 0x00010002, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 1,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "n1", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 0 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -4965,31 +4961,31 @@ static const type_info info[] = {
   "{016fe2ec-b2c8-45f8-b23b-39e53a753902}",
   /*kind*/ TKIND_ALIAS, /*flags*/ TYPEFLAG_FHIDDEN, /*align*/ TYPE_ALIGNMENT(n), /*size*/ sizeof(n),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
-  { /* vars */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
+  { /* vars */ },
 },
 {
   "nn",
   "{00000000-0000-0000-0000-000000000000}",
   /*kind*/ TKIND_ALIAS, /*flags*/ 0, /*align*/ TYPE_ALIGNMENT(nn), /*size*/ sizeof(nn),
   /*helpctx*/ 0x0003, /*version*/ 0x00010002, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
-  { /* vars */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
+  { /* vars */ },
 },
 {
   "_m",
   "{016fe2ec-b2c8-45f8-b23b-39e53a753906}",
   /*kind*/ TKIND_RECORD, /*flags*/ 0, /*align*/ TYPE_ALIGNMENT(struct _m), /*size*/ sizeof(struct _m),
   /*helpctx*/ 0x0003, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 1,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "m1", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 0 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -4999,31 +4995,31 @@ static const type_info info[] = {
   "{016fe2ec-b2c8-45f8-b23b-39e53a753905}",
   /*kind*/ TKIND_ALIAS, /*flags*/ TYPEFLAG_FHIDDEN, /*align*/ TYPE_ALIGNMENT(m), /*size*/ sizeof(m),
   /*helpctx*/ 0x0000, /*version*/ 0x00010002, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
-  { /* vars */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
+  { /* vars */ },
 },
 {
   "mm",
   "{00000000-0000-0000-0000-000000000000}",
   /*kind*/ TKIND_ALIAS, /*flags*/ 0, /*align*/ TYPE_ALIGNMENT(mm), /*size*/ sizeof(mm),
   /*helpctx*/ 0x0003, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
-  { /* vars */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
+  { /* vars */ },
 },
 {
   "IDualIface",
   "{b14b6bb5-904e-4ff9-b247-bd361f7aaedd}",
   /*kind*/ TKIND_DISPATCH, /*flags*/ TYPEFLAG_FDISPATCHABLE|TYPEFLAG_FDUAL, /*align*/ TYPE_ALIGNMENT(IDualIface*), /*size*/ sizeof(IDualIface*),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 7, /*#func*/ 8, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
+  /*#custdata*/ 0, {},
   { /* funcs */
     {
       /*id*/ 0x60000000, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 2, /*#opt*/ 0, /*vtbl*/ 0, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FIN},
         {VT_PTR, -1, PARAMFLAG_FOUT},
@@ -5040,7 +5036,7 @@ static const type_info info[] = {
       /*id*/ 0x60000001, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 1, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_UI4, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -5053,7 +5049,7 @@ static const type_info info[] = {
       /*id*/ 0x60000002, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 2, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_UI4, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -5066,7 +5062,7 @@ static const type_info info[] = {
       /*id*/ 0x60010000, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 3, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FOUT},
         {-1, 0, 0}
@@ -5081,7 +5077,7 @@ static const type_info info[] = {
       /*id*/ 0x60010001, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 3, /*#opt*/ 0, /*vtbl*/ 4, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_UINT, -1, PARAMFLAG_FIN},
         {VT_UI4, -1, PARAMFLAG_FIN},
@@ -5100,7 +5096,7 @@ static const type_info info[] = {
       /*id*/ 0x60010002, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 5, /*#opt*/ 0, /*vtbl*/ 5, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FIN},
         {VT_PTR, -1, PARAMFLAG_FIN},
@@ -5123,7 +5119,7 @@ static const type_info info[] = {
       /*id*/ 0x60010003, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 8, /*#opt*/ 0, /*vtbl*/ 6, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_I4, -1, PARAMFLAG_FIN},
         {VT_PTR, -1, PARAMFLAG_FIN},
@@ -5152,7 +5148,7 @@ static const type_info info[] = {
       /*id*/ 0x60020000, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 7, /*#scodes*/ 0, /*flags*/ 0,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -5162,20 +5158,20 @@ static const type_info info[] = {
       },
     },
   },
-  { /* vars */ {0}},
+  { /* vars */ },
 },
 {
   "IDualIface",
   "{b14b6bb5-904e-4ff9-b247-bd361f7aaedd}",
   /*kind*/ TKIND_INTERFACE, /*flags*/ TYPEFLAG_FDISPATCHABLE|TYPEFLAG_FOLEAUTOMATION|TYPEFLAG_FDUAL, /*align*/ TYPE_ALIGNMENT(IDualIface*), /*size*/ sizeof(IDualIface*),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 8, /*#func*/ 1, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
+  /*#custdata*/ 0, {},
   { /* funcs */
     {
       /*id*/ 0x60020000, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 7, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -5185,20 +5181,20 @@ static const type_info info[] = {
       },
     },
   },
-  { /* vars */ {0}},
+  { /* vars */ },
 },
 {
   "ISimpleIface",
   "{ec5dfcd6-eeb0-4cd6-b51e-8030e1dac009}",
   /*kind*/ TKIND_INTERFACE, /*flags*/ TYPEFLAG_FDISPATCHABLE, /*align*/ TYPE_ALIGNMENT(ISimpleIface*), /*size*/ sizeof(ISimpleIface*),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 8, /*#func*/ 1, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
+  /*#custdata*/ 0, {},
   { /* funcs */
     {
       /*id*/ 0x60020000, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 7, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -5208,38 +5204,38 @@ static const type_info info[] = {
       },
     },
   },
-  { /* vars */ {0}},
+  { /* vars */ },
 },
 {
   "test_struct",
   "{4029f190-ca4a-4611-aeb9-673983cb96dd}",
   /*kind*/ TKIND_RECORD, /*flags*/ 0, /*align*/ TYPE_ALIGNMENT(struct test_struct), /*size*/ sizeof(struct test_struct),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 4,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "hr", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 0 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000001, /*name*/ "b", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 4 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_BOOL, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000002, /*name*/ "disp", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 8 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_DISPATCH, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000003, /*name*/ "bstr", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 12 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_BSTR, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5249,31 +5245,31 @@ static const type_info info[] = {
   "{4029f190-ca4a-4611-aeb9-673983cb96de}",
   /*kind*/ TKIND_RECORD, /*flags*/ 0, /*align*/ TYPE_ALIGNMENT(struct test_struct2), /*size*/ sizeof(struct test_struct2),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 4,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "hr", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 0 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000001, /*name*/ "b", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 4 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_BOOL, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000002, /*name*/ "disp", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 8 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_DISPATCH, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000003, /*name*/ "bstr", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 12 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_BSTR, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5283,37 +5279,37 @@ static const type_info info[] = {
   "{016fe2ec-b2c8-45f8-b23b-39e53a75396a}",
   /*kind*/ TKIND_ALIAS, /*flags*/ TYPEFLAG_FRESTRICTED, /*align*/ TYPE_ALIGNMENT(t_INT), /*size*/ sizeof(t_INT),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
-  { /* vars */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
+  { /* vars */ },
 },
 {
   "a",
   "{00000000-0000-0000-0000-000000000000}",
   /*kind*/ TKIND_ALIAS, /*flags*/ 0, /*align*/ TYPE_ALIGNMENT(a), /*size*/ sizeof(a),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
-  { /* vars */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
+  { /* vars */ },
 },
 {
   "_a",
   "{00000000-0000-0000-0000-000000000000}",
   /*kind*/ TKIND_ENUM, /*flags*/ 0, /*align*/ 4, /*size*/ 4,
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 2,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "a1", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 0 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000001, /*name*/ "a2", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 1 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5323,19 +5319,19 @@ static const type_info info[] = {
   "{00000000-0000-0000-0000-000000000000}",
   /*kind*/ TKIND_ENUM, /*flags*/ 0, /*align*/ 4, /*size*/ 4,
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 2,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "aa1", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 0 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000001, /*name*/ "aa2", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 1 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5345,19 +5341,19 @@ static const type_info info[] = {
   "{00000000-0000-0000-0000-000000000000}",
   /*kind*/ TKIND_ENUM, /*flags*/ 0, /*align*/ 4, /*size*/ 4,
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 2,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "b1", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 0 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000001, /*name*/ "b2", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 1 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5367,19 +5363,19 @@ static const type_info info[] = {
   "{00000000-0000-0000-0000-000000000000}",
   /*kind*/ TKIND_ENUM, /*flags*/ 0, /*align*/ 4, /*size*/ 4,
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 2,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "bb1", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 0 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000001, /*name*/ "bb2", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 1 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5389,28 +5385,28 @@ static const type_info info[] = {
   "{016fe2ec-b2c8-45f8-b23b-39e53a75396b}",
   /*kind*/ TKIND_ALIAS, /*flags*/ 0, /*align*/ TYPE_ALIGNMENT(c), /*size*/ sizeof(c),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
-  { /* vars */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
+  { /* vars */ },
 },
 {
   "_c",
   "{00000000-0000-0000-0000-000000000000}",
   /*kind*/ TKIND_ENUM, /*flags*/ 0, /*align*/ 4, /*size*/ 4,
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 2,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "c1", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 0 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000001, /*name*/ "c2", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 1 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5420,19 +5416,19 @@ static const type_info info[] = {
   "{016fe2ec-b2c8-45f8-b23b-39e53a75396c}",
   /*kind*/ TKIND_ENUM, /*flags*/ 0, /*align*/ 4, /*size*/ 4,
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 2,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "cc1", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 0 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000001, /*name*/ "cc2", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 1 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5442,28 +5438,28 @@ static const type_info info[] = {
   "{016fe2ec-b2c8-45f8-b23b-39e53a75396d}",
   /*kind*/ TKIND_ALIAS, /*flags*/ TYPEFLAG_FRESTRICTED|TYPEFLAG_FHIDDEN, /*align*/ TYPE_ALIGNMENT(d), /*size*/ sizeof(d),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
-  { /* vars */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
+  { /* vars */ },
 },
 {
   "_d",
   "{00000000-0000-0000-0000-000000000000}",
   /*kind*/ TKIND_ENUM, /*flags*/ TYPEFLAG_FRESTRICTED|TYPEFLAG_FHIDDEN, /*align*/ 4, /*size*/ 4,
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 2,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "d1", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 0 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000001, /*name*/ "d2", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 1 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5473,19 +5469,19 @@ static const type_info info[] = {
   "{016fe2ec-b2c8-45f8-b23b-39e53a75396e}",
   /*kind*/ TKIND_ENUM, /*flags*/ TYPEFLAG_FRESTRICTED|TYPEFLAG_FHIDDEN, /*align*/ 4, /*size*/ 4,
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 2,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "dd1", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 0 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000001, /*name*/ "dd2", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 1 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5495,22 +5491,22 @@ static const type_info info[] = {
   "{016fe2ec-b2c8-45f8-b23b-39e53a753970}",
   /*kind*/ TKIND_ALIAS, /*flags*/ TYPEFLAG_FRESTRICTED|TYPEFLAG_FHIDDEN, /*align*/ TYPE_ALIGNMENT(e), /*size*/ sizeof(e),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
-  { /* vars */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
+  { /* vars */ },
 },
 {
   "_e",
   "{00000000-0000-0000-0000-000000000000}",
   /*kind*/ TKIND_RECORD, /*flags*/ TYPEFLAG_FRESTRICTED|TYPEFLAG_FHIDDEN, /*align*/ TYPE_ALIGNMENT(struct _e), /*size*/ sizeof(struct _e),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 1,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "e1", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 0 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5520,13 +5516,13 @@ static const type_info info[] = {
   "{016fe2ec-b2c8-45f8-b23b-39e53a753971}",
   /*kind*/ TKIND_RECORD, /*flags*/ TYPEFLAG_FRESTRICTED|TYPEFLAG_FHIDDEN, /*align*/ TYPE_ALIGNMENT(struct ee), /*size*/ sizeof(struct ee),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 1,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "ee1", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 0 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5536,28 +5532,28 @@ static const type_info info[] = {
   "{016fe2ec-b2c8-45f8-b23b-39e53a753972}",
   /*kind*/ TKIND_ALIAS, /*flags*/ TYPEFLAG_FRESTRICTED|TYPEFLAG_FHIDDEN, /*align*/ TYPE_ALIGNMENT(f), /*size*/ sizeof(f),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
-  { /* vars */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
+  { /* vars */ },
 },
 {
   "_f",
   "{00000000-0000-0000-0000-000000000000}",
   /*kind*/ TKIND_UNION, /*flags*/ TYPEFLAG_FRESTRICTED|TYPEFLAG_FHIDDEN, /*align*/ TYPE_ALIGNMENT(union _f), /*size*/ sizeof(union _f),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 2,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "f1", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 0 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000001, /*name*/ "f2", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 0 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_PTR, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5567,19 +5563,19 @@ static const type_info info[] = {
   "{016fe2ec-b2c8-45f8-b23b-39e53a753973}",
   /*kind*/ TKIND_UNION, /*flags*/ TYPEFLAG_FRESTRICTED|TYPEFLAG_FHIDDEN, /*align*/ TYPE_ALIGNMENT(union ff), /*size*/ sizeof(union ff),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 0, /*#func*/ 0, /*#var*/ 2,
-  /*#custdata*/ 0, {{0}},
-  { /* funcs */ {0}},
+  /*#custdata*/ 0, {},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "ff1", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 0 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0x40000001, /*name*/ "ff2", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
       { .oInst = 0 },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_PTR, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5589,13 +5585,13 @@ static const type_info info[] = {
   "{ec5dfcd6-eeb0-4cd6-b51e-8030e1dac00a}",
   /*kind*/ TKIND_INTERFACE, /*flags*/ TYPEFLAG_FDISPATCHABLE, /*align*/ TYPE_ALIGNMENT(ITestIface*), /*size*/ sizeof(ITestIface*),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 13, /*#func*/ 6, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
+  /*#custdata*/ 0, {},
   { /* funcs */
     {
       /*id*/ 0x60020000, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 7, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_USERDEFINED, TKIND_ALIAS, PARAMFLAG_NONE},
         {-1, 0, 0}
@@ -5610,7 +5606,7 @@ static const type_info info[] = {
       /*id*/ 0x60020001, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 8, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_USERDEFINED, TKIND_ENUM, PARAMFLAG_NONE},
         {-1, 0, 0}
@@ -5625,7 +5621,7 @@ static const type_info info[] = {
       /*id*/ 0x60020002, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 9, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_USERDEFINED, TKIND_ALIAS, PARAMFLAG_NONE},
         {-1, 0, 0}
@@ -5640,7 +5636,7 @@ static const type_info info[] = {
       /*id*/ 0x60020003, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 10, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_USERDEFINED, TKIND_ALIAS, PARAMFLAG_NONE},
         {-1, 0, 0}
@@ -5655,7 +5651,7 @@ static const type_info info[] = {
       /*id*/ 0x60020004, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 11, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_USERDEFINED, TKIND_ALIAS, PARAMFLAG_NONE},
         {-1, 0, 0}
@@ -5670,7 +5666,7 @@ static const type_info info[] = {
       /*id*/ 0x60020005, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 12, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_USERDEFINED, TKIND_ALIAS, PARAMFLAG_NONE},
         {-1, 0, 0}
@@ -5682,20 +5678,20 @@ static const type_info info[] = {
       },
     },
   },
-  { /* vars */ {0}},
+  { /* vars */ },
 },
 {
   "ITestDispatch",
   "{2d4430d5-99ea-4645-85f0-c5814b72804b}",
   /*kind*/ TKIND_DISPATCH, /*flags*/ TYPEFLAG_FDISPATCHABLE, /*align*/ TYPE_ALIGNMENT(ITestDispatch*), /*size*/ sizeof(ITestDispatch*),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 7, /*#func*/ 7, /*#var*/ 2,
-  /*#custdata*/ 0, {{0}},
+  /*#custdata*/ 0, {},
   { /* funcs */
     {
       /*id*/ 0x1, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 0, /*#scodes*/ 0, /*flags*/ 0,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -5708,7 +5704,7 @@ static const type_info info[] = {
       /*id*/ 0x2, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 0, /*#scodes*/ 0, /*flags*/ 0,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FOUT|PARAMFLAG_FRETVAL},
         {-1, 0, 0}
@@ -5723,7 +5719,7 @@ static const type_info info[] = {
       /*id*/ 0x3, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 0, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -5736,7 +5732,7 @@ static const type_info info[] = {
       /*id*/ 0x4, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 0, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FOUT|PARAMFLAG_FRETVAL},
         {-1, 0, 0}
@@ -5751,7 +5747,7 @@ static const type_info info[] = {
       /*id*/ 0x5, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 0, /*#scodes*/ 0, /*flags*/ 0,
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -5764,7 +5760,7 @@ static const type_info info[] = {
       /*id*/ 0x6, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 0, /*#scodes*/ 0, /*flags*/ 0,
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FOUT|PARAMFLAG_FRETVAL},
         {-1, 0, 0}
@@ -5779,7 +5775,7 @@ static const type_info info[] = {
       /*id*/ 0x7, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 2, /*#opt*/ 0, /*vtbl*/ 0, /*#scodes*/ 0, /*flags*/ 0,
       {VT_R8, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_BSTR, -1, PARAMFLAG_FIN},
         {VT_I4, -1, PARAMFLAG_FLCID},
@@ -5796,14 +5792,14 @@ static const type_info info[] = {
   { /* vars */
     {
       /*id*/ 0xa, /*name*/ "property_int", /*flags*/ 0, /*kind*/ VAR_DISPATCH,
-      { /* DUMMYUNIONNAME unused*/ 0},
-      /*#custdata*/ 0, {{0}},
+      { /* DUMMYUNIONNAME unused*/ },
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
     {
       /*id*/ 0xb, /*name*/ "property_HRESULT", /*flags*/ 0, /*kind*/ VAR_DISPATCH,
-      { /* DUMMYUNIONNAME unused*/ 0},
-      /*#custdata*/ 0, {{0}},
+      { /* DUMMYUNIONNAME unused*/ },
+      /*#custdata*/ 0, {},
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -5813,13 +5809,13 @@ static const type_info info[] = {
   "{79ca07f9-ac22-44ac-9aaf-811f45412293}",
   /*kind*/ TKIND_DISPATCH, /*flags*/ TYPEFLAG_FDISPATCHABLE|TYPEFLAG_FDUAL, /*align*/ TYPE_ALIGNMENT(ITestDispDual*), /*size*/ sizeof(ITestDispDual*),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 7, /*#func*/ 14, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
+  /*#custdata*/ 0, {},
   { /* funcs */
     {
       /*id*/ 0x60000000, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 2, /*#opt*/ 0, /*vtbl*/ 0, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FIN},
         {VT_PTR, -1, PARAMFLAG_FOUT},
@@ -5836,7 +5832,7 @@ static const type_info info[] = {
       /*id*/ 0x60000001, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 1, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_UI4, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -5849,7 +5845,7 @@ static const type_info info[] = {
       /*id*/ 0x60000002, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 2, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_UI4, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -5862,7 +5858,7 @@ static const type_info info[] = {
       /*id*/ 0x60010000, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 3, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FOUT},
         {-1, 0, 0}
@@ -5877,7 +5873,7 @@ static const type_info info[] = {
       /*id*/ 0x60010001, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 3, /*#opt*/ 0, /*vtbl*/ 4, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_UINT, -1, PARAMFLAG_FIN},
         {VT_UI4, -1, PARAMFLAG_FIN},
@@ -5896,7 +5892,7 @@ static const type_info info[] = {
       /*id*/ 0x60010002, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 5, /*#opt*/ 0, /*vtbl*/ 5, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FIN},
         {VT_PTR, -1, PARAMFLAG_FIN},
@@ -5919,7 +5915,7 @@ static const type_info info[] = {
       /*id*/ 0x60010003, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 8, /*#opt*/ 0, /*vtbl*/ 6, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_I4, -1, PARAMFLAG_FIN},
         {VT_PTR, -1, PARAMFLAG_FIN},
@@ -5948,7 +5944,7 @@ static const type_info info[] = {
       /*id*/ 0x1, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 7, /*#scodes*/ 0, /*flags*/ 0,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -5961,7 +5957,7 @@ static const type_info info[] = {
       /*id*/ 0x2, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 8, /*#scodes*/ 0, /*flags*/ 0,
       {VT_R8, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -5974,7 +5970,7 @@ static const type_info info[] = {
       /*id*/ 0x3, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 9, /*#scodes*/ 0, /*flags*/ 0,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -5987,7 +5983,7 @@ static const type_info info[] = {
       /*id*/ 0x4, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 10, /*#scodes*/ 0, /*flags*/ 0,
       {VT_R8, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -6000,7 +5996,7 @@ static const type_info info[] = {
       /*id*/ 0x5, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 11, /*#scodes*/ 0, /*flags*/ 0,
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -6013,7 +6009,7 @@ static const type_info info[] = {
       /*id*/ 0x6, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 12, /*#scodes*/ 0, /*flags*/ 0,
       {VT_R8, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -6026,7 +6022,7 @@ static const type_info info[] = {
       /*id*/ 0x7, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 13, /*#scodes*/ 0, /*flags*/ 0,
       {VT_R8, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_BSTR, -1, PARAMFLAG_FIN},
         {-1, 0, 0}
@@ -6038,20 +6034,20 @@ static const type_info info[] = {
       },
     },
   },
-  { /* vars */ {0}},
+  { /* vars */ },
 },
 {
   "ITestDispDual",
   "{79ca07f9-ac22-44ac-9aaf-811f45412293}",
   /*kind*/ TKIND_INTERFACE, /*flags*/ TYPEFLAG_FDISPATCHABLE|TYPEFLAG_FOLEAUTOMATION|TYPEFLAG_FDUAL, /*align*/ TYPE_ALIGNMENT(ITestDispDual*), /*size*/ sizeof(ITestDispDual*),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 14, /*#func*/ 7, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
+  /*#custdata*/ 0, {},
   { /* funcs */
     {
       /*id*/ 0x1, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 7, /*#scodes*/ 0, /*flags*/ 0,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -6064,7 +6060,7 @@ static const type_info info[] = {
       /*id*/ 0x2, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 8, /*#scodes*/ 0, /*flags*/ 0,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FOUT|PARAMFLAG_FRETVAL},
         {-1, 0, 0}
@@ -6079,7 +6075,7 @@ static const type_info info[] = {
       /*id*/ 0x3, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 9, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -6092,7 +6088,7 @@ static const type_info info[] = {
       /*id*/ 0x4, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 10, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FOUT|PARAMFLAG_FRETVAL},
         {-1, 0, 0}
@@ -6107,7 +6103,7 @@ static const type_info info[] = {
       /*id*/ 0x5, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 11, /*#scodes*/ 0, /*flags*/ 0,
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -6120,7 +6116,7 @@ static const type_info info[] = {
       /*id*/ 0x6, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 12, /*#scodes*/ 0, /*flags*/ 0,
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FOUT|PARAMFLAG_FRETVAL},
         {-1, 0, 0}
@@ -6135,7 +6131,7 @@ static const type_info info[] = {
       /*id*/ 0x7, /*func*/ FUNC_PUREVIRTUAL, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 3, /*#opt*/ 0, /*vtbl*/ 13, /*#scodes*/ 0, /*flags*/ 0,
       {VT_HRESULT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_BSTR, -1, PARAMFLAG_FIN},
         {VT_I4, -1, PARAMFLAG_FLCID},
@@ -6151,20 +6147,20 @@ static const type_info info[] = {
       },
     },
   },
-  { /* vars */ {0}},
+  { /* vars */ },
 },
 {
   "ITestDispInherit",
   "{cdb105e3-24fb-4ae6-b826-801b7b2a0a07}",
   /*kind*/ TKIND_DISPATCH, /*flags*/ TYPEFLAG_FDISPATCHABLE, /*align*/ TYPE_ALIGNMENT(ITestDispInherit*), /*size*/ sizeof(ITestDispInherit*),
   /*helpctx*/ 0x0000, /*version*/ 0x00000000, /*#vtbl*/ 7, /*#func*/ 14, /*#var*/ 0,
-  /*#custdata*/ 0, {{0}},
+  /*#custdata*/ 0, {},
   { /* funcs */
     {
       /*id*/ 0x60000000, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 2, /*#opt*/ 0, /*vtbl*/ 0, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FIN},
         {VT_PTR, -1, PARAMFLAG_FOUT},
@@ -6181,7 +6177,7 @@ static const type_info info[] = {
       /*id*/ 0x60000001, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 1, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_UI4, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -6194,7 +6190,7 @@ static const type_info info[] = {
       /*id*/ 0x60000002, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 2, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_UI4, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -6207,7 +6203,7 @@ static const type_info info[] = {
       /*id*/ 0x60010000, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 3, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FOUT},
         {-1, 0, 0}
@@ -6222,7 +6218,7 @@ static const type_info info[] = {
       /*id*/ 0x60010001, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 3, /*#opt*/ 0, /*vtbl*/ 4, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_UINT, -1, PARAMFLAG_FIN},
         {VT_UI4, -1, PARAMFLAG_FIN},
@@ -6241,7 +6237,7 @@ static const type_info info[] = {
       /*id*/ 0x60010002, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 5, /*#opt*/ 0, /*vtbl*/ 5, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_PTR, -1, PARAMFLAG_FIN},
         {VT_PTR, -1, PARAMFLAG_FIN},
@@ -6264,7 +6260,7 @@ static const type_info info[] = {
       /*id*/ 0x60010003, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 8, /*#opt*/ 0, /*vtbl*/ 6, /*#scodes*/ 0, /*flags*/ FUNCFLAG_FRESTRICTED,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_I4, -1, PARAMFLAG_FIN},
         {VT_PTR, -1, PARAMFLAG_FIN},
@@ -6293,7 +6289,7 @@ static const type_info info[] = {
       /*id*/ 0x1, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 7, /*#scodes*/ 0, /*flags*/ 0,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -6306,7 +6302,7 @@ static const type_info info[] = {
       /*id*/ 0x2, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 8, /*#scodes*/ 0, /*flags*/ 0,
       {VT_R8, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -6319,7 +6315,7 @@ static const type_info info[] = {
       /*id*/ 0x3, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 9, /*#scodes*/ 0, /*flags*/ 0,
       {VT_VOID, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -6332,7 +6328,7 @@ static const type_info info[] = {
       /*id*/ 0x4, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 10, /*#scodes*/ 0, /*flags*/ 0,
       {VT_R8, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -6345,7 +6341,7 @@ static const type_info info[] = {
       /*id*/ 0x5, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 11, /*#scodes*/ 0, /*flags*/ 0,
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -6358,7 +6354,7 @@ static const type_info info[] = {
       /*id*/ 0x6, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 0, /*#opt*/ 0, /*vtbl*/ 12, /*#scodes*/ 0, /*flags*/ 0,
       {VT_R8, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {-1, 0, 0}
       },
@@ -6371,7 +6367,7 @@ static const type_info info[] = {
       /*id*/ 0x7, /*func*/ FUNC_DISPATCH, /*inv*/ INVOKE_FUNC, /*call*/ CC_STDCALL,
       /*#param*/ 1, /*#opt*/ 0, /*vtbl*/ 13, /*#scodes*/ 0, /*flags*/ 0,
       {VT_R8, -1, PARAMFLAG_NONE}, /* ret */
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       { /* params */
         {VT_BSTR, -1, PARAMFLAG_FIN},
         {-1, 0, 0}
@@ -6383,7 +6379,7 @@ static const type_info info[] = {
       },
     },
   },
-  { /* vars */ {0}},
+  { /* vars */ },
 },
 {
   "custdata_interface",
@@ -6414,7 +6410,7 @@ static const type_info info[] = {
       },
     },
   },
-  { /* vars */ {0}},
+  { /* vars */ },
 },
 {
   "custdata_enum",
@@ -6424,7 +6420,7 @@ static const type_info info[] = {
   /*#custdata*/ 1, {
     { "{c8768723-e6d2-4442-b039-92e9c82429c4}", { VT_BSTR, { .value_str = "ITypeInfo2::GetCustData enum" } } },
   },
-  { /* funcs */ {0}},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "One", /*flags*/ 0, /*kind*/ VAR_CONST,
@@ -6437,7 +6433,7 @@ static const type_info info[] = {
     {
       /*id*/ 0x40000001, /*name*/ "Two", /*flags*/ 0, /*kind*/ VAR_CONST,
       { .varValue = { VT_I4, { .value_int = 1 } } },
-      /*#custdata*/ 0, {{0}},
+      /*#custdata*/ 0, {},
       {VT_INT, -1, PARAMFLAG_NONE}, /* ret */
     },
   },
@@ -6450,7 +6446,7 @@ static const type_info info[] = {
   /*#custdata*/ 1, {
     { "{c8768723-e6d2-4442-b039-92e9c82429c4}", { VT_BSTR, { .value_str = "ITypeInfo2::GetCustData struct" } } },
   },
-  { /* funcs */ {0}},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "test_field", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
@@ -6470,7 +6466,7 @@ static const type_info info[] = {
   /*#custdata*/ 1, {
     { "{c8768723-e6d2-4442-b039-92e9c82429c4}", { VT_BSTR, { .value_str = "ITypeInfo2::GetCustData union" } } },
   },
-  { /* funcs */ {0}},
+  { /* funcs */ },
   { /* vars */
     {
       /*id*/ 0x40000000, /*name*/ "test_field", /*flags*/ 0, /*kind*/ VAR_PERINSTANCE,
@@ -6490,8 +6486,8 @@ static const type_info info[] = {
   /*#custdata*/ 1, {
     { "{c8768723-e6d2-4442-b039-92e9c82429c4}", { VT_BSTR, { .value_str = "ITypeInfo2::GetCustData typedef" } } },
   },
-  { /* funcs */ {0}},
-  { /* vars */ {0}},
+  { /* funcs */ },
+  { /* vars */ },
 },
 {
   "custdata_dispatch",
@@ -6525,7 +6521,7 @@ static const type_info info[] = {
   { /* vars */
     {
       /*id*/ 0x0, /*name*/ "test_property", /*flags*/ 0, /*kind*/ VAR_DISPATCH,
-      { /* DUMMYUNIONNAME unused*/ 0},
+      { /* DUMMYUNIONNAME unused*/ },
       /*#custdata*/ 1, {
         { "{c8768723-e6d2-4442-b039-92e9c82429c4}", { VT_BSTR, { .value_str = "ITypeInfo2::GetVarCustData dispinterface property" } } },
       },
@@ -8001,14 +7997,6 @@ static void test_LoadRegTypeLib(void)
     hr = LoadRegTypeLib(&LIBID_TestTypelib, 2, 5, LOCALE_NEUTRAL, &tl);
     ok(hr == S_OK, "got 0x%08lx\n", hr);
 
-#ifdef __REACTOS__
-    if (!is_reactos() && (GetNTVersion() == _WIN32_WINNT_WS08))
-    {
-        win_skip("Skipping parts that crash on Windows Server 2008 - Build 6003 SP2 - AMD64\n");
-    }
-    else
-    {
-#endif
     hr = ITypeLib_GetLibAttr(tl, &attr);
     ok(hr == S_OK, "got 0x%08lx\n", hr);
 
@@ -8019,9 +8007,6 @@ static void test_LoadRegTypeLib(void)
 
     ITypeLib_ReleaseTLibAttr(tl, attr);
     ITypeLib_Release(tl);
-#ifdef __REACTOS__
-    }
-#endif
 
     hr = LoadRegTypeLib(&LIBID_TestTypelib, 1, 7, LOCALE_NEUTRAL, &tl);
     ok(hr == TYPE_E_LIBNOTREGISTERED, "got 0x%08lx\n", hr);
@@ -8814,23 +8799,9 @@ START_TEST(typelib)
     test_QueryPathOfRegTypeLib(64);
     test_CreateTypeLib(SYS_WIN64);
     test_SetTypeDescAlias(SYS_WIN64);
-#ifdef __REACTOS__ /* FIXME: Inspect */
-    if (is_reactos())
-    {
-        trace("test_dep(SYS_WIN64) crashes in ReactOS.\n");
-    }
-    else
-#endif
     test_dep(SYS_WIN64);
     test_CreateTypeLib(SYS_WIN32);
     test_SetTypeDescAlias(SYS_WIN32);
-#ifdef __REACTOS__ /* FIXME: Inspect */
-    if (is_reactos())
-    {
-        trace("test_dep(SYS_WIN32) crashes in ReactOS.\n");
-    }
-    else
-#endif
     test_dep(SYS_WIN32);
     test_inheritance();
     test_SetVarHelpContext();

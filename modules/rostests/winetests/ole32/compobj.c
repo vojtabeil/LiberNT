@@ -32,12 +32,34 @@
 #include "urlmon.h" /* for CLSID_FileProtocol */
 #include "dde.h"
 #include "cguid.h"
+#include "comsvcs.h"
 
 #include "ctxtcall.h"
 
 #include "wine/test.h"
 #include "winternl.h"
 #include "initguid.h"
+
+#ifdef __REACTOS__
+/* The checks only need these waits to time out, so their length does not change the outcome */
+#define COWAIT_TIMEOUT(ms) 5
+
+static void cowait_wait_thread(HANDLE thread)
+{
+    ok(!WaitForSingleObject(thread, 5000), "the helper thread did not finish\n");
+}
+
+static void cowait_wait_sent_message(void)
+{
+    DWORD start = GetTickCount();
+
+    while (!(HIWORD(GetQueueStatus(QS_SENDMESSAGE)) & QS_SENDMESSAGE) && GetTickCount() - start < 5000)
+        Sleep(1);
+    ok(HIWORD(GetQueueStatus(QS_SENDMESSAGE)) & QS_SENDMESSAGE, "the helper thread sent no message\n");
+}
+#else
+#define COWAIT_TIMEOUT(ms) (ms)
+#endif
 
 #define DEFINE_EXPECT(func) \
     static BOOL expect_ ## func = FALSE; static unsigned int called_ ## func = 0
@@ -69,6 +91,7 @@ DEFINE_EXPECT(PreInitialize);
 DEFINE_EXPECT(PostInitialize);
 DEFINE_EXPECT(PreUninitialize);
 DEFINE_EXPECT(PostUninitialize);
+DEFINE_EXPECT(context_callback_func);
 
 /* functions that are not present on all versions of Windows */
 static HRESULT (WINAPI * pCoGetObjectContext)(REFIID riid, LPVOID *ppv);
@@ -428,11 +451,20 @@ static void test_ProgIDFromCLSID(void)
     }
 }
 
+static LSTATUS set_hkcr_key(const WCHAR *name, const WCHAR *default_value)
+{
+    return RegSetKeyValueW(HKEY_CLASSES_ROOT, name, NULL, REG_SZ, default_value,
+            default_value ? (wcslen(default_value) + 1) * sizeof(WCHAR) : 0);
+}
+
 static void test_CLSIDFromProgID(void)
 {
     ULONG_PTR cookie = 0;
+    WCHAR clsidstr[39];
     HANDLE handle;
+    DWORD ret;
     CLSID clsid;
+
     HRESULT hr = CLSIDFromProgID(stdfont, &clsid);
     ok(hr == S_OK, "CLSIDFromProgID failed with error 0x%08lx\n", hr);
     ok(IsEqualCLSID(&clsid, &CLSID_StdFont), "clsid wasn't equal to CLSID_StdFont\n");
@@ -492,6 +524,91 @@ static void test_CLSIDFromProgID(void)
 
         deactivate_context(handle, cookie);
     }
+
+    /* Test "CurVer" key handling. */
+    StringFromGUID2(&CLSID_non_existent, clsidstr, ARRAYSIZE(clsidstr));
+
+    ret = set_hkcr_key(L"MyApp.DocumentTest\\CurVer", L"MyApp.DocumentTest.1");
+    if (ret == ERROR_ACCESS_DENIED)
+    {
+        skip("Failed to create test key, skipping some CLSIDFromProgID() tests.\n");
+        return;
+    }
+    ok(!ret, "Failed to create a test key.\n");
+    ret = set_hkcr_key(L"MyApp.DocumentTest.1\\CurVer", L"MyApp.DocumentTest.2");
+    ok(!ret, "Failed to create a test key.\n");
+    ret = set_hkcr_key(L"MyApp.DocumentTest.2\\CurVer", L"MyApp.DocumentTest");
+    ok(!ret, "Failed to create a test key.\n");
+    ret = set_hkcr_key(L"MyApp.DocumentTest.2\\CLSID", clsidstr);
+    ok(!ret, "Failed to create a test key.\n");
+    ret = set_hkcr_key(L"MyApp.DocumentTest.3\\CurVer", L"MyApp.DocumentTest.4");
+    ok(!ret, "Failed to create a test key.\n");
+    ret = set_hkcr_key(L"MyApp.DocumentTest.4\\CurVer", L"MyApp.DocumentTest.3");
+    ok(!ret, "Failed to create a test key.\n");
+    ret = set_hkcr_key(L"MyApp.DocumentTest.5\\CurVer", NULL);
+    ok(!ret, "Failed to create a test key.\n");
+
+    hr = CLSIDFromProgID(L"MyApp.DocumentTest", &clsid);
+    todo_wine
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    todo_wine
+    ok(IsEqualCLSID(&clsid, &CLSID_non_existent), "Unexpected clsid %s.\n", wine_dbgstr_guid(&clsid));
+
+    hr = CLSIDFromProgID(L"MyApp.DocumentTest.1", &clsid);
+    todo_wine
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    todo_wine
+    ok(IsEqualCLSID(&clsid, &CLSID_non_existent), "Unexpected clsid %s.\n", wine_dbgstr_guid(&clsid));
+
+    hr = CLSIDFromProgID(L"MyApp.DocumentTest.2", &clsid);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(IsEqualCLSID(&clsid, &CLSID_non_existent), "Unexpected clsid %s.\n", wine_dbgstr_guid(&clsid));
+
+    memset(&clsid, 0xcc, sizeof(clsid));
+    hr = CLSIDFromProgID(L"MyApp.DocumentTest.3", &clsid);
+    ok(hr == CO_E_CLASSSTRING, "Unexpected hr %#lx.\n", hr);
+    ok(IsEqualCLSID(&clsid, &CLSID_NULL), "Unexpected clsid %s.\n", wine_dbgstr_guid(&clsid));
+
+    memset(&clsid, 0xcc, sizeof(clsid));
+    hr = CLSIDFromProgID(L"MyApp.DocumentTest.5", &clsid);
+    ok(hr == CO_E_CLASSSTRING, "Unexpected hr %#lx.\n", hr);
+    ok(IsEqualCLSID(&clsid, &CLSID_NULL), "Unexpected clsid %s.\n", wine_dbgstr_guid(&clsid));
+
+    hr = CLSIDFromString(L"MyApp.DocumentTest", &clsid);
+    todo_wine
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    todo_wine
+    ok(IsEqualCLSID(&clsid, &CLSID_non_existent), "Unexpected clsid %s.\n", wine_dbgstr_guid(&clsid));
+
+    hr = CLSIDFromString(L"MyApp.DocumentTest.1", &clsid);
+    todo_wine
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    todo_wine
+    ok(IsEqualCLSID(&clsid, &CLSID_non_existent), "Unexpected clsid %s.\n", wine_dbgstr_guid(&clsid));
+
+    hr = CLSIDFromString(L"MyApp.DocumentTest.2", &clsid);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(IsEqualCLSID(&clsid, &CLSID_non_existent), "Unexpected clsid %s.\n", wine_dbgstr_guid(&clsid));
+
+    clsid = CLSID_StdFont;
+    hr = CLSIDFromString(L"MyApp.DocumentTest.3", &clsid);
+    todo_wine
+    ok(hr == REGDB_E_INVALIDVALUE, "Unexpected hr %#lx.\n", hr);
+    todo_wine
+    ok(IsEqualCLSID(&clsid, &CLSID_StdFont), "Unexpected clsid %s.\n", wine_dbgstr_guid(&clsid));
+
+    clsid = CLSID_StdFont;
+    hr = CLSIDFromString(L"MyApp.DocumentTest.5", &clsid);
+    ok(hr == CO_E_CLASSSTRING, "Unexpected hr %#lx.\n", hr);
+    todo_wine
+    ok(IsEqualCLSID(&clsid, &CLSID_StdFont), "Unexpected clsid %s.\n", wine_dbgstr_guid(&clsid));
+
+    RegDeleteTreeW(HKEY_CLASSES_ROOT, L"MyApp.DocumentTest");
+    RegDeleteTreeW(HKEY_CLASSES_ROOT, L"MyApp.DocumentTest.1");
+    RegDeleteTreeW(HKEY_CLASSES_ROOT, L"MyApp.DocumentTest.2");
+    RegDeleteTreeW(HKEY_CLASSES_ROOT, L"MyApp.DocumentTest.3");
+    RegDeleteTreeW(HKEY_CLASSES_ROOT, L"MyApp.DocumentTest.4");
+    RegDeleteTreeW(HKEY_CLASSES_ROOT, L"MyApp.DocumentTest.5");
 }
 
 static void test_CLSIDFromString(void)
@@ -1906,15 +2023,98 @@ static void test_CoFreeUnusedLibraries(void)
     CoUninitialize();
 }
 
+struct context_callback_arg
+{
+    IContextCallback *context_callback;
+    ULONG_PTR token;
+    BOOL is_mta;
+    GUID logical_thread_id;
+    BOOL todo_thread_id;
+};
+
+static HRESULT WINAPI context_callback_func(ComCallData *arg)
+{
+    struct context_callback_arg *ctx = (struct context_callback_arg *)arg;
+    ULONG_PTR token;
+    GUID thread_id;
+    HRESULT hr;
+
+    CHECK_EXPECT(context_callback_func);
+
+    hr = CoGetCurrentLogicalThreadId(&thread_id);
+    ok_ole_success(hr, "CoGetCurrentLgoicalThreadId");
+    todo_wine_if(ctx->todo_thread_id) ok(IsEqualIID(&thread_id, &ctx->logical_thread_id),
+            "thread_id = %s\n", wine_dbgstr_guid(&thread_id));
+
+    hr = pCoGetContextToken(&token);
+    ok_ole_success(hr, "CoGetContextToken");
+    ok(token == ctx->token, "executed in different context\n");
+    return S_FALSE;
+}
+
+static DWORD WINAPI context_callback_thread(void *arg)
+{
+    struct context_callback_arg *ctx = arg;
+    HRESULT hr;
+    GUID id;
+
+    CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+
+    hr = CoGetCurrentLogicalThreadId(&id);
+    ok_ole_success(hr, "CoGetCurrentLogicalThreadId");
+    hr = IContextCallback_QueryInterface(ctx->context_callback, &IID_IObjContext, (void **)&ctx->token);
+    ok_ole_success(hr, "IContextCallback_QueryInterface");
+    IObjContext_Release((IObjContext *)ctx->token);
+
+    SET_EXPECT(context_callback_func);
+    ctx->logical_thread_id = id;
+    /* TODO: native calls the callback in current thread after temporarily converting it to MTA */
+    if (ctx->is_mta) ctx->todo_thread_id = TRUE;
+    hr = IContextCallback_ContextCallback(ctx->context_callback, context_callback_func,
+            (ComCallData *)ctx, &IID_IContextCallback, 2, NULL);
+    ctx->todo_thread_id = FALSE;
+    CHECK_CALLED(context_callback_func, 1);
+    ok(hr == S_FALSE, "got 0x%08lx\n", hr);
+
+    SET_EXPECT(context_callback_func);
+    ctx->logical_thread_id = IID_IEnterActivityWithNoLock;
+    hr = IContextCallback_ContextCallback(ctx->context_callback, context_callback_func,
+            (ComCallData *)ctx, &IID_IEnterActivityWithNoLock, 2, NULL);
+    CHECK_CALLED(context_callback_func, 1);
+    ok(hr == S_FALSE, "got 0x%08lx\n", hr);
+
+    CoUninitialize();
+
+    CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+    SET_EXPECT(context_callback_func);
+    ctx->logical_thread_id = id;
+    hr = IContextCallback_ContextCallback(ctx->context_callback, context_callback_func,
+            (ComCallData *)ctx, &IID_IContextCallback, 2, NULL);
+    CHECK_CALLED(context_callback_func, 1);
+    ok(hr == S_FALSE, "got 0x%08lx\n", hr);
+
+    SET_EXPECT(context_callback_func);
+    ctx->logical_thread_id = IID_IEnterActivityWithNoLock;
+    hr = IContextCallback_ContextCallback(ctx->context_callback, context_callback_func,
+            (ComCallData *)ctx, &IID_IEnterActivityWithNoLock, 2, NULL);
+    CHECK_CALLED(context_callback_func, 1);
+    ok(hr == S_FALSE, "got 0x%08lx\n", hr);
+
+    CoUninitialize();
+    return 0;
+}
+
 static void test_CoGetObjectContext(void)
 {
     HRESULT hr;
     ULONG refs;
     IComThreadingInfo *pComThreadingInfo, *threadinginfo2;
+    struct context_callback_arg callback_arg;
     IContextCallback *pContextCallback;
-    IObjContext *pObjContext;
     APTTYPE apttype;
     THDTYPE thdtype;
+    HANDLE thread;
     GUID id, id2;
 
     if (!pCoGetObjectContext)
@@ -1950,6 +2150,21 @@ static void test_CoGetObjectContext(void)
     hr = CoGetCurrentLogicalThreadId(&id2);
     ok(IsEqualGUID(&id, &id2), "got %s, expected %s\n", wine_dbgstr_guid(&id), wine_dbgstr_guid(&id2));
 
+    id = GUID_NULL;
+    hr = IComThreadingInfo_SetCurrentLogicalThreadId(pComThreadingInfo, &id);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+
+    hr = IComThreadingInfo_GetCurrentLogicalThreadId(pComThreadingInfo, &id);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+    ok(IsEqualGUID(&id, &GUID_NULL), "id = %s\n", wine_dbgstr_guid(&id));
+
+    hr = CoGetCurrentLogicalThreadId(&id);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+    ok(IsEqualGUID(&id, &GUID_NULL), "id = %s\n", wine_dbgstr_guid(&id));
+
+    hr = IComThreadingInfo_SetCurrentLogicalThreadId(pComThreadingInfo, &id2);
+    ok(hr == S_OK, "got 0x%08lx\n", hr);
+
     hr = IComThreadingInfo_GetCurrentApartmentType(pComThreadingInfo, &apttype);
     ok_ole_success(hr, "IComThreadingInfo_GetCurrentApartmentType");
     ok(apttype == APTTYPE_MAINSTA, "apartment type should be APTTYPE_MAINSTA instead of %d\n", apttype);
@@ -1963,6 +2178,50 @@ static void test_CoGetObjectContext(void)
 
     hr = pCoGetObjectContext(&IID_IContextCallback, (void **)&pContextCallback);
     ok_ole_success(hr, "CoGetObjectContext(ContextCallback)");
+
+    callback_arg.context_callback = pContextCallback;
+    hr = pCoGetObjectContext(&IID_IObjContext, (void **)&callback_arg.token);
+    ok_ole_success(hr, "CoGetObjectContext");
+    IObjContext_Release((IObjContext *)callback_arg.token);
+    callback_arg.is_mta = FALSE;
+    callback_arg.logical_thread_id = id2;
+    callback_arg.todo_thread_id = FALSE;
+
+    SET_EXPECT(context_callback_func);
+    hr = IContextCallback_ContextCallback(pContextCallback, context_callback_func,
+            (ComCallData *)&callback_arg, &IID_IContextCallback, 2, NULL);
+    CHECK_CALLED(context_callback_func, 1);
+    ok(hr == S_FALSE, "got 0x%08lx\n", hr);
+
+    SET_EXPECT(context_callback_func);
+    callback_arg.logical_thread_id = IID_IEnterActivityWithNoLock;
+    hr = IContextCallback_ContextCallback(pContextCallback, context_callback_func,
+            (ComCallData *)&callback_arg, &IID_IEnterActivityWithNoLock, 2, NULL);
+    CHECK_CALLED(context_callback_func, 1);
+    ok(hr == S_FALSE, "got 0x%08lx\n", hr);
+
+    thread = CreateThread(NULL, 0, context_callback_thread, &callback_arg, 0, NULL);
+    ok(thread != NULL, "CreateThread failed\n");
+    while (1)
+    {
+        MSG msg;
+
+        switch(MsgWaitForMultipleObjects(1, &thread, FALSE, INFINITE, QS_ALLPOSTMESSAGE))
+        {
+        case WAIT_OBJECT_0:
+            break;
+        case WAIT_OBJECT_0 + 1:
+            while (PeekMessageA(&msg, 0, 0, 0, PM_REMOVE))
+                DispatchMessageA(&msg);
+            continue;
+        default:
+            ok(0, "MsgWaitForMultipleObjects failed\n");
+            break;
+        }
+
+        break;
+    }
+    CloseHandle(thread);
 
     refs = IContextCallback_Release(pContextCallback);
     ok(refs == 0, "pContextCallback should have 0 refs instead of %ld refs\n", refs);
@@ -1988,14 +2247,34 @@ static void test_CoGetObjectContext(void)
     hr = pCoGetObjectContext(&IID_IContextCallback, (void **)&pContextCallback);
     ok_ole_success(hr, "CoGetObjectContext(ContextCallback)");
 
+    callback_arg.context_callback = pContextCallback;
+    hr = pCoGetObjectContext(&IID_IObjContext, (void **)&callback_arg.token);
+    ok_ole_success(hr, "CoGetObjectContext");
+    IObjContext_Release((IObjContext *)callback_arg.token);
+    callback_arg.is_mta = TRUE;
+    callback_arg.logical_thread_id = id2;
+    callback_arg.todo_thread_id = FALSE;
+
+    SET_EXPECT(context_callback_func);
+    hr = IContextCallback_ContextCallback(pContextCallback, context_callback_func,
+            (ComCallData *)&callback_arg, &IID_IContextCallback, 2, NULL);
+    CHECK_CALLED(context_callback_func, 1);
+    ok(hr == S_FALSE, "got 0x%08lx\n", hr);
+
+    SET_EXPECT(context_callback_func);
+    callback_arg.logical_thread_id = IID_IEnterActivityWithNoLock;
+    hr = IContextCallback_ContextCallback(pContextCallback, context_callback_func,
+            (ComCallData *)&callback_arg, &IID_IEnterActivityWithNoLock, 2, NULL);
+    CHECK_CALLED(context_callback_func, 1);
+    ok(hr == S_FALSE, "got 0x%08lx\n", hr);
+
+    thread = CreateThread(NULL, 0, context_callback_thread, &callback_arg, 0, NULL);
+    ok(thread != NULL, "CreateThread failed\n");
+    WaitForSingleObject(thread, INFINITE);
+    CloseHandle(thread);
+
     refs = IContextCallback_Release(pContextCallback);
     ok(refs == 0, "pContextCallback should have 0 refs instead of %ld refs\n", refs);
-
-    hr = pCoGetObjectContext(&IID_IObjContext, (void **)&pObjContext);
-    ok_ole_success(hr, "CoGetObjectContext");
-
-    refs = IObjContext_Release(pObjContext);
-    ok(refs == 0, "pObjContext should have 0 refs instead of %ld refs\n", refs);
 
     CoUninitialize();
 }
@@ -2107,12 +2386,42 @@ static void test_CoGetCallContext(void)
     CoUninitialize();
 }
 
+static DWORD WINAPI get_context_token_thread(void *arg)
+{
+    ULONG_PTR mta_token = (ULONG_PTR)arg, token;
+    HRESULT hr;
+    ULONG refs;
+
+    test_apt_type(APTTYPE_MTA, APTTYPEQUALIFIER_IMPLICIT_MTA);
+    hr = pCoGetContextToken(&token);
+    ok(hr == S_OK, "Expected S_OK, got 0x%08lx\n", hr);
+    ok(token, "Expected token != 0\n");
+    ok(token == mta_token, "token != mta_token\n");
+
+    refs = IUnknown_AddRef((IUnknown *)token);
+    ok(refs == 1, "Expected 1, got %lu\n", refs);
+    IUnknown_Release((IUnknown *)token);
+
+    hr = CoInitialize(NULL);
+    ok(hr == S_OK, "CoInitialize() failed with error 0x%08lx\n", hr);
+    test_apt_type(APTTYPE_MAINSTA, APTTYPEQUALIFIER_NONE);
+
+    hr = pCoGetContextToken(&token);
+    ok(hr == S_OK, "Expected S_OK, got 0x%08lx\n", hr);
+    ok(token, "Expected token != 0\n");
+    ok(token != mta_token, "token == mta_token\n");
+
+    CoUninitialize();
+    return 0;
+}
+
 static void test_CoGetContextToken(void)
 {
     HRESULT hr;
     ULONG refs;
     ULONG_PTR token, token2;
     IObjContext *ctx;
+    HANDLE thread;
 
     if (!pCoGetContextToken)
     {
@@ -2173,6 +2482,22 @@ static void test_CoGetContextToken(void)
     refs = IObjContext_Release(ctx);
     ok(refs == 1, "Expected 0, got %lu\n", refs);
 
+    CoUninitialize();
+
+    hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    ok(hr == S_OK, "Expected S_OK, got 0x%08lx\n", hr);
+
+    token = 0;
+    hr = pCoGetContextToken(&token);
+    ok(hr == S_OK, "Expected S_OK, got 0x%08lx\n", hr);
+    ok(token, "Expected token != 0\n");
+    ok(token != token2, "token did not change\n");
+
+    thread = CreateThread(NULL, 0, get_context_token_thread, (void*)token, 0, NULL);
+    ok(thread != NULL, "CreateThread failed\n");
+    WaitForSingleObject(thread, INFINITE);
+    CloseHandle(thread);
+
     refs = IObjContext_Release(ctx);
     ok(refs == 0, "Expected 0, got %lu\n", refs);
 
@@ -2183,7 +2508,7 @@ static void test_TreatAsClass(void)
 {
     HRESULT hr;
     CLSID out;
-    static GUID deadbeef = {0xdeadbeef,0xdead,0xbeef,{0xde,0xad,0xbe,0xef,0xde,0xad,0xbe,0xef}};
+    static const GUID deadbeef = {0xdeadbeef,0xdead,0xbeef,{0xde,0xad,0xbe,0xef,0xde,0xad,0xbe,0xef}};
     static const char deadbeefA[] = "{DEADBEEF-DEAD-BEEF-DEAD-BEEFDEADBEEF}";
     IInternetProtocol *pIP = NULL;
     HKEY clsidkey, deadbeefkey;
@@ -2202,6 +2527,15 @@ static void test_TreatAsClass(void)
 
     lr = RegOpenKeyExA(HKEY_CLASSES_ROOT, "CLSID", 0, KEY_READ, &clsidkey);
     ok(!lr, "Couldn't open CLSID key, error %ld\n", lr);
+
+    hr = CoTreatAsClass(NULL, NULL);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+
+    hr = CoTreatAsClass(&deadbeef, NULL);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
+
+    hr = CoTreatAsClass(NULL, &deadbeef);
+    ok(hr == E_INVALIDARG, "Unexpected hr %#lx.\n", hr);
 
     lr = RegCreateKeyExA(clsidkey, deadbeefA, 0, NULL, 0, KEY_WRITE, NULL, &deadbeefkey, NULL);
     if (lr) {
@@ -2264,7 +2598,9 @@ static void test_TreatAsClass(void)
     ok(IsEqualGUID(&out, &deadbeef), "expected to get same clsid back\n");
 
     /* bizarrely, native's CoTreatAsClass takes some time to take effect in CoCreateInstance */
+#ifndef __REACTOS__
     Sleep(200);
+#endif
 
     hr = CoCreateInstance(&deadbeef, NULL, CLSCTX_INPROC_SERVER, &IID_IInternetProtocol, (void **)&pIP);
     ok(hr == REGDB_E_CLASSNOTREG, "CoCreateInstance gave wrong error: %08lx\n", hr);
@@ -2583,7 +2919,11 @@ static void CALLBACK apc_test_proc(ULONG_PTR param)
 static DWORD CALLBACK release_semaphore_thread( LPVOID arg )
 {
     HANDLE handle = arg;
+#ifdef __REACTOS__
+    if (WaitForSingleObject(handle, 50) == WAIT_TIMEOUT)
+#else
     if (WaitForSingleObject(handle, 200) == WAIT_TIMEOUT)
+#endif
         ReleaseSemaphore(handle, 1, NULL);
     return 0;
 }
@@ -2718,7 +3058,7 @@ static DWORD CALLBACK test_CoWaitForMultipleHandles_thread(LPVOID arg)
 
     index = 0xdeadbeef;
     PostMessageA(hWnd, WM_DDE_FIRST, 0, 0);
-    hr = CoWaitForMultipleHandles(0, 50, 2, handles, &index);
+    hr = CoWaitForMultipleHandles(0, COWAIT_TIMEOUT(50), 2, handles, &index);
     ok(hr == RPC_S_CALLPENDING, "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
     ok(index==0 || index==0xdeadbeef/* Win 8 */, "expected index 0, got %lu\n", index);
     success = PeekMessageA(&msg, hWnd, WM_DDE_FIRST, WM_DDE_FIRST, PM_REMOVE);
@@ -2726,7 +3066,7 @@ static DWORD CALLBACK test_CoWaitForMultipleHandles_thread(LPVOID arg)
 
     index = 0xdeadbeef;
     PostMessageA(hWnd, WM_USER, 0, 0);
-    hr = CoWaitForMultipleHandles(0, 50, 2, handles, &index);
+    hr = CoWaitForMultipleHandles(0, COWAIT_TIMEOUT(50), 2, handles, &index);
     ok(hr == RPC_S_CALLPENDING, "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
     ok(index==0 || index==0xdeadbeef/* Win 8 */, "expected index 0, got %lu\n", index);
     success = PeekMessageA(&msg, hWnd, WM_USER, WM_USER, PM_REMOVE);
@@ -2737,7 +3077,7 @@ static DWORD CALLBACK test_CoWaitForMultipleHandles_thread(LPVOID arg)
     index = 0xdeadbeef;
     PostMessageA(NULL, uMSG, 0, 0);
 
-    hr = CoWaitForMultipleHandles(COWAIT_ALERTABLE, 50, 2, handles, &index);
+    hr = CoWaitForMultipleHandles(COWAIT_ALERTABLE, COWAIT_TIMEOUT(50), 2, handles, &index);
     ok(hr == RPC_S_CALLPENDING, "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
     ok(index == 0 || broken(index == 0xdeadbeef) /* Win 8 */, "expected index 0, got %lu\n", index);
 
@@ -2771,7 +3111,7 @@ static DWORD CALLBACK test_CoWaitForMultipleHandles_thread(LPVOID arg)
 
     thread = CreateThread(NULL, 0, cowait_unmarshal_thread, stream, 0, &tid);
     ok(thread != NULL, "CreateThread failed, error %lu\n", GetLastError());
-    hr = CoWaitForMultipleHandles(0, 50, 1, &event, &index);
+    hr = CoWaitForMultipleHandles(0, COWAIT_TIMEOUT(50), 1, &event, &index);
     ok(hr == RPC_S_CALLPENDING, "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
     hr = CoWaitForMultipleHandles(0, 200, 1, &thread, &index);
     ok(hr == S_OK, "expected S_OK, got 0x%08lx\n", hr);
@@ -2861,7 +3201,7 @@ static void test_CoWaitForMultipleHandles(void)
 
     index = 0xdeadbeef;
     PostMessageA(hWnd, WM_DDE_FIRST, 0, 0);
-    hr = CoWaitForMultipleHandles(0, 50, 2, handles, &index);
+    hr = CoWaitForMultipleHandles(0, COWAIT_TIMEOUT(50), 2, handles, &index);
     ok(hr == RPC_S_CALLPENDING, "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
     ok(index == 0 || broken(index == 0xdeadbeef) /* Win 8 */, "expected index 0, got %lu\n", index);
     success = PeekMessageA(&msg, hWnd, WM_DDE_FIRST, WM_DDE_FIRST, PM_REMOVE);
@@ -2872,7 +3212,10 @@ static void test_CoWaitForMultipleHandles(void)
     index = 0xdeadbeef;
     thread = CreateThread(NULL, 0, post_message_thread, hWnd, 0, &tid);
     ok(thread != NULL, "CreateThread failed, error %lu\n", GetLastError());
-    hr = CoWaitForMultipleHandles(0, 100, 2, handles, &index);
+#ifdef __REACTOS__
+    cowait_wait_thread(thread);
+#endif
+    hr = CoWaitForMultipleHandles(0, COWAIT_TIMEOUT(100), 2, handles, &index);
     ok(hr == RPC_S_CALLPENDING, "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
     ok(index == 0 || broken(index == 0xdeadbeef) /* Win 8 */, "expected index 0, got %lu\n", index);
     success = PeekMessageA(&msg, hWnd, WM_DDE_FIRST, WM_DDE_FIRST, PM_REMOVE);
@@ -2884,7 +3227,10 @@ static void test_CoWaitForMultipleHandles(void)
     index = 0xdeadbeef;
     thread = CreateThread(NULL, 0, send_message_thread, hWnd, 0, &tid);
     ok(thread != NULL, "CreateThread failed, error %lu\n", GetLastError());
-    hr = CoWaitForMultipleHandles(0, 100, 2, handles, &index);
+#ifdef __REACTOS__
+    cowait_wait_sent_message();
+#endif
+    hr = CoWaitForMultipleHandles(0, COWAIT_TIMEOUT(100), 2, handles, &index);
     ok(hr == RPC_S_CALLPENDING, "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
     ok(index == 0 || broken(index == 0xdeadbeef) /* Win 8 */, "expected index 0, got %lu\n", index);
     success = PeekMessageA(&msg, hWnd, WM_DDE_FIRST, WM_DDE_FIRST, PM_REMOVE);
@@ -2908,7 +3254,7 @@ static void test_CoWaitForMultipleHandles(void)
 
     index = 0xdeadbeef;
     PostMessageA(hWnd, WM_DDE_FIRST, 0, 0);
-    hr = CoWaitForMultipleHandles(0, 50, 2, handles, &index);
+    hr = CoWaitForMultipleHandles(0, COWAIT_TIMEOUT(50), 2, handles, &index);
     ok(hr == RPC_S_CALLPENDING, "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
     ok(index == 0 || broken(index == 0xdeadbeef) /* Win 8 */, "expected index 0, got %lu\n", index);
     success = PeekMessageA(&msg, hWnd, WM_DDE_FIRST, WM_DDE_FIRST, PM_REMOVE);
@@ -2937,7 +3283,7 @@ static void test_CoWaitForMultipleHandles(void)
 
     index = 0xdeadbeef;
     PostMessageA(hWnd, WM_DDE_FIRST, 0, 0);
-    hr = CoWaitForMultipleHandles(COWAIT_ALERTABLE, 50, 2, handles, &index);
+    hr = CoWaitForMultipleHandles(COWAIT_ALERTABLE, COWAIT_TIMEOUT(50), 2, handles, &index);
     ok(hr == RPC_S_CALLPENDING, "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
     ok(index == 0 || broken(index == 0xdeadbeef) /* Win 8 */, "expected index 0, got %lu\n", index);
     success = PeekMessageA(&msg, hWnd, WM_DDE_FIRST, WM_DDE_FIRST, PM_REMOVE);
@@ -2959,7 +3305,7 @@ static void test_CoWaitForMultipleHandles(void)
     PostMessageA(hWnd, WM_DDE_FIRST, 0, 0);
     success = PeekMessageA(&msg, hWnd, WM_DDE_FIRST, WM_DDE_FIRST, PM_NOREMOVE);
     ok(success, "PeekMessageA returned FALSE\n");
-    hr = CoWaitForMultipleHandles(0, 50, 2, handles, &index);
+    hr = CoWaitForMultipleHandles(0, COWAIT_TIMEOUT(50), 2, handles, &index);
     ok(hr == RPC_S_CALLPENDING, "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
     ok(index == 0 || broken(index == 0xdeadbeef) /* Win 8 */, "expected index 0, got %lu\n", index);
     success = PeekMessageA(&msg, hWnd, WM_DDE_FIRST, WM_DDE_FIRST, PM_REMOVE);
@@ -2971,7 +3317,7 @@ static void test_CoWaitForMultipleHandles(void)
     ok(success, "PeekMessageA returned FALSE\n");
     thread = CreateThread(NULL, 0, release_semaphore_thread, handles[1], 0, &tid);
     ok(thread != NULL, "CreateThread failed, error %lu\n", GetLastError());
-    hr = CoWaitForMultipleHandles(COWAIT_INPUTAVAILABLE, 50, 2, handles, &index);
+    hr = CoWaitForMultipleHandles(COWAIT_INPUTAVAILABLE, COWAIT_TIMEOUT(50), 2, handles, &index);
     ok(hr == RPC_S_CALLPENDING || broken(hr == E_INVALIDARG) || broken(hr == S_OK) /* Win 8 */,
        "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
     if (hr != S_OK) ReleaseSemaphore(handles[1], 1, NULL);
@@ -3045,7 +3391,10 @@ static void test_CoWaitForMultipleHandles(void)
     PostMessageA(hWnd, WM_QUIT, 41, 0);
     thread = CreateThread(NULL, 0, post_message_thread, hWnd, 0, &tid);
     ok(thread != NULL, "CreateThread failed, error %lu\n", GetLastError());
-    hr = CoWaitForMultipleHandles(0, 100, 2, handles, &index);
+#ifdef __REACTOS__
+    cowait_wait_thread(thread);
+#endif
+    hr = CoWaitForMultipleHandles(0, COWAIT_TIMEOUT(100), 2, handles, &index);
     ok(hr == RPC_S_CALLPENDING, "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
     ok(index == 0 || broken(index == 0xdeadbeef) /* Win 8 */, "expected index 0, got %lu\n", index);
     success = PeekMessageA(&msg, hWnd, WM_DDE_FIRST, WM_DDE_FIRST, PM_REMOVE);
@@ -3071,7 +3420,10 @@ static void test_CoWaitForMultipleHandles(void)
     PostMessageA(hWnd, WM_QUIT, 42, 0);
     thread = CreateThread(NULL, 0, send_message_thread, hWnd, 0, &tid);
     ok(thread != NULL, "CreateThread failed, error %lu\n", GetLastError());
-    hr = CoWaitForMultipleHandles(0, 500, 2, handles, &index);
+#ifdef __REACTOS__
+    cowait_wait_sent_message();
+#endif
+    hr = CoWaitForMultipleHandles(0, COWAIT_TIMEOUT(500), 2, handles, &index);
     ok(hr == RPC_S_CALLPENDING, "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
     ok(index == 0 || broken(index == 0xdeadbeef) /* Win 8 */, "expected index 0, got %lu\n", index);
     success = PeekMessageA(&msg, hWnd, WM_DDE_FIRST, WM_DDE_FIRST, PM_REMOVE);
@@ -3103,7 +3455,10 @@ static void test_CoWaitForMultipleHandles(void)
         PostQuitMessage(44);
         thread = CreateThread(NULL, 0, post_message_thread, hWnd, 0, &tid);
         ok(thread != NULL, "CreateThread failed, error %lu\n", GetLastError());
-        hr = CoWaitForMultipleHandles(0, 100, 2, handles, &index);
+#ifdef __REACTOS__
+        cowait_wait_thread(thread);
+#endif
+        hr = CoWaitForMultipleHandles(0, COWAIT_TIMEOUT(100), 2, handles, &index);
         ok(hr == RPC_S_CALLPENDING, "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
         ok(index == 0 || broken(index == 0xdeadbeef) /* Win 8 */, "expected index 0, got %lu\n", index);
         success = PeekMessageA(&msg, hWnd, WM_DDE_FIRST, WM_DDE_FIRST, PM_REMOVE);
@@ -3121,7 +3476,10 @@ static void test_CoWaitForMultipleHandles(void)
         PostQuitMessage(45);
         thread = CreateThread(NULL, 0, send_message_thread, hWnd, 0, &tid);
         ok(thread != NULL, "CreateThread failed, error %lu\n", GetLastError());
-        hr = CoWaitForMultipleHandles(0, 100, 2, handles, &index);
+#ifdef __REACTOS__
+        cowait_wait_sent_message();
+#endif
+        hr = CoWaitForMultipleHandles(0, COWAIT_TIMEOUT(100), 2, handles, &index);
         ok(hr == RPC_S_CALLPENDING, "expected RPC_S_CALLPENDING, got 0x%08lx\n", hr);
         ok(index == 0 || broken(index == 0xdeadbeef) /* Win 8 */, "expected index 0, got %lu\n", index);
         success = PeekMessageA(&msg, hWnd, WM_DDE_FIRST, WM_DDE_FIRST, PM_REMOVE);
@@ -3145,7 +3503,7 @@ static void test_CoWaitForMultipleHandles(void)
 
     /* If COM was not initialized, messages are neither pumped nor peeked at */
     PostMessageA(hWnd, WM_DDE_FIRST, 0, 0);
-    hr = CoWaitForMultipleHandles(0, 100, 2, handles, &index);
+    hr = CoWaitForMultipleHandles(0, COWAIT_TIMEOUT(100), 2, handles, &index);
     ok(hr == RPC_S_CALLPENDING, "got %#lx\n", hr);
     success = MsgWaitForMultipleObjectsEx(0, NULL, 2, QS_ALLPOSTMESSAGE, MWMO_ALERTABLE);
     ok(success == 0, "MsgWaitForMultipleObjects returned %x\n", success);
@@ -3156,7 +3514,7 @@ static void test_CoWaitForMultipleHandles(void)
     CoInitializeEx(NULL, COINIT_MULTITHREADED);
 
     PostMessageA(hWnd, WM_DDE_FIRST, 0, 0);
-    hr = CoWaitForMultipleHandles(0, 100, 2, handles, &index);
+    hr = CoWaitForMultipleHandles(0, COWAIT_TIMEOUT(100), 2, handles, &index);
     ok(hr == RPC_S_CALLPENDING, "got %#lx\n", hr);
     success = MsgWaitForMultipleObjectsEx(0, NULL, 2, QS_ALLPOSTMESSAGE, MWMO_ALERTABLE);
     ok(success == 0, "MsgWaitForMultipleObjects returned %x\n", success);

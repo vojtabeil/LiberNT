@@ -88,11 +88,11 @@
 
 /* NTOS loader */
 #include <include/ntldr/winldr.h>
-#include <conversion.h> // More-or-less related to MM also...
 #include <peloader.h>
 
 /* File system headers */
 #include <fs/ext.h>
+#include <fs/exfat.h>
 #include <fs/fat.h>
 #include <fs/ntfs.h>
 #include <fs/iso.h>
@@ -130,9 +130,15 @@
 #include <arch/powerpc/hardware.h>
 #elif defined(_M_ARM)
 #include <arch/arm/hardware.h>
+#elif defined(_M_ARM64) || defined(_ARM64_) || defined(__aarch64__) || defined(__arm64__)
+#include <arch/arm64/arm64.h>
+#elif defined(_M_RISCV64)
+#include <arch/riscv64/riscv64.h>
 #elif defined(_M_MIPS)
 #include <arch/mips/arcbios.h>
 #endif
+
+#include <conversion.h>
 
 VOID __cdecl BootMain(IN PCCH CmdLine);
 

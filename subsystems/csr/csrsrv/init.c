@@ -430,7 +430,7 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
     SECURITY_DESCRIPTOR DosDevicesSd;
     NTSTATUS Status;
 
-    /* Generate the session BNOLINKS directory name */
+    /* Generate the Session BNOLINKS Directory name */
     _swprintf(SessionBuffer, L"%ws\\BNOLINKS", SESSION_ROOT);
     RtlInitUnicodeString(&SessionString, SessionBuffer);
 
@@ -451,14 +451,14 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
     }
 
     /* Now add the Session ID */
-    _swprintf(SessionBuffer, L"%lu", Session);
+    _swprintf(SessionBuffer, L"%ld", Session);
     RtlInitUnicodeString(&SessionString, SessionBuffer);
 
-    /* Create the per-session symlink to the BaseNamedObjects directory */
+    /* Check if this is the first Session */
     if (Session)
     {
-        /* Use the session path */
-        _swprintf(BnoBuffer, L"%ws\\%lu\\BaseNamedObjects", SESSION_ROOT, Session);
+        /* Not the first, so the name will be slighly more complex */
+        _swprintf(BnoBuffer, L"%ws\\%ld\\BaseNamedObjects", SESSION_ROOT, Session);
         RtlInitUnicodeString(&BnoString, BnoBuffer);
     }
     else
@@ -466,6 +466,8 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
         /* Use the direct name */
         RtlInitUnicodeString(&BnoString, L"\\BaseNamedObjects");
     }
+
+    /* Create the symlink */
     InitializeObjectAttributes(&ObjectAttributes,
                                &SessionString,
                                OBJ_OPENIF | OBJ_CASE_INSENSITIVE,
@@ -482,12 +484,12 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
         return Status;
     }
 
-    /* Create the \DosDevices security descriptor */
+    /* Create the \DosDevices Security Descriptor */
     Status = GetDosDevicesProtection(&DosDevicesSd);
     if (!NT_SUCCESS(Status)) return Status;
 
     /* Now create a directory for this session */
-    _swprintf(SessionBuffer, L"%ws\\%lu", SESSION_ROOT, Session);
+    _swprintf(SessionBuffer, L"%ws\\%ld", SESSION_ROOT, Session);
     RtlInitUnicodeString(&SessionString, SessionBuffer);
 
     /* Create the directory */
@@ -507,11 +509,34 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
         return Status;
     }
 
+    if (Session == 0)
+    {
+        UNICODE_STRING WindowsString = RTL_CONSTANT_STRING(L"\\Windows");
+
+        RtlInitUnicodeString(&SessionString, L"Windows");
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   &SessionString,
+                                   OBJ_OPENIF | OBJ_CASE_INSENSITIVE,
+                                   SessionObjectDirectory,
+                                   NULL);
+        Status = NtCreateSymbolicLinkObject(&BnoHandle,
+                                            SYMBOLIC_LINK_ALL_ACCESS,
+                                            &ObjectAttributes,
+                                            &WindowsString);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("CSRSS: NtCreateSymbolicLinkObject failed in "
+                    "CsrCreateSessionObjectDirectory - status = %lx\n", Status);
+            FreeDosDevicesProtection(&DosDevicesSd);
+            return Status;
+        }
+    }
+
     /* Next, create a directory for this session's DOS Devices */
     RtlInitUnicodeString(&SessionString, L"DosDevices");
     InitializeObjectAttributes(&ObjectAttributes,
                                &SessionString,
-                               OBJ_CASE_INSENSITIVE,
+                               OBJ_OPENIF | OBJ_CASE_INSENSITIVE,
                                SessionObjectDirectory,
                                &DosDevicesSd);
     Status = NtCreateDirectoryObject(&DosDevicesDirectory,
@@ -523,7 +548,7 @@ CsrCreateSessionObjectDirectory(IN ULONG Session)
                 "CsrCreateSessionObjectDirectory - status = %lx\n", Status);
     }
 
-    /* Release the security descriptor */
+    /* Release the Security Descriptor */
     FreeDosDevicesProtection(&DosDevicesSd);
 
     /* Return */
@@ -557,6 +582,8 @@ CsrParseServerCommandLine(IN ULONG ArgumentCount,
     ULONG i, DllIndex;
     ANSI_STRING AnsiString;
     OBJECT_ATTRIBUTES ObjectAttributes;
+    CHAR SessionDirectory[MAX_PATH];
+    INT Length;
 
     /* Set the Defaults */
     CsrTotalPerProcessDataLength = 0;
@@ -596,8 +623,14 @@ CsrParseServerCommandLine(IN ULONG ArgumentCount,
             /* Check if a session ID is specified */
             if (SessionId != 0)
             {
-                DPRINT1("Sessions not yet implemented\n");
-                ASSERT(SessionId);
+                Length = _snprintf(SessionDirectory,
+                                   sizeof(SessionDirectory),
+                                   "\\Sessions\\%lu%s",
+                                   SessionId,
+                                   ParameterValue);
+                if (Length < 0 || Length >= (INT)sizeof(SessionDirectory))
+                    return STATUS_NAME_TOO_LONG;
+                ParameterValue = SessionDirectory;
             }
 
             /* Initialize the directory name */
@@ -915,6 +948,7 @@ CsrSbApiPortInitialize(VOID)
     ULONG Size;
     PSECURITY_DESCRIPTOR PortSd;
     OBJECT_ATTRIBUTES ObjectAttributes;
+    ALPC_PORT_ATTRIBUTES PortAttributes;
     NTSTATUS Status;
     HANDLE hRequestThread;
     CLIENT_ID ClientId;
@@ -926,14 +960,15 @@ CsrSbApiPortInitialize(VOID)
     CsrSbApiPortName.Buffer = RtlAllocateHeap(CsrHeap, 0, Size);
     if (!CsrSbApiPortName.Buffer) return STATUS_NO_MEMORY;
 
-    /* Setup the Port Name string */
+    /* Setup the rest of the empty string */
     CsrSbApiPortName.Length = 0;
     CsrSbApiPortName.MaximumLength = (USHORT)Size;
+
+    /* Now append the full port name */
     RtlAppendUnicodeStringToString(&CsrSbApiPortName, &CsrDirectoryName);
-    RtlAppendUnicodeToString(&CsrSbApiPortName, L"\\");
+    RtlAppendUnicodeToString(&CsrSbApiPortName, UNICODE_PATH_SEP);
     RtlAppendUnicodeToString(&CsrSbApiPortName, SB_PORT_NAME);
-    if (CsrDebug & 2)
-        DPRINT1("CSRSS: Creating %wZ port and associated thread\n", &CsrSbApiPortName);
+    if (CsrDebug & 2) DPRINT1("CSRSS: Creating %wZ port and associated thread\n", &CsrSbApiPortName);
 
     /* Create Security Descriptor for this Port */
     Status = CsrCreateLocalSystemSD(&PortSd);
@@ -947,11 +982,13 @@ CsrSbApiPortInitialize(VOID)
                                PortSd);
 
     /* Create the Port Object */
-    Status = NtCreatePort(&CsrSbApiPort,
-                          &ObjectAttributes,
-                          sizeof(SB_CONNECTION_INFO),
-                          sizeof(SB_API_MSG),
-                          32 * sizeof(SB_API_MSG));
+    RtlZeroMemory(&PortAttributes, sizeof(PortAttributes));
+    PortAttributes.MaxMessageLength = sizeof(SB_API_MSG);
+    PortAttributes.MaxPoolUsage = 32 * sizeof(SB_API_MSG);
+    PortAttributes.SecurityQos.Length = sizeof(PortAttributes.SecurityQos);
+    PortAttributes.SecurityQos.ImpersonationLevel = SecurityIdentification;
+    PortAttributes.SecurityQos.ContextTrackingMode = SECURITY_DYNAMIC_TRACKING;
+    Status = NtAlpcCreatePort(&CsrSbApiPort, &ObjectAttributes, &PortAttributes);
     if (PortSd) RtlFreeHeap(CsrHeap, 0, PortSd);
 
     if (NT_SUCCESS(Status))
@@ -963,7 +1000,7 @@ CsrSbApiPortInitialize(VOID)
                                      0,
                                      0,
                                      0,
-                                     CsrSbApiRequestThread,
+                                     (PVOID)CsrSbApiRequestThread,
                                      NULL,
                                      &hRequestThread,
                                      &ClientId);
@@ -1112,12 +1149,15 @@ CsrServerInitialization(IN ULONG ArgumentCount,
 #endif
 
     /* Have us handle Hard Errors */
-    Status = NtSetDefaultHardErrorPort(CsrApiPort);
-    if (!NT_SUCCESS(Status))
+    if (SessionId == 0)
     {
-        DPRINT1("CSRSRV:%s: NtSetDefaultHardErrorPort failed (Status=0x%08lx)\n",
-                __FUNCTION__, Status);
-        return Status;
+        Status = NtSetDefaultHardErrorPort(CsrApiPort);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("CSRSRV:%s: NtSetDefaultHardErrorPort failed (Status=0x%08lx)\n",
+                    __FUNCTION__, Status);
+            return Status;
+        }
     }
 
     /* Return status */

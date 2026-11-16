@@ -22,6 +22,22 @@
 #ifndef __WINE_SHELL_MAIN_H
 #define __WINE_SHELL_MAIN_H
 
+#include <stdarg.h>
+#include <stdlib.h>
+
+#include "windef.h"
+#include "winbase.h"
+#include "wingdi.h"
+#include "winuser.h"
+#include "winnls.h"
+#include "commctrl.h"
+#include "objbase.h"
+#include "docobj.h"
+#include "shlobj.h"
+#include "shellapi.h"
+#include "shlwapi.h"
+#include "wine/list.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -30,12 +46,21 @@ extern "C" {
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(*(a)))
 
+HRESULT WINAPI ApplicationAssociationRegistration_Constructor(IUnknown *, REFIID, void **);
+HRESULT WINAPI KnownFolderManager_Constructor(IUnknown *, REFIID, void **);
+HRESULT SHELL_GetRegisteredFolderPath(REFKNOWNFOLDERID, DWORD, HANDLE, PWSTR *);
+
+/* explorer ("cabinet") window messages */
+#ifndef CWM_GETISHELLBROWSER
+#define CWM_GETISHELLBROWSER (WM_USER + 7)
+#endif
+
 /*******************************************
 *  global SHELL32.DLL variables
 */
 extern HMODULE	huser32 DECLSPEC_HIDDEN;
 extern HINSTANCE shell32_hInstance DECLSPEC_HIDDEN;
-extern int (WINAPI* SHELL_StrCmpLogical)(PCWSTR s1, PCWSTR s2);
+int WINAPI SHELL_StrCmpLogical(PCWSTR s1, PCWSTR s2);
 
 enum {
     REST_SH32_ENABLESHELLEXECUTEHOOKS = 0x00060001, // POLID_EnableShellExecuteHooks
@@ -52,6 +77,12 @@ SH32_ExtCoCreateInstance(
     _In_ REFIID riid,
     _Out_ LPVOID *ppv);
 
+#ifdef __REACTOS__
+HRESULT WINAPI WineShell32_GetClassObject(REFCLSID clsid, REFIID riid, void **obj);
+HRESULT WINAPI ExplorerBrowser_Constructor(IUnknown *outer, REFIID riid, void **obj);
+HRESULT WINAPI NamespaceTreeControl_Constructor(IUnknown *outer, REFIID riid, void **obj);
+#endif
+
 /* Iconcache */
 #define INVALID_INDEX -1
 BOOL SIC_Initialize(void);
@@ -62,6 +93,9 @@ extern INT ShellLargeIconSize;
 extern INT ShellSmallIconSize;
 extern INT ShellIconBPP;
 BOOL WINAPI Shell_GetImageLists(HIMAGELIST * lpBigList, HIMAGELIST * lpSmallList);
+#ifdef __REACTOS__
+HIMAGELIST SIC_GetImageList(INT iImageList);
+#endif
 
 /* Classes Root */
 HRESULT HCR_GetProgIdKeyOfExtension(PCWSTR szExtension, PHKEY phKey, BOOL AllowFallback);
@@ -127,6 +161,7 @@ HRESULT IDataObject_Constructor(HWND hwndOwner, LPCITEMIDLIST pMyPidl, PCUITEMID
 HRESULT IEnumFORMATETC_Constructor(UINT cfmt, const FORMATETC afmt[], IEnumFORMATETC **enumerator);
 
 LPCLASSFACTORY	IClassFactory_Constructor(REFCLSID);
+HRESULT ItemMenu_Constructor(IShellFolder*, LPCITEMIDLIST, const LPCITEMIDLIST*, UINT, REFIID, void**);
 IContextMenu2 *	ISvItemCm_Constructor(LPSHELLFOLDER pSFParent, LPCITEMIDLIST pidl, const LPCITEMIDLIST *aPidls, UINT uItemCount);
 HRESULT WINAPI INewItem_Constructor(IUnknown * pUnkOuter, REFIID riif, LPVOID *ppv);
 IContextMenu2 * ISvStaticItemCm_Constructor(LPSHELLFOLDER pSFParent, LPCITEMIDLIST pidl, LPCITEMIDLIST *apidl, UINT cidl, HKEY hKey);
@@ -139,9 +174,6 @@ HRESULT WINAPI IShellLink_ConstructFromFile(IShellFolder * psf, LPCITEMIDLIST pi
 HRESULT WINAPI IFileSystemBindData_Constructor(const WIN32_FIND_DATAW *pfd, LPBC *ppV);
 HRESULT WINAPI CPanel_ExtractIconA(LPITEMIDLIST pidl, LPCSTR pszFile, UINT nIconIndex, HICON *phiconLarge, HICON *phiconSmall, UINT nIconSize) DECLSPEC_HIDDEN;
 HRESULT WINAPI CPanel_ExtractIconW(LPITEMIDLIST pidl, LPCWSTR pszFile, UINT nIconIndex, HICON *phiconLarge, HICON *phiconSmall, UINT nIconSize) DECLSPEC_HIDDEN;
-
-HRESULT CRegFolder_CreateInstance(const GUID *pGuid, LPCITEMIDLIST pidlRoot, LPCWSTR lpszPath, LPCWSTR lpszEnumKeyName, REFIID riid, void **ppv);
-HRESULT WINAPI CustomDestinationList_Constructor(IUnknown *outer, REFIID riid, void **obj);
 
 /* initialisation for FORMATETC */
 #define InitFormatEtc(fe, cf, med) \
@@ -160,16 +192,35 @@ HRESULT WINAPI CustomDestinationList_Constructor(IUnknown *outer, REFIID riid, v
     DROPEFFECT_NONE)))
 
 
-HGLOBAL RenderHDROP(LPITEMIDLIST pidlRoot, LPITEMIDLIST * apidl, UINT cidl) DECLSPEC_HIDDEN;
-HGLOBAL RenderSHELLIDLIST (LPITEMIDLIST pidlRoot, LPITEMIDLIST * apidl, UINT cidl) DECLSPEC_HIDDEN;
-HGLOBAL RenderFILENAMEA (LPITEMIDLIST pidlRoot, LPITEMIDLIST * apidl, UINT cidl) DECLSPEC_HIDDEN;
-HGLOBAL RenderFILENAMEW (LPITEMIDLIST pidlRoot, LPITEMIDLIST * apidl, UINT cidl) DECLSPEC_HIDDEN;
+HGLOBAL RenderHDROP(const ITEMIDLIST *root_pidl, const ITEMIDLIST **pidls, unsigned int count) DECLSPEC_HIDDEN;
+HGLOBAL RenderSHELLIDLIST(const ITEMIDLIST *root_pidl, const ITEMIDLIST **pidls, unsigned int count) DECLSPEC_HIDDEN;
+HGLOBAL RenderFILENAMEA(const ITEMIDLIST *root_pidl, const ITEMIDLIST **pidls, unsigned int count) DECLSPEC_HIDDEN;
+HGLOBAL RenderFILENAMEW(const ITEMIDLIST *root_pidl, const ITEMIDLIST **pidls, unsigned int count) DECLSPEC_HIDDEN;
 
 EXTERN_C HRESULT
 SHELL_GetShellExtensionRegCLSID(HKEY hKey, LPCWSTR KeyName, CLSID *pClsId);
 EXTERN_C HRESULT
 SHELL_InitializeExtension(REFCLSID clsid, PCIDLIST_ABSOLUTE pidlFolder, IDataObject *pDO,
                           HKEY hkeyProgID, REFIID riid, void **ppv);
+
+static inline WCHAR *strdupAtoW(const char *str)
+{
+    WCHAR *ret;
+    DWORD len;
+
+    if (!str) return NULL;
+
+    len = MultiByteToWideChar(CP_ACP, 0, str, -1, NULL, 0);
+#ifdef __REACTOS__
+    ret = (WCHAR *)malloc(len * sizeof(WCHAR));
+#else
+    ret = malloc(len * sizeof(WCHAR));
+#endif
+    if (ret)
+        MultiByteToWideChar(CP_ACP, 0, str, -1, ret, len);
+
+    return ret;
+}
 
 /* Change Notification */
 void InitChangeNotifications(void) DECLSPEC_HIDDEN;
@@ -246,6 +297,10 @@ extern const GUID CLSID_UnixDosFolder DECLSPEC_HIDDEN;
 
 /* Default shell folder value registration */
 HRESULT SHELL_RegisterShellFolders(void) DECLSPEC_HIDDEN;
+
+#ifdef __REACTOS__
+HRESULT SHELL_AddAutomaticDestination(LPCWSTR pszAppID, PCIDLIST_ABSOLUTE pidl);
+#endif
 
 /* Detect Shell Links */
 BOOL SHELL_IsShortcut(LPCITEMIDLIST) DECLSPEC_HIDDEN;

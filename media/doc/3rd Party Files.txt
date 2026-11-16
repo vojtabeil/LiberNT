@@ -6,19 +6,19 @@ SPDX identifier of a license was used where possible.
 Please update this file when you port/sync an external project.
 
 
+Title: glmark2
+Path: base/applications/cmdutils/glmark2
+Used Version: 2023.01 (22c527cb0556f3a1ac4445aaa52cc532760928d5)
+License: GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later.html), SGI notice for src/scene-ideas (COPYING.SGI)
+URL: https://github.com/glmark2/glmark2
+Modifications: dropped android, doc, fastlane, meson and the bundled libjpeg-turbo; executable-relative data path and 5 second default scene duration under __REACTOS__
+
 Title: rdesktop
 Path: base/applications/mstsc
 Path: modules/rosapps/applications/net/tsclient
 Used Version: 1.8.3
 License: GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later.html)
 URL: https://github.com/rdesktop/rdesktop
-
-Title: TreeList
-Path: base/setup/reactos/treelist.c
-Path: base/setup/reactos/treelist.h
-Used Version: ??? (Imported on 2018.11.06: 2fdfb41 (0.4.11-dev-668))
-License: GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later.html)
-URL: https://github.com/sebkirche/treelist
 
 Title: DXTN OpenGL Compression Libs
 Path: dll/3rdparty/dxtn
@@ -47,6 +47,27 @@ License: libtiff (https://spdx.org/licenses/libtiff.html)
 URL: http://www.simplesystems.org/libtiff/
 Modifications: added .spec file
 
+Title: Public Suffix List (ICANN domains)
+Path: dll/win32/wininet/public_suffix_list.h
+Used Version: publicsuffix.org list of 2026-10-07 (ETag 7ba6fb3902bb3cd40f456e283f9182dc)
+License: MPL-2.0 (https://spdx.org/licenses/MPL-2.0.html)
+URL: https://publicsuffix.org/
+Modifications: ICANN section only, generated with sdk/tools/mkpsl.py
+
+Title: DirectX-Headers (DXCore)
+Path: sdk/include/psdk/dxcore.h
+Path: sdk/include/psdk/dxcore_interface.h
+Used Version: 461ef5138bd30922b44fbad77c4e47662812d2d5
+License: MIT (https://spdx.org/licenses/MIT.html)
+URL: https://github.com/microsoft/DirectX-Headers
+
+Title: JPEG XR reference codec
+Path: sdk/lib/3rdparty/jxr
+Used Version: Wine 11.14 libs/jxr (1012f3d99507b80d4869eabf0853567660a7ecbb)
+License: BSD-2-Clause (https://spdx.org/licenses/BSD-2-Clause.html)
+URL: https://gitlab.winehq.org/wine/wine/-/tree/wine-11.14/libs/jxr
+Modifications: portable C build and bounded bitstream reads, see README.md
+
 Title: Libxslt
 Path: dll/3rdparty/libxslt
 Used Version: 1.1.37
@@ -55,9 +76,9 @@ URL: http://xmlsoft.org
 
 Title: mbed TLS
 Path: dll/3rdparty/mbedtls
-Used Version: 2.16.11
-License: Apache-2.0 (https://spdx.org/licenses/Apache-2.0.html)
-URL: https://tls.mbed.org/
+Used Version: 3.6.7
+License: Apache-2.0 OR GPL-2.0-or-later (https://spdx.org/licenses/Apache-2.0.html)
+URL: https://github.com/Mbed-TLS/mbedtls
 
 Title: Mesa3D
 Path: dll/opengl/mesa
@@ -73,23 +94,62 @@ URL: https://gitlab.freedesktop.org/mesa/glu, ftp://ftp.freedesktop.org/pub/mesa
 
 Title: ACPICA
 Path: drivers/bus/acpi/acpica
-Used Version: 20221020
+Used Version: 20260930
 License: GPL-2.0 (https://spdx.org/licenses/GPL-2.0.html)
 URL: https://acpica.org/
+
+Title: Linux i915 VBT, PCI ID and register definitions (data only)
+Path: drivers/directx/hdgfx/core
+Used Version: Linux mainline 21a7f44fd (intel_vbt_defs.h, include/drm/intel/pciids.h, i915_cmd_parser.c)
+License: MIT (https://spdx.org/licenses/MIT.html)
+URL: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+Modifications: no code copied; VBT block IDs, field offsets, the supported PCI IDs and the Gen 7 render register allow-list restated in LiberNT's own code
+
+Title: Imagination PowerVR Rogue firmware
+Path: drivers/directx/powervr/fw
+Used Version: rogue_36.29.52.182_v1.fw (linux-firmware 8a58f81)
+License: Imagination Technologies binary redistribution license (drivers/directx/powervr/fw/LICENSE.powervr)
+URL: https://gitlab.freedesktop.org/imagination/linux-firmware
+
+Title: Ralink RT2870 firmware
+Path: drivers/network/dd/rt2800usb/fw
+Used Version: rt2870.bin (linux-firmware 20260319)
+License: Ralink Technology binary redistribution license (drivers/network/dd/rt2800usb/fw/LICENCE.ralink-firmware.txt)
+URL: https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git
+
+Title: Realtek RTL8852B firmware
+Path: drivers/network/dd/rtw8852bs/fw
+Used Version: rtw89/rtw8852b_fw-2.bin (linux-firmware 20260319)
+License: Realtek binary redistribution license (drivers/network/dd/rtw8852bs/fw/LICENCE.rtlwifi_firmware.txt)
+URL: https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git
+
+Title: Linux PowerVR DRM driver (drm/imagination)
+Path: drivers/directx/powervr/upstream
+Used Version: Linux mainline 6addb4f38
+License: GPL-2.0-only OR MIT (https://spdx.org/licenses/MIT.html)
+URL: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+Modifications: none; built over the LiberNT Linux compatibility layer (sdk/lib/drivers/linux-compat)
+
+Title: Linux DRM GPU VA manager, execution context, sync objects and GPU scheduler
+Path: sdk/lib/drivers/drm
+Used Version: Linux mainline 6addb4f38
+License: MIT (https://spdx.org/licenses/MIT.html), drm_gpuvm/drm_exec: GPL-2.0-only OR MIT
+URL: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git
+Modifications: imported drm_gpuvm.c, drm_exec.c, drm_syncobj.c, scheduler/*, the matching include/drm headers and include/uapi/drm/{drm,drm_mode,pvr_drm}.h; spsc_queue.h pointer casts use intptr_t; drm_core.c, drm_gem.c and drm_compat.h are LiberNT code
+
+Title: felix86
+Path: submodules/felix86 (feed)
+Path: dll/win32/amd64emu
+Used Version: 26.10 (git commit 24c158b)
+License: MIT (https://spdx.org/licenses/MIT.html)
+URL: https://github.com/OFFTKP/felix86
+Modifications: submodules/felix86-nt.patch; amd64emu.dll builds the recompiler core (src/felix86/v2, common, hle/cpuid.cpp) with the vendored biscuit (MIT), Zydis and Zycore (MIT), {fmt} (MIT), Berkeley SoftFloat 3e (BSD-3-Clause), Cephes (BSD) and the FEXCore SHMStats header (MIT); the Linux front end is replaced by LiberNT code in dll/win32/amd64emu
 
 Title: VirtIO Windows guest driver library
 Path: sdk/lib/drivers/virtio
 Used Version: git commit 4c4d181
 License: BSD-3-Clause (https://spdx.org/licenses/BSD-3-Clause.html)
 URL: https://github.com/virtio-win/kvm-guest-drivers-windows/tree/master/VirtIO
-
-Title: WinBtrfs
-Path: dll/shellext/shellbtrfs
-Path: drivers/filesystems/btrfs
-Path: sdk/lib/fslib/btrfslib
-Used Version: 1.8.1
-License: LGPL-3.0-or-later (https://spdx.org/licenses/LGPL-3.0-or-later.html)
-URL: https://github.com/maharmstone/btrfs
 
 Title: Microsoft CDFS File System Driver
 Path: drivers/filesystems/cdfs
@@ -125,6 +185,12 @@ Path: drivers/network/dd/netkvm
 Used Version: git commit 5e01b36
 License: BSD-3-Clause (https://spdx.org/licenses/BSD-3-Clause.html)
 URL: https://github.com/virtio-win/kvm-guest-drivers-windows/tree/03ca1696b9474d62b90fda5be06d91c8c34f6413/NetKVM/NDIS5
+
+Title: Raspberry Pi Windows drivers
+Path: drivers/platform/rpi3winsync
+Used Version: git commit 88ee238c9debecce810d208cac1e5f36add3d2a1
+License: MIT (https://spdx.org/licenses/MIT.html)
+URL: https://github.com/raspberrypi/windows-drivers
 
 Title: Microsoft CDROM Storage Class Driver
 Path: drivers/storage/class/cdrom
@@ -188,6 +254,36 @@ License: GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later.html)
 URL: https://pci-ids.ucw.cz/
 URL: https://github.com/pciutils/pciids
 
+Title: SpacemiT K1 U-Boot (FSBL/SPL, U-Boot FIT, SD boot header)
+Path: media/boot/spacemit-k1/bootinfo_sd.bin
+Path: media/boot/spacemit-k1/FSBL.bin
+Path: media/boot/spacemit-k1/u-boot.itb
+Path: media/boot/spacemit-k1/dtb/x1_orangepi-rv2.dtb
+Used Version: branch k1-bl-v2.2.y, git commit 7f51f4453f9811eeaafbdd839b1bf1b0cc27a413 (k1_defconfig, with media/boot/spacemit-k1/patches)
+License: GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later.html), media/boot/spacemit-k1/LICENCE.u-boot
+URL: https://github.com/spacemit-com/uboot-2022.10
+
+Title: SpacemiT K1 OpenSBI
+Path: media/boot/spacemit-k1/fw_dynamic.itb
+Used Version: branch k1-bl-v2.2.y, git commit fc02b891b17b8bdc1273a39f80aa374cd99ba9a2 (PLATFORM=generic, k1_defconfig, unmodified)
+License: BSD-2-Clause (https://spdx.org/licenses/BSD-2-Clause.html), media/boot/spacemit-k1/LICENCE.opensbi
+URL: https://github.com/spacemit-com/opensbi
+
+Title: StarFive JH7110 U-Boot (SPL, U-Boot FIT with OpenSBI) for the Orange Pi RV
+Path: media/boot/starfive-jh7110/u-boot-spl.bin.normal.out
+Path: media/boot/starfive-jh7110/u-boot.itb
+Used Version: U-Boot git commit 0a55b098d6f5f6bafa84fc2f18b433dd167bf729, OpenSBI git commit 6ad246a1494807ee91e36ffcf60e4c30bb309d45 (PLATFORM=generic)
+License: GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later.html), media/boot/starfive-jh7110/LICENCE.u-boot; OpenSBI: BSD-2-Clause (https://spdx.org/licenses/BSD-2-Clause.html), media/boot/starfive-jh7110/LICENCE.opensbi
+URL: https://github.com/u-boot/u-boot
+URL: https://github.com/riscv-software-src/opensbi
+Modifications: none; built with starfive_visionfive2_defconfig plus media/boot/starfive-jh7110/u-boot.config and u-boot-sd.dtsi
+
+Title: Orange Pi RV device tree
+Path: media/boot/starfive-jh7110/jh7110-orangepi-rv.dtb
+Used Version: U-Boot git commit 0a55b098d6f5f6bafa84fc2f18b433dd167bf729, dts/upstream/src/riscv/starfive/jh7110-orangepi-rv.dts (unmodified)
+License: GPL-2.0 OR MIT (https://spdx.org/licenses/MIT.html)
+URL: https://github.com/u-boot/u-boot
+
 Title: DejaVu Fonts
 Path: media/fonts
 Used Version: 2.37
@@ -242,7 +338,13 @@ Used Version: git commit d9c6040
 License: MIT (https://spdx.org/licenses/MIT.html)
 URL: https://github.com/microsoft/Windows-Driver-Frameworks
 
-Title: libmpg123 (used by winemp3.acm)
+Title: Little CMS
+Path: sdk/lib/3rdparty/lcms2
+Used Version: 2.19 (Wine 11.14 bundled version)
+License: MIT (https://spdx.org/licenses/MIT.html)
+URL: https://www.littlecms.com/
+
+Title: libmpg123 (used by l3codeca.acm)
 Path: sdk/lib/3rdparty/libmpg123
 Used Version: 1.26.1
 License: LGPL-2.1 (https://spdx.org/licenses/LGPL-2.1.html)
@@ -278,6 +380,13 @@ Used Version: 1.2.13
 License: Zlib (https://spdx.org/licenses/Zlib.html)
 URL: http://www.zlib.net
 
+Title: Zstandard
+Path: sdk/lib/3rdparty/zstd
+Used Version: 1.5.7
+License: BSD-3-Clause (https://spdx.org/licenses/BSD-3-Clause.html) OR GPL-2.0-only (https://spdx.org/licenses/GPL-2.0-only.html)
+URL: https://github.com/facebook/zstd
+Modifications: decompressor only (lib/common, lib/decompress); built for kernel mode with zstd_libernt.h, which leaves allocation to the caller's static workspace
+
 Title: chmc and lzxcomp
 Path: sdk/tools/hhpcomp/chmc
 Path: sdk/tools/hhpcomp/lzx_compress
@@ -312,3 +421,13 @@ Path: sdk/include/ddk/d3dkmthk.h
 Used Version: git commit 045831e
 License: MIT (https://spdx.org/licenses/MIT.html)
 URL: https://github.com/microsoft/libdxg
+
+Title: Apple graphics driver of aurora-silicon/linux - firmware interface description only
+Path: sdk/lib/drivers/applertkit/agxinit.c
+Path: sdk/include/reactos/drivers/appleagxinit.h
+Used Version: git commit c880586
+License: MIT (https://spdx.org/licenses/MIT.html), offered as GPL-2.0-only OR MIT
+URL: https://github.com/aurora-silicon/linux
+Notes: Structure layouts, the initial data's layout magic, register selectors, register windows
+Notes: and operating-point selections only; no code, and none of that driver's generated board
+Notes: data. See "3rd Party Apple GPU interface.txt" in this directory.

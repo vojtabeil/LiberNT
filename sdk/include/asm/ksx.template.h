@@ -56,13 +56,16 @@ CONSTANT(CONTEXT_FULL),
 CONSTANT(CONTEXT_CONTROL),
 CONSTANT(CONTEXT_INTEGER),
 CONSTANT(CONTEXT_FLOATING_POINT),
+#ifdef CONTEXT_DEBUG_REGISTERS
 CONSTANT(CONTEXT_DEBUG_REGISTERS),
+#endif
 #if defined(_M_IX86) || defined(_M_AMD64)
 CONSTANT(CONTEXT_SEGMENTS),
 #endif
 
 HEADER("Exception flags"),
 CONSTANT(EXCEPTION_NONCONTINUABLE),
+CONSTANT(EXCEPTION_MAXIMUM_PARAMETERS),
 CONSTANT(EXCEPTION_UNWINDING),
 CONSTANT(EXCEPTION_EXIT_UNWIND),
 CONSTANT(EXCEPTION_STACK_INVALID),
@@ -337,7 +340,7 @@ CONSTANT(DBG_STATUS_CONTROL_C),
 //CONSTANT(KI_SLIST_FAULT_COUNT_MAXIMUM), // i386
 //CONSTANTUSER_CALLBACK_FILTER),
 
-#if !defined(_M_ARM) && !defined(_M_ARM64)
+#if defined(_M_IX86) || defined(_M_AMD64)
 CONSTANT(MAXIMUM_IDTVECTOR),
 //CONSTANT(MAXIMUM_PRIMARY_VECTOR),
 CONSTANT(PRIMARY_VECTOR_BASE),
@@ -350,12 +353,13 @@ CONSTANT(MODE_MASK),
 
 /* STRUCTURE OFFSETS *********************************************************/
 
-#if (NTDDI_VERSION >= NTDDI_WIN7) || defined(__REACTOS__)
-HEADER("KAFFINITY_EX"),
-OFFSET(AfCount, KAFFINITY_EX, Count),
-OFFSET(AfBitmap, KAFFINITY_EX, Bitmap),
-SIZE(AffinityExLength, KAFFINITY_EX),
-#endif
+//HEADER("KAFFINITY_EX"),
+//OFFSET(AfCount, KAFFINITY_EX, Count),
+//OFFSET(AfBitmap, KAFFINITY_EX, Bitmap),
+//SIZE(AffinityExLength, KAFFINITY_EX),
+
+//HEADER("Aligned Affinity"),
+//OFFSET(AfsCpuSet, ???, CpuSet), // FIXME: obsolete
 
 HEADER("KAPC"),
 OFFSET(ApType, KAPC, Type),
@@ -448,7 +452,7 @@ OFFSET(EpDebugPort, EPROCESS, DebugPort),
 #if defined(_M_IX86)
 OFFSET(EpVdmObjects, EPROCESS, VdmObjects),
 #elif defined(_M_AMD64)
-OFFSET(EpWow64Process, EPROCESS, Wow64Process),
+OFFSET(EpWow64Process, EPROCESS, WoW64Process),
 #endif
 SIZE(ExecutiveProcessObjectLength, EPROCESS),
 
@@ -472,7 +476,7 @@ OFFSET(FbStackLimit, FIBER, StackLimit),
 OFFSET(FbDeallocationStack, FIBER, DeallocationStack),
 OFFSET(FbFiberContext, FIBER, FiberContext),
 //OFFSET(FbWx86Tib, FIBER, Wx86Tib),
-//OFFSET(FbActivationContextStackPointer, FIBER, ActivationContextStackPointer),
+OFFSET(FbActivationContextStackPointer, FIBER, ActivationContextStackPointer),
 OFFSET(FbFlsData, FIBER, FlsData),
 OFFSET(FbGuaranteedStackBytes, FIBER, GuaranteedStackBytes),
 //OFFSET(FbTebFlags, FIBER, TebFlags),
@@ -766,7 +770,12 @@ OFFSET(ThSystemCallNumber, KTHREAD, SystemCallNumber),
 OFFSET(ThTrapFrame, KTHREAD, TrapFrame),
 OFFSET(ThApcState, KTHREAD, ApcState),
 OFFSET(ThPriority, KTHREAD, Priority), // obsolete
+#if (NTDDI_VERSION < NTDDI_WIN7) || defined(KERNEL_LAYOUT_WIN11_ARM64)
 OFFSET(ThSwapBusy, KTHREAD, SwapBusy),
+#else
+/* SwapBusy was removed at Win7; use Running field at same region as stub offset */
+OFFSET(ThSwapBusy, KTHREAD, Running),
+#endif
 OFFSET(ThContextSwitches, KTHREAD, ContextSwitches),
 OFFSET(ThState, KTHREAD, State),
 OFFSET(ThProcess, KTHREAD, Process), // thProcess in native headers
@@ -780,8 +789,8 @@ OFFSET(ThWaitTime, KTHREAD, WaitTime),
 OFFSET(ThCombinedApcDisable, KTHREAD, CombinedApcDisable),
 OFFSET(ThKernelApcDisable, KTHREAD, KernelApcDisable),
 OFFSET(ThSpecialApcDisable, KTHREAD, SpecialApcDisable),
-#if defined(_M_ARM)
-//OFFSET(ThVfpState, KTHREAD, VfpState),
+#if defined(_M_ARM64)
+OFFSET(ThVfpState, KTHREAD, VfpState),
 #endif
 OFFSET(ThNextProcessor, KTHREAD, NextProcessor),
 //OFFSET(ThProcess, KTHREAD, Process),
@@ -792,7 +801,9 @@ OFFSET(ThAdjustIncrement, KTHREAD, AdjustIncrement),
 OFFSET(ThAffinity, KTHREAD, Affinity), // obsolete
 OFFSET(ThApcStateIndex, KTHREAD, ApcStateIndex),
 OFFSET(ThIdealProcessor, KTHREAD, IdealProcessor), // obsolete
+#if defined(_M_ARM64) || (NTDDI_VERSION < NTDDI_WIN8)
 OFFSET(ThApcStatePointer, KTHREAD, ApcStatePointer), // obsolete
+#endif
 OFFSET(ThSavedApcState, KTHREAD, SavedApcState), // obsolete
 OFFSET(ThWaitReason, KTHREAD, WaitReason),
 OFFSET(ThSaturation, KTHREAD, Saturation), // obsolete
@@ -817,8 +828,8 @@ HEADER("ETHREAD"),
 HEADER("KTIMER"),
 OFFSET(TiType, KTIMER, Header.Type),
 OFFSET(TiSize, KTIMER, Header.Size),
-#if (NTDDI_VERSION < NTDDI_WIN7)
-OFFSET(TiInserted, KTIMER, Header.Inserted),
+#if (NTDDI_VERSION < NTDDI_WIN7) && !defined(_M_ARM64)
+OFFSET(TiInserted, KTIMER, Header.Inserted), // bitfield at Win7+/arm64
 #endif
 OFFSET(TiSignalState, KTIMER, Header.SignalState),
 OFFSET(TiDueTime, KTIMER, DueTime),
@@ -856,11 +867,11 @@ OFFSET(UsMaxStackTraceDepth, KUSER_SHARED_DATA, MaxStackTraceDepth),
 OFFSET(UsCryptoExponent, KUSER_SHARED_DATA, CryptoExponent),
 OFFSET(UsTimeZoneId, KUSER_SHARED_DATA, TimeZoneId),
 OFFSET(UsLargePageMinimum, KUSER_SHARED_DATA, LargePageMinimum),
-//#if (NTDDI_VERSION >= NTDDI_WIN10)
-//OFFSET(UsNtBuildNumber, KUSER_SHARED_DATA, NtBuildNumber),
-//#else
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+OFFSET(UsNtBuildNumber, KUSER_SHARED_DATA, NtBuildNumber),
+#else
 OFFSET(UsReserved2, KUSER_SHARED_DATA, Reserved2),
-//#endif
+#endif
 OFFSET(UsNtProductType, KUSER_SHARED_DATA, NtProductType),
 OFFSET(UsProductTypeIsValid, KUSER_SHARED_DATA, ProductTypeIsValid),
 OFFSET(UsNtMajorVersion, KUSER_SHARED_DATA, NtMajorVersion),
@@ -880,19 +891,33 @@ OFFSET(UsLastSystemRITEventTickCount, KUSER_SHARED_DATA, LastSystemRITEventTickC
 OFFSET(UsNumberOfPhysicalPages, KUSER_SHARED_DATA, NumberOfPhysicalPages),
 OFFSET(UsSafeBootMode, KUSER_SHARED_DATA, SafeBootMode),
 OFFSET(UsTestRetInstruction, KUSER_SHARED_DATA, TestRetInstruction),
-OFFSET(UsSystemCall, KUSER_SHARED_DATA, SystemCall), // not in win10
-OFFSET(UsSystemCallReturn, KUSER_SHARED_DATA, SystemCallReturn), // not in win10
+#if (NTDDI_VERSION < NTDDI_WIN8)
+OFFSET(UsSystemCall, KUSER_SHARED_DATA, SystemCall),
+OFFSET(UsSystemCallReturn, KUSER_SHARED_DATA, SystemCallReturn),
+#elif (NTDDI_VERSION >= NTDDI_WIN10_TH2)
+OFFSET(UsSystemCall, KUSER_SHARED_DATA, SystemCall),
+#endif
 OFFSET(UsSystemCallPad, KUSER_SHARED_DATA, SystemCallPad),
 OFFSET(UsTickCount, KUSER_SHARED_DATA, TickCount),
 OFFSET(UsTickCountQuad, KUSER_SHARED_DATA, TickCountQuad),
-OFFSET(UsWow64SharedInformation, KUSER_SHARED_DATA, Wow64SharedInformation), // not in win10
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+/* Wow64SharedInformation was retired from the shared page */
+#elif (NTDDI_VERSION >= NTDDI_VISTASP2)
+OFFSET(UsWow64SharedInformation, KUSER_SHARED_DATA, DEPRECATED_Wow64SharedInformation),
+#elif (NTDDI_VERSION >= NTDDI_VISTA)
+/* Field does not exist -- Vista pre-SP2 has it under a different layout */
+#else
+OFFSET(UsWow64SharedInformation, KUSER_SHARED_DATA, Wow64SharedInformation),
+#endif
 //OFFSET(UsXState, KUSER_SHARED_DATA, XState), // win 10
 
 HEADER("KWAIT_BLOCK offsets"),
 OFFSET(WbWaitListEntry, KWAIT_BLOCK, WaitListEntry),
 OFFSET(WbThread, KWAIT_BLOCK, Thread),
 OFFSET(WbObject, KWAIT_BLOCK, Object),
-OFFSET(WbNextWaitBlock, KWAIT_BLOCK, NextWaitBlock), // not in win10
+#if (NTDDI_VERSION < NTDDI_WIN8) && !defined(_M_ARM64)
+OFFSET(WbNextWaitBlock, KWAIT_BLOCK, NextWaitBlock), // not in win8+/arm64
+#endif
 OFFSET(WbWaitKey, KWAIT_BLOCK, WaitKey),
 OFFSET(WbWaitType, KWAIT_BLOCK, WaitType),
 

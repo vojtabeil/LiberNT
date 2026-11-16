@@ -90,7 +90,14 @@ typedef PVOID (NTAPI *KDNET_MAP_PHYSICAL_MEMORY_64)(_In_ PHYSICAL_ADDRESS Physic
 typedef VOID (NTAPI *KDNET_UNMAP_VIRTUAL_ADDRESS)(_In_ PVOID VirtualAddress,
     _In_ ULONG NumberPages, _In_ BOOLEAN FlushCurrentTLB);
 typedef ULONG64 (NTAPI *KDNET_READ_CYCLE_COUNTER)(_Out_opt_ ULONG64 *Frequency);
-typedef VOID (NTAPI *KDNET_DBGPRINT)(_In_ PCHAR pFmt, ...);
+typedef VOID (__cdecl *KDNET_DBGPRINT)(_In_ PCHAR pFmt, ...);
+
+#define KD_ENV_UNSPECIFIED 0
+#define KD_ENV_BOOT        1
+#define KD_ENV_KERNEL      2
+#define KD_ENV_HYPERVISOR  3
+#define KD_ENV_SK          4
+#define KD_ENV_HCL         5
 
 #define KDNET_EXT_IMPORTS 33
 

@@ -2443,8 +2443,9 @@ FatCommonCreateOnNewStack (        //  implemented in Create.c
 
 _Requires_lock_held_(_Global_critical_region_)
 VOID
+NTAPI
 FatCommonCreateCallout (              //  implemented in Create.c
-    _In_ PFAT_CALLOUT_PARAMETERS CalloutParameters
+    _In_ PVOID Context
     );
 
 #endif
@@ -2993,9 +2994,12 @@ __pragma(warning(pop))                                                          
 //  );
 //
 
-#define FatNormalizeAndRaiseStatus(IRPCONTEXT,STATUS) {                         \
-    (IRPCONTEXT)->ExceptionStatus = (STATUS);                                   \
-    ExRaiseStatus(FsRtlNormalizeNtstatus((STATUS),STATUS_UNEXPECTED_IO_ERROR)); \
+#define FatNormalizeAndRaiseStatus(IRPCONTEXT,STATUS) {                 \
+    NTSTATUS FatNormalizedStatus;                                       \
+    FatNormalizedStatus = FsRtlNormalizeNtstatus((STATUS),              \
+                                                STATUS_UNEXPECTED_IO_ERROR); \
+    (IRPCONTEXT)->ExceptionStatus = FatNormalizedStatus;                \
+    ExRaiseStatus(FatNormalizedStatus);                                 \
 }
 
 
@@ -3107,5 +3111,3 @@ FatInterpretClusterType (
 #define IsDirectory(FcbOrDcb) ((NodeType((FcbOrDcb)) == FAT_NTC_DCB) || (NodeType((FcbOrDcb)) == FAT_NTC_ROOT_DCB))
 
 #endif // _FATPROCS_
-
-

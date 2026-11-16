@@ -62,6 +62,34 @@
 #define APIC_FREE_VECTOR 0xFF
 #define APIC_RESERVED_VECTOR 0xFE
 
+/* Upper bound on boot-IOAPIC redirection entries (PCH-class: 120 pins) */
+#include <reactos/hal/acpi_pci.h>
+#define APIC_MAX_GSI_PINS HAL_ACPI_MAX_GSI_PINS
+
+/* Pins actually present, from the IOAPIC version register; stays at
+   APIC_MAX_IRQ when discovery fails */
+extern ULONG HalpIoApicMaxIrq;
+
+#ifdef _M_AMD64
+/* Free vector window between the fixed line window (0x30..0x47) and the MSI
+   pool (0x50..0xCF), handed out to GSIs at or above APIC_MAX_IRQ. */
+#define APIC_SPILL_VECTOR_MIN 0x48
+#define APIC_SPILL_VECTOR_MAX 0x4F
+#endif
+
+extern UCHAR HalpVectorToIndex[256];
+extern BOOLEAN HalpApicHvMsrs;
+extern BOOLEAN HalpX2ApicMode;
+
+VOID HalpRequestSelfInterrupt(_In_ UCHAR Vector);
+BOOLEAN HalpReadHypervisorFrequency(_In_ ULONG Msr, _Out_ PULONG64 Frequency);
+VOID HalpSecondaryInitialize(VOID);
+BOOLEAN HalpSecondaryIsGsiv(_In_ ULONG Gsiv);
+BOOLEAN HalpSecondaryIsVector(_In_ ULONG Vector);
+ULONG HalpSecondaryGetRootVector(_In_ ULONG Gsiv, _Out_ PKIRQL OutIrql, _Out_ PKAFFINITY OutAffinity);
+BOOLEAN HalpSecondaryEnable(_In_ ULONG Vector, _In_ KIRQL Irql, _In_ KINTERRUPT_MODE InterruptMode);
+VOID HalpSecondaryDisable(_In_ ULONG Vector);
+
 /* The IMCR is supported by two read/writable or write-only I/O ports,
    22h and 23h, which receive address and data respectively.
    To access the IMCR, write a value of 70h to I/O port 22h, which selects the IMCR.
@@ -114,9 +142,25 @@ typedef enum _APIC_REGISTER
 } APIC_REGISTER;
 
 #define MSR_APIC_BASE 0x0000001B
+
+/* In extended mode the registers answer as model specific registers, one per
+ * sixteen bytes of the memory mapped window, starting here. */
+#define MSR_X2APIC_BASE 0x00000800
+#define MSR_X2APIC_ICR  0x00000830
+#define MSR_X2APIC_SELF 0x0000083F
+#define HV_X64_MSR_EOI 0x40000070
+#define HV_X64_MSR_ICR 0x40000071
+#define HV_CPUID_INTERFACE_HV1 0x31237648
+#define HV_ACCESS_INTR_CTRL_REGS 0x00000010
+#define HV_APIC_ACCESS_RECOMMENDED 0x00000008
+#define HV_X2APIC_MSRS_RECOMMENDED 0x00000100
+#define HV_X64_MSR_TSC_FREQUENCY 0x40000022
+#define HV_X64_MSR_APIC_FREQUENCY 0x40000023
+#define HV_ACCESS_FREQUENCY_MSRS 0x00000800
+#define HV_FREQUENCY_MSRS_AVAILABLE 0x00000100
 #define IOAPIC_PHYS_BASE 0xFEC00000
 #define APIC_CLOCK_INDEX 8
-#define ApicLogicalId(Cpu) ((UCHAR)(1<< Cpu))
+#define ApicLogicalId(Cpu) ((UCHAR)(((Cpu) < 8) ? (1u << (Cpu)) : 0))
 
 /* The following definitions are based on AMD documentation.
    They differ slightly in Intel documentation. */
@@ -185,7 +229,7 @@ typedef enum _TIMER_DV
     TIMER_DV_DivideBy1 = 11,
 } TIMER_DV;
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 typedef union _APIC_BASE_ADDRESS_REGISTER
 {
     UINT64 LongLong;
@@ -193,7 +237,8 @@ typedef union _APIC_BASE_ADDRESS_REGISTER
     {
         UINT64 Reserved1:8;
         UINT64 BootStrapCPUCore:1;
-        UINT64 Reserved2:2;
+        UINT64 Reserved2:1;
+        UINT64 ExtendedMode:1;
         UINT64 Enable:1;
         UINT64 BaseAddress:40;
         UINT64 ReservedMBZ:12;
@@ -311,12 +356,15 @@ typedef union _IOAPIC_REDIRECTION_REGISTER
         UINT64 Destination:8;
     };
 } IOAPIC_REDIRECTION_REGISTER;
-#include <poppack.h>
+#pragma pack(pop)
 
 FORCEINLINE
 ULONG
 ApicRead(APIC_REGISTER Register)
 {
+    if (HalpX2ApicMode)
+        return (ULONG)__readmsr(MSR_X2APIC_BASE + ((ULONG)Register >> 4));
+
     return READ_REGISTER_ULONG((PULONG)(APIC_BASE + Register));
 }
 
@@ -324,8 +372,28 @@ FORCEINLINE
 VOID
 ApicWrite(APIC_REGISTER Register, ULONG Value)
 {
+    if (HalpX2ApicMode)
+    {
+        __writemsr(MSR_X2APIC_BASE + ((ULONG)Register >> 4), Value);
+        return;
+    }
+
     WRITE_REGISTER_ULONG((PULONG)(APIC_BASE + Register), Value);
 }
+
+/* Extended mode widens the identifier and stops shifting it into the top byte. */
+FORCEINLINE
+ULONG
+ApicGetId(VOID)
+{
+    ULONG Id = ApicRead(APIC_ID);
+
+    return HalpX2ApicMode ? Id : (Id >> 24);
+}
+
+VOID
+NTAPI
+HalpSendEOI(VOID);
 
 VOID
 NTAPI

@@ -18,7 +18,7 @@
 #ifndef __WINE_STDDEF_H
 #define __WINE_STDDEF_H
 
-#include <corecrt.h>
+#include "corecrt.h"
 
 #if defined(__GNUC__) || defined(__clang__)
 #define offsetof(s,m)       __builtin_offsetof(s,m)
@@ -31,6 +31,13 @@
 typedef double max_align_t;
 
 #ifdef __cplusplus
+
+namespace std
+{
+    typedef decltype(nullptr) nullptr_t;
+}
+using ::std::nullptr_t;
+
 extern "C" {
 #endif
 

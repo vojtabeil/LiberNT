@@ -18,6 +18,7 @@ $if (_WDMDDK_)
 #define THREAD_SET_INFORMATION           0x0020
 #define THREAD_SET_LIMITED_INFORMATION   0x0400
 #define THREAD_QUERY_LIMITED_INFORMATION 0x0800
+#define THREAD_RESUME                    0x1000
 
 #define PROCESS_DUP_HANDLE               (0x0040)
 
@@ -117,6 +118,12 @@ typedef struct _VM_COUNTERS_EX {
   SIZE_T PrivateUsage;
 } VM_COUNTERS_EX, *PVM_COUNTERS_EX;
 
+typedef struct _VM_COUNTERS_EX2 {
+  VM_COUNTERS_EX CountersEx;
+  SIZE_T PrivateWorkingSetSize;
+  ULONGLONG SharedCommitUsage;
+} VM_COUNTERS_EX2, *PVM_COUNTERS_EX2;
+
 #define MAX_HW_COUNTERS 16
 #define THREAD_PROFILING_FLAG_DISPATCH  0x00000001
 
@@ -184,6 +191,12 @@ typedef VOID
   _Inout_ PEPROCESS Process,
   _In_ HANDLE ProcessId,
   _Inout_opt_ PPS_CREATE_NOTIFY_INFO CreateInfo);
+
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS2)
+typedef enum _PSCREATEPROCESSNOTIFYTYPE {
+  PsCreateProcessNotifySubsystems = 0
+} PSCREATEPROCESSNOTIFYTYPE;
+#endif
 
 typedef VOID
 (NTAPI *PCREATE_THREAD_NOTIFY_ROUTINE)(
@@ -281,6 +294,39 @@ typedef enum _PROCESSINFOCLASS {
   ProcessTokenVirtualizationEnabled,
   ProcessConsoleHostProcess,
   ProcessWindowInformation,
+  ProcessHandleInformation,
+  ProcessMitigationPolicy,
+  ProcessDynamicFunctionTableInformation,
+  ProcessHandleCheckingMode,
+  ProcessKeepAliveCount,
+  ProcessRevokeFileHandles,
+  ProcessWorkingSetControl,
+  ProcessHandleTable,
+  ProcessCheckStackExtentsMode,
+  ProcessCommandLineInformation,
+  ProcessProtectionInformation,
+  ProcessMemoryExhaustion,
+  ProcessFaultInformation,
+  ProcessTelemetryIdInformation,
+  ProcessCommitReleaseInformation,
+  ProcessDefaultCpuSetsInformation,
+  ProcessAllowedCpuSetsInformation,
+  ProcessSubsystemProcess,
+  ProcessJobMemoryInformation,
+  ProcessInPrivate,
+  ProcessRaiseUMExceptionOnInvalidHandleClose,
+  ProcessIumChallengeResponse,
+  ProcessChildProcessInformation,
+  ProcessHighGraphicsPriorityInformation,
+  ProcessSubsystemInformation,
+  ProcessEnergyValues,
+  ProcessPowerThrottlingState,
+  ProcessReserved3Information,
+  ProcessWin32kSyscallFilterInformation,
+  ProcessDisableSystemAllowedCpuSets,
+  ProcessWakeInformation,
+  ProcessEnergyTrackingState,
+  ProcessManageWritesToExecutableMemory,
   MaxProcessInfoClass
 } PROCESSINFOCLASS;
 
@@ -343,6 +389,14 @@ typedef enum _THREADINFOCLASS {
   ThreadEffectivePagePriority,
   MaxThreadInfoClass
 } THREADINFOCLASS;
+
+typedef struct _MANAGE_WRITES_TO_EXECUTABLE_MEMORY {
+  ULONG Version : 8;
+  ULONG ProcessEnableWriteExceptions : 1;
+  ULONG ThreadAllowWrites : 1;
+  ULONG Spare : 22;
+  PVOID KernelWriteToExecutableSignal;
+} MANAGE_WRITES_TO_EXECUTABLE_MEMORY, *PMANAGE_WRITES_TO_EXECUTABLE_MEMORY;
 
 typedef struct _PAGE_PRIORITY_INFORMATION {
   ULONG PagePriority;
@@ -431,4 +485,3 @@ typedef struct _PROCESS_HANDLE_TRACING_QUERY {
 extern NTKERNELAPI PEPROCESS PsInitialSystemProcess;
 
 $endif (_NTDDK_)
-

@@ -185,11 +185,34 @@ typedef _ATL_WIN_MODULE70 _ATL_WIN_MODULE;
 
 // Auto object map
 
+#if defined(_M_ARM64EC)
+#define _ATL_OBJMAP_FIRST_SECTION "ATL$_ec_a"
+#define _ATL_OBJMAP_ENTRY_SECTION "ATL$_ec_m"
+#define _ATL_OBJMAP_LAST_SECTION "ATL$_ec_z"
+#define _ATL_OBJMAP_FIRST __pobjMapEntryFirstEC
+#define _ATL_OBJMAP_LAST __pobjMapEntryLastEC
+#else
+#define _ATL_OBJMAP_FIRST_SECTION "ATL$__a"
+#define _ATL_OBJMAP_ENTRY_SECTION "ATL$__m"
+#define _ATL_OBJMAP_LAST_SECTION "ATL$__z"
+#define _ATL_OBJMAP_FIRST __pobjMapEntryFirst
+#define _ATL_OBJMAP_LAST __pobjMapEntryLast
+#endif
+
 #if defined(_MSC_VER)
+#if defined(_M_ARM64EC)
+#pragma section("ATL$_ec_a", read, write)
+#pragma section("ATL$_ec_z", read, write)
+#pragma section("ATL$_ec_m", read, write)
+#else
 #pragma section("ATL$__a", read, write)
 #pragma section("ATL$__z", read, write)
 #pragma section("ATL$__m", read, write)
+#endif
 #define _ATLALLOC(x) __declspec(allocate(x))
+#define _ATL_OBJMAP_ENTRY_CONST const
+#define _ATL_OBJMAP_BOUND_CONST
+#define _ATL_OBJMAP_BOUND_DECL
 
 #if defined(_M_IX86)
 #define OBJECT_ENTRY_PRAGMA(class) __pragma(comment(linker, "/include:___pobjMap_" #class));
@@ -202,10 +225,22 @@ typedef _ATL_WIN_MODULE70 _ATL_WIN_MODULE;
 #elif defined(__GNUC__)
 
 // GCC completely ignores __attribute__((unused)) on the __pobjMap_ pointer, so we pass it to a function that is not allowed to be optimized....
-static int __attribute__((optimize("O0"), unused)) hack_for_gcc(const _ATL_OBJMAP_ENTRY * const *)
+#if defined(__clang__)
+#define ATL_OBJMAP_HACK_ATTRIBUTES __attribute__((optnone, noinline, unused))
+#define _ATL_OBJMAP_ENTRY_CONST const
+#define _ATL_OBJMAP_BOUND_CONST const
+#define _ATL_OBJMAP_BOUND_DECL extern
+#else
+#define ATL_OBJMAP_HACK_ATTRIBUTES __attribute__((optimize("O0"), unused))
+#define _ATL_OBJMAP_ENTRY_CONST const
+#define _ATL_OBJMAP_BOUND_CONST
+#define _ATL_OBJMAP_BOUND_DECL
+#endif
+static int ATL_OBJMAP_HACK_ATTRIBUTES hack_for_gcc(const _ATL_OBJMAP_ENTRY * const *)
 {
     return 1;
 }
+#undef ATL_OBJMAP_HACK_ATTRIBUTES
 
 #define _ATLALLOC(x) __attribute__((section(x)))
 #define OBJECT_ENTRY_PRAGMA(class) static int __pobjMap_hack_##class = hack_for_gcc(&__pobjMap_##class);
@@ -217,8 +252,8 @@ static int __attribute__((optimize("O0"), unused)) hack_for_gcc(const _ATL_OBJMA
 
 extern "C"
 {
-    __declspec(selectany) _ATLALLOC("ATL$__a") _ATL_OBJMAP_ENTRY *__pobjMapEntryFirst = NULL;
-    __declspec(selectany) _ATLALLOC("ATL$__z") _ATL_OBJMAP_ENTRY *__pobjMapEntryLast = NULL;
+    _ATL_OBJMAP_BOUND_DECL __declspec(selectany) _ATLALLOC(_ATL_OBJMAP_FIRST_SECTION) _ATL_OBJMAP_ENTRY * _ATL_OBJMAP_BOUND_CONST _ATL_OBJMAP_FIRST = NULL;
+    _ATL_OBJMAP_BOUND_DECL __declspec(selectany) _ATLALLOC(_ATL_OBJMAP_LAST_SECTION) _ATL_OBJMAP_ENTRY * _ATL_OBJMAP_BOUND_CONST _ATL_OBJMAP_LAST = NULL;
 }
 
 
@@ -601,8 +636,8 @@ public:
     {
         GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (LPCWSTR)this, &m_hInstTypeLib);
 
-        m_ppAutoObjMapFirst = &__pobjMapEntryFirst + 1;
-        m_ppAutoObjMapLast = &__pobjMapEntryLast;
+        m_ppAutoObjMapFirst = const_cast<_ATL_OBJMAP_ENTRY **>(&_ATL_OBJMAP_FIRST) + 1;
+        m_ppAutoObjMapLast = const_cast<_ATL_OBJMAP_ENTRY **>(&_ATL_OBJMAP_LAST);
         if (FAILED(m_csObjMap.Init()))
         {
             ATLASSERT(0);
@@ -1632,7 +1667,7 @@ inline HRESULT __stdcall AtlInternalQueryInterface(void *pThis, const _ATL_INTMA
             }
             else
             {
-                hResult = pEntries[i].pFunc(pThis, iid, ppvObject, 0);
+                hResult = pEntries[i].pFunc(pThis, iid, ppvObject, pEntries[i].dw);
                 if (hResult == S_OK)
                     return hResult;
                 if (FAILED(hResult) && pEntries[i].piid != NULL)

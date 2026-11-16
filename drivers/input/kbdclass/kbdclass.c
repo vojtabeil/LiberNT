@@ -36,6 +36,48 @@ DriverUnload(IN PDRIVER_OBJECT DriverObject)
 	// nothing to do here yet
 }
 
+static PDEVICE_OBJECT
+ClassDeviceFor(
+	IN PDEVICE_OBJECT DeviceObject)
+{
+	PPORT_DEVICE_EXTENSION PortExtension;
+	PCLASS_DEVICE_EXTENSION ClassExtension;
+
+	if (((PCOMMON_DEVICE_EXTENSION)DeviceObject->DeviceExtension)->IsClassDO)
+		return DeviceObject;
+	PortExtension = DeviceObject->DeviceExtension;
+	if (!PortExtension->ClassDO)
+		return NULL;
+	ClassExtension = PortExtension->ClassDO->DeviceExtension;
+	return ClassExtension->DriverExtension->ConnectMultiplePorts ? NULL : PortExtension->ClassDO;
+}
+
+static VOID
+ClassCompletePendingRead(
+	IN PDEVICE_OBJECT ClassDeviceObject,
+	IN PFILE_OBJECT FileObject,
+	IN NTSTATUS Status)
+{
+	PCLASS_DEVICE_EXTENSION ClassExtension = ClassDeviceObject->DeviceExtension;
+	KIRQL OldIrql;
+	PIRP Irp;
+
+	KeAcquireSpinLock(&ClassExtension->SpinLock, &OldIrql);
+	Irp = ClassExtension->PendingIrp;
+	if (Irp && (!FileObject || IoGetCurrentIrpStackLocation(Irp)->FileObject == FileObject) &&
+	    IoSetCancelRoutine(Irp, NULL))
+		ClassExtension->PendingIrp = NULL;
+	else
+		Irp = NULL;
+	KeReleaseSpinLock(&ClassExtension->SpinLock, OldIrql);
+	if (Irp)
+	{
+		Irp->IoStatus.Status = Status;
+		Irp->IoStatus.Information = 0;
+		IoCompleteRequest(Irp, IO_NO_INCREMENT);
+	}
+}
+
 static NTSTATUS NTAPI
 ClassCreate(
 	IN PDEVICE_OBJECT DeviceObject,
@@ -78,7 +120,13 @@ ClassCleanup(
 	TRACE_(CLASS_NAME, "IRP_MJ_CLEANUP\n");
 
 	if (!((PCOMMON_DEVICE_EXTENSION)DeviceObject->DeviceExtension)->IsClassDO)
+	{
+		PDEVICE_OBJECT ClassDevice = ClassDeviceFor(DeviceObject);
+
+		if (ClassDevice)
+			ClassCompletePendingRead(ClassDevice, IoGetCurrentIrpStackLocation(Irp)->FileObject, STATUS_CANCELLED);
 		return ForwardIrpAndForget(DeviceObject, Irp);
+	}
 
 	/* FIXME: cleanup all associated Port devices */
 	Irp->IoStatus.Status = STATUS_SUCCESS;
@@ -92,16 +140,18 @@ ClassRead(
 	IN PDEVICE_OBJECT DeviceObject,
 	IN PIRP Irp)
 {
-	PCLASS_DEVICE_EXTENSION DeviceExtension = DeviceObject->DeviceExtension;
+	PDEVICE_OBJECT ClassDevice = ClassDeviceFor(DeviceObject);
+	PCLASS_DEVICE_EXTENSION DeviceExtension;
 	KIRQL OldIrql;
 	NTSTATUS Status;
 
 	TRACE_(CLASS_NAME, "IRP_MJ_READ\n");
 
-	ASSERT(DeviceExtension->Common.IsClassDO);
-
-	if (!((PCOMMON_DEVICE_EXTENSION)DeviceObject->DeviceExtension)->IsClassDO)
+	if (!ClassDevice)
 		return ForwardIrpAndForget(DeviceObject, Irp);
+
+	DeviceExtension = ClassDevice->DeviceExtension;
+	ASSERT(DeviceExtension->Common.IsClassDO);
 
 	if (IoGetCurrentIrpStackLocation(Irp)->Parameters.Read.Length < sizeof(KEYBOARD_INPUT_DATA))
 	{
@@ -113,7 +163,7 @@ ClassRead(
 	}
 
 	KeAcquireSpinLock(&DeviceExtension->SpinLock, &OldIrql);
-	Status = HandleReadIrp(DeviceObject, Irp, FALSE);
+	Status = HandleReadIrp(ClassDevice, Irp, FALSE);
 	KeReleaseSpinLock(&DeviceExtension->SpinLock, OldIrql);
 	return Status;
 }
@@ -123,13 +173,29 @@ ClassDeviceControl(
 	IN PDEVICE_OBJECT DeviceObject,
 	IN PIRP Irp)
 {
-	//PCLASS_DEVICE_EXTENSION DeviceExtension;
+	PDEVICE_OBJECT ClassDevice = ClassDeviceFor(DeviceObject);
 	NTSTATUS Status = STATUS_NOT_SUPPORTED;
 
 	TRACE_(CLASS_NAME, "IRP_MJ_DEVICE_CONTROL\n");
 
-	if (!((PCOMMON_DEVICE_EXTENSION)DeviceObject->DeviceExtension)->IsClassDO)
+	if (!ClassDevice)
 		return ForwardIrpAndForget(DeviceObject, Irp);
+
+	if (ClassDevice != DeviceObject)
+	{
+		switch (IoGetCurrentIrpStackLocation(Irp)->Parameters.DeviceIoControl.IoControlCode)
+		{
+			case IOCTL_KEYBOARD_QUERY_ATTRIBUTES:
+			case IOCTL_KEYBOARD_QUERY_INDICATOR_TRANSLATION:
+			case IOCTL_KEYBOARD_QUERY_INDICATORS:
+			case IOCTL_KEYBOARD_QUERY_TYPEMATIC:
+			case IOCTL_KEYBOARD_SET_INDICATORS:
+			case IOCTL_KEYBOARD_SET_TYPEMATIC:
+				break;
+			default:
+				return ForwardIrpAndForget(DeviceObject, Irp);
+		}
+	}
 
 	//DeviceExtension = (PCLASS_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
 
@@ -142,7 +208,7 @@ ClassDeviceControl(
 		{
 			/* FIXME: We hope that all devices will return the same result.
 			 * Ask only the first one */
-			PLIST_ENTRY Head = &((PCLASS_DEVICE_EXTENSION)DeviceObject->DeviceExtension)->ListHead;
+			PLIST_ENTRY Head = &((PCLASS_DEVICE_EXTENSION)ClassDevice->DeviceExtension)->ListHead;
 			if (Head->Flink != Head)
 			{
 				/* We have at least one device */
@@ -157,7 +223,7 @@ ClassDeviceControl(
 		case IOCTL_KEYBOARD_SET_TYPEMATIC: /* not in MSDN, would seem logical */
 		{
 			/* Send it to all associated Port devices */
-			PLIST_ENTRY Head = &((PCLASS_DEVICE_EXTENSION)DeviceObject->DeviceExtension)->ListHead;
+			PLIST_ENTRY Head = &((PCLASS_DEVICE_EXTENSION)ClassDevice->DeviceExtension)->ListHead;
 			PLIST_ENTRY Entry = Head->Flink;
 			Status = STATUS_SUCCESS;
 			while (Entry != Head)
@@ -196,6 +262,33 @@ ClassDeviceControl(
 	return Status;
 }
 
+static VOID
+ClassArmWaitWake(
+	IN PPORT_DEVICE_EXTENSION DeviceExtension);
+
+static VOID
+ClassCancelWaitWake(
+	IN PPORT_DEVICE_EXTENSION DeviceExtension);
+
+static IO_COMPLETION_ROUTINE ClassSystemPowerUpComplete;
+
+static NTSTATUS NTAPI
+ClassSystemPowerUpComplete(
+	IN PDEVICE_OBJECT DeviceObject,
+	IN PIRP Irp,
+	IN PVOID Context)
+{
+	UNREFERENCED_PARAMETER(DeviceObject);
+
+	if (Irp->PendingReturned)
+		IoMarkIrpPending(Irp);
+
+	if (NT_SUCCESS(Irp->IoStatus.Status))
+		ClassArmWaitWake(Context);
+
+	return STATUS_CONTINUE_COMPLETION;
+}
+
 static NTSTATUS NTAPI
 ClassPower(
 	IN PDEVICE_OBJECT DeviceObject,
@@ -203,10 +296,26 @@ ClassPower(
 {
 	NTSTATUS Status;
 	PPORT_DEVICE_EXTENSION DeviceExtension;
+	PIO_STACK_LOCATION Stack;
 
 	DeviceExtension = DeviceObject->DeviceExtension;
 	if (!DeviceExtension->Common.IsClassDO)
 	{
+		Stack = IoGetCurrentIrpStackLocation(Irp);
+		if (Stack->MinorFunction == IRP_MN_SET_POWER && Stack->Parameters.Power.Type == SystemPowerState)
+		{
+			if (Stack->Parameters.Power.State.SystemState == PowerSystemWorking)
+			{
+				PoStartNextPowerIrp(Irp);
+				IoCopyCurrentIrpStackLocationToNext(Irp);
+				IoSetCompletionRoutine(Irp, ClassSystemPowerUpComplete, DeviceExtension, TRUE, TRUE, TRUE);
+				return PoCallDriver(DeviceExtension->LowerDevice, Irp);
+			}
+
+			if (Stack->Parameters.Power.State.SystemState > DeviceExtension->SystemWake)
+				ClassCancelWaitWake(DeviceExtension);
+		}
+
 		/* Forward port DO IRPs to lower device */
 		PoStartNextPowerIrp(Irp);
 		IoSkipCurrentIrpStackLocation(Irp);
@@ -235,8 +344,7 @@ ReadRegistryEntries(
 	RTL_QUERY_REGISTRY_TABLE Parameters[4];
 	NTSTATUS Status;
 
-	/* HACK: We don't support multiple devices with this disabled */
-	ULONG DefaultConnectMultiplePorts = 1;
+	ULONG DefaultConnectMultiplePorts = 0;
 	ULONG DefaultDataQueueSize = 0x64;
 	PCWSTR DefaultDeviceBaseName = L"KeyboardClass";
 
@@ -419,21 +527,21 @@ cleanup:
 
 static NTSTATUS
 FillEntries(
-	IN PDEVICE_OBJECT ClassDeviceObject,
 	IN PIRP Irp,
 	IN PKEYBOARD_INPUT_DATA DataStart,
 	IN SIZE_T NumberOfEntries)
 {
+	PDEVICE_OBJECT TargetDevice = IoGetCurrentIrpStackLocation(Irp)->DeviceObject;
 	NTSTATUS Status = STATUS_SUCCESS;
 
-	if (ClassDeviceObject->Flags & DO_BUFFERED_IO)
+	if (TargetDevice->Flags & DO_BUFFERED_IO)
 	{
 		RtlCopyMemory(
 			Irp->AssociatedIrp.SystemBuffer,
 			DataStart,
 			NumberOfEntries * sizeof(KEYBOARD_INPUT_DATA));
 	}
-	else if (ClassDeviceObject->Flags & DO_DIRECT_IO)
+	else if (TargetDevice->Flags & DO_DIRECT_IO)
 	{
 		PVOID DestAddress = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
 		if (DestAddress)
@@ -625,6 +733,7 @@ DestroyPortDriver(
 
 	if (!DriverExtension->ConnectMultiplePorts && DeviceExtension->ClassDO)
 	{
+		ClassCompletePendingRead(DeviceExtension->ClassDO, NULL, STATUS_DEVICE_NOT_CONNECTED);
 		ExFreePoolWithTag(ClassDeviceExtension->PortData, CLASS_TAG);
 		ExFreePoolWithTag((PVOID)ClassDeviceExtension->DeviceName, CLASS_TAG);
 		IoDeleteDevice(DeviceExtension->ClassDO);
@@ -672,6 +781,8 @@ ClassAddDevice(
 	DeviceExtension->Common.IsClassDO = FALSE;
 	DeviceExtension->DeviceObject = Fdo;
 	DeviceExtension->PnpState = dsStopped;
+	DeviceExtension->Pdo = Pdo;
+	KeInitializeEvent(&DeviceExtension->WakeDone, NotificationEvent, FALSE);
 	Status = IoAttachDeviceToDeviceStackSafe(Fdo, Pdo, &DeviceExtension->LowerDevice);
 	if (!NT_SUCCESS(Status))
 	{
@@ -689,6 +800,8 @@ ClassAddDevice(
 		DeviceExtension->ClassDO = DriverExtension->MainClassDeviceObject;
 	else
 	{
+		Fdo->Flags |= DO_BUFFERED_IO;
+		Fdo->Flags &= ~DO_DIRECT_IO;
 		/* We need a new class device object for this Fdo */
 		Status = CreateClassDeviceObject(
 			DriverObject,
@@ -730,7 +843,7 @@ ClassCancelRoutine(
 	IN PDEVICE_OBJECT DeviceObject,
 	IN PIRP Irp)
 {
-	PCLASS_DEVICE_EXTENSION ClassDeviceExtension = DeviceObject->DeviceExtension;
+	PCLASS_DEVICE_EXTENSION ClassDeviceExtension = ClassDeviceFor(DeviceObject)->DeviceExtension;
 	KIRQL OldIrql;
 	BOOLEAN wasQueued = FALSE;
 
@@ -784,7 +897,6 @@ HandleReadIrp(
 			IoGetCurrentIrpStackLocation(Irp)->Parameters.Read.Length / sizeof(KEYBOARD_INPUT_DATA));
 
 		Status = FillEntries(
-			DeviceObject,
 			Irp,
 			DeviceExtension->PortData,
 			NumberOfEntries);
@@ -831,6 +943,137 @@ HandleReadIrp(
 	return Status;
 }
 
+static REQUEST_POWER_COMPLETE ClassWaitWakeComplete;
+
+static VOID
+ClassArmWaitWake(
+	IN PPORT_DEVICE_EXTENSION DeviceExtension)
+{
+	POWER_STATE PowerState;
+
+	if (!DeviceExtension->WakeAllowed ||
+		InterlockedCompareExchange(&DeviceExtension->WakeState, CLASS_WAKE_ARMED, CLASS_WAKE_IDLE) != CLASS_WAKE_IDLE)
+	{
+		return;
+	}
+
+	PowerState.SystemState = DeviceExtension->SystemWake;
+	PoRequestPowerIrp(DeviceExtension->Pdo,
+					  IRP_MN_WAIT_WAKE,
+					  PowerState,
+					  ClassWaitWakeComplete,
+					  DeviceExtension,
+					  &DeviceExtension->WakeIrp);
+}
+
+static VOID NTAPI
+ClassWaitWakeComplete(
+	IN PDEVICE_OBJECT DeviceObject,
+	IN UCHAR MinorFunction,
+	IN POWER_STATE PowerState,
+	IN PVOID Context,
+	IN PIO_STATUS_BLOCK IoStatus)
+{
+	PPORT_DEVICE_EXTENSION DeviceExtension = Context;
+
+	UNREFERENCED_PARAMETER(DeviceObject);
+	UNREFERENCED_PARAMETER(MinorFunction);
+	UNREFERENCED_PARAMETER(PowerState);
+
+	if (InterlockedExchange(&DeviceExtension->WakeState, CLASS_WAKE_IDLE) == CLASS_WAKE_CANCELLING)
+	{
+		KeSetEvent(&DeviceExtension->WakeDone, IO_NO_INCREMENT, FALSE);
+		return;
+	}
+
+	if (NT_SUCCESS(IoStatus->Status))
+		ClassArmWaitWake(DeviceExtension);
+}
+
+static VOID
+ClassCancelWaitWake(
+	IN PPORT_DEVICE_EXTENSION DeviceExtension)
+{
+	if (InterlockedCompareExchange(&DeviceExtension->WakeState, CLASS_WAKE_CANCELLING, CLASS_WAKE_ARMED) == CLASS_WAKE_ARMED)
+		IoCancelIrp(DeviceExtension->WakeIrp);
+}
+
+static VOID
+ClassDisarmWaitWake(
+	IN PPORT_DEVICE_EXTENSION DeviceExtension)
+{
+	DeviceExtension->WakeAllowed = FALSE;
+	KeClearEvent(&DeviceExtension->WakeDone);
+	if (InterlockedCompareExchange(&DeviceExtension->WakeState, CLASS_WAKE_CANCELLING, CLASS_WAKE_ARMED) == CLASS_WAKE_ARMED)
+	{
+		IoCancelIrp(DeviceExtension->WakeIrp);
+		KeWaitForSingleObject(&DeviceExtension->WakeDone, Executive, KernelMode, FALSE, NULL);
+	}
+}
+
+static VOID
+ClassStartWaitWake(
+	IN PPORT_DEVICE_EXTENSION DeviceExtension)
+{
+	DEVICE_CAPABILITIES Capabilities;
+	IO_STATUS_BLOCK Iosb;
+	PIO_STACK_LOCATION Stack;
+	KEVENT Event;
+	HANDLE KeyHandle;
+	UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"WaitWakeEnabled");
+	UCHAR Buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + sizeof(ULONG)];
+	PKEY_VALUE_PARTIAL_INFORMATION Value = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+	ULONG Length;
+	NTSTATUS Status;
+	PIRP Irp;
+
+	RtlZeroMemory(&Capabilities, sizeof(Capabilities));
+	Capabilities.Size = sizeof(Capabilities);
+	Capabilities.Version = 1;
+	Capabilities.Address = MAXULONG;
+	Capabilities.UINumber = MAXULONG;
+
+	KeInitializeEvent(&Event, NotificationEvent, FALSE);
+	Irp = IoBuildSynchronousFsdRequest(IRP_MJ_PNP, DeviceExtension->LowerDevice, NULL, 0, NULL, &Event, &Iosb);
+	if (Irp == NULL)
+		return;
+
+	Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+	Stack = IoGetNextIrpStackLocation(Irp);
+	Stack->MinorFunction = IRP_MN_QUERY_CAPABILITIES;
+	Stack->Parameters.DeviceCapabilities.Capabilities = &Capabilities;
+
+	Status = IoCallDriver(DeviceExtension->LowerDevice, Irp);
+	if (Status == STATUS_PENDING)
+	{
+		KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+		Status = Iosb.Status;
+	}
+
+	if (!NT_SUCCESS(Status) ||
+		Capabilities.SystemWake <= PowerSystemWorking ||
+		Capabilities.DeviceWake == PowerDeviceUnspecified)
+	{
+		return;
+	}
+
+	Status = IoOpenDeviceRegistryKey(DeviceExtension->Pdo, PLUGPLAY_REGKEY_DEVICE, KEY_READ, &KeyHandle);
+	if (NT_SUCCESS(Status))
+	{
+		Status = ZwQueryValueKey(KeyHandle, &ValueName, KeyValuePartialInformation, Value, sizeof(Buffer), &Length);
+		ZwClose(KeyHandle);
+		if (NT_SUCCESS(Status) && Value->Type == REG_DWORD && Value->DataLength == sizeof(ULONG) &&
+			*(PULONG)Value->Data == 0)
+		{
+			return;
+		}
+	}
+
+	DeviceExtension->SystemWake = Capabilities.SystemWake;
+	DeviceExtension->WakeAllowed = TRUE;
+	ClassArmWaitWake(DeviceExtension);
+}
+
 static NTSTATUS NTAPI
 ClassPnp(
 	IN PDEVICE_OBJECT DeviceObject,
@@ -854,6 +1097,9 @@ ClassPnp(
 				Status = STATUS_UNSUCCESSFUL;
 			}
 
+			if (DeviceExtension->InterfaceName.Length != 0)
+				if (!NT_SUCCESS(IoSetDeviceInterfaceState(&DeviceExtension->InterfaceName, TRUE)))
+				    DPRINT1("IoSetDeviceInterfaceState(%wZ) failed\n", &DeviceExtension->InterfaceName);
 			if (NT_SUCCESS(Status))
 			{
 				InitializeObjectAttributes(&ObjectAttributes,
@@ -868,18 +1114,38 @@ ClassPnp(
 									&Iosb,
 									0,
 									0);
+				/* FIXME: creates fail until the start completes, so this open of the class's own interface cannot succeed here */
 				if (!NT_SUCCESS(Status))
+				{
 					DeviceExtension->FileHandle = NULL;
+					Status = STATUS_SUCCESS;
+				}
 			}
 			else
 				DeviceExtension->FileHandle = NULL;
-			if (DeviceExtension->InterfaceName.Length != 0)
-				IoSetDeviceInterfaceState(&DeviceExtension->InterfaceName, TRUE);
+			if (NT_SUCCESS(Status))
+				ClassStartWaitWake(DeviceExtension);
 			Irp->IoStatus.Status = Status;
 			IoCompleteRequest(Irp, IO_NO_INCREMENT);
 			return Status;
 
+		case IRP_MN_SURPRISE_REMOVAL:
+			if (DeviceExtension->InterfaceName.Length != 0)
+				if (!NT_SUCCESS(IoSetDeviceInterfaceState(&DeviceExtension->InterfaceName, FALSE)))
+					DPRINT1("IoSetDeviceInterfaceState(%wZ) failed\n", &DeviceExtension->InterfaceName);
+			if (ClassDeviceFor(DeviceObject))
+				ClassCompletePendingRead(DeviceExtension->ClassDO, NULL, STATUS_DEVICE_NOT_CONNECTED);
+			ClassDisarmWaitWake(DeviceExtension);
+			if (DeviceExtension->FileHandle)
+			{
+				ZwClose(DeviceExtension->FileHandle);
+				DeviceExtension->FileHandle = NULL;
+			}
+			Status = STATUS_SUCCESS;
+			break;
+
 		case IRP_MN_STOP_DEVICE:
+			ClassDisarmWaitWake(DeviceExtension);
 			if (DeviceExtension->FileHandle)
 			{
 				ZwClose(DeviceExtension->FileHandle);
@@ -889,8 +1155,10 @@ ClassPnp(
 			break;
 
         case IRP_MN_REMOVE_DEVICE:
+			ClassDisarmWaitWake(DeviceExtension);
 			if (DeviceExtension->InterfaceName.Length != 0)
-				IoSetDeviceInterfaceState(&DeviceExtension->InterfaceName, FALSE);
+				if (!NT_SUCCESS(IoSetDeviceInterfaceState(&DeviceExtension->InterfaceName, FALSE)))
+				    DPRINT1("IoSetDeviceInterfaceState(%wZ) failed\n", &DeviceExtension->InterfaceName);
             if (DeviceExtension->FileHandle)
 			{
 				ZwClose(DeviceExtension->FileHandle);

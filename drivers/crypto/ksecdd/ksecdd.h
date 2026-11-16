@@ -93,8 +93,16 @@ KsecGenRandom(
 
 VOID
 NTAPI
+KsecInitializeRandomSupport(VOID);
+
+VOID
+NTAPI
 KsecInitializeEncryptionSupport (
     VOID);
+
+NTSTATUS
+NTAPI
+KsecInitializeBCrypt(VOID);
 
 NTSTATUS
 NTAPI
@@ -109,4 +117,3 @@ KsecDecryptMemory (
     _Inout_ PVOID Buffer,
     _In_ ULONG Length,
     _In_ ULONG OptionFlags);
-

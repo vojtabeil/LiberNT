@@ -2,6 +2,7 @@
 add_subdirectory(nt_0600)
 
 spec2def(ntdll.dll def/ntdll.spec ADD_IMPORTLIB)
+spec2def(ntdll_chpe.dll chpebridge.spec ADD_IMPORTLIB)
 
 # Link GCC stack protector lib
 if (STACK_PROTECTOR)
@@ -11,11 +12,13 @@ endif()
 add_definitions(
     -D__NTDLL__
     -D_NTOSKRNL_
-    -DCRTDLL)
+    -DCRTDLL
+    -DNTDDI_VERSION=${REACTOS_TARGET_NTDDI})
 
 include_directories(
     BEFORE include
-    ${REACTOS_SOURCE_DIR}/sdk/include/reactos/subsys)
+    ${REACTOS_SOURCE_DIR}/sdk/include/reactos/subsys
+    ${REACTOS_SOURCE_DIR}/sdk/lib/3rdparty/symcrypt/inc)
 
 add_library(rtl_um OBJECT
     rtl/libsupp.c
@@ -25,17 +28,43 @@ target_link_libraries(rtl_um apisets ${PSEH_LIB})
 add_dependencies(rtl_um psdk)
 
 # On NT6+ this is used by advapi32
-add_library(etwtrace etw/trace.c)
+add_library(etwtrace
+    etw/provider.c
+    etw/trace.c)
 target_link_libraries(etwtrace ${PSEH_LIB})
 add_dependencies(etwtrace psdk)
 
 list(APPEND SOURCE
+    alpc.c
+    rtl/capability.c
     dbg/dbgui.c
     ldr/ldrapi.c
+    ldr/ldrcfg.c
+    ldr/ldremul.c
+    ldr/ldrguard.c
     ldr/ldrinit.c
+    ldr/ldrmui.c
     ldr/ldrpe.c
     ldr/ldrutils.c
-    ldr/verifier.c)
+    ldr/verifier.c
+    rtl/barrier.c
+    rtl/exit.c
+    rtl/mui.c
+    rtl/nls.c
+    rtl/secmem.c
+    rtl/telemetry.c
+    rtl/transaction.c
+    rtl/userpfn.c
+    rtl/wnf.c
+    rtl/time.c
+    rtl/virtual.c
+    rtl/xstate.c
+    rtl/xstate_wow64.c)
+
+set_source_files_properties(rtl/capability.c PROPERTIES
+    COMPILE_DEFINITIONS "__WINE_PE_BUILD;SYMCRYPT_PLATFORM_WINE=1")
+
+list(APPEND SOURCE wow64.c)
 
 if(ARCH STREQUAL "i386")
     list(APPEND ASM_SOURCE dispatch/i386/dispatch.S)
@@ -45,14 +74,59 @@ elseif(ARCH STREQUAL "amd64")
         compat/amd64/msys2.S)
 elseif(ARCH STREQUAL "arm")
     list(APPEND ASM_SOURCE dispatch/arm/stubs_asm.s)
-else()
+elseif(ARCH STREQUAL "arm64")
+    list(APPEND ASM_SOURCE
+        dispatch/arm64/dispatch.S
+        ldr/arm64/guardcheck.S
+        ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/arm64/memcpy-advsimd.S
+        ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/arm64/memset.S
+        ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/arm64/strcpy.S
+        ${REACTOS_SOURCE_DIR}/sdk/lib/crt/string/arm64/wcscmp.S)
     list(APPEND SOURCE dispatch/dispatch.c)
+elseif(ARCH STREQUAL "riscv64")
+    list(APPEND ASM_SOURCE dispatch/riscv64/dispatch.S)
+    list(APPEND SOURCE
+        dispatch/dispatch.c
+        rtl/riscv64/rtlexcpt.c)
+elseif(ARCH STREQUAL "ppc")
+    list(APPEND ASM_SOURCE dispatch/ppc/dispatch.S)
+    list(APPEND SOURCE
+        dispatch/dispatch.c
+        rtl/ppc/rtlexcpt.c)
+endif()
+
+if(ARCH STREQUAL "riscv64")
+    list(APPEND SOURCE ldr/riscv64/emulation.c)
+else()
+    list(APPEND SOURCE ldr/noemulation.c)
+endif()
+
+if(ARCH STREQUAL "arm64")
+    list(APPEND SOURCE rtl/arm64/perfctr.c)
+elseif(ARCH STREQUAL "riscv64")
+    list(APPEND SOURCE rtl/riscv64/perfctr.c)
+else()
+    list(APPEND SOURCE rtl/noperfctr.c)
+endif()
+
+if(MSVC AND ARCH STREQUAL "arm64")
+    list(APPEND ASM_SOURCE arm64/chpe_msvc.S)
 endif()
 
 add_asm_files(ntdll_asm ${ASM_SOURCE})
 
 list(APPEND PCH_SKIP_SOURCE
     ${CMAKE_CURRENT_BINARY_DIR}/ntdll_stubs.c)
+
+if(ARCH STREQUAL "arm64")
+    list(APPEND SOURCE
+        arm64/ehandler.c
+        arm64/stubs.c
+        chpe.c
+        chpewrap.c)
+else()
+    list(APPEND SOURCE ldr/nohybrid.c)
+endif()
 
 add_library(ntdll MODULE
     ${SOURCE}
@@ -62,14 +136,21 @@ add_library(ntdll MODULE
     ${CMAKE_CURRENT_BINARY_DIR}/ntdll.def)
 
 set_module_type(ntdll win32dll ENTRYPOINT 0)
+if(WOW64_I386_RUNTIME)
+    target_compile_definitions(ntdll PRIVATE WOW64_I386_RUNTIME)
+    target_compile_definitions(rtl_um PRIVATE WOW64_I386_RUNTIME)
+endif()
 #############################################
 ## HACK FOR MSVC COMPILATION WITH win32dll ##
 set_subsystem(ntdll console)
 ################# END  HACK #################
 
-target_link_libraries(ntdll ntdll_vista_static etwtrace csrlib rtl rtl_um rtl_vista ntdllsys ntdllsys_nt6 libcntpr setjmp uuid ${PSEH_LIB})
+target_link_libraries(ntdll ntdllsys ntdllsys_nt6 ntdll_vista_static etwtrace csrlib rtl rtl_um rtl_vista libcntpr setjmp uuid symcrypt ${PSEH_LIB})
+if(MSVC AND ARCH STREQUAL "arm64")
+    target_link_libraries(ntdll chkstk)
+endif()
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
-    target_link_libraries(ntdll cryptlib ntdllsys_nt6)
+    target_link_libraries(ntdll cryptlib)
 endif()
 
 if (STACK_PROTECTOR)
@@ -79,6 +160,25 @@ endif()
 add_pch(ntdll include/ntdll.h "${PCH_SKIP_SOURCE}")
 add_dependencies(ntdll ntstatus asm)
 add_cd_file(TARGET ntdll DESTINATION reactos/system32 NO_CAB FOR all)
+
+if(ARM64EC_RUNTIME)
+    include_directories(${REACTOS_SOURCE_DIR}/ntos/include)
+    add_arm64ec_x64_source(NTDLL_CHPE_X64_SOURCE chpebridge_x64.c)
+endif()
+
+add_library(ntdll_chpe MODULE EXCLUDE_FROM_ALL
+    chpebridge.c
+    ${NTDLL_CHPE_X64_SOURCE}
+    ${CMAKE_CURRENT_BINARY_DIR}/ntdll_chpe.def)
+target_include_directories(ntdll_chpe PRIVATE ${REACTOS_SOURCE_DIR}/sdk/lib/cryptlib)
+if(ARM64EC_RUNTIME)
+    target_sources(ntdll_chpe PRIVATE
+        chpedynfntbl.c
+        chpeunwind.c)
+endif()
+set_module_type(ntdll_chpe win32dll ENTRYPOINT 0)
+add_importlibs(ntdll_chpe ntdll)
+add_dependencies(ntdll_chpe psdk)
 
 # Newer VS versions link to _ftol2 / _ftoul2_legacy
 if(MSVC AND ARCH STREQUAL "i386")

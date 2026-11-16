@@ -29,9 +29,12 @@
 /* INCLUDES *****************************************************************/
 
 #include "precomp.h"
+#include <exfuncs.h>
 
 #define NDEBUG
 #include <debug.h>
+
+#define IDS_STATUS_INSTALL_DEV 3500
 
 
 /* GLOBALS ******************************************************************/
@@ -39,11 +42,19 @@
 HANDLE hUserToken = NULL;
 HANDLE hInstallEvent = NULL;
 HANDLE hNoPendingInstalls = NULL;
+HANDLE hBootInstallComplete = NULL;
 
 /* Device-install event list */
 HANDLE hDeviceInstallListMutex;
 LIST_ENTRY DeviceInstallListHead;
 HANDLE hDeviceInstallListNotEmpty;
+LIST_ENTRY DoNotInstallListHead;
+
+typedef struct _DO_NOT_INSTALL_ENTRY
+{
+    LIST_ENTRY ListEntry;
+    WCHAR DeviceId[ANYSIZE_ARRAY];
+} DO_NOT_INSTALL_ENTRY, *PDO_NOT_INSTALL_ENTRY;
 
 DWORD
 CreatePnpInstallEventSecurity(
@@ -51,11 +62,402 @@ CreatePnpInstallEventSecurity(
 
 /* FUNCTIONS *****************************************************************/
 
-static BOOL
-InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
+static
+PDO_NOT_INSTALL_ENTRY
+FindDoNotInstallEntry(
+    _In_ PCWSTR DeviceId)
 {
-    BOOL DeviceInstalled = FALSE;
+    PLIST_ENTRY Entry;
+    PDO_NOT_INSTALL_ENTRY Item;
+
+    for (Entry = DoNotInstallListHead.Flink; Entry != &DoNotInstallListHead; Entry = Entry->Flink)
+    {
+        Item = CONTAINING_RECORD(Entry, DO_NOT_INSTALL_ENTRY, ListEntry);
+        if (_wcsicmp(Item->DeviceId, DeviceId) == 0)
+            return Item;
+    }
+
+    return NULL;
+}
+
+VOID
+SetDeviceDoNotInstall(
+    _In_ PCWSTR DeviceId,
+    _In_ BOOL DoNotInstall)
+{
+    PDO_NOT_INSTALL_ENTRY Item;
+
+    WaitForSingleObject(hDeviceInstallListMutex, INFINITE);
+
+    Item = FindDoNotInstallEntry(DeviceId);
+    if (Item && !DoNotInstall)
+    {
+        RemoveEntryList(&Item->ListEntry);
+        HeapFree(GetProcessHeap(), 0, Item);
+    }
+    else if (!Item && DoNotInstall)
+    {
+        Item = HeapAlloc(GetProcessHeap(), 0,
+                         FIELD_OFFSET(DO_NOT_INSTALL_ENTRY, DeviceId[wcslen(DeviceId) + 1]));
+        if (Item)
+        {
+            wcscpy(Item->DeviceId, DeviceId);
+            InsertTailList(&DoNotInstallListHead, &Item->ListEntry);
+        }
+    }
+
+    ReleaseMutex(hDeviceInstallListMutex);
+}
+
+BOOL
+IsDeviceDoNotInstall(
+    _In_ PCWSTR DeviceId)
+{
+    BOOL Result;
+
+    WaitForSingleObject(hDeviceInstallListMutex, INFINITE);
+    Result = (FindDoNotInstallEntry(DeviceId) != NULL);
+    ReleaseMutex(hDeviceInstallListMutex);
+
+    return Result;
+}
+
+typedef enum _DEVICE_INSTALL_STATE
+{
+    DeviceInstallRequired,
+    DeviceInstallComplete,
+    DeviceStartRequired,
+    DeviceInstallFailed
+} DEVICE_INSTALL_STATE;
+
+
+/*
+ * Return the installation state of a device instance. A newly enumerated PDO
+ * may already have a persistent driver installation but still be waiting for
+ * its user-mode start continuation. Only a started devnode is complete: a
+ * loaded-but-not-started driver still needs the setup action, which rechecks
+ * the disabled and problem state itself.
+ */
+static DEVICE_INSTALL_STATE
+GetDeviceInstallState(PCWSTR DeviceInstance)
+{
+    HKEY DeviceKey;
+    DWORD Value;
     DWORD BytesWritten;
+    DWORD DeviceStatus;
+    DWORD DeviceProblem;
+    CONFIGRET StatusResult;
+    DEVICE_INSTALL_STATE State = DeviceInstallRequired;
+
+    if (IsRootDeviceInstanceID((PWSTR)DeviceInstance))
+    {
+        return DeviceInstallComplete;
+    }
+
+    StatusResult = PNP_GetDeviceStatus(NULL,
+                                       (PWSTR)DeviceInstance,
+                                       &DeviceStatus,
+                                       &DeviceProblem,
+                                       0);
+    if (StatusResult == CR_NO_SUCH_DEVINST)
+    {
+        return DeviceInstallComplete;
+    }
+
+    if (RegOpenKeyExW(hEnumKey,
+                      DeviceInstance,
+                      0,
+                      KEY_QUERY_VALUE,
+                      &DeviceKey) != ERROR_SUCCESS)
+    {
+        return DeviceInstallRequired;
+    }
+
+    if (RegQueryValueExW(DeviceKey,
+                         L"Class",
+                         NULL,
+                         NULL,
+                         NULL,
+                         NULL) == ERROR_SUCCESS)
+    {
+        State = DeviceStartRequired;
+
+        if (StatusResult == CR_SUCCESS &&
+            ((DeviceStatus & DN_STARTED) ||
+             ((DeviceStatus & DN_HAS_PROBLEM) &&
+              (DeviceProblem == CM_PROB_FAILED_START ||
+               DeviceProblem == CM_PROB_FAILED_POST_START ||
+               DeviceProblem == CM_PROB_HELD_FOR_EJECT))))
+        {
+            State = DeviceInstallComplete;
+        }
+
+        goto done;
+    }
+
+    BytesWritten = sizeof(DWORD);
+    if (RegQueryValueExW(DeviceKey,
+                         L"ConfigFlags",
+                         NULL,
+                         NULL,
+                         (PBYTE)&Value,
+                         &BytesWritten) == ERROR_SUCCESS)
+    {
+        if (Value & CONFIGFLAG_FAILEDINSTALL)
+        {
+            State = DeviceInstallFailed;
+        }
+        else if (!(Value & CONFIGFLAG_FINISH_INSTALL) &&
+                 StatusResult == CR_SUCCESS &&
+                 (DeviceStatus & DN_HAS_PROBLEM) &&
+                 (DeviceProblem == CM_PROB_FAILED_START ||
+                  DeviceProblem == CM_PROB_FAILED_POST_START))
+        {
+            State = DeviceInstallComplete;
+        }
+    }
+
+done:
+    RegCloseKey(DeviceKey);
+    return State;
+}
+
+/* A device's arrival only asks that the device be installed while it still runs: one that left since is not set up again */
+static DEVICE_INSTALL_STATE
+GetArrivalInstallState(PCWSTR DeviceInstance)
+{
+    DEVICE_INSTALL_STATE State = GetDeviceInstallState(DeviceInstance);
+    DWORD DeviceStatus = 0;
+    DWORD DeviceProblem = 0;
+
+    if (State == DeviceStartRequired)
+        return DeviceInstallComplete;
+
+    if (State == DeviceInstallRequired &&
+        (PNP_GetDeviceStatus(NULL, (PWSTR)DeviceInstance, &DeviceStatus, &DeviceProblem, 0) != CR_SUCCESS ||
+         !(DeviceStatus & DN_STARTED)))
+    {
+        return DeviceInstallComplete;
+    }
+
+    return State;
+}
+
+
+/*
+ * Wait for the installer process to connect without polling the pipe.
+ *
+ * The connect IRP is completed either by the client opening the pipe or by
+ * cancellation when the installer process exits. This also keeps a failed
+ * child from leaving the service blocked in ConnectNamedPipe indefinitely.
+ */
+static BOOL
+WaitForInstallClientConnect(
+    _In_ HANDLE hPipe,
+    _In_ HANDLE hProcess)
+{
+    BOOL Connected = FALSE;
+    DWORD BytesTransferred;
+    DWORD ErrCode;
+    DWORD WaitResult;
+    HANDLE WaitHandles[2];
+    OVERLAPPED Overlapped;
+
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (Overlapped.hEvent == NULL)
+        return FALSE;
+
+    if (ConnectNamedPipe(hPipe, &Overlapped))
+    {
+        Connected = TRUE;
+        ErrCode = ERROR_SUCCESS;
+        goto cleanup;
+    }
+
+    ErrCode = GetLastError();
+    if (ErrCode == ERROR_PIPE_CONNECTED)
+    {
+        Connected = TRUE;
+        ErrCode = ERROR_SUCCESS;
+        goto cleanup;
+    }
+
+    if (ErrCode != ERROR_IO_PENDING)
+        goto cleanup;
+
+    WaitHandles[0] = Overlapped.hEvent;
+    WaitHandles[1] = hProcess;
+    WaitResult = WaitForMultipleObjects(RTL_NUMBER_OF(WaitHandles), WaitHandles, FALSE, INFINITE);
+    if (WaitResult == WAIT_OBJECT_0)
+    {
+        Connected = GetOverlappedResult(hPipe, &Overlapped, &BytesTransferred, FALSE);
+        ErrCode = Connected ? ERROR_SUCCESS : GetLastError();
+    }
+    else
+    {
+        if (WaitResult == WAIT_OBJECT_0 + 1)
+            ErrCode = ERROR_PROCESS_ABORTED;
+        else if (WaitResult == WAIT_FAILED)
+            ErrCode = GetLastError();
+        else
+            ErrCode = ERROR_GEN_FAILURE;
+
+        CancelIo(hPipe);
+        /* Cancellation completes asynchronously; keep the event and stack alive. */
+        GetOverlappedResult(hPipe, &Overlapped, &BytesTransferred, TRUE);
+    }
+
+cleanup:
+    CloseHandle(Overlapped.hEvent);
+    if (!Connected)
+        SetLastError(ErrCode);
+
+    return Connected;
+}
+
+
+/*
+ * The install pipe is created with FILE_FLAG_OVERLAPPED so the connect can be
+ * cancelled, which makes a WriteFile() with a NULL OVERLAPPED unusable: it
+ * takes kernel32's synchronous path and ends up in NtWaitForSingleObject() on
+ * an asynchronous handle, which never returns once the child is gone.
+ */
+static BOOL
+WriteToInstallPipe(
+    _In_ HANDLE hPipe,
+    _In_ HANDLE hProcess,
+    _In_reads_bytes_(Size) LPCVOID Buffer,
+    _In_ DWORD Size)
+{
+    OVERLAPPED Overlapped;
+    HANDLE WaitHandles[2];
+    DWORD BytesWritten;
+    DWORD ErrCode = ERROR_SUCCESS;
+    DWORD WaitResult;
+    BOOL Written = FALSE;
+
+    ZeroMemory(&Overlapped, sizeof(Overlapped));
+    Overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (Overlapped.hEvent == NULL)
+        return FALSE;
+
+    if (WriteFile(hPipe, Buffer, Size, &BytesWritten, &Overlapped))
+    {
+        Written = (BytesWritten == Size);
+        ErrCode = Written ? ERROR_SUCCESS : ERROR_WRITE_FAULT;
+        goto cleanup;
+    }
+
+    ErrCode = GetLastError();
+    if (ErrCode != ERROR_IO_PENDING)
+        goto cleanup;
+
+    WaitHandles[0] = Overlapped.hEvent;
+    WaitHandles[1] = hProcess;
+    WaitResult = WaitForMultipleObjects(RTL_NUMBER_OF(WaitHandles), WaitHandles, FALSE, INFINITE);
+    if (WaitResult == WAIT_OBJECT_0)
+    {
+        Written = GetOverlappedResult(hPipe, &Overlapped, &BytesWritten, FALSE);
+        ErrCode = Written ? ERROR_SUCCESS : GetLastError();
+        if (Written && BytesWritten != Size)
+        {
+            Written = FALSE;
+            ErrCode = ERROR_WRITE_FAULT;
+        }
+    }
+    else
+    {
+        ErrCode = (WaitResult == WAIT_OBJECT_0 + 1) ? ERROR_PROCESS_ABORTED :
+                  (WaitResult == WAIT_FAILED) ? GetLastError() : ERROR_GEN_FAILURE;
+        CancelIo(hPipe);
+        /* Drain even if cancellation raced with normal completion. */
+        GetOverlappedResult(hPipe, &Overlapped, &BytesWritten, TRUE);
+    }
+
+cleanup:
+    CloseHandle(Overlapped.hEvent);
+    if (!Written)
+        SetLastError(ErrCode);
+
+    return Written;
+}
+
+
+/*
+ * The named event is the protocol's completion notification.  Waiting for
+ * rundll32 to terminate first unnecessarily couples device installation to
+ * GUI and DLL process teardown, which may continue after ClientSideInstallW
+ * has committed the device and signalled the event.
+ *
+ * The process handle remains part of the wait so that a client which exits
+ * without signalling is still reported as a failed installation.
+ */
+static BOOL
+WaitForInstallCompletion(
+    _In_ HANDLE hInstallEvent,
+    _In_ HANDLE hProcess)
+{
+    DWORD WaitResult;
+    HANDLE WaitHandles[2];
+
+    WaitHandles[0] = hInstallEvent;
+    WaitHandles[1] = hProcess;
+
+    WaitResult = WaitForMultipleObjects(RTL_NUMBER_OF(WaitHandles),
+                                        WaitHandles,
+                                        FALSE,
+                                        INFINITE);
+    if (WaitResult == WAIT_OBJECT_0)
+        return TRUE;
+
+    if (WaitResult == WAIT_OBJECT_0 + 1)
+    {
+        SetLastError(ERROR_PROCESS_ABORTED);
+        return FALSE;
+    }
+
+    if (WaitResult != WAIT_FAILED)
+        SetLastError(ERROR_GEN_FAILURE);
+
+    return FALSE;
+}
+
+
+/*
+ * A DeviceInstall event is also the user-mode continuation point for a PDO
+ * whose driver is already installed. Run the normal Configuration Manager
+ * setup action so the kernel can advance an initialized devnode. The setup
+ * path rechecks the current state and observes DisableCount.
+ */
+static BOOL
+SetupInstalledDevice(
+    _In_ PCWSTR DeviceInstance)
+{
+    CONFIGRET Result;
+
+    Result = PNP_DeviceInstanceAction(NULL,
+                                      PNP_DEVINST_SETUP,
+                                      CM_SETUP_DEVNODE_READY,
+                                      (PWSTR)DeviceInstance,
+                                      NULL);
+    if (Result != CR_SUCCESS)
+    {
+        DPRINT1("Failed to set up installed device %S (error %lu)\n",
+                DeviceInstance, Result);
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+
+static BOOL
+InstallDevice(PCWSTR DeviceInstance, BOOL Arrival)
+{
+    DEVICE_INSTALL_STATE InstallState;
+    BOOL DeviceInstalled = FALSE;
+    BOOL ShowWizard = FALSE;
     DWORD Value;
     DWORD ErrCode;
     HANDLE hInstallEvent;
@@ -64,7 +466,6 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
     PROCESS_INFORMATION ProcessInfo;
     STARTUPINFOW StartupInfo;
     UUID RandomUuid;
-    HKEY DeviceKey;
     SECURITY_ATTRIBUTES EventAttrs;
     PSECURITY_DESCRIPTOR EventSd;
 
@@ -74,48 +475,28 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
     WCHAR PipeName[74];
     WCHAR UuidString[39];
 
-    DPRINT("InstallDevice(%S, %d)\n", DeviceInstance, ShowWizard);
+    DPRINT("InstallDevice(%S)\n", DeviceInstance);
 
     ZeroMemory(&ProcessInfo, sizeof(ProcessInfo));
 
-    if (RegOpenKeyExW(hEnumKey,
-                      DeviceInstance,
-                      0,
-                      KEY_QUERY_VALUE,
-                      &DeviceKey) == ERROR_SUCCESS)
+    InstallState = Arrival ? GetArrivalInstallState(DeviceInstance) : GetDeviceInstallState(DeviceInstance);
+    if (InstallState == DeviceInstallComplete)
     {
-        if (RegQueryValueExW(DeviceKey,
-                             L"Class",
-                             NULL,
-                             NULL,
-                             NULL,
-                             NULL) == ERROR_SUCCESS)
-        {
-            DPRINT("No need to install: %S\n", DeviceInstance);
-            RegCloseKey(DeviceKey);
-            return TRUE;
-        }
-
-        BytesWritten = sizeof(DWORD);
-        if (RegQueryValueExW(DeviceKey,
-                             L"ConfigFlags",
-                             NULL,
-                             NULL,
-                             (PBYTE)&Value,
-                             &BytesWritten) == ERROR_SUCCESS)
-        {
-            if (Value & CONFIGFLAG_FAILEDINSTALL)
-            {
-                DPRINT("No need to install: %S\n", DeviceInstance);
-                RegCloseKey(DeviceKey);
-                return TRUE;
-            }
-        }
-
-        RegCloseKey(DeviceKey);
+        DPRINT("No need to install: %S\n", DeviceInstance);
+        return TRUE;
+    }
+    if (InstallState == DeviceStartRequired)
+    {
+        DPRINT("Driver already installed, setting up device: %S\n", DeviceInstance);
+        return SetupInstalledDevice(DeviceInstance);
+    }
+    if (InstallState == DeviceInstallFailed)
+    {
+        DPRINT("Not retrying failed installation: %S\n", DeviceInstance);
+        return TRUE;
     }
 
-    DPRINT1("Installing: %S\n", DeviceInstance);
+    DPRINT("Installing: %S\n", DeviceInstance);
 
     /* Create a random UUID for the named pipe & event*/
     UuidCreate(&RandomUuid);
@@ -151,7 +532,7 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
     /* Create the named pipe */
     wcscpy(PipeName, L"\\\\.\\pipe\\PNP_Device_Install_Pipe_0.");
     wcscat(PipeName, UuidString);
-    hPipe = CreateNamedPipeW(PipeName, PIPE_ACCESS_OUTBOUND, PIPE_TYPE_BYTE, 1, 512, 512, 0, NULL);
+    hPipe = CreateNamedPipeW(PipeName, PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 512, 512, 60000, NULL);
     if (hPipe == INVALID_HANDLE_VALUE)
     {
         DPRINT1("CreateNamedPipeW failed with error %u\n", GetLastError());
@@ -184,10 +565,7 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
     {
         /* FIXME: This is probably not correct, I guess newdev should never be run with SYSTEM privileges.
 
-           Still, we currently do that in 2nd stage setup and probably Console mode as well, so allow it here.
-           (ShowWizard is only set to FALSE for these two modes) */
-        ASSERT(!ShowWizard);
-
+           Still, we currently do that in 2nd stage setup and probably Console mode as well, so allow it here. */
         if (!CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
         {
             DPRINT1("CreateProcessW failed with error %u\n", GetLastError());
@@ -195,34 +573,32 @@ InstallDevice(PCWSTR DeviceInstance, BOOL ShowWizard)
         }
     }
 
-    /* Wait for the function to connect to our pipe */
-    if (!ConnectNamedPipe(hPipe, NULL))
+    /* Wait for the function to connect to our pipe or terminate */
+    if (!WaitForInstallClientConnect(hPipe, ProcessInfo.hProcess))
     {
-        if (GetLastError() != ERROR_PIPE_CONNECTED)
-        {
-            DPRINT1("ConnectNamedPipe failed with error %u\n", GetLastError());
-            goto cleanup;
-        }
+        DPRINT1("WaitForInstallClientConnect failed with error %u\n", GetLastError());
+        goto cleanup;
     }
 
     /* Pass the data. The following output is partly compatible to Windows XP SP2 (researched using a modified newdev.dll to log this stuff) */
     Value = sizeof(InstallEventName);
-    WriteFile(hPipe, &Value, sizeof(Value), &BytesWritten, NULL);
-    WriteFile(hPipe, InstallEventName, Value, &BytesWritten, NULL);
+    if (!WriteToInstallPipe(hPipe, ProcessInfo.hProcess, &Value, sizeof(Value)) ||
+        !WriteToInstallPipe(hPipe, ProcessInfo.hProcess, InstallEventName, Value))
+        goto cleanup;
 
     /* I couldn't figure out what the following value means under WinXP. It's usually 0 in my tests, but was also 5 once.
        Therefore the following line is entirely ReactOS-specific. We use the value here to pass the ShowWizard variable. */
-    WriteFile(hPipe, &ShowWizard, sizeof(ShowWizard), &BytesWritten, NULL);
+    if (!WriteToInstallPipe(hPipe, ProcessInfo.hProcess, &ShowWizard, sizeof(ShowWizard)))
+        goto cleanup;
 
     Value = (wcslen(DeviceInstance) + 1) * sizeof(WCHAR);
-    WriteFile(hPipe, &Value, sizeof(Value), &BytesWritten, NULL);
-    WriteFile(hPipe, DeviceInstance, Value, &BytesWritten, NULL);
+    if (!WriteToInstallPipe(hPipe, ProcessInfo.hProcess, &Value, sizeof(Value)) ||
+        !WriteToInstallPipe(hPipe, ProcessInfo.hProcess, DeviceInstance, Value))
+        goto cleanup;
 
-    /* Wait for newdev.dll to finish processing */
-    WaitForSingleObject(ProcessInfo.hProcess, INFINITE);
-
-    /* If the event got signalled, this is success */
-    DeviceInstalled = WaitForSingleObject(hInstallEvent, 0) == WAIT_OBJECT_0;
+    /* Wait for ClientSideInstallW to report completion or exit early. */
+    DeviceInstalled = WaitForInstallCompletion(hInstallEvent,
+                                               ProcessInfo.hProcess);
 
 cleanup:
     if (hInstallEvent)
@@ -246,6 +622,353 @@ cleanup:
     }
 
     return DeviceInstalled;
+}
+
+
+/*
+ * Batch-install every device in a multi-sz list via a single
+ * rundll32.exe invocation of newdev.dll,ClientSideInstallW.
+ *
+ * Used at boot to amortize the rundll32 process-spawn cost (previously
+ * ~1 spawn per device, e.g. 53 spawns on the livecd first boot). The
+ * spawned child reads the whole device list from the named pipe and
+ * calls DevInstallW for each entry, signalling the install event once
+ * at the end.
+ *
+ * Returns TRUE if the batch child ran to completion and signalled the
+ * event (individual device failures inside the batch do NOT make this
+ * return FALSE — they match the per-device loop's tolerant behaviour).
+ * Returns FALSE on infrastructure failure (pipe/process creation, or
+ * child crash before signalling), in which case the caller should fall
+ * back to the per-device InstallDevice loop.
+ */
+static BOOL
+InstallDevicesBatchChild(PCWSTR MultiSzDeviceList, DWORD DeviceCount)
+{
+    BOOL BatchInstalled = FALSE;
+    DWORD Value;
+    DWORD ErrCode;
+    DWORD PipeBufferSize;
+    HANDLE hInstallEvent = NULL;
+    HANDLE hPipe = INVALID_HANDLE_VALUE;
+    LPVOID Environment = NULL;
+    PROCESS_INFORMATION ProcessInfo;
+    STARTUPINFOW StartupInfo;
+    UUID RandomUuid;
+    SECURITY_ATTRIBUTES EventAttrs;
+    PSECURITY_DESCRIPTOR EventSd;
+    PCWSTR currentDev;
+    DWORD i;
+
+    /* The following lengths are constant (see InstallDevice for rationale) */
+    WCHAR CommandLine[124];
+    WCHAR InstallEventName[73];
+    WCHAR PipeName[74];
+    WCHAR UuidString[39];
+
+    DPRINT("Installing: batch[%lu devices]\n", DeviceCount);
+
+    ZeroMemory(&ProcessInfo, sizeof(ProcessInfo));
+
+    if (DeviceCount == 0 || MultiSzDeviceList == NULL)
+        return TRUE;
+
+    /* Random UUID for the pipe/event names (same pattern as InstallDevice) */
+    UuidCreate(&RandomUuid);
+    swprintf(UuidString,
+        RTL_NUMBER_OF(UuidString),
+        L"{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+        RandomUuid.Data1, RandomUuid.Data2, RandomUuid.Data3,
+        RandomUuid.Data4[0], RandomUuid.Data4[1], RandomUuid.Data4[2],
+        RandomUuid.Data4[3], RandomUuid.Data4[4], RandomUuid.Data4[5],
+        RandomUuid.Data4[6], RandomUuid.Data4[7]);
+
+    ErrCode = CreatePnpInstallEventSecurity(&EventSd);
+    if (ErrCode != ERROR_SUCCESS)
+    {
+        DPRINT1("CreatePnpInstallEventSecurity failed with error %u\n", GetLastError());
+        return FALSE;
+    }
+
+    EventAttrs.nLength = sizeof(SECURITY_ATTRIBUTES);
+    EventAttrs.lpSecurityDescriptor = EventSd;
+    EventAttrs.bInheritHandle = FALSE;
+
+    wcscpy(InstallEventName, L"Global\\PNP_Device_Install_Event_0.");
+    wcscat(InstallEventName, UuidString);
+    hInstallEvent = CreateEventW(&EventAttrs, TRUE, FALSE, InstallEventName);
+    HeapFree(GetProcessHeap(), 0, EventSd);
+    if (!hInstallEvent)
+    {
+        DPRINT1("CreateEventW('%ls') failed with error %lu\n", InstallEventName, GetLastError());
+        goto cleanup;
+    }
+
+    /* 64 KB pipe buffer — 53 devices ≈ 8 KB, 64 KB leaves room to grow. */
+    PipeBufferSize = 64 * 1024;
+
+    wcscpy(PipeName, L"\\\\.\\pipe\\PNP_Device_Install_Pipe_0.");
+    wcscat(PipeName, UuidString);
+    hPipe = CreateNamedPipeW(PipeName, PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_WAIT, 1, PipeBufferSize, PipeBufferSize, 60000, NULL);
+    if (hPipe == INVALID_HANDLE_VALUE)
+    {
+        DPRINT1("CreateNamedPipeW failed with error %u\n", GetLastError());
+        goto cleanup;
+    }
+
+    /* Reuse the existing ClientSideInstallW entry point. The private marker
+     * selects batch mode without adding another newdev.dll export. */
+    wcscpy(CommandLine, L"rundll32.exe newdev.dll,ClientSideInstall ");
+    wcscat(CommandLine, PipeName);
+
+    ZeroMemory(&StartupInfo, sizeof(StartupInfo));
+    StartupInfo.cb = sizeof(StartupInfo);
+
+    if (hUserToken)
+    {
+        /* Match InstallDevice(): even silent installs should run in the
+         * current user's environment once an interactive logon is known. */
+        if (!CreateEnvironmentBlock(&Environment, hUserToken, FALSE))
+        {
+            DPRINT1("CreateEnvironmentBlock(batch) failed with error %d\n", GetLastError());
+            goto cleanup;
+        }
+
+        if (!CreateProcessAsUserW(hUserToken, NULL, CommandLine, NULL, NULL, FALSE,
+                                  CREATE_UNICODE_ENVIRONMENT, Environment, NULL,
+                                  &StartupInfo, &ProcessInfo))
+        {
+            DPRINT1("CreateProcessAsUserW(batch) failed with error %u\n", GetLastError());
+            goto cleanup;
+        }
+    }
+    else
+    {
+        /* Step 1 runs before any interactive user token is reported. */
+        if (!CreateProcessW(NULL, CommandLine, NULL, NULL, FALSE, 0, NULL, NULL, &StartupInfo, &ProcessInfo))
+        {
+            DPRINT1("CreateProcessW(batch) failed with error %u\n", GetLastError());
+            goto cleanup;
+        }
+    }
+
+    /* Wait for the child to connect to our pipe */
+    if (!WaitForInstallClientConnect(hPipe, ProcessInfo.hProcess))
+    {
+        DPRINT1("WaitForInstallClientConnect(batch) failed with error %u\n", GetLastError());
+        goto cleanup;
+    }
+
+    /* Prologue: event name size + event name */
+    Value = sizeof(InstallEventName);
+    if (!WriteToInstallPipe(hPipe, ProcessInfo.hProcess, &Value, sizeof(Value)) ||
+        !WriteToInstallPipe(hPipe, ProcessInfo.hProcess, InstallEventName, Value))
+    {
+        DPRINT1("WriteFile(EventName) failed with error %u\n", GetLastError());
+        goto cleanup;
+    }
+
+    /* ShowWizard — always FALSE for batch. */
+    {
+        BOOL ShowWizardFalse = FALSE;
+        if (!WriteToInstallPipe(hPipe, ProcessInfo.hProcess, &ShowWizardFalse, sizeof(ShowWizardFalse)))
+        {
+            DPRINT1("WriteFile(ShowWizard) failed with error %u\n", GetLastError());
+            goto cleanup;
+        }
+    }
+
+    /* Batch-specific payload: marker, DeviceCount, then N pairs. */
+    Value = NEWDEV_INSTALL_BATCH_MARKER;
+    if (!WriteToInstallPipe(hPipe, ProcessInfo.hProcess, &Value, sizeof(Value)))
+    {
+        DPRINT1("WriteFile(BatchMarker) failed with error %u\n", GetLastError());
+        goto cleanup;
+    }
+
+    if (!WriteToInstallPipe(hPipe, ProcessInfo.hProcess, &DeviceCount, sizeof(DeviceCount)))
+    {
+        DPRINT1("WriteFile(DeviceCount) failed with error %u\n", GetLastError());
+        goto cleanup;
+    }
+
+    i = 0;
+    for (currentDev = MultiSzDeviceList;
+         currentDev[0] != UNICODE_NULL && i < DeviceCount;
+         currentDev += lstrlenW(currentDev) + 1, i++)
+    {
+        /* Same per-device DPRINT1 format as the legacy InstallDevice path —
+         * this is what the serial log used to show before we hand control to
+         * rundll32, keeping "where is the installs?" answerable in batch mode
+         * without dragging DbgPrint into newdev.dll. */
+        DPRINT("Installing: %S\n", currentDev);
+
+        Value = (lstrlenW(currentDev) + 1) * sizeof(WCHAR);
+        if (!WriteToInstallPipe(hPipe, ProcessInfo.hProcess, &Value, sizeof(Value)) ||
+            !WriteToInstallPipe(hPipe, ProcessInfo.hProcess, currentDev, Value))
+        {
+            DPRINT1("WriteFile(DeviceInstance[%lu]) failed with error %u\n", i, GetLastError());
+            goto cleanup;
+        }
+    }
+
+    /* Batch completion is reported by the shared install event exactly once
+     * after the child's installation loop finishes. */
+    BatchInstalled = WaitForInstallCompletion(hInstallEvent,
+                                              ProcessInfo.hProcess);
+cleanup:
+    if (hInstallEvent)
+        CloseHandle(hInstallEvent);
+
+    if (hPipe != INVALID_HANDLE_VALUE)
+        CloseHandle(hPipe);
+
+    if (Environment)
+        DestroyEnvironmentBlock(Environment);
+
+    if (ProcessInfo.hProcess)
+        CloseHandle(ProcessInfo.hProcess);
+
+    if (ProcessInfo.hThread)
+        CloseHandle(ProcessInfo.hThread);
+
+    if (!BatchInstalled)
+    {
+        DPRINT1("InstallDevicesBatch failed for %lu device(s); caller will fall back\n", DeviceCount);
+    }
+
+    return BatchInstalled;
+}
+
+
+#define PNP_BATCH_MAX_SHARDS 4
+#define PNP_BATCH_MIN_PER_SHARD 8
+
+typedef struct _PNP_BATCH_SHARD
+{
+    PWSTR List;
+    DWORD Count;
+    HANDLE hThread;
+    BOOL Result;
+} PNP_BATCH_SHARD;
+
+static DWORD WINAPI
+InstallDevicesShardThread(LPVOID Parameter)
+{
+    PNP_BATCH_SHARD *Shard = Parameter;
+
+    Shard->Result = InstallDevicesBatchChild(Shard->List, Shard->Count);
+    return 0;
+}
+
+/*
+ * Spread the batch over several rundll32 children. One child per device was
+ * spawn-bound, but one child for everything serialises on that process's heap
+ * and SetupAPI state, so shard it and give each shard its own process.
+ */
+static BOOL
+InstallDevicesBatch(PCWSTR MultiSzDeviceList, DWORD DeviceCount)
+{
+    PNP_BATCH_SHARD Shards[PNP_BATCH_MAX_SHARDS];
+    SYSTEM_INFO SystemInfo;
+    PCWSTR currentDev;
+    SIZE_T ListBytes;
+    DWORD ShardCount;
+    DWORD i;
+    BOOL Result = TRUE;
+
+    if (DeviceCount == 0 || MultiSzDeviceList == NULL)
+        return TRUE;
+
+    GetSystemInfo(&SystemInfo);
+    ShardCount = SystemInfo.dwNumberOfProcessors;
+    if (ShardCount > PNP_BATCH_MAX_SHARDS)
+        ShardCount = PNP_BATCH_MAX_SHARDS;
+    if (ShardCount > DeviceCount / PNP_BATCH_MIN_PER_SHARD)
+        ShardCount = DeviceCount / PNP_BATCH_MIN_PER_SHARD;
+
+    if (ShardCount < 2)
+        return InstallDevicesBatchChild(MultiSzDeviceList, DeviceCount);
+
+    ListBytes = 0;
+    for (currentDev = MultiSzDeviceList;
+         currentDev[0] != UNICODE_NULL;
+         currentDev += lstrlenW(currentDev) + 1)
+    {
+        ListBytes += (lstrlenW(currentDev) + 1) * sizeof(WCHAR);
+    }
+    ListBytes += sizeof(WCHAR);
+
+    ZeroMemory(Shards, sizeof(Shards));
+    for (i = 0; i < ShardCount; i++)
+    {
+        Shards[i].List = HeapAlloc(GetProcessHeap(), 0, ListBytes);
+        if (Shards[i].List == NULL)
+        {
+            while (i-- != 0)
+                HeapFree(GetProcessHeap(), 0, Shards[i].List);
+
+            return InstallDevicesBatchChild(MultiSzDeviceList, DeviceCount);
+        }
+
+        Shards[i].List[0] = UNICODE_NULL;
+    }
+
+    {
+        PWSTR Cursor[PNP_BATCH_MAX_SHARDS];
+
+        for (i = 0; i < ShardCount; i++)
+            Cursor[i] = Shards[i].List;
+
+        i = 0;
+        for (currentDev = MultiSzDeviceList;
+             currentDev[0] != UNICODE_NULL;
+             currentDev += lstrlenW(currentDev) + 1)
+        {
+            DWORD slot = i % ShardCount;
+            SIZE_T cch = lstrlenW(currentDev) + 1;
+
+            memcpy(Cursor[slot], currentDev, cch * sizeof(WCHAR));
+            Cursor[slot] += cch;
+            Shards[slot].Count++;
+            i++;
+        }
+
+        for (i = 0; i < ShardCount; i++)
+            *Cursor[i] = UNICODE_NULL;
+    }
+
+    DPRINT("Installing: %lu device(s) across %lu batch process(es)\n", DeviceCount, ShardCount);
+
+    for (i = 1; i < ShardCount; i++)
+    {
+        Shards[i].hThread = CreateThread(NULL, 0, InstallDevicesShardThread, &Shards[i], 0, NULL);
+        if (Shards[i].hThread == NULL)
+        {
+            Shards[i].Result = InstallDevicesBatchChild(Shards[i].List, Shards[i].Count);
+        }
+    }
+
+    Shards[0].Result = InstallDevicesBatchChild(Shards[0].List, Shards[0].Count);
+
+    for (i = 1; i < ShardCount; i++)
+    {
+        if (Shards[i].hThread == NULL)
+            continue;
+
+        WaitForSingleObject(Shards[i].hThread, INFINITE);
+        CloseHandle(Shards[i].hThread);
+    }
+
+    for (i = 0; i < ShardCount; i++)
+    {
+        if (!Shards[i].Result)
+            Result = FALSE;
+
+        HeapFree(GetProcessHeap(), 0, Shards[i].List);
+    }
+
+    return Result;
 }
 
 
@@ -341,7 +1064,7 @@ CreatePnpInstallEventSecurity(
     _Out_ PSECURITY_DESCRIPTOR *EventSd)
 {
     DWORD ErrCode;
-    PACL Dacl;
+    PACL Dacl = NULL;
     ULONG DaclSize;
     SECURITY_DESCRIPTOR AbsoluteSd;
     ULONG Size = 0;
@@ -512,21 +1235,110 @@ cleanup:
 }
 
 
-FORCEINLINE
-BOOL
-IsUISuppressionAllowed(VOID)
+/* Loop to install all queued devices installations */
+typedef struct _BOOT_INSTALL_STATUS
 {
-    /* Display the newdev.dll wizard UI only if it's allowed */
-    return (g_IsUISuppressed || GetSuppressNewUIValue());
+    PCWSTR DeviceList;
+    ULONG DeviceCount;
+    HANDLE hStop;
+    WCHAR Phase[256];
+} BOOT_INSTALL_STATUS, *PBOOT_INSTALL_STATUS;
+
+static VOID
+DisplayBootInstallStatus(
+    _In_ PBOOT_INSTALL_STATUS Status,
+    _In_ ULONG Completed)
+{
+    WCHAR Text[272];
+    UNICODE_STRING String;
+
+    _snwprintf(Text, ARRAYSIZE(Text) - 1, L"%s %lu%%\r\n", Status->Phase,
+               Completed >= Status->DeviceCount ? 100 : Completed * 100 / Status->DeviceCount);
+    Text[ARRAYSIZE(Text) - 1] = UNICODE_NULL;
+    RtlInitUnicodeString(&String, Text);
+    NtDisplayString(&String);
 }
 
+static DWORD
+WINAPI
+BootInstallStatusThread(LPVOID lpParameter)
+{
+    PBOOT_INSTALL_STATUS Status = lpParameter;
+    ULONG LastCompleted = (ULONG)-1;
 
-/* Loop to install all queued devices installations */
+    do
+    {
+        ULONG Completed = 0;
+
+        for (PCWSTR Device = Status->DeviceList; *Device; Device += lstrlenW(Device) + 1)
+        {
+            if (GetDeviceInstallState(Device) != DeviceInstallRequired)
+                Completed++;
+        }
+        if (Completed != LastCompleted)
+        {
+            DisplayBootInstallStatus(Status, Completed);
+            LastCompleted = Completed;
+        }
+    } while (WaitForSingleObject(Status->hStop, 150) == WAIT_TIMEOUT);
+
+    return 0;
+}
+
+static HANDLE
+StartBootInstallStatus(
+    _Out_ PBOOT_INSTALL_STATUS Status,
+    _In_ PCWSTR DeviceList,
+    _In_ ULONG DeviceCount)
+{
+    HMODULE hSysSetup;
+    HANDLE hThread;
+
+    ZeroMemory(Status, sizeof(*Status));
+    if (SetupIsActive() || IsConsoleBoot())
+        return NULL;
+
+    Status->DeviceList = DeviceList;
+    Status->DeviceCount = DeviceCount;
+    hSysSetup = LoadLibraryExW(L"syssetup.dll", NULL, LOAD_LIBRARY_AS_DATAFILE);
+    if (hSysSetup != NULL)
+    {
+        LoadStringW(hSysSetup, IDS_STATUS_INSTALL_DEV, Status->Phase, ARRAYSIZE(Status->Phase));
+        FreeLibrary(hSysSetup);
+    }
+
+    Status->hStop = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (Status->hStop == NULL)
+        return NULL;
+
+    hThread = CreateThread(NULL, 0, BootInstallStatusThread, Status, 0, NULL);
+    if (hThread == NULL)
+    {
+        CloseHandle(Status->hStop);
+        Status->hStop = NULL;
+    }
+    return hThread;
+}
+
+static VOID
+StopBootInstallStatus(
+    _Inout_ PBOOT_INSTALL_STATUS Status,
+    _In_opt_ HANDLE hThread)
+{
+    if (hThread == NULL)
+        return;
+
+    SetEvent(Status->hStop);
+    WaitForSingleObject(hThread, INFINITE);
+    CloseHandle(hThread);
+    CloseHandle(Status->hStop);
+    DisplayBootInstallStatus(Status, Status->DeviceCount);
+}
+
 DWORD
 WINAPI
 DeviceInstallThread(LPVOID lpParameter)
 {
-    PLIST_ENTRY ListEntry;
     DeviceInstallParams* Params;
 
     UNREFERENCED_PARAMETER(lpParameter);
@@ -568,12 +1380,112 @@ DeviceInstallThread(LPVOID lpParameter)
         }
     }
 
+    /*
+     * Walk the raw multi-sz device list and build a filtered copy that
+     * contains ONLY devices which still need installation. Every already-
+     * installed device (Class assigned) or previously-failed device
+     * (CONFIGFLAG_FAILEDINSTALL) is dropped here, before we ever spawn
+     * rundll32 — this is where most of the boot-time savings come from on
+     * warm boots.
+     */
+    DWORD totalCount = 0, filteredCount = 0;
+    BOOL setupFailed = FALSE;
+    SIZE_T totalBytes = 0;
+    PWSTR filteredList = NULL;
+
     for (PWSTR currentDev = deviceList;
          currentDev[0] != UNICODE_NULL;
          currentDev += lstrlenW(currentDev) + 1)
     {
-        InstallDevice(currentDev, FALSE);
+        totalCount++;
+        totalBytes += (lstrlenW(currentDev) + 1) * sizeof(WCHAR);
     }
+    totalBytes += sizeof(WCHAR); /* final multi-sz terminator */
+
+    filteredList = HeapAlloc(GetProcessHeap(), 0, totalBytes);
+    if (filteredList)
+    {
+        PWSTR outCursor = filteredList;
+        for (PWSTR currentDev = deviceList;
+             currentDev[0] != UNICODE_NULL;
+             currentDev += lstrlenW(currentDev) + 1)
+        {
+            DEVICE_INSTALL_STATE InstallState = GetDeviceInstallState(currentDev);
+
+            if (InstallState == DeviceInstallRequired)
+            {
+                SIZE_T cch = lstrlenW(currentDev) + 1;
+                memcpy(outCursor, currentDev, cch * sizeof(WCHAR));
+                outCursor += cch;
+                filteredCount++;
+            }
+            else if (InstallState == DeviceInstallFailed)
+            {
+                DPRINT("Not retrying failed installation: %S\n", currentDev);
+            }
+            else if (InstallState == DeviceStartRequired &&
+                     !SetupInstalledDevice(currentDev))
+            {
+                SIZE_T cch = lstrlenW(currentDev) + 1;
+                memcpy(outCursor, currentDev, cch * sizeof(WCHAR));
+                outCursor += cch;
+                filteredCount++;
+                setupFailed = TRUE;
+            }
+            else
+            {
+                DPRINT("No need to install: %S\n", currentDev);
+            }
+        }
+        *outCursor = UNICODE_NULL; /* multi-sz terminator */
+    }
+
+    DPRINT("Boot device install: %lu candidate(s), %lu need install\n",
+            totalCount, filteredCount);
+
+    if (filteredList != NULL && filteredCount != 0)
+    {
+        BOOT_INSTALL_STATUS BootStatus;
+        HANDLE hBootStatusThread = StartBootInstallStatus(&BootStatus, filteredList, filteredCount);
+
+        /* Try the batch path first — one rundll32 spawn for the whole
+         * filtered boot device list. Falls back to the legacy per-device
+         * loop if the batch child fails to signal completion (e.g. an
+         * older newdev.dll without the private batch protocol, or an
+         * infrastructure failure). */
+        if (setupFailed ||
+            !InstallDevicesBatch(filteredList, filteredCount))
+        {
+            DPRINT1("Batch install failed, falling back to per-device loop\n");
+
+            for (PWSTR currentDev = filteredList;
+                 currentDev[0] != UNICODE_NULL;
+                 currentDev += lstrlenW(currentDev) + 1)
+            {
+                InstallDevice(currentDev, FALSE);
+            }
+        }
+
+        StopBootInstallStatus(&BootStatus, hBootStatusThread);
+    }
+    else if (filteredList == NULL)
+    {
+        /* Allocation failed — fall back to the legacy per-device loop over
+         * the unfiltered list. Each InstallDevice call will still skip
+         * already-installed entries via its own RegQueryValueExW check. */
+        DPRINT1("Filtered list allocation failed, falling back to per-device loop\n");
+
+        for (PWSTR currentDev = deviceList;
+             currentDev[0] != UNICODE_NULL;
+             currentDev += lstrlenW(currentDev) + 1)
+        {
+            InstallDevice(currentDev, FALSE);
+        }
+    }
+    /* else: nothing to install, skip the spawn entirely. */
+
+    if (filteredList)
+        HeapFree(GetProcessHeap(), 0, filteredList);
 
 Cleanup:
     HeapFree(GetProcessHeap(), 0, deviceList);
@@ -581,30 +1493,122 @@ Cleanup:
     // Step 2: start the wait-loop for newly added devices
 Step2:
 
+    SetEvent(hBootInstallComplete);
+
     DPRINT("Step 2: Starting the wait-loop\n");
 
     WaitForSingleObject(hInstallEvent, INFINITE);
 
-    BOOL showWizard = !SetupIsActive() && !IsConsoleBoot();
-
     while (TRUE)
     {
-        /* Dequeue the next oldest device-install event */
+        /*
+         * Drain the queue into a local list under a single mutex hold, then
+         * release the mutex and process the whole burst. When the kernel
+         * triggers a flurry of DeviceInstall events (e.g. after Step 1
+         * completes and PnP starts its way through all boot devices), this
+         * lets us batch them into one rundll32 spawn instead of firing one
+         * CreateProcess per event — which was the main residual slowness
+         * after the Step 1 batch optimization.
+         */
+        LIST_ENTRY LocalBurst;
+        BOOL BurstEmpty;
+        InitializeListHead(&LocalBurst);
+
         WaitForSingleObject(hDeviceInstallListMutex, INFINITE);
-        ListEntry = (IsListEmpty(&DeviceInstallListHead)
-                        ? NULL : RemoveHeadList(&DeviceInstallListHead));
+        while (!IsListEmpty(&DeviceInstallListHead))
+        {
+            PLIST_ENTRY entry = RemoveHeadList(&DeviceInstallListHead);
+            InsertTailList(&LocalBurst, entry);
+        }
+        BurstEmpty = IsListEmpty(&LocalBurst);
+        if (BurstEmpty)
+            SetEvent(hNoPendingInstalls);
+        else
+            ResetEvent(hNoPendingInstalls);
         ReleaseMutex(hDeviceInstallListMutex);
 
-        if (ListEntry == NULL)
+        if (BurstEmpty)
         {
-            SetEvent(hNoPendingInstalls);
             WaitForSingleObject(hDeviceInstallListNotEmpty, INFINITE);
+            continue;
         }
-        else
+
+        /*
+         * If the burst contains more than one device, batch them through a
+         * single ClientSideInstallW rundll32 spawn. Otherwise fall back to the
+         * per-device path.
+         */
+        /* Count the burst and build a multi-sz list for the batch child. */
+        DWORD burstCount = 0;
+        SIZE_T burstBytes = sizeof(WCHAR); /* final multi-sz NUL */
+
+        for (PLIST_ENTRY e = LocalBurst.Flink; e != &LocalBurst; e = e->Flink)
         {
-            ResetEvent(hNoPendingInstalls);
-            Params = CONTAINING_RECORD(ListEntry, DeviceInstallParams, ListEntry);
-            InstallDevice(Params->DeviceIds, showWizard && !IsUISuppressionAllowed());
+            DeviceInstallParams* p = CONTAINING_RECORD(e, DeviceInstallParams, ListEntry);
+            burstCount++;
+            burstBytes += (lstrlenW(p->DeviceIds) + 1) * sizeof(WCHAR);
+        }
+
+        PWSTR burstList = NULL;
+        if (burstCount > 1)
+        {
+            burstList = HeapAlloc(GetProcessHeap(), 0, burstBytes);
+        }
+
+        if (burstList != NULL)
+        {
+            /* Filter out devices that no longer need install. */
+            DWORD filteredBurstCount = 0;
+            BOOL setupFailed = FALSE;
+            PWSTR outCursor = burstList;
+            for (PLIST_ENTRY e = LocalBurst.Flink; e != &LocalBurst; e = e->Flink)
+            {
+                DeviceInstallParams* p = CONTAINING_RECORD(e, DeviceInstallParams, ListEntry);
+                DEVICE_INSTALL_STATE InstallState = p->Arrival ? GetArrivalInstallState(p->DeviceIds)
+                                                               : GetDeviceInstallState(p->DeviceIds);
+
+                if (InstallState == DeviceInstallRequired)
+                {
+                    SIZE_T cch = lstrlenW(p->DeviceIds) + 1;
+                    memcpy(outCursor, p->DeviceIds, cch * sizeof(WCHAR));
+                    outCursor += cch;
+                    filteredBurstCount++;
+                }
+                else if (InstallState == DeviceStartRequired &&
+                         !SetupInstalledDevice(p->DeviceIds))
+                {
+                    setupFailed = TRUE;
+                }
+            }
+            *outCursor = UNICODE_NULL;
+
+            if (!setupFailed &&
+                (filteredBurstCount == 0 ||
+                 InstallDevicesBatch(burstList, filteredBurstCount)))
+            {
+                /* Burst handled (batch succeeded or nothing to do). */
+                HeapFree(GetProcessHeap(), 0, burstList);
+                while (!IsListEmpty(&LocalBurst))
+                {
+                    PLIST_ENTRY e = RemoveHeadList(&LocalBurst);
+                    Params = CONTAINING_RECORD(e, DeviceInstallParams, ListEntry);
+                    HeapFree(GetProcessHeap(), 0, Params);
+                }
+                continue;
+            }
+
+            HeapFree(GetProcessHeap(), 0, burstList);
+            /* Fall through to per-device loop on batch failure. */
+            DPRINT1("Step 2 batch failed, falling back to per-device loop\n");
+        }
+
+        /* Per-device path: either a single-device burst or the batch
+         * attempt failed — process each entry individually. */
+        while (!IsListEmpty(&LocalBurst))
+        {
+            PLIST_ENTRY e = RemoveHeadList(&LocalBurst);
+            Params = CONTAINING_RECORD(e, DeviceInstallParams, ListEntry);
+            InstallDevice(Params->DeviceIds, Params->Arrival);
             HeapFree(GetProcessHeap(), 0, Params);
         }
     }

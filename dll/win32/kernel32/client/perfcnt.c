@@ -13,6 +13,8 @@
 #define NDEBUG
 #include <debug.h>
 
+#define K32_QPC_BYPASS_CONFIGURATION 0x0001
+
 /* FUNCTIONS ******************************************************************/
 
 /*
@@ -24,6 +26,12 @@ QueryPerformanceCounter(OUT PLARGE_INTEGER lpPerformanceCount)
 {
     LARGE_INTEGER Frequency;
     NTSTATUS Status;
+
+    if ((*(volatile USHORT *)&SharedUserData->QpcData == K32_QPC_BYPASS_CONFIGURATION) &&
+        RtlQueryPerformanceCounter(lpPerformanceCount))
+    {
+        return TRUE;
+    }
 
     Status = NtQueryPerformanceCounter(lpPerformanceCount, &Frequency);
     if (Frequency.QuadPart == 0) Status = STATUS_NOT_IMPLEMENTED;
@@ -46,6 +54,13 @@ QueryPerformanceFrequency(OUT PLARGE_INTEGER lpFrequency)
 {
     LARGE_INTEGER Count;
     NTSTATUS Status;
+
+    if ((*(volatile USHORT *)&SharedUserData->QpcData == K32_QPC_BYPASS_CONFIGURATION) &&
+        RtlQueryPerformanceFrequency(lpFrequency) &&
+        (lpFrequency->QuadPart != 0))
+    {
+        return TRUE;
+    }
 
     Status = NtQueryPerformanceCounter(&Count, lpFrequency);
     if (lpFrequency->QuadPart == 0) Status = STATUS_NOT_IMPLEMENTED;

@@ -707,6 +707,21 @@ PVOLENTRY
 GetVolumeFromPartition(
     _In_ PPARTENTRY PartEntry);
 
+PVOLENTRY
+RefreshPartitionVolume(
+    _In_ PPARTENTRY PartEntry);
+
+VOID
+RefreshVolumeList(VOID);
+
+PDISKENTRY
+GetDiskForVolume(
+    _In_ PVOLENTRY VolumeEntry);
+
+PPARTENTRY
+GetPartitionForVolume(
+    _In_ PVOLENTRY VolumeEntry);
+
 VOID
 RemoveVolume(
     _In_ PVOLENTRY VolumeEntry);
@@ -749,6 +764,10 @@ san_main(
     _In_ PWSTR *argv);
 
 /* select.c */
+VOID
+SelectVolumeEntry(
+    _In_ PVOLENTRY VolumeEntry);
+
 EXIT_CODE
 SelectDisk(
     INT argc,
@@ -780,6 +799,15 @@ EXIT_CODE
 shrink_main(
     _In_ INT argc,
     _In_ PWSTR *argv);
+
+VOID
+PrintResizeSize(
+    _In_ UINT MessageId,
+    _In_ ULONGLONG ullBytes);
+
+VOID
+RefreshResizedVolume(
+    _In_ ULONG ulVolumeNumber);
 
 /* uniqueid.c */
 EXIT_CODE

@@ -23,9 +23,6 @@
 
 #include <stdarg.h>
 #include <string.h>
-#ifdef __REACTOS__
-#include <wchar.h>
-#endif
 
 #include "windef.h"
 #include "winbase.h"
@@ -45,7 +42,15 @@ WINE_DEFAULT_DEBUG_CHANNEL(msacm);
 /**********************************************************************/
 
 HANDLE MSACM_hHeap = NULL;
+#ifdef __REACTOS__
+#undef MSACM_pFirstACMDriverID
+static PWINE_ACMDRIVERID MSACM_pFirstACMDriverID = NULL;
+static CRITICAL_SECTION MSACM_RegisterLock;
+static volatile LONG MSACM_DriversRegistered;
+static BOOL MSACM_RegisteringDrivers;
+#else
 PWINE_ACMDRIVERID MSACM_pFirstACMDriverID = NULL;
+#endif
 static PWINE_ACMDRIVERID MSACM_pLastACMDriverID;
 
 static DWORD MSACM_suspendBroadcastCount = 0;
@@ -55,17 +60,17 @@ static PWINE_ACMNOTIFYWND MSACM_pLastACMNotifyWnd = NULL;
 
 static void MSACM_ReorderDriversByPriority(void);
 
+static const WCHAR drvkey[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Drivers32";
+static const WCHAR baseKey[] = L"Software\\Microsoft\\AudioCompressionManager\\DriverCache\\";
+static const WCHAR basePriorityKey[] =
+    L"Software\\Microsoft\\Multimedia\\Audio Compression Manager\\Priority v4.00";
+
 /***********************************************************************
  *           MSACM_RegisterDriverFromRegistry()
  */
 PWINE_ACMDRIVERID MSACM_RegisterDriverFromRegistry(LPCWSTR pszRegEntry)
 {
     static const WCHAR msacmW[] = {'M','S','A','C','M','.'};
-    static const WCHAR drvkey[] = {'S','o','f','t','w','a','r','e','\\',
-				   'M','i','c','r','o','s','o','f','t','\\',
-				   'W','i','n','d','o','w','s',' ','N','T','\\',
-				   'C','u','r','r','e','n','t','V','e','r','s','i','o','n','\\',
-				   'D','r','i','v','e','r','s','3','2','\0'};
     WCHAR buf[2048];
     DWORD bufLen, lRet;
     HKEY hKey;
@@ -74,15 +79,15 @@ PWINE_ACMDRIVERID MSACM_RegisterDriverFromRegistry(LPCWSTR pszRegEntry)
     /* The requested registry entry must have the format msacm.XXXXX in order to
        be recognized in any future sessions of msacm
      */
-    if (0 == _wcsnicmp(pszRegEntry, msacmW, ARRAY_SIZE(msacmW))) {
+    if (0 == wcsnicmp(pszRegEntry, msacmW, ARRAY_SIZE(msacmW))) {
         lRet = RegOpenKeyExW(HKEY_LOCAL_MACHINE, drvkey, 0, KEY_QUERY_VALUE, &hKey);
         if (lRet != ERROR_SUCCESS) {
-            WARN("unable to open registry key - 0x%08x\n", lRet);
+            WARN("unable to open registry key - 0x%08lx\n", lRet);
         } else {
             bufLen = sizeof(buf);
             lRet = RegQueryValueExW(hKey, pszRegEntry, NULL, NULL, (LPBYTE)buf, &bufLen);
             if (lRet != ERROR_SUCCESS) {
-                WARN("unable to query requested subkey %s - 0x%08x\n", debugstr_w(pszRegEntry), lRet);
+                WARN("unable to query requested subkey %s - 0x%08lx\n", debugstr_w(pszRegEntry), lRet);
             } else {
                 MSACM_RegisterDriver(pszRegEntry, buf, 0);
             }
@@ -168,7 +173,12 @@ static BOOL MSACM_FillCache(PWINE_ACMDRIVERID padid)
 	padid->aFormatTag[ntag].cbwfx = aftd.cbFormatSize;
     }
 
+#ifdef __REACTOS__
+    if (!padid->pLocalDriver)
+        acmDriverClose(had, 0);
+#else
     acmDriverClose(had, 0);
+#endif
 
     return TRUE;
 
@@ -184,9 +194,6 @@ errCleanUp:
  */
 static	LPWSTR	MSACM_GetRegistryKey(const WINE_ACMDRIVERID* padid)
 {
-    static const WCHAR	baseKey[] = {'S','o','f','t','w','a','r','e','\\','M','i','c','r','o','s','o','f','t','\\',
-                                     'A','u','d','i','o','C','o','m','p','r','e','s','s','i','o','n','M','a','n','a','g','e','r','\\',
-                                     'D','r','i','v','e','r','C','a','c','h','e','\\','\0'};
     LPWSTR	ret;
     int		len;
 
@@ -353,15 +360,7 @@ PWINE_ACMDRIVERID MSACM_RegisterDriver(LPCWSTR pszDriverAlias, LPCWSTR pszFileNa
  */
 void MSACM_RegisterAllDrivers(void)
 {
-    static const WCHAR msacm32[] = {'m','s','a','c','m','3','2','.','d','l','l','\0'};
     static const WCHAR msacmW[] = {'M','S','A','C','M','.'};
-    static const WCHAR drv32[] = {'d','r','i','v','e','r','s','3','2','\0'};
-    static const WCHAR sys[] = {'s','y','s','t','e','m','.','i','n','i','\0'};
-    static const WCHAR drvkey[] = {'S','o','f','t','w','a','r','e','\\',
-				   'M','i','c','r','o','s','o','f','t','\\',
-				   'W','i','n','d','o','w','s',' ','N','T','\\',
-				   'C','u','r','r','e','n','t','V','e','r','s','i','o','n','\\',
-				   'D','r','i','v','e','r','s','3','2','\0'};
     DWORD i, cnt, bufLen, lRet, type;
     WCHAR buf[2048], valname[64], *name, *s;
     FILETIME lastWrite;
@@ -378,7 +377,7 @@ void MSACM_RegisterAllDrivers(void)
 	    bufLen = ARRAY_SIZE(buf);
 	    lRet = RegEnumKeyExW(hKey, i, buf, &bufLen, 0, 0, 0, &lastWrite);
 	    if (lRet != ERROR_SUCCESS) continue;
-	    if (_wcsnicmp(buf, msacmW, ARRAY_SIZE(msacmW))) continue;
+	    if (wcsnicmp(buf, msacmW, ARRAY_SIZE(msacmW))) continue;
 	    if (!(name = wcschr(buf, '='))) continue;
 	    *name = 0;
 	    MSACM_RegisterDriver(buf, name + 1, 0);
@@ -388,18 +387,22 @@ void MSACM_RegisterAllDrivers(void)
 	bufLen = sizeof(buf);
 	while(RegEnumValueW(hKey, i, valname, &cnt, 0,
 		    &type, (BYTE*)buf, &bufLen) == ERROR_SUCCESS){
-	    if (!_wcsnicmp(valname, msacmW, ARRAY_SIZE(msacmW)))
+	    if (!wcsnicmp(valname, msacmW, ARRAY_SIZE(msacmW)))
 		MSACM_RegisterDriver(valname, buf, 0);
 	    ++i;
+#ifdef __REACTOS__
+	    cnt = ARRAY_SIZE(valname);
+	    bufLen = sizeof(buf);
+#endif
 	}
     	RegCloseKey( hKey );
     }
 
-    if (GetPrivateProfileSectionW(drv32, buf, ARRAY_SIZE(buf), sys))
+    if (GetPrivateProfileSectionW(L"drivers32", buf, ARRAY_SIZE(buf), L"system.ini"))
     {
 	for(s = buf; *s;  s += lstrlenW(s) + 1)
 	{
-	    if (_wcsnicmp(s, msacmW, ARRAY_SIZE(msacmW))) continue;
+	    if (wcsnicmp(s, msacmW, ARRAY_SIZE(msacmW))) continue;
 	    if (!(name = wcschr(s, '='))) continue;
 	    *name = 0;
 	    MSACM_RegisterDriver(s, name + 1, 0);
@@ -407,7 +410,7 @@ void MSACM_RegisterAllDrivers(void)
 	}
     }
     MSACM_ReorderDriversByPriority();
-    MSACM_RegisterDriver(msacm32, msacm32, 0);
+    MSACM_RegisterDriver(L"msacm32.dll", L"msacm32.dll", 0);
 }
 
 /***********************************************************************
@@ -417,7 +420,7 @@ PWINE_ACMNOTIFYWND MSACM_RegisterNotificationWindow(HWND hNotifyWnd, DWORD dwNot
 {
     PWINE_ACMNOTIFYWND	panwnd;
 
-    TRACE("(%p,0x%08x)\n", hNotifyWnd, dwNotifyMsg);
+    TRACE("(%p,0x%08lx)\n", hNotifyWnd, dwNotifyMsg);
 
     panwnd = HeapAlloc(MSACM_hHeap, 0, sizeof(WINE_ACMNOTIFYWND));
     panwnd->obj.dwType = WINE_ACMOBJ_NOTIFYWND;
@@ -531,6 +534,13 @@ void MSACM_RePositionDriver(PWINE_ACMDRIVERID padid, DWORD dwPriority)
         while (pTargetPosition->pNextACMDriverID != NULL) {
             pTargetPosition = pTargetPosition->pNextACMDriverID;
         }
+#ifdef __REACTOS__
+        padid->pPrevACMDriverID = pTargetPosition;
+        padid->pNextACMDriverID = NULL;
+        pTargetPosition->pNextACMDriverID = padid;
+        MSACM_pLastACMDriverID = padid;
+        return;
+#endif
     }
     
     /* Place selected driver in selected position */
@@ -568,13 +578,6 @@ static void MSACM_ReorderDriversByPriority(void)
     if (iNumDrivers > 1)
     {
         LONG lError;
-        static const WCHAR basePriorityKey[] = {
-            'S','o','f','t','w','a','r','e','\\',
-            'M','i','c','r','o','s','o','f','t','\\',
-            'M','u','l','t','i','m','e','d','i','a','\\',
-            'A','u','d','i','o',' ','C','o','m','p','r','e','s','s','i','o','n',' ','M','a','n','a','g','e','r','\\',
-            'P','r','i','o','r','i','t','y',' ','v','4','.','0','0','\0'
-        };
         unsigned int i;
         LONG lBufferLength;
         WCHAR szBuffer[256];
@@ -608,15 +611,13 @@ static void MSACM_ReorderDriversByPriority(void)
             */
         for (i = 0; i < iNumDrivers; i++)
         {
-            static const WCHAR priorityTmpl[] = {'P','r','i','o','r','i','t','y','%','l','d','\0'};
             WCHAR szSubKey[17];
             unsigned int iTargetPosition;
             unsigned int iCurrentPosition;
             WCHAR * pAlias;
-            static const WCHAR sPrefix[] = {'m','s','a','c','m','.','\0'};
-            
+
             /* Build expected entry name */
-            swprintf(szSubKey, priorityTmpl, i + 1);
+            swprintf(szSubKey, 17, L"Priority%ld", i + 1);
             lBufferLength = sizeof(szBuffer);
             lError = RegQueryValueExW(hPriorityKey, szSubKey, NULL, NULL, (LPBYTE)szBuffer, (LPDWORD)&lBufferLength);
             if (lError != ERROR_SUCCESS) continue;
@@ -625,7 +626,7 @@ static void MSACM_ReorderDriversByPriority(void)
             iTargetPosition = i;
             
             /* Locate driver alias in driver list */
-            pAlias = wcsstr(szBuffer, sPrefix);
+            pAlias = wcsstr(szBuffer, L"msacm.");
             if (pAlias == NULL) continue;
             
             for (iCurrentPosition = 0; iCurrentPosition < iNumDrivers; iCurrentPosition++) {
@@ -669,31 +670,21 @@ void MSACM_WriteCurrentPriorities(void)
 {
     LONG lError;
     HKEY hPriorityKey;
-    static const WCHAR basePriorityKey[] = {
-        'S','o','f','t','w','a','r','e','\\',
-        'M','i','c','r','o','s','o','f','t','\\',
-        'M','u','l','t','i','m','e','d','i','a','\\',
-        'A','u','d','i','o',' ','C','o','m','p','r','e','s','s','i','o','n',' ','M','a','n','a','g','e','r','\\',
-        'P','r','i','o','r','i','t','y',' ','v','4','.','0','0','\0'
-    };
     PWINE_ACMDRIVERID padid;
     DWORD dwPriorityCounter;
-    static const WCHAR priorityTmpl[] = {'P','r','i','o','r','i','t','y','%','l','d','\0'};
-    static const WCHAR valueTmpl[] = {'%','c',',',' ','%','s','\0'};
-    static const WCHAR converterAlias[] = {'I','n','t','e','r','n','a','l',' ','P','C','M',' ','C','o','n','v','e','r','t','e','r','\0'};
     WCHAR szSubKey[17];
     WCHAR szBuffer[256];
 
     /* Delete ACM priority key and create it anew */
     lError = RegDeleteKeyW(HKEY_CURRENT_USER, basePriorityKey);
     if (lError != ERROR_SUCCESS && lError != ERROR_FILE_NOT_FOUND) {
-        ERR("unable to remove current key %s (0x%08x) - priority changes won't persist past application end.\n",
+        ERR("unable to remove current key %s (0x%08lx) - priority changes won't persist past application end.\n",
             debugstr_w(basePriorityKey), lError);
         return;
     }
     lError = RegCreateKeyW(HKEY_CURRENT_USER, basePriorityKey, &hPriorityKey);
     if (lError != ERROR_SUCCESS) {
-        ERR("unable to create key %s (0x%08x) - priority changes won't persist past application end.\n",
+        ERR("unable to create key %s (0x%08lx) - priority changes won't persist past application end.\n",
             debugstr_w(basePriorityKey), lError);
         return;
     }
@@ -705,30 +696,30 @@ void MSACM_WriteCurrentPriorities(void)
 
         /* Build required value name */
         dwPriorityCounter++;
-        swprintf(szSubKey, priorityTmpl, dwPriorityCounter);
-        
+        swprintf(szSubKey, 17, L"Priority%ld", dwPriorityCounter);
+
         /* Value has a 1 in front for enabled drivers and 0 for disabled drivers */
-        swprintf(szBuffer, valueTmpl, (padid->fdwSupport & ACMDRIVERDETAILS_SUPPORTF_DISABLED) ? '0' : '1', padid->pszDriverAlias);
-        _wcslwr(szBuffer);
+        swprintf(szBuffer, 256, L"%c, %s", (padid->fdwSupport & ACMDRIVERDETAILS_SUPPORTF_DISABLED) ? '0' : '1', padid->pszDriverAlias);
+        wcslwr(szBuffer);
         
         lError = RegSetValueExW(hPriorityKey, szSubKey, 0, REG_SZ, (BYTE *)szBuffer, (lstrlenW(szBuffer) + 1) * sizeof(WCHAR));
         if (lError != ERROR_SUCCESS) {
-            ERR("unable to write value for %s under key %s (0x%08x)\n",
+            ERR("unable to write value for %s under key %s (0x%08lx)\n",
                 debugstr_w(padid->pszDriverAlias), debugstr_w(basePriorityKey), lError);
         }
     }
     
     /* Build required value name */
     dwPriorityCounter++;
-    swprintf(szSubKey, priorityTmpl, dwPriorityCounter);
-        
+    swprintf(szSubKey, 17, L"Priority%ld", dwPriorityCounter);
+
     /* Value has a 1 in front for enabled drivers and 0 for disabled drivers */
-    swprintf(szBuffer, valueTmpl, '1', converterAlias);
-        
+    swprintf(szBuffer, 256, L"%c, %s", '1', L"Internal PCM Converter");
+
     lError = RegSetValueExW(hPriorityKey, szSubKey, 0, REG_SZ, (BYTE *)szBuffer, (lstrlenW(szBuffer) + 1) * sizeof(WCHAR));
     if (lError != ERROR_SUCCESS) {
-        ERR("unable to write value for %s under key %s (0x%08x)\n",
-            debugstr_w(converterAlias), debugstr_w(basePriorityKey), lError);
+        ERR("unable to write value for Internal PCM Converter under key %s (0x%08lx)\n",
+            debugstr_w(basePriorityKey), lError);
     }
     RegCloseKey(hPriorityKey);
 }
@@ -798,6 +789,37 @@ PWINE_ACMDRIVERID MSACM_UnregisterDriver(PWINE_ACMDRIVERID p)
 
     return pNextACMDriverID;
 }
+
+#ifdef __REACTOS__
+void MSACM_InitializeDriverList(void)
+{
+    InitializeCriticalSection(&MSACM_RegisterLock);
+}
+
+void MSACM_DeleteDriverList(void)
+{
+    DeleteCriticalSection(&MSACM_RegisterLock);
+}
+
+/* Driver DLLs load on first use: DllMain runs under the loader lock. */
+PWINE_ACMDRIVERID MSACM_GetFirstDriverID(void)
+{
+    if (!InterlockedCompareExchange(&MSACM_DriversRegistered, 0, 0))
+    {
+        EnterCriticalSection(&MSACM_RegisterLock);
+        if (!MSACM_DriversRegistered && !MSACM_RegisteringDrivers)
+        {
+            MSACM_RegisteringDrivers = TRUE;
+            MSACM_RegisterAllDrivers();
+            MSACM_RegisteringDrivers = FALSE;
+            InterlockedExchange(&MSACM_DriversRegistered, TRUE);
+        }
+        LeaveCriticalSection(&MSACM_RegisterLock);
+    }
+
+    return MSACM_pFirstACMDriverID;
+}
+#endif
 
 /***********************************************************************
  *           MSACM_UnregisterAllDrivers()
@@ -1040,6 +1062,7 @@ PWINE_ACMLOCALDRIVERINST MSACM_OpenLocalDriver(PWINE_ACMLOCALDRIVER paldrv, LPAR
      * + first open with NULL as lParam2 (session instance),
      * + then do a second open with the real non null lParam2)
      */
+#ifndef __REACTOS__
     if (MSACM_GetNumberOfModuleRefs(paldrv->hModule, paldrv->lpDrvProc, NULL) == 0 && lParam2)
     {
         PWINE_ACMLOCALDRIVERINST   ret;
@@ -1064,6 +1087,7 @@ PWINE_ACMLOCALDRIVERINST MSACM_OpenLocalDriver(PWINE_ACMLOCALDRIVER paldrv, LPAR
         pDrvInst->bSession = TRUE;
         return ret;
     }
+#endif
     
     if (!MSACM_AddToList(pDrvInst, lParam2))
     {

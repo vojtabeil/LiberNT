@@ -126,7 +126,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
     PIRP_CONTEXT IrpContext = NULL;
 
     BOOLEAN TopLevel;
@@ -207,7 +207,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
     PIRP_CONTEXT IrpContext = NULL;
 
     BOOLEAN TopLevel;
@@ -1099,8 +1099,8 @@ Return Value:
                 continue;
             }
 
-            if (!FsRtlIsAnsiCharacterLegalFat(OemLabel.Buffer[i], FALSE) ||
-                (OemLabel.Buffer[i] == '.')) {
+            if (!FsRtlIsAnsiCharacterLegalFat((UCHAR)OemLabel.Buffer[i], FALSE) ||
+                ((UCHAR)OemLabel.Buffer[i] == '.')) {
 
                 return STATUS_INVALID_VOLUME_LABEL;
             }

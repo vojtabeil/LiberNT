@@ -50,6 +50,26 @@ BasepNotifyCsrOfThread(IN HANDLE ThreadHandle,
     return STATUS_SUCCESS;
 }
 
+VOID
+FASTCALL
+BaseThreadInitThunk(
+    _In_ DWORD Unknown,
+    _In_ LPTHREAD_START_ROUTINE lpStartAddress,
+    _In_ LPVOID lpParameter)
+{
+    UNREFERENCED_PARAMETER(Unknown);
+    NtSetInformationThread(NtCurrentThread(),
+                           ThreadQuerySetWin32StartAddress,
+                           &lpStartAddress,
+                           sizeof(lpStartAddress));
+    if ((NtCurrentTeb()->NtTib.Version == (30 << 8)) && !BaseRunningInServerProcess)
+    {
+        CsrNewThread();
+    }
+
+    ExitThread(lpStartAddress(lpParameter));
+}
+
 DECLSPEC_NORETURN
 VOID
 WINAPI
@@ -85,6 +105,7 @@ BaseThreadStartup(
         }
     }
     _SEH2_END;
+    UNREACHABLE;
 }
 
 VOID
@@ -135,7 +156,7 @@ HANDLE
 WINAPI
 DECLSPEC_HOTPATCH
 CreateThread(IN LPSECURITY_ATTRIBUTES lpThreadAttributes,
-             IN DWORD dwStackSize,
+             IN SIZE_T dwStackSize,
              IN LPTHREAD_START_ROUTINE lpStartAddress,
              IN LPVOID lpParameter,
              IN DWORD dwCreationFlags,
@@ -156,9 +177,57 @@ CreateThread(IN LPSECURITY_ATTRIBUTES lpThreadAttributes,
  */
 HANDLE
 WINAPI
+CreateRemoteThreadEx(IN HANDLE hProcess,
+                     IN LPSECURITY_ATTRIBUTES lpThreadAttributes,
+                     IN SIZE_T dwStackSize,
+                     IN LPTHREAD_START_ROUTINE lpStartAddress,
+                     IN LPVOID lpParameter,
+                     IN DWORD dwCreationFlags,
+                     IN LPPROC_THREAD_ATTRIBUTE_LIST lpAttributeList,
+                     OUT LPDWORD lpThreadId)
+{
+    HANDLE Thread;
+    NTSTATUS Status;
+
+    Status = BasepValidateThreadAttributeList(lpAttributeList);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return NULL;
+    }
+
+    Thread = CreateRemoteThread(hProcess,
+                                lpThreadAttributes,
+                                dwStackSize,
+                                lpStartAddress,
+                                lpParameter,
+                                lpAttributeList ? (dwCreationFlags | CREATE_SUSPENDED) : dwCreationFlags,
+                                lpThreadId);
+    if (!Thread || !lpAttributeList)
+        return Thread;
+
+    Status = BasepApplyThreadAttributeList(lpAttributeList, Thread);
+    if (!NT_SUCCESS(Status))
+    {
+        NtTerminateThread(Thread, Status);
+        CloseHandle(Thread);
+        BaseSetLastNTError(Status);
+        return NULL;
+    }
+
+    if (!(dwCreationFlags & CREATE_SUSPENDED))
+        NtResumeThread(Thread, NULL);
+    return Thread;
+}
+
+/*
+ * @implemented
+ */
+HANDLE
+WINAPI
 CreateRemoteThread(IN HANDLE hProcess,
                    IN LPSECURITY_ATTRIBUTES lpThreadAttributes,
-                   IN DWORD dwStackSize,
+                   IN SIZE_T dwStackSize,
                    IN LPTHREAD_START_ROUTINE lpStartAddress,
                    IN LPVOID lpParameter,
                    IN DWORD dwCreationFlags,
@@ -180,7 +249,7 @@ CreateRemoteThread(IN HANDLE hProcess,
     ULONG ReturnLength;
     SIZE_T ReturnSize;
 
-    DPRINT("CreateRemoteThread: hProcess: %p dwStackSize: %lu lpStartAddress"
+    DPRINT("CreateRemoteThread: hProcess: %p dwStackSize: %Iu lpStartAddress"
            ": %p lpParameter: %p, dwCreationFlags: %lx\n", hProcess,
            dwStackSize, lpStartAddress, lpParameter, dwCreationFlags);
 
@@ -304,7 +373,7 @@ CreateRemoteThread(IN HANDLE hProcess,
         Teb->SubProcessTag = NtCurrentTeb()->SubProcessTag;
     }
 
-    /* Notify CSR */
+    /* Notify CSR for ReactOS bookkeeping. */
     if (!BaseRunningInServerProcess)
     {
         Status = BasepNotifyCsrOfThread(hThread, &ClientId);
@@ -337,7 +406,7 @@ Quit:
             RtlFreeActivationContextStack(ActivationContextStack);
 
         NtTerminateThread(hThread, Status);
-        // FIXME: Wait for the thread to terminate?
+        NtWaitForSingleObject(hThread, FALSE, NULL);
         BaseFreeThreadStack(hProcess, &InitialTeb);
         NtClose(hThread);
 
@@ -387,8 +456,15 @@ ExitThread(IN DWORD uExitCode)
     LdrShutdownThread();
 
     /* Tell the Kernel to free the Stack */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    NtCurrentTeb()->ReservedPad1 = TRUE;
+#elif (NTDDI_VERSION >= NTDDI_LONGHORN)
+    NtCurrentTeb()->SpareBool1 = TRUE;
+#else
     NtCurrentTeb()->FreeStackOnTermination = TRUE;
-    NtTerminateThread(NULL, uExitCode);
+#endif
+    Status = NtTerminateThread(NULL, uExitCode);
+    if (Status == STATUS_CANT_TERMINATE_SELF) ExitProcess(uExitCode);
 
     /* We should never reach this place */
     ERROR_FATAL("It should not happen\n");
@@ -654,6 +730,23 @@ SuspendThread(IN HANDLE hThread)
     return PreviousSuspendCount;
 }
 
+DWORD
+WINAPI
+Wow64SuspendThread(IN HANDLE hThread)
+{
+    ULONG PreviousSuspendCount;
+    NTSTATUS Status;
+
+    Status = BasepSuspendWow64Thread(hThread, &PreviousSuspendCount);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return -1;
+    }
+
+    return PreviousSuspendCount;
+}
+
 /*
  * @implemented
  */
@@ -690,64 +783,6 @@ SetThreadAffinityMask(IN HANDLE hThread,
     }
 
     return ThreadBasic.AffinityMask;
-}
-
-#define THEONLYGROUP 0 // Fake support for a single group
-
-/*
- * @implemented
- */
-BOOL
-WINAPI
-GetThreadGroupAffinity(IN HANDLE hThread,
-                       OUT PGROUP_AFFINITY GroupAffinity)
-{
-    NTSTATUS Status;
-    THREAD_BASIC_INFORMATION ThreadBasic;
-
-    STUB; // FIXME: Real group support
-    Status = NtQueryInformationThread(hThread,
-                                      ThreadBasicInformation,
-                                      &ThreadBasic,
-                                      sizeof(ThreadBasic),
-                                      NULL);
-    if (!NT_SUCCESS(Status))
-    {
-        BaseSetLastNTError(Status);
-        return FALSE;
-    }
-    ZeroMemory(GroupAffinity, sizeof(*GroupAffinity)); // For Reserved
-    GroupAffinity->Mask = ThreadBasic.AffinityMask;
-    GroupAffinity->Group = THEONLYGROUP;
-    return TRUE;
-}
-
-/*
- * @implemented
- */
-BOOL
-WINAPI
-SetThreadGroupAffinity(IN HANDLE hThread,
-                       IN const GROUP_AFFINITY *GroupAffinity,
-                       OUT OPTIONAL PGROUP_AFFINITY PreviousGroupAffinity)
-{
-    DWORD_PTR OldMask;
-
-    STUB; // FIXME: Real group support
-    if (!GroupAffinity || GroupAffinity->Group != THEONLYGROUP)
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    OldMask = SetThreadAffinityMask(hThread, GroupAffinity->Mask);
-    if (OldMask && PreviousGroupAffinity)
-    {
-        ZeroMemory(PreviousGroupAffinity, sizeof(*PreviousGroupAffinity)); // For Reserved
-        PreviousGroupAffinity->Mask = OldMask;
-        PreviousGroupAffinity->Group = THEONLYGROUP;
-    }
-    return OldMask != 0;
 }
 
 /*
@@ -942,6 +977,50 @@ SetThreadIdealProcessor(IN HANDLE hThread,
 /*
  * @implemented
  */
+BOOL
+WINAPI
+GetThreadIdealProcessorEx(IN HANDLE Thread, OUT PPROCESSOR_NUMBER IdealProcessor)
+{
+    PROCESSOR_NUMBER Processor;
+    NTSTATUS Status;
+
+    Status = NtQueryInformationThread(Thread, ThreadIdealProcessorEx, &Processor, sizeof(Processor), NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    *IdealProcessor = Processor;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetThreadIdealProcessorEx(IN HANDLE Thread, IN PPROCESSOR_NUMBER IdealProcessor, OUT PPROCESSOR_NUMBER PreviousIdealProcessor OPTIONAL)
+{
+    PROCESSOR_NUMBER Processor = *IdealProcessor;
+    NTSTATUS Status;
+
+    /* The native information class exchanges the requested and previous values. */
+    Status = NtSetInformationThread(Thread, ThreadIdealProcessorEx, &Processor, sizeof(Processor));
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    if (PreviousIdealProcessor)
+        *PreviousIdealProcessor = Processor;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
 DWORD
 WINAPI
 GetProcessIdOfThread(IN HANDLE Thread)
@@ -988,25 +1067,47 @@ GetThreadId(IN HANDLE Thread)
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 LANGID
 WINAPI
 SetThreadUILanguage(IN LANGID LangId)
 {
-#if (NTDDI_VERSION < NTDDI_LONGHORN)
-    /* We only support LangId == 0, for selecting a language
-     * identifier that best supports the NT Console. */
-    if (LangId != 0)
+    WCHAR Language[LOCALE_NAME_MAX_LENGTH + 1];
+    UNICODE_STRING Name;
+    NTSTATUS Status;
+    ULONG Count;
+
+    if (LangId == 0)
     {
-        BaseSetLastNTError(STATUS_NOT_SUPPORTED);
+        RtlSetThreadPreferredUILanguages(MUI_CONSOLE_FILTER, NULL, NULL);
+        return GetThreadUILanguage();
+    }
+
+    Name.Buffer = Language;
+    Name.Length = 0;
+    Name.MaximumLength = (LOCALE_NAME_MAX_LENGTH - 1) * sizeof(WCHAR);
+    if (LangId == LANGIDFROMLCID(LOCALE_SYSTEM_DEFAULT) ||
+        LangId == LANGIDFROMLCID(LOCALE_USER_DEFAULT) ||
+        LangId == LANGIDFROMLCID(LOCALE_CUSTOM_DEFAULT) ||
+        LangId == LANGIDFROMLCID(LOCALE_CUSTOM_UI_DEFAULT) ||
+        LangId == LANGIDFROMLCID(LOCALE_CUSTOM_UNSPECIFIED) ||
+        !NT_SUCCESS(RtlLcidToLocaleName(MAKELCID(LangId, SORT_DEFAULT), &Name, RTL_LOCALE_ALLOW_NEUTRAL_NAMES, FALSE)))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return 0;
     }
-#endif
+    Language[Name.Length / sizeof(WCHAR)] = UNICODE_NULL;
+    Language[Name.Length / sizeof(WCHAR) + 1] = UNICODE_NULL;
 
-    UNIMPLEMENTED;
+    Status = RtlSetThreadPreferredUILanguages(MUI_LANGUAGE_NAME, Language, &Count);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return 0;
+    }
 
-    return LANGIDFROMLCID(NtCurrentTeb()->CurrentLocale);
+    return LangId;
 }
 
 /*
@@ -1057,7 +1158,7 @@ QueueUserAPC(IN PAPCFUNC pfnAPC,
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -1066,6 +1167,11 @@ SetThreadStackGuarantee(IN OUT PULONG StackSizeInBytes)
     PTEB Teb = NtCurrentTeb();
     ULONG GuaranteedStackBytes;
     ULONG AllocationSize;
+    ULONG RoundedSize;
+    SIZE_T StackReserve;
+    SIZE_T GuardSize;
+    PVOID GuardBase;
+    NTSTATUS Status;
 
     if (!StackSizeInBytes)
     {
@@ -1081,20 +1187,57 @@ SetThreadStackGuarantee(IN OUT PULONG StackSizeInBytes)
     /* Return the size of the previous stack */
     *StackSizeInBytes = GuaranteedStackBytes;
 
-    /*
-     * If the new stack size is either zero or is less than the current size,
-     * the previous stack size is returned and we return success.
-     */
-    if ((AllocationSize == 0) || (AllocationSize < GuaranteedStackBytes))
-    {
+    if (AllocationSize == 0)
         return TRUE;
+
+    if (AllocationSize > MAXULONG - (PAGE_SIZE - 1))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
     }
 
-    // FIXME: Unimplemented!
-    UNIMPLEMENTED_ONCE;
+    RoundedSize = (AllocationSize + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+#ifdef _WIN64
+    if (RoundedSize < 2 * PAGE_SIZE)
+        RoundedSize = 2 * PAGE_SIZE;
+#endif
 
-    // Temporary HACK for supporting applications!
-    return TRUE; // FALSE;
+    StackReserve = (ULONG_PTR)Teb->NtTib.StackBase - (ULONG_PTR)Teb->DeallocationStack;
+    if (RoundedSize >= StackReserve)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (RoundedSize > GuaranteedStackBytes)
+    {
+        /* Commit the guarantee as guard pages now, so that a large frame
+         * cannot skip over it before the overflow is detected. */
+        GuardSize = (SIZE_T)RoundedSize + PAGE_SIZE;
+        if (GuardSize >= (ULONG_PTR)Teb->NtTib.StackLimit -
+                         (ULONG_PTR)Teb->DeallocationStack)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+
+        GuardBase = (PBYTE)Teb->NtTib.StackLimit - GuardSize;
+        Status = NtAllocateVirtualMemory(NtCurrentProcess(),
+                                         &GuardBase,
+                                         0,
+                                         &GuardSize,
+                                         MEM_COMMIT,
+                                         PAGE_READWRITE | PAGE_GUARD);
+        if (!NT_SUCCESS(Status))
+        {
+            BaseSetLastNTError(Status);
+            return FALSE;
+        }
+
+        Teb->GuaranteedStackBytes = RoundedSize;
+    }
+
+    return TRUE;
 }
 
 /*
@@ -1249,17 +1392,17 @@ TlsFree(IN DWORD Index)
         {
             /* Use the expansion bitmap */
             TlsBitmap = Peb->TlsExpansionBitmap;
-            Index = TlsIndex;
         }
     }
     else
     {
         /* Use the normal bitmap */
         TlsBitmap = Peb->TlsBitmap;
+        TlsIndex = Index;
     }
 
     /* Check if the index was set */
-    BitSet = RtlAreBitsSet(TlsBitmap, Index, 1);
+    BitSet = RtlAreBitsSet(TlsBitmap, TlsIndex, 1);
     if (BitSet)
     {
         /* Tell the kernel to free the TLS cells */
@@ -1275,7 +1418,7 @@ TlsFree(IN DWORD Index)
         }
 
         /* Clear the bit */
-        RtlClearBits(TlsBitmap, Index, 1);
+        RtlClearBits(TlsBitmap, TlsIndex, 1);
     }
     else
     {

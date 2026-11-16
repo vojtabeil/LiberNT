@@ -22,9 +22,6 @@ HANDLE SmpWindowsSubSysProcessId;
 BOOLEAN RegPosixSingleInstance;
 WCHAR InitialCommandBuffer[256];
 
-#define DEFAULT_INITIAL_COMMAND     L"winlogon.exe"
-#define DEFAULT_KMODE_SUBSYSTEM     L"\\SystemRoot\\System32\\win32k.sys"
-
 /* FUNCTIONS ******************************************************************/
 
 NTSTATUS
@@ -34,13 +31,23 @@ SmpCallCsrCreateProcess(IN PSB_API_MSG SbApiMsg,
                         IN HANDLE PortHandle)
 {
     NTSTATUS Status;
+    SIZE_T BufferLength = sizeof(SB_API_MSG);
+
+    UNREFERENCED_PARAMETER(MessageLength);
 
     /* Initialize the header and send the message to CSRSS */
-    SbApiMsg->h.u2.ZeroInit = 0;
-    SbApiMsg->h.u1.s1.DataLength = MessageLength + 8;
+    RtlZeroMemory(&SbApiMsg->h, sizeof(SbApiMsg->h));
+    SbApiMsg->h.u1.s1.DataLength = sizeof(SB_API_MSG) - sizeof(SbApiMsg->h);
     SbApiMsg->h.u1.s1.TotalLength = sizeof(SB_API_MSG);
     SbApiMsg->ApiNumber = SbpCreateProcess;
-    Status = NtRequestWaitReplyPort(PortHandle, &SbApiMsg->h, &SbApiMsg->h);
+    Status = NtAlpcSendWaitReceivePort(PortHandle,
+                                       ALPC_MSGFLG_SYNC_REQUEST,
+                                       &SbApiMsg->h,
+                                       NULL,
+                                       &SbApiMsg->h,
+                                       &BufferLength,
+                                       NULL,
+                                       NULL);
     if (NT_SUCCESS(Status)) Status = SbApiMsg->ReturnValue;
     return Status;
 }
@@ -149,11 +156,13 @@ SmpLoadSubSystem(IN PUNICODE_STRING FileName,
     HANDLE SubSysProcessId;
     NTSTATUS Status = STATUS_SUCCESS;
     SB_API_MSG SbApiMsg;
+    SIZE_T BufferLength;
     RTL_USER_PROCESS_INFORMATION ProcessInformation;
     LARGE_INTEGER Timeout;
     PVOID State;
     PSB_CREATE_PROCESS_MSG CreateProcess = &SbApiMsg.u.CreateProcess;
     PSB_CREATE_SESSION_MSG CreateSession = &SbApiMsg.u.CreateSession;
+    BOOLEAN InitialSubsystem = FALSE;
 
     /* Make sure this is a found subsystem */
     if (Flags & SMP_INVALID_PATH)
@@ -308,8 +317,9 @@ SmpLoadSubSystem(IN PUNICODE_STRING FileName,
         if ((ProcessId) && !(*ProcessId)) *ProcessId = SubSysProcessId;
 
         /* Was this the initial CSRSS on Session 0? */
-        if (!MuSessionId)
+        if (!SmpWindowsSubSysProcess)
         {
+            InitialSubsystem = TRUE;
             /* Then save it in the global variables */
             SmpWindowsSubSysProcessId = SubSysProcessId;
             SmpWindowsSubSysProcess = ProcessInformation.ProcessHandle;
@@ -376,19 +386,25 @@ SmpLoadSubSystem(IN PUNICODE_STRING FileName,
 
         /* Send the create session message to the subsystem */
         SbApiMsg.ReturnValue = STATUS_SUCCESS;
-        SbApiMsg.h.u2.ZeroInit = 0;
-        SbApiMsg.h.u1.s1.DataLength = sizeof(SB_CREATE_SESSION_MSG) + 8;
+        RtlZeroMemory(&SbApiMsg.h, sizeof(SbApiMsg.h));
+        SbApiMsg.h.u1.s1.DataLength = sizeof(SB_API_MSG) - sizeof(SbApiMsg.h);
         SbApiMsg.h.u1.s1.TotalLength = sizeof(SB_API_MSG);
         SbApiMsg.ApiNumber = SbpCreateSession;
-        Status = NtRequestWaitReplyPort(Subsystem->SbApiPort,
-                                        &SbApiMsg.h,
-                                        &SbApiMsg.h);
+        BufferLength = sizeof(SbApiMsg);
+        Status = NtAlpcSendWaitReceivePort(Subsystem->SbApiPort,
+                                           ALPC_MSGFLG_SYNC_REQUEST,
+                                           &SbApiMsg.h,
+                                           NULL,
+                                           &SbApiMsg.h,
+                                           &BufferLength,
+                                           NULL,
+                                           NULL);
         if (NT_SUCCESS(Status)) Status = SbApiMsg.ReturnValue;
         if (!NT_SUCCESS(Status))
         {
             /* Delete the session and handle failure if the LPC call failed */
             SmpDeleteSession(CreateSession->SessionId);
-            DPRINT1("SMSS: SmpLoadSubSystem - NtRequestWaitReplyPort Failed with  Status %lx for sessionid %lu\n",
+            DPRINT1("SMSS: SmpLoadSubSystem - NtAlpcSendWaitReceivePort Failed with  Status %lx for sessionid %lu\n",
                     Status,
                     MuSessionId);
             goto Quickie;
@@ -405,7 +421,7 @@ SmpLoadSubSystem(IN PUNICODE_STRING FileName,
     }
 
     /* Check if this was the subsystem for a different session */
-    if (MuSessionId)
+    if (!InitialSubsystem)
     {
         /* Wait up to 60 seconds for it to initialize */
         Timeout.QuadPart = -600000000;
@@ -510,6 +526,80 @@ Quickie2:
 
 NTSTATUS
 NTAPI
+SmpLoadSubSystemsForSystemSession(OUT PHANDLE ProcessId)
+{
+    NTSTATUS Status, Status2;
+    PSMP_REGISTRY_VALUE RegEntry;
+    UNICODE_STRING Win32kName;
+    PLIST_ENTRY NextEntry;
+    ULONG SessionId;
+    PVOID State;
+
+    Status = SmpAcquirePrivilege(SE_LOAD_DRIVER_PRIVILEGE, &State);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    ASSERT(AttachedSessionId == -1);
+    Status = NtSetSystemInformation(SystemSessionCreate,
+                                    &SessionId,
+                                    sizeof(SessionId));
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("SMSS: Session space creation failed\n");
+        SmpReleasePrivilege(State);
+        return Status;
+    }
+    ASSERT(SessionId == 0);
+    AttachedSessionId = SessionId;
+
+    RtlInitUnicodeString(&Win32kName, L"\\SystemRoot\\System32\\win32k.sys");
+    Status = NtSetSystemInformation(SystemExtendServiceTableInformation,
+                                    &Win32kName,
+                                    sizeof(Win32kName));
+    if (!NT_SUCCESS(Status))
+        DPRINT1("SMSS: Load of WIN32K failed.\n");
+
+    NextEntry = SmpSubSystemsToLoad.Flink;
+    while (NT_SUCCESS(Status) && NextEntry != &SmpSubSystemsToLoad)
+    {
+        RegEntry = CONTAINING_RECORD(NextEntry, SMP_REGISTRY_VALUE, Entry);
+        if (_wcsicmp(RegEntry->Name.Buffer, L"Debug") != 0)
+        {
+            Status = SmpExecuteCommand(&RegEntry->Value,
+                                       SessionId,
+                                       ProcessId,
+                                       SMP_SUBSYSTEM_FLAG);
+            if (!NT_SUCCESS(Status))
+                DPRINT1("SMSS: Subsystem execute failed (%wZ)\n", &RegEntry->Value);
+        }
+        NextEntry = NextEntry->Flink;
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        UNICODE_STRING Wininit = RTL_CONSTANT_STRING(L"wininit.exe");
+        HANDLE WininitProcess;
+
+        Status = SmpExecuteInitialCommand(SessionId, &Wininit, &WininitProcess, NULL);
+        if (NT_SUCCESS(Status))
+            NtClose(WininitProcess);
+        else
+            DPRINT1("SMSS: Execute of wininit failed (%lx)\n", Status);
+    }
+
+    if (AttachedSessionId != -1)
+    {
+        Status2 = NtSetSystemInformation(SystemSessionDetach,
+                                         &AttachedSessionId,
+                                         sizeof(AttachedSessionId));
+        ASSERT(NT_SUCCESS(Status2));
+        AttachedSessionId = -1;
+    }
+    SmpReleasePrivilege(State);
+    return Status;
+}
+
+NTSTATUS
+NTAPI
 SmpLoadSubSystemsForMuSession(IN PULONG MuSessionId,
                               OUT PHANDLE ProcessId,
                               IN PUNICODE_STRING InitialCommand)
@@ -576,7 +666,7 @@ SmpLoadSubSystemsForMuSession(IN PULONG MuSessionId,
                      * instead of the Kmode one...
                      */
                     RtlInitUnicodeString(&DestinationString,
-                                         DEFAULT_KMODE_SUBSYSTEM);
+                                         L"\\SystemRoot\\System32\\win32k.sys");
                     Status = NtSetSystemInformation(SystemExtendServiceTableInformation,
                                                     &DestinationString,
                                                     sizeof(DestinationString));
@@ -641,11 +731,11 @@ SmpLoadSubSystemsForMuSession(IN PULONG MuSessionId,
     }
     else
     {
-        /* Use the default initial command (Winlogon) */
-        RtlInitUnicodeString(InitialCommand, DEFAULT_INITIAL_COMMAND);
+        /* Use the default Winlogon initial command */
+        RtlInitUnicodeString(InitialCommand, L"winlogon.exe");
         InitialCommandBuffer[0] = UNICODE_NULL;
 
-        /* Check if there is a debugger for it */
+        /* Check if there's a debugger for Winlogon */
         Status2 = LdrQueryImageFileExecutionOptions(InitialCommand,
                                                     L"Debugger",
                                                     REG_SZ,
@@ -655,7 +745,7 @@ SmpLoadSubSystemsForMuSession(IN PULONG MuSessionId,
                                                     NULL);
         if ((NT_SUCCESS(Status2)) && (InitialCommandBuffer[0]))
         {
-            /* Set up the debugger string */
+            /* Put the debugger string with the Winlogon string */
             RtlStringCbCatW(InitialCommandBuffer, sizeof(InitialCommandBuffer), L" ");
             RtlStringCbCatW(InitialCommandBuffer, sizeof(InitialCommandBuffer), InitialCommand->Buffer);
             RtlInitUnicodeString(InitialCommand, InitialCommandBuffer);

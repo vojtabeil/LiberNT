@@ -32,8 +32,7 @@ extern ULONG FrameBufferSize;
 extern PCM_FRAMEBUF_DEVICE_DATA FrameBufferData;
 
 static BOOLEAN
-XboxFindPciBios(
-    _Out_ PPCI_REGISTRY_INFO BusData)
+XboxFindPciBios(PPCI_REGISTRY_INFO BusData)
 {
     /* We emulate PCI BIOS here, there are 2 known working PCI buses on an original Xbox */
     BusData->NoBuses = 2;
@@ -207,7 +206,7 @@ DetectDisplayController(
     FramebufData = (PCM_FRAMEBUF_DEVICE_DATA)(PartialDescriptor + 1);
     RtlCopyMemory(FramebufData, FrameBufferData, sizeof(*FrameBufferData));
     FramebufData->Version  = 1;
-    FramebufData->Revision = 3;
+    FramebufData->Revision = 4;
     FramebufData->VideoClock = 0;
 
     FldrCreateComponentKey(BusKey,

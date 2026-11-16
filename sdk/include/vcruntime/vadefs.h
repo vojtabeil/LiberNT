@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#ifdef __GNUC__
+#if defined(__GNUC__) || defined(__clang__)
 #ifndef __GNUC_VA_LIST
 #define __GNUC_VA_LIST
   typedef __builtin_va_list __gnuc_va_list;
@@ -27,7 +27,7 @@ extern "C" {
 
 #ifndef _VA_LIST_DEFINED
 #define _VA_LIST_DEFINED
-#if defined(__GNUC__)
+#if defined(__GNUC__) || defined(__clang__)
   typedef __gnuc_va_list va_list;
 #elif defined(_MSC_VER)
   typedef _Writable_bytes_(_Inexpressible_("length varies")) char *  va_list;
@@ -63,6 +63,10 @@ extern "C" {
 #define _VA_STRUCT_ALIGN 16
 #define _ALIGNOF(ap) ((((ap)+_VA_STRUCT_ALIGN - 1) & ~(_VA_STRUCT_ALIGN -1)) - (ap))
 #define _APALIGN(t,ap) (__alignof(t) > 8 ? _ALIGNOF((uintptr_t) ap) : 0)
+#elif defined(_M_ARM64) || defined(_M_ARM64EC)
+#define _VA_ALIGN 8
+#define _SLOTSIZEOF(t) ((sizeof(t) + _VA_ALIGN - 1) & ~(_VA_ALIGN - 1))
+#define _APALIGN(t,ap) (((va_list)0 - (ap)) & (__alignof(t) - 1))
 #else
 #define _SLOTSIZEOF(t) (sizeof(t))
 #define _APALIGN(t,ap) (__alignof(t))

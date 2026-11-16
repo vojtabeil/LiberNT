@@ -1,9 +1,6 @@
 
 project(SHELL)
 
-remove_definitions(-D_WIN32_WINNT=0x502)
-add_definitions(-D_WIN32_WINNT=0x600)
-
 add_definitions(
     -D__WINESRC__
     -D_SHLWAPI_
@@ -35,7 +32,6 @@ list(APPEND PCH_SKIP_SOURCE
     propbag.cpp
     querysrc.cpp
     utils.cpp
-    wsprintf.c
     zonechk.c
     ${CMAKE_CURRENT_BINARY_DIR}/shlwapi_stubs.c)
 
@@ -68,7 +64,7 @@ target_compile_options(shlwapi_autocomp PRIVATE $<TARGET_PROPERTY:shlwapi,COMPIL
 add_dependencies(shlwapi_autocomp psdk)
 
 set_module_type(shlwapi win32dll UNICODE)
-target_link_libraries(shlwapi uuid wine crtheap cppstl)
+target_link_libraries(shlwapi uuid wine wine_dll_version msvcrtex cppstl)
 if(DLL_EXPORT_VERSION LESS 0x600)
     target_link_libraries(shlwapi evalcmd)
 endif()

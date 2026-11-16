@@ -13,6 +13,7 @@
 #include "winlogon.h"
 
 #include <ndk/cmfuncs.h>
+#include <winsvc.h>
 
 /* GLOBALS ******************************************************************/
 
@@ -43,75 +44,6 @@ WlStrDup(
 
 
 static
-BOOL
-StartServicesManager(VOID)
-{
-    STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
-    PROCESS_INFORMATION ProcessInformation;
-    LPCWSTR ServiceString = L"services.exe";
-    BOOL res;
-
-    /* Start the service control manager (services.exe) */
-    TRACE("WL: Creating new process - %S\n", ServiceString);
-    res = CreateProcessW(ServiceString,
-                         NULL,
-                         NULL,
-                         NULL,
-                         FALSE,
-                         DETACHED_PROCESS,
-                         NULL,
-                         NULL,
-                         &StartupInfo,
-                         &ProcessInformation);
-    if (!res)
-    {
-        ERR("WL: Failed to execute services (error %lu)\n", GetLastError());
-        return FALSE;
-    }
-
-    TRACE("WL: Created new process - %S\n", ServiceString);
-
-    CloseHandle(ProcessInformation.hThread);
-    CloseHandle(ProcessInformation.hProcess);
-
-    TRACE("WL: StartServicesManager() done.\n");
-
-    return TRUE;
-}
-
-
-static
-BOOL
-StartLsass(VOID)
-{
-    STARTUPINFOW StartupInfo = { sizeof(StartupInfo) };
-    PROCESS_INFORMATION ProcessInformation;
-    LPCWSTR ServiceString = L"lsass.exe";
-    BOOL res;
-
-    /* Start the local security authority subsystem (lsass.exe) */
-    TRACE("WL: Creating new process - %S\n", ServiceString);
-    res = CreateProcessW(ServiceString,
-                         NULL,
-                         NULL,
-                         NULL,
-                         FALSE,
-                         DETACHED_PROCESS,
-                         NULL,
-                         NULL,
-                         &StartupInfo,
-                         &ProcessInformation);
-
-    TRACE("WL: Created new process - %S\n", ServiceString);
-
-    CloseHandle(ProcessInformation.hThread);
-    CloseHandle(ProcessInformation.hProcess);
-
-    return res;
-}
-
-
-static
 VOID
 WaitForLsass(VOID)
 {
@@ -121,7 +53,7 @@ WaitForLsass(VOID)
     hEvent = CreateEventW(NULL,
                           TRUE,
                           FALSE,
-                          L"LSA_RPC_SERVER_ACTIVE");
+                          L"Global\\LSA_RPC_SERVER_ACTIVE");
     if (hEvent == NULL)
     {
         dwError = GetLastError();
@@ -131,7 +63,7 @@ WaitForLsass(VOID)
         {
             hEvent = OpenEventW(SYNCHRONIZE,
                                 FALSE,
-                                L"LSA_RPC_SERVER_ACTIVE");
+                                L"Global\\LSA_RPC_SERVER_ACTIVE");
             if (hEvent == NULL)
             {
                ERR("WL: Could not open the notification event (Error %lu)\n", GetLastError());
@@ -165,7 +97,8 @@ UpdateTcpIpInformation(VOID)
                            &hKey);
     if (lError != ERROR_SUCCESS)
     {
-        ERR("WL: RegOpenKeyExW(\"HKLM\\System\\CurrentControlSet\\Services\\Tcpip\\Parameters\") failed (error %lu)\n", lError);
+        if (lError != ERROR_FILE_NOT_FOUND)
+            ERR("WL: RegOpenKeyExW(\"HKLM\\System\\CurrentControlSet\\Services\\Tcpip\\Parameters\") failed (error %lu)\n", lError);
         return;
     }
 
@@ -316,7 +249,7 @@ InitKeyboardLayouts(VOID)
 
             /* Load keyboard layout with given locale id */
             Flags = KLF_SUBSTITUTE_OK;
-            if (i > 1)
+            if (i > 2)
                 Flags |= KLF_NOTELLSHELL|KLF_REPLACELANG;
             else // First layout
                 Flags |= KLF_ACTIVATE; // |0x40000000
@@ -428,6 +361,63 @@ GinaLoadFailedWindowProc(
 }
 
 
+static
+BOOL
+IsPlugPlayServiceRunning(VOID)
+{
+    SC_HANDLE hSCManager;
+    SC_HANDLE hService;
+    SERVICE_STATUS ServiceStatus;
+    BOOL bRunning = FALSE;
+
+    hSCManager = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+    if (hSCManager == NULL)
+        return FALSE;
+
+    hService = OpenServiceW(hSCManager, L"PlugPlay", SERVICE_QUERY_STATUS);
+    if (hService != NULL)
+    {
+        if (QueryServiceStatus(hService, &ServiceStatus))
+        {
+            bRunning = (ServiceStatus.dwCurrentState == SERVICE_RUNNING ||
+                        ServiceStatus.dwCurrentState == SERVICE_START_PENDING);
+        }
+        CloseServiceHandle(hService);
+    }
+
+    CloseServiceHandle(hSCManager);
+    return bRunning;
+}
+
+
+static
+DWORD
+WINAPI
+WaitForBootDeviceInstallThread(
+    IN LPVOID lpParameter)
+{
+    PWLSESSION Session = (PWLSESSION)lpParameter;
+    HANDLE hEvents[2];
+
+    hEvents[0] = CreateEventW(NULL, TRUE, FALSE, L"Global\\PnP_Boot_Install_Complete");
+    hEvents[1] = OpenEventW(SYNCHRONIZE, FALSE, L"SC_AutoStartComplete");
+    if (hEvents[0] != NULL && hEvents[1] != NULL &&
+        WaitForMultipleObjects(2, hEvents, FALSE, INFINITE) == WAIT_OBJECT_0 + 1 &&
+        IsPlugPlayServiceRunning())
+    {
+        WaitForSingleObject(hEvents[0], INFINITE);
+    }
+
+    if (hEvents[1] != NULL)
+        CloseHandle(hEvents[1]);
+    if (hEvents[0] != NULL)
+        CloseHandle(hEvents[0]);
+
+    PostMessageW(Session->SASWindow, WLX_WM_SAS, WLX_SAS_TYPE_CTRL_ALT_DEL, 0);
+    return 0;
+}
+
+
 int
 WINAPI
 WinMain(
@@ -445,6 +435,7 @@ WinMain(
     NTSTATUS Status;
 #endif
     ULONG HardErrorResponse;
+    DWORD SetupType;
     MSG Msg;
 
     UNREFERENCED_PARAMETER(hPrevInstance);
@@ -453,19 +444,18 @@ WinMain(
 
     hAppInstance = hInstance;
 
+    if (!RegisterLogonProcess(GetCurrentProcessId(), TRUE))
+    {
+        ERR("WL: Could not register logon process\n");
+        ExitProcess(1);
+    }
+
     /* Make us critical */
     RtlSetProcessIsCritical(TRUE, NULL, FALSE);
     RtlSetThreadIsCritical(TRUE, NULL, FALSE);
 
     /* Update the cached TCP/IP Information in the registry */
     UpdateTcpIpInformation();
-
-    if (!RegisterLogonProcess(GetCurrentProcessId(), TRUE))
-    {
-        ERR("WL: Could not register logon process\n");
-        NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
-        ExitProcess(1);
-    }
 
     WLSession = (PWLSESSION)HeapAlloc(GetProcessHeap(), 0, sizeof(WLSESSION));
     if (!WLSession)
@@ -505,20 +495,6 @@ WinMain(
         ExitProcess(1);
     }
 
-    if (!StartServicesManager())
-    {
-        ERR("WL: Could not start services.exe\n");
-        NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
-        ExitProcess(1);
-    }
-
-    if (!StartLsass())
-    {
-        ERR("WL: Failed to start lsass.exe service (error %lu)\n", GetLastError());
-        NtRaiseHardError(STATUS_SYSTEM_PROCESS_TERMINATED, 0, 0, NULL, OptionOk, &HardErrorResponse);
-        ExitProcess(1);
-    }
-
     /* Wait for the LSA server */
     WaitForLsass();
 
@@ -536,7 +512,11 @@ WinMain(
         ExitProcess(1);
     }
 
-    DisplayStatusMessage(WLSession, WLSession->WinlogonDesktop, IDS_REACTOSISSTARTINGUP);
+    SetupType = GetSetupType();
+    DisplayStatusMessage(WLSession,
+                         SetupType ? WLSession->ApplicationDesktop
+                                   : WLSession->WinlogonDesktop,
+                         IDS_REACTOSISSTARTINGUP);
 
 #if 0
     /* Connect to NetLogon service (lsass.exe) */
@@ -586,10 +566,9 @@ WinMain(
 
     /* Display logged out screen */
     WLSession->LogonState = STATE_INIT;
-    RemoveStatusMessage(WLSession);
 
     /* Check for pending setup */
-    if (GetSetupType() != 0)
+    if (SetupType != 0)
     {
         /* Run setup and reboot when done */
         TRACE("WL: Setup mode detected\n");
@@ -597,7 +576,12 @@ WinMain(
     }
     else
     {
-        PostMessageW(WLSession->SASWindow, WLX_WM_SAS, WLX_SAS_TYPE_CTRL_ALT_DEL, 0);
+        HANDLE hThread = CreateThread(NULL, 0, WaitForBootDeviceInstallThread, WLSession, 0, NULL);
+
+        if (hThread != NULL)
+            CloseHandle(hThread);
+        else
+            PostMessageW(WLSession->SASWindow, WLX_WM_SAS, WLX_SAS_TYPE_CTRL_ALT_DEL, 0);
     }
 
     /* Tell kernel that CurrentControlSet is good (needed

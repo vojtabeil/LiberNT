@@ -77,6 +77,7 @@ WDFDEVICE_INIT::WDFDEVICE_INIT(
     Pdo.DefaultLocale = 0x0;
     Pdo.DescriptionEntry = NULL;
     Pdo.ForwardRequestToParent = FALSE;
+    Pdo.NoPowerDependencyOnParent = FALSE;
 
     RtlZeroMemory(&Security, sizeof(Security));
 
@@ -89,6 +90,8 @@ WDFDEVICE_INIT::WDFDEVICE_INIT(
     InitializeListHead(&CxDeviceInitListHead);
 
     ReleaseHardwareOrderOnFailure = WdfReleaseHardwareOrderOnFailureEarly;
+
+    CxContextObject = NULL;
 
 #if (FX_CORE_MODE == FX_CORE_USER_MODE)
 
@@ -145,6 +148,10 @@ WDFDEVICE_INIT::~WDFDEVICE_INIT()
         delete PreprocessInfo;
     }
 
+    if (CxContextObject != NULL) {
+        CxContextObject->DeleteObject();
+    }
+
     while(!IsListEmpty(&CxDeviceInitListHead)) {
         next = RemoveHeadList(&CxDeviceInitListHead);
         PWDFCXDEVICE_INIT cxInit;
@@ -164,6 +171,52 @@ WDFDEVICE_INIT::~WDFDEVICE_INIT()
     }
 #endif
 
+}
+
+NTSTATUS
+WDFDEVICE_INIT::AllocateCxContext(
+    _In_ PFX_DRIVER_GLOBALS CxDriverGlobals,
+    _In_ PWDF_OBJECT_ATTRIBUTES ContextAttributes,
+    _Outptr_opt_ PVOID* Context
+    )
+{
+    NTSTATUS status;
+
+    if (CxContextObject == NULL) {
+        status = FxUserObject::_Create(CxDriverGlobals,
+                                       WDF_NO_OBJECT_ATTRIBUTES,
+                                       &CxContextObject);
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+    }
+
+    return FxObjectAllocateContext(CxContextObject,
+                                   ContextAttributes,
+                                   FALSE,
+                                   Context);
+}
+
+PVOID
+WDFDEVICE_INIT::GetCxTypedContext(
+    _In_ PCWDF_OBJECT_CONTEXT_TYPE_INFO TypeInfo
+    )
+{
+    FxContextHeader* header;
+
+    if (CxContextObject == NULL) {
+        return NULL;
+    }
+
+    for (header = CxContextObject->GetContextHeader();
+         header != NULL;
+         header = header->NextHeader) {
+        if (header->ContextTypeInfo == TypeInfo) {
+            return &header->Context[0];
+        }
+    }
+
+    return NULL;
 }
 
 _Must_inspect_result_

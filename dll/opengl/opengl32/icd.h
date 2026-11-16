@@ -362,6 +362,101 @@ typedef VOID (APIENTRY * PFN_SETPROCTABLE)(const GLCLTPROCTABLE*);
 /* This doesn't seem to be anywhere in ddk or psdk */
 DECLARE_HANDLE(DHGLRC);
 
+typedef struct _WGL_PRESENTBUFFERS_CB
+{
+    UINT Version;
+    UINT SyncType;
+    LUID AdapterLuid;
+    PVOID PrivateData;
+    RECT UpdateRect;
+} WGL_PRESENTBUFFERS_CB, *PWGL_PRESENTBUFFERS_CB;
+
+/* Version 4 of the present callback hands the compositor the ICD's own
+ * buffer. The ICD resets ReleaseEvent before the call; it is set again once
+ * no compositor frame reads the buffer, including when it is not published.
+ * CompletionEvent is set when the buffer's GPU writes are complete, and
+ * PrivateData still describes the buffer for a direct present. */
+#define WGL_PRESENTBUFFERS_CB_RETAINED_VERSION 4
+
+typedef struct _WGL_PRESENTBUFFERS_CB_RETAINED
+{
+    WGL_PRESENTBUFFERS_CB Base;
+    HANDLE SharedSurface;       /* D3DKMT global share, B8G8R8A8 */
+    UINT Width;
+    UINT Height;
+    HANDLE ReleaseEvent;
+    HANDLE CompletionEvent;
+    UINT Flags;                 /* WGL_PRESENTBUFFERS_SCANOUT */
+} WGL_PRESENTBUFFERS_CB_RETAINED, *PWGL_PRESENTBUFFERS_CB_RETAINED;
+
+/* The buffer is linear in memory the display can scan out as a plane. */
+#define WGL_PRESENTBUFFERS_SCANOUT 0x00000001u
+
+typedef struct _WGL_PRESENTBUFFERS
+{
+    HANDLE hSurface;
+    LUID AdapterLuid;
+    ULONGLONG PresentToken;
+    PVOID PrivateData;
+} WGL_PRESENTBUFFERS, *PWGL_PRESENTBUFFERS;
+
+#define WGL_PRESENTBUFFERS2_VERSION 1
+
+typedef struct _WGL_PRESENTBUFFERS2
+{
+    UINT Size;
+    UINT Version;
+    HANDLE hSurface;
+    LUID AdapterLuid;
+    ULONGLONG PresentToken;
+    PVOID PrivateData;
+    HANDLE CompletionEvent;
+} WGL_PRESENTBUFFERS2, *PWGL_PRESENTBUFFERS2;
+
+typedef struct _WGL_CHECKFULLSCREENSUPPORT_CB
+{
+    UINT Version;
+    LUID AdapterLuid;
+    UINT hDevice;
+    HMONITOR hMonitor;
+    UINT VidPnSourceId;
+} WGL_CHECKFULLSCREENSUPPORT_CB, *PWGL_CHECKFULLSCREENSUPPORT_CB;
+
+#define WGL_MAX_BROADCAST_CONTEXT 64
+
+typedef struct _WGL_PRESENTTOREDIRECTIONSURFACE_CB
+{
+    UINT Version;
+    UINT hContext;
+    UINT hSource;
+    UINT hDestination;
+    HANDLE hSharedHandle;
+    UINT64 UpdateId;
+    RECT UpdateRect;
+    UINT BroadcastContextCount;
+    UINT BroadcastContext[WGL_MAX_BROADCAST_CONTEXT];
+    UINT BroadcastSrcAllocation[WGL_MAX_BROADCAST_CONTEXT];
+    UINT BroadcastDstAllocation[WGL_MAX_BROADCAST_CONTEXT];
+    UINT PrivateDriverDataSize;
+    PVOID PrivateDriverData;
+} WGL_PRESENTTOREDIRECTIONSURFACE_CB, *PWGL_PRESENTTOREDIRECTIONSURFACE_CB;
+
+typedef struct _WGL_SUBMITPRESENTTOREDIRECTIONSURFACE_CB
+{
+    UINT Version;
+    HANDLE hSharedHandle;
+    UINT64 UpdateId;
+    RECT UpdateRect;
+    UINT BroadcastHwQueueCount;
+    UINT *BroadcastHwQueue;
+    UINT *BroadcastSrcAllocation;
+    UINT *BroadcastDstAllocation;
+    UINT PrivateDriverDataSize;
+    PVOID PrivateDriverData;
+} WGL_SUBMITPRESENTTOREDIRECTIONSURFACE_CB, *PWGL_SUBMITPRESENTTOREDIRECTIONSURFACE_CB;
+
+typedef BOOL (WINAPI *PFN_WGL_MAKE_CONTEXT_CURRENT_ARB)(HDC hDrawDC, HDC hReadDC, HGLRC hglrc);
+
 struct ICD_Data
 {
     /* The Name returned with OPENGL_GETINFO escape code */
@@ -386,10 +481,17 @@ struct ICD_Data
     BOOL      (WINAPI *DrvShareLists)( DHGLRC, DHGLRC );
     BOOL      (WINAPI *DrvSwapBuffers)( HDC );
     BOOL      (WINAPI *DrvSwapLayerBuffers)( HDC, UINT );
+    BOOL      (WINAPI *DrvPresentBuffers)( HDC, PWGL_PRESENTBUFFERS );
+    BOOL      (WINAPI *DrvPresentBuffers2)( HDC, PWGL_PRESENTBUFFERS2 );
+
+    /* The client procedure table is only ever handed out by DrvSetContext,
+     * but a WGL extension can also bind a context of this ICD. */
+    const GLCLTPROCTABLE* ProcTable;
+    /* WGL_ARB_make_current_read binding entry, from DrvGetProcAddress. */
+    PFN_WGL_MAKE_CONTEXT_CURRENT_ARB MakeContextCurrentARB;
 
     /* Make this a linked list */
     struct ICD_Data* next;
 };
 
-struct ICD_Data* IntGetIcdData(HDC hdc);
-
+struct ICD_Data* IntGetIcdData(HDC hdc, LUID *AdapterLuid, BOOL *AdapterLuidValid);

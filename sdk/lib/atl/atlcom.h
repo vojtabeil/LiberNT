@@ -53,6 +53,14 @@ public:
     {
     }
 
+    static HRESULT WINAPI _Delegate(void *pv, REFIID riid, void **ppvObject, DWORD_PTR dw)
+    {
+        IUnknown *pUnk = *reinterpret_cast<IUnknown **>(reinterpret_cast<DWORD_PTR>(pv) + dw);
+        if (!pUnk)
+            return E_NOINTERFACE;
+        return pUnk->QueryInterface(riid, ppvObject);
+    }
+
     void SetVoid(void *)
     {
     }
@@ -594,9 +602,9 @@ public:                                                                         
         };                                                                        \
         return _entries;                                                        \
     }                                                                            \
-    virtual ULONG STDMETHODCALLTYPE AddRef() = 0;                                \
-    virtual ULONG STDMETHODCALLTYPE Release() = 0;                                \
-    STDMETHOD(QueryInterface)(REFIID, void **) = 0;
+    virtual ULONG STDMETHODCALLTYPE AddRef() override = 0;                       \
+    virtual ULONG STDMETHODCALLTYPE Release() override = 0;                      \
+    STDMETHOD(QueryInterface)(REFIID, void **) override = 0;
 
 #define COM_INTERFACE_ENTRY_IID(iid, x)                                            \
     {&iid, offsetofclass(x, _ComMapClass), _ATL_SIMPLEMAPENTRY},
@@ -666,7 +674,7 @@ public:                                                                         
 
 #define COM_INTERFACE_ENTRY_AGGREGATE(iid, punk)                                \
     {&iid,                                                                      \
-    (DWORD_PTR)offsetof(_ComMapClass, punk),                                    \
+    reinterpret_cast<DWORD_PTR>(&reinterpret_cast<_ComMapClass *>(_ATL_PACKING)->punk) - _ATL_PACKING, \
     _Delegate},
 
 #define DECLARE_GET_CONTROLLING_UNKNOWN()                                        \
@@ -715,7 +723,7 @@ public:                                                                         
         class ::GetObjectDescription,                                                                                  \
         class ::GetCategoryMap,                                                                                        \
         class ::ObjectMain};                                                                                           \
-    extern "C" _ATLALLOC("ATL$__m") ATL::_ATL_OBJMAP_ENTRY *const __pobjMap_##class = &__objMap_##class;               \
+    extern "C" _ATLALLOC(_ATL_OBJMAP_ENTRY_SECTION) ATL::_ATL_OBJMAP_ENTRY *_ATL_OBJMAP_ENTRY_CONST __pobjMap_##class = &__objMap_##class; \
     OBJECT_ENTRY_PRAGMA(class)
 
 
@@ -732,7 +740,7 @@ public:
     }
 
 public:
-    STDMETHOD(CreateInstance)(LPUNKNOWN pUnkOuter, REFIID riid, void **ppvObj)
+    STDMETHOD(CreateInstance)(LPUNKNOWN pUnkOuter, REFIID riid, void **ppvObj) override
     {
         HRESULT hResult;
 
@@ -749,7 +757,7 @@ public:
         return hResult;
     }
 
-    STDMETHOD(LockServer)(BOOL fLock)
+    STDMETHOD(LockServer)(BOOL fLock) override
     {
         if (fLock)
             _pAtlModule->Lock();

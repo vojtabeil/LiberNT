@@ -1,6 +1,7 @@
 
 include_directories(${REACTOS_SOURCE_DIR}/sdk/lib/conutils)
 include_directories(${REACTOS_SOURCE_DIR}/sdk/include/reactos/libs/fmifs)
+include_directories(${REACTOS_SOURCE_DIR}/sdk/lib/storageutils)
 
 list(APPEND SOURCE
     active.c
@@ -46,6 +47,7 @@ list(APPEND SOURCE
     setid.c
     shrink.c
     uniqueid.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/storageutils/mountmgrutil.c
     diskpart.h)
 
 add_executable(diskpart ${SOURCE} diskpart.rc)
@@ -54,7 +56,7 @@ add_message_headers(UNICODE diskpart_msg.mc)
 add_dependencies(diskpart diskpart_msg)
 
 set_module_type(diskpart win32cui UNICODE)
-target_link_libraries(diskpart conutils ${PSEH_LIB})
+target_link_libraries(diskpart conutils volresize ${PSEH_LIB})
 add_importlibs(diskpart fmifs advapi32 msvcrt user32 kernel32 ntdll)
 
 if(MSVC)

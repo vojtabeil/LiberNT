@@ -146,6 +146,22 @@ TestProviderInfo(void)
         HANDLE FileHandle;
         OBJECT_ATTRIBUTES ObjectAttributes;
 
+        if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+        {
+            if (NT_SUCCESS(TestData[i].IrpStatus))
+            {
+                TestData[i].ExpectedInfo.Version = 2;
+                TestData[i].ExpectedInfo.MaxSendSize = 0x3FFFFFFF;
+                if (i != 1) /* TCP and raw IP */
+                    TestData[i].ExpectedInfo.MaxDatagramSize = 65515;
+                TestData[i].ExpectedInfo.ServiceFlags = 0x001589AF;
+                if (i == 0) /* TCP */
+                    TestData[i].ExpectedInfo.ServiceFlags |= TDI_SERVICE_NO_PUSH;
+            }
+            if (i == 4) /* IPMULTICAST is absent on Windows 11. */
+                TestData[i].CreateStatus = STATUS_OBJECT_NAME_NOT_FOUND;
+        }
+
         trace("Testing device %wZ\n", &TestData[i].DeviceName);
 
         InitializeObjectAttributes(
@@ -180,13 +196,17 @@ TestProviderInfo(void)
             NULL);
         ok_eq_hex(Status, STATUS_SUCCESS);
         if (!NT_SUCCESS(Status))
+        {
+            ZwClose(FileHandle);
             return;
+        }
 
         DeviceObject = IoGetRelatedDeviceObject(FileObject);
         ok(DeviceObject != NULL, "Device object is NULL!\n");
         if (!DeviceObject)
         {
             ObDereferenceObject(FileObject);
+            ZwClose(FileHandle);
             return;
         }
 
@@ -195,6 +215,7 @@ TestProviderInfo(void)
         if (!ProviderInfo)
         {
             ObDereferenceObject(FileObject);
+            ZwClose(FileHandle);
             return;
         }
 
@@ -204,6 +225,7 @@ TestProviderInfo(void)
         {
             ExFreePoolWithTag(ProviderInfo, 'tseT');
             ObDereferenceObject(FileObject);
+            ZwClose(FileHandle);
             return;
         }
 
@@ -218,6 +240,7 @@ TestProviderInfo(void)
             IoFreeMdl(Mdl);
             ExFreePoolWithTag(ProviderInfo, 'tseT');
             ObDereferenceObject(FileObject);
+            ZwClose(FileHandle);
             return;
         }
 
@@ -241,13 +264,14 @@ TestProviderInfo(void)
                 KernelMode,
                 FALSE,
                 NULL);
-            Status = StatusBlock.Status;
+            Status = Irp->IoStatus.Status;
         }
         ok_eq_hex(Status, TestData[i].IrpStatus);
 
         IoFreeIrp(Irp);
         IoFreeMdl(Mdl);
         ObDereferenceObject(FileObject);
+        ZwClose(FileHandle);
 
         if (!NT_SUCCESS(Status))
         {
@@ -259,6 +283,11 @@ TestProviderInfo(void)
         ok_eq_ulong(ProviderInfo->MaxSendSize, TestData[i].ExpectedInfo.MaxSendSize);
         ok_eq_ulong(ProviderInfo->MaxConnectionUserData, TestData[i].ExpectedInfo.MaxConnectionUserData);
         ok_eq_ulong(ProviderInfo->MaxDatagramSize, TestData[i].ExpectedInfo.MaxDatagramSize);
+        if (GetNTVersion() < _WIN32_WINNT_VISTA)
+        {
+            TestData[i].ExpectedInfo.ServiceFlags &=
+                ~(TDI_SERVICE_PREPOST_RECVS | TDI_SERVICE_NO_PUSH);
+        }
         ok_eq_hex(ProviderInfo->ServiceFlags, TestData[i].ExpectedInfo.ServiceFlags);
         ok_eq_ulong(ProviderInfo->MinimumLookaheadData, TestData[i].ExpectedInfo.MinimumLookaheadData);
         ok_eq_ulong(ProviderInfo->MaximumLookaheadData, TestData[i].ExpectedInfo.MaximumLookaheadData);

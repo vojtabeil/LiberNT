@@ -39,51 +39,46 @@ INT WINAPI SetupPromptReboot( HSPFILEQ file_queue, HWND owner, BOOL scan_only )
 }
 
 /***********************************************************************
- *      SetupAddToSourceListA (SETUPAPI.@)
+ *              SetupLogFileW  (SETUPAPI.@)
  */
-BOOL WINAPI SetupAddToSourceListA(DWORD flags, PCSTR source)
+BOOL WINAPI SetupLogFileW(HSPFILELOG file_log, PCWSTR section, PCWSTR source, PCWSTR target,
+                          DWORD checksum, PCWSTR tag, PCWSTR description, PCWSTR other, DWORD flags)
 {
-    FIXME("0x%08x %s: stub\n", flags, debugstr_a(source));
-    return TRUE;
-}
-
-/***********************************************************************
- *      SetupAddToSourceListW (SETUPAPI.@)
- */
-BOOL WINAPI SetupAddToSourceListW(DWORD flags, PCWSTR source)
-{
-    FIXME("0x%08x %s: stub\n", flags, debugstr_w(source));
-    return TRUE;
-}
-
-/***********************************************************************
- *      SetupSetSourceListA (SETUPAPI.@)
- */
-BOOL WINAPI SetupSetSourceListA(DWORD flags, PCSTR *list, UINT count)
-{
-    FIXME("0x%08x %p %d\n", flags, list, count);
+    FIXME("(%p, %s, '%s', '%s', %lu, %s, %s, %s, %lu): stub\n", file_log,
+          debugstr_w(section), debugstr_w(source), debugstr_w(target), checksum,
+          debugstr_w(tag), debugstr_w(description), debugstr_w(other), flags);
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return FALSE;
 }
 
 /***********************************************************************
- *      SetupSetSourceListW (SETUPAPI.@)
+ *              SetupLogFileA  (SETUPAPI.@)
  */
-BOOL WINAPI SetupSetSourceListW(DWORD flags, PCWSTR *list, UINT count)
+BOOL WINAPI SetupLogFileA(HSPFILELOG file_log, PCSTR section, PCSTR source, PCSTR target,
+                          DWORD checksum, PCSTR tag, PCSTR description, PCSTR other, DWORD flags)
 {
-    FIXME("0x%08x %p %d\n", flags, list, count);
+    FIXME("(%p, %p, '%s', '%s', %lu, %p, %p, %p, %lu): stub\n", file_log,
+          section, source, target, checksum, tag, description, other, flags);
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return FALSE;
 }
 
+/***********************************************************************
+ *              SetupDiDrawMiniIcon  (SETUPAPI.@)
+ */
+INT WINAPI SetupDiDrawMiniIcon(HDC hdc, RECT rect, INT index, DWORD flags)
+{
+    FIXME("(%p, %s, %d, %lx) stub\n", hdc, wine_dbgstr_rect(&rect), index, flags);
+    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    return 0;
+}
 
 /***********************************************************************
- *      SetupDiRemoveDevice(SETUPAPI.@)
+ *              SetupDiGetClassBitmapIndex  (SETUPAPI.@)
  */
-BOOL WINAPI
-SetupDiRemoveDevice(
-    IN HDEVINFO DeviceInfoSet,
-    IN PSP_DEVINFO_DATA DeviceInfoData)
+BOOL WINAPI SetupDiGetClassBitmapIndex(const GUID *class, PINT index)
 {
-    FIXME ("Stub %p %p\n", DeviceInfoSet, DeviceInfoData);
+    FIXME("(%s, %p) stub\n", debugstr_guid(class), index);
     SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return FALSE;
 }
@@ -98,17 +93,6 @@ SetupDiUnremoveDevice(
     IN PSP_DEVINFO_DATA DeviceInfoData)
 {
     FIXME ("Stub %p %p\n", DeviceInfoSet, DeviceInfoData);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
-}
-
-
-/***********************************************************************
- *              SetupDiRemoveDeviceInterface (SETUPAPI.@)
- */
-BOOL WINAPI SetupDiRemoveDeviceInterface(HDEVINFO info, PSP_DEVICE_INTERFACE_DATA data)
-{
-    FIXME("(%p, %p): stub\n", info, data);
     SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
     return FALSE;
 }

@@ -11,6 +11,8 @@ add_library(rshell MODULE ${SOURCE})
 
 set_module_type(rshell win32dll UNICODE)
 
+add_cd_file(TARGET rshell DESTINATION reactos FOR all)
+
 target_link_libraries(rshell
     shellbars
     shellmenu
@@ -26,7 +28,7 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
 endif()
 
 add_importlibs(rshell
-    browseui
+    explorerframe
     uxtheme
     shlwapi
     advapi32
@@ -34,10 +36,13 @@ add_importlibs(rshell
     comctl32
     gdi32
     ole32
+    oleaut32
     user32
     msvcrt
     kernel32
     ntdll)
+
+add_delay_importlibs(rshell shdocvw)
 
 add_custom_command(TARGET rshell POST_BUILD
   COMMAND "${CMAKE_COMMAND}" -E copy

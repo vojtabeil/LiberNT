@@ -1,3 +1,5 @@
+# Drop the inherited global target version before bumping to 0xA01.
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
 add_definitions(-D_WIN32_WINNT=0xA01 -DWINVER=0xA01)
 
 add_definitions(
@@ -38,11 +40,28 @@ if(NOT MSVC)
 endif()
 
 list(APPEND SOURCE_STATIC
-    #console.c #looks like ReactOS console.c is nothing like wine.
+    console.c
+    debug.c
     locale.c
+    main.c
     path.c
+    registry.c
+    security.c
     string.c
+    thread.c
+    version.c
     )
+
+if(MSVC AND ARCH STREQUAL "amd64")
+    add_asm_files(kernelbase_static_asm amd64/fiber.s)
+    list(APPEND SOURCE_STATIC ${kernelbase_static_asm})
+elseif(MSVC AND ARCH STREQUAL "i386")
+    add_asm_files(kernelbase_static_asm i386/fiber.s)
+    list(APPEND SOURCE_STATIC ${kernelbase_static_asm})
+elseif(MSVC AND ARCH STREQUAL "arm64")
+    add_asm_files(kernelbase_static_asm arm64/fiber.s)
+    list(APPEND SOURCE_STATIC ${kernelbase_static_asm})
+endif()
 
 add_library(kernelbase_static ${SOURCE_STATIC})
 target_compile_definitions(kernelbase_static PRIVATE WINSHLWAPI= WINPATHCCHAPI= PATHCCH_NO_DEPRECATE=)
@@ -58,4 +77,3 @@ else()
     target_compile_options(kernelbase_static PRIVATE -Wno-unused-variable)
     target_compile_options(kernelbase_static PRIVATE -Wno-unused-function)
 endif()
-

@@ -1,0 +1,1683 @@
+/*
+ * PROJECT:     LiberNT WDDM DirectX Graphics Kernel
+ * LICENSE:     GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later)
+ * PURPOSE:     GPU command buffer / DMA submission
+ * COPYRIGHT:   Copyright 2024-2026 LiberNT WDDM Team
+ *
+ * DxgkRender — translates a context command buffer through DxgkDdiRender
+ *              and submits it as tracked GPU work.
+ * DxgkPresent — present surface to display via the present queue.
+ *
+ * The present path validates parameters, builds a DXGKRNL_PRESENT_ENTRY
+ * descriptor, and hands it off to the present queue (present.c).  The
+ * queue handles VSync synchronisation and dispatches to either the DOD
+ * (DxgkDdiPresentDisplayOnly) or full WDDM (DxgkDdiPresent) miniport
+ * callback.
+ */
+
+#include "dxgkrnl_private.h"
+#include "present.h"
+#include "vidmm.h"
+#include "vidpn.h"
+#include "vidsch.h"
+
+/* ========================================================================
+ * Render ring
+ *
+ * The WDDM render contract gives the user-mode driver a command buffer, an
+ * allocation list, and a patch-location list that dxgkrnl owns.  One backing
+ * block holds all three and is mapped into the creating process exactly once;
+ * D3DKMTRender translates its contents into a kernel DMA buffer through
+ * DxgkDdiRender and then republishes the same mapping for the next frame.
+ * ====================================================================== */
+
+#define DXGKP_RENDER_MIN_COMMAND_BYTES  PAGE_SIZE
+#define DXGKP_RENDER_MAX_PRIVATE_DATA   (64 * 1024)
+#define DXGKP_RENDER_MAX_COMMAND_BYTES  (1024 * 1024)
+
+BOOLEAN
+DxgkMeasureDmaPrivateData(
+    _In_opt_ PVOID PrivateData,
+    _In_ ULONG PrivateDataSize,
+    _In_opt_ PVOID Next,
+    _In_ ULONG NextSize,
+    _Out_ PULONG Used)
+{
+    *Used = 0;
+    if (PrivateData == NULL || PrivateDataSize == 0)
+        return Next == PrivateData && NextSize == PrivateDataSize;
+    if ((PUCHAR)Next < (PUCHAR)PrivateData ||
+        (PUCHAR)Next > (PUCHAR)PrivateData + PrivateDataSize ||
+        NextSize > PrivateDataSize)
+    {
+        return FALSE;
+    }
+    *Used = max((ULONG)((PUCHAR)Next - (PUCHAR)PrivateData), PrivateDataSize - NextSize);
+    return TRUE;
+}
+
+VOID
+DxgkContextRenderTeardown(
+    _Inout_ PDXGKRNL_CONTEXT Context)
+{
+    KAPC_STATE ApcState;
+    BOOLEAN Attached = FALSE;
+
+    PAGED_CODE();
+    if (Context == NULL || Context->RenderRingKernel == NULL)
+        return;
+
+    if (Context->RenderRingUser != NULL && Context->RenderRingMdl != NULL)
+    {
+        if (Context->RenderRingProcess != NULL && Context->RenderRingProcess != PsGetCurrentProcess())
+        {
+            KeStackAttachProcess((PKPROCESS)Context->RenderRingProcess,
+                                 &ApcState);
+            Attached = TRUE;
+        }
+        MmUnmapLockedPages(Context->RenderRingUser, Context->RenderRingMdl);
+        if (Attached)
+            KeUnstackDetachProcess(&ApcState);
+        Context->RenderRingUser = NULL;
+    }
+    if (Context->RenderRingMdl != NULL)
+    {
+        IoFreeMdl(Context->RenderRingMdl);
+        Context->RenderRingMdl = NULL;
+    }
+    if (Context->RenderRingProcess != NULL)
+    {
+        ObDereferenceObject(Context->RenderRingProcess);
+        Context->RenderRingProcess = NULL;
+    }
+    ExFreePoolWithTag(Context->RenderRingKernel, TAG_DXGK_CONTEXT);
+    Context->RenderRingKernel = NULL;
+    Context->RenderRingBytes = 0;
+    Context->RenderCommandBufferSize = 0;
+    Context->RenderAllocationListSize = 0;
+    Context->RenderPatchLocationListSize = 0;
+}
+
+/*
+ * DxgkContextRenderInitialize
+ *
+ * Builds and publishes the render ring for a freshly created context.  The
+ * geometry follows the miniport's DXGK_CONTEXTINFO, clamped to what this
+ * scheduler's inline packet capacity can actually submit, so a request that
+ * is accepted here can always be submitted later.
+ *
+ * IRQL: PASSIVE_LEVEL, in the creating process context.
+ */
+NTSTATUS
+DxgkContextRenderInitialize(
+    _Inout_ PDXGKRNL_CONTEXT Context)
+{
+    SIZE_T TotalBytes;
+    ULONG CommandBytes;
+    ULONG AllocationCount;
+    ULONG PatchCount;
+    PMDL Mdl;
+    PVOID Kernel;
+    PVOID User = NULL;
+
+    PAGED_CODE();
+    if (Context == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    CommandBytes = Context->ContextInfo.DmaBufferSize;
+    if (CommandBytes < DXGKP_RENDER_MIN_COMMAND_BYTES)
+        CommandBytes = DXGKP_RENDER_MIN_COMMAND_BYTES;
+    if (CommandBytes > DXGKP_RENDER_MAX_COMMAND_BYTES)
+        CommandBytes = DXGKP_RENDER_MAX_COMMAND_BYTES;
+    CommandBytes = (ULONG)ROUND_TO_PAGES(CommandBytes);
+
+    AllocationCount = Context->ContextInfo.AllocationListSize;
+    if (AllocationCount == 0)
+        AllocationCount = VIDSCH_INLINE_ALLOCATIONS;
+    PatchCount = Context->ContextInfo.PatchLocationListSize;
+    if (PatchCount == 0)
+        PatchCount = VIDSCH_INLINE_PATCHES;
+
+    TotalBytes = (SIZE_T)CommandBytes +
+                 (SIZE_T)AllocationCount * sizeof(D3DDDI_ALLOCATIONLIST) +
+                 (SIZE_T)PatchCount * sizeof(D3DDDI_PATCHLOCATIONLIST);
+    if (TotalBytes > MAXULONG - PAGE_SIZE)
+        return STATUS_INVALID_PARAMETER;
+    Context->RenderAllocationListOffset = CommandBytes;
+    Context->RenderPatchLocationListOffset = CommandBytes + AllocationCount * (ULONG)sizeof(D3DDDI_ALLOCATIONLIST);
+    TotalBytes = ROUND_TO_PAGES(TotalBytes);
+
+    Kernel = ExAllocatePoolWithTag(NonPagedPool, TotalBytes, TAG_DXGK_CONTEXT);
+    if (Kernel == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+    RtlZeroMemory(Kernel, TotalBytes);
+
+    Mdl = IoAllocateMdl(Kernel, (ULONG)TotalBytes, FALSE, FALSE, NULL);
+    if (Mdl == NULL)
+    {
+        ExFreePoolWithTag(Kernel, TAG_DXGK_CONTEXT);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    MmBuildMdlForNonPagedPool(Mdl);
+
+    _SEH2_TRY
+    {
+        User = MmMapLockedPagesSpecifyCache(Mdl, UserMode, MmCached, NULL, FALSE, NormalPagePriority);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        User = NULL;
+    }
+    _SEH2_END;
+    if (User == NULL)
+    {
+        IoFreeMdl(Mdl);
+        ExFreePoolWithTag(Kernel, TAG_DXGK_CONTEXT);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    Context->RenderRingKernel = Kernel;
+    Context->RenderRingUser = User;
+    Context->RenderRingMdl = Mdl;
+    Context->RenderRingBytes = TotalBytes;
+    Context->RenderCommandBufferSize = CommandBytes;
+    Context->RenderAllocationListSize = AllocationCount;
+    Context->RenderPatchLocationListSize = PatchCount;
+    Context->RenderRingProcess = PsGetCurrentProcess();
+    ObReferenceObject(Context->RenderRingProcess);
+    return STATUS_SUCCESS;
+}
+
+static VOID
+DxgkpRenderPublishRing(
+    _In_ PDXGKRNL_CONTEXT Context,
+    _Inout_ D3DKMT_RENDER *pRender)
+{
+    pRender->pNewCommandBuffer = Context->RenderRingUser;
+    pRender->NewCommandBufferSize = Context->RenderCommandBufferSize;
+    pRender->pNewAllocationList = (D3DDDI_ALLOCATIONLIST *)((PUCHAR)Context->RenderRingUser + Context->RenderAllocationListOffset);
+    pRender->NewAllocationListSize = Context->RenderAllocationListSize;
+    pRender->pNewPatchLocationList = (D3DDDI_PATCHLOCATIONLIST *)((PUCHAR)Context->RenderRingUser + Context->RenderPatchLocationListOffset);
+    pRender->NewPatchLocationListSize = Context->RenderPatchLocationListSize;
+    pRender->NewCommandBuffer = 0;
+}
+
+static VOID
+DxgkpRenderReleaseAllocations(
+    _Inout_updates_(Count) PDXGKVMM_ALLOCATION *References,
+    _Inout_updates_(Count) PDXGKVMM_ALLOCATION *OpenBindings,
+    _In_ UINT Count)
+{
+    UINT Index;
+
+    for (Index = 0; Index < Count; ++Index)
+    {
+        if (OpenBindings[Index] != NULL)
+            DxgkVidMmDereferenceLogicalAllocation(OpenBindings[Index]);
+        if (References[Index] != NULL)
+        {
+            DxgkVidMmReleaseSubmissionResidencyPin(References[Index]);
+            DxgkVidMmDereferenceAllocation(References[Index]);
+        }
+        OpenBindings[Index] = NULL;
+        References[Index] = NULL;
+    }
+}
+
+/* ========================================================================
+ * DxgkRender
+ *
+ * D3DKMTRender -- translates the context's command buffer into a DMA buffer
+ * through DxgkDdiRender and submits it as tracked GPU work.
+ *
+ * Every allocation the request names is referenced and residency-pinned
+ * before translation, so the placement DxgkDdiPatch writes at kick time is
+ * the one that was validated here and cannot be evicted underneath the
+ * packet.  The pins are owned by the submission and released exactly once at
+ * its terminal edge.  A zero-length render carries no GPU work and is
+ * acknowledged after validation.
+ *
+ * IRQL: PASSIVE_LEVEL
+ * ====================================================================== */
+/* Passes one command buffer may take before translation is deemed stuck. */
+#define DXGKP_RENDER_MAX_PASSES 64
+
+NTSTATUS
+NTAPI
+DxgkRender(
+    _Inout_ D3DKMT_RENDER *pRender)
+{
+    PDXGKRNL_ADAPTER Adapter = NULL;
+    PDXGKRNL_DEVICE Device = NULL;
+    PDXGKRNL_CONTEXT Context;
+    PDXGKRNL_DMA_BUFFER DmaBuffer = NULL;
+    DXGKARG_RENDER RenderArgs;
+    DXGKRNL_TRACK_DMA_ARGS TrackArgs;
+    D3DDDI_ALLOCATIONLIST *UserAllocationList;
+    D3DDDI_PATCHLOCATIONLIST *UserPatchList;
+    D3DDDI_ALLOCATIONLIST InlineCapturedAllocations[VIDSCH_INLINE_ALLOCATIONS];
+    D3DDDI_PATCHLOCATIONLIST InlineCapturedPatches[VIDSCH_INLINE_PATCHES];
+    D3DDDI_PATCHLOCATIONLIST InlinePatchOut[VIDSCH_INLINE_PATCHES];
+    DXGK_ALLOCATIONLIST InlineKernelAllocations[VIDSCH_INLINE_ALLOCATIONS];
+    PDXGKVMM_ALLOCATION InlineAllocationReferences[VIDSCH_INLINE_ALLOCATIONS];
+    PDXGKVMM_ALLOCATION InlineOpenBindings[VIDSCH_INLINE_ALLOCATIONS];
+    D3DDDI_ALLOCATIONLIST *CapturedAllocations = InlineCapturedAllocations;
+    D3DDDI_PATCHLOCATIONLIST *CapturedPatches = InlineCapturedPatches;
+    D3DDDI_PATCHLOCATIONLIST *PatchOut = InlinePatchOut;
+    DXGK_ALLOCATIONLIST *KernelAllocations = InlineKernelAllocations;
+    PDXGKVMM_ALLOCATION *AllocationReferences = InlineAllocationReferences;
+    PDXGKVMM_ALLOCATION *OpenBindings = InlineOpenBindings;
+    PDXGKVMM_ALLOCATION InlineTrackReferences[VIDSCH_INLINE_ALLOCATIONS];
+    PDXGKVMM_ALLOCATION InlineTrackBindings[VIDSCH_INLINE_ALLOCATIONS];
+    PDXGKVMM_ALLOCATION *TrackReferences = InlineTrackReferences;
+    PDXGKVMM_ALLOCATION *TrackBindings = InlineTrackBindings;
+    UINT TrackCount = 0;
+    UINT PlacementRestarts = 0;
+    UINT AllocationCapacity = VIDSCH_INLINE_ALLOCATIONS;
+    UINT PatchCapacity = VIDSCH_INLINE_PATCHES;
+    PVOID ListStorage = NULL;
+    PVOID DmaBufferPrivateData = NULL;
+    ULONG DmaBufferPrivateDataSize = 0;
+    UINT ReferencedCount = 0;
+    UINT PatchOutCount = 0;
+    UINT DmaBytesUsed = 0;
+    UINT MultipassOffset = 0;
+    UINT QueuedBuffers = 0;
+    UINT Pass;
+    ULONGLONG BackpressureDeadline = 0;
+    UINT Index;
+    ULONG VidSchFence = 0;
+    NTSTATUS Status;
+    BOOLEAN RingLocked = FALSE;
+    BOOLEAN KmdTransaction = FALSE;
+
+    PAGED_CODE();
+
+    if (pRender == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    if (pRender->hContext == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    if (pRender->Flags.RenderKm || pRender->Flags.RenderKmReadback)
+        return STATUS_INVALID_PARAMETER;
+
+    Context = DxgkLookupContextByHandle(pRender->hContext, &Adapter, &Device);
+    if (Context == NULL)
+        return STATUS_INVALID_PARAMETER;
+    if (Adapter == NULL || Device == NULL)
+    {
+        DxgkDereferenceContext(Context);
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (Adapter->MiniportContext == NULL || Adapter->MiniportContext->UseDodLayout || Adapter->MiniportContext->IsDisplayOnlyDriver)
+    {
+        DxgkDereferenceContext(Context);
+        return STATUS_NOT_SUPPORTED;
+    }
+    /*
+     * There is no separate device handle to cross-check: hDevice and hContext
+     * are the same union member, so this field is the context handle we just
+     * resolved.  Comparing it against Device->Handle compared a context handle
+     * with a device handle, which never matches -- every legitimate render was
+     * refused, and only negative tests existed to notice.
+     */
+    if (Context->VirtualAddressing)
+    {
+        /* Virtual contexts submit through SubmitCommandVirtual, not here. */
+        DxgkDereferenceContext(Context);
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (pRender->BroadcastContextCount != 0)
+    {
+        /* Broadcasting one command buffer to additional contexts is not
+         * implemented; refuse rather than silently rendering to one. */
+        DxgkDereferenceContext(Context);
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    DXGKRNL_TRACE("DxgkRender: hDevice=0x%X hContext=0x%X CmdBufSize=%u allocs=%u patches=%u\n",
+                  pRender->hDevice,
+                  pRender->hContext,
+                  pRender->CommandLength,
+                  pRender->AllocationCount,
+                  pRender->PatchLocationCount);
+
+    (VOID)KeWaitForSingleObject(&Context->RenderLock, Executive, KernelMode, FALSE, NULL);
+    RingLocked = TRUE;
+
+    if (Context->RenderRingKernel == NULL || Context->RenderRingUser == NULL)
+    {
+        Status = STATUS_DEVICE_NOT_READY;
+        goto Cleanup;
+    }
+    if (Context->RenderRingProcess != PsGetCurrentProcess())
+    {
+        Status = STATUS_ACCESS_DENIED;
+        goto Cleanup;
+    }
+    if (pRender->AllocationCount > Context->RenderAllocationListSize ||
+        pRender->PatchLocationCount > Context->RenderPatchLocationListSize)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto Cleanup;
+    }
+    if (pRender->CommandLength > Context->RenderCommandBufferSize ||
+        pRender->CommandOffset > Context->RenderCommandBufferSize ||
+        pRender->CommandOffset + pRender->CommandLength > Context->RenderCommandBufferSize)
+    {
+        Status = STATUS_INVALID_PARAMETER;
+        goto Cleanup;
+    }
+
+    if (pRender->CommandLength == 0)
+    {
+        DxgkpRenderPublishRing(Context, pRender);
+        pRender->QueuedBufferCount = 0;
+        Status = STATUS_SUCCESS;
+        goto Cleanup;
+    }
+
+    if (Context->RenderAllocationListSize > VIDSCH_INLINE_ALLOCATIONS ||
+        Context->RenderPatchLocationListSize > VIDSCH_INLINE_PATCHES)
+    {
+        PUCHAR Cursor;
+
+        AllocationCapacity = max(Context->RenderAllocationListSize, (ULONG)VIDSCH_INLINE_ALLOCATIONS);
+        PatchCapacity = max(Context->RenderPatchLocationListSize, (ULONG)VIDSCH_INLINE_PATCHES);
+        ListStorage = ExAllocatePoolWithTag(NonPagedPool,
+                                            (SIZE_T)AllocationCapacity * (sizeof(DXGK_ALLOCATIONLIST) +
+                                                                          4 * sizeof(PDXGKVMM_ALLOCATION) +
+                                                                          sizeof(D3DDDI_ALLOCATIONLIST)) +
+                                            (SIZE_T)PatchCapacity * 2 * sizeof(D3DDDI_PATCHLOCATIONLIST),
+                                            TAG_DXGK_SUBMITDMA);
+        if (ListStorage == NULL)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Cleanup;
+        }
+        Cursor = (PUCHAR)ListStorage;
+        KernelAllocations = (DXGK_ALLOCATIONLIST *)Cursor;
+        Cursor += (SIZE_T)AllocationCapacity * sizeof(DXGK_ALLOCATIONLIST);
+        AllocationReferences = (PDXGKVMM_ALLOCATION *)Cursor;
+        Cursor += (SIZE_T)AllocationCapacity * sizeof(PDXGKVMM_ALLOCATION);
+        OpenBindings = (PDXGKVMM_ALLOCATION *)Cursor;
+        Cursor += (SIZE_T)AllocationCapacity * sizeof(PDXGKVMM_ALLOCATION);
+        TrackReferences = (PDXGKVMM_ALLOCATION *)Cursor;
+        Cursor += (SIZE_T)AllocationCapacity * sizeof(PDXGKVMM_ALLOCATION);
+        TrackBindings = (PDXGKVMM_ALLOCATION *)Cursor;
+        Cursor += (SIZE_T)AllocationCapacity * sizeof(PDXGKVMM_ALLOCATION);
+        CapturedAllocations = (D3DDDI_ALLOCATIONLIST *)Cursor;
+        Cursor += (SIZE_T)AllocationCapacity * sizeof(D3DDDI_ALLOCATIONLIST);
+        CapturedPatches = (D3DDDI_PATCHLOCATIONLIST *)Cursor;
+        Cursor += (SIZE_T)PatchCapacity * sizeof(D3DDDI_PATCHLOCATIONLIST);
+        PatchOut = (D3DDDI_PATCHLOCATIONLIST *)Cursor;
+    }
+
+    if (DXGK_CB_FULL(Adapter, DxgkDdiRender) == NULL || DXGK_CB_FULL(Adapter, DxgkDdiSubmitCommand) == NULL)
+    {
+        Status = STATUS_NOT_SUPPORTED;
+        goto Cleanup;
+    }
+
+    /* Snapshot the user-writable lists before validating them so no entry can
+     * change between validation and use. */
+    RtlZeroMemory(CapturedAllocations, AllocationCapacity * sizeof(*CapturedAllocations));
+    RtlZeroMemory(CapturedPatches, PatchCapacity * sizeof(*CapturedPatches));
+    RtlZeroMemory(KernelAllocations, AllocationCapacity * sizeof(*KernelAllocations));
+    RtlZeroMemory(AllocationReferences, AllocationCapacity * sizeof(*AllocationReferences));
+    RtlZeroMemory(OpenBindings, AllocationCapacity * sizeof(*OpenBindings));
+    UserAllocationList = (D3DDDI_ALLOCATIONLIST *)((PUCHAR)Context->RenderRingKernel + Context->RenderAllocationListOffset);
+    UserPatchList = (D3DDDI_PATCHLOCATIONLIST *)((PUCHAR)Context->RenderRingKernel + Context->RenderPatchLocationListOffset);
+    if (pRender->AllocationCount != 0)
+        RtlCopyMemory(CapturedAllocations, UserAllocationList, pRender->AllocationCount * sizeof(*CapturedAllocations));
+    if (pRender->PatchLocationCount != 0)
+        RtlCopyMemory(CapturedPatches, UserPatchList, pRender->PatchLocationCount * sizeof(*CapturedPatches));
+
+    for (Index = 0; Index < pRender->PatchLocationCount; ++Index)
+    {
+        if (CapturedPatches[Index].AllocationIndex >= pRender->AllocationCount)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto Cleanup;
+        }
+    }
+
+    for (Index = 0; Index < pRender->AllocationCount; ++Index)
+    {
+        PDXGKVMM_ALLOCATION Reference = NULL;
+        PDXGKVMM_ALLOCATION Binding = NULL;
+
+        if (CapturedAllocations[Index].hAllocation == 0)
+        {
+            ReferencedCount = Index + 1;
+            continue;
+        }
+        Status = DxgkVidMmReferenceAllocation((HANDLE)(ULONG_PTR)CapturedAllocations[Index].hAllocation, Adapter, Device, &Reference);
+        if (!NT_SUCCESS(Status))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto Cleanup;
+        }
+        /* Cache maintenance belongs at the final tracked-submission boundary,
+         * after DxgkDdiRender has finished updating allocation-backed data. */
+        Status = DxgkVidMmAcquireSubmissionResidencyPinEx(Reference,
+                                                          Adapter,
+                                                          &KernelAllocations[Index],
+                                                          FALSE);
+        if (Status == STATUS_DEVICE_BUSY && TrackCount != 0 && PlacementRestarts < pRender->AllocationCount)
+        {
+            /* The pins taken so far can fence off the only hole this allocation fits. */
+            PlacementRestarts++;
+            DxgkpRenderReleaseAllocations(AllocationReferences, OpenBindings, ReferencedCount);
+            ReferencedCount = 0;
+            TrackCount = 0;
+            Status = DxgkVidMmMakeResident(Reference, Adapter);
+            if (NT_SUCCESS(Status))
+            {
+                DxgkVidMmDereferenceAllocation(Reference);
+                Index = (UINT)-1;
+                continue;
+            }
+        }
+        if (!NT_SUCCESS(Status))
+        {
+            DxgkVidMmDereferenceAllocation(Reference);
+            goto Cleanup;
+        }
+        KernelAllocations[Index].WriteOperation = CapturedAllocations[Index].WriteOperation;
+        Status = DxgkVidMmReferenceOpenBinding((HANDLE)(ULONG_PTR)CapturedAllocations[Index].hAllocation, Adapter, Device, &KernelAllocations[Index].hDeviceSpecificAllocation, &Binding);
+        if (!NT_SUCCESS(Status))
+        {
+            DxgkVidMmReleaseSubmissionResidencyPin(Reference);
+            DxgkVidMmDereferenceAllocation(Reference);
+            goto Cleanup;
+        }
+        AllocationReferences[Index] = Reference;
+        OpenBindings[Index] = Binding;
+        TrackReferences[TrackCount] = Reference;
+        TrackBindings[TrackCount] = Binding;
+        TrackCount++;
+        ReferencedCount = Index + 1;
+    }
+
+    if (!DxgkBeginKmdTransactionPastMonitorPower(Adapter))
+    {
+        Status = STATUS_DELETE_PENDING;
+        goto Cleanup;
+    }
+    KmdTransaction = TRUE;
+    if (InterlockedCompareExchange(&Device->ExecutionState, 0, 0) != D3DKMT_DEVICEEXECUTION_ACTIVE ||
+        InterlockedCompareExchange(&Context->Destroying, 0, 0) != 0)
+    {
+        Status = STATUS_DEVICE_REMOVED;
+        goto Cleanup;
+    }
+
+    Status = DxgkAllocateDmaBufferInSegmentSet(Adapter, max(Context->ContextInfo.DmaBufferSize, pRender->CommandLength), Context->ContextInfo.DmaBufferSegmentSet, &DmaBuffer);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    /* The miniport declares how much DMA-buffer private data it writes per
+     * submission; give it exactly that, not a pointer-sized stack slot. */
+    DmaBufferPrivateDataSize = Context->ContextInfo.DmaBufferPrivateDataSize;
+    if (DmaBufferPrivateDataSize != 0)
+    {
+        if (DmaBufferPrivateDataSize > DXGKP_RENDER_MAX_PRIVATE_DATA)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto Cleanup;
+        }
+        DmaBufferPrivateData = ExAllocatePoolWithTag(NonPagedPool, DmaBufferPrivateDataSize, TAG_DXGK_SUBMITDMA);
+        if (DmaBufferPrivateData == NULL)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Cleanup;
+        }
+        RtlZeroMemory(DmaBufferPrivateData, DmaBufferPrivateDataSize);
+    }
+
+    /*
+     * A command buffer may translate into more DMA than one buffer holds.
+     * The driver then returns STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER with
+     * pDmaBuffer, pPatchLocationListOut and MultipassOffset describing what it
+     * wrote.  That portion is submitted, a fresh DMA buffer is taken, and the
+     * driver is called again with the same command buffer and the
+     * MultipassOffset it returned, which dxgkrnl never alters.
+     */
+    for (Pass = 0;; ++Pass)
+    {
+        UINT PreviousOffset = MultipassOffset;
+        BOOLEAN Partial;
+
+        if (Pass != 0)
+        {
+            Status = DxgkAllocateDmaBufferInSegmentSet(Adapter, max(Context->ContextInfo.DmaBufferSize, pRender->CommandLength), Context->ContextInfo.DmaBufferSegmentSet, &DmaBuffer);
+            if (!NT_SUCCESS(Status))
+                goto Cleanup;
+            /* The submitted packet kept its own copy of the last pass's
+             * private data; this buffer starts clean. */
+            if (DmaBufferPrivateData != NULL)
+                RtlZeroMemory(DmaBufferPrivateData, DmaBufferPrivateDataSize);
+        }
+
+        RtlZeroMemory(&RenderArgs, sizeof(RenderArgs));
+        RenderArgs.pCommand = (PUCHAR)Context->RenderRingKernel + pRender->CommandOffset;
+        RenderArgs.CommandLength = pRender->CommandLength;
+        RenderArgs.pDmaBuffer = DmaBuffer->VirtualAddress;
+        RenderArgs.DmaSize = DmaBuffer->Capacity;
+        RenderArgs.pDmaBufferPrivateData = DmaBufferPrivateData;
+        RenderArgs.DmaBufferPrivateDataSize = DmaBufferPrivateDataSize;
+        RenderArgs.pAllocationList = KernelAllocations;
+        RenderArgs.AllocationListSize = pRender->AllocationCount;
+        RenderArgs.pPatchLocationListIn = CapturedPatches;
+        RenderArgs.PatchLocationListInSize = pRender->PatchLocationCount;
+        RenderArgs.pPatchLocationListOut = PatchOut;
+        RenderArgs.PatchLocationListOutSize = PatchCapacity;
+        RenderArgs.MultipassOffset = MultipassOffset;
+        RenderArgs.DmaBufferSegmentId = DmaBuffer->SegmentId;
+        RenderArgs.DmaBufferPhysicalAddress = DmaBuffer->SegmentAddress;
+        RtlZeroMemory(PatchOut, PatchCapacity * sizeof(*PatchOut));
+
+        if (!DxgkAcquireKmdCall(Adapter))
+        {
+            Status = STATUS_DELETE_PENDING;
+            goto Cleanup;
+        }
+        Status = DXGK_CB_FULL(Adapter, DxgkDdiRender)(Context->hMiniportContext != NULL ? Context->hMiniportContext : Device->hMiniportDevice, &RenderArgs);
+        DxgkReleaseKmdCall(Adapter);
+        Partial = (Status == STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER);
+        if (!NT_SUCCESS(Status) && !Partial)
+            goto Cleanup;
+
+        if (RenderArgs.pDmaBuffer == NULL ||
+            (PUCHAR)RenderArgs.pDmaBuffer < (PUCHAR)DmaBuffer->VirtualAddress ||
+            (PUCHAR)RenderArgs.pDmaBuffer > (PUCHAR)DmaBuffer->VirtualAddress + DmaBuffer->Capacity)
+        {
+            Status = STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
+            goto Cleanup;
+        }
+        DmaBytesUsed = (UINT)((PUCHAR)RenderArgs.pDmaBuffer - (PUCHAR)DmaBuffer->VirtualAddress);
+        if (!DxgkMeasureDmaPrivateData(DmaBufferPrivateData,
+                                       DmaBufferPrivateDataSize,
+                                       RenderArgs.pDmaBufferPrivateData,
+                                       RenderArgs.DmaBufferPrivateDataSize,
+                                       &DmaBuffer->PrivateDataUsed))
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto Cleanup;
+        }
+        if (RenderArgs.pPatchLocationListOut < PatchOut ||
+            (SIZE_T)(RenderArgs.pPatchLocationListOut - PatchOut) > PatchCapacity)
+        {
+            Status = STATUS_INVALID_PARAMETER;
+            goto Cleanup;
+        }
+        PatchOutCount = (UINT)(RenderArgs.pPatchLocationListOut - PatchOut);
+        for (Index = 0; Index < PatchOutCount; ++Index)
+        {
+            UINT AllocationIndex = PatchOut[Index].AllocationIndex;
+
+            if (AllocationIndex >= pRender->AllocationCount)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                goto Cleanup;
+            }
+            /* DXGK_ALLOCATIONLIST carries no size, so the miniport cannot
+             * bound the offset it will patch.  dxgkrnl owns the allocation
+             * and must refuse an offset that would resolve outside it,
+             * otherwise a user-mode driver could name a neighbouring
+             * allocation's memory. */
+            if (CapturedAllocations[AllocationIndex].hAllocation == 0)
+                continue;
+            if (AllocationReferences[AllocationIndex] == NULL ||
+                PatchOut[Index].AllocationOffset >= AllocationReferences[AllocationIndex]->Size)
+            {
+                Status = STATUS_INVALID_PARAMETER;
+                goto Cleanup;
+            }
+        }
+        MultipassOffset = RenderArgs.MultipassOffset;
+
+        /* A pass that wrote nothing and recorded no progress would ask for
+         * the same buffer forever; so would a stream that never ends. */
+        if (Partial &&
+            ((DmaBytesUsed == 0 && MultipassOffset == PreviousOffset) ||
+             Pass + 1 >= DXGKP_RENDER_MAX_PASSES))
+        {
+            DXGKRNL_WARN("DxgkRender: multipass translation stalled at pass %u "
+                         "(offset %u, %u bytes)\n",
+                         Pass, MultipassOffset, DmaBytesUsed);
+            Status = STATUS_GRAPHICS_INSUFFICIENT_DMA_BUFFER;
+            goto Cleanup;
+        }
+
+        {
+            DmaBuffer->SubmissionStartOffset = 0;
+            DmaBuffer->SubmissionEndOffset = DmaBytesUsed;
+
+            RtlZeroMemory(&TrackArgs, sizeof(TrackArgs));
+            TrackArgs.Device = Device;
+            TrackArgs.Context = Context;
+            TrackArgs.EnforceSubmissionQuota = TRUE;
+            TrackArgs.AllocationReferences = TrackReferences;
+            TrackArgs.AllocationReferenceCount = TrackCount;
+            TrackArgs.OpenBindingReferences = TrackBindings;
+            TrackArgs.OpenBindingReferenceCount = TrackCount;
+            BackpressureDeadline = 0;
+
+RetryTrackedSubmit:
+            Status = VidSchSubmitCommandTracked(Adapter,
+                                                Context->NodeOrdinal,
+                                                0,
+                                                DmaBuffer,
+                                                DmaBufferPrivateData,
+                                                DmaBufferPrivateDataSize,
+                                                KernelAllocations,
+                                                pRender->AllocationCount,
+                                                PatchOut,
+                                                PatchOutCount,
+                                                Adapter->SchedulingCaps.MultiEngineAware ? NULL : Device->hMiniportDevice,
+                                                Adapter->SchedulingCaps.MultiEngineAware ? Context->hMiniportContext : NULL,
+                                                Context->SchedulingPriority,
+                                                &TrackArgs,
+                                                0,
+                                                0,
+                                                &VidSchFence);
+            if (Status == STATUS_RETRY)
+            {
+                if (BackpressureDeadline == 0)
+                {
+                    BackpressureDeadline =
+                        KeQueryInterruptTime() +
+                        (ULONGLONG)VIDSCH_CONTEXT_BACKPRESSURE_MS * 10000ULL;
+                }
+                Status = DxgkYieldKmdTransactionForContextRoom(Adapter,
+                                                               Context,
+                                                               BackpressureDeadline,
+                                                               &KmdTransaction);
+                if (!NT_SUCCESS(Status))
+                    goto Cleanup;
+                if (InterlockedCompareExchange(&Device->ExecutionState, 0, 0) !=
+                        D3DKMT_DEVICEEXECUTION_ACTIVE ||
+                    InterlockedCompareExchange(&Context->Destroying, 0, 0) != 0)
+                {
+                    Status = STATUS_DEVICE_REMOVED;
+                    goto Cleanup;
+                }
+                goto RetryTrackedSubmit;
+            }
+            if (!NT_SUCCESS(Status))
+                goto Cleanup;
+
+            /* The DMA buffer is now owned by the tracked submission, which
+             * took its own allocation references and residency pins; the
+             * ones this call holds are released below either way. */
+            DmaBuffer = NULL;
+            ++QueuedBuffers;
+        }
+
+        if (!Partial)
+            break;
+    }
+
+    DxgkpRenderPublishRing(Context, pRender);
+    pRender->QueuedBufferCount = QueuedBuffers;
+    Status = STATUS_SUCCESS;
+
+Cleanup:
+    DxgkpRenderReleaseAllocations(AllocationReferences, OpenBindings, ReferencedCount);
+    if (DmaBufferPrivateData != NULL)
+        ExFreePoolWithTag(DmaBufferPrivateData, TAG_DXGK_SUBMITDMA);
+    if (DmaBuffer != NULL)
+        DxgkFreeDmaBuffer(DmaBuffer);
+    if (ListStorage != NULL)
+        ExFreePoolWithTag(ListStorage, TAG_DXGK_SUBMITDMA);
+    if (KmdTransaction)
+        DxgkEndKmdTransaction(Adapter);
+    if (RingLocked)
+        KeReleaseMutex(&Context->RenderLock, FALSE);
+    DxgkDereferenceContext(Context);
+    return Status;
+}
+
+/* ========================================================================
+ * DxgkPresent
+ *
+ * D3DKMTPresent -- presents a rendered surface to the display.
+ *
+ * Validates the present parameters, determines the present type
+ * (blt / flip / colour fill), and routes the operation through the
+ * present queue in present.c.
+ *
+ * For display-only adapters with immediate flip interval, the present
+ * is executed synchronously (the shadow FB is pushed to the GPU before
+ * this function returns).  For full WDDM adapters or VSync-synchronized
+ * presents, the operation is queued and processed at VSync time.
+ *
+ * IRQL: PASSIVE_LEVEL
+ * ====================================================================== */
+static NTSTATUS
+DxgkpBuildRedirectedBltPresent(
+    _In_ const D3DKMT_PRESENT *Present,
+    _In_ ULONG InputLength,
+    _In_ ULONG_PTR SurfaceHandle,
+    _In_ PEPROCESS OwnerProcess,
+    _In_ ULONG GlobalShare,
+    _In_ const RECT *DestinationRect,
+    _Out_ DXGKRNL_REDIRECTED_BLT_PRESENT *RedirectedPresent)
+{
+    const UCHAR *Token;
+    ULONG TokenOffset;
+    ULONG UnionOffset;
+    ULONG RequiredLength;
+    ULONG Model;
+    ULONG TokenSize;
+    ULONGLONG PhysicalSurface;
+    ULONGLONG EventId;
+
+    if (Present == NULL || SurfaceHandle == 0 || OwnerProcess == NULL ||
+        GlobalShare == 0 || DestinationRect == NULL ||
+        RedirectedPresent == NULL)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    TokenOffset = FIELD_OFFSET(D3DKMT_PRESENT, PresentHistoryToken);
+#if (REACTOS_WDDM_TARGET_LEVEL >= 1200)
+    UnionOffset = 16;
+#else
+    UnionOffset = 8;
+#endif
+    RequiredLength = TokenOffset + UnionOffset +
+                     FIELD_OFFSET(D3DKMT_BLTMODEL_PRESENTHISTORYTOKEN,
+                                  EventId) +
+                     sizeof(EventId);
+    if (InputLength < RequiredLength)
+        return STATUS_BUFFER_TOO_SMALL;
+
+    Token = (const UCHAR *)Present + TokenOffset;
+    RtlCopyMemory(&Model, Token, sizeof(Model));
+    RtlCopyMemory(&TokenSize, Token + sizeof(Model), sizeof(TokenSize));
+    RtlCopyMemory(&PhysicalSurface,
+                  Token + UnionOffset +
+                      FIELD_OFFSET(D3DKMT_BLTMODEL_PRESENTHISTORYTOKEN,
+                                   hPhysicalSurface),
+                  sizeof(PhysicalSurface));
+    RtlCopyMemory(&EventId,
+                  Token + UnionOffset +
+                      FIELD_OFFSET(D3DKMT_BLTMODEL_PRESENTHISTORYTOKEN,
+                                   EventId),
+                  sizeof(EventId));
+
+    if (Model != D3DKMT_PM_REDIRECTED_BLT || TokenSize != 0 ||
+        PhysicalSurface == 0 || PhysicalSurface > MAXULONG ||
+        (ULONG)PhysicalSurface != GlobalShare || EventId == 0)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    RtlZeroMemory(RedirectedPresent, sizeof(*RedirectedPresent));
+    RedirectedPresent->Size = sizeof(*RedirectedPresent);
+    RedirectedPresent->SurfaceHandle = SurfaceHandle;
+    RedirectedPresent->WindowHandle = (ULONG_PTR)Present->hWindow;
+    RedirectedPresent->OwnerProcess = OwnerProcess;
+    RedirectedPresent->GlobalShare = GlobalShare;
+    RedirectedPresent->UpdateId = EventId;
+    RedirectedPresent->DestinationRect = *DestinationRect;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+DxgkpCaptureRedirectedBltPresent(
+    _In_ const D3DKMT_PRESENT *Present,
+    _In_ ULONG InputLength,
+    _In_ ULONG_PTR SurfaceHandle,
+    _In_ PEPROCESS OwnerProcess,
+    _In_ ULONG GlobalShare,
+    _In_ const RECT *DestinationRect,
+    _Out_ DXGKRNL_REDIRECTED_BLT_PRESENT *RedirectedPresent)
+{
+    NTSTATUS Status = DxgkpBuildRedirectedBltPresent(Present, InputLength, SurfaceHandle, OwnerProcess,
+                                                     GlobalShare, DestinationRect, RedirectedPresent);
+
+    return NT_SUCCESS(Status) ? DxgkAdmitRedirectedBltPresent(RedirectedPresent) : Status;
+}
+
+/* The source of a redirected Blt is the whole source allocation and its destination the window client of the
+ * redirection surface, each clipped by a valid SrcRect or DstRect. */
+static NTSTATUS
+DxgkpResolveRedirectedBltRects(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _In_ PDXGKRNL_DEVICE Device,
+    _In_ const D3DKMT_PRESENT *Present,
+    _In_ ULONG InputLength,
+    _Inout_ PDXGKRNL_PRESENT_ENTRY Entry)
+{
+    DXGKRNL_REDIRECTED_BLT_PRESENT Query;
+    DXGKARG_DESCRIBEALLOCATION Describe;
+    RECT Client, Source, Destination;
+    ULONG_PTR SurfaceHandle;
+    NTSTATUS Status;
+
+    SurfaceHandle = (ULONG_PTR)InterlockedCompareExchangePointer(
+        (PVOID volatile *)&Entry->DestinationAllocation->RedirectionSurfaceHandle, NULL, NULL);
+    if (SurfaceHandle == 0 || Entry->DestinationAllocation->Resource == NULL ||
+        Entry->DestinationAllocation->Resource->GlobalShareHandle == 0)
+        return STATUS_SUCCESS;
+    if (Entry->SourceAllocation == NULL)
+        return STATUS_INVALID_PARAMETER;
+    Status = DxgkpBuildRedirectedBltPresent(Present, InputLength, SurfaceHandle, Device->OwnerProcess,
+                                            Entry->DestinationAllocation->Resource->GlobalShareHandle,
+                                            &Entry->DstRect, &Query);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    Status = DxgkQueryRedirectedBltClient(&Query, &Client);
+    if (!NT_SUCCESS(Status))
+        return Status;
+    if (DXGK_CB_FULL(Adapter, DxgkDdiDescribeAllocation) == NULL)
+        return STATUS_NOT_SUPPORTED;
+
+    RtlZeroMemory(&Describe, sizeof(Describe));
+    Describe.hAllocation = Entry->SourceAllocation->MiniportHandle;
+    if (!DxgkAcquireKmdCall(Adapter))
+        return STATUS_DELETE_PENDING;
+    Status = DXGK_CB_FULL(Adapter, DxgkDdiDescribeAllocation)(Adapter->MiniportDeviceContext, &Describe);
+    DxgkReleaseKmdCall(Adapter);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    if (Client.right <= Client.left || Client.bottom <= Client.top ||
+        !DxgkPresentCoreComputeBltRects(Describe.Width, Describe.Height,
+                                        (ULONG)(Client.right - Client.left), (ULONG)(Client.bottom - Client.top),
+                                        Present->Flags.SrcRectValid ? &Present->SrcRect : NULL,
+                                        Present->Flags.DstRectValid ? &Present->DstRect : NULL,
+                                        &Source, &Destination))
+    {
+        return STATUS_GRAPHICS_PRESENT_OCCLUDED;
+    }
+    Destination.left += Client.left;
+    Destination.top += Client.top;
+    Destination.right += Client.left;
+    Destination.bottom += Client.top;
+    Entry->SrcRect = Source;
+    Entry->DstRect = Destination;
+    return STATUS_SUCCESS;
+}
+
+static VOID
+DxgkpCloseWindowBltShare(
+    _Inout_ PDXGKRNL_DEVICE Device)
+{
+    D3DKMT_DESTROYALLOCATION Destroy;
+
+    if (Device->WindowBltResource != 0)
+    {
+        RtlZeroMemory(&Destroy, sizeof(Destroy));
+        Destroy.hDevice = Device->Handle;
+        Destroy.hResource = Device->WindowBltResource;
+        (VOID)DxgkDestroyAllocation(&Destroy);
+    }
+    Device->WindowBltShare = 0;
+    Device->WindowBltResource = 0;
+    Device->WindowBltAllocation = 0;
+}
+
+static NTSTATUS
+DxgkpOpenWindowBltShare(
+    _Inout_ PDXGKRNL_DEVICE Device,
+    _In_ ULONG GlobalShare)
+{
+    D3DKMT_OPENRESOURCE Open;
+    D3DDDI_OPENALLOCATIONINFO Info;
+    PVOID RuntimeData = NULL;
+    PVOID ResourceData = NULL;
+    PVOID TotalData = NULL;
+    NTSTATUS Status;
+
+    RtlZeroMemory(&Open, sizeof(Open));
+    Open.hDevice = Device->Handle;
+    Open.hGlobalShare = GlobalShare;
+    Status = DxgkOpenResource(&Open);
+    if (Status != STATUS_BUFFER_TOO_SMALL)
+        return NT_SUCCESS(Status) ? STATUS_INVALID_PARAMETER : Status;
+    if (Open.NumAllocations != 1)
+        return STATUS_NOT_SUPPORTED;
+
+    if (Open.PrivateRuntimeDataSize != 0)
+        RuntimeData = ExAllocatePoolWithTag(NonPagedPool, Open.PrivateRuntimeDataSize, TAG_DXGK_PRESENT);
+    if (Open.ResourcePrivateDriverDataSize != 0)
+        ResourceData = ExAllocatePoolWithTag(NonPagedPool, Open.ResourcePrivateDriverDataSize, TAG_DXGK_PRESENT);
+    if (Open.TotalPrivateDriverDataBufferSize != 0)
+        TotalData = ExAllocatePoolWithTag(NonPagedPool, Open.TotalPrivateDriverDataBufferSize, TAG_DXGK_PRESENT);
+    if ((Open.PrivateRuntimeDataSize != 0 && RuntimeData == NULL) ||
+        (Open.ResourcePrivateDriverDataSize != 0 && ResourceData == NULL) ||
+        (Open.TotalPrivateDriverDataBufferSize != 0 && TotalData == NULL))
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+    }
+    else
+    {
+        RtlZeroMemory(&Info, sizeof(Info));
+        Open.pOpenAllocationInfo = &Info;
+        Open.pPrivateRuntimeData = RuntimeData;
+        Open.pResourcePrivateDriverData = ResourceData;
+        Open.pTotalPrivateDriverDataBuffer = TotalData;
+        Status = DxgkOpenResource(&Open);
+        if (NT_SUCCESS(Status))
+        {
+            Device->WindowBltShare = GlobalShare;
+            Device->WindowBltResource = Open.hResource;
+            Device->WindowBltAllocation = Info.hAllocation;
+        }
+    }
+
+    if (TotalData != NULL)
+        ExFreePoolWithTag(TotalData, TAG_DXGK_PRESENT);
+    if (ResourceData != NULL)
+        ExFreePoolWithTag(ResourceData, TAG_DXGK_PRESENT);
+    if (RuntimeData != NULL)
+        ExFreePoolWithTag(RuntimeData, TAG_DXGK_PRESENT);
+    return Status;
+}
+
+/* A Blt with hDestination 0 (destination unknown) presents into the window's GDI redirection surface. */
+static NTSTATUS
+DxgkpResolveWindowBltDestination(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _In_ PDXGKRNL_DEVICE Device,
+    _In_ const D3DKMT_PRESENT *Present,
+    _Inout_ PDXGKRNL_PRESENT_ENTRY Entry,
+    _Out_ PDXGKRNL_WINDOW_BLT_TARGET Target)
+{
+    PDXGKRNL_GDI_BLT_TEXTURE GdiBltTexture = NULL;
+    RECT Destination;
+    ULONG Share = 0;
+    BOOLEAN Visible;
+    NTSTATUS Status;
+
+    Status = DxgkIssueWindowBltTarget(Entry->Window, Target);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Destination = Target->ClientRect;
+    if (Present->Flags.DstRectValid)
+    {
+        Destination.left = max(Target->ClientRect.left + Present->DstRect.left, Target->ClientRect.left);
+        Destination.top = max(Target->ClientRect.top + Present->DstRect.top, Target->ClientRect.top);
+        Destination.right = min(Target->ClientRect.left + Present->DstRect.right, Target->ClientRect.right);
+        Destination.bottom = min(Target->ClientRect.top + Present->DstRect.bottom, Target->ClientRect.bottom);
+    }
+    Visible = Destination.right > Destination.left && Destination.bottom > Destination.top;
+    if (!Visible)
+    {
+        Status = STATUS_GRAPHICS_PRESENT_OCCLUDED;
+    }
+    else
+    {
+        Share = Target->GlobalShare;
+        Status = DxgkReferenceGdiBltTexture(Adapter, Target->GlobalShare, &GdiBltTexture);
+        if (NT_SUCCESS(Status))
+            Share = GdiBltTexture->TextureShare;
+        else if (Status == STATUS_NOT_SUPPORTED)
+            Status = STATUS_SUCCESS; /* FIXME: without GDI hardware acceleration the Blt targets the CPU-visible staging surface itself */
+    }
+    if (Visible && NT_SUCCESS(Status))
+    {
+        KeWaitForSingleObject(&Device->WindowBltMutex, Executive, KernelMode, FALSE, NULL);
+        if (Device->WindowBltResource == 0 || Device->WindowBltShare != Share)
+        {
+            DxgkpCloseWindowBltShare(Device);
+            Status = DxgkpOpenWindowBltShare(Device, Share);
+        }
+        if (NT_SUCCESS(Status))
+        {
+            Entry->hDestination = Device->WindowBltAllocation;
+            Status = DxgkVidMmReferenceAllocation((HANDLE)(ULONG_PTR)Entry->hDestination, Adapter, Device,
+                                                  &Entry->DestinationAllocation);
+        }
+        if (NT_SUCCESS(Status))
+        {
+            Status = DxgkVidMmReferenceOpenBinding((HANDLE)(ULONG_PTR)Entry->hDestination, Adapter, Device,
+                                                   &Entry->DestinationOpenBindingHandle,
+                                                   &Entry->DestinationOpenBindingReference);
+            if (Status == STATUS_NOT_FOUND)
+                Status = STATUS_SUCCESS;
+        }
+        KeReleaseMutex(&Device->WindowBltMutex, FALSE);
+    }
+
+    if (NT_SUCCESS(Status))
+    {
+        Entry->DstRect = Destination;
+        Entry->GdiBltTexture = GdiBltTexture;
+    }
+    else
+    {
+        if (GdiBltTexture != NULL)
+            DxgkDereferenceGdiBltTexture(GdiBltTexture);
+        DxgkCancelWindowBltTarget(Entry->Window, Target->UpdateId);
+    }
+    return Status;
+}
+
+static NTSTATUS
+DxgkpAdmitWindowRedirectedBlt(
+    _In_ ULONG_PTR Window,
+    _In_ ULONG_PTR SurfaceHandle,
+    _In_ PEPROCESS OwnerProcess,
+    _In_ const DXGKRNL_WINDOW_BLT_TARGET *Target,
+    _In_ const RECT *DestinationRect,
+    _Out_ DXGKRNL_REDIRECTED_BLT_PRESENT *RedirectedPresent)
+{
+    RtlZeroMemory(RedirectedPresent, sizeof(*RedirectedPresent));
+    RedirectedPresent->Size = sizeof(*RedirectedPresent);
+    RedirectedPresent->SurfaceHandle = SurfaceHandle;
+    RedirectedPresent->WindowHandle = Window;
+    RedirectedPresent->OwnerProcess = OwnerProcess;
+    RedirectedPresent->GlobalShare = Target->GlobalShare;
+    RedirectedPresent->UpdateId = Target->UpdateId;
+    RedirectedPresent->DestinationRect = *DestinationRect;
+    return DxgkAdmitRedirectedBltPresent(RedirectedPresent);
+}
+
+/*
+ * Overlay planes ride a compositor flip: each is referenced for the queued
+ * entry, and the miniport must accept the whole configuration now, so that
+ * an unsupported overlay fails this present instead of the armed flip.  A
+ * refused present tells the compositor to compose those planes itself.
+ */
+static NTSTATUS
+DxgkpAdmitPresentOverlays(
+    _In_ PDXGKRNL_ADAPTER Adapter,
+    _In_ PDXGKRNL_DEVICE Device,
+    _Inout_ PDXGKRNL_PRESENT_ENTRY Entry,
+    _In_reads_(OverlayCount) const RXGK_PRESENT_OVERLAY *Overlays,
+    _In_ UINT OverlayCount)
+{
+    DXGKP_MPO_CHECK_PLANE Planes[1 + RXGK_PRESENT_MAX_OVERLAYS];
+    BOOL Supported = FALSE;
+    UINT ReturnInfo = 0;
+    NTSTATUS Status;
+    UINT Index, Other;
+
+    /* Only an MMIO flip can arm every plane at once. */
+    if (Entry->Type != DxgkPresentTypeFlip || Entry->SourceAllocation == NULL ||
+        OverlayCount > RXGK_PRESENT_MAX_OVERLAYS || Entry->SharedSurface.HeadlessDesktop ||
+        Adapter->MiniportContext->IsDisplayOnlyDriver ||
+        !(Entry->FlipInterval == D3DDDI_FLIPINTERVAL_IMMEDIATE ?
+              Adapter->FlipCaps.FlipImmediateMmIo : Adapter->FlipCaps.FlipOnVSyncMmIo) ||
+        !DxgkMpoSupported(Adapter))
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
+    /* The miniport withdrew this source's overlays: the compositor composes
+     * until it has flipped a composed frame (DxgkCbMultiPlaneOverlayDisabled). */
+    if (Entry->VidPnSourceId >= 32 ||
+        (InterlockedCompareExchange(&Adapter->MpoDisabledSources, 0, 0) &
+         (LONG)(1UL << Entry->VidPnSourceId)) != 0)
+    {
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    RtlZeroMemory(Planes, sizeof(Planes));
+    Planes[0].hAllocation = Entry->SourceAllocation->MiniportHandle;
+    Planes[0].VidPnSourceId = Entry->VidPnSourceId;
+    DxgkMpoPrimaryPlane(&Entry->SrcRect, &Entry->DstRect, &Planes[0].Plane);
+    for (Index = 0; Index < OverlayCount; ++Index)
+    {
+        const RXGK_PRESENT_OVERLAY *Overlay = &Overlays[Index];
+        PDXGKRNL_PRESENT_OVERLAY Captured = &Entry->Overlays[Index];
+
+        if (Overlay->hAllocation == 0 || Overlay->LayerIndex == 0 ||
+            Overlay->LayerIndex > RXGK_PRESENT_MAX_OVERLAYS)
+            return STATUS_INVALID_PARAMETER;
+        for (Other = 0; Other < Index; ++Other)
+        {
+            if (Overlays[Other].LayerIndex == Overlay->LayerIndex)
+                return STATUS_INVALID_PARAMETER;
+        }
+        Status = DxgkMpoCaptureOverlay(Overlay, &Planes[Index + 1].Plane);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        Status = DxgkVidMmReferenceAllocation((HANDLE)(ULONG_PTR)Overlay->hAllocation,
+                                              Adapter, Device, &Planes[Index + 1].Plane.Allocation);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        /* The entry owns the reference from here; its release drops it. */
+        *Captured = Planes[Index + 1].Plane;
+        Entry->OverlayCount = Index + 1;
+        Planes[Index + 1].hAllocation = Captured->Allocation->MiniportHandle;
+        Planes[Index + 1].VidPnSourceId = Entry->VidPnSourceId;
+    }
+
+    Status = DxgkCheckMultiPlaneOverlay(Adapter, OverlayCount + 1, Planes, 0, NULL,
+                                        &Supported, &ReturnInfo);
+    if (NT_SUCCESS(Status) && !Supported)
+        Status = STATUS_NOT_SUPPORTED;
+    return Status;
+}
+
+static NTSTATUS
+DxgkpPresent(
+    _Inout_ D3DKMT_PRESENT *pPresent,
+    _In_ ULONG InputLength,
+    _In_reads_opt_(OverlayCount) const RXGK_PRESENT_OVERLAY *Overlays,
+    _In_ UINT OverlayCount,
+    _In_ UINT HdrMetadata,
+    _In_opt_ const RXGK_HDR10_METADATA *Hdr10)
+{
+    PDXGKRNL_ADAPTER         Adapter = NULL;
+    PDXGKRNL_DEVICE          Device = NULL;
+    PDXGKRNL_CONTEXT         Context = NULL;
+    DXGKRNL_PRESENT_ENTRY    Entry;
+    ULONG64                  PresentId;
+    NTSTATUS                 Status;
+    BOOLEAN                  DestinationIsInternal = FALSE;
+    BOOLEAN                  WindowTargetIssued = FALSE;
+    DXGKRNL_WINDOW_BLT_TARGET WindowTarget;
+
+    PAGED_CODE();
+
+    if (pPresent == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    if (pPresent->hDevice == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    if (pPresent->Flags.Value == 0 && pPresent->hSource == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    RtlZeroMemory(&Entry, sizeof(Entry));
+
+    Context = DxgkLookupContextByHandle(pPresent->hContext, &Adapter, &Device);
+    if (Context != NULL)
+    {
+        if (!DxgkReferenceDevice(Device))
+        {
+            DxgkDereferenceContext(Context);
+            return STATUS_DELETE_PENDING;
+        }
+    }
+    else
+    {
+        Status = DxgkReferenceOwnedDeviceByHandle(pPresent->hDevice, PsGetCurrentProcess(), &Adapter, &Device);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        if (Adapter->SchedulingCaps.MultiEngineAware)
+        {
+            DxgkDereferenceDevice(Device);
+            return STATUS_INVALID_PARAMETER;
+        }
+    }
+
+    Entry.Context = Context;
+    Entry.Device = Device;
+    if (Adapter->State != DxgkAdapterStateStarted || InterlockedCompareExchange(&Adapter->SubmitDmaStopping, 0, 0) != 0)
+    {
+        DxgkpReleasePresentEntry(&Entry);
+        return STATUS_DELETE_PENDING;
+    }
+
+    Status = DxgkpAcquireSharedSurfaceSnapshot(Adapter, &Entry.SharedSurface);
+    if (!NT_SUCCESS(Status))
+    {
+        DxgkpReleasePresentEntry(&Entry);
+        return Status;
+    }
+
+    /* --- Build the present entry ---------------------------------------- */
+
+    Entry.hSource        = pPresent->hSource;
+    Entry.hDestination   = pPresent->hDestination;
+    Entry.Color          = pPresent->Color;
+    Entry.FlipInterval   = pPresent->FlipInterval;
+    Entry.DoNotWait      = pPresent->Flags.FlipDoNotWait;
+
+    /*
+     * Determine the VidPn source.  If RestrictVidPnSource is set, use the
+     * caller-specified VidPnSourceId.  Otherwise default to source 0
+     * (the primary display).
+     */
+    if (pPresent->Flags.RestrictVidPnSource)
+        Entry.VidPnSourceId = pPresent->VidPnSourceId;
+    else
+        Entry.VidPnSourceId = 0;
+
+    Entry.Window = (ULONG_PTR)pPresent->hWindow;
+    Entry.CompositorGeneration = DxgkVidPnCaptureCompositorGeneration(
+        Adapter, Device, Entry.VidPnSourceId, Entry.Window);
+
+    /* Source rectangle. */
+    if (pPresent->Flags.SrcRectValid)
+    {
+        Entry.SrcRect = pPresent->SrcRect;
+    }
+    else
+    {
+        /* Default to the full committed display resolution. */
+        Entry.SrcRect.left   = 0;
+        Entry.SrcRect.top    = 0;
+        Entry.SrcRect.right  = (LONG)Entry.SharedSurface.CommittedWidth;
+        Entry.SrcRect.bottom = (LONG)Entry.SharedSurface.CommittedHeight;
+    }
+
+    /* Destination rectangle. */
+    if (pPresent->Flags.DstRectValid)
+    {
+        Entry.DstRect = pPresent->DstRect;
+    }
+    else
+    {
+        Entry.DstRect.left   = 0;
+        Entry.DstRect.top    = 0;
+        Entry.DstRect.right  = (LONG)Entry.SharedSurface.CommittedWidth;
+        Entry.DstRect.bottom = (LONG)Entry.SharedSurface.CommittedHeight;
+    }
+
+    /*
+     * Determine the present type from the D3DKMT_PRESENTFLAGS.
+     *
+     * Priority order (matching Windows behaviour):
+     *   1. Flip — hardware page flip (if supported).
+     *   2. ColorFill — solid colour fill.
+     *   3. Blt — default: blit from source to destination.
+     */
+    if (pPresent->Flags.Flip)
+    {
+        if (pPresent->Flags.Blt ||
+            pPresent->Flags.ColorFill ||
+            Entry.hSource == 0 ||
+            Entry.hDestination != 0)
+        {
+            DxgkpReleasePresentEntry(&Entry);
+            return STATUS_INVALID_PARAMETER;
+        }
+        Entry.Type = DxgkPresentTypeFlip;
+    }
+    else if (pPresent->Flags.ColorFill)
+    {
+        Entry.Type = DxgkPresentTypeColorFill;
+    }
+    else
+    {
+        /* Default to blit present (covers Blt flag and unset flags). */
+        Entry.Type = DxgkPresentTypeBlt;
+    }
+
+    /*
+     * KMT rectangles are in source space, while DxgkDdiPresent consumes
+     * destination-space rectangles.  Snapshot them now because this present
+     * may remain queued after the caller's buffer goes away; they are mapped
+     * once the destination rectangle is final.
+     */
+    if (pPresent->SubRectCnt != 0)
+    {
+        SIZE_T SubRectBytes;
+
+        if (pPresent->pSrcSubRects == NULL)
+        {
+            DxgkpReleasePresentEntry(&Entry);
+            return STATUS_INVALID_PARAMETER;
+        }
+        if (pPresent->SubRectCnt > DXGK_PRESENT_CORE_MAX_SUBRECTS)
+        {
+            DxgkpReleasePresentEntry(&Entry);
+            return STATUS_NOT_SUPPORTED;
+        }
+        if (Entry.Type == DxgkPresentTypeFlip)
+        {
+            DxgkpReleasePresentEntry(&Entry);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        SubRectBytes =
+            (SIZE_T)pPresent->SubRectCnt * sizeof(Entry.DstSubRects[0]);
+        Entry.DstSubRects = ExAllocatePoolWithTag(
+                                NonPagedPool,
+                                SubRectBytes,
+                                TAG_DXGK_PRESENT);
+        if (Entry.DstSubRects == NULL)
+        {
+            DxgkpReleasePresentEntry(&Entry);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        _SEH2_TRY
+        {
+            RtlCopyMemory(Entry.DstSubRects,
+                          pPresent->pSrcSubRects,
+                          SubRectBytes);
+            Status = STATUS_SUCCESS;
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+        if (!NT_SUCCESS(Status))
+        {
+            DxgkpReleasePresentEntry(&Entry);
+            return Status;
+        }
+        Entry.DstSubRectCount = pPresent->SubRectCnt;
+    }
+    else if (pPresent->pSrcSubRects != NULL)
+    {
+        DxgkpReleasePresentEntry(&Entry);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /*
+     * User-mode present callers may omit hDestination to mean "present to the
+     * current primary". Route those blits to the shared-primary allocation
+     * when dxgkrnl already exposed one.
+     */
+    if (Entry.Type == DxgkPresentTypeBlt)
+    {
+        if (Entry.hSource == 0 && Entry.hDestination == 0)
+        {
+            DXGKRNL_WARN("DxgkPresent: rejecting source-less blt present "
+                          "hDevice=0x%X hWindow=%p VidPn=%u rect=(%ld,%ld)-(%ld,%ld)\n",
+                          pPresent->hDevice,
+                          pPresent->hWindow,
+                          Entry.VidPnSourceId,
+                          Entry.DstRect.left,
+                          Entry.DstRect.top,
+                          Entry.DstRect.right,
+                          Entry.DstRect.bottom);
+            DxgkpReleasePresentEntry(&Entry);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        if (Entry.hSource != 0 &&
+            Entry.hDestination == 0 &&
+            Entry.SharedSurface.PrimaryHandle != NULL &&
+            DxgkpDeviceOwnsVidPnSource(Device->Handle, Entry.VidPnSourceId))
+        {
+            /*
+             * Only the VidPn source owner may present straight to the primary.
+             * Non-owners need window clipping or a redirection destination;
+             * they cannot overwrite the desktop primary.
+             */
+            Entry.hDestination = (D3DKMT_HANDLE)(ULONG_PTR)Entry.SharedSurface.PrimaryHandle;
+            DestinationIsInternal = TRUE;
+        }
+    }
+
+    if (Entry.hSource != 0)
+    {
+        Status = DxgkVidMmReferenceAllocation((HANDLE)(ULONG_PTR)Entry.hSource, Adapter, Device, &Entry.SourceAllocation);
+        if (!NT_SUCCESS(Status))
+        {
+            DxgkpReleasePresentEntry(&Entry);
+            return Status;
+        }
+        if (Entry.Type == DxgkPresentTypeFlip &&
+            Entry.SourceAllocation->PrimaryVidPnSourceId != D3DDDI_ID_UNINITIALIZED &&
+            Entry.SourceAllocation->PrimaryVidPnSourceId != Entry.VidPnSourceId)
+        {
+            DxgkpReleasePresentEntry(&Entry);
+            return STATUS_INVALID_PARAMETER;
+        }
+        Status = DxgkVidMmReferenceOpenBinding((HANDLE)(ULONG_PTR)Entry.hSource, Adapter, Device, &Entry.SourceOpenBindingHandle, &Entry.SourceOpenBindingReference);
+        if (!NT_SUCCESS(Status) && Status != STATUS_NOT_FOUND)
+        {
+            DxgkpReleasePresentEntry(&Entry);
+            return Status;
+        }
+    }
+
+    if (Entry.hDestination != 0)
+    {
+        Status = DxgkVidMmReferenceAllocation((HANDLE)(ULONG_PTR)Entry.hDestination, Adapter, DestinationIsInternal ? NULL : Device, &Entry.DestinationAllocation);
+        if (!NT_SUCCESS(Status))
+        {
+            DxgkpReleasePresentEntry(&Entry);
+            return Status;
+        }
+        if (!DestinationIsInternal)
+        {
+            Status = DxgkVidMmReferenceOpenBinding((HANDLE)(ULONG_PTR)Entry.hDestination, Adapter, Device, &Entry.DestinationOpenBindingHandle, &Entry.DestinationOpenBindingReference);
+            if (!NT_SUCCESS(Status) && Status != STATUS_NOT_FOUND)
+            {
+                DxgkpReleasePresentEntry(&Entry);
+                return Status;
+            }
+        }
+    }
+
+    /* A hidden, minimized, or empty window has no destination pixels. Query
+     * USER only after validating the device/context and allocation handles.
+     * Do not send a BLT with a NULL destination to the miniport: NULL is valid
+     * for a flip, not a copy. Occlusion rejects only this display operation;
+     * it neither completes preceding GPU work nor faults the device. */
+    if (Entry.Type == DxgkPresentTypeBlt &&
+        Entry.hDestination == 0 && Entry.Window != 0)
+    {
+        /* Occlusion returns before queue admission. Preserve the terminal
+         * device/context failure that DxgkpQueuePresent would report, so a
+         * hidden window cannot turn a lost device into a retryable present. */
+        if (InterlockedCompareExchange(&Device->Destroying, 0, 0) != 0 ||
+            InterlockedCompareExchange(&Device->ExecutionState, 0, 0) !=
+                D3DKMT_DEVICEEXECUTION_ACTIVE ||
+            (Context != NULL &&
+             InterlockedCompareExchange(&Context->Destroying, 0, 0) != 0))
+        {
+            DxgkpReleasePresentEntry(&Entry);
+            return STATUS_DEVICE_REMOVED;
+        }
+        Status = DxgkQueryWindowPresentState(Entry.Window);
+        if (!NT_SUCCESS(Status))
+        {
+            DxgkpReleasePresentEntry(&Entry);
+            return Status;
+        }
+        if (!Adapter->MiniportContext->IsDisplayOnlyDriver &&
+            DXGK_CB_FULL(Adapter, DxgkDdiPresent) != NULL)
+        {
+            RtlZeroMemory(&WindowTarget, sizeof(WindowTarget));
+            Status = DxgkpResolveWindowBltDestination(Adapter, Device, pPresent, &Entry, &WindowTarget);
+            if (!NT_SUCCESS(Status))
+            {
+                DxgkpReleasePresentEntry(&Entry);
+                /* TODO: present into a window whose composition surface lives on another adapter */
+                if (Status == STATUS_DEVICE_NOT_READY || Status == STATUS_NOT_SUPPORTED ||
+                    Status == STATUS_NOT_FOUND || Status == STATUS_INVALID_HANDLE)
+                {
+                    return STATUS_GRAPHICS_PRESENT_OCCLUDED;
+                }
+                return Status;
+            }
+            WindowTargetIssued = TRUE;
+        }
+    }
+
+    if (Entry.Type == DxgkPresentTypeBlt && !WindowTargetIssued && pPresent->Flags.RedirectedBlt &&
+        Entry.DestinationAllocation != NULL && Entry.Window != 0)
+    {
+        Status = DxgkpResolveRedirectedBltRects(Adapter, Device, pPresent, InputLength, &Entry);
+        if (!NT_SUCCESS(Status))
+        {
+            DxgkpReleasePresentEntry(&Entry);
+            return Status;
+        }
+    }
+
+    if (Entry.DstSubRectCount != 0)
+    {
+        if (Entry.Type == DxgkPresentTypeColorFill)
+        {
+            Status = DxgkPresentCoreCopyDestinationSubRects(
+                         &Entry.DstRect,
+                         Entry.DstSubRects,
+                         Entry.DstSubRectCount,
+                         Entry.DstSubRects,
+                         Entry.DstSubRectCount);
+        }
+        else
+        {
+            Status = DxgkPresentCoreMapSourceSubRects(
+                         &Entry.SrcRect,
+                         &Entry.DstRect,
+                         Entry.DstSubRects,
+                         Entry.DstSubRectCount,
+                         Entry.DstSubRects,
+                         Entry.DstSubRectCount);
+        }
+        if (!NT_SUCCESS(Status))
+        {
+            if (WindowTargetIssued)
+                DxgkCancelWindowBltTarget(Entry.Window, WindowTarget.UpdateId);
+            DxgkpReleasePresentEntry(&Entry);
+            return Status;
+        }
+    }
+
+    if (Entry.DestinationAllocation != NULL)
+    {
+        PDXGKVMM_ALLOCATION Redirected = Entry.DestinationAllocation;
+        PDXGKVMM_ALLOCATION Staging = NULL;
+        ULONG_PTR SurfaceHandle;
+        D3DKMT_HANDLE RedirectedShare = 0;
+
+        /* A GDI blt texture stands in for the window's staging redirection surface. */
+        if (Entry.GdiBltTexture != NULL &&
+            NT_SUCCESS(DxgkVidMmReferenceAllocation((HANDLE)(ULONG_PTR)Entry.GdiBltTexture->StagingAllocation,
+                                                    Adapter, NULL, &Staging)))
+        {
+            Redirected = Staging;
+        }
+        SurfaceHandle = (ULONG_PTR)InterlockedCompareExchangePointer(
+            (PVOID volatile *)&Redirected->RedirectionSurfaceHandle,
+            NULL, NULL);
+        if (Entry.GdiBltTexture != NULL && Staging == NULL)
+            SurfaceHandle = 0;
+        if (SurfaceHandle != 0 && Redirected->Resource != NULL)
+            RedirectedShare = Redirected->Resource->GlobalShareHandle;
+        if (Staging != NULL)
+            DxgkVidMmDereferenceAllocation(Staging);
+        if (SurfaceHandle != 0)
+        {
+            if (Entry.Type != DxgkPresentTypeBlt || RedirectedShare == 0 ||
+                (WindowTargetIssued && RedirectedShare != WindowTarget.GlobalShare))
+            {
+                Status = STATUS_INVALID_PARAMETER;
+            }
+            else
+            {
+                Entry.RedirectedBltWork = DxgkAllocateRedirectedBltWork();
+                if (Entry.RedirectedBltWork == NULL)
+                    Status = STATUS_INSUFFICIENT_RESOURCES;
+                else if (WindowTargetIssued)
+                    Status = DxgkpAdmitWindowRedirectedBlt(Entry.Window, SurfaceHandle, Device->OwnerProcess,
+                                                           &WindowTarget, &Entry.DstRect,
+                                                           &Entry.RedirectedBltPresent);
+                else
+                    Status = DxgkpCaptureRedirectedBltPresent(
+                                 pPresent,
+                                 InputLength,
+                                 SurfaceHandle,
+                                 Device->OwnerProcess,
+                                 RedirectedShare,
+                                 &Entry.DstRect,
+                                 &Entry.RedirectedBltPresent);
+            }
+            if (!NT_SUCCESS(Status))
+            {
+                if (WindowTargetIssued)
+                    DxgkCancelWindowBltTarget(Entry.Window, WindowTarget.UpdateId);
+                DxgkpReleasePresentEntry(&Entry);
+                return Status;
+            }
+            Entry.RedirectedBltPresentAdmitted = TRUE;
+        }
+    }
+    if (WindowTargetIssued && !Entry.RedirectedBltPresentAdmitted)
+    {
+        DxgkCancelWindowBltTarget(Entry.Window, WindowTarget.UpdateId);
+        DxgkpReleasePresentEntry(&Entry);
+        return STATUS_GRAPHICS_PRESENT_OCCLUDED;
+    }
+
+    Entry.SourceIsSharedPrimary = Entry.SourceAllocation != NULL && Entry.SourceAllocation == Entry.SharedSurface.PrimaryAllocation;
+    Entry.SourceIsSharedShadow = Entry.SourceAllocation != NULL && Entry.SourceAllocation == Entry.SharedSurface.ShadowAllocation;
+    Entry.DestinationIsSharedPrimary = Entry.DestinationAllocation != NULL && Entry.DestinationAllocation == Entry.SharedSurface.PrimaryAllocation;
+    Entry.DestinationIsSharedShadow = Entry.DestinationAllocation != NULL && Entry.DestinationAllocation == Entry.SharedSurface.ShadowAllocation;
+    if (!Adapter->MiniportContext->IsDisplayOnlyDriver &&
+        Entry.Type != DxgkPresentTypeFlip &&
+        Entry.SharedSurface.ShadowFb == NULL &&
+        !Entry.SourceIsSharedPrimary &&
+        !Entry.SourceIsSharedShadow &&
+        !Entry.DestinationIsSharedPrimary &&
+        !Entry.DestinationIsSharedShadow)
+    {
+        DxgkpReleaseSharedSurfaceSnapshot(&Entry.SharedSurface);
+    }
+
+    if (OverlayCount != 0)
+    {
+        Status = DxgkpAdmitPresentOverlays(Adapter, Device, &Entry, Overlays, OverlayCount);
+        if (!NT_SUCCESS(Status))
+        {
+            DxgkpReleasePresentEntry(&Entry);
+            return Status;
+        }
+        /* Metadata reaches the output with the planes it describes. */
+        Entry.HdrMetadata = HdrMetadata;
+        if (HdrMetadata == RXGK_PRESENT_HDR_METADATA_HDR10 && Hdr10 != NULL)
+            Entry.Hdr10 = *Hdr10;
+    }
+
+    /* --- Submit to the present queue ----------------------------------- */
+
+    Status = DxgkpQueuePresent(Adapter, &Entry, &PresentId);
+
+    if (!NT_SUCCESS(Status) && Status != STATUS_DEVICE_BUSY)
+    {
+        DXGKRNL_WARN("DxgkPresent: DxgkpQueuePresent returned 0x%08lX\n",
+                     Status);
+    }
+
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+DxgkPresent(
+    _Inout_ D3DKMT_PRESENT *pPresent,
+    _In_ ULONG InputLength)
+{
+    return DxgkpPresent(pPresent, InputLength, NULL, 0,
+                        RXGK_PRESENT_HDR_METADATA_UNCHANGED, NULL);
+}
+
+/* A compositor flip carrying overlay planes; see RXGK_PRESENT_OVERLAYS. */
+NTSTATUS
+NTAPI
+DxgkPresentWithOverlays(
+    _Inout_ RXGK_PRESENT_OVERLAYS *Request,
+    _In_ ULONG InputLength)
+{
+    D3DKMT_PRESENT *Present;
+
+    if (Request == NULL ||
+        InputLength < sizeof(*Request) + RTL_SIZEOF_THROUGH_FIELD(D3DKMT_PRESENT, Flags) ||
+        Request->OverlayCount == 0 || Request->OverlayCount > RXGK_PRESENT_MAX_OVERLAYS ||
+        Request->HdrMetadata > RXGK_PRESENT_HDR_METADATA_HDR10)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+    Present = (D3DKMT_PRESENT *)(Request + 1);
+    return DxgkpPresent(Present, InputLength - sizeof(*Request),
+                        Request->Overlays, Request->OverlayCount,
+                        Request->HdrMetadata, &Request->Hdr10);
+}
+
+NTSTATUS
+__cdecl
+DxgkPresentCallback(
+    _Inout_ D3DKMT_PRESENT *pPresent)
+{
+    return DxgkPresent(pPresent, RXGK_D3DKMT_PRESENT_WIRE_SIZE);
+}

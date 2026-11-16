@@ -67,6 +67,9 @@ VOID
 #define HALP_LOW_STUB_SIZE_IN_PAGES 3
 #endif
 
+/* Phase 0 copies of ACPI data stay below 16 MB, as they always have on x86 */
+#define HALP_ACPI_MAX_PHYSICAL_ADDRESS 0x1000000
+
 FORCEINLINE
 UCHAR
 BCD_INT(
@@ -235,9 +238,65 @@ HalpEnableInterruptHandler(IN UCHAR Flags,
 VOID NTAPI HalpInitializePICs(IN BOOLEAN EnableInterrupts);
 VOID __cdecl HalpApcInterrupt(VOID);
 VOID __cdecl HalpDispatchInterrupt(VOID);
+VOID __cdecl HalpIpiInterrupt(VOID);
 PHAL_SW_INTERRUPT_HANDLER __cdecl HalpDispatchInterrupt2(VOID);
 DECLSPEC_NORETURN VOID FASTCALL HalpApcInterrupt2ndEntry(IN PKTRAP_FRAME TrapFrame);
 DECLSPEC_NORETURN VOID FASTCALL HalpDispatchInterrupt2ndEntry(IN PKTRAP_FRAME TrapFrame);
+
+#ifdef _M_AMD64
+/* apic/msi support */
+CODE_SEG("INIT")
+BOOLEAN
+NTAPI
+HalpInitializeMsiVectors(VOID);
+
+BOOLEAN
+NTAPI
+HalpAllocateMsiVector(
+    _In_ KIRQL DesiredIrql,
+    _Out_ PUCHAR OutVector,
+    _Out_ PKIRQL OutIrql,
+    _Out_ PKAFFINITY OutAffinity);
+
+BOOLEAN
+NTAPI
+HalpFreeMsiVector(
+    _In_ UCHAR Vector);
+
+KIRQL
+FASTCALL
+HalpMsiVectorToIrql(
+    _In_ UCHAR Vector);
+
+#endif /* _M_AMD64 */
+
+NTSTATUS
+NTAPI
+HalpInitPowerManagement(
+    _In_ PPM_DISPATCH_TABLE PmDriverDispatchTable,
+    _Out_ PPM_DISPATCH_TABLE *PmHalDispatchTable);
+
+VOID
+NTAPI
+ApicInitializeLocalApic(
+    _In_ ULONG Cpu);
+
+VOID
+HalpSaveInterruptControllers(VOID);
+
+VOID
+HalpRestoreInterruptControllers(VOID);
+
+VOID
+HalpRestoreClock(VOID);
+
+ULONG
+HalpSaveLocalInterrupts(VOID);
+
+VOID
+HalpRestoreLocalInterrupts(
+    _In_ ULONG Processor,
+    _In_ ULONG Priority);
 
 /* profil.c */
 extern BOOLEAN HalpProfilingStopped;
@@ -259,10 +318,24 @@ VOID
 NTAPI
 HalpCalibrateStallExecution(VOID);
 
+extern ULONG HalpStallScaleFactor;
+
 /* pci.c */
 VOID HalpInitPciBus (VOID);
 
+/* legacy/bus/pcibus.c: ACPI _PRT line-shape hints for IOAPIC RTE programming */
+BOOLEAN NTAPI HalpQueryPciGsiRteHints(_In_ ULONG Gsi, _Out_ PBOOLEAN ActiveLow, _Out_ PBOOLEAN LevelTriggered);
+
+/* generic/spinlock.c: any-IRQL lock protocol for shared hardware index/data windows */
+VOID NTAPI HalpAcquireRaisedSpinLock(_In_ PKSPIN_LOCK SpinLock, _Out_ PULONG_PTR OutFlags);
+VOID NTAPI HalpReleaseRaisedSpinLock(_In_ PKSPIN_LOCK SpinLock, _In_ ULONG_PTR Flags);
+
+/* generic/gsihints.c: MADT interrupt-source-override hints for IOAPIC RTE programming */
+VOID NTAPI HalpRegisterInterruptOverride(_In_ ULONG SourceIrq, _In_ ULONG GlobalIrq, _In_ USHORT IntiFlags);
+BOOLEAN NTAPI HalpQueryMadtRteHints(_In_ ULONG Gsi, _Out_ PBOOLEAN ActiveLow, _Out_ PBOOLEAN LevelTriggered);
+
 /* dma.c */
+CODE_SEG("INIT") VOID HalpReserveMapBuffers(IN PLOADER_PARAMETER_BLOCK LoaderBlock);
 CODE_SEG("INIT") VOID HalpInitDma (VOID);
 
 /* Non-generic initialization */
@@ -511,11 +584,27 @@ HalpIs16BitPortDecodeSupported(
     VOID
 );
 
+BOOLEAN
+HalpQueryAcpiRootPointer(
+    _Out_ PPHYSICAL_ADDRESS Address
+);
+
 NTSTATUS
 NTAPI
 HalpQueryAcpiResourceRequirements(
     OUT PIO_RESOURCE_REQUIREMENTS_LIST *Requirements
 );
+
+BOOLEAN
+NTAPI
+HalpGetPmTimer(
+    OUT PULONG Port,
+    OUT PULONG Mask
+);
+
+VOID
+NTAPI
+HalpAcpiReset(VOID);
 
 VOID
 FASTCALL
@@ -556,6 +645,66 @@ HalpDebugPciDumpBus(
     IN PPCI_COMMON_CONFIG PciData
 );
 
+#ifdef _M_AMD64
+CODE_SEG("INIT")
+VOID
+NTAPI
+HalpAcpiPcieInitializeExtendedConfig(
+    VOID
+);
+#endif
+
+#ifdef _M_AMD64
+/* MSI/MSI-X Capability Functions */
+
+UCHAR
+NTAPI
+HalpPciDetectMsiCapability(
+    IN PBUS_HANDLER BusHandler,
+    IN PCI_SLOT_NUMBER Slot
+);
+
+UCHAR
+NTAPI
+HalpPciDetectMsiXCapability(
+    IN PBUS_HANDLER BusHandler,
+    IN PCI_SLOT_NUMBER Slot
+);
+
+BOOLEAN
+NTAPI
+HalpPciEnableMsi(
+    IN PBUS_HANDLER BusHandler,
+    IN PCI_SLOT_NUMBER Slot,
+    IN ULONG Vector,
+    IN UCHAR ProcessorNumber
+);
+
+BOOLEAN
+NTAPI
+HalpPciEnableMsiX(
+    IN PBUS_HANDLER BusHandler,
+    IN PCI_SLOT_NUMBER Slot,
+    IN ULONG TableEntry,
+    IN ULONG Vector,
+    IN UCHAR ProcessorNumber
+);
+
+BOOLEAN
+NTAPI
+HalpPciDisableMsi(
+    IN PBUS_HANDLER BusHandler,
+    IN PCI_SLOT_NUMBER Slot
+);
+
+BOOLEAN
+NTAPI
+HalpPciDisableMsiX(
+    IN PBUS_HANDLER BusHandler,
+    IN PCI_SLOT_NUMBER Slot
+);
+#endif /* _M_AMD64 */
+
 VOID
 NTAPI
 HalpInitProcessor(
@@ -594,6 +743,8 @@ HalInitializeBios(
     _In_ PLOADER_PARAMETER_BLOCK LoaderBlock
 );
 
+extern BOOLEAN HalBootViaEfi;
+
 #ifdef _M_AMD64
 #define KfLowerIrql KeLowerIrql
 #define KiEnterInterruptTrap(TrapFrame) /* We do all neccessary in asm code */
@@ -630,6 +781,17 @@ extern PWCHAR HalHardwareIdString;
 extern PWCHAR HalName;
 
 extern KAFFINITY HalpDefaultInterruptAffinity;
+
+NTSTATUS
+HalpSecondaryQueryInformation(
+    _In_ ULONG BufferSize,
+    _Out_ PVOID Buffer,
+    _Out_opt_ PULONG ReturnedLength);
+
+NTSTATUS
+HalpSecondaryRegisterInterface(
+    _In_ ULONG BufferSize,
+    _In_ PVOID Buffer);
 
 extern IDTUsageFlags HalpIDTUsageFlags[MAXIMUM_IDTVECTOR+1];
 

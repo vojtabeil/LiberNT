@@ -131,6 +131,42 @@ typedef struct _INTERRUPT_VECTOR_DATA
     };
 } INTERRUPT_VECTOR_DATA, *PINTERRUPT_VECTOR_DATA;
 
+typedef NTSTATUS
+(NTAPI *PHAL_SECONDARY_INTERRUPT_ENABLE)(
+    _In_ PVOID Context,
+    _In_ ULONG Gsiv,
+    _In_ KINTERRUPT_MODE Mode,
+    _In_ KINTERRUPT_POLARITY Polarity);
+
+typedef VOID
+(NTAPI *PHAL_SECONDARY_INTERRUPT_DISABLE)(
+    _In_ PVOID Context,
+    _In_ ULONG Gsiv);
+
+typedef struct _HAL_SECONDARY_INTERRUPT_INTERFACE
+{
+    ULONG Size;
+    PVOID Context;
+    PCSTR OwnerName;
+    USHORT OwnerNameLength;
+    ULONG PrimaryGsiv;
+    KIRQL Irql;
+    PHAL_SECONDARY_INTERRUPT_ENABLE EnableInterrupt;
+    PHAL_SECONDARY_INTERRUPT_DISABLE DisableInterrupt;
+} HAL_SECONDARY_INTERRUPT_INTERFACE, *PHAL_SECONDARY_INTERRUPT_INTERFACE;
+
+typedef BOOLEAN
+(NTAPI *PHAL_SECONDARY_INTERRUPT_DISPATCH)(
+    _In_ ULONG Gsiv);
+
+typedef struct _HAL_SECONDARY_INTERRUPT_INFORMATION
+{
+    ULONG Size;
+    ULONG GsivBase;
+    ULONG GsivCount;
+    PHAL_SECONDARY_INTERRUPT_DISPATCH DispatchInterrupt;
+} HAL_SECONDARY_INTERRUPT_INFORMATION, *PHAL_SECONDARY_INTERRUPT_INFORMATION;
+
 typedef struct _INTERRUPT_CONNECTION_DATA
 {
     ULONG Count;
@@ -2025,18 +2061,13 @@ typedef struct _BUS_HANDLER
 //
 // Kernel Exports
 //
-#if !defined(_NTSYSTEM_) && (defined(_NTDRIVER_) || defined(_NTDDK_) || defined(_NTIFS_) || defined(_NTHAL_))
-extern NTSYSAPI PHAL_PRIVATE_DISPATCH HalPrivateDispatchTable;
-#define HALPRIVATEDISPATCH ((PHAL_PRIVATE_DISPATCH)&HalPrivateDispatchTable)
-#else
 extern NTSYSAPI HAL_PRIVATE_DISPATCH HalPrivateDispatchTable;
 #define HALPRIVATEDISPATCH (&HalPrivateDispatchTable)
-#endif
 
 //
 // HAL Exports
 //
-extern NTHALAPI PUCHAR KdComPortInUse;
+extern NTKERNELAPI PUCHAR KdComPortInUse;
 
 //
 // HAL Constants
@@ -2061,6 +2092,5 @@ typedef struct _X86_BIOS_REGISTERS
 
 #endif
 #endif
-
 
 

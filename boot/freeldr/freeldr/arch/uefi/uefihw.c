@@ -9,6 +9,12 @@
 
 #include <uefildr.h>
 #include "../vidfb.h"
+#if defined(_M_IX86) || defined(_M_AMD64)
+#include <arch/pc/pcbios.h>
+#endif
+#include <reactos/arc/loaderblk.h>
+#include <Fdt.h>
+#include <libernt/fdtlib.h>
 
 #include <debug.h>
 DBG_DEFAULT_CHANNEL(HWDETECT);
@@ -23,10 +29,449 @@ extern ULONG_PTR VramAddress;
 extern ULONG VramSize;
 extern PCM_FRAMEBUF_DEVICE_DATA FrameBufferData;
 
+#ifndef TAG_HW_RESOURCE_LIST
+#define TAG_HW_RESOURCE_LIST    'lRwH'
+#endif
+
 BOOLEAN AcpiPresent = FALSE;
 static EFI_EVENT IdleTimerEvent = NULL;
 
+#define EDID_BASE_BLOCK_SIZE          128
+#define EDID_FIRST_DETAILED_TIMING    54
+
+static
+BOOLEAN
+UefiEdidGetMonitorData(
+    _In_reads_bytes_(EDID_BASE_BLOCK_SIZE) const UCHAR* Edid,
+    _Out_ PCM_MONITOR_DEVICE_DATA MonitorData,
+    _Out_ PULONG RefreshRate)
+{
+    const UCHAR* Timing = Edid + EDID_FIRST_DETAILED_TIMING;
+    ULONG PixelClock10KHz;
+    ULONG HorizontalActive, HorizontalBlank;
+    ULONG HorizontalFrontPorch, HorizontalSync, HorizontalBackPorch;
+    ULONG VerticalActive, VerticalBlank;
+    ULONG VerticalFrontPorch, VerticalSync, VerticalBackPorch;
+    ULONG HorizontalSize, VerticalSize;
+    ULONGLONG TotalPixels;
+
+    PixelClock10KHz = Timing[0] | ((ULONG)Timing[1] << 8);
+    if (PixelClock10KHz == 0)
+        return FALSE;
+
+    HorizontalActive = Timing[2] | ((ULONG)(Timing[4] & 0xF0) << 4);
+    HorizontalBlank = Timing[3] | ((ULONG)(Timing[4] & 0x0F) << 8);
+    VerticalActive = Timing[5] | ((ULONG)(Timing[7] & 0xF0) << 4);
+    VerticalBlank = Timing[6] | ((ULONG)(Timing[7] & 0x0F) << 8);
+    HorizontalFrontPorch = Timing[8] |
+        ((ULONG)(Timing[11] & 0xC0) << 2);
+    HorizontalSync = Timing[9] |
+        ((ULONG)(Timing[11] & 0x30) << 4);
+    VerticalFrontPorch = ((Timing[10] >> 4) & 0x0F) |
+        ((ULONG)(Timing[11] & 0x0C) << 2);
+    VerticalSync = (Timing[10] & 0x0F) |
+        ((ULONG)(Timing[11] & 0x03) << 4);
+
+    if ((HorizontalActive == 0) || (VerticalActive == 0) ||
+        (HorizontalBlank < HorizontalFrontPorch + HorizontalSync) ||
+        (VerticalBlank < VerticalFrontPorch + VerticalSync))
+    {
+        return FALSE;
+    }
+
+    HorizontalBackPorch = HorizontalBlank -
+        HorizontalFrontPorch - HorizontalSync;
+    VerticalBackPorch = VerticalBlank - VerticalFrontPorch - VerticalSync;
+    HorizontalSize = Timing[12] | ((ULONG)(Timing[14] & 0xF0) << 4);
+    VerticalSize = Timing[13] | ((ULONG)(Timing[14] & 0x0F) << 8);
+    if (HorizontalSize == 0)
+        HorizontalSize = (ULONG)Edid[21] * 10;
+    if (VerticalSize == 0)
+        VerticalSize = (ULONG)Edid[22] * 10;
+
+    if ((HorizontalActive > MAXUSHORT) || (VerticalActive > MAXUSHORT) ||
+        (HorizontalFrontPorch > MAXUSHORT) ||
+        (HorizontalSync > MAXUSHORT) ||
+        (HorizontalBackPorch > MAXUSHORT) ||
+        (VerticalFrontPorch > MAXUSHORT) ||
+        (VerticalSync > MAXUSHORT) ||
+        (VerticalBackPorch > MAXUSHORT) ||
+        (HorizontalSize > MAXUSHORT) || (VerticalSize > MAXUSHORT))
+    {
+        return FALSE;
+    }
+
+    RtlZeroMemory(MonitorData, sizeof(*MonitorData));
+    MonitorData->Version = 1;
+    MonitorData->Revision = 0;
+    MonitorData->HorizontalScreenSize = (USHORT)HorizontalSize;
+    MonitorData->VerticalScreenSize = (USHORT)VerticalSize;
+    MonitorData->HorizontalResolution = (USHORT)HorizontalActive;
+    MonitorData->VerticalResolution = (USHORT)VerticalActive;
+    MonitorData->HorizontalDisplayTimeLow = (USHORT)HorizontalActive;
+    MonitorData->HorizontalDisplayTime = (USHORT)HorizontalActive;
+    MonitorData->HorizontalDisplayTimeHigh = (USHORT)HorizontalActive;
+    MonitorData->HorizontalBackPorchLow = (USHORT)HorizontalBackPorch;
+    MonitorData->HorizontalBackPorch = (USHORT)HorizontalBackPorch;
+    MonitorData->HorizontalBackPorchHigh = (USHORT)HorizontalBackPorch;
+    MonitorData->HorizontalFrontPorchLow = (USHORT)HorizontalFrontPorch;
+    MonitorData->HorizontalFrontPorch = (USHORT)HorizontalFrontPorch;
+    MonitorData->HorizontalFrontPorchHigh = (USHORT)HorizontalFrontPorch;
+    MonitorData->HorizontalSyncLow = (USHORT)HorizontalSync;
+    MonitorData->HorizontalSync = (USHORT)HorizontalSync;
+    MonitorData->HorizontalSyncHigh = (USHORT)HorizontalSync;
+    MonitorData->VerticalBackPorchLow = (USHORT)VerticalBackPorch;
+    MonitorData->VerticalBackPorch = (USHORT)VerticalBackPorch;
+    MonitorData->VerticalBackPorchHigh = (USHORT)VerticalBackPorch;
+    MonitorData->VerticalFrontPorchLow = (USHORT)VerticalFrontPorch;
+    MonitorData->VerticalFrontPorch = (USHORT)VerticalFrontPorch;
+    MonitorData->VerticalFrontPorchHigh = (USHORT)VerticalFrontPorch;
+    MonitorData->VerticalSyncLow = (USHORT)VerticalSync;
+    MonitorData->VerticalSync = (USHORT)VerticalSync;
+    MonitorData->VerticalSyncHigh = (USHORT)VerticalSync;
+
+    TotalPixels = (ULONGLONG)(HorizontalActive + HorizontalBlank) *
+                  (VerticalActive + VerticalBlank);
+    *RefreshRate = (ULONG)(((ULONGLONG)PixelClock10KHz * 10000 +
+                            TotalPixels / 2) / TotalPixels);
+    return (*RefreshRate != 0);
+}
+
+static
+VOID
+UefiCreateMonitorPeripheral(
+    _In_ PCONFIGURATION_COMPONENT_DATA ControllerKey,
+    _In_ PCM_MONITOR_DEVICE_DATA MonitorData)
+{
+    PCONFIGURATION_COMPONENT_DATA MonitorKey;
+    PCM_PARTIAL_RESOURCE_LIST ResourceList;
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR Descriptor;
+    PCM_MONITOR_DEVICE_DATA ResourceMonitorData;
+    ULONG Size;
+
+    Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors[1]) +
+           sizeof(*ResourceMonitorData);
+    ResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
+    if (ResourceList == NULL)
+    {
+        ERR("Failed to allocate EDID monitor descriptor\n");
+        return;
+    }
+
+    RtlZeroMemory(ResourceList, Size);
+    ResourceList->Version = 1;
+    ResourceList->Revision = 2;
+    ResourceList->Count = 1;
+
+    Descriptor = &ResourceList->PartialDescriptors[0];
+    Descriptor->Type = CmResourceTypeDeviceSpecific;
+    Descriptor->ShareDisposition = CmResourceShareUndetermined;
+    Descriptor->u.DeviceSpecificData.DataSize = sizeof(*ResourceMonitorData);
+    ResourceMonitorData = (PCM_MONITOR_DEVICE_DATA)(Descriptor + 1);
+    *ResourceMonitorData = *MonitorData;
+
+    FldrCreateComponentKey(ControllerKey,
+                           PeripheralClass,
+                           MonitorPeripheral,
+                           Output | ConsoleOut,
+                           0,
+                           0xFFFFFFFF,
+                           "UEFI EDID Monitor",
+                           ResourceList,
+                           Size,
+                           &MonitorKey);
+}
+
 /* FUNCTIONS *****************************************************************/
+
+PVOID
+UefiGetSmbiosEpsPointer(VOID)
+{
+    EFI_GUID Smbios3Guid = SMBIOS3_TABLE_GUID;
+    EFI_GUID SmbiosGuid = SMBIOS_TABLE_GUID;
+    PSMBIOS_ENTRY_POINT LegacyEntry = NULL;
+    UINTN Index;
+
+    if (!GlobalSystemTable)
+        return NULL;
+
+    for (Index = 0; Index < GlobalSystemTable->NumberOfTableEntries; ++Index)
+    {
+        EFI_CONFIGURATION_TABLE *Entry = &GlobalSystemTable->ConfigurationTable[Index];
+
+        if (!memcmp(&Entry->VendorGuid, &Smbios3Guid, sizeof(EFI_GUID)))
+        {
+            PSMBIOS3_ENTRY_POINT Entry3 = (PSMBIOS3_ENTRY_POINT)Entry->VendorTable;
+
+            if (Entry3 &&
+                (memcmp(Entry3->Anchor, "_SM3_", sizeof(Entry3->Anchor)) == 0) &&
+                (Entry3->TableAddress != 0))
+            {
+                return Entry->VendorTable;
+            }
+        }
+        else if (!memcmp(&Entry->VendorGuid, &SmbiosGuid, sizeof(EFI_GUID)))
+        {
+            PSMBIOS_ENTRY_POINT Entry2 = (PSMBIOS_ENTRY_POINT)Entry->VendorTable;
+
+            if (Entry2 &&
+                (memcmp(Entry2->Anchor, "_SM_", sizeof(Entry2->Anchor)) == 0) &&
+                (Entry2->TableAddress != 0))
+            {
+                LegacyEntry = Entry2;
+            }
+        }
+    }
+
+    /* Prefer SMBIOS 3.x, but UEFI firmware can publish only a 2.x entry point. */
+    return LegacyEntry;
+}
+
+static
+PSMBIOS_HEADER
+UefiSmbiosNextStructure(
+    _In_ PSMBIOS_HEADER Header)
+{
+    const CHAR *String;
+    ULONG Guard = 0;
+
+    if (Header->Length < sizeof(SMBIOS_HEADER))
+        return NULL;
+
+    String = (const CHAR*)((UINTN)Header + Header->Length);
+
+    while (((String[0] != ANSI_NULL) || (String[1] != ANSI_NULL)) &&
+           (++Guard < 4096))
+    {
+        ++String;
+    }
+
+    if (Guard >= 4096)
+        return NULL;
+
+    return (PSMBIOS_HEADER)(String + 2);
+}
+
+static
+PSMBIOS_HEADER
+UefiGetSmbiosTable(VOID)
+{
+    EFI_GUID Smbios3Guid = SMBIOS3_TABLE_GUID;
+    EFI_GUID SmbiosGuid = SMBIOS_TABLE_GUID;
+    UINTN Index;
+
+    if (!GlobalSystemTable)
+        return NULL;
+
+    for (Index = 0; Index < GlobalSystemTable->NumberOfTableEntries; ++Index)
+    {
+        EFI_CONFIGURATION_TABLE *Entry = &GlobalSystemTable->ConfigurationTable[Index];
+
+        if (!memcmp(&Entry->VendorGuid, &Smbios3Guid, sizeof(EFI_GUID)))
+        {
+            PSMBIOS3_ENTRY_POINT Entry3 = (PSMBIOS3_ENTRY_POINT)Entry->VendorTable;
+
+            if (Entry3 &&
+                (memcmp(Entry3->Anchor, "_SM3_", sizeof(Entry3->Anchor)) == 0) &&
+                (Entry3->TableAddress != 0))
+            {
+                return (PSMBIOS_HEADER)(UINTN)Entry3->TableAddress;
+            }
+        }
+
+        if (!memcmp(&Entry->VendorGuid, &SmbiosGuid, sizeof(EFI_GUID)))
+        {
+            PSMBIOS_ENTRY_POINT Entry2 = (PSMBIOS_ENTRY_POINT)Entry->VendorTable;
+
+            if (Entry2 &&
+                (memcmp(Entry2->Anchor, "_SM_", sizeof(Entry2->Anchor)) == 0) &&
+                (Entry2->TableAddress != 0))
+            {
+                return (PSMBIOS_HEADER)(UINTN)Entry2->TableAddress;
+            }
+        }
+    }
+
+    return NULL;
+}
+
+BOOLEAN
+UefiGetSmbiosSystemUuid(
+    _Out_ PGUID SystemGuid)
+{
+    PSMBIOS_HEADER Header;
+    ULONG Count;
+
+    Header = UefiGetSmbiosTable();
+
+    for (Count = 0; Count < 256 && Header && Header->Type != 127; ++Count)
+    {
+        if (Header->Type == 1)
+        {
+            PSMBIOS_SYSTEM_INFO SystemInfo = (PSMBIOS_SYSTEM_INFO)Header;
+
+            if (Header->Length < FIELD_OFFSET(SMBIOS_SYSTEM_INFO, WakeUpType))
+                return FALSE;
+
+            RtlCopyMemory(SystemGuid, SystemInfo->UUID, sizeof(*SystemGuid));
+            return TRUE;
+        }
+
+        Header = UefiSmbiosNextStructure(Header);
+    }
+
+    return FALSE;
+}
+
+#if defined(_M_ARM) || defined(_M_ARM64) || defined(_ARM64_) || defined(__aarch64__) || defined(__arm64__) || defined(_M_RISCV64)
+
+static
+const CHAR*
+UefiSmbiosGetString(
+    _In_ PSMBIOS_HEADER Header,
+    _In_ UCHAR StringIndex)
+{
+    const CHAR *String;
+    UCHAR Index;
+
+    if ((StringIndex == 0) || (Header->Length < sizeof(SMBIOS_HEADER)))
+        return NULL;
+
+    String = (const CHAR*)((UINTN)Header + Header->Length);
+
+    for (Index = 1; Index < StringIndex; ++Index)
+    {
+        ULONG Guard = 0;
+
+        while ((String[0] != ANSI_NULL) && (++Guard < 1024))
+            ++String;
+
+        if ((Guard >= 1024) || (String[1] == ANSI_NULL))
+            return NULL;
+
+        ++String;
+    }
+
+    return (String[0] != ANSI_NULL) ? String : NULL;
+}
+
+static
+BOOLEAN
+UefiIsUsableSmbiosString(
+    _In_opt_ PCSTR String)
+{
+    if (!String || (String[0] == ANSI_NULL))
+        return FALSE;
+
+    if (!strcmp(String, "To Be Filled By O.E.M.") ||
+        !strcmp(String, "Default string") ||
+        !strcmp(String, "System Product Name") ||
+        !strcmp(String, "System manufacturer") ||
+        !strcmp(String, "Not Specified") ||
+        !strcmp(String, "Unknown") ||
+        !strcmp(String, "Unknown Product"))
+    {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+static
+BOOLEAN
+UefiGetSmbiosSystemIdentifier(
+    _Out_writes_bytes_(BufferSize) PCHAR Buffer,
+    _In_ SIZE_T BufferSize)
+{
+    PSMBIOS_HEADER Header;
+    ULONG Count;
+
+    Header = UefiGetSmbiosTable();
+    if (!Header)
+        return FALSE;
+
+    for (Count = 0; Count < 256 && Header && Header->Type != 127; ++Count)
+    {
+        if (Header->Type == 1)
+        {
+            PSMBIOS_SYSTEM_INFO SystemInfo = (PSMBIOS_SYSTEM_INFO)Header;
+            PCSTR Manufacturer;
+            PCSTR ProductName;
+
+            if (Header->Length < FIELD_OFFSET(SMBIOS_SYSTEM_INFO, Version))
+                return FALSE;
+
+            Manufacturer = UefiSmbiosGetString(Header, SystemInfo->Manufacturer);
+            ProductName = UefiSmbiosGetString(Header, SystemInfo->ProductName);
+
+            if (UefiIsUsableSmbiosString(Manufacturer) &&
+                UefiIsUsableSmbiosString(ProductName))
+            {
+                if (strstr(ProductName, Manufacturer))
+                    return NT_SUCCESS(RtlStringCbCopyA(Buffer, BufferSize, ProductName));
+
+                return NT_SUCCESS(RtlStringCbPrintfA(Buffer,
+                                                     BufferSize,
+                                                     "%s %s",
+                                                     Manufacturer,
+                                                     ProductName));
+            }
+
+            if (UefiIsUsableSmbiosString(ProductName))
+                return NT_SUCCESS(RtlStringCbCopyA(Buffer, BufferSize, ProductName));
+
+            if (UefiIsUsableSmbiosString(Manufacturer))
+                return NT_SUCCESS(RtlStringCbCopyA(Buffer, BufferSize, Manufacturer));
+
+            return FALSE;
+        }
+
+        Header = UefiSmbiosNextStructure(Header);
+    }
+
+    return FALSE;
+}
+
+static
+BOOLEAN
+UefiGetDeviceTreeModel(
+    _Out_writes_bytes_(BufferSize) PCHAR Buffer,
+    _In_ SIZE_T BufferSize)
+{
+    EFI_GUID DeviceTreeGuid = FDT_TABLE_GUID;
+    const CHAR *Model;
+    FDT Fdt;
+    ULONG Size, Length;
+    UINTN Index;
+
+    for (Index = 0; Index < GlobalSystemTable->NumberOfTableEntries; ++Index)
+    {
+        EFI_CONFIGURATION_TABLE *Entry = &GlobalSystemTable->ConfigurationTable[Index];
+
+        if (memcmp(&Entry->VendorGuid, &DeviceTreeGuid, sizeof(DeviceTreeGuid)) ||
+            !FdtValidateHeader(Entry->VendorTable, FDT_MAXIMUM_SIZE, &Size) ||
+            !FdtOpen(Entry->VendorTable, Size, &Fdt))
+        {
+            continue;
+        }
+        Model = FdtGetProperty(&Fdt, FdtRootNode(&Fdt), "model", &Length);
+        if (Model && Length > 1 && Model[Length - 1] == ANSI_NULL)
+            return NT_SUCCESS(RtlStringCbCopyA(Buffer, BufferSize, Model));
+    }
+    return FALSE;
+}
+
+static
+BOOLEAN
+UefiGetFirmwareSystemIdentifier(
+    _Out_writes_bytes_(BufferSize) PCHAR Buffer,
+    _In_ SIZE_T BufferSize)
+{
+    return UefiGetSmbiosSystemIdentifier(Buffer, BufferSize) ||
+           UefiGetDeviceTreeModel(Buffer, BufferSize);
+}
+
+#endif
 
 VOID
 StallExecutionProcessor(ULONG Microseconds)
@@ -147,7 +592,7 @@ DetectAcpiBios(PCONFIGURATION_COMPONENT_DATA SystemKey, ULONG *BusNumber)
     PCM_PARTIAL_RESOURCE_LIST PartialResourceList;
     PCM_PARTIAL_RESOURCE_DESCRIPTOR PartialDescriptor;
     PRSDP_DESCRIPTOR Rsdp;
-    PACPI_BIOS_DATA AcpiBiosData;
+    PACPI_BIOS_MULTI_NODE AcpiBiosData;
     ULONG TableSize, Size;
 
     Rsdp = FindAcpiBios();
@@ -158,7 +603,7 @@ DetectAcpiBios(PCONFIGURATION_COMPONENT_DATA SystemKey, ULONG *BusNumber)
         AcpiPresent = TRUE;
 
         /* Calculate the table size */
-        TableSize = sizeof(ACPI_BIOS_DATA);
+        TableSize = sizeof(ACPI_BIOS_MULTI_NODE);
 
         /* Set 'Configuration Data' value */
         Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors[1]) + TableSize;
@@ -180,17 +625,17 @@ DetectAcpiBios(PCONFIGURATION_COMPONENT_DATA SystemKey, ULONG *BusNumber)
         PartialDescriptor->u.DeviceSpecificData.DataSize = TableSize;
 
         /* Fill the table */
-        AcpiBiosData = (PACPI_BIOS_DATA)(PartialDescriptor + 1);
+        AcpiBiosData = (PACPI_BIOS_MULTI_NODE)(PartialDescriptor + 1);
 
         if (Rsdp->revision > 0)
         {
             TRACE("ACPI >1.0, using XSDT address\n");
-            AcpiBiosData->RSDTAddress.QuadPart = Rsdp->xsdt_physical_address;
+            AcpiBiosData->RsdtAddress.QuadPart = Rsdp->xsdt_physical_address;
         }
         else
         {
             TRACE("ACPI 1.0, using RSDT address\n");
-            AcpiBiosData->RSDTAddress.LowPart = Rsdp->rsdt_physical_address;
+            AcpiBiosData->RsdtAddress.LowPart = Rsdp->rsdt_physical_address;
         }
 
         AcpiBiosData->Count = 0;
@@ -222,6 +667,10 @@ DetectDisplayController(
     PCM_PARTIAL_RESOURCE_LIST PartialResourceList;
     PCM_PARTIAL_RESOURCE_DESCRIPTOR PartialDescriptor;
     PCM_FRAMEBUF_DEVICE_DATA FramebufData;
+    CM_MONITOR_DEVICE_DATA MonitorData;
+    UCHAR Edid[EDID_BASE_BLOCK_SIZE];
+    ULONG RefreshRate = 0;
+    BOOLEAN HasMonitorData;
     ULONG Size;
 
     if (!VramAddress || (VramSize == 0) || !FrameBufferData)
@@ -256,12 +705,17 @@ DetectDisplayController(
     PartialDescriptor->Flags = 0;
     PartialDescriptor->u.DeviceSpecificData.DataSize = sizeof(*FramebufData);
 
+    HasMonitorData = UefiVideoGetEdid(Edid) &&
+                     UefiEdidGetMonitorData(Edid,
+                                            &MonitorData,
+                                            &RefreshRate);
+
     /* Get pointer to framebuffer-specific data */
     FramebufData = (PCM_FRAMEBUF_DEVICE_DATA)(PartialDescriptor + 1);
     RtlCopyMemory(FramebufData, FrameBufferData, sizeof(*FrameBufferData));
     FramebufData->Version  = 1;
-    FramebufData->Revision = 3;
-    FramebufData->VideoClock = 0; // FIXME: Use EDID
+    FramebufData->Revision = 5;
+    FramebufData->VideoClock = HasMonitorData ? RefreshRate : 0;
 
     FldrCreateComponentKey(BusKey,
                            ControllerClass,
@@ -274,8 +728,10 @@ DetectDisplayController(
                            Size,
                            &ControllerKey);
 
-    // NOTE: Don't add a MonitorPeripheral for now.
-    // We should use EDID data for it.
+    if (HasMonitorData)
+    {
+        UefiCreateMonitorPeripheral(ControllerKey, &MonitorData);
+    }
 }
 
 static
@@ -336,8 +792,26 @@ UefiHwDetect(
     FldrCreateSystemKey(&SystemKey, "AT/AT COMPATIBLE");
 #elif defined(_M_IA64)
     FldrCreateSystemKey(&SystemKey, "Intel Itanium processor family");
-#elif defined(_M_ARM) || defined(_M_ARM64)
-    FldrCreateSystemKey(&SystemKey, "ARM processor family");
+#elif defined(_M_ARM) || defined(_M_ARM64) || defined(_ARM64_) || defined(__aarch64__) || defined(__arm64__)
+    {
+        CHAR SystemIdentifier[128];
+
+        RtlStringCbCopyA(SystemIdentifier,
+                         sizeof(SystemIdentifier),
+                         "ARM processor family");
+        UefiGetFirmwareSystemIdentifier(SystemIdentifier, sizeof(SystemIdentifier));
+        FldrCreateSystemKey(&SystemKey, SystemIdentifier);
+    }
+#elif defined(_M_RISCV64)
+    {
+        CHAR SystemIdentifier[128];
+
+        RtlStringCbCopyA(SystemIdentifier,
+                         sizeof(SystemIdentifier),
+                         "RISC-V processor family");
+        UefiGetFirmwareSystemIdentifier(SystemIdentifier, sizeof(SystemIdentifier));
+        FldrCreateSystemKey(&SystemKey, SystemIdentifier);
+    }
 #else
     #error Please define a system key for your architecture
 #endif

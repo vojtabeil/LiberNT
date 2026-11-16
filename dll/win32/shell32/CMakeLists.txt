@@ -7,9 +7,6 @@ add_subdirectory(shellrecyclebin)
 
 spec2def(shell32.dll shell32.spec ADD_IMPORTLIB)
 
-remove_definitions(-D_WIN32_WINNT=0x502)
-add_definitions(-D_WIN32_WINNT=0x600)
-
 add_definitions(
     -D_SHELL32_
     -D_WINE)
@@ -23,9 +20,9 @@ list(APPEND SOURCE
     CActiveDesktop.cpp
     CActiveDesktop.h
     CIDLDataObj.cpp
-    CQueryAssociations.cpp
+    CNamespaceTreeControl.cpp
     changenotify.cpp
-    debughlp.cpp
+    windowpropertystore.cpp
     dialogs/dialogs.cpp
     dialogs/drive.cpp
     dialogs/drvdefext.cpp
@@ -33,11 +30,11 @@ list(APPEND SOURCE
     dialogs/filetypes.cpp
     dialogs/folder_options.cpp
     dialogs/item_prop.cpp
+    dialogs/linkprop.cpp
     dialogs/general.cpp
     dialogs/recycler_prop.cpp
     dialogs/view.cpp
     CDropTargetHelper.cpp
-    CEnumIDListBase.cpp
     CExtractIcon.cpp
     CRecycleBinCleaner.cpp
     folders.cpp
@@ -45,77 +42,84 @@ list(APPEND SOURCE
     propsheet.cpp
     shell32.cpp
     utils.cpp
-    CShellItem.cpp
-    CShellItemArray.cpp
-    CShellLink.cpp
     CFolderOptions.cpp
-    folders/CDesktopFolder.cpp
-    folders/CFSFolder.cpp
-    folders/CDrivesFolder.cpp
     folders/CMyDocsFolder.cpp
-    folders/CPrinterFolder.cpp
-    folders/CAdminToolsFolder.cpp
     folders/CNetFolder.cpp
     folders/CFontsFolder.cpp
     folders/CControlPanelFolder.cpp
     folders/CRecycleBin.cpp
     folders/CRecycleBinFolderViewCB.cpp
-    folders/CRegFolder.cpp
     droptargets/CexeDropHandler.cpp
     droptargets/CFSDropTarget.cpp
     droptargets/CRecyclerDropTarget.cpp
     prop.cpp
-    shldataobject.cpp
     shlexec.cpp
     shlfileop.cpp
-    shlfolder.cpp
-    CFileSysBindData.cpp
     CDefView.cpp
     CDefViewUtil.cpp
     CDefViewDual.cpp
     CDefViewBckgrndMenu.cpp
     stubs.cpp
     systray.cpp
-    CUserEventTimer.cpp
-    CUserEventTimer.h
     CUserNotification.cpp
+    CUserAssist.cpp
+    COperationsProgressDialog.cpp
+    CISFBand.cpp
+    autocomplete/ACLCustomMRU.cpp
+    autocomplete/aclhistory.cpp
+    autocomplete/aclistisf.cpp
+    autocomplete/aclmulti.cpp
+    autocomplete/CAutoComplete.cpp
+    bandproxy.cpp
+    regtreeoptions.cpp
     CDefaultContextMenu.cpp
     COpenWithMenu.cpp
     CNewMenu.cpp
     CSendToMenu.cpp
     CCopyMoveToMenu.cpp
     CCopyAsPathMenu.cpp
+    CStartMenuPin.cpp
+    CTextPreviewHandler.cpp
+    CFileOperation.cpp
     CShellDispatch.cpp
-    CShellLibrary.cpp
-    CShellLibrary.h
     CFolder.cpp
     CFolderItems.cpp
+    CAutomationCM.cpp
+    CCDBurn.cpp
+    CFadeTask.cpp
+    CFolderShortcut.cpp
+    CShellFolderViewOC.cpp
+    CShellSearchExt.cpp
+    CThumbnail.cpp
+    CShellWindows.cpp
     CFolderItemVerbs.cpp)
 
 list(APPEND WINE_SOURCE
     appbar.c
-    wine/classes.c
+    appmodel.c
     wine/clipboard.c
     wine/control.c
-    wine/pidl.c
+    wine/ebrowser.c
     wine/shell32_main.c
     wine/shellole.c
     wine/shellord.c
-    wine/shellpath.c
+    wine/appassociation.c
     wine/shellreg.c
     wine/shellstring.c
-    wine/shlmenu.c
-    wine/shpolicy.c)
-
-set_source_files_properties(${WINE_SOURCE} PROPERTIES COMPILE_DEFINITIONS _CRT_NON_CONFORMING_SWPRINTFS)
+    wine/shlmenu.c)
 
 list(APPEND PCH_SKIP_SOURCE
     ${WINE_SOURCE}
+    network_address.c
     vista.c
     ${CMAKE_CURRENT_BINARY_DIR}/shell32_stubs.c)
 
 file(GLOB_RECURSE shell32_rc_deps res/*.*)
-list(APPEND shell32_rc_deps ${CMAKE_CURRENT_BINARY_DIR}/shell32_shldisp.tlb)
+list(APPEND shell32_rc_deps
+    ${CMAKE_CURRENT_BINARY_DIR}/shell32_shldisp.tlb
+    ${CMAKE_CURRENT_SOURCE_DIR}/rgs_res.rc
+    ${CMAKE_CURRENT_SOURCE_DIR}/operationsprogress.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/shresdef.h)
 add_rc_deps(shell32.rc ${shell32_rc_deps})
 
 add_library(shell32 MODULE
@@ -124,25 +128,60 @@ add_library(shell32 MODULE
     shell32.rc
     ${CMAKE_CURRENT_BINARY_DIR}/shell32.def)
 
+target_compile_definitions(shell32 PRIVATE CONST_VTABLE)
+
+if(WOW64_I386_RUNTIME AND ARCH STREQUAL "i386")
+    target_compile_definitions(shell32 PRIVATE BUILD_WOW6432)
+endif()
+
+if(ARCH STREQUAL "arm64" AND ENABLE_FEX_ARM64EC AND EXISTS "${REACTOS_SOURCE_DIR}/submodules/fex-arm64ec/CMakeLists.txt")
+    target_compile_definitions(shell32 PRIVATE ENABLE_FEX_ARM64EC)
+endif()
+
+if(ENABLE_MESA_LLVMPIPE AND MESA_LLVMPIPE_FROM_SOURCE)
+    target_compile_definitions(shell32 PRIVATE ENABLE_MESA_LLVMPIPE)
+endif()
+
+if(ENABLE_FFMPEG)
+    target_compile_definitions(shell32 PRIVATE ENABLE_FFMPEG)
+endif()
+
 if(MSVC)
     # error C4311: 'type cast': pointer truncation from 'HANDLE' to 'INT'
     remove_target_compile_option(shell32 "/we4311")
 endif()
 
 add_typelib(shell32_shldisp.idl)
-set_source_files_properties(shell32.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/shell32_shldisp.tlb)
+
+add_library(shell32_shared STATIC
+    CEnumIDListBase.cpp
+    debughlp.cpp
+    nsutils.cpp
+    shldataobject.cpp
+    shlfolder.cpp)
+target_compile_definitions(shell32_shared PRIVATE UNICODE _UNICODE CONST_VTABLE)
+target_link_libraries(shell32_shared PRIVATE atl_classes libmsvcrt oldnames)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(shell32_shared PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-Wno-overloaded-virtual>")
+endif()
+add_dependencies(shell32_shared psdk)
+add_pch(shell32_shared precomp.h "")
 
 set_module_type(shell32 win32dll UNICODE)
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     # FIXME: This is some ATL related nonsense that triggers GCC 13+ warnings
     target_compile_options(shell32 PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-Wno-overloaded-virtual>")
 endif()
-target_link_libraries(shell32 shellmenu shelldesktop wine uuid recyclebin cpprt atl_classes oldnames)
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(shell32 PRIVATE -Wno-single-bit-bitfield-constant-conversion)
+endif()
+target_link_libraries(shell32 shellmenu shelldesktop shell32_shared wine uuid recyclebin cpprt atl_classes oldnames)
 if(DLL_EXPORT_VERSION GREATER_EQUAL 0x600)
     target_link_libraries(shell32 evalcmd)
 endif()
-add_delay_importlibs(shell32 powrprof shdocvw devmgr winspool.drv winmm mpr uxtheme ole32 oleaut32 userenv browseui version fmifs netapi32 secur32)
-add_importlibs(shell32 advapi32 gdi32 user32 comctl32 comdlg32 shlwapi shcore msvcrt kernel32 ntdll)
+add_delay_importlibs(shell32 powrprof shdocvw devmgr winspool.drv winmm mpr uxtheme ole32 oleaut32 userenv explorerframe version fmifs netapi32 secur32 gdiplus iphlpapi propsys oleacc)
+add_importlibs(shell32 windows.storage advapi32 gdi32 user32 comctl32 comdlg32 shlwapi shcore msvcrt kernel32 ntdll)
 add_dependencies(shell32 stdole2) # shell32_shldisp.tlb needs stdole2.tlb
 add_pch(shell32 precomp.h "${PCH_SKIP_SOURCE}")
 add_cd_file(TARGET shell32 DESTINATION reactos/system32 FOR all)
+add_neutral_resource_file(shell32 shell32.rc shell32_mun.rc)

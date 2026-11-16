@@ -57,6 +57,17 @@ ExReleaseFastMutexUnsafeAndLeaveCriticalRegion(
 //
 // Pushlock functions
 //
+NTKERNELAPI
+NTSTATUS
+FASTCALL
+ExBlockOnAddressPushLock(
+    _Inout_ PEX_PUSH_LOCK PushLock,
+    _In_reads_bytes_(AddressSize) volatile VOID *Address,
+    _In_reads_bytes_(AddressSize) PVOID CompareAddress,
+    _In_ SIZE_T AddressSize,
+    _In_opt_ PLARGE_INTEGER Timeout
+);
+
 VOID
 FASTCALL
 ExfAcquirePushLockExclusive(
@@ -144,6 +155,15 @@ NtAddAtom(
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
+NtAllocateReserveObject(
+    _Out_ PHANDLE ReserveHandle,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ MEMORY_RESERVE_OBJECT_TYPE Type
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
 NtCancelTimer(
     _In_ HANDLE TimerHandle,
     _Out_opt_ PBOOLEAN CurrentState
@@ -217,6 +237,17 @@ NtCreateTimer(
     _In_ ACCESS_MASK DesiredAccess,
     _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
     _In_ TIMER_TYPE TimerType
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCreateTimer2(
+    _Out_ PHANDLE TimerHandle,
+    _In_opt_ PVOID Reserved1,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ ULONG Attributes,
+    _In_ ACCESS_MASK DesiredAccess
 );
 
 NTSYSCALLAPI
@@ -325,6 +356,17 @@ NtQueryDefaultLocale(
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
+NtQueryLicenseValue(
+    _In_ PUNICODE_STRING ValueName,
+    _Out_opt_ PULONG Type,
+    _Out_writes_bytes_to_opt_(DataSize, *ResultDataSize) PVOID Data,
+    _In_ ULONG DataSize,
+    _Out_ PULONG ResultDataSize
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
 NtQueryDefaultUILanguage(
     LANGID* LanguageId
 );
@@ -410,6 +452,29 @@ NtQuerySystemInformation(
     _Out_writes_bytes_to_opt_(SystemInformationLength, *ReturnLength) PVOID SystemInformation,
     _In_ ULONG SystemInformationLength,
     _Out_opt_ PULONG ReturnLength
+);
+
+__kernel_entry
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtQuerySystemInformationEx(
+    _In_ SYSTEM_INFORMATION_CLASS SystemInformationClass,
+    _In_reads_bytes_(InputBufferLength) PVOID InputBuffer,
+    _In_ ULONG InputBufferLength,
+    _Out_writes_bytes_opt_(SystemInformationLength) PVOID SystemInformation,
+    _In_ ULONG SystemInformationLength,
+    _Out_opt_ PULONG ReturnLength
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtConvertBetweenAuxiliaryCounterAndPerformanceCounter(
+    _In_ ULONG ConversionType,
+    _In_ PULONGLONG FromValue,
+    _Out_opt_ PULONGLONG ToValue,
+    _Out_opt_ PULONGLONG ConversionError
 );
 
 NTSYSCALLAPI
@@ -621,10 +686,22 @@ NTSYSCALLAPI
 NTSTATUS
 NTAPI
 NtTraceEvent(
-    _In_ ULONG TraceHandle,
+    _In_opt_ HANDLE TraceHandle,
     _In_ ULONG Flags,
     _In_ ULONG TraceHeaderLength,
     _In_ PEVENT_TRACE_HEADER TraceHeader
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtTraceControl(
+    _In_ ULONG FunctionCode,
+    _In_reads_bytes_opt_(InBufferLen) PVOID InBuffer,
+    _In_ ULONG InBufferLen,
+    _Out_writes_bytes_opt_(OutBufferLen) PVOID OutBuffer,
+    _In_ ULONG OutBufferLen,
+    _Out_ PULONG ReturnSize
 );
 
 NTSYSAPI
@@ -814,6 +891,17 @@ ZwQueryDefaultUILanguage(
 NTSYSAPI
 NTSTATUS
 NTAPI
+ZwQueryLicenseValue(
+    _In_ PUNICODE_STRING ValueName,
+    _Out_opt_ PULONG Type,
+    _Out_writes_bytes_to_opt_(DataSize, *ResultDataSize) PVOID Data,
+    _In_ ULONG DataSize,
+    _Out_ PULONG ResultDataSize
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
 ZwQueryEvent(
     _In_ HANDLE EventHandle,
     _In_ EVENT_INFORMATION_CLASS EventInformationClass,
@@ -878,6 +966,18 @@ NTAPI
 ZwQuerySystemInformation(
     _In_ SYSTEM_INFORMATION_CLASS SystemInformationClass,
     _Out_writes_bytes_to_opt_(SystemInformationLength, *ReturnLength) PVOID SystemInformation,
+    _In_ ULONG SystemInformationLength,
+    _Out_opt_ PULONG ReturnLength
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwQuerySystemInformationEx(
+    _In_ SYSTEM_INFORMATION_CLASS SystemInformationClass,
+    _In_reads_bytes_(InputBufferLength) PVOID InputBuffer,
+    _In_ ULONG InputBufferLength,
+    _Out_writes_bytes_opt_(SystemInformationLength) PVOID SystemInformation,
     _In_ ULONG SystemInformationLength,
     _Out_opt_ PULONG ReturnLength
 );
@@ -1052,10 +1152,22 @@ NTSYSAPI
 NTSTATUS
 NTAPI
 ZwTraceEvent(
-    _In_ ULONG TraceHandle,
+    _In_opt_ HANDLE TraceHandle,
     _In_ ULONG Flags,
     _In_ ULONG TraceHeaderLength,
     _In_ PEVENT_TRACE_HEADER TraceHeader
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwTraceControl(
+    _In_ ULONG FunctionCode,
+    _In_reads_bytes_opt_(InBufferLen) PVOID InBuffer,
+    _In_ ULONG InBufferLen,
+    _Out_writes_bytes_opt_(OutBufferLen) PVOID OutBuffer,
+    _In_ ULONG OutBufferLen,
+    _Out_ PULONG ReturnSize
 );
 
 #ifdef __cplusplus

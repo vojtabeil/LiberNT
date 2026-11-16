@@ -29,8 +29,8 @@ typedef HANDLE HKEY, *PHKEY;
 
 BOOLEAN
 RegImportBinaryHive(
-    _In_ PVOID ChunkBase,
-    _In_ ULONG ChunkSize,
+    _Inout_ PVOID *ChunkBase,
+    _Inout_ PULONG ChunkSize,
     _In_ PCSTR SearchPath,
     _In_ BOOLEAN LoadAlternate);
 
@@ -71,6 +71,12 @@ RegQueryValue(
     _Out_opt_ PULONG Type,
     _Out_opt_ PUCHAR Data,
     _Inout_opt_ PULONG DataSize);
+
+LONG
+RegSetValueDword(
+    _In_ HKEY Key,
+    _In_z_ PCWSTR ValueName,
+    _In_ ULONG Data);
 
 #if 0
 LONG

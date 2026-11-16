@@ -20,6 +20,18 @@ Author:
 #ifndef _AMD64_KETYPES_H
 #define _AMD64_KETYPES_H
 
+#define PROCESSOR_POWER_STATE_LEGACY_AREA_SIZE 0x1C8
+#include <potypes.h>
+#ifndef NTOS_MODE_USER
+C_ASSERT(FIELD_OFFSET(PROCESSOR_POWER_STATE, ArchitecturalEfficiencyClass) == 0x1C8);
+C_ASSERT(FIELD_OFFSET(PROCESSOR_POWER_STATE, PerformanceSchedulingClass) == 0x1C9);
+C_ASSERT(FIELD_OFFSET(PROCESSOR_POWER_STATE, EfficiencySchedulingClass) == 0x1CA);
+C_ASSERT(FIELD_OFFSET(PROCESSOR_POWER_STATE, Reserved) == 0x1CB);
+C_ASSERT(FIELD_OFFSET(PROCESSOR_POWER_STATE, Parked) == 0x1CC);
+C_ASSERT(FIELD_OFFSET(PROCESSOR_POWER_STATE, SoftParked) == 0x1CD);
+C_ASSERT(FIELD_OFFSET(PROCESSOR_POWER_STATE, LongPriorQosPeriod) == 0x1CE);
+#endif
+
 //
 // Dependencies
 //
@@ -88,17 +100,18 @@ Author:
 //
 // Double fault stack size
 //
-#define DOUBLE_FAULT_STACK_SIZE 0x2000
+#define DOUBLE_FAULT_STACK_SIZE KERNEL_STACK_SIZE
 
 //
 // CPU Vendors
 //
 typedef enum
 {
-    CPU_UNKNOWN = 0,
-    CPU_AMD = 1,
-    CPU_INTEL = 2,
-    CPU_VIA = 3,
+    CPU_UNKNOWN,
+    CPU_AMD,
+    CPU_INTEL,
+    CPU_VIA,
+    CPU_CENTAUR = CPU_VIA
 } CPU_VENDORS;
 
 //
@@ -191,15 +204,10 @@ typedef enum
 // EFlags
 //
 #define EFLAGS_CF               0x01L
-#define EFLAGS_RESERVED1        0x02L
-#define EFLAGS_PF               0x04L
-#define EFLAGS_AF               0x10L
 #define EFLAGS_ZF               0x40L
-#define EFLAGS_SF               0x80L
 #define EFLAGS_TF               0x100L
 #define EFLAGS_INTERRUPT_MASK   0x200L
 #define EFLAGS_DF               0x400L
-#define EFLAGS_OF               0x800L
 #define EFLAGS_IOPL             0x3000L
 #define EFLAGS_NESTED_TASK      0x4000L
 //#define EFLAGS_NF               0x4000
@@ -209,7 +217,7 @@ typedef enum
 #define EFLAGS_VIF              0x80000
 #define EFLAGS_VIP              0x100000
 #define EFLAGS_ID               0x200000
-#define EFLAGS_USER_SANITIZE    0x3F4DD7
+#define EFLAGS_USER_SANITIZE    0x200DD7
 #define EFLAG_SIGN              0x8000
 #define EFLAG_ZERO              0x4000
 #define EFLAGS_TF_MASK          0x0100
@@ -217,7 +225,6 @@ typedef enum
 #define EFLAGS_ID_MASK          0x200000
 #define EFLAGS_IF_MASK          0x0200
 #define EFLAGS_IF_SHIFT         0x0009
-#define EFLAGS_USER_THREAD_SANITIZE 0x200FD5 /* Allowed flags: ID|OF|DF|IF|TF|SF|ZF|AF|PF|CF */
 
 //
 // MXCSR Floating Control/Status Bit Masks
@@ -267,7 +274,11 @@ typedef enum
 #define MSR_FS_BASE             0xC0000100
 #define MSR_GS_BASE             0xC0000101
 #define MSR_GS_SWAP             0xC0000102
+#define MSR_MCG_CAP             0x0179
 #define MSR_MCG_STATUS          0x017A
+#define MSR_MC0_STATUS          0x0401
+#define MSR_MC0_ADDR            0x0402
+#define MSR_MC0_MISC            0x0403
 #define MSR_AMD_ACCESS          0x9C5A203A
 #define MSR_IA32_MISC_ENABLE    0x000001A0
 #define MSR_LAST_BRANCH_FROM    0x01DB
@@ -328,6 +339,7 @@ typedef enum
 #define IPI_FROZEN_STATE_THAW 3
 #define IPI_FROZEN_STATE_OWNER 4
 #define IPI_FROZEN_STATE_TARGET_FREEZE 5
+#define IPI_FROZEN_STATE_SAVING 6
 #define IPI_FROZEN_FLAG_ACTIVE 0x20
 
 //
@@ -679,6 +691,9 @@ typedef struct _KPRCB
 #endif
     UINT64 RspBase;
     UINT64 PrcbLock;
+#if (NTDDI_VERSION >= NTDDI_VISTA)
+    PCHAR PriorityState;
+#endif
     UINT64 SetMember;
     KPROCESSOR_STATE ProcessorState;
     CHAR CpuType;
@@ -772,7 +787,7 @@ typedef struct _KPRCB
     UCHAR PrcbPad2[12];
 #endif
     UINT64 TargetSet;
-    ULONG IpiFrozen;
+    volatile ULONG IpiFrozen;
     UCHAR PrcbPad3[116];
     REQUEST_MAILBOX RequestMailbox[64];
     UINT64 SenderSummary;
@@ -900,7 +915,21 @@ typedef struct _KPRCB
     ULONG KeAlignmentFixupCount;
     UCHAR VendorString[13];
     UCHAR PrcbPad10[3];
+#if (NTDDI_VERSION >= NTDDI_WINBLUE)
+    // Win 8.1+ widened FeatureBits to 64 bits; expose a high-dword accessor
+    // (FeatureBitsHigh) for ReactOS code that still composes it from halves.
+    union
+    {
+        ULONG64 FeatureBits;
+        struct
+        {
+            ULONG FeatureBitsLow;
+            ULONG FeatureBitsHigh;
+        };
+    };
+#else
     ULONG FeatureBits;
+#endif
     LARGE_INTEGER UpdateSignature;
     KDPC DpcWatchdogDpc;
     KTIMER DpcWatchdogTimer;
@@ -950,14 +979,15 @@ typedef struct _KPRCB
     ULONG CacheCount;
 #endif
 #ifdef __REACTOS__
-#if (NTDDI_VERSION < NTDDI_LONGHORN)
-    UINT64 StartCycles;
-    UINT64 CycleTime;
-#endif
 #if  (NTDDI_VERSION < NTDDI_WINBLUE)
     // On Win 8.1+ the FeatureBits field is extended to 64 bits
     ULONG FeatureBitsHigh;
 #endif
+    /*
+     * Windows dump readers obtain the saved processor context through
+     * the OffsetPrcbContext member of KDDEBUGGER_DATA64.
+     */
+    PCONTEXT Context;
 #endif
 } KPRCB, *PKPRCB;
 
@@ -1044,7 +1074,7 @@ typedef struct _KEXCEPTION_FRAME
     ULONG64 P4Home;
     ULONG64 P5;
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-    ULONG64 Spare1;
+    ULONG64 InitialStack;                // Win8+ name: Spare1 [ReactOS reuses the freed slot]
 #else
     ULONG64 InitialStack;
 #endif
@@ -1065,7 +1095,7 @@ typedef struct _KEXCEPTION_FRAME
     ULONG64 OutputBuffer;
     ULONG64 OutputLength;
 #if (NTDDI_VERSION >= NTDDI_WIN8)
-    ULONG64 Spare2;
+    ULONG64 CallbackStack;               // Win8+ name: Spare2 [ReactOS reuses the freed slot]
 #endif
     ULONG64 MxCsr;
     ULONG64 Rbp;
@@ -1127,10 +1157,14 @@ typedef struct _UAPC_FRAME
 typedef struct _KUSER_EXCEPTION_STACK
 {
     CONTEXT Context;
+    ULONG64 ContextEx[4];
     EXCEPTION_RECORD ExceptionRecord;
     ULONG64 Alignment;
     MACHINE_FRAME MachineFrame;
 } KUSER_EXCEPTION_STACK, * PKUSER_EXCEPTION_STACK;
+
+C_ASSERT(FIELD_OFFSET(KUSER_EXCEPTION_STACK, ExceptionRecord) == 0x4F0);
+C_ASSERT(FIELD_OFFSET(KUSER_EXCEPTION_STACK, MachineFrame) == 0x590);
 
 typedef struct _DISPATCHER_CONTEXT
 {

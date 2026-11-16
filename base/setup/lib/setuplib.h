@@ -36,7 +36,6 @@ extern "C" {
 #include "spapisup/fileqsup.h"
 #include "spapisup/infsupp.h"
 #include "utils/linklist.h"
-#include "utils/ntverrsrc.h"
 // #include "utils/arcname.h"
 #include "utils/bldrsup.h"
 #include "utils/filesup.h"
@@ -46,7 +45,6 @@ extern "C" {
 #include "utils/partinfo.h"
 #include "utils/partlist.h"
 #include "utils/arcname.h"
-#include "utils/osdetect.h"
 #include "utils/regutil.h"
 
 typedef enum _ARCHITECTURE_TYPE
@@ -133,6 +131,8 @@ typedef struct _USETUP_DATA
     LONG FormatPartition;
     LONG AutoPartition;
     LONG FsType;
+    BOOLEAN SelfTest;
+    BOOLEAN Upgrade;
 
 /* Settings lists *****/
     PGENERIC_LIST ComputerList;
@@ -168,11 +168,6 @@ typedef struct _USETUP_DATA
 BOOLEAN
 NTAPI
 CheckUnattendedSetup(
-    IN OUT PUSETUP_DATA pSetupData);
-
-VOID
-NTAPI
-InstallSetupInfFile(
     IN OUT PUSETUP_DATA pSetupData);
 
 NTSTATUS
@@ -258,6 +253,24 @@ UpdateRegistry(
     /**/IN PCWSTR SelectedLanguageId,    /* HACK HACK! */
     IN PREGISTRY_STATUS_ROUTINE StatusRoutine OPTIONAL,
     IN PFONTSUBSTSETTINGS SubstSettings OPTIONAL);
+
+PVOID
+RegSaveKeptSettings(
+    _In_ HINF SetupInf,
+    _In_ PCWSTR Section);
+
+VOID
+RegRestoreKeptSettings(
+    _In_opt_ PVOID KeptSettings);
+
+NTSTATUS
+NTAPI
+MountTargetRegistry(
+    _In_ PUSETUP_DATA pSetupData);
+
+VOID
+NTAPI
+UnmountTargetRegistry(VOID);
 
 #ifdef __cplusplus
 }

@@ -23,7 +23,7 @@ RpcThreadRoutine(
     RPC_STATUS Status;
 
     Status = RpcServerUseProtseqEpW(L"ncacn_np", 20, L"\\pipe\\browser", NULL);
-    if (Status != RPC_S_OK)
+    if (Status != RPC_S_OK && Status != RPC_S_ALREADY_LISTENING)
     {
         ERR("RpcServerUseProtseqEpW() failed (Status %lx)\n", Status);
         return 0;
@@ -37,7 +37,7 @@ RpcThreadRoutine(
     }
 
     Status = RpcServerListen(1, RPC_C_LISTEN_MAX_CALLS_DEFAULT, FALSE);
-    if (Status != RPC_S_OK)
+    if (Status != RPC_S_OK && Status != RPC_S_ALREADY_LISTENING)
     {
         ERR("RpcServerListen() failed (Status %lx)\n", Status);
     }

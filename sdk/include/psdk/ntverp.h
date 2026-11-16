@@ -16,16 +16,24 @@
 //
 // Windows NT Build 3790.3959
 //
+#ifndef VER_PRODUCTBUILD
 #define VER_PRODUCTBUILD                    3790
+#endif
+#ifndef VER_PRODUCTBUILD_QFE
 #define VER_PRODUCTBUILD_QFE                3959
+#endif
 
 //
-// Windows NT Version 5.2
+// Windows NT Version (derived from build target)
 //
+#ifndef VER_PRODUCTMAJORVERSION
 #define VER_PRODUCTMAJORVERSION             5
+#endif
+#ifndef VER_PRODUCTMINORVERSION
 #define VER_PRODUCTMINORVERSION             2
-#define VER_PRODUCTVERSION_W                (0x0502)
-#define VER_PRODUCTVERSION_DW               (0x05020000 | VER_PRODUCTBUILD)
+#endif
+#define VER_PRODUCTVERSION_W                ((VER_PRODUCTMAJORVERSION << 8) | VER_PRODUCTMINORVERSION)
+#define VER_PRODUCTVERSION_DW               ((VER_PRODUCTVERSION_W << 16) | VER_PRODUCTBUILD)
 
 //
 // Not a beta
@@ -146,6 +154,6 @@
 #define VER_COMPANYNAME_STR                 \
     "ReactOS Project"
 #define VER_PRODUCTNAME_STR                 \
-    "ReactOS Operating System"
+    "LiberNT Operating System"
 #define VER_LEGALTRADEMARKS_STR             \
     "ReactOS is a registered trademark of ReactOS Deutschland e.V."

@@ -2,12 +2,19 @@
 list(APPEND SOURCE
     GetExtendedTcpTable.c
     GetExtendedUdpTable.c
+    GetIfEntry.c
     GetInterfaceName.c
+    GetIpNetEntry2.c
     GetNetworkParams.c
     GetOwnerModuleFromTcpEntry.c
     GetOwnerModuleFromUdpEntry.c
     icmp.c
+    icmp_echo.c
+    InitializeIpInterfaceEntry.c
+    NotifyIpInterfaceChange.c
     SendARP.c
+    UnicastIpAddressChange.c
+    UnicastIpAddressTimeChange.c
     testlist.c)
 
 add_executable(iphlpapi_apitest ${SOURCE})

@@ -130,6 +130,7 @@ BOOL WINAPI Shell_NotifyIconW(DWORD dwMessage, PNOTIFYICONDATAW pnid)
     BOOL ret = FALSE;
     HWND hShellTrayWnd;
     DWORD cbSize, dwValidFlags;
+    NOTIFYICONDATAW nid;
     TRAYNOTIFYDATAW tnid;
     COPYDATASTRUCT data;
 
@@ -165,36 +166,57 @@ BOOL WINAPI Shell_NotifyIconW(DWORD dwMessage, PNOTIFYICONDATAW pnid)
 
     /* Build the data structure */
     ZeroMemory(&tnid, sizeof(tnid));
+    ZeroMemory(&nid, sizeof(nid));
     tnid.dwSignature = NI_NOTIFY_SIG;
     tnid.dwMessage   = dwMessage;
 
     /* Copy only the needed data, everything else is zeroed out */
-    CopyMemory(&tnid.nid, pnid, cbSize);
+    CopyMemory(&nid, pnid, cbSize);
     /* Adjust the size (the NOTIFYICONDATA structure is the full-fledged one) and the flags */
-    tnid.nid.cbSize = sizeof(tnid.nid);
-    tnid.nid.uFlags &= dwValidFlags;
+    nid.cbSize = sizeof(nid);
+    nid.uFlags &= dwValidFlags;
 
     /* Be sure the szTip member (that could be cut-off) is correctly NULL-terminated */
-    if (tnid.nid.uFlags & NIF_TIP)
+    if (nid.uFlags & NIF_TIP)
     {
         if (cbSize <= NOTIFYICONDATAW_V1_SIZE)
         {
 #define NIDV1_TIP_SIZE_W  (NOTIFYICONDATAW_V1_SIZE - FIELD_OFFSET(NOTIFYICONDATAW, szTip))/sizeof(WCHAR)
-            tnid.nid.szTip[NIDV1_TIP_SIZE_W - 1] = 0;
+            nid.szTip[NIDV1_TIP_SIZE_W - 1] = 0;
 #undef NIDV1_TIP_SIZE_W
         }
         else
         {
-            tnid.nid.szTip[_countof(tnid.nid.szTip) - 1] = 0;
+            nid.szTip[_countof(nid.szTip) - 1] = 0;
         }
     }
 
     /* Be sure the info strings are correctly NULL-terminated */
-    if (tnid.nid.uFlags & NIF_INFO)
+    if (nid.uFlags & NIF_INFO)
     {
-        tnid.nid.szInfo[_countof(tnid.nid.szInfo) - 1] = 0;
-        tnid.nid.szInfoTitle[_countof(tnid.nid.szInfoTitle) - 1] = 0;
+        nid.szInfo[_countof(nid.szInfo) - 1] = 0;
+        nid.szInfoTitle[_countof(nid.szInfoTitle) - 1] = 0;
     }
+
+#if defined(BUILD_WOW6432)
+    tnid.nid.cbSize = sizeof(tnid.nid);
+    tnid.nid.hWnd = (UINT64)(LONG_PTR)nid.hWnd;
+    tnid.nid.uID = nid.uID;
+    tnid.nid.uFlags = nid.uFlags;
+    tnid.nid.uCallbackMessage = nid.uCallbackMessage;
+    tnid.nid.hIcon = (UINT64)(LONG_PTR)nid.hIcon;
+    CopyMemory(tnid.nid.szTip, nid.szTip, sizeof(tnid.nid.szTip));
+    tnid.nid.dwState = nid.dwState;
+    tnid.nid.dwStateMask = nid.dwStateMask;
+    CopyMemory(tnid.nid.szInfo, nid.szInfo, sizeof(tnid.nid.szInfo));
+    tnid.nid.uTimeout = nid.uTimeout;
+    CopyMemory(tnid.nid.szInfoTitle, nid.szInfoTitle, sizeof(tnid.nid.szInfoTitle));
+    tnid.nid.dwInfoFlags = nid.dwInfoFlags;
+    tnid.nid.guidItem = nid.guidItem;
+    tnid.nid.hBalloonIcon = (UINT64)(LONG_PTR)nid.hBalloonIcon;
+#else
+    tnid.nid = nid;
+#endif
 
     if (dwMessage == NIM_SETFOCUS)
     {
@@ -210,5 +232,71 @@ BOOL WINAPI Shell_NotifyIconW(DWORD dwMessage, PNOTIFYICONDATAW pnid)
     if (SendMessageW(hShellTrayWnd, WM_COPYDATA, (WPARAM)pnid->hWnd, (LPARAM)&data))
         ret = TRUE;
 
+    SetLastError(ret ? ERROR_SUCCESS : (DWORD)E_FAIL);
     return ret;
+}
+
+/*************************************************************************
+ * Shell_NotifyIconGetRect
+ */
+HRESULT WINAPI Shell_NotifyIconGetRect(const NOTIFYICONIDENTIFIER *Identifier, RECT *IconLocation)
+{
+    static LONG MappingCounter;
+    TRAYNOTIFYICONGETRECTDATA Request = {0};
+    PTRAYNOTIFYICONGETRECTRESULT Result;
+    COPYDATASTRUCT CopyData;
+    WCHAR MappingName[NI_GETRECT_MAPPING_LENGTH];
+    HANDLE Mapping;
+    HWND ShellTrayWnd;
+    HRESULT Status;
+
+    if (!Identifier || !IconLocation)
+        return E_POINTER;
+
+    SetRectEmpty(IconLocation);
+    if (Identifier->cbSize != sizeof(*Identifier))
+        return E_INVALIDARG;
+
+    ShellTrayWnd = FindWindowW(L"Shell_TrayWnd", NULL);
+    if (!ShellTrayWnd)
+        return E_FAIL;
+
+    if (FAILED(StringCchPrintfW(MappingName, _countof(MappingName), L"ROS_NotifyIconRect_%08lx_%08lx_%08lx", GetCurrentProcessId(), GetCurrentThreadId(), InterlockedIncrement(&MappingCounter))))
+        return E_FAIL;
+
+    Mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0, sizeof(*Result), MappingName);
+    if (!Mapping)
+        return E_FAIL;
+
+    Result = (PTRAYNOTIFYICONGETRECTRESULT)MapViewOfFile(Mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(*Result));
+    if (!Result)
+    {
+        CloseHandle(Mapping);
+        return E_FAIL;
+    }
+
+    Result->Result = E_FAIL;
+    SetRectEmpty(&Result->IconRect);
+    Request.dwSignature = NI_GETRECT_SIG;
+#if defined(BUILD_WOW6432)
+    Request.Identifier.cbSize = sizeof(Request.Identifier);
+    Request.Identifier.hWnd = (UINT64)(LONG_PTR)Identifier->hWnd;
+    Request.Identifier.uID = Identifier->uID;
+    Request.Identifier.guidItem = Identifier->guidItem;
+#else
+    Request.Identifier = *Identifier;
+#endif
+    StringCchCopyW(Request.MappingName, _countof(Request.MappingName), MappingName);
+    CopyData.dwData = TABDMC_NOTIFY_GETRECT;
+    CopyData.cbData = sizeof(Request);
+    CopyData.lpData = &Request;
+    SendMessageW(ShellTrayWnd, WM_COPYDATA, (WPARAM)Identifier->hWnd, (LPARAM)&CopyData);
+
+    Status = Result->Result;
+    if (SUCCEEDED(Status))
+        *IconLocation = Result->IconRect;
+
+    UnmapViewOfFile(Result);
+    CloseHandle(Mapping);
+    return Status;
 }

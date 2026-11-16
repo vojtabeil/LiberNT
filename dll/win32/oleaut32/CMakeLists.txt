@@ -1,8 +1,6 @@
 
-remove_definitions(-D_WIN32_WINNT=0x502)
-add_definitions(-D_WIN32_WINNT=0x600)
-
 add_definitions(
+    -DCOM_NO_WINDOWS_H
     -D_OLEAUT32_
     -DPROXY_DELEGATION
     -DWINE_REGISTER_DLL
@@ -11,6 +9,10 @@ add_definitions(
 
 spec2def(oleaut32.dll oleaut32.spec ADD_IMPORTLIB)
 add_rpcproxy_files(oleaut32_oaidl.idl oleaut32_ocidl.idl)
+
+include_directories(BEFORE ${REACTOS_SOURCE_DIR}/sdk/include/ucrt)
+
+add_arm64ec_x64_source(OLEAUT32_THUNKS_SOURCE thunks.c __WINESRC__)
 
 list(APPEND SOURCE
     connpt.c
@@ -22,7 +24,7 @@ list(APPEND SOURCE
     olepropframe.c
     recinfo.c
     safearray.c
-    thunks.c
+    ${OLEAUT32_THUNKS_SOURCE}
     typelib.c
     usrmarshal.c
     varformat.c
@@ -58,11 +60,14 @@ endif()
 
 add_idl_headers(oleaut32_idlheader oleaut32_oaidl.idl)
 add_dependencies(oleaut32 oleaut32_idlheader)
-add_idl_reg_scripts(oleaut32 registry oleaut32_oaidl.idl oleaut32_ocidl.idl)
-set_module_type(oleaut32 win32dll)
-target_link_libraries(oleaut32 wine wineldr uuid ${PSEH_LIB} oldnames wine_dll_canunload)
+set_module_type(oleaut32 win32dll ENTRYPOINT DllMain 12)
+target_link_libraries(oleaut32 wine wine_dll_canunload wineldr uuid ${PSEH_LIB} ucrtoldnames msvcrtex)
 add_delay_importlibs(oleaut32 comctl32 urlmon windowscodecs)
-add_importlibs(oleaut32 ole32 rpcrt4 user32 gdi32 advapi32 kernel32_vista msvcrt kernel32 ntdll)
+add_importlibs(oleaut32 ole32 rpcrt4 user32 gdi32 advapi32 kernel32_vista ucrtbase kernel32 ntdll)
 add_pch(oleaut32 precomp.h "${PCH_SKIP_SOURCE}")
 add_cd_file(TARGET oleaut32 DESTINATION reactos/system32 FOR all)
 set_wine_module_FIXME(oleaut32) # CORE-5743: No ARRAY_SIZE and CONST_VTABLE
+
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    set_property(SOURCE typelib.c APPEND PROPERTY COMPILE_OPTIONS -Wno-unused-function)
+endif()

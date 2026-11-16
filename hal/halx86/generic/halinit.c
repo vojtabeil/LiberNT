@@ -18,7 +18,9 @@
 BOOLEAN HalpOnlyBootProcessor;
 //#endif
 BOOLEAN HalpPciLockSettings;
+BOOLEAN HalpUsePlatformTick;
 BOOLEAN HalBootViaEfi;
+ULONG HalpStallScaleFactor = INITIAL_STALL_COUNT;
 
 /* PRIVATE FUNCTIONS *********************************************************/
 
@@ -44,6 +46,14 @@ HalpGetParameters(
         if (strstr(CommandLine, "PCILOCK"))
             HalpPciLockSettings = TRUE;
 
+        /*
+         * USEPLATFORMTICK (bcdedit /set useplatformtick yes on Windows) keeps
+         * the clock on the platform timer and leaves the local APIC timer
+         * alone, for software that programs that timer itself.
+         */
+        if (strstr(CommandLine, "USEPLATFORMTICK"))
+            HalpUsePlatformTick = TRUE;
+
         /* Check for initial breakpoint */
         if (strstr(CommandLine, "BREAK"))
             DbgBreakPoint();
@@ -62,7 +72,7 @@ HalInitializeProcessor(
     HalpInitProcessor(ProcessorNumber, LoaderBlock);
 
     /* Set default stall count */
-    KeGetPcr()->StallScaleFactor = INITIAL_STALL_COUNT;
+    KeGetPcr()->StallScaleFactor = HalpStallScaleFactor;
 
     /* Update the interrupt affinity and processor mask */
     InterlockedBitTestAndSetAffinity(&HalpActiveProcessors, ProcessorNumber);
@@ -107,6 +117,7 @@ HalInitSystem(
             HalBootViaEfi = LoaderBlock->Extension->BootViaEFI;
 #endif
 #endif
+        HalpInitializeEfiRuntime(LoaderBlock);
 
         /* Check for PRCB version mismatch */
         if (Prcb->MajorVersion != PRCB_MAJOR_VERSION)
@@ -131,6 +142,11 @@ HalInitSystem(
 
         /* Initialize the PICs */
         HalpInitializePICs(TRUE);
+
+        /* Initialize MSI vector allocator (amd64 APIC only) */
+#ifdef _M_AMD64
+        HalpInitializeMsiVectors();
+#endif
 
         /* Initialize CMOS lock */
         KeInitializeSpinLock(&HalpSystemHardwareLock);
@@ -169,6 +185,8 @@ HalInitSystem(
 
         /* Initialize Phase 0 of the x86 emulator */
         HalInitializeBios(0, LoaderBlock);
+
+        HalpReserveMapBuffers(LoaderBlock);
     }
     else if (BootPhase == 1)
     {

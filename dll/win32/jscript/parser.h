@@ -16,7 +16,9 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#ifdef __REACTOS__
 #pragma once
+#endif
 
 typedef struct _expression_t expression_t;
 typedef struct _statement_t statement_t;
@@ -67,7 +69,6 @@ static inline void *parser_alloc_tmp(parser_ctx_t *ctx, DWORD size)
     return heap_pool_alloc(&ctx->script->tmp_heap, size);
 }
 
-int hex_to_int(WCHAR);
 BOOL is_identifier_char(WCHAR);
 BOOL unescape(WCHAR*,size_t*);
 HRESULT parse_decimal(const WCHAR**,const WCHAR*,double*);

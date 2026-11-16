@@ -35,8 +35,6 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(urlmon);
 
-DEFINE_GUID(CLSID_CUri, 0xDF2FCE13, 0x25EC, 0x45BB, 0x9D,0x4C, 0xCE,0xCD,0x47,0xC2,0x43,0x0C);
-
 LONG URLMON_refCount = 0;
 HINSTANCE urlmon_instance;
 
@@ -351,6 +349,8 @@ static const IClassFactoryVtbl ClassFactoryVtbl =
     CF_LockServer
 };
 
+static ClassFactory PersistentZoneIdentifierCF =
+    { { &ClassFactoryVtbl }, PersistentZoneIdentifier_Construct};
 static ClassFactory FileProtocolCF =
     { { &ClassFactoryVtbl }, FileProtocol_Construct};
 static ClassFactory FtpProtocolCF =
@@ -371,8 +371,6 @@ static ClassFactory StdURLMonikerCF =
     { { &ClassFactoryVtbl }, StdURLMoniker_Construct};
 static ClassFactory MimeFilterCF =
     { { &ClassFactoryVtbl }, MimeFilter_Construct};
-static ClassFactory CUriCF =
-    { { &ClassFactoryVtbl }, Uri_Construct};
 
 struct object_creation_info
 {
@@ -383,6 +381,7 @@ struct object_creation_info
 
 static const struct object_creation_info object_creation[] =
 {
+    { &CLSID_PersistentZoneIdentifier,            &PersistentZoneIdentifierCF.IClassFactory_iface,    NULL },
     { &CLSID_FileProtocol,            &FileProtocolCF.IClassFactory_iface,    L"file" },
     { &CLSID_FtpProtocol,             &FtpProtocolCF.IClassFactory_iface,     L"ftp"  },
     { &CLSID_GopherProtocol,          &GopherProtocolCF.IClassFactory_iface,  L"gopher" },
@@ -393,7 +392,6 @@ static const struct object_creation_info object_creation[] =
     { &CLSID_InternetZoneManager,     &ZoneManagerCF.IClassFactory_iface,     NULL    },
     { &CLSID_StdURLMoniker,           &StdURLMonikerCF.IClassFactory_iface,   NULL    },
     { &CLSID_DeCompMimeFilter,        &MimeFilterCF.IClassFactory_iface,      NULL    },
-    { &CLSID_CUri,                    &CUriCF.IClassFactory_iface,            NULL    }
 };
 
 static void init_session(void)
@@ -450,11 +448,24 @@ static HRESULT register_inf(BOOL doregister)
 {
     HRESULT (WINAPI *pRegInstall)(HMODULE hm, LPCSTR pszSection, const STRTABLEA* pstTable);
     HMODULE hAdvpack;
+#ifdef __REACTOS__
+    HRESULT hr;
+#endif
 
     hAdvpack = LoadLibraryW(L"advpack.dll");
+#ifdef __REACTOS__
+    if (!hAdvpack) return HRESULT_FROM_WIN32(GetLastError());
+#endif
     pRegInstall = (void *)GetProcAddress(hAdvpack, "RegInstall");
 
+#ifdef __REACTOS__
+    hr = pRegInstall ? pRegInstall(hProxyDll, doregister ? "RegisterDll" : "UnregisterDll", NULL)
+                    : HRESULT_FROM_WIN32(GetLastError());
+    FreeLibrary(hAdvpack);
+    return hr;
+#else
     return pRegInstall(hProxyDll, doregister ? "RegisterDll" : "UnregisterDll", NULL);
+#endif
 }
 
 /***********************************************************************

@@ -39,7 +39,7 @@ KefAcquireSpinLockAtDpcLevel(
     *SpinLock = (KSPIN_LOCK)KeGetCurrentThread() | 1;
 #endif
 }
-#endif // _MINIHAL_
+#endif /* defined(_MINIHAL_) */
 
 /*
  * @implemented
@@ -86,7 +86,6 @@ KfReleaseSpinLock(PKSPIN_LOCK SpinLock,
     KeLowerIrql(OldIrql);
 }
 
-#ifndef _MINIHAL_
 /*
  * @implemented
  */
@@ -100,7 +99,7 @@ KeAcquireQueuedSpinLock(IN KSPIN_LOCK_QUEUE_NUMBER LockNumber)
     KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
 
     /* Acquire the lock */
-    KxAcquireSpinLock(KeGetCurrentPrcb()->LockQueue[LockNumber].Lock); // HACK
+    KxAcquireQueuedSpinLock(&KeGetCurrentPrcb()->LockQueue[LockNumber]);
     return OldIrql;
 }
 
@@ -117,7 +116,7 @@ KeAcquireQueuedSpinLockRaiseToSynch(IN KSPIN_LOCK_QUEUE_NUMBER LockNumber)
     KeRaiseIrql(SYNCH_LEVEL, &OldIrql);
 
     /* Acquire the lock */
-    KxAcquireSpinLock(KeGetCurrentPrcb()->LockQueue[LockNumber].Lock); // HACK
+    KxAcquireQueuedSpinLock(&KeGetCurrentPrcb()->LockQueue[LockNumber]);
     return OldIrql;
 }
 
@@ -137,7 +136,7 @@ KeAcquireInStackQueuedSpinLock(IN PKSPIN_LOCK SpinLock,
     KeRaiseIrql(DISPATCH_LEVEL, &LockHandle->OldIrql);
 
     /* Acquire the lock */
-    KxAcquireSpinLock(LockHandle->LockQueue.Lock); // HACK
+    KxAcquireQueuedSpinLock(&LockHandle->LockQueue);
 }
 
 /*
@@ -156,7 +155,7 @@ KeAcquireInStackQueuedSpinLockRaiseToSynch(IN PKSPIN_LOCK SpinLock,
     KeRaiseIrql(SYNCH_LEVEL, &LockHandle->OldIrql);
 
     /* Acquire the lock */
-    KxAcquireSpinLock(LockHandle->LockQueue.Lock); // HACK
+    KxAcquireQueuedSpinLock(&LockHandle->LockQueue);
 }
 
 /*
@@ -168,7 +167,7 @@ KeReleaseQueuedSpinLock(IN KSPIN_LOCK_QUEUE_NUMBER LockNumber,
                         IN KIRQL OldIrql)
 {
     /* Release the lock */
-    KxReleaseSpinLock(KeGetCurrentPrcb()->LockQueue[LockNumber].Lock); // HACK
+    KxReleaseQueuedSpinLock(&KeGetCurrentPrcb()->LockQueue[LockNumber]);
 
     /* Lower IRQL back */
     KeLowerIrql(OldIrql);
@@ -182,10 +181,11 @@ FASTCALL
 KeReleaseInStackQueuedSpinLock(IN PKLOCK_QUEUE_HANDLE LockHandle)
 {
     /* Simply lower IRQL back */
-    KxReleaseSpinLock(LockHandle->LockQueue.Lock); // HACK
+    KxReleaseQueuedSpinLock(&LockHandle->LockQueue);
     KeLowerIrql(LockHandle->OldIrql);
 }
 
+#ifndef _MINIHAL_
 /*
  * @implemented
  */
@@ -194,12 +194,11 @@ FASTCALL
 KeTryToAcquireQueuedSpinLockRaiseToSynch(IN KSPIN_LOCK_QUEUE_NUMBER LockNumber,
                                          IN PKIRQL OldIrql)
 {
-    PKSPIN_LOCK Lock = KeGetCurrentPrcb()->LockQueue[LockNumber].Lock;
-
     /* KM tests demonstrate that this raises IRQL even if locking fails */
     KeRaiseIrql(SYNCH_LEVEL, OldIrql);
-    /* HACK */
-    return KeTryToAcquireSpinLockAtDpcLevel(Lock);
+
+    /* Try to acquire the lock */
+    return KxTryToAcquireQueuedSpinLock(&KeGetCurrentPrcb()->LockQueue[LockNumber]);
 }
 
 /*
@@ -210,20 +209,32 @@ FASTCALL
 KeTryToAcquireQueuedSpinLock(IN KSPIN_LOCK_QUEUE_NUMBER LockNumber,
                              OUT PKIRQL OldIrql)
 {
-    PKSPIN_LOCK Lock = KeGetCurrentPrcb()->LockQueue[LockNumber].Lock;
+    KIRQL PreviousIrql;
+    LOGICAL Acquired;
 
     /* KM tests demonstrate that this raises IRQL even if locking fails */
-    KeRaiseIrql(DISPATCH_LEVEL, OldIrql);
-    /* HACK */
-    return KeTryToAcquireSpinLockAtDpcLevel(Lock);
+    KeRaiseIrql(DISPATCH_LEVEL, &PreviousIrql);
+
+    /* Try to acquire the lock */
+    Acquired = KxTryToAcquireQueuedSpinLock(&KeGetCurrentPrcb()->LockQueue[LockNumber]);
+    if (!Acquired)
+    {
+        KeLowerIrql(PreviousIrql);
+        return FALSE;
+    }
+
+    *OldIrql = PreviousIrql;
+    return TRUE;
 }
-#endif // !_MINIHAL_
+#endif /* !defined(_MINIHAL_) */
 
-#endif // _M_IX86
+#endif /* defined(_M_IX86) */
 
+/* Any-IRQL lock protocol for shared hardware index/data windows (CMOS,
+   IOAPIC): taken with interrupts disabled, caller restores the state. */
 VOID
 NTAPI
-HalpAcquireCmosSpinLock(VOID)
+HalpAcquireRaisedSpinLock(_In_ PKSPIN_LOCK SpinLock, _Out_ PULONG_PTR OutFlags)
 {
     ULONG_PTR Flags;
 
@@ -232,24 +243,34 @@ HalpAcquireCmosSpinLock(VOID)
     _disable();
 
     /* Acquire the lock */
-    KxAcquireSpinLock(&HalpSystemHardwareLock);
+    KxAcquireSpinLock(SpinLock);
 
-    /* We have the lock, save the flags now */
-    HalpSystemHardwareFlags = Flags;
+    /* We have the lock, hand the flags back now */
+    *OutFlags = Flags;
+}
+
+VOID
+NTAPI
+HalpReleaseRaisedSpinLock(_In_ PKSPIN_LOCK SpinLock, _In_ ULONG_PTR Flags)
+{
+    /* Release the lock */
+    KxReleaseSpinLock(SpinLock);
+
+    /* Restore the flags */
+    __writeeflags(Flags);
+}
+
+VOID
+NTAPI
+HalpAcquireCmosSpinLock(VOID)
+{
+    HalpAcquireRaisedSpinLock(&HalpSystemHardwareLock, &HalpSystemHardwareFlags);
 }
 
 VOID
 NTAPI
 HalpReleaseCmosSpinLock(VOID)
 {
-    ULONG_PTR Flags;
-
-    /* Get the flags */
-    Flags = HalpSystemHardwareFlags;
-
-    /* Release the lock */
-    KxReleaseSpinLock(&HalpSystemHardwareLock);
-
-    /* Restore the flags */
-    __writeeflags(Flags);
+    HalpReleaseRaisedSpinLock(&HalpSystemHardwareLock, HalpSystemHardwareFlags);
 }
+

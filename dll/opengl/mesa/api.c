@@ -96,6 +96,7 @@ void APIENTRY _mesa_Bitmap( GLsizei width, GLsizei height,
          struct gl_image image;
          image.Width = width;
          image.Height = height;
+         image.Depth = 1;
          image.Components = 0;
          image.Type = GL_BITMAP;
          image.Format = GL_COLOR_INDEX;
@@ -514,6 +515,18 @@ void APIENTRY _mesa_CopyTexSubImage2D( GLenum target, GLint level,
 {
    GET_CONTEXT;
           (*CC->API.CopyTexSubImage2D)( CC, target, level, xoffset, yoffset,
+                                 x, y, width, height );
+}
+
+
+void APIENTRY _mesa_CopyTexSubImage3D( GLenum target, GLint level,
+                                   GLint xoffset, GLint yoffset,
+                                   GLint zoffset, GLint x, GLint y,
+                                   GLsizei width, GLsizei height )
+{
+   GET_CONTEXT;
+   (*CC->API.CopyTexSubImage3D)( CC, target, level,
+                                 xoffset, yoffset, zoffset,
                                  x, y, width, height );
 }
 
@@ -2528,7 +2541,9 @@ void APIENTRY _mesa_TexImage1D( GLenum target, GLint level, GLint internalformat
 {
    struct gl_image *teximage;
    GET_CONTEXT;
-          teximage = gl_unpack_image( CC, width, 1, format, type, pixels );
+   teximage = width > 0 && pixels != NULL
+            ? gl_unpack_image( CC, width, 1, format, type, pixels )
+            : NULL;
    (*CC->API.TexImage1D)( CC, target, level, internalformat,
                           width, border, format, type, teximage );
 }
@@ -2543,9 +2558,30 @@ void APIENTRY _mesa_TexImage2D( GLenum target, GLint level, GLint internalformat
 
   GET_CONTEXT;
 
-  teximage = gl_unpack_image( CC, width, height, format, type, pixels );
+  teximage = width > 0 && height > 0 && pixels != NULL
+           ? gl_unpack_image( CC, width, height, format, type, pixels )
+           : NULL;
   (*CC->API.TexImage2D)( CC, target, level, internalformat,
              width, height, border, format, type, teximage );
+}
+
+
+void APIENTRY _mesa_TexImage3D( GLenum target, GLint level, GLint internalformat,
+                            GLsizei width, GLsizei height, GLsizei depth,
+                            GLint border, GLenum format, GLenum type,
+                            const GLvoid *pixels )
+{
+  struct gl_image *teximage;
+
+  GET_CONTEXT;
+
+  teximage = width > 0 && height > 0 && depth > 0 && pixels != NULL
+           ? gl_unpack_image3D( CC, width, height, depth,
+                                format, type, pixels )
+           : NULL;
+  (*CC->API.TexImage3D)( CC, target, level, internalformat,
+                         width, height, depth, border,
+                         format, type, teximage );
 }
 
 
@@ -2599,7 +2635,7 @@ void APIENTRY _mesa_TexSubImage1D( GLenum target, GLint level, GLint xoffset,
 {
    struct gl_image *image;
    GET_CONTEXT;
-   image = gl_unpack_texsubimage( CC, width, 1, format, type, pixels );
+   image = gl_unpack_texsubimage( CC, width, 1, 1, format, type, pixels );
    (*CC->API.TexSubImage1D)( CC, target, level, xoffset, width,
                              format, type, image );
 }
@@ -2613,9 +2649,27 @@ void APIENTRY _mesa_TexSubImage2D( GLenum target, GLint level,
 {
    struct gl_image *image;
    GET_CONTEXT;
-   image = gl_unpack_texsubimage( CC, width, height, format, type, pixels );
+   image = gl_unpack_texsubimage( CC, width, height, 1,
+                                  format, type, pixels );
    (*CC->API.TexSubImage2D)( CC, target, level, xoffset, yoffset,
                              width, height, format, type, image );
+}
+
+
+void APIENTRY _mesa_TexSubImage3D( GLenum target, GLint level,
+                               GLint xoffset, GLint yoffset, GLint zoffset,
+                               GLsizei width, GLsizei height, GLsizei depth,
+                               GLenum format, GLenum type,
+                               const GLvoid *pixels )
+{
+   struct gl_image *image;
+   GET_CONTEXT;
+   image = gl_unpack_texsubimage( CC, width, height, depth,
+                                  format, type, pixels );
+   (*CC->API.TexSubImage3D)( CC, target, level,
+                             xoffset, yoffset, zoffset,
+                             width, height, depth,
+                             format, type, image );
 }
 
 

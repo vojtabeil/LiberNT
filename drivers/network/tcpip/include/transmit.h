@@ -17,6 +17,7 @@ typedef struct IPFRAGMENT_CONTEXT {
     PNDIS_PACKET Datagram;              /* Pointer to original NDIS packet */
     PVOID DatagramData;                 /* Pointer to datagram data */
     UINT HeaderSize;                    /* IP datagram header size */
+    USHORT FlagsFragOfs;                /* IP datagram flags and fragment offset */
     PNDIS_PACKET NdisPacket;            /* Pointer to NDIS packet */
     PNDIS_BUFFER NdisBuffer;            /* Pointer to NDIS buffer */
     PVOID Header;                       /* Pointer to IP header in fragment buffer */
@@ -27,6 +28,7 @@ typedef struct IPFRAGMENT_CONTEXT {
     PNEIGHBOR_CACHE_ENTRY NCE;          /* Pointer to NCE to use */
     KEVENT Event;                       /* Signalled when the transmission is complete */
     NDIS_STATUS Status;                 /* Status of the transmission */
+    BOOLEAN Detached;
 } IPFRAGMENT_CONTEXT, *PIPFRAGMENT_CONTEXT;
 
 

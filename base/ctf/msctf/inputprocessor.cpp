@@ -254,39 +254,16 @@ public:
     STDMETHODIMP Reset() override;
     STDMETHODIMP Skip(_In_ ULONG ulCount) override;
 
+    BOOL Add(_In_ const TF_INPUTPROCESSORPROFILE *pProfile);
+
 protected:
     LONG m_cRefs;
+    TF_INPUTPROCESSORPROFILE *m_profiles;
+    ULONG m_count;
+    ULONG m_index;
 };
 
 ////////////////////////////////////////////////////////////////////////////
-
-static void
-add_userkey(_In_ REFCLSID rclsid, _In_ LANGID langid, _In_ REFGUID guidProfile)
-{
-    HKEY key;
-    WCHAR buf[39], buf2[39], fullkey[168];
-    DWORD disposition = 0;
-    LSTATUS error;
-
-    TRACE("\n");
-
-    StringFromGUID2(rclsid, buf, _countof(buf));
-    StringFromGUID2(guidProfile, buf2, _countof(buf2));
-    StringCchPrintfW(fullkey, _countof(fullkey), L"%s\\%s\\%s\\0x%08x\\%s",
-                     szwSystemTIPKey, buf, L"LanguageProfile", langid, buf2);
-
-    error = RegCreateKeyExW(HKEY_CURRENT_USER, fullkey, 0, NULL, 0,
-                            KEY_READ | KEY_WRITE, NULL, &key, &disposition);
-
-    if (error == ERROR_SUCCESS && disposition == REG_CREATED_NEW_KEY)
-    {
-        DWORD zero = 0;
-        RegSetValueExW(key, L"Enable", 0, REG_DWORD, (PBYTE)&zero, sizeof(DWORD));
-    }
-
-    if (error == ERROR_SUCCESS)
-        RegCloseKey(key);
-}
 
 ////////////////////////////////////////////////////////////////////////////
 
@@ -404,14 +381,10 @@ STDMETHODIMP CInputProcessorProfiles::AddLanguageProfile(
                             NULL, &fmtkey, &disposition);
     if (error == ERROR_SUCCESS)
     {
-        DWORD zero = 0x0;
         RegSetValueExW(fmtkey, L"Description", 0, REG_SZ, (PBYTE)pchDesc, cchDesc * sizeof(WCHAR));
         RegSetValueExW(fmtkey, L"IconFile", 0, REG_SZ, (PBYTE)pchIconFile, cchFile * sizeof(WCHAR));
         RegSetValueExW(fmtkey, L"IconIndex", 0, REG_DWORD, (PBYTE)&uIconIndex, sizeof(uIconIndex));
-        if (disposition == REG_CREATED_NEW_KEY)
-            RegSetValueExW(fmtkey, L"Enable", 0, REG_DWORD, (PBYTE)&zero, sizeof(DWORD));
         RegCloseKey(fmtkey);
-        add_userkey(rclsid, langid, guidProfile);
     }
     RegCloseKey(tipkey);
 
@@ -582,14 +555,48 @@ STDMETHODIMP CInputProcessorProfiles::GetActiveLanguageProfile(
     }
 }
 
+static BOOL
+open_language_profile_key(
+    _In_ REFCLSID rclsid,
+    _In_ LANGID langid,
+    _In_ REFGUID guidProfile,
+    _In_ REGSAM sam,
+    _Out_ HKEY *phKey)
+{
+    WCHAR buf[39], buf2[39], fullkey[168];
+
+    StringFromGUID2(rclsid, buf, _countof(buf));
+    StringFromGUID2(guidProfile, buf2, _countof(buf2));
+    StringCchPrintfW(fullkey, _countof(fullkey), L"%s\\%s\\%s\\0x%08x\\%s", szwSystemTIPKey, buf,
+                     L"LanguageProfile", langid, buf2);
+    return RegOpenKeyExW(HKEY_LOCAL_MACHINE, fullkey, 0, sam, phKey) == ERROR_SUCCESS;
+}
+
 STDMETHODIMP CInputProcessorProfiles::GetLanguageProfileDescription(
     _In_ REFCLSID rclsid,
     _In_ LANGID langid,
     _In_ REFGUID guidProfile,
     _Out_ BSTR *pbstrProfile)
 {
-    FIXME("STUB:(%p)\n", this);
-    return E_NOTIMPL;
+    HKEY hKey;
+    WCHAR szDesc[MAX_PATH];
+    DWORD cb = sizeof(szDesc) - sizeof(WCHAR), dwType;
+    LSTATUS error;
+
+    TRACE("(%p) %s %x %s %p\n", this, debugstr_guid(&rclsid), langid, debugstr_guid(&guidProfile), pbstrProfile);
+
+    if (!pbstrProfile)
+        return E_INVALIDARG;
+    *pbstrProfile = NULL;
+    if (!open_language_profile_key(rclsid, langid, guidProfile, KEY_READ, &hKey))
+        return E_FAIL;
+    error = RegQueryValueExW(hKey, L"Description", NULL, &dwType, (BYTE *)szDesc, &cb);
+    RegCloseKey(hKey);
+    if (error != ERROR_SUCCESS || dwType != REG_SZ)
+        return E_FAIL;
+    szDesc[cb / sizeof(WCHAR)] = UNICODE_NULL;
+    *pbstrProfile = SysAllocString(szDesc);
+    return *pbstrProfile ? S_OK : E_OUTOFMEMORY;
 }
 
 STDMETHODIMP CInputProcessorProfiles::GetCurrentLanguage(_Out_ LANGID *plangid)
@@ -607,20 +614,39 @@ STDMETHODIMP CInputProcessorProfiles::ChangeCurrentLanguage(_In_ LANGID langid)
 {
     ITfLanguageProfileNotifySink *sink;
     struct list *cursor;
-    BOOL accept;
 
-    FIXME("STUB:(%p)\n", this);
+    TF_LANGUAGEPROFILE active;
 
-    SINK_FOR_EACH(cursor, &m_LanguageProfileNotifySink, ITfLanguageProfileNotifySink, sink)
+    TRACE("(%p) %x\n", this, langid);
+
+    if (LOWORD(HandleToUlong(GetKeyboardLayout(0))) != langid)
     {
-        accept = TRUE;
-        sink->OnLanguageChange(langid, &accept);
-        if (!accept)
+        HKL ahkl[64], hkl = NULL;
+        int c = GetKeyboardLayoutList(_countof(ahkl), ahkl);
+        for (int i = 0; i < c && !hkl; ++i)
+        {
+            if (LOWORD(HandleToUlong(ahkl[i])) == langid)
+                hkl = ahkl[i];
+        }
+        if (!hkl)
+            return E_INVALIDARG;
+        if (!ActivateKeyboardLayout(hkl, 0))
             return E_FAIL;
     }
 
-    /* TODO:  On successful language change call OnLanguageChanged sink */
-    return E_NOTIMPL;
+    if (m_currentLanguage == langid)
+        return S_OK;
+
+    m_currentLanguage = langid;
+    if (get_active_textservice_by_category(GUID_TFCAT_TIP_KEYBOARD, &active) && active.langid != langid)
+        deactivate_textservice_by_category(GUID_TFCAT_TIP_KEYBOARD);
+    activate_default_textservice(langid);
+
+    SINK_FOR_EACH(cursor, &m_LanguageProfileNotifySink, ITfLanguageProfileNotifySink, sink)
+    {
+        sink->OnLanguageChanged();
+    }
+    return S_OK;
 }
 
 STDMETHODIMP CInputProcessorProfiles::GetLanguageList(
@@ -666,12 +692,52 @@ STDMETHODIMP CInputProcessorProfiles::EnableLanguageProfile(
     StringCchPrintfW(fullkey, _countof(fullkey), L"%s\\%s\\%s\\0x%08x\\%s", szwSystemTIPKey, buf,
                      L"LanguageProfile", langid, buf2);
 
-    error = RegOpenKeyExW(HKEY_CURRENT_USER, fullkey, 0, KEY_READ | KEY_WRITE, &key);
+    error = RegCreateKeyExW(HKEY_CURRENT_USER, fullkey, 0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &key, NULL);
     if (error != ERROR_SUCCESS)
         return E_FAIL;
 
     RegSetValueExW(key, L"Enable", 0, REG_DWORD, (LPBYTE)&fEnable, sizeof(fEnable));
     RegCloseKey(key);
+    return S_OK;
+}
+
+static HRESULT
+get_language_profile_enabled(
+    _In_ REFCLSID rclsid,
+    _In_ LANGID langid,
+    _In_ REFGUID guidProfile,
+    _Out_ BOOL *pfEnable)
+{
+    HKEY key;
+    WCHAR buf[39], buf2[39], fullkey[168];
+    LSTATUS error;
+    DWORD dwEnable, count;
+
+    StringFromGUID2(rclsid, buf, _countof(buf));
+    StringFromGUID2(guidProfile, buf2, _countof(buf2));
+    StringCchPrintfW(fullkey, _countof(fullkey), L"%s\\%s\\%s\\0x%08x\\%s", szwSystemTIPKey,
+                     buf, L"LanguageProfile", langid, buf2);
+
+    error = RegOpenKeyExW(HKEY_CURRENT_USER, fullkey, 0, KEY_READ, &key);
+    if (error == ERROR_SUCCESS)
+    {
+        count = sizeof(dwEnable);
+        error = RegQueryValueExW(key, L"Enable", 0, NULL, (LPBYTE)&dwEnable, &count);
+        RegCloseKey(key);
+        if (error == ERROR_SUCCESS)
+        {
+            *pfEnable = (dwEnable != 0);
+            return S_OK;
+        }
+    }
+
+    error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, fullkey, 0, KEY_READ, &key);
+    if (error != ERROR_SUCCESS)
+        return E_FAIL;
+    count = sizeof(dwEnable);
+    error = RegQueryValueExW(key, L"Enable", 0, NULL, (LPBYTE)&dwEnable, &count);
+    RegCloseKey(key);
+    *pfEnable = (error != ERROR_SUCCESS) || (dwEnable != 0);
     return S_OK;
 }
 
@@ -681,40 +747,12 @@ STDMETHODIMP CInputProcessorProfiles::IsEnabledLanguageProfile(
     _In_ REFGUID guidProfile,
     _Out_ BOOL *pfEnable)
 {
-    HKEY key;
-    WCHAR buf[39], buf2[39], fullkey[168];
-    LSTATUS error;
-
     TRACE("(%p) %s, %i, %s, %p\n", this, debugstr_guid(&rclsid), langid, debugstr_guid(&guidProfile), pfEnable);
 
     if (!pfEnable)
         return E_INVALIDARG;
 
-    StringFromGUID2(rclsid, buf, _countof(buf));
-    StringFromGUID2(guidProfile, buf2, _countof(buf2));
-    StringCchPrintfW(fullkey, _countof(fullkey), L"%s\\%s\\%s\\0x%08x\\%s", szwSystemTIPKey,
-                     buf, L"LanguageProfile", langid, buf2);
-
-    error = RegOpenKeyExW(HKEY_CURRENT_USER, fullkey, 0, KEY_READ | KEY_WRITE, &key);
-    if (error == ERROR_SUCCESS)
-    {
-        DWORD count = sizeof(DWORD);
-        error = RegQueryValueExW(key, L"Enable", 0, NULL, (LPBYTE)pfEnable, &count);
-        RegCloseKey(key);
-    }
-
-    if (error != ERROR_SUCCESS) /* Try Default */
-    {
-        error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, fullkey, 0, KEY_READ | KEY_WRITE, &key);
-        if (error == ERROR_SUCCESS)
-        {
-            DWORD count = sizeof(DWORD);
-            error = RegQueryValueExW(key, L"Enable", 0, NULL, (LPBYTE)pfEnable, &count);
-            RegCloseKey(key);
-        }
-    }
-
-    return (error == ERROR_SUCCESS) ? S_OK : E_FAIL;
+    return get_language_profile_enabled(rclsid, langid, guidProfile, pfEnable);
 }
 
 STDMETHODIMP CInputProcessorProfiles::EnableLanguageProfileByDefault(
@@ -753,6 +791,127 @@ STDMETHODIMP CInputProcessorProfiles::SubstituteKeyboardLayout(
     return E_NOTIMPL;
 }
 
+static void
+fill_input_processor_profile(
+    _In_ REFCLSID rclsid,
+    _In_ LANGID langid,
+    _In_ REFGUID guidProfile,
+    _Out_ TF_INPUTPROCESSORPROFILE *pProfile)
+{
+    static const GUID *s_categories[] = { &GUID_TFCAT_TIP_KEYBOARD, &GUID_TFCAT_TIP_SPEECH,
+                                          &GUID_TFCAT_TIP_HANDWRITING };
+    static const struct
+    {
+        const GUID *pCategory;
+        DWORD dwCaps;
+    } s_caps[] = {
+        { &GUID_TFCAT_TIPCAP_SECUREMODE, TF_IPP_CAPS_SECUREMODESUPPORT },
+        { &GUID_TFCAT_TIPCAP_UIELEMENTENABLED, TF_IPP_CAPS_UIELEMENTENABLED },
+        { &GUID_TFCAT_TIPCAP_COMLESS, TF_IPP_CAPS_COMLESSSUPPORT },
+    };
+    ITfCategoryMgr *pCatMgr = NULL;
+    BOOL fEnabled = FALSE;
+
+    ZeroMemory(pProfile, sizeof(*pProfile));
+    pProfile->dwProfileType = TF_PROFILETYPE_INPUTPROCESSOR;
+    pProfile->langid = langid;
+    pProfile->clsid = rclsid;
+    pProfile->guidProfile = guidProfile;
+    if (SUCCEEDED(CategoryMgr_Constructor(NULL, (IUnknown **)&pCatMgr)))
+    {
+        GUID catid = GUID_NULL;
+        if (pCatMgr->FindClosestCategory(rclsid, &catid, s_categories, _countof(s_categories)) == S_OK)
+            pProfile->catid = catid;
+        for (const auto &entry : s_caps)
+        {
+            const GUID *pCategory = entry.pCategory;
+            if (pCatMgr->FindClosestCategory(rclsid, &catid, &pCategory, 1) == S_OK && catid == *entry.pCategory)
+                pProfile->dwCaps |= entry.dwCaps;
+        }
+        pCatMgr->Release();
+    }
+    if (SUCCEEDED(get_language_profile_enabled(rclsid, langid, guidProfile, &fEnabled)) && fEnabled)
+        pProfile->dwFlags = TF_IPP_FLAG_ACTIVE | TF_IPP_FLAG_ENABLED;
+}
+
+static BOOL
+is_installed_layout(_In_ HKL hkl)
+{
+    INT cLayouts = GetKeyboardLayoutList(0, NULL);
+    BOOL fFound = FALSE;
+    if (cLayouts <= 0)
+        return FALSE;
+    HKL *phkls = (HKL *)cicMemAlloc(cLayouts * sizeof(HKL));
+    if (!phkls)
+        return FALSE;
+    cLayouts = GetKeyboardLayoutList(cLayouts, phkls);
+    for (INT i = 0; i < cLayouts && !fFound; ++i)
+        fFound = (phkls[i] == hkl);
+    cicMemFree(phkls);
+    return fFound;
+}
+
+static void
+fill_layout_profile(_In_ HKL hkl, _Out_ TF_INPUTPROCESSORPROFILE *pProfile)
+{
+    ZeroMemory(pProfile, sizeof(*pProfile));
+    pProfile->dwProfileType = TF_PROFILETYPE_KEYBOARDLAYOUT;
+    pProfile->langid = LOWORD(HandleToUlong(hkl));
+    pProfile->catid = GUID_TFCAT_TIP_KEYBOARD;
+    pProfile->hkl = hkl;
+    /* TODO: Set TF_IPP_FLAG_ACTIVE and TF_IPP_FLAG_ENABLED as Windows 11 does for layout profiles */
+}
+
+static void
+add_tip_profiles(_In_ CEnumTfInputProcessorProfiles *pEnum, _In_ LANGID langid, _In_ BOOL fAll)
+{
+    HKEY hTips;
+    WCHAR szClsid[39], szLang[16], szProfile[39], szKey[100];
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, szwSystemTIPKey, 0, KEY_READ, &hTips) != ERROR_SUCCESS)
+        return;
+    for (DWORD iTip = 0;; ++iTip)
+    {
+        DWORD cch = _countof(szClsid);
+        CLSID clsid;
+        HKEY hLangs;
+        if (RegEnumKeyExW(hTips, iTip, szClsid, &cch, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        if (FAILED(CLSIDFromString(szClsid, &clsid)))
+            continue;
+        StringCchPrintfW(szKey, _countof(szKey), L"%s\\LanguageProfile", szClsid);
+        if (RegOpenKeyExW(hTips, szKey, 0, KEY_READ, &hLangs) != ERROR_SUCCESS)
+            continue;
+        for (DWORD iLang = 0;; ++iLang)
+        {
+            HKEY hProfiles;
+            cch = _countof(szLang);
+            if (RegEnumKeyExW(hLangs, iLang, szLang, &cch, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+                break;
+            LANGID lid = (LANGID)wcstoul(szLang, NULL, 16);
+            if (!fAll && lid != langid)
+                continue;
+            if (RegOpenKeyExW(hLangs, szLang, 0, KEY_READ, &hProfiles) != ERROR_SUCCESS)
+                continue;
+            for (DWORD iProfile = 0;; ++iProfile)
+            {
+                TF_INPUTPROCESSORPROFILE profile;
+                GUID guidProfile;
+                cch = _countof(szProfile);
+                if (RegEnumKeyExW(hProfiles, iProfile, szProfile, &cch, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+                    break;
+                if (FAILED(CLSIDFromString(szProfile, &guidProfile)))
+                    continue;
+                fill_input_processor_profile(clsid, lid, guidProfile, &profile);
+                pEnum->Add(&profile);
+            }
+            RegCloseKey(hProfiles);
+        }
+        RegCloseKey(hLangs);
+    }
+    RegCloseKey(hTips);
+}
+
 STDMETHODIMP CInputProcessorProfiles::ActivateProfile(
     _In_ DWORD dwProfileType,
     _In_ LANGID langid,
@@ -761,9 +920,27 @@ STDMETHODIMP CInputProcessorProfiles::ActivateProfile(
     _In_ HKL hkl,
     _In_ DWORD dwFlags)
 {
-    FIXME("(%p)->(%d %x %s %s %p %x)\n", this, dwProfileType, langid, debugstr_guid(&clsid),
+    TRACE("(%p)->(%d %x %s %s %p %x)\n", this, dwProfileType, langid, debugstr_guid(&clsid),
           debugstr_guid(&guidProfile), hkl, dwFlags);
-    return E_NOTIMPL;
+
+    switch (dwProfileType)
+    {
+        case TF_PROFILETYPE_INPUTPROCESSOR:
+        {
+            TF_LANGUAGEPROFILE active;
+            if (get_active_textservice(clsid, &active) && active.langid == langid && active.guidProfile == guidProfile)
+                return S_OK;
+            return ActivateLanguageProfile(clsid, langid, guidProfile);
+        }
+        case TF_PROFILETYPE_KEYBOARDLAYOUT:
+            /* FIXME: Windows 11 also fails an installed layout when the thread has no active thread manager */
+            if (!is_installed_layout(hkl))
+                return E_FAIL;
+            deactivate_textservice_by_category(GUID_TFCAT_TIP_KEYBOARD);
+            return ActivateKeyboardLayout(hkl, 0) ? S_OK : E_FAIL;
+        default:
+            return E_INVALIDARG;
+    }
 }
 
 STDMETHODIMP CInputProcessorProfiles::DeactivateProfile(
@@ -774,9 +951,17 @@ STDMETHODIMP CInputProcessorProfiles::DeactivateProfile(
     _In_ HKL hkl,
     _In_ DWORD dwFlags)
 {
-    FIXME("(%p)->(%d %x %s %s %p %x)\n", this, dwProfileType, langid, debugstr_guid(&clsid),
+    TF_LANGUAGEPROFILE active;
+
+    TRACE("(%p)->(%d %x %s %s %p %x)\n", this, dwProfileType, langid, debugstr_guid(&clsid),
           debugstr_guid(&guidProfile), hkl, dwFlags);
-    return E_NOTIMPL;
+
+    if (dwProfileType == TF_PROFILETYPE_INPUTPROCESSOR && get_active_textservice(clsid, &active) &&
+        active.langid == langid && active.guidProfile == guidProfile)
+    {
+        deactivate_textservice_by_category(active.catid);
+    }
+    return S_OK;
 }
 
 STDMETHODIMP CInputProcessorProfiles::GetProfile(
@@ -787,9 +972,31 @@ STDMETHODIMP CInputProcessorProfiles::GetProfile(
     _In_ HKL hkl,
     _Out_ TF_INPUTPROCESSORPROFILE *pProfile)
 {
-    FIXME("(%p)->(%d %x %s %s %p %p)\n", this, dwProfileType, langid, debugstr_guid(&clsid),
+    TRACE("(%p)->(%d %x %s %s %p %p)\n", this, dwProfileType, langid, debugstr_guid(&clsid),
           debugstr_guid(&guidProfile), hkl, pProfile);
-    return E_NOTIMPL;
+
+    if (!pProfile)
+        return E_INVALIDARG;
+
+    switch (dwProfileType)
+    {
+        case TF_PROFILETYPE_INPUTPROCESSOR:
+        {
+            HKEY hKey;
+            if (!open_language_profile_key(clsid, langid, guidProfile, KEY_READ, &hKey))
+                return E_FAIL;
+            RegCloseKey(hKey);
+            fill_input_processor_profile(clsid, langid, guidProfile, pProfile);
+            return S_OK;
+        }
+        case TF_PROFILETYPE_KEYBOARDLAYOUT:
+            if (!is_installed_layout(hkl))
+                return E_INVALIDARG;
+            fill_layout_profile(hkl, pProfile);
+            return S_OK;
+        default:
+            return E_INVALIDARG;
+    }
 }
 
 STDMETHODIMP CInputProcessorProfiles::EnumProfiles(
@@ -798,11 +1005,40 @@ STDMETHODIMP CInputProcessorProfiles::EnumProfiles(
 {
     TRACE("(%p)->(%x %p)\n", this, langid, ppEnum);
 
-    CEnumTfInputProcessorProfiles *enum_profiles = new(cicNoThrow) CEnumTfInputProcessorProfiles();
-    if (!enum_profiles)
+    if (!ppEnum)
+        return E_INVALIDARG;
+    *ppEnum = NULL;
+
+    CEnumTfInputProcessorProfiles *pEnum = new(cicNoThrow) CEnumTfInputProcessorProfiles();
+    if (!pEnum)
         return E_OUTOFMEMORY;
 
-    *ppEnum = static_cast<IEnumTfInputProcessorProfiles *>(enum_profiles);
+    INT cLayouts = GetKeyboardLayoutList(0, NULL);
+    HKL *phkls = (cLayouts > 0) ? (HKL *)cicMemAlloc(cLayouts * sizeof(HKL)) : NULL;
+    if (phkls)
+    {
+        cLayouts = GetKeyboardLayoutList(cLayouts, phkls);
+        for (INT i = 0; i < cLayouts; ++i)
+        {
+            TF_INPUTPROCESSORPROFILE profile;
+            if (langid && LOWORD(HandleToUlong(phkls[i])) != langid)
+                continue;
+            fill_layout_profile(phkls[i], &profile);
+            pEnum->Add(&profile);
+        }
+        cicMemFree(phkls);
+    }
+    if (langid)
+    {
+        add_tip_profiles(pEnum, langid, FALSE);
+        add_tip_profiles(pEnum, 0, FALSE);
+    }
+    else
+    {
+        add_tip_profiles(pEnum, 0, TRUE);
+    }
+
+    *ppEnum = pEnum;
     return S_OK;
 }
 
@@ -810,8 +1046,9 @@ STDMETHODIMP CInputProcessorProfiles::ReleaseInputProcessor(
     _In_ REFCLSID rclsid,
     _In_ DWORD dwFlags)
 {
-    FIXME("(%p)->(%s %x)\n", this, debugstr_guid(&rclsid), dwFlags);
-    return E_NOTIMPL;
+    TRACE("(%p)->(%s %x)\n", this, debugstr_guid(&rclsid), dwFlags);
+    /* TODO: Unload the text service DLL as dwFlags requests */
+    return S_OK;
 }
 
 STDMETHODIMP CInputProcessorProfiles::RegisterProfile(
@@ -828,10 +1065,49 @@ STDMETHODIMP CInputProcessorProfiles::RegisterProfile(
     _In_ BOOL bEnabledByDefault,
     _In_ DWORD dwFlags)
 {
-    FIXME("(%p)->(%s %x %s %s %d %s %u %u %p %x %x %x)\n", this, debugstr_guid(&rclsid), langid,
-          debugstr_guid(&guidProfile), debugstr_w(pchDesc), cchDesc, debugstr_w(pchIconFile),
+    HKEY hKey;
+    WCHAR buf[39], buf2[39], fullkey[168], szText[MAX_PATH];
+    LSTATUS error;
+    HRESULT hr;
+
+    TRACE("(%p)->(%s %x %s %s %d %s %u %u %p %x %x %x)\n", this, debugstr_guid(&rclsid), langid,
+          debugstr_guid(&guidProfile), debugstr_wn(pchDesc, cchDesc), cchDesc, debugstr_wn(pchIconFile, cchFile),
           cchFile, uIconIndex, hklsubstitute, dwPreferredLayout, bEnabledByDefault, dwFlags);
-    return E_NOTIMPL;
+
+    if ((cchDesc && !pchDesc) || (cchFile && !pchIconFile))
+        return E_INVALIDARG;
+
+    hr = Register(rclsid);
+    if (FAILED(hr))
+        return hr;
+
+    StringFromGUID2(rclsid, buf, _countof(buf));
+    StringFromGUID2(guidProfile, buf2, _countof(buf2));
+    StringCchPrintfW(fullkey, _countof(fullkey), L"%s\\%s\\%s\\0x%08x\\%s", szwSystemTIPKey, buf,
+                     L"LanguageProfile", langid, buf2);
+    error = RegCreateKeyExW(HKEY_LOCAL_MACHINE, fullkey, 0, NULL, 0, KEY_READ | KEY_WRITE, NULL, &hKey, NULL);
+    if (error != ERROR_SUCCESS)
+        return HRESULT_FROM_WIN32(error);
+
+    StringCchCopyNW(szText, _countof(szText), pchDesc ? pchDesc : L"", cchDesc);
+    RegSetValueExW(hKey, L"Description", 0, REG_SZ, (const BYTE *)szText, (wcslen(szText) + 1) * sizeof(WCHAR));
+    if (cchFile)
+    {
+        StringCchCopyNW(szText, _countof(szText), pchIconFile, cchFile);
+        RegSetValueExW(hKey, L"IconFile", 0, REG_SZ, (const BYTE *)szText, (wcslen(szText) + 1) * sizeof(WCHAR));
+        RegSetValueExW(hKey, L"IconIndex", 0, REG_DWORD, (const BYTE *)&uIconIndex, sizeof(uIconIndex));
+    }
+    if (hklsubstitute)
+    {
+        StringCchPrintfW(szText, _countof(szText), L"0x%08x", HandleToUlong(hklsubstitute));
+        RegSetValueExW(hKey, L"SubstituteLayout", 0, REG_SZ, (const BYTE *)szText,
+                       (wcslen(szText) + 1) * sizeof(WCHAR));
+    }
+    DWORD dwEnable = !!bEnabledByDefault;
+    RegSetValueExW(hKey, L"Enable", 0, REG_DWORD, (const BYTE *)&dwEnable, sizeof(dwEnable));
+    /* TODO: Store dwPreferredLayout */
+    RegCloseKey(hKey);
+    return S_OK;
 }
 
 STDMETHODIMP CInputProcessorProfiles::UnregisterProfile(
@@ -840,17 +1116,52 @@ STDMETHODIMP CInputProcessorProfiles::UnregisterProfile(
     _In_ REFGUID guidProfile,
     _In_ DWORD dwFlags)
 {
-    FIXME("(%p)->(%s %x %s %x)\n", this, debugstr_guid(&rclsid), langid,
-          debugstr_guid(&guidProfile), dwFlags);
-    return E_NOTIMPL;
+    WCHAR buf[39], buf2[39], fullkey[168];
+
+    TRACE("(%p)->(%s %x %s %x)\n", this, debugstr_guid(&rclsid), langid, debugstr_guid(&guidProfile), dwFlags);
+
+    StringFromGUID2(rclsid, buf, _countof(buf));
+    StringFromGUID2(guidProfile, buf2, _countof(buf2));
+    StringCchPrintfW(fullkey, _countof(fullkey), L"%s\\%s\\%s\\0x%08x\\%s", szwSystemTIPKey, buf,
+                     L"LanguageProfile", langid, buf2);
+    RegDeleteTreeW(HKEY_LOCAL_MACHINE, fullkey);
+    RegDeleteTreeW(HKEY_CURRENT_USER, fullkey);
+    return S_OK;
 }
 
 STDMETHODIMP CInputProcessorProfiles::GetActiveProfile(
     _In_ REFGUID catid,
     _Out_ TF_INPUTPROCESSORPROFILE *pProfile)
 {
-    FIXME("(%p)->(%s %p)\n", this, debugstr_guid(&catid), pProfile);
-    return E_NOTIMPL;
+    TF_LANGUAGEPROFILE languageProfile;
+    TF_INPUTPROCESSORPROFILE profile = {};
+
+    TRACE("(%p)->(%s %p)\n", this, debugstr_guid(&catid), pProfile);
+
+    if (cicIsNullPtr(&catid) || !pProfile || catid != GUID_TFCAT_TIP_KEYBOARD)
+        return E_INVALIDARG;
+
+    profile.catid = catid;
+    profile.dwFlags = TF_IPP_FLAG_ACTIVE | TF_IPP_FLAG_ENABLED;
+    if (get_active_textservice_by_category(catid, &languageProfile))
+    {
+        profile.dwProfileType = TF_PROFILETYPE_INPUTPROCESSOR;
+        profile.langid = languageProfile.langid;
+        profile.clsid = languageProfile.clsid;
+        profile.guidProfile = languageProfile.guidProfile;
+    }
+    else
+    {
+        profile.hkl = GetKeyboardLayout(0);
+        if (!profile.hkl)
+            return S_FALSE;
+
+        profile.dwProfileType = TF_PROFILETYPE_KEYBOARDLAYOUT;
+        profile.langid = LOWORD(HandleToUlong(profile.hkl));
+    }
+
+    *pProfile = profile;
+    return S_OK;
 }
 
 STDMETHODIMP CInputProcessorProfiles::AdviseSink(
@@ -1258,11 +1569,26 @@ STDMETHODIMP CEnumTfLanguageProfiles::Clone(_Out_ IEnumTfLanguageProfiles **ppEn
 
 CEnumTfInputProcessorProfiles::CEnumTfInputProcessorProfiles()
     : m_cRefs(1)
+    , m_profiles(NULL)
+    , m_count(0)
+    , m_index(0)
 {
 }
 
 CEnumTfInputProcessorProfiles::~CEnumTfInputProcessorProfiles()
 {
+    cicMemFree(m_profiles);
+}
+
+BOOL CEnumTfInputProcessorProfiles::Add(_In_ const TF_INPUTPROCESSORPROFILE *pProfile)
+{
+    TF_INPUTPROCESSORPROFILE *profiles =
+        (TF_INPUTPROCESSORPROFILE *)cicMemReAlloc(m_profiles, (m_count + 1) * sizeof(*profiles));
+    if (!profiles)
+        return FALSE;
+    m_profiles = profiles;
+    m_profiles[m_count++] = *pProfile;
+    return TRUE;
 }
 
 STDMETHODIMP CEnumTfInputProcessorProfiles::QueryInterface(REFIID iid, LPVOID *ppvObj)
@@ -1299,8 +1625,23 @@ STDMETHODIMP_(ULONG) CEnumTfInputProcessorProfiles::Release()
 
 STDMETHODIMP CEnumTfInputProcessorProfiles::Clone(_Out_ IEnumTfInputProcessorProfiles **ppEnum)
 {
-    FIXME("(%p)->(%p)\n", this, ppEnum);
-    return E_NOTIMPL;
+    if (!ppEnum)
+        return E_INVALIDARG;
+    *ppEnum = NULL;
+    CEnumTfInputProcessorProfiles *pClone = new(cicNoThrow) CEnumTfInputProcessorProfiles();
+    if (!pClone)
+        return E_OUTOFMEMORY;
+    for (ULONG i = 0; i < m_count; ++i)
+    {
+        if (!pClone->Add(&m_profiles[i]))
+        {
+            pClone->Release();
+            return E_OUTOFMEMORY;
+        }
+    }
+    pClone->m_index = m_index;
+    *ppEnum = pClone;
+    return S_OK;
 }
 
 STDMETHODIMP CEnumTfInputProcessorProfiles::Next(
@@ -1308,22 +1649,32 @@ STDMETHODIMP CEnumTfInputProcessorProfiles::Next(
     _Out_ TF_INPUTPROCESSORPROFILE *pProfile,
     _Out_ ULONG *pcFetch)
 {
-    FIXME("(%p)->(%u %p %p)\n", this, ulCount, pProfile, pcFetch);
+    ULONG fetched = 0;
+
+    if (!pProfile && ulCount && m_index < m_count)
+        return E_INVALIDARG;
+    while (fetched < ulCount && m_index < m_count)
+        pProfile[fetched++] = m_profiles[m_index++];
     if (pcFetch)
-        *pcFetch = 0;
-    return S_FALSE;
+        *pcFetch = fetched;
+    return (fetched == ulCount) ? S_OK : S_FALSE;
 }
 
 STDMETHODIMP CEnumTfInputProcessorProfiles::Reset()
 {
-    FIXME("(%p)\n", this);
-    return E_NOTIMPL;
+    m_index = 0;
+    return S_OK;
 }
 
 STDMETHODIMP CEnumTfInputProcessorProfiles::Skip(_In_ ULONG ulCount)
 {
-    FIXME("(%p)->(%u)\n", this, ulCount);
-    return E_NOTIMPL;
+    if (ulCount > m_count - m_index)
+    {
+        m_index = m_count;
+        return S_FALSE;
+    }
+    m_index += ulCount;
+    return S_OK;
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -1332,4 +1683,130 @@ EXTERN_C
 HRESULT InputProcessorProfiles_Constructor(IUnknown *pUnkOuter, IUnknown **ppOut)
 {
     return CInputProcessorProfiles::CreateInstance(pUnkOuter, (CInputProcessorProfiles **)ppOut);
+}
+
+static BOOL
+parse_input_method(_In_ LPCWSTR psz, _Out_ LANGID *plangid, _Out_ CLSID *pclsid, _Out_ GUID *pguidProfile)
+{
+    WCHAR buf[39];
+    LPWSTR end;
+    ULONG langid = wcstoul(psz, &end, 16);
+    if (end == psz || *end != L':' || langid > 0xFFFF)
+        return FALSE;
+    psz = end + 1;
+    if (wcslen(psz) != 76 || psz[0] != L'{' || psz[38] != L'{')
+        return FALSE;
+    StringCchCopyNW(buf, _countof(buf), psz, 38);
+    if (FAILED(CLSIDFromString(buf, pclsid)))
+        return FALSE;
+    StringCchCopyNW(buf, _countof(buf), psz + 38, 38);
+    if (FAILED(CLSIDFromString(buf, pguidProfile)))
+        return FALSE;
+    *plangid = (LANGID)langid;
+    return TRUE;
+}
+
+static BOOL
+find_user_input_method(_In_ LANGID langid, _Out_ CLSID *pclsid, _Out_ GUID *pguidProfile)
+{
+    HKEY hUserProfile;
+    WCHAR name[MAX_PATH], prefix[6];
+    DWORD cb;
+    LANGID found;
+
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\International\\User Profile", 0, KEY_READ,
+                      &hUserProfile) != ERROR_SUCCESS)
+        return FALSE;
+
+    cb = sizeof(name);
+    if (RegQueryValueExW(hUserProfile, L"InputMethodOverride", NULL, NULL, (LPBYTE)name, &cb) == ERROR_SUCCESS &&
+        parse_input_method(name, &found, pclsid, pguidProfile) && found == langid)
+    {
+        RegCloseKey(hUserProfile);
+        return TRUE;
+    }
+
+    StringCchPrintfW(prefix, _countof(prefix), L"%04X:", langid);
+    DWORD bestOrder = MAXDWORD;
+    BOOL bestIsTip = FALSE;
+    WCHAR subkey[LOCALE_NAME_MAX_LENGTH + 1];
+    for (DWORD index = 0;; ++index)
+    {
+        DWORD cchSubkey = _countof(subkey);
+        HKEY hLang;
+        if (RegEnumKeyExW(hUserProfile, index, subkey, &cchSubkey, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        if (RegOpenKeyExW(hUserProfile, subkey, 0, KEY_QUERY_VALUE, &hLang) != ERROR_SUCCESS)
+            continue;
+        for (DWORD value = 0;; ++value)
+        {
+            DWORD cchName = _countof(name), type, order, cbOrder = sizeof(order);
+            LSTATUS error = RegEnumValueW(hLang, value, name, &cchName, NULL, &type, (LPBYTE)&order, &cbOrder);
+            if (error == ERROR_MORE_DATA)
+                continue;
+            if (error != ERROR_SUCCESS)
+                break;
+            if (type != REG_DWORD || _wcsnicmp(name, prefix, 5) || order >= bestOrder)
+                continue;
+            bestOrder = order;
+            bestIsTip = parse_input_method(name, &found, pclsid, pguidProfile);
+        }
+        RegCloseKey(hLang);
+    }
+    RegCloseKey(hUserProfile);
+    return bestIsTip;
+}
+
+static BOOL
+is_secure_desktop(void)
+{
+    WCHAR szName[32];
+    HDESK hDesk = GetThreadDesktop(GetCurrentThreadId());
+    if (!hDesk || !GetUserObjectInformationW(hDesk, UOI_NAME, szName, sizeof(szName), NULL))
+        return FALSE;
+    return !_wcsicmp(szName, L"Winlogon");
+}
+
+static BOOL
+supports_secure_mode(REFCLSID clsid)
+{
+    ITfCategoryMgr *catmgr;
+    const GUID *required = &GUID_TFCAT_TIPCAP_SECUREMODE;
+    GUID category;
+    HRESULT hr;
+
+    if (FAILED(CategoryMgr_Constructor(NULL, (IUnknown **)&catmgr)))
+        return FALSE;
+    hr = catmgr->FindClosestCategory(clsid, &category, &required, 1);
+    catmgr->Release();
+    return hr == S_OK && category == GUID_TFCAT_TIPCAP_SECUREMODE;
+}
+
+EXTERN_C
+HRESULT activate_default_textservice(LANGID langid)
+{
+    TF_LANGUAGEPROFILE profile;
+
+    if (get_active_textservice_by_category(GUID_TFCAT_TIP_KEYBOARD, &profile))
+        return S_OK;
+
+    CLSID clsid;
+    GUID guidProfile;
+    if (!find_user_input_method(langid, &clsid, &guidProfile))
+        return S_FALSE;
+
+    BOOL fEnabled;
+    if (FAILED(get_language_profile_enabled(clsid, langid, guidProfile, &fEnabled)) || !fEnabled)
+        return S_FALSE;
+
+    if (is_secure_desktop() && !supports_secure_mode(clsid))
+        return S_FALSE;
+
+    TRACE("activating %s %s for %04x\n", debugstr_guid(&clsid), debugstr_guid(&guidProfile), langid);
+    ZeroMemory(&profile, sizeof(profile));
+    profile.clsid = clsid;
+    profile.langid = langid;
+    profile.guidProfile = guidProfile;
+    profile.fActive = TRUE;
+    return add_active_textservice(&profile);
 }

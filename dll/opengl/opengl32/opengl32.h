@@ -15,6 +15,8 @@
 #include <winuser.h>
 #include <wingdi.h>
 #include <winddi.h>
+#include <ntgdityp.h>
+#include <ntgdihdl.h>
 #include <GL/gl.h>
 
 #ifndef OPENGL32_USE_TLS
@@ -61,6 +63,12 @@ struct wgl_dc_data
     /* ICD */
     struct ICD_Data* icd_data;
     INT nb_icd_formats;
+    LUID AdapterLuid;
+    BOOL AdapterLuidValid;
+    HANDLE RedirectSurface;
+    ULONGLONG RedirectUpdateId;
+    POINT RedirectClientOffset;
+    BOOL RedirectPresented;
 
     /* Software implementation */
     INT nb_sw_formats;
@@ -69,6 +77,10 @@ struct wgl_dc_data
     /* Linked list */
     struct wgl_dc_data* next;
 };
+
+/* Existing DC data lookup for the ICD callback path. */
+struct wgl_dc_data* IntGetDcData(HDC hdc);
+struct wgl_context* get_context(HGLRC hglrc);
 
 /* Clean up functions */
 void IntDeleteAllContexts(void);
@@ -80,6 +92,8 @@ IntGetCurrentDispatchTable(void)
 {
     return (GLDISPATCHTABLE*)NtCurrentTeb()->glTable;
 }
+
+const GLDISPATCHTABLE* IntGetNoContextDispatchTable(void);
 
 FORCEINLINE
 void
@@ -142,6 +156,9 @@ IntGetCurrentDHGLRC(void)
     if(!ctx) return NULL;
     return ctx->dhglrc;
 }
+
+BOOL IntIsPixelFormatInitializing(VOID);
+extern DWORD PixelFormatInitTlsIndex;
 
 /* Software implementation functions */
 INT sw_DescribePixelFormat(HDC hdc, INT format, UINT size, PIXELFORMATDESCRIPTOR* descr);

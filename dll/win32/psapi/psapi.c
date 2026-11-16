@@ -251,41 +251,7 @@ BOOL
 WINAPI
 EmptyWorkingSet(HANDLE hProcess)
 {
-    SYSTEM_INFO SystemInfo;
-    QUOTA_LIMITS QuotaLimits;
-    NTSTATUS Status;
-
-    GetSystemInfo(&SystemInfo);
-
-    /* Query the working set */
-    Status = NtQueryInformationProcess(hProcess,
-                                       ProcessQuotaLimits,
-                                       &QuotaLimits,
-                                       sizeof(QuotaLimits),
-                                       NULL);
-
-    if (!NT_SUCCESS(Status))
-    {
-        SetLastError(RtlNtStatusToDosError(Status));
-        return FALSE;
-    }
-
-    /* Empty the working set */
-    QuotaLimits.MinimumWorkingSetSize = -1;
-    QuotaLimits.MaximumWorkingSetSize = -1;
-
-    /* Set the working set */
-    Status = NtSetInformationProcess(hProcess,
-                                     ProcessQuotaLimits,
-                                     &QuotaLimits,
-                                     sizeof(QuotaLimits));
-    if (!NT_SUCCESS(Status) && Status != STATUS_PRIVILEGE_NOT_HELD)
-    {
-        SetLastError(RtlNtStatusToDosError(Status));
-        return FALSE;
-    }
-
-    return TRUE;
+    return SetProcessWorkingSetSizeEx(hProcess, (SIZE_T)-1, (SIZE_T)-1, 0);
 }
 
 
@@ -299,7 +265,7 @@ EnumDeviceDrivers(LPVOID *lpImageBase,
                   LPDWORD lpcbNeeded)
 {
     NTSTATUS Status;
-    DWORD NewSize, Count;
+    DWORD Count;
     PRTL_PROCESS_MODULES Information;
     /* By default, to prevent too many reallocations, we already make room for 4 modules */
     DWORD Size = sizeof(RTL_PROCESS_MODULES) + 3 * sizeof(RTL_PROCESS_MODULE_INFORMATION);
@@ -319,9 +285,7 @@ EnumDeviceDrivers(LPVOID *lpImageBase,
         /* In case of an error */
         if (!NT_SUCCESS(Status))
         {
-            /* Save the amount of output modules */
-            NewSize = Information->NumberOfModules;
-            /* And free buffer */
+            /* Free buffer */
             LocalFree(Information);
 
             /* If it was not a length mismatch (ie, buffer too small), just leave */
@@ -331,21 +295,15 @@ EnumDeviceDrivers(LPVOID *lpImageBase,
                 return FALSE;
             }
 
-            /* Compute new size length */
-            ASSERT(Size >= sizeof(RTL_PROCESS_MODULES));
-            NewSize *= sizeof(RTL_PROCESS_MODULE_INFORMATION);
-            NewSize += sizeof(ULONG);
-            ASSERT(NewSize >= sizeof(RTL_PROCESS_MODULES));
             /* Check whether it is really bigger - otherwise, leave */
-            if (NewSize < Size)
+            if (Count <= Size)
             {
-                ASSERT(NewSize > Size);
                 SetLastError(RtlNtStatusToDosError(STATUS_INFO_LENGTH_MISMATCH));
                 return FALSE;
             }
 
-            /* Loop again with that new buffer */
-            Size = NewSize;
+            /* Loop again with the required size */
+            Size = Count;
             continue;
         }
 
@@ -557,6 +515,62 @@ EnumProcessModules(HANDLE hProcess,
     _SEH2_END;
 
     return TRUE;
+}
+
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+EnumProcessModulesEx(HANDLE hProcess,
+                     HMODULE *lphModule,
+                     DWORD cb,
+                     LPDWORD lpcbNeeded,
+                     DWORD dwFilterFlag)
+{
+    DWORD Needed;
+#ifdef _WIN64
+    BOOL Wow64Process;
+#endif
+
+    if (dwFilterFlag & ~LIST_MODULES_ALL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (cb && !lphModule)
+    {
+        SetLastError(ERROR_NOACCESS);
+        return FALSE;
+    }
+
+    if (!lpcbNeeded)
+    {
+        if (!EnumProcessModules(hProcess, lphModule, cb, &Needed))
+        {
+            return FALSE;
+        }
+
+        SetLastError(ERROR_NOACCESS);
+        return FALSE;
+    }
+
+#ifdef _WIN64
+    if (!IsWow64Process(hProcess, &Wow64Process))
+    {
+        return FALSE;
+    }
+
+    if (dwFilterFlag == LIST_MODULES_32BIT && !Wow64Process)
+    {
+        *lpcbNeeded = 0;
+        return TRUE;
+    }
+#endif
+
+    return EnumProcessModules(hProcess, lphModule, cb, lpcbNeeded);
 }
 
 
@@ -1093,6 +1107,32 @@ GetWsChanges(HANDLE hProcess,
     return TRUE;
 }
 
+BOOL
+WINAPI
+GetWsChangesEx(HANDLE hProcess,
+               PPSAPI_WS_WATCH_INFORMATION_EX lpWatchInfoEx,
+               PDWORD cb)
+{
+    ULONG ReturnLength = 0;
+    NTSTATUS Status;
+
+    Status = NtQueryInformationProcess(hProcess,
+                                       ProcessWorkingSetWatchEx,
+                                       lpWatchInfoEx,
+                                       *cb,
+                                       &ReturnLength);
+    if (NT_SUCCESS(Status) || Status == STATUS_BUFFER_TOO_SMALL)
+        *cb = ReturnLength;
+
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastError(RtlNtStatusToDosError(Status));
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 
 /*
  * @implemented
@@ -1189,11 +1229,10 @@ GetProcessImageFileNameA(HANDLE hProcess,
 
     /* Copy name */
     Len = WideCharToMultiByte(CP_ACP, 0, ImageFileName->Buffer,
-                              ImageFileName->Length, lpImageFileName, nSize, NULL, NULL);
-    /* If conversion was successful, don't return len with added \0 */
-    if (Len != 0)
+                              ImageFileName->Length / sizeof(WCHAR), lpImageFileName, nSize, NULL, NULL);
+    if (Len < nSize)
     {
-        Len -= sizeof(ANSI_NULL);
+        lpImageFileName[Len] = ANSI_NULL;
     }
 
     LocalFree(ImageFileName);

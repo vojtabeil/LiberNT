@@ -13,19 +13,19 @@
 #include <excpt.h>
 #include <stdlib.h>
 #include <intrin.h>
-#include <pseh/pseh2.h>
+#include <pseh/pseh_cpp_push.h>
 
 // Defined in winnt.h
 #define FAST_FAIL_FATAL_APP_EXIT 7
 
-extern "C" int __cdecl main(int, char**, char**);
+int __cdecl main(int, char**, char**);
 extern "C" int __cdecl wmain(int, wchar_t**, wchar_t**);
 
 template<typename Tmain>
-static int call_main();
+static inline int call_main();
 
 template<>
-int call_main<decltype(main)>()
+inline int call_main<decltype(main)>()
 {
     _configure_narrow_argv(_crt_argv_unexpanded_arguments);
 
@@ -33,7 +33,7 @@ int call_main<decltype(main)>()
 }
 
 template<>
-int call_main<decltype(wmain)>()
+inline int call_main<decltype(wmain)>()
 {
     _configure_wide_argv(_crt_argv_unexpanded_arguments);
 
@@ -68,7 +68,7 @@ static bool __scrt_initialize()
 template<typename Tmain>
 static __declspec(noinline) int __cdecl __commonCRTStartup()
 {
-    int exitCode;
+    int exitCode = 0;
 
     if (!__scrt_initialize())
     {
@@ -87,3 +87,4 @@ static __declspec(noinline) int __cdecl __commonCRTStartup()
 
     exit(exitCode);
 }
+#include <pseh/pseh_cpp_pop.h>

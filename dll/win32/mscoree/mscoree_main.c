@@ -214,7 +214,13 @@ HRESULT WINAPI CorBindToRuntimeHost(LPCWSTR pwszVersion, LPCWSTR pwszBuildFlavor
 
     if (SUCCEEDED(ret))
     {
+#ifdef __REACTOS__
+        ret = set_startup_flags(info, startupFlags, TRUE, pwszHostConfigFile);
+        if (SUCCEEDED(ret))
+            ret = ICLRRuntimeInfo_GetInterface(info, rclsid, riid, ppv);
+#else
         ret = ICLRRuntimeInfo_GetInterface(info, rclsid, riid, ppv);
+#endif
 
         ICLRRuntimeInfo_Release(info);
     }
@@ -229,6 +235,10 @@ void CDECL mono_print_handler_fn(const char *string, INT is_stdout)
     if (!tls)
     {
         tls = malloc(sizeof(*tls));
+#ifdef __REACTOS__
+        if (!tls)
+            RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
         tls->length = 0;
         TlsSetValue(print_tls_index, tls);
     }
@@ -562,7 +572,13 @@ HRESULT WINAPI CorBindToRuntimeEx(LPWSTR szVersion, LPWSTR szBuildFlavor, DWORD 
 
     if (SUCCEEDED(ret))
     {
+#ifdef __REACTOS__
+        ret = set_startup_flags(info, nflags, FALSE, NULL);
+        if (SUCCEEDED(ret))
+            ret = ICLRRuntimeInfo_GetInterface(info, rslsid, riid, ppv);
+#else
         ret = ICLRRuntimeInfo_GetInterface(info, rslsid, riid, ppv);
+#endif
 
         ICLRRuntimeInfo_Release(info);
     }
@@ -596,7 +612,6 @@ STDAPI ClrCreateManagedInstance(LPCWSTR pTypeName, REFIID riid, void **ppObject)
     HRESULT ret;
     ICLRRuntimeInfo *info;
     RuntimeHost *host;
-    MonoObject *obj;
     IUnknown *unk;
 
     TRACE("(%s,%s,%p)\n", debugstr_w(pTypeName), debugstr_guid(riid), ppObject);
@@ -612,10 +627,7 @@ STDAPI ClrCreateManagedInstance(LPCWSTR pTypeName, REFIID riid, void **ppObject)
     }
 
     if (SUCCEEDED(ret))
-        ret = RuntimeHost_CreateManagedInstance(host, pTypeName, NULL, &obj);
-
-    if (SUCCEEDED(ret))
-        ret = RuntimeHost_GetIUnknownForObject(host, obj, &unk);
+        ret = RuntimeHost_CreateManagedInstance(host, pTypeName, &unk);
 
     if (SUCCEEDED(ret))
     {
@@ -715,7 +727,20 @@ HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)
     if(!ppv)
         return E_INVALIDARG;
 
+#ifdef __REACTOS__
+    hr = check_monodata_assembly(rclsid);
+    if (FAILED(hr))
+    {
+        *ppv = NULL;
+        return hr;
+    }
+#endif
+
     This = malloc(sizeof(mscorecf));
+#ifdef __REACTOS__
+    if (!This)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     This->IClassFactory_iface.lpVtbl = &mscorecf_vtbl;
     This->pfnCreateInstance = create_monodata;
@@ -728,6 +753,7 @@ HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv)
     return hr;
 }
 
+#ifndef __REACTOS__
 static void parse_msi_version_string(const char *version, int *parts)
 {
     const char *minor_start, *build_start;
@@ -764,6 +790,9 @@ static int compare_versions(const char *a, const char *b)
 
 static BOOL invoke_appwiz(void)
 {
+#ifdef __REACTOS__
+    return FALSE;
+#else
     PROCESS_INFORMATION pi;
     STARTUPINFOW si;
     WCHAR app[MAX_PATH];
@@ -798,6 +827,7 @@ static BOOL invoke_appwiz(void)
     }
 
     return ret;
+#endif
 }
 
 static BOOL get_support_msi(LPCWSTR mono_path, LPWSTR msi_path)
@@ -956,10 +986,13 @@ end:
         CoUninitialize();
     return ret;
 }
+#endif
 
 HRESULT WINAPI DllRegisterServer(void)
 {
+#ifndef __REACTOS__
     install_wine_mono();
+#endif
 
     return __wine_register_resources();
 }

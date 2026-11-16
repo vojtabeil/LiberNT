@@ -40,35 +40,6 @@ PciPmeInterfaceInitializer(IN PVOID Instance)
     return STATUS_UNSUCCESSFUL;
 }
 
-VOID
-NTAPI
-PciPmeInterface_Reference(IN PVOID Context)
-{
-    PPCI_FDO_EXTENSION FdoExtension = (PPCI_FDO_EXTENSION)Context;
-
-    InterlockedIncrement(&FdoExtension->PciPmeInterfaceCount);
-}
-
-VOID
-NTAPI
-PciPmeInterface_Dereference(IN PVOID Context)
-{
-    PPCI_FDO_EXTENSION FdoExtension = (PPCI_FDO_EXTENSION)Context;
-
-    InterlockedDecrement(&FdoExtension->PciPmeInterfaceCount);
-}
-
-VOID
-NTAPI
-PciPmeInterface_UpdateEnable(IN PDEVICE_OBJECT DeviceObject,
-                             IN BOOLEAN Enable)
-{
-    UNREFERENCED_PARAMETER(DeviceObject);
-    UNREFERENCED_PARAMETER(Enable);
-
-    DPRINT1("PciPmeInterface_UpdateEnable is not yet implemented\n");
-}
-
 NTSTATUS
 NTAPI
 PciPmeInterfaceConstructor(IN PVOID DeviceExtension,
@@ -78,28 +49,18 @@ PciPmeInterfaceConstructor(IN PVOID DeviceExtension,
                            IN USHORT Size,
                            IN PINTERFACE Interface)
 {
-    PPCI_PME_INTERFACE PmeInterface;
-
+    UNREFERENCED_PARAMETER(DeviceExtension);
     UNREFERENCED_PARAMETER(Instance);
     UNREFERENCED_PARAMETER(InterfaceData);
-    UNREFERENCED_PARAMETER(Version);
+    UNREFERENCED_PARAMETER(Size);
+    UNREFERENCED_PARAMETER(Interface);
 
-    PAGED_CODE();
+    /* Only version 1 is supported */
+    if (Version != PCI_PME_INTRF_STANDARD_VER) return STATUS_NOINTERFACE;
 
-    if (Size < sizeof(PCI_PME_INTERFACE))
-    {
-        return STATUS_UNSUCCESSFUL;
-    }
-
-    PmeInterface = (PPCI_PME_INTERFACE)Interface;
-    PmeInterface->Size = sizeof(*PmeInterface);
-    PmeInterface->Version = PCI_PME_INTRF_STANDARD_VER;
-    PmeInterface->Context = DeviceExtension;
-    PmeInterface->InterfaceReference = PciPmeInterface_Reference;
-    PmeInterface->InterfaceDereference = PciPmeInterface_Dereference;
-    PmeInterface->UpdateEnable = PciPmeInterface_UpdateEnable;
-
-    return STATUS_SUCCESS;
+    /* Not yet implemented */
+    UNIMPLEMENTED_DBGBREAK();
+    return STATUS_NOT_IMPLEMENTED;
 }
 
 /* EOF */

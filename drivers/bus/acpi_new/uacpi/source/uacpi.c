@@ -16,15 +16,6 @@
 
 struct uacpi_runtime_context g_uacpi_rt_ctx = { 0 };
 
-uacpi_status uacpi_is_platform_reduced_hardware(uacpi_bool *out_value)
-{
-    if (!uacpi_table_subsystem_available())
-        return UACPI_STATUS_INIT_LEVEL_MISMATCH;
-
-    *out_value = uacpi_is_hardware_reduced();
-    return UACPI_STATUS_OK;
-}
-
 void uacpi_context_set_log_level(uacpi_log_level lvl)
 {
     if (lvl == 0)
@@ -35,15 +26,14 @@ void uacpi_context_set_log_level(uacpi_log_level lvl)
 
 void uacpi_logger_initialize(void)
 {
-    static uacpi_bool version_printed = UACPI_FALSE;
-
     if (g_uacpi_rt_ctx.log_level == 0)
         uacpi_context_set_log_level(UACPI_DEFAULT_LOG_LEVEL);
 
+    static uacpi_bool version_printed = UACPI_FALSE;
     if (!version_printed) {
         version_printed = UACPI_TRUE;
         uacpi_info(
-            "starting uACPI, version %d.%d.%d",
+            "starting uACPI, version %d.%d.%d\n",
             UACPI_MAJOR, UACPI_MINOR, UACPI_PATCH
         );
     }
@@ -219,12 +209,12 @@ static uacpi_status set_mode(enum hw_mode mode)
     struct acpi_fadt *fadt = &g_uacpi_rt_ctx.fadt;
 
     if (uacpi_unlikely(!fadt->smi_cmd)) {
-        uacpi_error("SMI_CMD is not implemented by the firmware");
+        uacpi_error("SMI_CMD is not implemented by the firmware\n");
         return UACPI_STATUS_NOT_FOUND;
     }
 
     if (uacpi_unlikely(!fadt->acpi_enable && !fadt->acpi_disable)) {
-        uacpi_error("mode transition is not implemented by the hardware");
+        uacpi_error("mode transition is not implemented by the hardware\n");
         return UACPI_STATUS_NOT_FOUND;
     }
 
@@ -252,7 +242,7 @@ static uacpi_status set_mode(enum hw_mode mode)
         stalled_time += 100;
     }
 
-    uacpi_error("hardware time out while changing modes");
+    uacpi_error("hardware time out while changing modes\n");
     return UACPI_STATUS_HARDWARE_TIMEOUT;
 }
 
@@ -269,20 +259,20 @@ static uacpi_status enter_mode(enum hw_mode mode, uacpi_bool *did_change)
     mode_str = mode == HW_MODE_LEGACY ? "legacy" : "acpi";
 
     if (read_mode() == mode) {
-        uacpi_trace("%s mode already enabled", mode_str);
+        uacpi_trace("%s mode already enabled\n", mode_str);
         return UACPI_STATUS_OK;
     }
 
     ret = set_mode(mode);
     if (uacpi_unlikely_error(ret)) {
         uacpi_warn(
-            "unable to enter %s mode: %s",
+            "unable to enter %s mode: %s\n",
             mode_str, uacpi_status_to_string(ret)
         );
         return ret;
     }
 
-    uacpi_trace("entered %s mode", mode_str);
+    uacpi_trace("entered %s mode\n", mode_str);
     if (did_change != UACPI_NULL)
         *did_change = UACPI_TRUE;
 
@@ -389,7 +379,7 @@ static void trace_table_load_failure(
 {
     uacpi_log_lvl(
         lvl,
-        "failed to load "UACPI_PRI_TBL_HDR": %s",
+        "failed to load "UACPI_PRI_TBL_HDR": %s\n",
         UACPI_FMT_TBL_HDR(tbl), uacpi_status_to_string(ret)
     );
 }
@@ -430,7 +420,7 @@ static uacpi_bool warn_on_bad_timesource(uacpi_u64 begin_ts, uacpi_u64 end_ts)
     return UACPI_FALSE;
 
 out_bad_timesource:
-    uacpi_warn("%s, this may cause problems", reason);
+    uacpi_warn("%s, this may cause problems\n", reason);
     return UACPI_TRUE;
 }
 
@@ -454,7 +444,7 @@ uacpi_status uacpi_namespace_load(void)
 
     ret = uacpi_table_find_by_signature(ACPI_DSDT_SIGNATURE, &tbl);
     if (uacpi_unlikely_error(ret)) {
-        uacpi_error("unable to find DSDT: %s", uacpi_status_to_string(ret));
+        uacpi_error("unable to find DSDT: %s\n", uacpi_status_to_string(ret));
         goto out_fatal_error;
     }
 
@@ -489,7 +479,7 @@ uacpi_status uacpi_namespace_load(void)
 
     if (uacpi_unlikely(st.failure_counter != 0 || g_uacpi_rt_ctx.bad_timesource)) {
         uacpi_info(
-            "loaded %u AML blob%s (%u error%s)",
+            "loaded %u AML blob%s (%u error%s)\n",
             st.load_counter, st.load_counter > 1 ? "s" : "", st.failure_counter,
             st.failure_counter == 1 ? "" : "s"
         );
@@ -501,7 +491,7 @@ uacpi_status uacpi_namespace_load(void)
 
         uacpi_info(
             "successfully loaded %u AML blob%s, %"UACPI_PRIu64" ops in "
-            "%"UACPI_PRIu64"ms (avg %"UACPI_PRIu64"/s)",
+            "%"UACPI_PRIu64"ms (avg %"UACPI_PRIu64"/s)\n",
             st.load_counter, st.load_counter > 1 ? "s" : "",
             UACPI_FMT64(ops), UACPI_FMT64(elapsed_ms(begin_ts, end_ts)),
             UACPI_FMT64(ops_per_sec)
@@ -510,7 +500,7 @@ uacpi_status uacpi_namespace_load(void)
 
     ret = uacpi_initialize_events();
     if (uacpi_unlikely_error(ret)) {
-        uacpi_error("event initialization failed: %s",
+        uacpi_error("event initialization failed: %s\n",
                     uacpi_status_to_string(ret));
         goto out_fatal_error;
     }
@@ -679,19 +669,19 @@ uacpi_status uacpi_namespace_initialize(void)
     if (uacpi_likely(!g_uacpi_rt_ctx.bad_timesource)) {
         uacpi_info(
             "namespace initialization done in %"UACPI_PRIu64"ms: "
-            "%zu devices, %zu thermal zones",
+            "%zu devices, %zu thermal zones\n",
             UACPI_FMT64(elapsed_ms(begin_ts, end_ts)),
             ctx.devices, ctx.thermal_zones
         );
     } else {
         uacpi_info(
-            "namespace initialization done: %zu devices, %zu thermal zones",
+            "namespace initialization done: %zu devices, %zu thermal zones\n",
             ctx.devices, ctx.thermal_zones
         );
     }
 
     uacpi_trace(
-        "_STA calls: %zu (%zu errors), _INI calls: %zu (%zu errors)",
+        "_STA calls: %zu (%zu errors), _INI calls: %zu (%zu errors)\n",
         ctx.sta_executed, ctx.sta_errors, ctx.ini_executed,
         ctx.ini_errors
     );
@@ -809,14 +799,14 @@ uacpi_status uacpi_execute_simple(
 #define TRACE_BAD_RET(path_fmt, type, ...)                                 \
     uacpi_warn(                                                            \
         "unexpected '%s' object returned by method "path_fmt               \
-        ", expected type mask: %08X", uacpi_object_type_to_string(type),   \
+        ", expected type mask: %08X\n", uacpi_object_type_to_string(type), \
         __VA_ARGS__                                                        \
     )
 
 #define TRACE_NO_RET(path_fmt, ...)                                        \
     uacpi_warn(                                                            \
         "no value returned from method "path_fmt", expected type mask: "   \
-        "%08X", __VA_ARGS__                                                \
+        "%08X\n", __VA_ARGS__                                              \
     )
 
 static void trace_invalid_return_type(
@@ -916,7 +906,7 @@ uacpi_status uacpi_eval_simple_integer(
     return uacpi_eval_integer(parent, path, UACPI_NULL, out_value);
 }
 
-uacpi_status uacpi_eval_string_or_buffer(
+uacpi_status uacpi_eval_buffer_or_string(
     uacpi_namespace_node *parent, const uacpi_char *path,
     const uacpi_object_array *args, uacpi_object **ret
 )
@@ -928,7 +918,7 @@ uacpi_status uacpi_eval_string_or_buffer(
     );
 }
 
-uacpi_status uacpi_eval_simple_string_or_buffer(
+uacpi_status uacpi_eval_simple_buffer_or_string(
     uacpi_namespace_node *parent, const uacpi_char *path, uacpi_object **ret
 )
 {

@@ -1,15 +1,12 @@
 
-remove_definitions(
-    -DWINVER=0x502
-    -D_WIN32_WINNT=0x502)
-add_definitions(
-    -DWINVER=0x600
-    -D_WIN32_WINNT=0x600)
+include_directories(${REACTOS_SOURCE_DIR}/sdk/include/reactos/libs/zlib)
 
 add_definitions(
-    -D_WINE)
+    -D_WINE
+    -D_WININET_INTERNAL_)
 
 spec2def(wininet.dll wininet.spec ADD_IMPORTLIB)
+add_message_headers(UNICODE winineterror.mc)
 
 list(APPEND SOURCE
     cookie.c
@@ -26,15 +23,13 @@ list(APPEND PCH_SKIP_SOURCE
     urlcache.c
     ${CMAKE_CURRENT_BINARY_DIR}/wininet_stubs.c)
 
-add_library(wininet_inflate OBJECT inflate.c)
-add_dependencies(wininet_inflate psdk)
-
 add_library(wininet MODULE
     ${SOURCE}
     ${PCH_SKIP_SOURCE}
-    $<TARGET_OBJECTS:wininet_inflate>
+    ${CMAKE_CURRENT_BINARY_DIR}/winineterror.rc
     rsrc.rc
     ${CMAKE_CURRENT_BINARY_DIR}/wininet.def)
+add_dependencies(wininet winineterror)
 
 if(MSVC)
     # Disable warning C4090: 'function': different 'const' qualifiers
@@ -42,10 +37,10 @@ if(MSVC)
 endif()
 
 set_module_type(wininet win32dll)
-target_link_libraries(wininet wine ${PSEH_LIB} oldnames)
+target_link_libraries(wininet wine ${PSEH_LIB} oldnames zlib)
 
-add_delay_importlibs(wininet secur32 cryptui iphlpapi dhcpcsvc)
-add_importlibs(wininet crypt32 mpr shlwapi shell32 user32 advapi32 ws2_32 normaliz kernel32_vista msvcrt kernel32 ntdll)
+add_delay_importlibs(wininet secur32 crypt32 cryptui iphlpapi dhcpcsvc ws2_32)
+add_importlibs(wininet mpr shlwapi shell32 user32 advapi32 normaliz kernel32_vista msvcrt kernel32 ntdll)
 add_pch(wininet precomp.h "${PCH_SKIP_SOURCE}")
 add_cd_file(TARGET wininet DESTINATION reactos/system32 FOR all)
 set_wine_module_FIXME(wininet) # CORE-5743: No ARRAY_SIZE macro

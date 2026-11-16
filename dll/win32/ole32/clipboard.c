@@ -1197,6 +1197,9 @@ static DWORD get_tymed_from_nonole_cf(UINT cf)
     case CF_OEMTEXT:
     case CF_UNICODETEXT:
     case CF_HDROP:
+#ifdef __REACTOS__
+    case CF_LOCALE:
+#endif
         return TYMED_ISTREAM | TYMED_HGLOBAL;
     case CF_ENHMETAFILE:
         return TYMED_ENHMF;
@@ -1694,8 +1697,27 @@ static HRESULT WINAPI snapshot_GetCanonicalFormatEtc(IDataObject *iface, FORMATE
 static HRESULT WINAPI snapshot_SetData(IDataObject *iface, FORMATETC *fmt,
                                        STGMEDIUM *med, BOOL release)
 {
+#ifdef __REACTOS__
+    snapshot *This = impl_from_IDataObject(iface);
+
+    TRACE("(%p, %p, %p, %d)\n", iface, fmt, med, release);
+
+    if (!fmt || !med) return E_INVALIDARG;
+
+    if (!This->data)
+    {
+        if (!OpenClipboard(NULL)) return CLIPBRD_E_CANT_OPEN;
+        get_current_dataobject(&This->data);
+        CloseClipboard();
+    }
+
+    if (!This->data) return E_NOTIMPL;
+
+    return IDataObject_SetData(This->data, fmt, med, release);
+#else
     TRACE("(%p, %p, %p, %d): not implemented\n", iface, fmt, med, release);
     return E_NOTIMPL;
+#endif
 }
 
 /************************************************************************
@@ -1843,7 +1865,11 @@ static HRESULT set_clipboard_formats(ole_clipbrd *clipbrd, IDataObject *data)
     priv_data->unk2 = 1;
     priv_data->count = count;
     priv_data->unk3[0] = 0;
+#ifdef __REACTOS__
+    priv_data->unk3[1] = sizeof(void *) == 8;
+#else
     priv_data->unk3[1] = 0;
+#endif
 
     IEnumFORMATETC_Reset(enum_fmt);
 
@@ -1899,11 +1925,8 @@ static HWND create_clipbrd_window(void);
  */
 static inline HRESULT get_clipbrd_window(ole_clipbrd *clipbrd, HWND *wnd)
 {
-#ifdef __REACTOS__
-    /* The clipboard window can get destroyed if the  thread that created it dies so we may need to create it again */
-    if (!IsWindow(clipbrd->window))
-        clipbrd->window = create_clipbrd_window();
-#endif
+    if ( clipbrd->window && !IsWindow(clipbrd->window) )
+        clipbrd->window = NULL;
 
     if ( !clipbrd->window )
         clipbrd->window = create_clipbrd_window();
@@ -2056,19 +2079,11 @@ static LRESULT CALLBACK clipbrd_wndproc(HWND hwnd, UINT message, WPARAM wparam, 
     ole_clipbrd *clipbrd;
 
     get_ole_clipbrd(&clipbrd);
-#ifdef __REACTOS__
-    if(clipbrd == NULL)
-        return DefWindowProcW(hwnd, message, wparam, lparam);
-#endif
 
     switch (message)
     {
     case WM_RENDERFORMAT:
     {
-#ifdef __REACTOS__
-    if (clipbrd->cached_enum)
-    {
-#endif
         UINT cf = wparam;
         ole_priv_data_entry *entry;
 
@@ -2079,9 +2094,7 @@ static LRESULT CALLBACK clipbrd_wndproc(HWND hwnd, UINT message, WPARAM wparam, 
 
         if(entry)
             render_format(clipbrd->src_data, &entry->fmtetc);
-#ifdef __REACTOS__
-    }
-#endif
+
         break;
     }
 
@@ -2248,6 +2261,9 @@ HRESULT WINAPI OleGetClipboard(IDataObject **obj)
     HRESULT hr;
     ole_clipbrd *clipbrd;
     DWORD seq_no;
+#ifdef __REACTOS__
+    HWND wnd;
+#endif
 
     TRACE("(%p)\n", obj);
 
@@ -2255,6 +2271,11 @@ HRESULT WINAPI OleGetClipboard(IDataObject **obj)
     *obj = NULL;
 
     if(FAILED(hr = get_ole_clipbrd(&clipbrd))) return hr;
+#ifdef __REACTOS__
+    if(FAILED(hr = get_clipbrd_window(clipbrd, &wnd))) return hr;
+    if(!OpenClipboard(wnd)) return CLIPBRD_E_CANT_OPEN;
+    CloseClipboard();
+#endif
 
     seq_no = GetClipboardSequenceNumber();
     EnterCriticalSection(&latest_snapshot_cs);

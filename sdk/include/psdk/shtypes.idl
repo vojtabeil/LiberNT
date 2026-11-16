@@ -21,7 +21,7 @@
 
 import "wtypes.idl";
 
-cpp_quote("#include <pshpack1.h>")
+cpp_quote("#pragma pack(push, 1)")
 typedef struct
 {
     WORD cb;      /* nr of bytes in this item */
@@ -38,8 +38,9 @@ typedef struct _ITEMIDLIST
 #define UNALIGNED
 #endif
 
-typedef ITEMIDLIST UNALIGNED *LPITEMIDLIST;
-typedef const ITEMIDLIST UNALIGNED *LPCITEMIDLIST;
+typedef [unique] BYTE_BLOB *wirePIDL;
+typedef [wire_marshal(wirePIDL)] ITEMIDLIST UNALIGNED *LPITEMIDLIST;
+typedef [wire_marshal(wirePIDL)] const ITEMIDLIST UNALIGNED *LPCITEMIDLIST;
 
 cpp_quote("#if defined(STRICT_TYPED_ITEMIDS) && defined(__cplusplus)")
 cpp_quote("typedef struct _ITEMIDLIST_RELATIVE : public ITEMIDLIST { } ITEMIDLIST_RELATIVE;")
@@ -51,26 +52,26 @@ typedef ITEMIDLIST ITEMIDLIST_ABSOLUTE;
 typedef ITEMIDLIST ITEMID_CHILD;
 cpp_quote("#endif")
 
-typedef ITEMIDLIST_RELATIVE *PIDLIST_RELATIVE;
-typedef ITEMIDLIST_RELATIVE UNALIGNED *PUIDLIST_RELATIVE;
-typedef const ITEMIDLIST_RELATIVE *PCIDLIST_RELATIVE;
-typedef const ITEMIDLIST_RELATIVE UNALIGNED *PCUIDLIST_RELATIVE;
+typedef [wire_marshal(wirePIDL)] ITEMIDLIST_RELATIVE *PIDLIST_RELATIVE;
+typedef [wire_marshal(wirePIDL)] ITEMIDLIST_RELATIVE UNALIGNED *PUIDLIST_RELATIVE;
+typedef [wire_marshal(wirePIDL)] const ITEMIDLIST_RELATIVE *PCIDLIST_RELATIVE;
+typedef [wire_marshal(wirePIDL)] const ITEMIDLIST_RELATIVE UNALIGNED *PCUIDLIST_RELATIVE;
 typedef const PCUIDLIST_RELATIVE *PCUIDLIST_RELATIVE_ARRAY;
 
-typedef ITEMIDLIST_ABSOLUTE *PIDLIST_ABSOLUTE;
+typedef [wire_marshal(wirePIDL)] ITEMIDLIST_ABSOLUTE *PIDLIST_ABSOLUTE;
 typedef ITEMIDLIST_ABSOLUTE UNALIGNED *PUIDLIST_ABSOLUTE;
-typedef const ITEMIDLIST_ABSOLUTE *PCIDLIST_ABSOLUTE;
-typedef const ITEMIDLIST_ABSOLUTE UNALIGNED *PCUIDLIST_ABSOLUTE;
+typedef [wire_marshal(wirePIDL)] const ITEMIDLIST_ABSOLUTE *PCIDLIST_ABSOLUTE;
+typedef [wire_marshal(wirePIDL)] const ITEMIDLIST_ABSOLUTE UNALIGNED *PCUIDLIST_ABSOLUTE;
 typedef const PCIDLIST_ABSOLUTE *PCIDLIST_ABSOLUTE_ARRAY;
 typedef const PCUIDLIST_ABSOLUTE *PCUIDLIST_ABSOLUTE_ARRAY;
 
-typedef ITEMID_CHILD *PITEMID_CHILD;
-typedef ITEMID_CHILD UNALIGNED *PUITEMID_CHILD;
-typedef const ITEMID_CHILD *PCITEMID_CHILD;
-typedef const ITEMID_CHILD UNALIGNED *PCUITEMID_CHILD;
+typedef [wire_marshal(wirePIDL)] ITEMID_CHILD *PITEMID_CHILD;
+typedef [wire_marshal(wirePIDL)] ITEMID_CHILD UNALIGNED *PUITEMID_CHILD;
+typedef [wire_marshal(wirePIDL)] const ITEMID_CHILD *PCITEMID_CHILD;
+typedef [wire_marshal(wirePIDL)] const ITEMID_CHILD UNALIGNED *PCUITEMID_CHILD;
 typedef const PCUITEMID_CHILD *PCUITEMID_CHILD_ARRAY;
 
-cpp_quote("#include <poppack.h>")
+cpp_quote("#pragma pack(pop)")
 
 #ifndef MAX_PATH
 #define MAX_PATH 260
@@ -87,7 +88,7 @@ typedef enum tagSTRRET_TYPE
     STRRET_CSTR = 2
 } STRRET_TYPE;
 
-cpp_quote("#include <pshpack8.h>")
+cpp_quote("#pragma pack(push, 8)")
 typedef struct _STRRET
 {
     UINT uType;			/* STRRET_xxx */
@@ -98,16 +99,16 @@ typedef struct _STRRET
     [case(STRRET_CSTR)]         char      cStr[MAX_PATH]; /* ANSI Buffer */
     } DUMMYUNIONNAME;
 } STRRET, *LPSTRRET;
-cpp_quote("#include <poppack.h>")
+cpp_quote("#pragma pack(pop)")
 
-cpp_quote("#include <pshpack1.h>")
+cpp_quote("#pragma pack(push, 1)")
 typedef struct
 {
     int fmt;
     int cxChar;
     STRRET str;
 } SHELLDETAILS, *LPSHELLDETAILS;
-cpp_quote("#include <poppack.h>")
+cpp_quote("#pragma pack(pop)")
 
 typedef struct _COMDLG_FILTERSPEC
 {
@@ -210,3 +211,45 @@ typedef [v1_enum] enum DEVICE_SCALE_FACTOR
   SCALE_450_PERCENT = 450,
   SCALE_500_PERCENT = 500
 } DEVICE_SCALE_FACTOR;
+
+cpp_quote("#ifndef LF_FACESIZE")
+#define LF_FACESIZE 32
+
+typedef struct tagLOGFONTA
+{
+    LONG lfHeight;
+    LONG lfWidth;
+    LONG lfEscapement;
+    LONG lfOrientation;
+    LONG lfWeight;
+    BYTE lfItalic;
+    BYTE lfUnderline;
+    BYTE lfStrikeOut;
+    BYTE lfCharSet;
+    BYTE lfOutPrecision;
+    BYTE lfClipPrecision;
+    BYTE lfQuality;
+    BYTE lfPitchAndFamily;
+    CHAR lfFaceName[LF_FACESIZE];
+} LOGFONTA;
+
+typedef struct tagLOGFONTW
+{
+    LONG lfHeight;
+    LONG lfWidth;
+    LONG lfEscapement;
+    LONG lfOrientation;
+    LONG lfWeight;
+    BYTE lfItalic;
+    BYTE lfUnderline;
+    BYTE lfStrikeOut;
+    BYTE lfCharSet;
+    BYTE lfOutPrecision;
+    BYTE lfClipPrecision;
+    BYTE lfQuality;
+    BYTE lfPitchAndFamily;
+    WCHAR lfFaceName[LF_FACESIZE];
+} LOGFONTW;
+
+typedef LOGFONTW LOGFONT;
+cpp_quote("#endif")

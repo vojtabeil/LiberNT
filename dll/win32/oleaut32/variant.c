@@ -590,6 +590,7 @@ HRESULT VARIANT_ClearInd(VARIANTARG *pVarg)
         {
             IRecordInfo_RecordClear(rec_info, V_RECORD(pVarg));
             IRecordInfo_Release(rec_info);
+            CoTaskMemFree(V_RECORD(pVarg));
         }
         break;
     }
@@ -670,12 +671,23 @@ HRESULT WINAPI DECLSPEC_HOTPATCH VariantClear(VARIANTARG* pVarg)
 static HRESULT VARIANT_CopyIRecordInfo(VARIANT *dest, const VARIANT *src)
 {
   IRecordInfo *src_info = V_RECORDINFO(src);
+#ifdef __REACTOS__
+  void *src_record = V_RECORD(src), *record;
+#endif
   HRESULT hr = S_OK;
   ULONG size;
 
+#ifdef __REACTOS__
+  V_RECORD(dest) = NULL;
+  V_RECORDINFO(dest) = NULL;
+#endif
   if (!src_info)
   {
+#ifdef __REACTOS__
+    if (src_record) return E_INVALIDARG;
+#else
     if (V_RECORD(src)) return E_INVALIDARG;
+#endif
     return S_OK;
   }
 
@@ -684,13 +696,35 @@ static HRESULT VARIANT_CopyIRecordInfo(VARIANT *dest, const VARIANT *src)
 
   /* Windows does not use RecordCreate() here, memory should be allocated in compatible way so RecordDestroy()
      could free it later. */
+#ifdef __REACTOS__
+  record = CoTaskMemAlloc(size);
+  if (!record) return E_OUTOFMEMORY;
+#else
   V_RECORD(dest) = CoTaskMemAlloc(size);
   if (!V_RECORD(dest)) return E_OUTOFMEMORY;
+#endif
   if (size)
+#ifdef __REACTOS__
+      memset(record, 0, size);
+#else
       memset(V_RECORD(dest), 0, size);
+#endif
 
+#ifdef __REACTOS__
+  hr = IRecordInfo_RecordCopy(src_info, src_record, record);
+  if (FAILED(hr))
+  {
+    CoTaskMemFree(record);
+    return hr;
+  }
+  V_RECORD(dest) = record;
+#endif
   IRecordInfo_AddRef(V_RECORDINFO(dest) = src_info);
+#ifdef __REACTOS__
+  return hr;
+#else
   return IRecordInfo_RecordCopy(src_info, V_RECORD(src), V_RECORD(dest));
+#endif
 }
 
 /******************************************************************************
@@ -874,7 +908,11 @@ HRESULT WINAPI VariantCopyInd(VARIANT* pvargDest, const VARIANTARG* pvargSrc)
   }
   else if (V_VT(pSrc) == (VT_RECORD|VT_BYREF))
   {
+#ifdef __REACTOS__
+    hres = VARIANT_CopyIRecordInfo(pvargDest, pSrc);
+#else
     hres = VARIANT_CopyIRecordInfo(pvargDest, pvargSrc);
+#endif
   }
   else if (V_VT(pSrc) == (VT_DISPATCH|VT_BYREF) ||
            V_VT(pSrc) == (VT_UNKNOWN|VT_BYREF))
@@ -1186,9 +1224,13 @@ static HRESULT VARIANT_RollUdate(UDATE *lpUd)
  *| 11-15  0-23    Hours (24 hour clock). 24-32 are invalid.
  */
 INT WINAPI DosDateTimeToVariantTime(USHORT wDosDate, USHORT wDosTime,
-                                    double *pDateOut)
+                                    DOUBLE *pDateOut)
 {
+#ifdef __REACTOS__
+  UDATE ud = {0};
+#else
   UDATE ud;
+#endif
 
   TRACE("(0x%x(%d/%d/%d),0x%x(%d:%d:%d),%p)\n",
         wDosDate, DOS_YEAR(wDosDate), DOS_MONTH(wDosDate), DOS_DAY(wDosDate),
@@ -1226,7 +1268,7 @@ INT WINAPI DosDateTimeToVariantTime(USHORT wDosDate, USHORT wDosTime,
  * NOTES
  *   See DosDateTimeToVariantTime() for Dos format details and bugs.
  */
-INT WINAPI VariantTimeToDosDateTime(double dateIn, USHORT *pwDosDate, USHORT *pwDosTime)
+INT WINAPI VariantTimeToDosDateTime(DOUBLE dateIn, USHORT *pwDosDate, USHORT *pwDosTime)
 {
   UDATE ud;
 
@@ -1260,9 +1302,13 @@ INT WINAPI VariantTimeToDosDateTime(double dateIn, USHORT *pwDosDate, USHORT *pw
  *  Success: TRUE. *pDateOut contains the converted value.
  *  Failure: FALSE, if lpSt cannot be represented in VT_DATE format.
  */
-INT WINAPI SystemTimeToVariantTime(LPSYSTEMTIME lpSt, double *pDateOut)
+INT WINAPI SystemTimeToVariantTime(LPSYSTEMTIME lpSt, DOUBLE *pDateOut)
 {
+#ifdef __REACTOS__
+  UDATE ud = {0};
+#else
   UDATE ud;
+#endif
 
   TRACE("(%p->%d/%d/%d %d:%d:%d,%p)\n", lpSt, lpSt->wDay, lpSt->wMonth,
         lpSt->wYear, lpSt->wHour, lpSt->wMinute, lpSt->wSecond, pDateOut);
@@ -1291,7 +1337,7 @@ INT WINAPI SystemTimeToVariantTime(LPSYSTEMTIME lpSt, double *pDateOut)
  *  Success: TRUE. *lpSt contains the converted value.
  *  Failure: FALSE, if dateIn is too large or small.
  */
-INT WINAPI VariantTimeToSystemTime(double dateIn, LPSYSTEMTIME lpSt)
+INT WINAPI VariantTimeToSystemTime(DOUBLE dateIn, LPSYSTEMTIME lpSt)
 {
   UDATE ud;
 
@@ -3047,52 +3093,69 @@ HRESULT WINAPI VarAnd(LPVARIANT left, LPVARIANT right, LPVARIANT result)
 
     if (leftvt == VT_NULL || rightvt == VT_NULL)
     {
-        /*
-         * Special cases for when left variant is VT_NULL
-         * (VT_NULL & 0 = VT_NULL, VT_NULL & value = value)
-         */
-        if (leftvt == VT_NULL)
+        /* Three-valued logic for `And` with Null:
+         *   zero    And Null = zero  (typed by the resvt computed above)
+         *   nonzero And Null = Null
+         *   Null    And Null = Null
+         *
+         * Both orderings must produce the same result. */
+        VARIANT *other = leftvt == VT_NULL ? right : left;
+
+        switch (V_VT(other))
+        {
+        case VT_EMPTY:                                break;
+        case VT_I1:   if (V_I1(other))                resvt = VT_NULL; break;
+        case VT_UI1:  if (V_UI1(other))               resvt = VT_NULL; break;
+        case VT_I2:   if (V_I2(other))                resvt = VT_NULL; break;
+        case VT_UI2:  if (V_UI2(other))               resvt = VT_NULL; break;
+        case VT_I4:   if (V_I4(other))                resvt = VT_NULL; break;
+        case VT_UI4:  if (V_UI4(other))               resvt = VT_NULL; break;
+        case VT_I8:   if (V_I8(other))                resvt = VT_NULL; break;
+        case VT_UI8:  if (V_UI8(other))               resvt = VT_NULL; break;
+        case VT_INT:  if (V_INT(other))               resvt = VT_NULL; break;
+        case VT_UINT: if (V_UINT(other))              resvt = VT_NULL; break;
+        case VT_BOOL: if (V_BOOL(other))              resvt = VT_NULL; break;
+        case VT_R4:   if (V_R4(other) != 0.0f)        resvt = VT_NULL; break;
+        case VT_R8:   if (V_R8(other) != 0.0)         resvt = VT_NULL; break;
+        case VT_DATE: if (V_DATE(other) != 0.0)       resvt = VT_NULL; break;
+        case VT_CY:   if (V_CY(other).int64)          resvt = VT_NULL; break;
+        case VT_DECIMAL: if (V_DECIMAL(other).Hi32 || V_DECIMAL(other).Lo64) resvt = VT_NULL; break;
+        case VT_BSTR:
         {
             VARIANT_BOOL b;
-            switch(rightvt)
-            {
-            case VT_I1:   if (V_I1(right)) resvt = VT_NULL; break;
-            case VT_UI1:  if (V_UI1(right)) resvt = VT_NULL; break;
-            case VT_I2:   if (V_I2(right)) resvt = VT_NULL; break;
-            case VT_UI2:  if (V_UI2(right)) resvt = VT_NULL; break;
-            case VT_I4:   if (V_I4(right)) resvt = VT_NULL; break;
-            case VT_UI4:  if (V_UI4(right)) resvt = VT_NULL; break;
-            case VT_I8:   if (V_I8(right)) resvt = VT_NULL; break;
-            case VT_UI8:  if (V_UI8(right)) resvt = VT_NULL; break;
-            case VT_INT:  if (V_INT(right)) resvt = VT_NULL; break;
-            case VT_UINT: if (V_UINT(right)) resvt = VT_NULL; break;
-            case VT_BOOL: if (V_BOOL(right)) resvt = VT_NULL; break;
-            case VT_R4:   if (V_R4(right)) resvt = VT_NULL; break;
-            case VT_R8:   if (V_R8(right)) resvt = VT_NULL; break;
-            case VT_CY:
-                if(V_CY(right).int64)
-                    resvt = VT_NULL;
-                break;
-            case VT_DECIMAL:
-                if (V_DECIMAL(right).Hi32 || V_DECIMAL(right).Lo64)
-                    resvt = VT_NULL;
-                break;
-            case VT_BSTR:
-                hres = VarBoolFromStr(V_BSTR(right),
+            hres = VarBoolFromStr(V_BSTR(other),
                 LOCALE_USER_DEFAULT, VAR_LOCALBOOL, &b);
-                if (FAILED(hres))
-                    return hres;
-                else if (b)
-                    V_VT(result) = VT_NULL;
-                else
-                {
-                    V_VT(result) = VT_BOOL;
-                    V_BOOL(result) = b;
-                }
+            if (FAILED(hres))
                 goto VarAnd_Exit;
+            if (b)
+                V_VT(result) = VT_NULL;
+            else
+            {
+                V_VT(result) = VT_BOOL;
+                V_BOOL(result) = VARIANT_FALSE;
             }
+            goto VarAnd_Exit;
         }
+        default:
+            V_VT(result) = VT_NULL;
+            goto VarAnd_Exit;
+        }
+
         V_VT(result) = resvt;
+        switch (resvt)
+        {
+        case VT_BOOL: V_BOOL(result) = VARIANT_FALSE; break;
+        case VT_I1:   V_I1(result)   = 0; break;
+        case VT_UI1:  V_UI1(result)  = 0; break;
+        case VT_I2:   V_I2(result)   = 0; break;
+        case VT_UI2:  V_UI2(result)  = 0; break;
+        case VT_I4:   V_I4(result)   = 0; break;
+        case VT_UI4:  V_UI4(result)  = 0; break;
+        case VT_I8:   V_I8(result)   = 0; break;
+        case VT_UI8:  V_UI8(result)  = 0; break;
+        case VT_INT:  V_INT(result)  = 0; break;
+        case VT_UINT: V_UINT(result) = 0; break;
+        }
         goto VarAnd_Exit;
     }
 
@@ -3106,7 +3169,7 @@ HRESULT WINAPI VarAnd(LPVARIANT left, LPVARIANT right, LPVARIANT result)
         V_VT(&varLeft) = VT_I4; /* Don't overflow */
     else
     {
-        double d;
+        DOUBLE d;
 
         if (V_VT(&varLeft) == VT_BSTR &&
             FAILED(VarR8FromStr(V_BSTR(&varLeft),
@@ -3122,7 +3185,7 @@ HRESULT WINAPI VarAnd(LPVARIANT left, LPVARIANT right, LPVARIANT result)
         V_VT(&varRight) = VT_I4; /* Don't overflow */
     else
     {
-        double d;
+        DOUBLE d;
 
         if (V_VT(&varRight) == VT_BSTR &&
             FAILED(VarR8FromStr(V_BSTR(&varRight),
@@ -4252,7 +4315,7 @@ VarOr_AsEmpty:
         V_VT(&varLeft) = VT_I4; /* Don't overflow */
     else
     {
-        double d;
+        DOUBLE d;
 
         if (V_VT(&varLeft) == VT_BSTR &&
             FAILED(VarR8FromStr(V_BSTR(&varLeft), LOCALE_USER_DEFAULT, 0, &d)))
@@ -4267,7 +4330,7 @@ VarOr_AsEmpty:
         V_VT(&varRight) = VT_I4; /* Don't overflow */
     else
     {
-        double d;
+        DOUBLE d;
 
         if (V_VT(&varRight) == VT_BSTR &&
             FAILED(VarR8FromStr(V_BSTR(&varRight), LOCALE_USER_DEFAULT, 0, &d)))
@@ -4614,7 +4677,7 @@ HRESULT WINAPI VarXor(LPVARIANT pVarLeft, LPVARIANT pVarRight, LPVARIANT pVarOut
     VARTYPE vt;
     VARIANT varLeft, varRight;
     VARIANT tempLeft, tempRight;
-    double d;
+    DOUBLE d;
     HRESULT hRet;
 
     TRACE("(%s,%s,%p)\n", debugstr_variant(pVarLeft), debugstr_variant(pVarRight), pVarOut);
@@ -5198,7 +5261,7 @@ HRESULT WINAPI VarRound(LPVARIANT pVarIn, int deci, LPVARIANT pVarOut)
 	break;
     case VT_DECIMAL:
     {
-        double dbl;
+        DOUBLE dbl;
 
         hRet = VarR8FromDec(&V_DECIMAL(pVarIn), &dbl);
         if (FAILED(hRet))
@@ -5757,7 +5820,7 @@ HRESULT WINAPI VarImp(LPVARIANT left, LPVARIANT right, LPVARIANT result)
     VARTYPE leftvt,rightvt;
     VARTYPE rightExtraFlags,leftExtraFlags,ExtraFlags;
     VARIANT lv,rv;
-    double d;
+    DOUBLE d;
     VARIANT tempLeft, tempRight;
 
     VariantInit(&lv);
@@ -5911,7 +5974,9 @@ HRESULT WINAPI VarImp(LPVARIANT left, LPVARIANT right, LPVARIANT result)
         case VT_BOOL:   if (V_BOOL(left) == VARIANT_TRUE) resvt = VT_NULL; break;
         case VT_R4:     if (V_R4(left) == -1.0) resvt = VT_NULL; break;
         case VT_R8:     if (V_R8(left) == -1.0) resvt = VT_NULL; break;
-        case VT_CY:     if (V_CY(left).int64 == -1) resvt = VT_NULL; break;
+        case VT_DATE:   if (V_DATE(left) == -1.0) resvt = VT_NULL; break;
+        /* VT_CY stores values scaled by 10000, so -1 is -10000 in .int64. */
+        case VT_CY:     if (V_CY(left).int64 == -10000) resvt = VT_NULL; break;
         case VT_DECIMAL:
             if (V_DECIMAL(left).Hi32 == 0xffffffff)
                 resvt = VT_NULL;

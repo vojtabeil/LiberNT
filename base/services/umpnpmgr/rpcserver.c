@@ -47,15 +47,11 @@ RTL_RESOURCE NotificationListLock;
 DWORD WINAPI
 RpcServerThread(LPVOID lpParameter)
 {
+    HANDLE hReady = lpParameter;
     RPC_STATUS Status;
     BOOLEAN RegisteredProtSeq = FALSE;
 
-    UNREFERENCED_PARAMETER(lpParameter);
-
     DPRINT("RpcServerThread() called\n");
-
-    InitializeListHead(&NotificationListHead);
-    RtlInitializeResource(&NotificationListLock);
 
 #if 0
     /* 2k/XP/2k3-compatible protocol sequence/endpoint */
@@ -81,7 +77,11 @@ RpcServerThread(LPVOID lpParameter)
 
     /* Make sure there's a usable endpoint */
     if (RegisteredProtSeq == FALSE)
+    {
+        if (hReady)
+            SetEvent(hReady);
         return 0;
+    }
 
     Status = RpcServerRegisterIf(pnp_v1_0_s_ifspec,
                                  NULL,
@@ -89,21 +89,34 @@ RpcServerThread(LPVOID lpParameter)
     if (Status != RPC_S_OK)
     {
         DPRINT1("RpcServerRegisterIf() failed (Status %lx)\n", Status);
+        if (hReady)
+            SetEvent(hReady);
         return 0;
     }
 
+    Status = RpcServerUseProtseqEpW(L"ncacn_np",
+                                    20,
+                                    L"\\pipe\\wine_plugplay",
+                                    NULL);
+    if (Status == RPC_S_OK)
+        Status = RpcServerRegisterIf(plugplay_v0_0_s_ifspec, NULL, NULL);
+    if (Status != RPC_S_OK)
+        DPRINT1("Device event listener endpoint not registered (Status %lx)\n", Status);
+
     Status = RpcServerListen(1,
                              20,
-                             FALSE);
+                             TRUE);
+    if (hReady)
+        SetEvent(hReady);
     if (Status != RPC_S_OK)
     {
         DPRINT1("RpcServerListen() failed (Status %lx)\n", Status);
         return 0;
     }
 
-    /* ROS HACK (this should never happen...) */
-    DPRINT1("*** Other devices won't be installed correctly. If something\n");
-    DPRINT1("*** doesn't work, try to reboot to get a new chance.\n");
+    Status = RpcMgmtWaitServerListen();
+    if (Status != RPC_S_OK)
+        DPRINT1("RpcMgmtWaitServerListen() failed (Status %lx)\n", Status);
 
     DPRINT("RpcServerThread() done\n");
 
@@ -145,6 +158,9 @@ NtStatusToCrError(NTSTATUS Status)
 
         case STATUS_OBJECT_NAME_NOT_FOUND:
             return CR_NO_SUCH_VALUE;
+
+        case STATUS_PLUGPLAY_QUERY_VETOED:
+            return CR_REMOVE_VETOED;
 
         default:
             return CR_FAILURE;
@@ -208,7 +224,7 @@ ClearDeviceStatus(
     CONFIGRET ret = CR_SUCCESS;
     NTSTATUS Status;
 
-    DPRINT1("ClearDeviceStatus(%S 0x%lx 0x%lx)\n",
+    DPRINT("ClearDeviceStatus(%S 0x%lx 0x%lx)\n",
             pszDeviceID, ulStatus, ulProblem);
 
     RtlInitUnicodeString(&PlugPlayData.DeviceInstance,
@@ -273,7 +289,7 @@ SetDeviceStatus(
     CONFIGRET ret = CR_SUCCESS;
     NTSTATUS Status;
 
-    DPRINT1("SetDeviceStatus(%S 0x%lx 0x%lx)\n",
+    DPRINT("SetDeviceStatus(%S 0x%lx 0x%lx)\n",
             pszDeviceID, ulStatus, ulProblem);
 
     RtlInitUnicodeString(&PlugPlayData.DeviceInstance,
@@ -292,6 +308,185 @@ SetDeviceStatus(
 }
 
 
+/* The devices a removal reaches, children before their parents, as the PnP manager queries them */
+typedef struct _REMOVAL_DEVICES
+{
+    ULONG Count;
+    ULONG Capacity;
+    ULONG Queried;
+    PWSTR *Ids;
+} REMOVAL_DEVICES, *PREMOVAL_DEVICES;
+
+static
+BOOL
+AddRemovalDevice(
+    _Inout_ PREMOVAL_DEVICES Devices,
+    _In_ PCWSTR DeviceId)
+{
+    SIZE_T Size = (wcslen(DeviceId) + 1) * sizeof(WCHAR);
+    PWSTR *Ids;
+    ULONG Capacity;
+
+    if (Devices->Count == Devices->Capacity)
+    {
+        Capacity = Devices->Capacity ? Devices->Capacity * 2 : 8;
+        if (Devices->Ids != NULL)
+            Ids = HeapReAlloc(GetProcessHeap(), 0, Devices->Ids, Capacity * sizeof(PWSTR));
+        else
+            Ids = HeapAlloc(GetProcessHeap(), 0, Capacity * sizeof(PWSTR));
+        if (Ids == NULL)
+            return FALSE;
+        Devices->Ids = Ids;
+        Devices->Capacity = Capacity;
+    }
+
+    Devices->Ids[Devices->Count] = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (Devices->Ids[Devices->Count] == NULL)
+        return FALSE;
+    CopyMemory(Devices->Ids[Devices->Count], DeviceId, Size);
+    Devices->Count++;
+    return TRUE;
+}
+
+static
+VOID
+FreeRemovalDevices(
+    _Inout_ PREMOVAL_DEVICES Devices)
+{
+    ULONG Index;
+
+    for (Index = 0; Index < Devices->Count; Index++)
+        HeapFree(GetProcessHeap(), 0, Devices->Ids[Index]);
+    if (Devices->Ids != NULL)
+        HeapFree(GetProcessHeap(), 0, Devices->Ids);
+    ZeroMemory(Devices, sizeof(*Devices));
+}
+
+static
+BOOL
+GetRelatedDevice(
+    _In_ PCWSTR DeviceId,
+    _In_ ULONG Relation,
+    _Out_writes_(Length) PWSTR Related,
+    _In_ ULONG Length)
+{
+    PLUGPLAY_CONTROL_RELATED_DEVICE_DATA PlugPlayData;
+
+    RtlInitUnicodeString(&PlugPlayData.TargetDeviceInstance, DeviceId);
+    PlugPlayData.Relation = Relation;
+    PlugPlayData.RelatedDeviceInstance = Related;
+    PlugPlayData.RelatedDeviceInstanceLength = Length;
+    return NT_SUCCESS(NtPlugPlayControl(PlugPlayControlGetRelatedDevice, &PlugPlayData, sizeof(PlugPlayData)));
+}
+
+static
+BOOL
+CollectRemovalDevices(
+    _In_ PCWSTR DeviceId,
+    _Inout_ PREMOVAL_DEVICES Devices)
+{
+    WCHAR Child[MAX_DEVICE_ID_LEN];
+    WCHAR Next[MAX_DEVICE_ID_LEN];
+
+    if (GetRelatedDevice(DeviceId, PNP_GET_CHILD_DEVICE, Child, ARRAYSIZE(Child)))
+    {
+        for (;;)
+        {
+            if (!CollectRemovalDevices(Child, Devices))
+                return FALSE;
+            if (!GetRelatedDevice(Child, PNP_GET_SIBLING_DEVICE, Next, ARRAYSIZE(Next)))
+                break;
+            wcscpy(Child, Next);
+        }
+    }
+
+    return AddRemovalDevice(Devices, DeviceId);
+}
+
+static
+VOID
+SendRemovalEvent(
+    _In_ PREMOVAL_DEVICES Devices,
+    _In_ ULONG Count,
+    _In_ DWORD Code)
+{
+    DEV_BROADCAST_HANDLE EventData;
+    WCHAR PdoName[MAX_PATH];
+    ULONG Index;
+
+    ZeroMemory(&EventData, sizeof(EventData));
+    EventData.dbch_size = FIELD_OFFSET(DEV_BROADCAST_HANDLE, dbch_data) + 2 * sizeof(WCHAR);
+    EventData.dbch_devicetype = DBT_DEVTYP_HANDLE;
+    EventData.dbch_nameoffset = -1;
+
+    for (Index = 0; Index < Count; Index++)
+    {
+        ZeroMemory(PdoName, sizeof(PdoName));
+        if (GetPhysicalDeviceObjectName(Devices->Ids[Index], PdoName, sizeof(PdoName)) && PdoName[0] != UNICODE_NULL)
+            BroadcastListenerEvent(Code, PdoName, (PBYTE)&EventData, EventData.dbch_size);
+    }
+}
+
+/* Applications that registered on a handle to a device of the removal are asked before the PnP manager asks the
+ * drivers; one that denies keeps the devices, and those already asked hear that the removal failed (dbt.h) */
+static
+CONFIGRET
+QueryRemovalApplications(
+    _In_ PCWSTR DeviceId,
+    _Out_ PREMOVAL_DEVICES Devices,
+    _Out_opt_ PPNP_VETO_TYPE pVetoType,
+    _Out_writes_opt_(ulNameLength) LPWSTR pszVetoName,
+    _In_ DWORD ulNameLength)
+{
+    DEV_BROADCAST_HANDLE EventData;
+    WCHAR PdoName[MAX_PATH];
+    ULONG Index;
+
+    ZeroMemory(Devices, sizeof(*Devices));
+    if (!CollectRemovalDevices(DeviceId, Devices))
+    {
+        FreeRemovalDevices(Devices);
+        return CR_OUT_OF_MEMORY;
+    }
+
+    ZeroMemory(&EventData, sizeof(EventData));
+    EventData.dbch_size = FIELD_OFFSET(DEV_BROADCAST_HANDLE, dbch_data) + 2 * sizeof(WCHAR);
+    EventData.dbch_devicetype = DBT_DEVTYP_HANDLE;
+    EventData.dbch_nameoffset = -1;
+
+    for (Index = 0; Index < Devices->Count; Index++)
+    {
+        ZeroMemory(PdoName, sizeof(PdoName));
+        if (!GetPhysicalDeviceObjectName(Devices->Ids[Index], PdoName, sizeof(PdoName)) || PdoName[0] == UNICODE_NULL)
+            continue;
+
+        Devices->Queried = Index + 1;
+        if (!QueryListeners(DBT_DEVICEQUERYREMOVE, PdoName, (PBYTE)&EventData, EventData.dbch_size))
+        {
+            SendRemovalEvent(Devices, Devices->Queried, DBT_DEVICEQUERYREMOVEFAILED);
+            FreeRemovalDevices(Devices);
+            if (pVetoType != NULL)
+                *pVetoType = PNP_VetoWindowsApp;
+            /* TODO: name the application that denied the removal (format INFO_NEEDED) */
+            if (pszVetoName != NULL && ulNameLength > 0)
+                *pszVetoName = UNICODE_NULL;
+            return CR_REMOVE_VETOED;
+        }
+    }
+
+    return CR_SUCCESS;
+}
+
+/* The drivers kept the devices: the applications asked put them back */
+static
+VOID
+CancelRemovalApplications(
+    _Inout_ PREMOVAL_DEVICES Devices)
+{
+    SendRemovalEvent(Devices, Devices->Queried, DBT_DEVICEQUERYREMOVEFAILED);
+}
+
+
 static
 CONFIGRET
 DisableDeviceInstance(
@@ -301,11 +496,16 @@ DisableDeviceInstance(
     _In_ DWORD ulNameLength)
 {
     PLUGPLAY_CONTROL_QUERY_REMOVE_DATA QueryRemoveData;
+    REMOVAL_DEVICES Devices;
     CONFIGRET ret = CR_SUCCESS;
     NTSTATUS Status;
 
     DPRINT1("DisableDeviceInstance(%S %p %p %lu)\n",
             pszDeviceInstance, pVetoType, pszVetoName, ulNameLength);
+
+    ret = QueryRemovalApplications(pszDeviceInstance, &Devices, pVetoType, pszVetoName, ulNameLength);
+    if (ret != CR_SUCCESS)
+        return ret;
 
     RtlInitUnicodeString(&QueryRemoveData.DeviceInstance,
                          pszDeviceInstance);
@@ -333,6 +533,14 @@ DisableDeviceInstance(
     {
         ret = NtStatusToCrError(Status);
     }
+    else
+    {
+        SetDeviceStatus(pszDeviceInstance, DN_HAS_PROBLEM, CM_PROB_DISABLED);
+    }
+
+    if (!NT_SUCCESS(Status))
+        CancelRemovalApplications(&Devices);
+    FreeRemovalDevices(&Devices);
 
     return ret;
 }
@@ -404,7 +612,6 @@ IsValidDeviceInstanceID(
 }
 
 
-static
 BOOL
 IsRootDeviceInstanceID(
     _In_ PWSTR pszDeviceInstanceID)
@@ -688,7 +895,20 @@ __RPC_USER
 PNP_NOTIFY_HANDLE_rundown(
     PNP_NOTIFY_HANDLE pHandle)
 {
-    DPRINT1("PNP_NOTIFY_HANDLE_rundown(%p)\n", pHandle);
+    PNOTIFY_ENTRY pEntry = (PNOTIFY_ENTRY)pHandle;
+
+    DPRINT("PNP_NOTIFY_HANDLE_rundown(%p)\n", pHandle);
+
+    if (pEntry == NULL)
+        return;
+
+    RtlAcquireResourceExclusive(&NotificationListLock, TRUE);
+    RemoveEntryList(&pEntry->ListEntry);
+    RtlReleaseResource(&NotificationListLock);
+
+    if (pEntry->pszName)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, pEntry->pszName);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, pEntry);
 }
 
 
@@ -841,7 +1061,6 @@ PNP_ValidateDeviceInstance(
     HKEY hDeviceKey = NULL;
 
     UNREFERENCED_PARAMETER(hBinding);
-    UNREFERENCED_PARAMETER(ulFlags);
 
     DPRINT("PNP_ValidateDeviceInstance(%p %S 0x%08lx)\n",
            hBinding, pDeviceID, ulFlags);
@@ -860,7 +1079,8 @@ PNP_ValidateDeviceInstance(
         goto Done;
     }
 
-    /* FIXME: add more tests */
+    if (!(ulFlags & CM_LOCATE_DEVNODE_PHANTOM) && !IsPresentDeviceInstanceID(pDeviceID))
+        ret = CR_NO_SUCH_DEVNODE;
 
 Done:
     if (hDeviceKey != NULL)
@@ -2158,6 +2378,8 @@ PNP_GetDeviceRegProp(
         else
         {
             ret = NtStatusToCrError(Status);
+            if (ret == CR_NO_SUCH_VALUE)
+                *pulLength = 0;
         }
     }
 
@@ -2720,7 +2942,8 @@ PNP_GetInterfaceDeviceList(
     DPRINT("PNP_GetInterfaceDeviceList(%p %p %S %p %p 0x%08lx)\n",
            hBinding, InterfaceGuid, pszDeviceID, Buffer, pulLength, ulFlags);
 
-    if (!IsValidDeviceInstanceID(pszDeviceID))
+    if (pszDeviceID != NULL && *pszDeviceID != UNICODE_NULL &&
+        !IsValidDeviceInstanceID(pszDeviceID))
         return CR_INVALID_DEVINST;
 
     RtlInitUnicodeString(&PlugPlayData.DeviceInstance,
@@ -2729,18 +2952,19 @@ PNP_GetInterfaceDeviceList(
     PlugPlayData.Flags = ulFlags;
     PlugPlayData.FilterGuid = InterfaceGuid;
     PlugPlayData.Buffer = Buffer;
-    PlugPlayData.BufferSize = *pulLength;
+    PlugPlayData.BufferSize = *pulLength / sizeof(WCHAR);
 
     Status = NtPlugPlayControl(PlugPlayControlGetInterfaceDeviceList,
                                (PVOID)&PlugPlayData,
                                sizeof(PLUGPLAY_CONTROL_INTERFACE_DEVICE_LIST_DATA));
-    if (NT_SUCCESS(Status))
+    if (NT_SUCCESS(Status) && PlugPlayData.BufferSize <= *pulLength / sizeof(WCHAR))
     {
-        *pulLength = PlugPlayData.BufferSize;
+        *pulLength = PlugPlayData.BufferSize * sizeof(WCHAR);
     }
     else
     {
-        ret = NtStatusToCrError(Status);
+        *pulLength = 0;
+        ret = NT_SUCCESS(Status) ? CR_BUFFER_SMALL : NtStatusToCrError(Status);
     }
 
     DPRINT("PNP_GetInterfaceDeviceList() done (returns %lx)\n", ret);
@@ -2767,7 +2991,8 @@ PNP_GetInterfaceDeviceListSize(
     DPRINT("PNP_GetInterfaceDeviceListSize(%p %p %p %S 0x%08lx)\n",
            hBinding, pulLen, InterfaceGuid, pszDeviceID, ulFlags);
 
-    if (!IsValidDeviceInstanceID(pszDeviceID))
+    if (pszDeviceID != NULL && *pszDeviceID != UNICODE_NULL &&
+        !IsValidDeviceInstanceID(pszDeviceID))
         return CR_INVALID_DEVINST;
 
     RtlInitUnicodeString(&PlugPlayData.DeviceInstance,
@@ -2783,7 +3008,7 @@ PNP_GetInterfaceDeviceListSize(
                                sizeof(PLUGPLAY_CONTROL_INTERFACE_DEVICE_LIST_DATA));
     if (NT_SUCCESS(Status))
     {
-        *pulLen = PlugPlayData.BufferSize;
+        *pulLen = PlugPlayData.BufferSize * sizeof(WCHAR);
     }
     else
     {
@@ -3254,10 +3479,17 @@ GenerateDeviceID(
     DWORD dwInstanceNumber;
     DWORD dwError = ERROR_SUCCESS;
     CONFIGRET ret = CR_SUCCESS;
+    LPWSTR pszChar;
 
     /* Fail, if the device name contains backslashes */
     if (wcschr(pszDeviceID, L'\\') != NULL)
         return CR_INVALID_DEVICE_ID;
+
+    for (pszChar = pszDeviceID; *pszChar != UNICODE_NULL; pszChar++)
+    {
+        if (*pszChar == L' ' || *pszChar == L',')
+            *pszChar = L'_';
+    }
 
     /* Generated ID is: Root\<Device ID>\<Instance number> */
     dwInstanceNumber = 0;
@@ -3266,7 +3498,7 @@ GenerateDeviceID(
         if (dwInstanceNumber >= 10000)
             return CR_FAILURE;
 
-        _swprintf(szGeneratedInstance, L"Root\\%ls\\%04lu",
+        _swprintf(szGeneratedInstance, L"ROOT\\%ls\\%04lu",
                   pszDeviceID, dwInstanceNumber);
 
         /* Try to open the enum key of the device instance */
@@ -3329,6 +3561,8 @@ PNP_CreateDevInst(
             return ret;
     }
 
+    _wcsupr(pszDeviceID);
+
     /* Try to open the device instance key */
     RegOpenKeyEx(hEnumKey, pszDeviceID, 0, KEY_READ | KEY_WRITE, &hKey);
 
@@ -3362,6 +3596,8 @@ PNP_CreateDevInst(
             /* Open the device instance key */
             RegOpenKeyEx(hEnumKey, pszDeviceID, 0, KEY_READ | KEY_WRITE, &hKey);
         }
+
+        SetDeviceDoNotInstall(pszDeviceID, (ulFlags & CM_CREATE_DEVNODE_DO_NOT_INSTALL) != 0);
 
         /* Create a device node for the device */
         RtlInitUnicodeString(&ControlData.DeviceInstance, pszDeviceID);
@@ -3409,7 +3645,7 @@ SetupDeviceInstance(
     CONFIGRET ret = CR_SUCCESS;
     NTSTATUS Status;
 
-    DPRINT1("SetupDeviceInstance(%S 0x%08lx)\n",
+    DPRINT("SetupDeviceInstance(%S 0x%08lx)\n",
             pszDeviceInstance, ulMinorAction);
 
     if (IsRootDeviceInstanceID(pszDeviceInstance))
@@ -3443,17 +3679,22 @@ SetupDeviceInstance(
         goto done;
     }
 
-    GetDeviceStatus(pszDeviceInstance,
-                    &ulStatus,
-                    &ulProblem);
+    ret = GetDeviceStatus(pszDeviceInstance,
+                          &ulStatus,
+                          &ulProblem);
+    if (ret != CR_SUCCESS)
+        goto done;
 
-    if (ulStatus & DN_STARTED)
+    if (ulStatus & (DN_STARTED | DN_NEED_RESTART))
     {
         goto done;
     }
 
     if (ulStatus & DN_HAS_PROBLEM)
     {
+        if (ulProblem == CM_PROB_DISABLED)
+            goto done;
+
         ret = ClearDeviceStatus(pszDeviceInstance,
                                 DN_HAS_PROBLEM,
                                 ulProblem);
@@ -3479,15 +3720,52 @@ done:
 }
 
 
+static
+VOID
+UpdateDeviceConfigFlags(
+    _In_ LPWSTR pszDeviceID,
+    _In_ DWORD dwSetFlags,
+    _In_ DWORD dwClearFlags)
+{
+    HKEY hDeviceKey;
+    DWORD dwConfigFlags = 0;
+    DWORD dwNewFlags;
+    DWORD dwSize = sizeof(dwConfigFlags);
+    DWORD dwType;
+
+    if (RegOpenKeyExW(hEnumKey, pszDeviceID, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, &hDeviceKey) != ERROR_SUCCESS)
+        return;
+
+    if (RegQueryValueExW(hDeviceKey, L"ConfigFlags", NULL, &dwType, (LPBYTE)&dwConfigFlags, &dwSize) != ERROR_SUCCESS ||
+        dwType != REG_DWORD)
+        dwConfigFlags = 0;
+
+    dwNewFlags = (dwConfigFlags | dwSetFlags) & ~dwClearFlags;
+    if (dwNewFlags != dwConfigFlags)
+        RegSetValueExW(hDeviceKey, L"ConfigFlags", 0, REG_DWORD, (LPBYTE)&dwNewFlags, sizeof(dwNewFlags));
+    RegCloseKey(hDeviceKey);
+}
+
+
 static CONFIGRET
 EnableDeviceInstance(
     _In_ LPWSTR pszDeviceInstance)
 {
     PLUGPLAY_CONTROL_DEVICE_CONTROL_DATA ControlData;
     CONFIGRET ret = CR_SUCCESS;
+    DWORD ulStatus, ulProblem;
     NTSTATUS Status;
 
     DPRINT("Enable device instance %S\n", pszDeviceInstance);
+
+    UpdateDeviceConfigFlags(pszDeviceInstance, 0, CONFIGFLAG_DISABLED);
+
+    if (GetDeviceStatus(pszDeviceInstance, &ulStatus, &ulProblem) == CR_SUCCESS &&
+        (ulStatus & DN_HAS_PROBLEM) &&
+        ulProblem == CM_PROB_DISABLED)
+    {
+        ClearDeviceStatus(pszDeviceInstance, DN_HAS_PROBLEM, ulProblem);
+    }
 
     RtlInitUnicodeString(&ControlData.DeviceInstance, pszDeviceInstance);
     Status = NtPlugPlayControl(PlugPlayControlStartDevice, &ControlData, sizeof(ControlData));
@@ -3669,7 +3947,7 @@ PNP_SetDeviceProblem(
 
     UNREFERENCED_PARAMETER(hBinding);
 
-    DPRINT1("PNP_SetDeviceProblem(%p %S %lu 0x%08lx)\n",
+    DPRINT("PNP_SetDeviceProblem(%p %S %lu 0x%08lx)\n",
            hBinding, pDeviceID, ulProblem, ulFlags);
 
     if (ulFlags & ~CM_SET_DEVNODE_PROBLEM_BITS)
@@ -3719,6 +3997,8 @@ PNP_DisableDevInst(
     DWORD ulNameLength,
     DWORD ulFlags)
 {
+    CONFIGRET ret;
+
     UNREFERENCED_PARAMETER(hBinding);
 
     DPRINT1("PNP_DisableDevInst(%p %S %p %p %lu 0x%08lx)\n",
@@ -3731,10 +4011,72 @@ PNP_DisableDevInst(
         IsRootDeviceInstanceID(pDeviceID))
         return CR_INVALID_DEVINST;
 
-    return DisableDeviceInstance(pDeviceID,
-                                 pVetoType,
-                                 pszVetoName,
-                                 ulNameLength);
+    ret = DisableDeviceInstance(pDeviceID,
+                                pVetoType,
+                                pszVetoName,
+                                ulNameLength);
+    if (ret == CR_SUCCESS && (ulFlags & CM_DISABLE_PERSIST))
+        UpdateDeviceConfigFlags(pDeviceID, CONFIGFLAG_DISABLED, 0);
+
+    return ret;
+}
+
+
+static
+VOID
+DeleteDeviceInterfaceKeys(
+    _In_ LPWSTR pszDeviceID)
+{
+    WCHAR szClassName[40];
+    WCHAR szInterfaceName[MAX_DEVICE_ID_LEN + 40];
+    WCHAR szDeviceInstance[MAX_DEVICE_ID_LEN];
+    HKEY hClassesKey, hInterfaceClassKey, hInterfaceKey;
+    DWORD dwClassIndex, dwIndex, dwSize;
+    BOOL bMatch;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"System\\CurrentControlSet\\Control\\DeviceClasses",
+                      0,
+                      KEY_ENUMERATE_SUB_KEYS,
+                      &hClassesKey) != ERROR_SUCCESS)
+        return;
+
+    for (dwClassIndex = 0; ; dwClassIndex++)
+    {
+        dwSize = ARRAYSIZE(szClassName);
+        if (RegEnumKeyExW(hClassesKey, dwClassIndex, szClassName, &dwSize, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
+        if (RegOpenKeyExW(hClassesKey, szClassName, 0, KEY_READ, &hInterfaceClassKey) != ERROR_SUCCESS)
+            continue;
+
+        for (dwIndex = 0; ; )
+        {
+            dwSize = ARRAYSIZE(szInterfaceName);
+            if (RegEnumKeyExW(hInterfaceClassKey, dwIndex, szInterfaceName, &dwSize, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+                break;
+
+            bMatch = FALSE;
+            if (RegOpenKeyExW(hInterfaceClassKey, szInterfaceName, 0, KEY_QUERY_VALUE, &hInterfaceKey) == ERROR_SUCCESS)
+            {
+                dwSize = sizeof(szDeviceInstance) - sizeof(WCHAR);
+                if (RegQueryValueExW(hInterfaceKey, L"DeviceInstance", NULL, NULL,
+                                     (LPBYTE)szDeviceInstance, &dwSize) == ERROR_SUCCESS)
+                {
+                    szDeviceInstance[dwSize / sizeof(WCHAR)] = UNICODE_NULL;
+                    bMatch = !_wcsicmp(szDeviceInstance, pszDeviceID);
+                }
+                RegCloseKey(hInterfaceKey);
+            }
+
+            if (bMatch && SHDeleteKeyW(hInterfaceClassKey, szInterfaceName) == ERROR_SUCCESS)
+                continue;
+            dwIndex++;
+        }
+
+        RegCloseKey(hInterfaceClassKey);
+    }
+
+    RegCloseKey(hClassesKey);
 }
 
 
@@ -3746,8 +4088,98 @@ PNP_UninstallDevInst(
     LPWSTR pDeviceID,
     DWORD ulFlags)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    PLUGPLAY_CONTROL_DEVICE_CONTROL_DATA ControlData;
+    HKEY DeviceKey, ProfilesKey, ProfileKey;
+    WCHAR DriverKey[MAX_PATH] = L"", ProfileName[MAX_PATH], KeyPath[MAX_PATH + MAX_DEVICE_ID_LEN];
+    DWORD Size, Type, Index;
+    LONG Error;
+    NTSTATUS Status;
+
+    if (ulFlags != 0)
+        return CR_INVALID_FLAG;
+    if (!IsValidDeviceInstanceID(pDeviceID) || IsRootDeviceInstanceID(pDeviceID))
+        return CR_INVALID_DEVINST;
+
+    Error = RegOpenKeyExW(hEnumKey, pDeviceID, 0, KEY_READ, &DeviceKey);
+    if (Error != ERROR_SUCCESS)
+        return Error == ERROR_FILE_NOT_FOUND ? CR_NO_SUCH_DEVNODE : CR_REGISTRY_ERROR;
+    Size = sizeof(DriverKey);
+    Error = RegQueryValueExW(DeviceKey, L"Driver", NULL, &Type, (PBYTE)DriverKey, &Size);
+    RegCloseKey(DeviceKey);
+    if (Error != ERROR_SUCCESS && Error != ERROR_FILE_NOT_FOUND)
+        return CR_REGISTRY_ERROR;
+    if (Error == ERROR_SUCCESS)
+    {
+        PWSTR Separator;
+        DriverKey[ARRAYSIZE(DriverKey) - 1] = UNICODE_NULL;
+        Separator = wcschr(DriverKey, L'\\');
+        if (Type != REG_SZ || !Separator || Separator == DriverKey ||
+            !Separator[1] || wcschr(Separator + 1, L'\\'))
+            DriverKey[0] = UNICODE_NULL;
+    }
+
+    /* Do not erase the registry while the driver can still use the device. */
+    RtlInitUnicodeString(&ControlData.DeviceInstance, pDeviceID);
+    Status = NtPlugPlayControl(PlugPlayControlDeregisterDevice, &ControlData, sizeof(ControlData));
+    if (!NT_SUCCESS(Status) && Status != STATUS_NO_SUCH_DEVICE)
+        return NtStatusToCrError(Status);
+
+    DeleteDeviceInterfaceKeys(pDeviceID);
+
+    Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, REGSTR_PATH_HWPROFILES, 0, KEY_READ | KEY_WRITE, &ProfilesKey);
+    if (Error == ERROR_SUCCESS)
+    {
+        for (Index = 0; ; ++Index)
+        {
+            Size = ARRAYSIZE(ProfileName);
+            Error = RegEnumKeyExW(ProfilesKey, Index, ProfileName, &Size, NULL, NULL, NULL, NULL);
+            if (Error == ERROR_NO_MORE_ITEMS)
+                break;
+            if (Error != ERROR_SUCCESS)
+                break;
+            Error = RegOpenKeyExW(ProfilesKey, ProfileName, 0, KEY_READ | KEY_WRITE, &ProfileKey);
+            if (Error != ERROR_SUCCESS)
+                break;
+            swprintf(KeyPath, ARRAYSIZE(KeyPath), L"System\\CurrentControlSet\\Enum\\%ls", pDeviceID);
+            Error = SHDeleteKeyW(ProfileKey, KeyPath);
+            if ((Error == ERROR_SUCCESS || Error == ERROR_FILE_NOT_FOUND || Error == ERROR_PATH_NOT_FOUND) && DriverKey[0])
+            {
+                swprintf(KeyPath, ARRAYSIZE(KeyPath), L"System\\CurrentControlSet\\Control\\Class\\%ls", DriverKey);
+                Error = SHDeleteKeyW(ProfileKey, KeyPath);
+            }
+            RegCloseKey(ProfileKey);
+            if (Error != ERROR_SUCCESS && Error != ERROR_FILE_NOT_FOUND && Error != ERROR_PATH_NOT_FOUND)
+                break;
+        }
+        RegCloseKey(ProfilesKey);
+        if (Error != ERROR_NO_MORE_ITEMS)
+            return CR_REGISTRY_ERROR;
+    }
+    else if (Error != ERROR_FILE_NOT_FOUND && Error != ERROR_PATH_NOT_FOUND)
+        return CR_REGISTRY_ERROR;
+
+    if (DriverKey[0])
+    {
+        Error = SHDeleteKeyW(hClassKey, DriverKey);
+        if (Error != ERROR_SUCCESS && Error != ERROR_FILE_NOT_FOUND && Error != ERROR_PATH_NOT_FOUND)
+            return CR_REGISTRY_ERROR;
+    }
+    Error = SHDeleteKeyW(hEnumKey, pDeviceID);
+    if (Error == ERROR_SUCCESS)
+    {
+        WCHAR szParent[MAX_DEVICE_ID_LEN];
+        PWSTR pSeparator;
+
+        wcsncpy(szParent, pDeviceID, ARRAYSIZE(szParent) - 1);
+        szParent[ARRAYSIZE(szParent) - 1] = UNICODE_NULL;
+        pSeparator = wcsrchr(szParent, L'\\');
+        if (pSeparator)
+        {
+            *pSeparator = UNICODE_NULL;
+            RegDeleteKeyW(hEnumKey, szParent);
+        }
+    }
+    return Error == ERROR_SUCCESS ? CR_SUCCESS : CR_REGISTRY_ERROR;
 }
 
 
@@ -3935,10 +4367,11 @@ PNP_QueryRemove(
     DWORD ulFlags)
 {
     PLUGPLAY_CONTROL_QUERY_REMOVE_DATA PlugPlayData;
+    REMOVAL_DEVICES Devices;
     NTSTATUS Status;
     DWORD ret = CR_SUCCESS;
 
-    DPRINT1("PNP_QueryRemove(%p %S %p %p %lu 0x%lx)\n",
+    DPRINT("PNP_QueryRemove(%p %S %p %p %lu 0x%lx)\n",
             hBinding, pszDeviceID, pVetoType, pszVetoName,
             ulNameLength, ulFlags);
 
@@ -3955,6 +4388,10 @@ PNP_QueryRemove(
     if (pszVetoName != NULL && ulNameLength > 0)
         *pszVetoName = UNICODE_NULL;
 
+    ret = QueryRemovalApplications(pszDeviceID, &Devices, pVetoType, pszVetoName, ulNameLength);
+    if (ret != CR_SUCCESS)
+        return ret;
+
     RtlZeroMemory(&PlugPlayData, sizeof(PlugPlayData));
     RtlInitUnicodeString(&PlugPlayData.DeviceInstance,
                          pszDeviceID);
@@ -3965,8 +4402,14 @@ PNP_QueryRemove(
     Status = NtPlugPlayControl(PlugPlayControlQueryAndRemoveDevice,
                                &PlugPlayData,
                                sizeof(PlugPlayData));
+    if (pVetoType != NULL)
+        *pVetoType = PlugPlayData.VetoType;
     if (!NT_SUCCESS(Status))
+    {
         ret = NtStatusToCrError(Status);
+        CancelRemovalApplications(&Devices);
+    }
+    FreeRemovalDevices(&Devices);
 
     return ret;
 }
@@ -3984,6 +4427,7 @@ PNP_RequestDeviceEject(
     DWORD ulFlags)
 {
     PLUGPLAY_CONTROL_QUERY_REMOVE_DATA PlugPlayData;
+    REMOVAL_DEVICES Devices;
     NTSTATUS Status;
     DWORD ret = CR_SUCCESS;
 
@@ -4003,6 +4447,10 @@ PNP_RequestDeviceEject(
     if (pszVetoName != NULL && ulNameLength > 0)
         *pszVetoName = UNICODE_NULL;
 
+    ret = QueryRemovalApplications(pszDeviceID, &Devices, pVetoType, pszVetoName, ulNameLength);
+    if (ret != CR_SUCCESS)
+        return ret;
+
     RtlZeroMemory(&PlugPlayData, sizeof(PlugPlayData));
     RtlInitUnicodeString(&PlugPlayData.DeviceInstance,
                          pszDeviceID);
@@ -4014,7 +4462,11 @@ PNP_RequestDeviceEject(
                                &PlugPlayData,
                                sizeof(PlugPlayData));
     if (!NT_SUCCESS(Status))
+    {
         ret = NtStatusToCrError(Status);
+        CancelRemovalApplications(&Devices);
+    }
+    FreeRemovalDevices(&Devices);
 
     return ret;
 }
@@ -5007,6 +5459,679 @@ PNP_FreeResDes(
 }
 
 
+typedef struct _RES_DES_LOCATION
+{
+    ULONG ResType;
+    ULONG Tag;
+    ULONG Count;
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR Partial;
+    PIO_RESOURCE_DESCRIPTOR Io;
+} RES_DES_LOCATION, *PRES_DES_LOCATION;
+
+
+static
+ULONG
+GetResDesType(
+    _In_ UCHAR CmType)
+{
+    switch (CmType)
+    {
+        case CmResourceTypeNull:
+            return ResType_None;
+        case CmResourceTypePort:
+            return ResType_IO;
+        case CmResourceTypeInterrupt:
+            return ResType_IRQ;
+        case CmResourceTypeMemory:
+            return ResType_Mem;
+        case CmResourceTypeDma:
+            return ResType_DMA;
+        case CmResourceTypeBusNumber:
+            return ResType_BusNumber;
+        case CmResourceTypeMemoryLarge:
+            return ResType_MemLarge;
+        case CmResourceTypeDevicePrivate:
+            return ResType_DevicePrivate;
+        default:
+            return (ULONG)-1;
+    }
+}
+
+
+static
+ULONG
+GetMemoryDesFlags(
+    _In_ USHORT Flags)
+{
+    ULONG Result = 0;
+
+    if (!(Flags & CM_RESOURCE_MEMORY_READ_ONLY))
+        Result |= fMD_RAM;
+    if (!(Flags & CM_RESOURCE_MEMORY_24))
+        Result |= fMD_32;
+    if (Flags & CM_RESOURCE_MEMORY_PREFETCHABLE)
+        Result |= fMD_PrefetchAllowed;
+    if (Flags & CM_RESOURCE_MEMORY_WRITE_ONLY)
+        Result |= fMD_ReadDisallowed;
+    if (Flags & CM_RESOURCE_MEMORY_COMBINEDWRITE)
+        Result |= fMD_CombinedWriteAllowed;
+    if (Flags & CM_RESOURCE_MEMORY_CACHEABLE)
+        Result |= fMD_Cacheable;
+    if (Flags & CM_RESOURCE_MEMORY_WINDOW_DECODE)
+        Result |= fMD_WINDOW_DECODE;
+    if (Flags & CM_RESOURCE_MEMORY_BAR)
+        Result |= fMD_MEMORY_BAR;
+    return Result;
+}
+
+
+static
+ULONG
+GetDmaDesFlags(
+    _In_ USHORT Flags)
+{
+    ULONG Result = fDD_BYTE;
+
+    if (Flags & CM_RESOURCE_DMA_8_AND_16)
+        Result = fDD_BYTE_AND_WORD;
+    else if (Flags & CM_RESOURCE_DMA_32)
+        Result = fDD_DWORD;
+    else if (Flags & CM_RESOURCE_DMA_16)
+        Result = fDD_WORD;
+    if (Flags & CM_RESOURCE_DMA_BUS_MASTER)
+        Result |= fDD_BusMaster;
+    if (Flags & CM_RESOURCE_DMA_TYPE_A)
+        Result |= fDD_TypeA;
+    if (Flags & CM_RESOURCE_DMA_TYPE_B)
+        Result |= fDD_TypeB;
+    if (Flags & CM_RESOURCE_DMA_TYPE_F)
+        Result |= fDD_TypeF;
+    return Result;
+}
+
+
+static
+USHORT
+GetIrqDesFlags(
+    _In_ UCHAR ShareDisposition,
+    _In_ USHORT Flags)
+{
+    return ((Flags & CM_RESOURCE_INTERRUPT_LATCHED) ? fIRQD_Edge : fIRQD_Level) |
+           ((ShareDisposition == CmResourceShareShared) ? fIRQD_Share : fIRQD_Exclusive);
+}
+
+
+static
+ULONG
+GetLargeMemoryShift(
+    _In_ USHORT Flags)
+{
+    if (Flags & CM_RESOURCE_MEMORY_LARGE_40)
+        return 8;
+    if (Flags & CM_RESOURCE_MEMORY_LARGE_48)
+        return 16;
+    if (Flags & CM_RESOURCE_MEMORY_LARGE_64)
+        return 32;
+    return 0;
+}
+
+
+static
+BOOL
+NextPartialDescriptor(
+    _Inout_ PCM_PARTIAL_RESOURCE_DESCRIPTOR *Partial,
+    _In_ LPBYTE End)
+{
+    LPBYTE Next = (LPBYTE)(*Partial + 1);
+
+    if (Next > End)
+        return FALSE;
+    if ((*Partial)->Type == CmResourceTypeDeviceSpecific)
+    {
+        if ((*Partial)->u.DeviceSpecificData.DataSize > (ULONG)(End - Next))
+            return FALSE;
+        Next += (*Partial)->u.DeviceSpecificData.DataSize;
+    }
+    *Partial = (PCM_PARTIAL_RESOURCE_DESCRIPTOR)Next;
+    return TRUE;
+}
+
+
+static
+BOOL
+FindAllocatedResDes(
+    _In_reads_bytes_(DataSize) LPBYTE Data,
+    _In_ ULONG DataSize,
+    _In_ ULONG LogConfTag,
+    _In_ RESOURCEID ResourceID,
+    _In_ ULONG StartTag,
+    _Out_ PRES_DES_LOCATION Location)
+{
+    PCM_RESOURCE_LIST List = (PCM_RESOURCE_LIST)Data;
+    PCM_FULL_RESOURCE_DESCRIPTOR Full;
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR Partial, Current;
+    LPBYTE End = Data + DataSize;
+    ULONG FullIndex, Index, Type;
+
+    if (DataSize < FIELD_OFFSET(CM_RESOURCE_LIST, List) || LogConfTag >= List->Count)
+        return FALSE;
+
+    Full = List->List;
+    for (FullIndex = 0;; FullIndex++)
+    {
+        if ((LPBYTE)Full + FIELD_OFFSET(CM_FULL_RESOURCE_DESCRIPTOR, PartialResourceList.PartialDescriptors) > End)
+            return FALSE;
+        Partial = Full->PartialResourceList.PartialDescriptors;
+        if (FullIndex == LogConfTag)
+            break;
+        for (Index = 0; Index < Full->PartialResourceList.Count; Index++)
+        {
+            if (!NextPartialDescriptor(&Partial, End))
+                return FALSE;
+        }
+        Full = (PCM_FULL_RESOURCE_DESCRIPTOR)Partial;
+    }
+
+    for (Index = 0; Index < Full->PartialResourceList.Count; Index++)
+    {
+        Current = Partial;
+        if (!NextPartialDescriptor(&Partial, End))
+            return FALSE;
+        Type = GetResDesType(Current->Type);
+        if (Index < StartTag || Type == (ULONG)-1)
+            continue;
+        if (ResourceID != ResType_All && ResourceID != Type)
+            continue;
+        Location->ResType = Type;
+        Location->Tag = Index;
+        Location->Count = 1;
+        Location->Partial = Current;
+        Location->Io = NULL;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+static
+BOOL
+FindRequiredResDes(
+    _In_reads_bytes_(DataSize) LPBYTE Data,
+    _In_ ULONG DataSize,
+    _In_ ULONG LogConfTag,
+    _In_ RESOURCEID ResourceID,
+    _In_ ULONG StartTag,
+    _Out_ PRES_DES_LOCATION Location)
+{
+    PIO_RESOURCE_REQUIREMENTS_LIST Requirements = (PIO_RESOURCE_REQUIREMENTS_LIST)Data;
+    PIO_RESOURCE_LIST IoList;
+    PIO_RESOURCE_DESCRIPTOR Descriptor;
+    LPBYTE End = Data + DataSize;
+    ULONG ListIndex, Index, Count, Type;
+
+    if (DataSize < FIELD_OFFSET(IO_RESOURCE_REQUIREMENTS_LIST, List) ||
+        LogConfTag >= Requirements->AlternativeLists)
+    {
+        return FALSE;
+    }
+
+    IoList = Requirements->List;
+    for (ListIndex = 0;; ListIndex++)
+    {
+        if ((LPBYTE)IoList + FIELD_OFFSET(IO_RESOURCE_LIST, Descriptors) > End ||
+            IoList->Count > (ULONG)(End - (LPBYTE)IoList->Descriptors) / sizeof(IO_RESOURCE_DESCRIPTOR))
+        {
+            return FALSE;
+        }
+        if (ListIndex == LogConfTag)
+            break;
+        IoList = (PIO_RESOURCE_LIST)(IoList->Descriptors + IoList->Count);
+    }
+
+    for (Index = 0; Index < IoList->Count; Index += Count)
+    {
+        Descriptor = &IoList->Descriptors[Index];
+        Count = 1;
+        while (Index + Count < IoList->Count &&
+               (IoList->Descriptors[Index + Count].Option & IO_RESOURCE_ALTERNATIVE) &&
+               IoList->Descriptors[Index + Count].Type == Descriptor->Type)
+        {
+            Count++;
+        }
+        Type = GetResDesType(Descriptor->Type);
+        if (Index < StartTag || Type == (ULONG)-1 || Type == ResType_None)
+            continue;
+        if (ResourceID != ResType_All && ResourceID != Type)
+            continue;
+        Location->ResType = Type;
+        Location->Tag = Index;
+        Location->Count = Count;
+        Location->Partial = NULL;
+        Location->Io = Descriptor;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+
+static
+CONFIGRET
+LoadLogConfData(
+    _In_ LPWSTR pDeviceID,
+    _In_ ULONG ulLogConfType,
+    _Out_ PULONG pulRegDataType,
+    _Out_ PULONG pulDataSize,
+    _Out_ LPBYTE *ppData)
+{
+    HKEY hConfigKey = NULL;
+    CONFIGRET ret;
+
+    *ppData = NULL;
+    *pulDataSize = 0;
+
+    if (OpenConfigurationKey(pDeviceID, ulLogConfType, &hConfigKey) != CR_SUCCESS)
+        return CR_NO_MORE_LOG_CONF;
+
+    ret = GetConfigurationData(hConfigKey, ulLogConfType, pulRegDataType, pulDataSize, ppData, 0, NULL);
+    RegCloseKey(hConfigKey);
+
+    if (ret != CR_SUCCESS || *pulDataSize == 0 || *ppData == NULL)
+    {
+        if (*ppData != NULL)
+            HeapFree(GetProcessHeap(), 0, *ppData);
+        *ppData = NULL;
+        return CR_NO_MORE_LOG_CONF;
+    }
+
+    return CR_SUCCESS;
+}
+
+
+static
+BOOL
+FindResDes(
+    _In_ ULONG RegDataType,
+    _In_reads_bytes_(DataSize) LPBYTE Data,
+    _In_ ULONG DataSize,
+    _In_ ULONG LogConfTag,
+    _In_ RESOURCEID ResourceID,
+    _In_ ULONG StartTag,
+    _Out_ PRES_DES_LOCATION Location)
+{
+    if (RegDataType == REG_RESOURCE_LIST)
+        return FindAllocatedResDes(Data, DataSize, LogConfTag, ResourceID, StartTag, Location);
+    if (RegDataType == REG_RESOURCE_REQUIREMENTS_LIST)
+        return FindRequiredResDes(Data, DataSize, LogConfTag, ResourceID, StartTag, Location);
+    return FALSE;
+}
+
+
+static
+ULONG
+BuildAllocatedResDes(
+    _In_ PCM_PARTIAL_RESOURCE_DESCRIPTOR Partial,
+    _In_ BOOL Wide,
+    _Out_writes_bytes_opt_(return) LPBYTE Buffer)
+{
+    ULONG Size;
+    ULONG Shift;
+
+    switch (Partial->Type)
+    {
+        case CmResourceTypePort:
+        {
+            PIO_RESOURCE Io = (PIO_RESOURCE)Buffer;
+
+            Size = sizeof(IO_RESOURCE);
+            if (Io == NULL)
+                return Size;
+            ZeroMemory(Io, Size);
+            Io->IO_Header.IOD_Type = IOType_Range;
+            Io->IO_Header.IOD_Alloc_Base = Partial->u.Port.Start.QuadPart;
+            Io->IO_Header.IOD_Alloc_End = Partial->u.Port.Start.QuadPart + Partial->u.Port.Length - 1;
+            Io->IO_Header.IOD_DesFlags = Partial->Flags;
+            return Size;
+        }
+
+        case CmResourceTypeInterrupt:
+        {
+            ULONG Flags = MAKELONG(GetIrqDesFlags(Partial->ShareDisposition, Partial->Flags),
+                                   HIWORD(Partial->u.Interrupt.Level));
+
+            if (Wide)
+            {
+                PIRQ_RESOURCE_64 Irq = (PIRQ_RESOURCE_64)Buffer;
+
+                Size = sizeof(IRQ_RESOURCE_64);
+                if (Irq == NULL)
+                    return Size;
+                ZeroMemory(Irq, Size);
+                Irq->IRQ_Header.IRQD_Type = IRQType_Range;
+                Irq->IRQ_Header.IRQD_Flags = Flags;
+                Irq->IRQ_Header.IRQD_Alloc_Num = Partial->u.Interrupt.Vector;
+                Irq->IRQ_Header.IRQD_Affinity = (ULONG64)Partial->u.Interrupt.Affinity;
+            }
+            else
+            {
+                PIRQ_RESOURCE_32 Irq = (PIRQ_RESOURCE_32)Buffer;
+
+                Size = sizeof(IRQ_RESOURCE_32);
+                if (Irq == NULL)
+                    return Size;
+                ZeroMemory(Irq, Size);
+                Irq->IRQ_Header.IRQD_Type = IRQType_Range;
+                Irq->IRQ_Header.IRQD_Flags = Flags;
+                Irq->IRQ_Header.IRQD_Alloc_Num = Partial->u.Interrupt.Vector;
+                Irq->IRQ_Header.IRQD_Affinity = (ULONG32)Partial->u.Interrupt.Affinity;
+            }
+            return Size;
+        }
+
+        case CmResourceTypeMemory:
+        {
+            PMEM_RESOURCE Mem = (PMEM_RESOURCE)Buffer;
+
+            Size = sizeof(MEM_RESOURCE);
+            if (Mem == NULL)
+                return Size;
+            ZeroMemory(Mem, Size);
+            Mem->MEM_Header.MD_Type = MType_Range;
+            Mem->MEM_Header.MD_Alloc_Base = Partial->u.Memory.Start.QuadPart;
+            Mem->MEM_Header.MD_Alloc_End = Partial->u.Memory.Start.QuadPart + Partial->u.Memory.Length - 1;
+            Mem->MEM_Header.MD_Flags = GetMemoryDesFlags(Partial->Flags);
+            return Size;
+        }
+
+        case CmResourceTypeMemoryLarge:
+        {
+            PMEM_LARGE_RESOURCE Mem = (PMEM_LARGE_RESOURCE)Buffer;
+
+            Size = sizeof(MEM_LARGE_RESOURCE);
+            if (Mem == NULL)
+                return Size;
+            Shift = GetLargeMemoryShift(Partial->Flags);
+            ZeroMemory(Mem, Size);
+            Mem->MEM_LARGE_Header.MLD_Type = MLType_Range;
+            Mem->MEM_LARGE_Header.MLD_Alloc_Base = Partial->u.Memory40.Start.QuadPart;
+            Mem->MEM_LARGE_Header.MLD_Alloc_End = Partial->u.Memory40.Start.QuadPart +
+                                                  ((ULONGLONG)Partial->u.Memory40.Length40 << Shift) - 1;
+            Mem->MEM_LARGE_Header.MLD_Flags = GetMemoryDesFlags(Partial->Flags &
+                                                                ~(CM_RESOURCE_MEMORY_LARGE_40 |
+                                                                  CM_RESOURCE_MEMORY_LARGE_48 |
+                                                                  CM_RESOURCE_MEMORY_LARGE_64));
+            return Size;
+        }
+
+        case CmResourceTypeDma:
+        {
+            PDMA_RESOURCE Dma = (PDMA_RESOURCE)Buffer;
+
+            Size = sizeof(DMA_RESOURCE);
+            if (Dma == NULL)
+                return Size;
+            ZeroMemory(Dma, Size);
+            Dma->DMA_Header.DD_Type = DType_Range;
+            Dma->DMA_Header.DD_Flags = GetDmaDesFlags(Partial->Flags);
+            Dma->DMA_Header.DD_Alloc_Chan = Partial->u.Dma.Channel;
+            return Size;
+        }
+
+        case CmResourceTypeBusNumber:
+        {
+            PBUSNUMBER_RESOURCE Bus = (PBUSNUMBER_RESOURCE)Buffer;
+
+            Size = sizeof(BUSNUMBER_RESOURCE);
+            if (Bus == NULL)
+                return Size;
+            ZeroMemory(Bus, Size);
+            Bus->BusNumber_Header.BUSD_Type = BusNumberType_Range;
+            Bus->BusNumber_Header.BUSD_Flags = Partial->Flags;
+            Bus->BusNumber_Header.BUSD_Alloc_Base = Partial->u.BusNumber.Start;
+            Bus->BusNumber_Header.BUSD_Alloc_End = Partial->u.BusNumber.Start + Partial->u.BusNumber.Length - 1;
+            return Size;
+        }
+
+        case CmResourceTypeDevicePrivate:
+        {
+            PDEVPRIVATE_RESOURCE Private = (PDEVPRIVATE_RESOURCE)Buffer;
+
+            Size = sizeof(DEVPRIVATE_RESOURCE);
+            if (Private == NULL)
+                return Size;
+            ZeroMemory(Private, Size);
+            Private->PRV_Header.PD_Type = PType_Range;
+            Private->PRV_Header.PD_Data1 = Partial->u.DevicePrivate.Data[0];
+            Private->PRV_Header.PD_Data2 = Partial->u.DevicePrivate.Data[1];
+            Private->PRV_Header.PD_Data3 = Partial->u.DevicePrivate.Data[2];
+            Private->PRV_Header.PD_Flags = Partial->Flags;
+            return Size;
+        }
+
+        default:
+            return 0;
+    }
+}
+
+
+static
+ULONG
+BuildRequiredResDes(
+    _In_reads_(Count) PIO_RESOURCE_DESCRIPTOR Descriptors,
+    _In_ ULONG Count,
+    _In_ BOOL Wide,
+    _Out_writes_bytes_opt_(return) LPBYTE Buffer)
+{
+    ULONG Index, Shift, Size;
+
+    switch (Descriptors->Type)
+    {
+        case CmResourceTypePort:
+        {
+            PIO_RESOURCE Io = (PIO_RESOURCE)Buffer;
+
+            Size = sizeof(IO_DES) + Count * sizeof(IO_RANGE);
+            if (Io == NULL)
+                return Size;
+            ZeroMemory(Io, Size);
+            Io->IO_Header.IOD_Count = Count;
+            Io->IO_Header.IOD_Type = IOType_Range;
+            for (Index = 0; Index < Count; Index++)
+            {
+                Io->IO_Data[Index].IOR_Align = ~((ULONGLONG)Descriptors[Index].u.Port.Alignment - 1);
+                Io->IO_Data[Index].IOR_nPorts = Descriptors[Index].u.Port.Length;
+                Io->IO_Data[Index].IOR_Min = Descriptors[Index].u.Port.MinimumAddress.QuadPart;
+                Io->IO_Data[Index].IOR_Max = Descriptors[Index].u.Port.MaximumAddress.QuadPart;
+                Io->IO_Data[Index].IOR_RangeFlags = Descriptors[Index].Flags;
+            }
+            return Size;
+        }
+
+        case CmResourceTypeInterrupt:
+        {
+            PIRQ_RANGE Ranges;
+
+            Size = (Wide ? sizeof(IRQ_DES_64) : sizeof(IRQ_DES_32)) + Count * sizeof(IRQ_RANGE);
+            if (Buffer == NULL)
+                return Size;
+            ZeroMemory(Buffer, Size);
+            if (Wide)
+            {
+                ((PIRQ_DES_64)Buffer)->IRQD_Count = Count;
+                ((PIRQ_DES_64)Buffer)->IRQD_Type = IRQType_Range;
+                Ranges = ((PIRQ_RESOURCE_64)Buffer)->IRQ_Data;
+            }
+            else
+            {
+                ((PIRQ_DES_32)Buffer)->IRQD_Count = Count;
+                ((PIRQ_DES_32)Buffer)->IRQD_Type = IRQType_Range;
+                Ranges = ((PIRQ_RESOURCE_32)Buffer)->IRQ_Data;
+            }
+            for (Index = 0; Index < Count; Index++)
+            {
+                Ranges[Index].IRQR_Min = Descriptors[Index].u.Interrupt.MinimumVector;
+                Ranges[Index].IRQR_Max = Descriptors[Index].u.Interrupt.MaximumVector;
+                Ranges[Index].IRQR_Flags = GetIrqDesFlags(Descriptors[Index].ShareDisposition, Descriptors[Index].Flags);
+            }
+            return Size;
+        }
+
+        case CmResourceTypeMemory:
+        {
+            PMEM_RESOURCE Mem = (PMEM_RESOURCE)Buffer;
+
+            Size = sizeof(MEM_DES) + Count * sizeof(MEM_RANGE);
+            if (Mem == NULL)
+                return Size;
+            ZeroMemory(Mem, Size);
+            Mem->MEM_Header.MD_Count = Count;
+            Mem->MEM_Header.MD_Type = MType_Range;
+            for (Index = 0; Index < Count; Index++)
+            {
+                Mem->MEM_Data[Index].MR_Align = ~((ULONGLONG)Descriptors[Index].u.Memory.Alignment - 1);
+                Mem->MEM_Data[Index].MR_nBytes = Descriptors[Index].u.Memory.Length;
+                Mem->MEM_Data[Index].MR_Min = Descriptors[Index].u.Memory.MinimumAddress.QuadPart;
+                Mem->MEM_Data[Index].MR_Max = Descriptors[Index].u.Memory.MaximumAddress.QuadPart;
+                Mem->MEM_Data[Index].MR_Flags = GetMemoryDesFlags(Descriptors[Index].Flags);
+            }
+            return Size;
+        }
+
+        case CmResourceTypeMemoryLarge:
+        {
+            PMEM_LARGE_RESOURCE Mem = (PMEM_LARGE_RESOURCE)Buffer;
+
+            Size = sizeof(MEM_LARGE_DES) + Count * sizeof(MEM_LARGE_RANGE);
+            if (Mem == NULL)
+                return Size;
+            ZeroMemory(Mem, Size);
+            Mem->MEM_LARGE_Header.MLD_Count = Count;
+            Mem->MEM_LARGE_Header.MLD_Type = MLType_Range;
+            for (Index = 0; Index < Count; Index++)
+            {
+                Shift = GetLargeMemoryShift(Descriptors[Index].Flags);
+                Mem->MEM_LARGE_Data[Index].MLR_Align = ~(((ULONGLONG)Descriptors[Index].u.Memory40.Alignment40 << Shift) - 1);
+                Mem->MEM_LARGE_Data[Index].MLR_nBytes = (ULONGLONG)Descriptors[Index].u.Memory40.Length40 << Shift;
+                Mem->MEM_LARGE_Data[Index].MLR_Min = Descriptors[Index].u.Memory40.MinimumAddress.QuadPart;
+                Mem->MEM_LARGE_Data[Index].MLR_Max = Descriptors[Index].u.Memory40.MaximumAddress.QuadPart;
+                Mem->MEM_LARGE_Data[Index].MLR_Flags = GetMemoryDesFlags(Descriptors[Index].Flags &
+                                                                         ~(CM_RESOURCE_MEMORY_LARGE_40 |
+                                                                           CM_RESOURCE_MEMORY_LARGE_48 |
+                                                                           CM_RESOURCE_MEMORY_LARGE_64));
+            }
+            return Size;
+        }
+
+        case CmResourceTypeDma:
+        {
+            PDMA_RESOURCE Dma = (PDMA_RESOURCE)Buffer;
+
+            Size = sizeof(DMA_DES) + Count * sizeof(DMA_RANGE);
+            if (Dma == NULL)
+                return Size;
+            ZeroMemory(Dma, Size);
+            Dma->DMA_Header.DD_Count = Count;
+            Dma->DMA_Header.DD_Type = DType_Range;
+            for (Index = 0; Index < Count; Index++)
+            {
+                Dma->DMA_Data[Index].DR_Min = Descriptors[Index].u.Dma.MinimumChannel;
+                Dma->DMA_Data[Index].DR_Max = Descriptors[Index].u.Dma.MaximumChannel;
+                Dma->DMA_Data[Index].DR_Flags = GetDmaDesFlags(Descriptors[Index].Flags);
+            }
+            return Size;
+        }
+
+        case CmResourceTypeBusNumber:
+        {
+            PBUSNUMBER_RESOURCE Bus = (PBUSNUMBER_RESOURCE)Buffer;
+
+            Size = sizeof(BUSNUMBER_DES) + Count * sizeof(BUSNUMBER_RANGE);
+            if (Bus == NULL)
+                return Size;
+            ZeroMemory(Bus, Size);
+            Bus->BusNumber_Header.BUSD_Count = Count;
+            Bus->BusNumber_Header.BUSD_Type = BusNumberType_Range;
+            for (Index = 0; Index < Count; Index++)
+            {
+                Bus->BusNumber_Data[Index].BUSR_Min = Descriptors[Index].u.BusNumber.MinBusNumber;
+                Bus->BusNumber_Data[Index].BUSR_Max = Descriptors[Index].u.BusNumber.MaxBusNumber;
+                Bus->BusNumber_Data[Index].BUSR_nBusNumbers = Descriptors[Index].u.BusNumber.Length;
+                Bus->BusNumber_Data[Index].BUSR_Flags = Descriptors[Index].Flags;
+            }
+            return Size;
+        }
+
+        case CmResourceTypeDevicePrivate:
+        {
+            PDEVPRIVATE_RESOURCE Private = (PDEVPRIVATE_RESOURCE)Buffer;
+
+            Size = sizeof(DEVPRIVATE_DES) + Count * sizeof(DEVPRIVATE_RANGE);
+            if (Private == NULL)
+                return Size;
+            ZeroMemory(Private, Size);
+            Private->PRV_Header.PD_Count = Count;
+            Private->PRV_Header.PD_Type = PType_Range;
+            for (Index = 0; Index < Count; Index++)
+            {
+                Private->PRV_Data[Index].PR_Data1 = Descriptors[Index].u.DevicePrivate.Data[0];
+                Private->PRV_Data[Index].PR_Data2 = Descriptors[Index].u.DevicePrivate.Data[1];
+                Private->PRV_Data[Index].PR_Data3 = Descriptors[Index].u.DevicePrivate.Data[2];
+            }
+            return Size;
+        }
+
+        default:
+            return 0;
+    }
+}
+
+
+static
+ULONG
+BuildResDes(
+    _In_ PRES_DES_LOCATION Location,
+    _In_ BOOL Wide,
+    _Out_writes_bytes_opt_(return) LPBYTE Buffer)
+{
+    if (Location->Partial != NULL)
+        return BuildAllocatedResDes(Location->Partial, Wide, Buffer);
+    return BuildRequiredResDes(Location->Io, Location->Count, Wide, Buffer);
+}
+
+
+static
+CONFIGRET
+LookupResDes(
+    _In_ LPWSTR pDeviceID,
+    _In_ DWORD ulLogConfTag,
+    _In_ DWORD ulLogConfType,
+    _In_ RESOURCEID ResourceID,
+    _In_ DWORD ulResourceTag,
+    _Out_ LPBYTE *ppData,
+    _Out_ PRES_DES_LOCATION Location)
+{
+    DWORD RegDataType = 0;
+    ULONG ulDataSize = 0;
+
+    if (!IsValidDeviceInstanceID(pDeviceID))
+        return CR_INVALID_DEVINST;
+
+    if (LoadLogConfData(pDeviceID, ulLogConfType, &RegDataType, &ulDataSize, ppData) != CR_SUCCESS)
+        return CR_INVALID_RES_DES;
+
+    if (!FindResDes(RegDataType, *ppData, ulDataSize, ulLogConfTag, ResourceID, ulResourceTag, Location) ||
+        Location->Tag != ulResourceTag)
+    {
+        HeapFree(GetProcessHeap(), 0, *ppData);
+        *ppData = NULL;
+        return CR_INVALID_RES_DES;
+    }
+
+    return CR_SUCCESS;
+}
+
+
 /* Function 49 */
 DWORD
 WINAPI
@@ -5021,20 +6146,22 @@ PNP_GetNextResDes(
     DWORD *pulNextResTag,
     DWORD ulFlags)
 {
-    HKEY hConfigKey = NULL;
+    RES_DES_LOCATION Location;
     DWORD RegDataType = 0;
     ULONG ulDataSize = 0;
+    ULONG StartTag = 0;
     LPBYTE lpData = NULL;
     CONFIGRET ret = CR_SUCCESS;
 
-    DPRINT1("PNP_GetNextResDes(%p %S 0x%lx %lu %lu %ul %p %p 0x%08lx)\n",
+    DPRINT("PNP_GetNextResDes(%p %S 0x%lx %lu %lu %lu %p %p 0x%08lx)\n",
            hBinding, pDeviceID, ulLogConfTag, ulLogConfType, ResourceID,
            ulResourceTag, pulNextResType, pulNextResTag, ulFlags);
 
-    if (pulNextResType == NULL)
+    if (pulNextResType == NULL || pulNextResTag == NULL)
         return CR_INVALID_POINTER;
 
     *pulNextResType = 0;
+    *pulNextResTag = 0;
 
     if (ulFlags != 0)
         return CR_INVALID_FLAG;
@@ -5042,63 +6169,38 @@ PNP_GetNextResDes(
     if (!IsValidDeviceInstanceID(pDeviceID))
         return CR_INVALID_DEVINST;
 
-    ret = OpenConfigurationKey(pDeviceID,
-                               ulLogConfType,
-                               &hConfigKey);
-    if (ret != CR_SUCCESS)
+    if (LoadLogConfData(pDeviceID, ulLogConfType, &RegDataType, &ulDataSize, &lpData) != CR_SUCCESS)
+        return CR_NO_MORE_RES_DES;
+
+    if (ulResourceTag != (DWORD)-1)
     {
-        DPRINT1("OpenConfigurationKey() failed (Error %lu)\n", ret);
-        ret = CR_NO_MORE_LOG_CONF;
-        goto done;
+        if (!FindResDes(RegDataType, lpData, ulDataSize, ulLogConfTag, ResType_All, ulResourceTag, &Location) ||
+            Location.Tag != ulResourceTag)
+        {
+            ret = CR_INVALID_RES_DES;
+        }
+        else
+        {
+            StartTag = ulResourceTag + Location.Count;
+        }
     }
 
-    ret = GetConfigurationData(hConfigKey,
-                               ulLogConfType,
-                               &RegDataType,
-                               &ulDataSize,
-                               &lpData,
-                               0,
-                               NULL);
-    if (ret != CR_SUCCESS)
+    if (ret == CR_SUCCESS)
     {
-        DPRINT1("GetConfigurationData() failed (Error %lu)\n", ret);
-        ret = CR_NO_MORE_LOG_CONF;
-        goto done;
+        if (FindResDes(RegDataType, lpData, ulDataSize, ulLogConfTag, ResourceID, StartTag, &Location))
+        {
+            *pulNextResType = Location.ResType;
+            *pulNextResTag = Location.Tag;
+        }
+        else
+        {
+            ret = CR_NO_MORE_RES_DES;
+        }
     }
 
-    DPRINT1("Data size %lu\n", ulDataSize);
+    HeapFree(GetProcessHeap(), 0, lpData);
 
-    if (ulDataSize == 0 || lpData == NULL)
-    {
-        DPRINT1("No config data available!\n");
-        ret = CR_NO_MORE_LOG_CONF;
-        goto done;
-    }
-
-    /* Get the next resource descriptor */
-    if (RegDataType == REG_RESOURCE_LIST)
-    {
-        DPRINT1("FIXME: REG_RESOURCE_LIST\n");
-        /* FIXME */
-        ret = CR_NO_MORE_LOG_CONF;
-        goto done;
-    }
-    else if (RegDataType == REG_RESOURCE_REQUIREMENTS_LIST)
-    {
-        DPRINT1("FIXME: REG_RESOURCE_REQUIREMENTS_LIST\n");
-        /* FIXME */
-        ret = CR_NO_MORE_LOG_CONF;
-        goto done;
-    }
-
-done:
-    if (lpData != NULL)
-        HeapFree(GetProcessHeap(), 0, lpData);
-
-    if (hConfigKey != NULL)
-        RegCloseKey(hConfigKey);
-
-    DPRINT1("PNP_GetNextResDes() returns %lu\n", ret);
+    DPRINT("PNP_GetNextResDes() returns %lu\n", ret);
 
     return ret;
 }
@@ -5118,8 +6220,33 @@ PNP_GetResDesData(
     PNP_RPC_BUFFER_SIZE BufferLen,
     DWORD ulFlags)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    RES_DES_LOCATION Location;
+    LPBYTE lpData = NULL;
+    ULONG Size;
+    BOOL Wide;
+    CONFIGRET ret;
+
+    DPRINT("PNP_GetResDesData(%p %S 0x%lx %lu %lu %lu %p %lu 0x%08lx)\n",
+           hBinding, pDeviceID, ulLogConfTag, ulLogConfType, ResourceID,
+           ulResourceTag, Buffer, BufferLen, ulFlags);
+
+    if ((ulFlags & ~CM_RESDES_WIDTH_BITS) || (ulFlags & CM_RESDES_WIDTH_BITS) == CM_RESDES_WIDTH_BITS)
+        return CR_INVALID_FLAG;
+
+    ret = LookupResDes(pDeviceID, ulLogConfTag, ulLogConfType, ResourceID, ulResourceTag, &lpData, &Location);
+    if (ret != CR_SUCCESS)
+        return ret;
+
+    Wide = (ulFlags & CM_RESDES_WIDTH_BITS) != CM_RESDES_WIDTH_32;
+    Size = BuildResDes(&Location, Wide, NULL);
+    if (BufferLen < Size)
+        ret = CR_BUFFER_SMALL;
+    else if (Size != 0)
+        BuildResDes(&Location, Wide, Buffer);
+
+    HeapFree(GetProcessHeap(), 0, lpData);
+
+    return ret;
 }
 
 
@@ -5136,8 +6263,31 @@ PNP_GetResDesDataSize(
     DWORD *pulSize,
     DWORD ulFlags)
 {
-    UNIMPLEMENTED;
-    return CR_CALL_NOT_IMPLEMENTED;
+    RES_DES_LOCATION Location;
+    LPBYTE lpData = NULL;
+    CONFIGRET ret;
+
+    DPRINT("PNP_GetResDesDataSize(%p %S 0x%lx %lu %lu %lu %p 0x%08lx)\n",
+           hBinding, pDeviceID, ulLogConfTag, ulLogConfType, ResourceID,
+           ulResourceTag, pulSize, ulFlags);
+
+    if (pulSize == NULL)
+        return CR_INVALID_POINTER;
+
+    *pulSize = 0;
+
+    if ((ulFlags & ~CM_RESDES_WIDTH_BITS) || (ulFlags & CM_RESDES_WIDTH_BITS) == CM_RESDES_WIDTH_BITS)
+        return CR_INVALID_FLAG;
+
+    ret = LookupResDes(pDeviceID, ulLogConfTag, ulLogConfType, ResourceID, ulResourceTag, &lpData, &Location);
+    if (ret != CR_SUCCESS)
+        return ret;
+
+    *pulSize = BuildResDes(&Location, (ulFlags & CM_RESDES_WIDTH_BITS) != CM_RESDES_WIDTH_32, NULL);
+
+    HeapFree(GetProcessHeap(), 0, lpData);
+
+    return CR_SUCCESS;
 }
 
 

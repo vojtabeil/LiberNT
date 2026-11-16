@@ -602,7 +602,11 @@ static void lambda_textured_triangle( GLcontext *ctx, GLuint v0, GLuint v1,
    GLboolean flat_shade = (ctx->Light.ShadeModel==GL_FLAT);		\
    GLint r, g, b, a;							\
    GLfloat twidth, theight;						\
-   if (ctx->Texture.Enabled & TEXTURE_2D) {			\
+   if (ctx->Texture.Enabled & TEXTURE_3D) {			\
+      twidth = (GLfloat) ctx->Texture.Current3D->Image[0]->Width;	\
+      theight = (GLfloat) ctx->Texture.Current3D->Image[0]->Height;	\
+   }									\
+   else if (ctx->Texture.Enabled & TEXTURE_2D) {			\
       twidth = (GLfloat) ctx->Texture.Current2D->Image[0]->Width;	\
       theight = (GLfloat) ctx->Texture.Current2D->Image[0]->Height;	\
    }									\
@@ -727,6 +731,12 @@ void gl_set_triangle_function( GLcontext *ctx )
              && ctx->Texture.Current2D->WrapT==GL_REPEAT
              && ctx->Texture.Current2D->Image[0]->Format==GL_RGB
              && ctx->Texture.Current2D->Image[0]->Border==0
+             && ctx->Texture.Current2D->Image[0]->Width2!=0
+             && ctx->Texture.Current2D->Image[0]->Height2!=0
+             && (ctx->Texture.Current2D->Image[0]->Width2 &
+                 (ctx->Texture.Current2D->Image[0]->Width2-1))==0
+             && (ctx->Texture.Current2D->Image[0]->Height2 &
+                 (ctx->Texture.Current2D->Image[0]->Height2-1))==0
              && (ctx->Texture.EnvMode==GL_DECAL
                  || ctx->Texture.EnvMode==GL_REPLACE)
              && ctx->Hint.PerspectiveCorrection==GL_FASTEST
@@ -747,7 +757,13 @@ void gl_set_triangle_function( GLcontext *ctx )
          else {
             GLboolean needLambda = GL_TRUE;
             /* if mag filter == min filter we're not mipmapping */
-            if (ctx->Texture.Enabled & TEXTURE_2D) {
+            if (ctx->Texture.Enabled & TEXTURE_3D) {
+               if (ctx->Texture.Current3D->MinFilter==
+                   ctx->Texture.Current3D->MagFilter) {
+                  needLambda = GL_FALSE;
+               }
+            }
+            else if (ctx->Texture.Enabled & TEXTURE_2D) {
                if (ctx->Texture.Current2D->MinFilter==
                    ctx->Texture.Current2D->MagFilter) {
                   needLambda = GL_FALSE;
@@ -790,4 +806,3 @@ void gl_set_triangle_function( GLcontext *ctx )
       ctx->Driver.TriangleFunc = select_triangle;
    }
 }
-

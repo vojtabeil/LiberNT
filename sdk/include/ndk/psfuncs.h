@@ -56,6 +56,13 @@ PsGetProcessWin32Process(
 );
 
 NTKERNELAPI
+ULONGLONG
+NTAPI
+PsGetProcessSequenceNumber(
+    _In_ PEPROCESS Process
+);
+
+NTKERNELAPI
 PEJOB
 NTAPI
 PsGetProcessJob(
@@ -70,11 +77,93 @@ PsGetJobUIRestrictionsClass(
 );
 
 NTKERNELAPI
+ULONG
+NTAPI
+PsGetProcessMitigationPolicyFlags(
+    _In_ PEPROCESS Process,
+    _In_ ULONG Policy
+);
+
+NTKERNELAPI
 VOID
 NTAPI
 PsSetJobUIRestrictionsClass(
     _In_ PEJOB Job,
     _In_ ULONG UIRestrictionsClass
+);
+
+NTKERNELAPI
+VOID
+NTAPI
+PsUpdateComponentPower(
+    _In_opt_ PEPROCESS Process,
+    _In_ ULONG Component,
+    _In_ ULONGLONG Value
+);
+
+NTKERNELAPI
+PVOID
+NTAPI
+PsGetProcessDxgProcess(
+    _In_ PEPROCESS Process
+);
+
+NTKERNELAPI
+PESILO
+NTAPI
+PsGetProcessServerSilo(
+    _In_ PEPROCESS Process
+);
+
+NTKERNELAPI
+PESILO
+NTAPI
+PsAttachSiloToCurrentThread(
+    _In_opt_ PESILO Silo
+);
+
+NTKERNELAPI
+VOID
+NTAPI
+PsDetachSiloFromCurrentThread(
+    _In_opt_ PESILO PreviousSilo
+);
+
+NTKERNELAPI
+PESILO
+NTAPI
+PsGetCurrentServerSilo(VOID);
+
+NTKERNELAPI
+PESILO
+NTAPI
+PsGetHostSilo(VOID);
+
+NTKERNELAPI
+BOOLEAN
+NTAPI
+PsIsCurrentThreadInServerSilo(VOID);
+
+NTKERNELAPI
+BOOLEAN
+NTAPI
+PsIsHostSilo(
+    _In_opt_ PESILO Silo
+);
+
+NTKERNELAPI
+ULONG
+NTAPI
+PsGetServerSiloServiceSessionId(
+    _In_opt_ PESILO Silo
+);
+
+NTKERNELAPI
+VOID
+NTAPI
+PsSetProcessDxgProcess(
+    _Inout_ PEPROCESS Process,
+    _In_opt_ PVOID DxgProcess
 );
 
 NTKERNELAPI
@@ -211,9 +300,27 @@ PsLookupProcessThreadByCid(
     _Out_ PETHREAD *Thread
 );
 
-BOOLEAN
+LOGICAL
 NTAPI
 PsIsProtectedProcess(
+    _In_ PEPROCESS Process
+);
+
+LOGICAL
+NTAPI
+PsIsProtectedProcessLight(
+    _In_ PEPROCESS Process
+);
+
+USHORT
+NTAPI
+PsGetProcessMachine(
+    _In_ PEPROCESS Process
+);
+
+USHORT
+NTAPI
+PsWow64GetProcessMachine(
     _In_ PEPROCESS Process
 );
 
@@ -222,6 +329,19 @@ BOOLEAN
 NTAPI
 PsIsSystemProcess(
     _In_ PEPROCESS Process
+);
+
+ULONG
+NTAPI
+PsGetProcessPriorityClass(
+    _In_ PEPROCESS Process
+);
+
+VOID
+NTAPI
+PsSetProcessPriorityClass(
+    _In_ PEPROCESS Process,
+    _In_ ULONG PriorityClass
 );
 
 VOID
@@ -245,9 +365,58 @@ PsGetProcessExitStatus(
 );
 
 NTKERNELAPI
+PCHAR
+NTAPI
+PsGetProcessImageFileName(
+    _In_ PEPROCESS Process
+);
+
+NTKERNELAPI
+PVOID
+NTAPI
+PsGetProcessWow64Process(
+    _In_ PEPROCESS Process
+);
+
+NTKERNELAPI
+struct _PEB32 *
+NTAPI
+PsGetProcessPeb32(
+    _In_ PEPROCESS Process
+);
+
+NTKERNELAPI
+PVOID
+NTAPI
+PsGetCurrentProcessWow64Process(
+    VOID
+);
+
+NTKERNELAPI
+PEPROCESS
+NTAPI
+PsGetCurrentThreadProcess(
+    VOID
+);
+
+NTKERNELAPI
+HANDLE
+NTAPI
+PsGetCurrentThreadProcessId(
+    VOID
+);
+
+NTKERNELAPI
 ULONG
 NTAPI
 PsGetProcessSessionId(
+    _In_ PEPROCESS Process
+);
+
+NTKERNELAPI
+ULONG
+NTAPI
+PsGetProcessSessionIdEx(
     _In_ PEPROCESS Process
 );
 
@@ -373,6 +542,56 @@ NtAlertThread(
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
+NtAlertThreadByThreadId(
+    _In_ HANDLE ThreadId
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtAlertMultipleThreadByThreadId(
+    _In_reads_(ThreadCount) PHANDLE ThreadIds,
+    _In_ ULONG ThreadCount,
+    _Reserved_ PVOID Reserved1,
+    _Reserved_ PVOID Reserved2
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtWaitForAlertByThreadId(
+    _In_ PVOID Address,
+    _In_opt_ PLARGE_INTEGER Timeout
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtQueueApcThreadEx(
+    _In_ HANDLE ThreadHandle,
+    _In_opt_ HANDLE UserApcReserveHandle,
+    _In_ PKNORMAL_ROUTINE ApcRoutine,
+    _In_opt_ PVOID NormalContext,
+    _In_opt_ PVOID SystemArgument1,
+    _In_opt_ PVOID SystemArgument2
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtQueueApcThreadEx2(
+    _In_ HANDLE ThreadHandle,
+    _In_opt_ HANDLE UserApcReserveHandle,
+    _In_ ULONG QueueUserApcFlags,
+    _In_ PKNORMAL_ROUTINE ApcRoutine,
+    _In_opt_ PVOID NormalContext,
+    _In_opt_ PVOID SystemArgument1,
+    _In_opt_ PVOID SystemArgument2
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
 NtAssignProcessToJobObject(
     _In_ HANDLE JobHandle,
     _In_ HANDLE ProcessHandle
@@ -438,7 +657,52 @@ NtCreateThread(
     _In_ BOOLEAN CreateSuspended
 );
 
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCreateUserProcess(
+    _Out_ PHANDLE ProcessHandle,
+    _Out_ PHANDLE ThreadHandle,
+    _In_ ACCESS_MASK ProcessDesiredAccess,
+    _In_ ACCESS_MASK ThreadDesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ProcessObjectAttributes,
+    _In_opt_ POBJECT_ATTRIBUTES ThreadObjectAttributes,
+    _In_ ULONG ProcessFlags,
+    _In_ ULONG ThreadFlags,
+    _In_opt_ PRTL_USER_PROCESS_PARAMETERS ProcessParameters,
+    _Inout_ PPS_CREATE_INFO CreateInfo,
+    _Inout_opt_ PPS_ATTRIBUTE_LIST AttributeList
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCreateThreadEx(
+    _Out_ PHANDLE ThreadHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ HANDLE ProcessHandle,
+    _In_ PVOID StartRoutine,
+    _In_opt_ PVOID Argument,
+    _In_ ULONG CreateFlags,
+    _In_ SIZE_T ZeroBits,
+    _In_ SIZE_T StackSize,
+    _In_ SIZE_T MaximumStackSize,
+    _In_opt_ PPS_ATTRIBUTE_LIST AttributeList
+);
+#endif
+
 #ifndef NTOS_MODE_USER
+#if !defined(_M_IX86) && !defined(_M_AMD64) && !defined(_M_ARM)
+NTKERNELAPI
+PVOID
+NTAPI
+PsGetCurrentThreadTeb(
+    VOID
+);
+#endif
+
 FORCEINLINE struct _TEB * NtCurrentTeb(VOID)
 {
 #if defined(_M_IX86)
@@ -448,12 +712,8 @@ FORCEINLINE struct _TEB * NtCurrentTeb(VOID)
 #elif defined (_M_ARM)
     // return (struct _TEB *)KeGetPcr()->Used_Self;
     return (struct _TEB *)(ULONG_PTR)_MoveFromCoprocessor(CP15_TPIDRURW);
-#elif defined (_M_ARM64)
-    return (struct _TEB *)__getReg(18);
-// #elif defined(_M_PPC)
-//     return (struct _TEB *)_read_teb_dword(0x18);
 #else
-#error Unsupported architecture
+    return (struct _TEB *)PsGetCurrentThreadTeb();
 #endif
 }
 #else
@@ -497,6 +757,18 @@ NtOpenProcessToken(
     _In_ HANDLE ProcessHandle,
     _In_ ACCESS_MASK DesiredAccess,
     _Out_ PHANDLE TokenHandle
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtGetNextThread(
+    _In_ HANDLE ProcessHandle,
+    _In_opt_ HANDLE ThreadHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_ ULONG HandleAttributes,
+    _In_ ULONG Flags,
+    _Out_ PHANDLE NewThreadHandle
 );
 
 NTSYSCALLAPI
@@ -719,6 +991,25 @@ ZwCreateThread(
     _In_ PINITIAL_TEB UserStack,
     _In_ BOOLEAN CreateSuspended
 );
+
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwCreateThreadEx(
+    _Out_ PHANDLE ThreadHandle,
+    _In_ ACCESS_MASK DesiredAccess,
+    _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes,
+    _In_ HANDLE ProcessHandle,
+    _In_ PVOID StartRoutine,
+    _In_opt_ PVOID Argument,
+    _In_ ULONG CreateFlags,
+    _In_ SIZE_T ZeroBits,
+    _In_ SIZE_T StackSize,
+    _In_ SIZE_T MaximumStackSize,
+    _In_opt_ PPS_ATTRIBUTE_LIST AttributeList
+);
+#endif
 
 NTSYSAPI
 NTSTATUS

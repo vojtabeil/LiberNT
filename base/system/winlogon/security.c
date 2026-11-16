@@ -8,6 +8,7 @@
 /* INCLUDES *****************************************************************/
 
 #include "winlogon.h"
+#include <ndk/obfuncs.h>
 
 /* DEFINES ******************************************************************/
 
@@ -21,8 +22,6 @@
 
 #define DESKTOP_INTERACTIVE_LIMITED (STANDARD_RIGHTS_READ | DESKTOP_ENUMERATE | \
     DESKTOP_READOBJECTS | DESKTOP_CREATEWINDOW)
-
-#define DESKTOP_WINLOGON_ADMINS_LIMITED (STANDARD_RIGHTS_REQUIRED | DESKTOP_ENUMERATE)
 
 #define WINSTA_ALL (WINSTA_ENUMDESKTOPS | WINSTA_READATTRIBUTES | \
     WINSTA_ACCESSCLIPBOARD | WINSTA_CREATEDESKTOP | \
@@ -96,6 +95,56 @@ ConvertToSelfRelative(
     return RelativeSd;
 }
 
+static
+BOOL
+SetLowIntegrityLabel(
+    _Inout_ PSECURITY_DESCRIPTOR AbsoluteSd,
+    _Out_ PACL *Sacl)
+{
+    SID_IDENTIFIER_AUTHORITY MandatoryLabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+    PSID LowLabelSid = NULL;
+    DWORD SaclSize;
+    BOOL Success = FALSE;
+
+    *Sacl = NULL;
+    if (!AllocateAndInitializeSid(&MandatoryLabelAuthority,
+                                  1,
+                                  SECURITY_MANDATORY_LOW_RID,
+                                  0, 0, 0, 0, 0, 0, 0,
+                                  &LowLabelSid))
+    {
+        ERR("SetLowIntegrityLabel(): Failed to create the low label SID (error code %lu)\n", GetLastError());
+        return FALSE;
+    }
+
+    SaclSize = sizeof(ACL) + sizeof(SYSTEM_MANDATORY_LABEL_ACE) - sizeof(DWORD) + GetLengthSid(LowLabelSid);
+    *Sacl = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, SaclSize);
+    if (*Sacl == NULL)
+    {
+        ERR("SetLowIntegrityLabel(): Failed to allocate memory buffer for SACL!\n");
+        goto Quit;
+    }
+
+    if (!InitializeAcl(*Sacl, SaclSize, ACL_REVISION) ||
+        !AddMandatoryAce(*Sacl, ACL_REVISION, 0, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP, LowLabelSid))
+    {
+        ERR("SetLowIntegrityLabel(): Failed to set up the low label (error code %lu)\n", GetLastError());
+        goto Quit;
+    }
+
+    if (!SetSecurityDescriptorSacl(AbsoluteSd, TRUE, *Sacl, FALSE))
+    {
+        ERR("SetLowIntegrityLabel(): Failed to set up SACL to absolute security descriptor (error code %lu)\n", GetLastError());
+        goto Quit;
+    }
+
+    Success = TRUE;
+
+Quit:
+    FreeSid(LowLabelSid);
+    return Success;
+}
+
 /**
  * @brief
  * Creates a security descriptor for the default
@@ -116,9 +165,9 @@ CreateWinstaSecurity(
     BOOL Success = FALSE;
     SECURITY_DESCRIPTOR AbsoluteSd;
     PSECURITY_DESCRIPTOR RelativeSd = NULL;
-    PSID WinlogonSid = NULL, AdminsSid = NULL, NetworkServiceSid = NULL; /* NetworkServiceSid is a HACK, see the comment below for information */
+    PSID WinlogonSid = NULL, AdminsSid = NULL;
     DWORD DaclSize;
-    PACL Dacl;
+    PACL Dacl = NULL, Sacl = NULL;
 
     /* Create the Winlogon SID */
     if (!AllocateAndInitializeSid(&NtAuthority,
@@ -143,62 +192,18 @@ CreateWinstaSecurity(
         goto Quit;
     }
 
-    /* HACK: Create the network service SID */
-    if (!AllocateAndInitializeSid(&NtAuthority,
-                                  1,
-                                  SECURITY_NETWORK_SERVICE_RID,
-                                  0, 0, 0, 0, 0, 0, 0,
-                                  &NetworkServiceSid))
-    {
-        ERR("CreateWinstaSecurity(): Failed to create the network service SID (error code %lu)\n", GetLastError());
-        goto Quit;
-    }
-
     /*
      * Build up the DACL size. This includes a number
      * of four ACEs of two different SIDs. The first two
      * ACEs give both window station and generic access
      * to Winlogon, the last two give limited window station
      * and desktop access to admins.
-     *
-     * ===================== !!!MUST READ!!! =====================
-     *
-     * HACK -- Include in the DACL two more ACEs for network
-     * service SID. Network services will be granted full
-     * access to the default window station. Whilst technically
-     * services that are either network or local ones are part
-     * and act on behalf of the system, what we are doing here
-     * is a hack because of two reasons:
-     *
-     * 1) Winlogon does not allow default window station (Winsta0)
-     * access to network services on Windows. As a matter of fact,
-     * network services must access their own service window station
-     * (aka Service-0x0-3e4$) which never gets created. Why it never
-     * gets created is explained on the second point.
-     *
-     * 2) Our LSASS terribly lacks in code that handles special logon
-     * service types, NetworkService and LocalService. For this reason
-     * whenever an access token is created for a network service process
-     * for example, its authentication ID (aka LogonId represented as a LUID)
-     * is a uniquely generated ID by LSASS for this process. This is wrong
-     * on so many levels, partly because a network service is not a regular
-     * service and network services have their own special authentication logon
-     * ID (with its respective LUID as {0x3e4, 0x0}). On top of that, a network
-     * service process must have an impersonation token but for whatever reason
-     * we are creating a primary access token instead.
-     *
-     * FOR ANYONE WHO'S INTERESTED ON FIXING THIS, DO NOT FORGET TO REMOVE THIS
-     * HACK!!!
-     *
-     * =========================== !!!END!!! ================================
      */
     DaclSize = sizeof(ACL) +
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(WinlogonSid) +
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(WinlogonSid) +
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(AdminsSid) +
-               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(AdminsSid) +
-               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(NetworkServiceSid) +
-               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(NetworkServiceSid);
+               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(AdminsSid);
 
     /* Allocate the DACL now */
     Dacl = RtlAllocateHeap(RtlGetProcessHeap(),
@@ -261,28 +266,6 @@ CreateWinstaSecurity(
         goto Quit;
     }
 
-    /* HACK: Fifth ACE -- give full access to network services */
-    if (!AddAccessAllowedAceEx(Dacl,
-                               ACL_REVISION,
-                               NO_PROPAGATE_INHERIT_ACE,
-                               WINSTA_ALL,
-                               NetworkServiceSid))
-    {
-        ERR("CreateWinstaSecurity(): Failed to set ACE for network service (error code %lu)\n", GetLastError());
-        goto Quit;
-    }
-
-    /* HACK: Sixth ACE -- give full generic access to network services */
-    if (!AddAccessAllowedAceEx(Dacl,
-                               ACL_REVISION,
-                               INHERIT_ONLY_ACE | OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
-                               GENERIC_ACCESS,
-                               NetworkServiceSid))
-    {
-        ERR("CreateWinstaSecurity(): Failed to set ACE for network service (error code %lu)\n", GetLastError());
-        goto Quit;
-    }
-
     /* Initialize the security descriptor */
     if (!InitializeSecurityDescriptor(&AbsoluteSd, SECURITY_DESCRIPTOR_REVISION))
     {
@@ -296,6 +279,9 @@ CreateWinstaSecurity(
         ERR("CreateWinstaSecurity(): Failed to set up DACL to absolute security descriptor (error code %lu)\n", GetLastError());
         goto Quit;
     }
+
+    if (!SetLowIntegrityLabel(&AbsoluteSd, &Sacl))
+        goto Quit;
 
     /* Convert it to self-relative format */
     RelativeSd = ConvertToSelfRelative(&AbsoluteSd);
@@ -320,12 +306,10 @@ Quit:
         FreeSid(AdminsSid);
     }
 
-    /* HACK */
-    if (NetworkServiceSid != NULL)
+    if (Sacl != NULL)
     {
-        FreeSid(NetworkServiceSid);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Sacl);
     }
-    /* END HACK */
 
     if (Dacl != NULL)
     {
@@ -363,9 +347,9 @@ CreateApplicationDesktopSecurity(
     BOOL Success = FALSE;
     SECURITY_DESCRIPTOR AbsoluteSd;
     PSECURITY_DESCRIPTOR RelativeSd = NULL;
-    PSID WinlogonSid = NULL, AdminsSid = NULL, NetworkServiceSid = NULL; /* NetworkServiceSid is a HACK, see the comment in CreateWinstaSecurity for information */
+    PSID WinlogonSid = NULL, AdminsSid = NULL;
     DWORD DaclSize;
-    PACL Dacl;
+    PACL Dacl = NULL, Sacl = NULL;
 
     /* Create the Winlogon SID */
     if (!AllocateAndInitializeSid(&NtAuthority,
@@ -390,17 +374,6 @@ CreateApplicationDesktopSecurity(
         goto Quit;
     }
 
-    /* HACK: Create the network service SID */
-    if (!AllocateAndInitializeSid(&NtAuthority,
-                                  1,
-                                  SECURITY_NETWORK_SERVICE_RID,
-                                  0, 0, 0, 0, 0, 0, 0,
-                                  &NetworkServiceSid))
-    {
-        ERR("CreateApplicationDesktopSecurity(): Failed to create the network service SID (error code %lu)\n", GetLastError());
-        goto Quit;
-    }
-
     /*
      * Build up the DACL size. This includes a number
      * of two ACEs of two different SIDs. The first ACE
@@ -409,8 +382,7 @@ CreateApplicationDesktopSecurity(
      */
     DaclSize = sizeof(ACL) +
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(WinlogonSid) +
-               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(AdminsSid) +
-               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(NetworkServiceSid); /* HACK */
+               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(AdminsSid);
 
     /* Allocate the DACL now */
     Dacl = RtlAllocateHeap(RtlGetProcessHeap(),
@@ -451,17 +423,6 @@ CreateApplicationDesktopSecurity(
         goto Quit;
     }
 
-    /* HACK: Third ACE -- Give full desktop power to network services */
-    if (!AddAccessAllowedAceEx(Dacl,
-                               ACL_REVISION,
-                               0,
-                               DESKTOP_ALL,
-                               NetworkServiceSid))
-    {
-        ERR("CreateApplicationDesktopSecurity(): Failed to set ACE for network services (error code %lu)\n", GetLastError());
-        goto Quit;
-    }
-
     /* Initialize the security descriptor */
     if (!InitializeSecurityDescriptor(&AbsoluteSd, SECURITY_DESCRIPTOR_REVISION))
     {
@@ -475,6 +436,9 @@ CreateApplicationDesktopSecurity(
         ERR("CreateApplicationDesktopSecurity(): Failed to set up DACL to absolute security descriptor (error code %lu)\n", GetLastError());
         goto Quit;
     }
+
+    if (!SetLowIntegrityLabel(&AbsoluteSd, &Sacl))
+        goto Quit;
 
     /* Conver it to self-relative format */
     RelativeSd = ConvertToSelfRelative(&AbsoluteSd);
@@ -499,12 +463,10 @@ Quit:
         FreeSid(AdminsSid);
     }
 
-    /* HACK */
-    if (NetworkServiceSid != NULL)
+    if (Sacl != NULL)
     {
-        FreeSid(NetworkServiceSid);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Sacl);
     }
-    /* END HACK */
 
     if (Dacl != NULL)
     {
@@ -527,8 +489,7 @@ Quit:
  * Creates a security descriptor for the default
  * Winlogon desktop. This descriptor serves as a
  * security measure for the winlogon desktop so
- * that only Winlogon itself (and admins) can
- * interact with it.
+ * that only Winlogon itself can interact with it.
  *
  * @param[out] WinlogonDesktopSd
  * A pointer to a created security descriptor for
@@ -545,9 +506,9 @@ CreateWinlogonDesktopSecurity(
     BOOL Success = FALSE;
     SECURITY_DESCRIPTOR AbsoluteSd;
     PSECURITY_DESCRIPTOR RelativeSd = NULL;
-    PSID WinlogonSid = NULL, AdminsSid = NULL;
+    PSID WinlogonSid = NULL;
     DWORD DaclSize;
-    PACL Dacl;
+    PACL Dacl = NULL;
 
     /* Create the Winlogon SID */
     if (!AllocateAndInitializeSid(&NtAuthority,
@@ -560,27 +521,9 @@ CreateWinlogonDesktopSecurity(
         return FALSE;
     }
 
-    /* Create the admins SID */
-    if (!AllocateAndInitializeSid(&NtAuthority,
-                                  2,
-                                  SECURITY_BUILTIN_DOMAIN_RID,
-                                  DOMAIN_ALIAS_RID_ADMINS,
-                                  0, 0, 0, 0, 0, 0,
-                                  &AdminsSid))
-    {
-        ERR("CreateWinlogonDesktopSecurity(): Failed to create the admins SID (error code %lu)\n", GetLastError());
-        goto Quit;
-    }
-
-    /*
-     * Build up the DACL size. This includes a number
-     * of two ACEs of two different SIDs. The first ACE
-     * gives full access to Winlogon, the last one gives
-     * limited desktop access to admins.
-     */
+    /* Build up the DACL size. Its only ACE gives full access to Winlogon. */
     DaclSize = sizeof(ACL) +
-               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(WinlogonSid) +
-               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(AdminsSid);
+               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(WinlogonSid);
 
     /* Allocate the DACL now */
     Dacl = RtlAllocateHeap(RtlGetProcessHeap(),
@@ -610,17 +553,6 @@ CreateWinlogonDesktopSecurity(
         goto Quit;
     }
 
-    /* Second ACE -- Give limited desktop access to admins */
-    if (!AddAccessAllowedAceEx(Dacl,
-                               ACL_REVISION,
-                               0,
-                               DESKTOP_WINLOGON_ADMINS_LIMITED,
-                               AdminsSid))
-    {
-        ERR("CreateWinlogonDesktopSecurity(): Failed to set ACE for admins (error code %lu)\n", GetLastError());
-        goto Quit;
-    }
-
     /* Initialize the security descriptor */
     if (!InitializeSecurityDescriptor(&AbsoluteSd, SECURITY_DESCRIPTOR_REVISION))
     {
@@ -632,6 +564,12 @@ CreateWinlogonDesktopSecurity(
     if (!SetSecurityDescriptorDacl(&AbsoluteSd, TRUE, Dacl, FALSE))
     {
         ERR("CreateWinlogonDesktopSecurity(): Failed to set up DACL to absolute security descriptor (error code %lu)\n", GetLastError());
+        goto Quit;
+    }
+
+    if (!SetSecurityDescriptorOwner(&AbsoluteSd, WinlogonSid, FALSE))
+    {
+        ERR("CreateWinlogonDesktopSecurity(): Failed to set the owner of the security descriptor (error code %lu)\n", GetLastError());
         goto Quit;
     }
 
@@ -651,11 +589,6 @@ Quit:
     if (WinlogonSid != NULL)
     {
         FreeSid(WinlogonSid);
-    }
-
-    if (AdminsSid != NULL)
-    {
-        FreeSid(AdminsSid);
     }
 
     if (Dacl != NULL)
@@ -696,7 +629,7 @@ CreateScreenSaverSecurity(
     PSECURITY_DESCRIPTOR RelativeSd = NULL;
     PSID WinlogonSid = NULL, AdminsSid = NULL, InteractiveSid = NULL;
     DWORD DaclSize;
-    PACL Dacl;
+    PACL Dacl = NULL;
 
     /* Create the Winlogon SID */
     if (!AllocateAndInitializeSid(&NtAuthority,
@@ -879,10 +812,10 @@ AllowWinstaAccessToUser(
     BOOL Success = FALSE;
     SECURITY_DESCRIPTOR AbsoluteSd;
     PSECURITY_DESCRIPTOR RelativeSd = NULL;
-    PSID WinlogonSid = NULL, AdminsSid = NULL, InteractiveSid = NULL, NetworkServiceSid = NULL; /* NetworkServiceSid is a HACK, see the comment in CreateWinstaSecurity for information */
+    PSID WinlogonSid = NULL, AdminsSid = NULL, InteractiveSid = NULL;
     SECURITY_INFORMATION SecurityInformation;
     DWORD DaclSize;
-    PACL Dacl;
+    PACL Dacl = NULL;
 
     /* Create the Winlogon SID */
     if (!AllocateAndInitializeSid(&NtAuthority,
@@ -918,17 +851,6 @@ AllowWinstaAccessToUser(
         goto Quit;
     }
 
-    /* HACK: Create the network service SID */
-    if (!AllocateAndInitializeSid(&NtAuthority,
-                                  1,
-                                  SECURITY_NETWORK_SERVICE_RID,
-                                  0, 0, 0, 0, 0, 0, 0,
-                                  &NetworkServiceSid))
-    {
-        ERR("AllowWinstaAccessToUser(): Failed to create the network service SID (error code %lu)\n", GetLastError());
-        goto Quit;
-    }
-
     /*
      * Build up the DACL size. This includes a number
      * of eight ACEs of four different SIDs. The first ACE
@@ -945,9 +867,7 @@ AllowWinstaAccessToUser(
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(InteractiveSid) +
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(InteractiveSid) +
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(LogonSid) +
-               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(LogonSid) +
-               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(NetworkServiceSid) + /* HACK */
-               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(NetworkServiceSid);
+               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(LogonSid);
 
     /* Allocate the DACL now */
     Dacl = RtlAllocateHeap(RtlGetProcessHeap(),
@@ -1054,28 +974,6 @@ AllowWinstaAccessToUser(
         goto Quit;
     }
 
-    /* HACK : Ninenth ACE -- Give full winsta access to network services */
-    if (!AddAccessAllowedAceEx(Dacl,
-                               ACL_REVISION,
-                               NO_PROPAGATE_INHERIT_ACE,
-                               WINSTA_ALL,
-                               NetworkServiceSid))
-    {
-        ERR("AllowWinstaAccessToUser(): Failed to set ACE for logon network service SID (error code %lu)\n", GetLastError());
-        goto Quit;
-    }
-
-    /* HACK: Tenth ACE -- Give generic access to network services */
-    if (!AddAccessAllowedAceEx(Dacl,
-                               ACL_REVISION,
-                               INHERIT_ONLY_ACE | OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
-                               GENERIC_ACCESS,
-                               NetworkServiceSid))
-    {
-        ERR("AllowWinstaAccessToUser(): Failed to set ACE for network service SID (error code %lu)\n", GetLastError());
-        goto Quit;
-    }
-
     /* Initialize the security descriptor */
     if (!InitializeSecurityDescriptor(&AbsoluteSd, SECURITY_DESCRIPTOR_REVISION))
     {
@@ -1124,13 +1022,6 @@ Quit:
         FreeSid(InteractiveSid);
     }
 
-    /* HACK */
-    if (NetworkServiceSid != NULL)
-    {
-        FreeSid(NetworkServiceSid);
-    }
-    /* END HACK */
-
     if (Dacl != NULL)
     {
         RtlFreeHeap(RtlGetProcessHeap(), 0, Dacl);
@@ -1170,10 +1061,10 @@ AllowDesktopAccessToUser(
     BOOL Success = FALSE;
     SECURITY_DESCRIPTOR AbsoluteSd;
     PSECURITY_DESCRIPTOR RelativeSd = NULL;
-    PSID WinlogonSid = NULL, AdminsSid = NULL, InteractiveSid = NULL, NetworkServiceSid = NULL; /* NetworkServiceSid is a HACK, see the comment in CreateWinstaSecurity for information */
+    PSID WinlogonSid = NULL, AdminsSid = NULL, InteractiveSid = NULL;
     SECURITY_INFORMATION SecurityInformation;
     DWORD DaclSize;
-    PACL Dacl;
+    PACL Dacl = NULL;
 
     /* Create the Winlogon SID */
     if (!AllocateAndInitializeSid(&NtAuthority,
@@ -1209,17 +1100,6 @@ AllowDesktopAccessToUser(
         goto Quit;
     }
 
-    /* HACK: Create the network service SID */
-    if (!AllocateAndInitializeSid(&NtAuthority,
-                                  1,
-                                  SECURITY_NETWORK_SERVICE_RID,
-                                  0, 0, 0, 0, 0, 0, 0,
-                                  &NetworkServiceSid))
-    {
-        ERR("AllowDesktopAccessToUser(): Failed to create the network service SID (error code %lu)\n", GetLastError());
-        goto Quit;
-    }
-
     /*
      * Build up the DACL size. This includes a number
      * of four ACEs of four different SIDs. The first ACE
@@ -1232,8 +1112,7 @@ AllowDesktopAccessToUser(
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(WinlogonSid) +
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(AdminsSid) +
                sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(InteractiveSid) +
-               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(LogonSid) +
-               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(NetworkServiceSid); /* HACK */
+               sizeof(ACCESS_ALLOWED_ACE) - sizeof(DWORD) + GetLengthSid(LogonSid);
 
     /* Allocate the DACL now */
     Dacl = RtlAllocateHeap(RtlGetProcessHeap(),
@@ -1296,17 +1175,6 @@ AllowDesktopAccessToUser(
         goto Quit;
     }
 
-    /* HACK: Fifth ACE -- Give full desktop to network services */
-    if (!AddAccessAllowedAceEx(Dacl,
-                               ACL_REVISION,
-                               0,
-                               DESKTOP_ALL,
-                               NetworkServiceSid))
-    {
-        ERR("AllowDesktopAccessToUser(): Failed to set ACE for network service SID (error code %lu)\n", GetLastError());
-        goto Quit;
-    }
-
     /* Initialize the security descriptor */
     if (!InitializeSecurityDescriptor(&AbsoluteSd, SECURITY_DESCRIPTOR_REVISION))
     {
@@ -1355,13 +1223,6 @@ Quit:
         FreeSid(InteractiveSid);
     }
 
-    /* HACK */
-    if (NetworkServiceSid != NULL)
-    {
-        FreeSid(NetworkServiceSid);
-    }
-    /* END HACK */
-
     if (Dacl != NULL)
     {
         RtlFreeHeap(RtlGetProcessHeap(), 0, Dacl);
@@ -1372,6 +1233,151 @@ Quit:
         RtlFreeHeap(RtlGetProcessHeap(), 0, RelativeSd);
     }
 
+    return Success;
+}
+
+static
+BOOL
+UpdateSessionDirectoryAccess(
+    _In_ HANDLE UserToken,
+    _In_ BOOL Grant,
+    _In_ PCWSTR DirectoryName)
+{
+    WCHAR Buffer[64];
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE Directory = NULL;
+    DWORD SessionId, Length = 0, Index;
+    PTOKEN_USER User = NULL;
+    PTOKEN_GROUPS Groups = NULL;
+    PSID UserSid, LogonSid = NULL;
+    PSECURITY_DESCRIPTOR Sd = NULL;
+    SECURITY_DESCRIPTOR NewSd;
+    PACL OldDacl = NULL, NewDacl = NULL;
+    BOOLEAN DaclPresent = FALSE, DaclDefaulted;
+    ULONG SdLength = 0, AclLength;
+    PACE_HEADER Ace;
+    NTSTATUS Status;
+    BOOL Success = FALSE;
+
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &SessionId) || SessionId == 0)
+        return TRUE;
+
+    GetTokenInformation(UserToken, TokenUser, NULL, 0, &Length);
+    User = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+    if (!User || !GetTokenInformation(UserToken, TokenUser, User, Length, &Length))
+        goto Quit;
+    UserSid = User->User.Sid;
+
+    Length = 0;
+    GetTokenInformation(UserToken, TokenGroups, NULL, 0, &Length);
+    Groups = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+    if (!Groups || !GetTokenInformation(UserToken, TokenGroups, Groups, Length, &Length))
+        goto Quit;
+    for (Index = 0; Index < Groups->GroupCount; Index++)
+    {
+        if ((Groups->Groups[Index].Attributes & SE_GROUP_LOGON_ID) == SE_GROUP_LOGON_ID)
+        {
+            LogonSid = Groups->Groups[Index].Sid;
+            break;
+        }
+    }
+    if (!LogonSid)
+        goto Quit;
+
+    StringCchPrintfW(Buffer, ARRAYSIZE(Buffer), L"\\Sessions\\%lu\\%s", SessionId, DirectoryName);
+    RtlInitUnicodeString(&Name, Buffer);
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenDirectoryObject(&Directory, READ_CONTROL | WRITE_DAC, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("UpdateSessionDirectoryAccess(): Failed to open %wZ (Status 0x%08lx)\n", &Name, Status);
+        goto Quit;
+    }
+
+    Status = NtQuerySecurityObject(Directory, DACL_SECURITY_INFORMATION, NULL, 0, &SdLength);
+    if (Status != STATUS_BUFFER_TOO_SMALL)
+        goto Quit;
+    Sd = RtlAllocateHeap(RtlGetProcessHeap(), 0, SdLength);
+    if (!Sd)
+        goto Quit;
+    Status = NtQuerySecurityObject(Directory, DACL_SECURITY_INFORMATION, Sd, SdLength, &SdLength);
+    if (!NT_SUCCESS(Status))
+        goto Quit;
+    Status = RtlGetDaclSecurityDescriptor(Sd, &DaclPresent, &OldDacl, &DaclDefaulted);
+    if (!NT_SUCCESS(Status) || !DaclPresent || !OldDacl)
+        goto Quit;
+
+    AclLength = OldDacl->AclSize +
+                3 * (sizeof(ACCESS_ALLOWED_ACE) + max(GetLengthSid(UserSid), GetLengthSid(LogonSid)));
+    NewDacl = RtlAllocateHeap(RtlGetProcessHeap(), 0, AclLength);
+    if (!NewDacl || !NT_SUCCESS(RtlCreateAcl(NewDacl, AclLength, ACL_REVISION)))
+        goto Quit;
+
+    for (Index = 0; Index < OldDacl->AceCount; Index++)
+    {
+        if (!NT_SUCCESS(RtlGetAce(OldDacl, Index, (PVOID*)&Ace)))
+            goto Quit;
+        if (Ace->AceType == ACCESS_ALLOWED_ACE_TYPE &&
+            (RtlEqualSid(&((PACCESS_ALLOWED_ACE)Ace)->SidStart, UserSid) ||
+             RtlEqualSid(&((PACCESS_ALLOWED_ACE)Ace)->SidStart, LogonSid)))
+        {
+            continue;
+        }
+        if (!NT_SUCCESS(RtlAddAce(NewDacl, ACL_REVISION, MAXULONG, Ace, Ace->AceSize)))
+            goto Quit;
+    }
+
+    if (Grant &&
+        (!NT_SUCCESS(RtlAddAccessAllowedAce(NewDacl, ACL_REVISION, DIRECTORY_ALL_ACCESS, UserSid)) ||
+         !NT_SUCCESS(RtlAddAccessAllowedAceEx(NewDacl, ACL_REVISION,
+                                              OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE,
+                                              GENERIC_ALL, LogonSid)) ||
+         !NT_SUCCESS(RtlAddAccessAllowedAce(NewDacl, ACL_REVISION,
+                                            READ_CONTROL | DIRECTORY_QUERY | DIRECTORY_TRAVERSE |
+                                            DIRECTORY_CREATE_OBJECT | DIRECTORY_CREATE_SUBDIRECTORY,
+                                            LogonSid))))
+    {
+        goto Quit;
+    }
+
+    if (!NT_SUCCESS(RtlCreateSecurityDescriptor(&NewSd, SECURITY_DESCRIPTOR_REVISION)) ||
+        !NT_SUCCESS(RtlSetDaclSecurityDescriptor(&NewSd, TRUE, NewDacl, FALSE)))
+    {
+        goto Quit;
+    }
+    Status = NtSetSecurityObject(Directory, DACL_SECURITY_INFORMATION, &NewSd);
+    if (!NT_SUCCESS(Status))
+    {
+        ERR("UpdateSessionDirectoryAccess(): Failed to set the DACL (Status 0x%08lx)\n", Status);
+        goto Quit;
+    }
+
+    Success = TRUE;
+
+Quit:
+    if (Directory)
+        NtClose(Directory);
+    if (NewDacl)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, NewDacl);
+    if (Sd)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Sd);
+    if (Groups)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, Groups);
+    if (User)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, User);
+    return Success;
+}
+
+BOOL
+UpdateNamedObjectAccess(
+    _In_ HANDLE UserToken,
+    _In_ BOOL Grant)
+{
+    BOOL Success = UpdateSessionDirectoryAccess(UserToken, Grant, L"BaseNamedObjects");
+
+    if (!UpdateSessionDirectoryAccess(UserToken, Grant, L"AppContainerNamedObjects"))
+        Success = FALSE;
     return Success;
 }
 
@@ -1395,7 +1401,7 @@ AllowAccessOnSession(
     BOOL Success = FALSE;
     DWORD Index, SidLength, GroupsLength = 0;
     PTOKEN_GROUPS TokenGroup = NULL;
-    PSID LogonSid;
+    PSID LogonSid = NULL;
 
     /* Get required buffer size and allocate the TOKEN_GROUPS buffer */
     if (!GetTokenInformation(Session->UserToken,
@@ -1440,6 +1446,12 @@ AllowAccessOnSession(
         }
     }
 
+    if (LogonSid == NULL)
+    {
+        ERR("AllowAccessOnSession(): Failed to find logon SID!\n");
+        goto Quit;
+    }
+
     /* Allow window station access to this user within this session */
     if (!AllowWinstaAccessToUser(Session->InteractiveWindowStation, LogonSid))
     {
@@ -1453,6 +1465,9 @@ AllowAccessOnSession(
         ERR("AllowAccessOnSession(): Failed to allow application desktop access to the logon user!\n");
         goto Quit;
     }
+
+    if (!UpdateNamedObjectAccess(Session->UserToken, TRUE))
+        WARN("AllowAccessOnSession(): Failed to allow named object access to the logon user\n");
 
     /* Get the length of this logon SID */
     SidLength = GetLengthSid(LogonSid);

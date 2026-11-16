@@ -143,9 +143,19 @@ CsrNotifyWaitBlock(IN PCSR_WAIT_BLOCK WaitBlock,
             CsrReleaseCapturedArguments(&WaitBlock->WaitApiMessage);
         }
 
+#ifdef _WIN64
+        if (WaitBlock->WaitThread->Process->Flags & CsrProcessIsWow64) CsrWow64MessageToClient(&WaitBlock->WaitApiMessage);
+#endif
+
         /* Reply to the port */
-        NtReplyPort(WaitBlock->WaitThread->Process->ClientPort,
-                    &WaitBlock->WaitApiMessage.Header);
+        NtAlpcSendWaitReceivePort(WaitBlock->WaitThread->Process->ClientPort,
+                                  ALPC_MSGFLG_REPLY_MESSAGE,
+                                  &WaitBlock->WaitApiMessage.Header,
+                                  NULL,
+                                  NULL,
+                                  NULL,
+                                  NULL,
+                                  NULL);
 
         /* Check if we should dereference the thread */
         if (DereferenceThread)

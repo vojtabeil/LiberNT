@@ -11,6 +11,7 @@ add_library(threaddll SHARED
     threaddll.def
 )
 set_entrypoint(threaddll DllMain 12)
+add_dependencies(threaddll psdk)
 if(MSVC)
     target_link_libraries(threaddll runtmchk)
 endif()
@@ -33,6 +34,10 @@ get_property(INCLUDE_DIRS DIRECTORY . PROPERTY INCLUDE_DIRECTORIES)
 list(REMOVE_ITEM INCLUDE_DIRS "${REACTOS_SOURCE_DIR}/sdk/include/crt")
 set_property(DIRECTORY . PROPERTY INCLUDE_DIRECTORIES ${INCLUDE_DIRS})
 include_directories(${REACTOS_SOURCE_DIR}/sdk/include/ucrt)
+
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    add_compile_options(-fno-builtin)
+endif()
 
 add_definitions(
     -DUSE_WINE_TODOS
@@ -57,14 +62,10 @@ list(APPEND SOURCE
 set_source_files_properties(ucrtbase_winetest.rc OBJECT_DEPENDS threaddll)
 
 add_executable(ucrtbase_winetest ${SOURCE})
-if(NOT MSVC)
-    #set_target_properties(ucrtbase_winetest PROPERTIES LINK_FLAGS "-Wl,--major-os-version,6")
-    target_compile_options(ucrtbase_winetest PRIVATE -Wno-format)
-endif()
 set_module_type(ucrtbase_winetest win32cui)
 
-target_link_libraries(ucrtbase_winetest wine oldnames ${PSEH_LIB} chkstk)
-if(NOT MSVC)
+target_link_libraries(ucrtbase_winetest wine ucrtoldnames ${PSEH_LIB} chkstk)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     # Add this manually here, so it can link to ucrtbase.dll and vcstartup
     target_link_libraries(ucrtbase_winetest -lgcc)
 endif()
@@ -72,3 +73,11 @@ endif()
 add_importlibs(ucrtbase_winetest ucrtbase kernel32 ntdll)
 add_dependencies(ucrtbase_winetest threaddll)
 add_rostests_file(TARGET ucrtbase_winetest)
+
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(ucrtbase_winetest PRIVATE -Wno-unused-but-set-global)
+endif()
+
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(ucrtbase_winetest PRIVATE -Wno-format)
+endif()

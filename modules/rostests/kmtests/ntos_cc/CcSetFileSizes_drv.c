@@ -30,6 +30,7 @@ static BOOLEAN TestSizing = FALSE;
 static BOOLEAN TestDirtying = FALSE;
 static BOOLEAN TestUncaching = FALSE;
 static BOOLEAN TestWritten = FALSE;
+static BOOLEAN TestBackingChanged = FALSE;
 
 NTSTATUS
 TestEntry(
@@ -149,17 +150,19 @@ PerformTest(
     PDEVICE_OBJECT DeviceObject)
 {
     PVOID Bcb;
-    BOOLEAN Ret;
+    BOOLEAN Ret = FALSE;
     PULONG Buffer;
     PTEST_FCB Fcb;
     LARGE_INTEGER Offset;
     IO_STATUS_BLOCK IoStatus;
+    CC_FILE_SIZES InitialFileSizes;
 
     ok_eq_pointer(TestFileObject, NULL);
     ok_eq_pointer(TestDeviceObject, NULL);
     ok_eq_ulong(TestTestId, -1);
 
     TestWritten = FALSE;
+    TestBackingChanged = FALSE;
     TestDeviceObject = DeviceObject;
     TestTestId = TestId;
     TestFileObject = IoCreateStreamFileObject(NULL, DeviceObject);
@@ -183,8 +186,18 @@ PerformTest(
                 Fcb->Header.AllocationSize.QuadPart = VACB_MAPPING_GRANULARITY - PAGE_SIZE;
             }
 
+            InitialFileSizes = *(PCC_FILE_SIZES)&Fcb->Header.AllocationSize;
+            if (TestId == 8)
+            {
+                /* A volume stream initially exposes only its BPB. The backing
+                 * device already contains valid bytes beyond this mapping. */
+                InitialFileSizes.AllocationSize.QuadPart = 62;
+                InitialFileSizes.FileSize.QuadPart = 62;
+                InitialFileSizes.ValidDataLength.QuadPart = MAXLONGLONG;
+            }
+
             KmtStartSeh();
-            CcInitializeCacheMap(TestFileObject, (PCC_FILE_SIZES)&Fcb->Header.AllocationSize, TRUE, &Callbacks, NULL);
+            CcInitializeCacheMap(TestFileObject, &InitialFileSizes, TRUE, &Callbacks, NULL);
             KmtEndSeh(STATUS_SUCCESS);
 
             if (!skip(CcIsFileCached(TestFileObject) == TRUE, "CcInitializeCacheMap failed\n"))
@@ -334,6 +347,142 @@ PerformTest(
                     if (Ret == TRUE)
                         CcUnpinData(Bcb);
                 }
+                else if (TestId == 8)
+                {
+                    Offset.QuadPart = 0;
+                    KmtStartSeh();
+                    Ret = CcPinRead(TestFileObject, &Offset, 62, PIN_WAIT, &Bcb, (PVOID *)&Buffer);
+                    KmtEndSeh(STATUS_SUCCESS);
+                    if (!skip(Ret == TRUE, "Initial metadata pin failed\n"))
+                    {
+                        ok_eq_ulong(Buffer[0], 0xBABABABA);
+                        CcUnpinData(Bcb);
+                    }
+
+                    InitialFileSizes.AllocationSize.QuadPart = PAGE_SIZE;
+                    InitialFileSizes.FileSize.QuadPart = PAGE_SIZE;
+                    KmtStartSeh();
+                    CcSetFileSizes(TestFileObject, &InitialFileSizes);
+                    Ret = CcPinRead(TestFileObject, &Offset, PAGE_SIZE, PIN_WAIT, &Bcb, (PVOID *)&Buffer);
+                    KmtEndSeh(STATUS_SUCCESS);
+                    if (!skip(Ret == TRUE, "Extended metadata pin failed\n"))
+                    {
+                        /* Includes the boot signature and the following sector. */
+                        ok_eq_ulong(Buffer[508 / sizeof(ULONG)], 0xBABABABA);
+                        ok_eq_ulong(Buffer[512 / sizeof(ULONG)], 0xBABABABA);
+                        ok_eq_ulong(Buffer[(PAGE_SIZE - sizeof(ULONG)) / sizeof(ULONG)], 0xBABABABA);
+                        CcUnpinData(Bcb);
+                    }
+                }
+                else if (TestId == 9)
+                {
+                    /* Kill lazy writer */
+                    CcSetAdditionalCacheAttributes(TestFileObject, FALSE, TRUE);
+
+                    Offset.QuadPart = VACB_MAPPING_GRANULARITY - 2 * PAGE_SIZE;
+                    KmtStartSeh();
+                    Ret = CcPinRead(TestFileObject, &Offset, PAGE_SIZE, PIN_WAIT, &Bcb, (PVOID *)&Buffer);
+                    KmtEndSeh(STATUS_SUCCESS);
+
+                    if (!skip(Ret == TRUE, "CcPinRead failed\n"))
+                    {
+                        CC_FILE_SIZES Shrunk;
+
+                        Buffer[0] = 0xDADADADA;
+
+                        TestDirtying = TRUE;
+                        CcSetDirtyPinnedData(Bcb, NULL);
+                        TestDirtying = FALSE;
+
+                        TestUnpin = TRUE;
+                        CcUnpinData(Bcb);
+                        TestUnpin = FALSE;
+
+                        ok_bool_false(TestWritten, "Dirty page written before the file was shrunk\n");
+
+                        Shrunk.AllocationSize.QuadPart = VACB_MAPPING_GRANULARITY - 2 * PAGE_SIZE;
+                        Shrunk.FileSize.QuadPart = VACB_MAPPING_GRANULARITY - 2 * PAGE_SIZE;
+                        Shrunk.ValidDataLength.QuadPart = VACB_MAPPING_GRANULARITY - 2 * PAGE_SIZE;
+
+                        TestSizing = TRUE;
+                        KmtStartSeh();
+                        CcSetFileSizes(TestFileObject, &Shrunk);
+                        KmtEndSeh(STATUS_SUCCESS);
+                        TestSizing = FALSE;
+
+                        Fcb->Header.AllocationSize = Shrunk.AllocationSize;
+                        Fcb->Header.FileSize = Shrunk.FileSize;
+                        Fcb->Header.ValidDataLength = Shrunk.ValidDataLength;
+
+                        KmtStartSeh();
+                        CcFlushCache(TestFileObject->SectionObjectPointer, NULL, 0, &IoStatus);
+                        KmtEndSeh(STATUS_SUCCESS);
+
+                        ok_eq_hex(IoStatus.Status, STATUS_SUCCESS);
+                        ok_bool_false(TestWritten, "A page past the new end of file was still written\n");
+
+                        Offset.QuadPart = 0;
+                        KmtStartSeh();
+                        Ret = CcPinRead(TestFileObject, &Offset, PAGE_SIZE, PIN_WAIT, &Bcb, (PVOID *)&Buffer);
+                        KmtEndSeh(STATUS_SUCCESS);
+                        if (!skip(Ret == TRUE, "CcPinRead after the shrink failed\n"))
+                        {
+                            ok_eq_ulong(Buffer[0], 0xBABABABA);
+                            CcUnpinData(Bcb);
+                        }
+                    }
+                }
+                else if (TestId == 7)
+                {
+                    Buffer = ExAllocatePool(NonPagedPool, PAGE_SIZE);
+                    if (!skip(Buffer != NULL, "ExAllocatePool failed\n"))
+                    {
+                        Offset.QuadPart = PAGE_SIZE;
+                        KmtStartSeh();
+                        Ret = CcCopyRead(TestFileObject,
+                                         &Offset,
+                                         PAGE_SIZE,
+                                         TRUE,
+                                         Buffer,
+                                         &IoStatus);
+                        KmtEndSeh(STATUS_SUCCESS);
+                        ok_bool_true(Ret, "CcCopyRead failed\n");
+                        if (Ret)
+                        {
+                            ok_eq_ulong(Buffer[0], 0xBABABABA);
+                            ok_eq_ulong(Buffer[(PAGE_SIZE - sizeof(ULONG)) / sizeof(ULONG)],
+                                        0xBABABABA);
+                        }
+
+                        TestBackingChanged = TRUE;
+                        KmtStartSeh();
+                        Ret = CcPurgeCacheSection(TestFileObject->SectionObjectPointer,
+                                                  &Offset,
+                                                  PAGE_SIZE,
+                                                  FALSE);
+                        KmtEndSeh(STATUS_SUCCESS);
+                        ok_bool_true(Ret, "CcPurgeCacheSection failed for a partial VACB range\n");
+
+                        RtlZeroMemory(Buffer, PAGE_SIZE);
+                        KmtStartSeh();
+                        Ret = CcCopyRead(TestFileObject,
+                                         &Offset,
+                                         PAGE_SIZE,
+                                         TRUE,
+                                         Buffer,
+                                         &IoStatus);
+                        KmtEndSeh(STATUS_SUCCESS);
+                        ok_bool_true(Ret, "CcCopyRead after purge failed\n");
+                        if (Ret)
+                        {
+                            ok_eq_ulong(Buffer[0], 0xACACACAC);
+                            ok_eq_ulong(Buffer[(PAGE_SIZE - sizeof(ULONG)) / sizeof(ULONG)],
+                                        0xACACACAC);
+                        }
+
+                        ExFreePool(Buffer);
+                    }
+                }
             }
         }
     }
@@ -467,7 +616,9 @@ TestIrpHandler(
 
         if (Offset.QuadPart < Fcb->Header.FileSize.QuadPart)
         {
-            RtlFillMemory(Buffer, min(Length, Fcb->Header.FileSize.QuadPart - Offset.QuadPart), 0xBA);
+            RtlFillMemory(Buffer,
+                          min(Length, Fcb->Header.FileSize.QuadPart - Offset.QuadPart),
+                          TestTestId == 7 && TestBackingChanged ? 0xAC : 0xBA);
             Buffer = (PVOID)((ULONG_PTR)Buffer + (ULONG_PTR)min(Length, Fcb->Header.FileSize.QuadPart - Offset.QuadPart));
 
             if (Length > (Fcb->Header.FileSize.QuadPart - Offset.QuadPart))

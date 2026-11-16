@@ -72,15 +72,19 @@ END
  * bitmaps and avi files. Licence's can be
  * found in the corresponding directorys
  */
+#ifndef NEUTRAL_RESOURCES_IN_MUN
 #include "icon_res.rc"
 #include "bitmap_res.rc"
 #include "avi_res.rc"
+#endif
 #include "rgs_res.rc"
 
 #include <reactos/manifest_dll.rc>
 #include <reactos/manifest_hosted.rc>
 
 1 TYPELIB "shell32_shldisp.tlb"
+
+#include "res/operationsprogress.rc"
 
 /*
  * Everything specific to any language goes

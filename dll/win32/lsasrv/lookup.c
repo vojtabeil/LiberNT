@@ -32,9 +32,10 @@ SamIFree_SAMPR_ULONG_ARRAY(PSAMPR_ULONG_ARRAY Ptr);
 
 NTSTATUS
 NTAPI
-SamrConnect(IN PSAMPR_SERVER_NAME ServerName,
+SamIConnect(IN PSAMPR_SERVER_NAME ServerName,
             OUT SAMPR_HANDLE *ServerHandle,
-            IN ACCESS_MASK DesiredAccess);
+            IN ACCESS_MASK DesiredAccess,
+            IN BOOLEAN Trusted);
 
 NTSTATUS
 NTAPI
@@ -75,6 +76,7 @@ typedef struct _WELL_KNOWN_SID
 
 
 LIST_ENTRY WellKnownSidListHead;
+static SID_IDENTIFIER_AUTHORITY AppPackageAuthority = {SECURITY_APP_PACKAGE_AUTHORITY};
 PSID LsapWorldSid = NULL;
 PSID LsapNetworkSid = NULL;
 PSID LsapBatchSid = NULL;
@@ -184,6 +186,7 @@ LsapInitSids(VOID)
     WCHAR szAccountName[80];
     WCHAR szDomainName[80];
     ULONG SubAuthorities[8];
+    ULONG Capability;
     HINSTANCE hInstance;
 
     InitializeListHead(&WellKnownSidListHead);
@@ -688,6 +691,46 @@ LsapInitSids(VOID)
                   SidTypeAlias,
                   NULL);
 
+    LsapLoadString(hInstance, IDS_APP_PACKAGE_AUTHORITY, szDomainName, ARRAYSIZE(szDomainName));
+
+    LsapLoadString(hInstance, IDS_ALL_APP_PACKAGES, szAccountName, ARRAYSIZE(szAccountName));
+    SubAuthorities[0] = SECURITY_APP_PACKAGE_BASE_RID;
+    SubAuthorities[1] = SECURITY_BUILTIN_PACKAGE_ANY_PACKAGE;
+    LsapCreateSid(&AppPackageAuthority,
+                  2,
+                  SubAuthorities,
+                  szAccountName,
+                  szDomainName,
+                  SidTypeWellKnownGroup,
+                  NULL);
+
+    LsapLoadString(hInstance, IDS_ALL_RESTRICTED_APP_PACKAGES, szAccountName, ARRAYSIZE(szAccountName));
+    SubAuthorities[1] = SECURITY_BUILTIN_PACKAGE_ANY_RESTRICTED_PACKAGE;
+    LsapCreateSid(&AppPackageAuthority,
+                  2,
+                  SubAuthorities,
+                  szAccountName,
+                  szDomainName,
+                  SidTypeWellKnownGroup,
+                  NULL);
+
+    for (Capability = SECURITY_CAPABILITY_INTERNET_CLIENT; Capability <= SECURITY_CAPABILITY_CONTACTS; Capability++)
+    {
+        LsapLoadString(hInstance,
+                       IDS_CAPABILITY_INTERNET_CLIENT + Capability - SECURITY_CAPABILITY_INTERNET_CLIENT,
+                       szAccountName,
+                       ARRAYSIZE(szAccountName));
+        SubAuthorities[0] = SECURITY_CAPABILITY_BASE_RID;
+        SubAuthorities[1] = Capability;
+        LsapCreateSid(&AppPackageAuthority,
+                      2,
+                      SubAuthorities,
+                      szAccountName,
+                      szDomainName,
+                      SidTypeWellKnownGroup,
+                      NULL);
+    }
+
     /* FIXME: Add more well known sids */
 
     return STATUS_SUCCESS;
@@ -756,7 +799,9 @@ LsapLookupFullyQualifiedWellKnownName(PUNICODE_STRING AccountName,
                                 WELL_KNOWN_SID,
                                 ListEntry);
         if (RtlEqualUnicodeString(AccountName, &Ptr->AccountName, TRUE) &&
-            RtlEqualUnicodeString(DomainName, &Ptr->DomainName, TRUE))
+            RtlEqualUnicodeString(DomainName, &Ptr->DomainName, TRUE) &&
+            RtlCompareMemory(RtlIdentifierAuthoritySid(Ptr->Sid), &AppPackageAuthority,
+                             sizeof(AppPackageAuthority)) != sizeof(AppPackageAuthority))
         {
             return Ptr;
         }
@@ -1158,7 +1203,6 @@ LsapLookupIsolatedNames(DWORD Count,
                         PLSAPR_TRANSLATED_SID_EX2 SidsBuffer,
                         PULONG Mapped)
 {
-    UNICODE_STRING EmptyDomainName = RTL_CONSTANT_STRING(L"");
     PWELL_KNOWN_SID ptr, ptr2;
     PSID DomainSid;
     ULONG DomainIndex;
@@ -1227,7 +1271,7 @@ LsapLookupIsolatedNames(DWORD Count,
                     }
 
                     Status = LsapAddDomainToDomainsList(DomainsBuffer,
-                                                        &EmptyDomainName,
+                                                        &ptr->DomainName,
                                                         DomainSid,
                                                         &DomainIndex);
 
@@ -1330,12 +1374,13 @@ LsapLookupIsolatedBuiltinNames(DWORD Count,
     ULONG i;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    Status = SamrConnect(NULL,
+    Status = SamIConnect(NULL,
                          &ServerHandle,
-                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN);
+                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
+                         TRUE);
     if (!NT_SUCCESS(Status))
     {
-        TRACE("SamrConnect failed (Status %08lx)\n", Status);
+        TRACE("SamIConnect failed (Status %08lx)\n", Status);
         goto done;
     }
 
@@ -1428,12 +1473,13 @@ LsapLookupIsolatedAccountNames(DWORD Count,
 
     TRACE("()\n");
 
-    Status = SamrConnect(NULL,
+    Status = SamIConnect(NULL,
                          &ServerHandle,
-                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN);
+                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
+                         TRUE);
     if (!NT_SUCCESS(Status))
     {
-        TRACE("SamrConnect failed (Status %08lx)\n", Status);
+        TRACE("SamIConnect failed (Status %08lx)\n", Status);
         goto done;
     }
 
@@ -1632,12 +1678,13 @@ LsapLookupBuiltinNames(DWORD Count,
     ULONG i;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    Status = SamrConnect(NULL,
+    Status = SamIConnect(NULL,
                          &ServerHandle,
-                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN);
+                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
+                         TRUE);
     if (!NT_SUCCESS(Status))
     {
-        TRACE("SamrConnect failed (Status %08lx)\n", Status);
+        TRACE("SamIConnect failed (Status %08lx)\n", Status);
         goto done;
     }
 
@@ -1729,12 +1776,13 @@ LsapLookupAccountNames(DWORD Count,
     ULONG i;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    Status = SamrConnect(NULL,
+    Status = SamIConnect(NULL,
                          &ServerHandle,
-                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN);
+                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
+                         TRUE);
     if (!NT_SUCCESS(Status))
     {
-        TRACE("SamrConnect failed (Status %08lx)\n", Status);
+        TRACE("SamIConnect failed (Status %08lx)\n", Status);
         goto done;
     }
 
@@ -2053,6 +2101,37 @@ done:
 }
 
 
+static BOOLEAN
+LsapIsClientLocalSystem(VOID)
+{
+    UCHAR Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    PTOKEN_USER User = (PTOKEN_USER)Buffer;
+    HANDLE TokenHandle;
+    ULONG Length;
+    NTSTATUS Status;
+
+    if (RpcImpersonateClient(NULL) != RPC_S_OK)
+        return FALSE;
+
+    Status = NtOpenThreadToken(NtCurrentThread(),
+                               TOKEN_QUERY,
+                               TRUE,
+                               &TokenHandle);
+    RpcRevertToSelf();
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    Status = NtQueryInformationToken(TokenHandle,
+                                     TokenUser,
+                                     User,
+                                     sizeof(Buffer),
+                                     &Length);
+    NtClose(TokenHandle);
+
+    return NT_SUCCESS(Status) && RtlEqualSid(User->User.Sid, LsapLocalSystemSid);
+}
+
+
 static NTSTATUS
 LsapLookupWellKnownSids(PLSAPR_SID_ENUM_BUFFER SidEnumBuffer,
                         PLSAPR_TRANSLATED_NAME_EX NamesBuffer,
@@ -2061,9 +2140,11 @@ LsapLookupWellKnownSids(PLSAPR_SID_ENUM_BUFFER SidEnumBuffer,
 {
     PWELL_KNOWN_SID ptr, ptr2;
     LPWSTR SidString = NULL;
+    PSID DomainSid;
     ULONG DomainIndex;
     ULONG i;
     NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN ClientChecked = FALSE, ClientIsLocalSystem = FALSE;
 
     for (i = 0; i < SidEnumBuffer->Entries; i++)
     {
@@ -2079,7 +2160,12 @@ LsapLookupWellKnownSids(PLSAPR_SID_ENUM_BUFFER SidEnumBuffer,
         ptr = LsapLookupWellKnownSid(SidEnumBuffer->SidInfo[i].Sid);
         if (ptr != NULL)
         {
-            NamesBuffer[i].Use = ptr->Use;
+            if (ptr->Sid == LsapLocalSystemSid && !ClientChecked)
+            {
+                ClientIsLocalSystem = LsapIsClientLocalSystem();
+                ClientChecked = TRUE;
+            }
+            NamesBuffer[i].Use = (ptr->Sid == LsapLocalSystemSid && ClientIsLocalSystem) ? SidTypeUser : ptr->Use;
             NamesBuffer[i].Flags = 0;
 
             NamesBuffer[i].Name.Length = ptr->AccountName.Length;
@@ -2117,6 +2203,25 @@ LsapLookupWellKnownSids(PLSAPR_SID_ENUM_BUFFER SidEnumBuffer,
 
                     NamesBuffer[i].DomainIndex = DomainIndex;
                 }
+                else
+                {
+                    DomainSid = CreateDomainSidFromAccountSid(ptr->Sid);
+                    if (DomainSid == NULL)
+                    {
+                        Status = STATUS_INSUFFICIENT_RESOURCES;
+                        goto done;
+                    }
+
+                    Status = LsapAddDomainToDomainsList(DomainsBuffer,
+                                                        &ptr->DomainName,
+                                                        DomainSid,
+                                                        &DomainIndex);
+                    MIDL_user_free(DomainSid);
+                    if (!NT_SUCCESS(Status))
+                        goto done;
+
+                    NamesBuffer[i].DomainIndex = DomainIndex;
+                }
             }
 
             TRACE("Mapped to: %wZ\n", &NamesBuffer[i].Name);
@@ -2146,12 +2251,13 @@ LsapLookupBuiltinDomainSids(PLSAPR_SID_ENUM_BUFFER SidEnumBuffer,
     ULONG i;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    Status = SamrConnect(NULL,
+    Status = SamIConnect(NULL,
                          &ServerHandle,
-                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN);
+                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
+                         TRUE);
     if (!NT_SUCCESS(Status))
     {
-        TRACE("SamrConnect failed (Status %08lx)\n", Status);
+        TRACE("SamIConnect failed (Status %08lx)\n", Status);
         goto done;
     }
 
@@ -2285,12 +2391,13 @@ LsapLookupAccountDomainSids(PLSAPR_SID_ENUM_BUFFER SidEnumBuffer,
     ULONG i;
     NTSTATUS Status = STATUS_SUCCESS;
 
-    Status = SamrConnect(NULL,
+    Status = SamIConnect(NULL,
                          &ServerHandle,
-                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN);
+                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
+                         TRUE);
     if (!NT_SUCCESS(Status))
     {
-        TRACE("SamrConnect failed (Status %08lx)\n", Status);
+        TRACE("SamIConnect failed (Status %08lx)\n", Status);
         goto done;
     }
 
@@ -2502,7 +2609,9 @@ LsapLookupSids(PLSAPR_SID_ENUM_BUFFER SidEnumBuffer,
 done:
     TRACE("done Status: %lx  Mapped: %lu\n", Status, Mapped);
 
-    if (!NT_SUCCESS(Status))
+    if (!NT_SUCCESS(Status) &&
+        Status != STATUS_NONE_MAPPED &&
+        Status != STATUS_SOME_NOT_MAPPED)
     {
         if (DomainsBuffer != NULL)
         {
@@ -2517,6 +2626,28 @@ done:
     }
     else
     {
+        for (i = 0; i < SidEnumBuffer->Entries; i++)
+        {
+            UNICODE_STRING SidString;
+
+            if (NamesBuffer[i].Use != SidTypeUnknown || NamesBuffer[i].Name.Buffer != NULL)
+                continue;
+
+            if (!NT_SUCCESS(RtlConvertSidToUnicodeString(&SidString, (PSID)SidEnumBuffer->SidInfo[i].Sid, TRUE)))
+                continue;
+
+            NamesBuffer[i].Name.Buffer = MIDL_user_allocate(SidString.Length + sizeof(WCHAR));
+            if (NamesBuffer[i].Name.Buffer != NULL)
+            {
+                RtlCopyMemory(NamesBuffer[i].Name.Buffer, SidString.Buffer, SidString.Length);
+                NamesBuffer[i].Name.Buffer[SidString.Length / sizeof(WCHAR)] = UNICODE_NULL;
+                NamesBuffer[i].Name.Length = SidString.Length;
+                NamesBuffer[i].Name.MaximumLength = SidString.Length + sizeof(WCHAR);
+            }
+
+            RtlFreeUnicodeString(&SidString);
+        }
+
         *ReferencedDomains = DomainsBuffer;
         TranslatedNames->Entries = SidEnumBuffer->Entries;
         TranslatedNames->Names = NamesBuffer;

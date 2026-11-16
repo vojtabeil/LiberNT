@@ -10,20 +10,20 @@ spec2def(rosload.exe rosload.spec)
 list(APPEND ROSLOAD_SOURCE
     include/freeldr.h
     bootmgr.c
-    custom.c
     linuxboot.c
     miscboot.c
-    options.c
+    settingsmenu.c
     oslist.c
     lib/rtl/libsupp.c
-    ${REACTOS_SOURCE_DIR}/ntoskrnl/config/cmboot.c
-    ${REACTOS_SOURCE_DIR}/ntoskrnl/ke/config.c
-    ntldr/advopts.c
+    ${REACTOS_SOURCE_DIR}/ntos/config/cmboot.c
+    ${REACTOS_SOURCE_DIR}/ntos/ke/arcconfig.c
+    ntldr/startup.c
     ntldr/conversion.c
     ntldr/headless.c
     ntldr/inffile.c
     ntldr/ntldropts.c
     ntldr/registry.c
+    ntldr/resume.c
     ntldr/setupldr.c
     ntldr/winldr.c
     ntldr/wlmemory.c
@@ -35,18 +35,22 @@ if(ARCH STREQUAL "i386")
         arch/i386/halstub.c
         arch/i386/ntoskrnl.c
         disk/scsiport.c
+        ntldr/arch/i386/hiber.c
         ntldr/arch/i386/winldr.c)
 
     list(APPEND ROSLOAD_ASM_SOURCE
+        ${REACTOS_SOURCE_DIR}/bootloader/arch/i386/resume.S
         arch/i386/drvmap.S
         arch/i386/linux.S)
 
 elseif(ARCH STREQUAL "amd64")
 
     list(APPEND ROSLOAD_SOURCE
+        ntldr/arch/amd64/hiber.c
         ntldr/arch/amd64/winldr.c)
 
     list(APPEND ROSLOAD_ASM_SOURCE
+        ${REACTOS_SOURCE_DIR}/bootloader/arch/amd64/resume.S
         arch/amd64/misc.S
         arch/amd64/linux.S)
 
@@ -75,6 +79,10 @@ set_target_properties(rosload
     ENABLE_EXPORTS TRUE
     DEFINE_SYMBOL "")
 
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(rosload PRIVATE --param=min-pagesize=0)
+endif()
+
 set_image_base(rosload 0x10000) # 0x200000
 set_subsystem(rosload native)
 set_entrypoint(rosload RunLoader)
@@ -97,4 +105,4 @@ endif()
 
 add_dependencies(rosload bugcodes asm xdk)
 
-add_cd_file(TARGET rosload DESTINATION loader NO_CAB FOR bootcd regtest)
+add_cd_file(TARGET rosload DESTINATION loader NO_CAB FOR bootcd livecd)

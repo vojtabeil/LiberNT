@@ -122,7 +122,6 @@ GetAllowedWorldAce(IN PACL Acl,
 }
 
 
-static
 ULONG
 GetAccountFlags(ULONG AccountControl,
                 PACL Dacl)
@@ -251,8 +250,9 @@ GetPasswordAge(IN PLARGE_INTEGER PasswordLastSet)
     if (!NT_SUCCESS(Status))
         return 0;
 
-    RtlTimeToSecondsSince1970(&SystemTime, &SystemSecondsSince1970);
-    RtlTimeToSecondsSince1970(PasswordLastSet, &PasswordSecondsSince1970);
+    if (!RtlTimeToSecondsSince1970(&SystemTime, &SystemSecondsSince1970) ||
+        !RtlTimeToSecondsSince1970(PasswordLastSet, &PasswordSecondsSince1970))
+        return 0;
 
     return SystemSecondsSince1970 - PasswordSecondsSince1970;
 }
@@ -416,14 +416,14 @@ GetUserPrivileges(
     _Out_ PDWORD AuthFlags)
 {
     PGROUP_MEMBERSHIP GroupMembership = NULL;
-    ULONG GroupCount, SidCount, AliasCount, i;
+    ULONG GroupCount, SidCount = 0, AliasCount, i;
     PSID *SidArray = NULL;
     PULONG AliasArray = NULL;
     BOOL bAdmin = FALSE, bUser = FALSE;
     NET_API_STATUS ApiStatus = NERR_Success;
     NTSTATUS Status;
 
-    FIXME("GetUserPrivileges(%p)\n", UserHandle);
+    TRACE("GetUserPrivileges(%p)\n", UserHandle);
 
     /* Get the users group memberships */
     Status = SamGetGroupsForUser(UserHandle,
@@ -1415,6 +1415,9 @@ NET_API_STATUS
 SetUserInfo(SAM_HANDLE UserHandle,
             LPBYTE UserInfo,
             DWORD Level,
+#ifdef __REACTOS__
+            BOOL NewAccount,
+#endif
             PDWORD parm_err)
 {
     USER_ALL_INFORMATION UserAllInfo;
@@ -2192,6 +2195,15 @@ SetUserInfo(SAM_HANDLE UserHandle,
     if (ApiStatus != NERR_Success)
         goto done;
 
+#ifdef __REACTOS__
+    if (NewAccount && (UserAllInfo.WhichFields & USER_ALL_USERACCOUNTCONTROL) &&
+        !(UserAllInfo.UserAccountControl & (USER_TEMP_DUPLICATE_ACCOUNT | USER_NORMAL_ACCOUNT |
+          USER_INTERDOMAIN_TRUST_ACCOUNT | USER_WORKSTATION_TRUST_ACCOUNT | USER_SERVER_TRUST_ACCOUNT)))
+    {
+        UserAllInfo.UserAccountControl |= USER_NORMAL_ACCOUNT;
+    }
+#endif
+
     Status = SamSetInformationUser(UserHandle,
                                    UserAllInformation,
                                    &UserAllInfo);
@@ -2353,6 +2365,9 @@ NetUserAdd(LPCWSTR servername,
     ApiStatus = SetUserInfo(UserHandle,
                             bufptr,
                             level,
+#ifdef __REACTOS__
+                            TRUE,
+#endif
                             parm_err);
     if (ApiStatus != NERR_Success)
     {
@@ -2374,6 +2389,52 @@ done:
 
     if (ServerHandle != NULL)
         SamCloseHandle(ServerHandle);
+
+    return ApiStatus;
+}
+
+
+static
+NET_API_STATUS
+NetpGetCallerAccountName(LPWSTR UserName,
+                         DWORD UserNameLength,
+                         LPWSTR DomainName,
+                         DWORD DomainNameLength)
+{
+    PTOKEN_USER UserInfo = NULL;
+    HANDLE TokenHandle = NULL;
+    SID_NAME_USE Use;
+    DWORD Size = 0;
+    NET_API_STATUS ApiStatus = NERR_Success;
+
+    if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &TokenHandle) &&
+        !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &TokenHandle))
+        return GetLastError();
+
+    GetTokenInformation(TokenHandle, TokenUser, NULL, 0, &Size);
+
+    UserInfo = HeapAlloc(GetProcessHeap(), 0, Size);
+    if (UserInfo == NULL)
+    {
+        ApiStatus = ERROR_NOT_ENOUGH_MEMORY;
+        goto done;
+    }
+
+    if (!GetTokenInformation(TokenHandle, TokenUser, UserInfo, Size, &Size) ||
+        !LookupAccountSidW(NULL,
+                           UserInfo->User.Sid,
+                           UserName,
+                           &UserNameLength,
+                           DomainName,
+                           &DomainNameLength,
+                           &Use))
+        ApiStatus = GetLastError();
+
+done:
+    if (UserInfo != NULL)
+        HeapFree(GetProcessHeap(), 0, UserInfo);
+
+    CloseHandle(TokenHandle);
 
     return ApiStatus;
 }
@@ -2403,7 +2464,7 @@ NetUserChangePassword(LPCWSTR domainname,
 {
     PMSV1_0_CHANGEPASSWORD_REQUEST RequestBuffer = NULL;
     PMSV1_0_CHANGEPASSWORD_RESPONSE ResponseBuffer = NULL;
-    ULONG RequestBufferSize;
+    ULONG RequestBufferSize = 0;
     ULONG ResponseBufferSize = 0;
     LPWSTR Ptr;
     ANSI_STRING PackageName;
@@ -2412,15 +2473,31 @@ NetUserChangePassword(LPCWSTR domainname,
     NET_API_STATUS ApiStatus = NERR_Success;
     NTSTATUS Status = STATUS_SUCCESS;
     NTSTATUS ProtocolStatus;
+    WCHAR CallerName[UNLEN + 1];
+    WCHAR CallerDomain[DNLEN + 1];
 
     TRACE("(%s, %s, ..., ...)\n", debugstr_w(domainname), debugstr_w(username));
-
-    /* FIXME: handle null domain or user name */
 
     /* Check the parameters */
     if ((oldpassword == NULL) ||
         (newpassword == NULL))
         return ERROR_INVALID_PARAMETER;
+
+    if ((domainname == NULL) || (username == NULL))
+    {
+        ApiStatus = NetpGetCallerAccountName(CallerName,
+                                             ARRAYSIZE(CallerName),
+                                             CallerDomain,
+                                             ARRAYSIZE(CallerDomain));
+        if (ApiStatus != NERR_Success)
+            return ApiStatus;
+
+        if (domainname == NULL)
+            domainname = CallerDomain;
+
+        if (username == NULL)
+            username = CallerName;
+    }
 
     /* Connect to the LSA server */
     Status = LsaConnectUntrusted(&LsaHandle);
@@ -2523,7 +2600,10 @@ NetUserChangePassword(LPCWSTR domainname,
 
 done:
     if (RequestBuffer != NULL)
+    {
+        SecureZeroMemory(RequestBuffer, RequestBufferSize);
         NetApiBufferFree(RequestBuffer);
+    }
 
     if (ResponseBuffer != NULL)
         LsaFreeReturnBuffer(ResponseBuffer);
@@ -4071,6 +4151,9 @@ NetUserSetInfo(LPCWSTR servername,
     ApiStatus = SetUserInfo(UserHandle,
                             buf,
                             level,
+#ifdef __REACTOS__
+                            FALSE,
+#endif
                             parm_err);
     if (ApiStatus != NERR_Success)
     {

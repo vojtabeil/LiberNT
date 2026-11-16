@@ -10,6 +10,7 @@
 #define NDEBUG
 #include <debug.h>
 
+#if defined(_M_IX86) || defined(_M_AMD64)
 static HAL_AMLI_BAD_IO_ADDRESS_LIST ExpectedList[] =
 {
     { 0x0000, 0x10, 1, NULL },
@@ -147,8 +148,55 @@ TestAMLIllegalIOPortAddresses(void)
     }
     ExFreePoolWithTag(AddressList, 'OImK');
 }
+#endif
+
+#ifdef _WIN64
+static
+void
+TestNativeSystemInformation(void)
+{
+    static const HAL_QUERY_INFORMATION_CLASS UnsupportedClasses[] =
+    {
+        HalFrameBufferCachingInformation,
+#if !defined(_M_AMD64)
+        HalDisplayBiosInformation,
+        HalQueryAMLIIllegalIOPortAddresses,
+#endif
+        (HAL_QUERY_INFORMATION_CLASS)MAXULONG
+    };
+    HAL_ACPI_ROOT_POINTER_INFORMATION AcpiInformation;
+    ULONG Output;
+    ULONG ReturnedLength;
+    NTSTATUS Status;
+    ULONG Index;
+
+    for (Index = 0; Index < RTL_NUMBER_OF(UnsupportedClasses); Index++)
+    {
+        Output = 0x55555555;
+        ReturnedLength = 0x55555555;
+        Status = HalQuerySystemInformation(UnsupportedClasses[Index], sizeof(Output), &Output, &ReturnedLength);
+        ok_eq_hex(Status, STATUS_INVALID_LEVEL);
+        ok_eq_ulong(ReturnedLength, 0);
+        ok_eq_hex(Output, 0x55555555);
+    }
+
+    RtlFillMemory(&AcpiInformation, sizeof(AcpiInformation), 0x55);
+    ReturnedLength = 0x55555555;
+    Status = HalQuerySystemInformation(HalAcpiAuditInformation, 0, &AcpiInformation, &ReturnedLength);
+    ok_eq_hex(Status, STATUS_INFO_LENGTH_MISMATCH);
+    ok_eq_ulong(ReturnedLength, 0);
+    ok_eq_ulonglong(AcpiInformation.RsdpPhysicalAddress.QuadPart, 0x5555555555555555ULL);
+}
+#endif
 
 START_TEST(HalSystemInfo)
 {
+#if defined(_M_IX86) || defined(_M_AMD64)
     TestAMLIllegalIOPortAddresses();
+#endif
+#ifdef _WIN64
+    TestNativeSystemInformation();
+#elif !defined(_M_IX86)
+    skip(FALSE, "HalSystemInfo is not implemented for this architecture\n");
+#endif
 }

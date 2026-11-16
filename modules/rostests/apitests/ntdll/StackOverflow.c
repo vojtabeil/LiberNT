@@ -11,6 +11,8 @@
 
 #ifdef _MSC_VER
 #pragma warning(disable : 4717) // disable warning about recursive function
+#elif defined(__clang__)
+#pragma clang diagnostic ignored "-Winfinite-recursion"
 #elif defined(__GNUC__) && (__GNUC__ >= 12)
 #pragma GCC diagnostic ignored "-Winfinite-recursion"
 #endif
@@ -55,7 +57,7 @@ infinite_recursive(void)
     /* Of course this is private memory. */
     ok_long(MemoryBasicInfo.Type, MEM_PRIVATE);
 
-    LastStackAllocation = &Buffer[-0x500];
+    LastStackAllocation = (PVOID)((ULONG_PTR)Buffer - sizeof(Buffer));
 
     infinite_recursive();
 }
@@ -82,9 +84,12 @@ START_TEST(StackOverflow)
     ok_ptr(NtCurrentTeb()->DeallocationStack, StackAllocationBase);
     ok_ptr(NtCurrentTeb()->NtTib.StackBase, (PVOID)((ULONG_PTR)MemoryBasicInfo.BaseAddress + MemoryBasicInfo.RegionSize));
 #ifdef _WIN64
-    ok_ptr(NtCurrentTeb()->NtTib.StackLimit, (PVOID)((ULONG_PTR)MemoryBasicInfo.BaseAddress - 2 * PAGE_SIZE));
+    ok_ptr(NtCurrentTeb()->NtTib.StackLimit, (PVOID)((ULONG_PTR)MemoryBasicInfo.BaseAddress - 4 * PAGE_SIZE));
 #else
-    ok_ptr(NtCurrentTeb()->NtTib.StackLimit, (PVOID)((ULONG_PTR)MemoryBasicInfo.BaseAddress - PAGE_SIZE));
+    ok(((ULONG_PTR)NtCurrentTeb()->NtTib.StackLimit & (PAGE_SIZE - 1)) == 0 &&
+       (ULONG_PTR)NtCurrentTeb()->NtTib.StackLimit < (ULONG_PTR)MemoryBasicInfo.BaseAddress,
+       "StackLimit %p is not a page boundary below %p\n",
+       NtCurrentTeb()->NtTib.StackLimit, MemoryBasicInfo.BaseAddress);
 #endif
     trace("Guaranteed stack size is %lu.\n", NtCurrentTeb()->GuaranteedStackBytes);
 
@@ -118,9 +123,9 @@ START_TEST(StackOverflow)
     ok_ptr(MemoryBasicInfo.AllocationBase, StackAllocationBase);
     ok_long(MemoryBasicInfo.AllocationProtect, PAGE_READWRITE);
 #ifdef _WIN64
-    ok_long(MemoryBasicInfo.RegionSize, 3 * PAGE_SIZE);
+    ok_long(MemoryBasicInfo.RegionSize, 5 * PAGE_SIZE);
 #else
-    ok_long(MemoryBasicInfo.RegionSize, 2 * PAGE_SIZE);
+    ok_long(MemoryBasicInfo.RegionSize, (ULONG_PTR)NtCurrentTeb()->NtTib.StackBase - (ULONG_PTR)NtCurrentTeb()->NtTib.StackLimit);
 #endif
     ok_long(MemoryBasicInfo.State, MEM_COMMIT);
     ok_long(MemoryBasicInfo.Protect, PAGE_READWRITE);

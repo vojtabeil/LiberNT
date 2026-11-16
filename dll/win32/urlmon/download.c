@@ -21,6 +21,10 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(urlmon);
 
+#ifdef __REACTOS__
+const GUID SID_LiberNTStartNotImplemented = {0x6e1b3ab5, 0x1b7c, 0x4f1e, {0x9a, 0x3d, 0x2c, 0x5e, 0x7f, 0x41, 0xd0, 0x9b}};
+#endif
+
 typedef struct {
     IBindStatusCallback IBindStatusCallback_iface;
     IServiceProvider    IServiceProvider_iface;
@@ -35,6 +39,9 @@ typedef struct {
 
     stop_cache_binding_proc_t onstop_proc;
     void *ctx;
+#ifdef __REACTOS__
+    BOOL start_not_impl;
+#endif
 } DownloadBSC;
 
 static inline DownloadBSC *impl_from_IBindStatusCallback(IBindStatusCallback *iface)
@@ -120,6 +127,9 @@ static HRESULT WINAPI DownloadBSC_OnStartBinding(IBindStatusCallback *iface,
     }
 
     /* Windows seems to ignore E_NOTIMPL if it's returned from the client. */
+#ifdef __REACTOS__
+    This->start_not_impl = hres == E_NOTIMPL;
+#endif
     return hres == E_NOTIMPL ? S_OK : hres;
 }
 
@@ -305,6 +315,16 @@ static HRESULT WINAPI DwlServiceProvider_QueryService(IServiceProvider *iface,
     HRESULT hres;
 
     TRACE("(%p)->(%s %s %p)\n", This, debugstr_guid(guidService), debugstr_guid(riid), ppv);
+
+#ifdef __REACTOS__
+    if(IsEqualGUID(guidService, &SID_LiberNTStartNotImplemented)) {
+        if(!This->start_not_impl)
+            return E_NOINTERFACE;
+        IServiceProvider_AddRef(iface);
+        *ppv = iface;
+        return S_OK;
+    }
+#endif
 
     if(!This->callback)
         return E_NOINTERFACE;

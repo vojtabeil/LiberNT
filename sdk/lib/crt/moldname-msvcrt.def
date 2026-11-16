@@ -62,7 +62,8 @@ rmdir==_rmdir
 rmtmp==_rmtmp
 searchenv==_searchenv
 setmode==_setmode
-snprintf=_snprintf
+snprintf==_snprintf
+vsnprintf==_vsnprintf
 sopen==_sopen
 spawnl==_spawnl
 spawnle==_spawnle
@@ -120,3 +121,4 @@ cabs==_cabs
 hypot==_hypot
 logb==_logb
 nextafter==_nextafter
+wcstoull==_wcstoui64

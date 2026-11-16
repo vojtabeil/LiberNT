@@ -6,12 +6,93 @@
  */
 
 #include "precomp.h"
+#include <tlhelp32.h>
+#include <algorithm>
+#include <map>
 
 static const DWORD ListTimeout = 10000;
 
 // This value needs to be lower than the <timeout> configured in sysreg.xml! (usually 180000)
 // Otherwise, sysreg2 kills the VM before we can kill the process.
-static const DWORD ProcessActivityTimeout = 170000;
+static DWORD ProcessActivityTimeout = 30000;
+static DWORD ProcessRunTimeout = 170000;
+
+static ULONGLONG
+ProcessCpuTime(HANDLE hProcess)
+{
+    FILETIME Creation, Exit, Kernel, User;
+
+    if (!GetProcessTimes(hProcess, &Creation, &Exit, &Kernel, &User))
+        return 0;
+
+    return ((ULONGLONG)Kernel.dwHighDateTime << 32 | Kernel.dwLowDateTime) +
+           ((ULONGLONG)User.dwHighDateTime << 32 | User.dwLowDateTime);
+}
+
+static bool
+DescendantsActiveSince(DWORD RootId, map<DWORD, ULONGLONG>& Seen)
+{
+    vector<PROCESSENTRY32W> Processes;
+    vector<DWORD> Tree(1, RootId);
+    map<DWORD, ULONGLONG> Current;
+    PROCESSENTRY32W Entry;
+    ULONGLONG Used = 0;
+    bool Started = false;
+    HANDLE hSnapshot;
+    size_t i, j;
+
+    hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE)
+        return false;
+    Entry.dwSize = sizeof(Entry);
+    for (BOOL More = Process32FirstW(hSnapshot, &Entry); More; More = Process32NextW(hSnapshot, &Entry))
+        Processes.push_back(Entry);
+    CloseHandle(hSnapshot);
+
+    for (i = 0; i < Tree.size(); i++)
+    {
+        for (j = 0; j < Processes.size(); j++)
+        {
+            DWORD Id = Processes[j].th32ProcessID;
+
+            if (Processes[j].th32ParentProcessID != Tree[i] || Id == RootId || Id == 0)
+                continue;
+            if (find(Tree.begin(), Tree.end(), Id) != Tree.end())
+                continue;
+            Tree.push_back(Id);
+
+            HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, Id);
+            if (!hProcess)
+                continue;
+            ULONGLONG CpuTime = ProcessCpuTime(hProcess);
+            CloseHandle(hProcess);
+
+            map<DWORD, ULONGLONG>::iterator Last = Seen.find(Id);
+            if (Last == Seen.end())
+                Started = true;
+            else if (CpuTime > Last->second)
+                Used += CpuTime - Last->second;
+            Current[Id] = CpuTime;
+        }
+    }
+
+    Seen.swap(Current);
+    return Started || Used >= 10000000;
+}
+
+static VOID
+ReadTimeout(PCWSTR pwszName, DWORD& dwMilliseconds)
+{
+    WCHAR wszSeconds[16];
+
+    if (GetEnvironmentVariableW(pwszName, wszSeconds, ARRAYSIZE(wszSeconds)))
+    {
+        DWORD dwSeconds = wcstoul(wszSeconds, NULL, 10);
+
+        if (dwSeconds >= 1 && dwSeconds <= 3600)
+            dwMilliseconds = dwSeconds * 1000;
+    }
+}
 
 
 /**
@@ -37,6 +118,9 @@ CWineTest::CWineTest()
         m_TestPath = wszDirectory;
         m_TestPath += L"\\bin\\";
     }
+
+    ReadTimeout(L"ROSAUTOTEST_TIMEOUT", ProcessActivityTimeout);
+    ReadTimeout(L"ROSAUTOTEST_RUN_TIMEOUT", ProcessRunTimeout);
 }
 
 /**
@@ -102,7 +186,7 @@ CWineTest::GetNextFile()
         else
         {
             /* Check for 'special' tests (e.g. "kmtest") or full test name ("ntdll_winetest") */
-            if (Module.substr(Module.length() - 4, 4) == L"test")
+            if (Module.length() >= 4 && Module.substr(Module.length() - 4, 4) == L"test")
             {
                 /* Search for files with the pattern "modulename.exe" */
                 FindPath += Configuration.GetModule();
@@ -224,6 +308,8 @@ CWineTest::GetNextTest()
 
         /* Move the pointer to the first test */
         pStart = strchr(m_ListBuffer, '\n');
+        if (!pStart || strncmp(m_ListBuffer, "Valid test names:", 17) != 0)
+            TESTEXCEPTION("The --list command did not print a test list\n");
         pStart += 5;
     }
 
@@ -270,6 +356,14 @@ CWineTest::GetNextTestInfo()
 {
     while(!m_CurrentFile.empty() || GetNextFile())
     {
+        string Program = UnicodeToAscii(m_CurrentFile.substr(0, m_CurrentFile.find_last_of(L'.')));
+
+        if (!CCategories::WantsProgram(Configuration.GetCategories(), Program))
+        {
+            m_CurrentFile.clear();
+            continue;
+        }
+
         /* The user asked for a list of all modules */
         if (Configuration.ListModulesOnly())
         {
@@ -288,8 +382,11 @@ CWineTest::GetNextTestInfo()
                 if(!Configuration.GetTest().empty() && Configuration.GetTest() != m_CurrentTest)
                     continue;
 
+                if (!CCategories::WantsTest(Configuration.GetCategories(), Program, m_CurrentTest))
+                    continue;
+
                 {
-                    auto_ptr<CTestInfo> TestInfo(new CTestInfo());
+                    unique_ptr<CTestInfo> TestInfo(new CTestInfo());
                     size_t UnderscorePosition;
 
                     /* Build the command line */
@@ -347,7 +444,8 @@ CWineTest::RunTest(CTestInfo* TestInfo)
     DWORD BytesAvailable;
     stringstream ss, ssFinish;
     DWORD StartTime;
-    float TotalTime;
+    DWORD TotalTime;
+    char TotalTimeString[32];
     string tailString;
     CPipe Pipe;
     char Buffer[1024];
@@ -363,16 +461,22 @@ CWineTest::RunTest(CTestInfo* TestInfo)
     {
         /* Execute the test */
         CPipedProcess Process(TestInfo->CommandLine, Pipe);
+        ULONGLONG LastCpuTime = ProcessCpuTime(Process.GetProcessHandle());
+        DWORD TestProcessId = GetProcessId(Process.GetProcessHandle());
+        map<DWORD, ULONGLONG> Descendants;
 
         /* Receive all the data from the pipe */
         for (;;)
         {
+            if (GetTickCount() - StartTime >= ProcessRunTimeout)
+                TESTEXCEPTION("Timeout while waiting for the test process (wall clock)\n");
             DWORD dwReadResult = Pipe.Read(Buffer, sizeof(Buffer) - 1, &BytesAvailable, ProcessActivityTimeout);
             if (dwReadResult == ERROR_SUCCESS)
             {
                 /* Output text through StringOut, even while the test is still running */
                 Buffer[BytesAvailable] = 0;
                 tailString = StringOut(tailString.append(string(Buffer)), false);
+                LastCpuTime = ProcessCpuTime(Process.GetProcessHandle());
 
                 if (Configuration.DoSubmit())
                     TestInfo->Log += Buffer;
@@ -385,6 +489,13 @@ CWineTest::RunTest(CTestInfo* TestInfo)
             else if (dwReadResult == WAIT_TIMEOUT)
             {
                 // The process activity timeout above has elapsed without any new data.
+                ULONGLONG CpuTime = ProcessCpuTime(Process.GetProcessHandle());
+                // Tests such as cmd's batch test do their work in processes they start.
+                if (CpuTime - LastCpuTime >= 10000000 || DescendantsActiveSince(TestProcessId, Descendants))
+                {
+                    LastCpuTime = CpuTime;
+                    continue;
+                }
                 TESTEXCEPTION("Timeout while waiting for the test process\n");
             }
             else
@@ -392,6 +503,24 @@ CWineTest::RunTest(CTestInfo* TestInfo)
                 // An unexpected error.
                 TESTEXCEPTION("CPipe::Read failed for the test run\n");
             }
+        }
+
+        /* A broken output pipe is also produced by a crash. Preserve the
+         * exit status instead of reporting only that the test completed. */
+        if (WaitForSingleObject(Process.GetProcessHandle(), ProcessActivityTimeout) != WAIT_OBJECT_0)
+            TESTEXCEPTION("Timeout waiting for test process termination\n");
+        DWORD ExitCode;
+        if (!GetExitCodeProcess(Process.GetProcessHandle(), &ExitCode))
+            TESTEXCEPTION("GetExitCodeProcess failed for the test run\n");
+        if (ExitCode != 0)
+        {
+            char ExitMessage[96];
+            if (!tailString.empty())
+                StringOut(tailString);
+            tailString.clear();
+            snprintf(ExitMessage, sizeof(ExitMessage), "Test process exited with code 0x%08lx\n", ExitCode);
+            StringOut(ExitMessage);
+            TestInfo->Log += ExitMessage;
         }
     }
     catch(CTestException& e)
@@ -407,9 +536,10 @@ CWineTest::RunTest(CTestInfo* TestInfo)
     if(!tailString.empty())
         StringOut(tailString);
 
-    TotalTime = ((float)GetTickCount() - StartTime)/1000;
+    TotalTime = GetTickCount() - StartTime;
+    snprintf(TotalTimeString, sizeof(TotalTimeString), "%lu.%02lu", TotalTime / 1000, ((TotalTime % 1000) * 100) / 1000);
     ssFinish << "Test " << TestInfo->Test << " completed in ";
-    ssFinish << setprecision(2) << fixed << TotalTime << " seconds." << endl;
+    ssFinish << TotalTimeString << " seconds." << endl;
     StringOut(ssFinish.str());
     TestInfo->Log += ssFinish.str();
 }
@@ -420,8 +550,8 @@ CWineTest::RunTest(CTestInfo* TestInfo)
 void
 CWineTest::Run()
 {
-    auto_ptr<CTestList> TestList;
-    auto_ptr<CWebService> WebService;
+    unique_ptr<CTestList> TestList;
+    unique_ptr<CWebService> WebService;
     CTestInfo* TestInfo;
     DWORD ErrorMode = 0;
 
@@ -464,7 +594,7 @@ CWineTest::Run()
     /* Get information for each test to run */
     while((TestInfo = TestList->GetNextTestInfo()) != 0)
     {
-        auto_ptr<CTestInfo> TestInfoPtr(TestInfo);
+        unique_ptr<CTestInfo> TestInfoPtr(TestInfo);
 
         RunTest(TestInfo);
 

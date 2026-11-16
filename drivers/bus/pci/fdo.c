@@ -12,12 +12,15 @@
 #define NDEBUG
 #include <debug.h>
 
+static LONG PciPdoSequenceNumber = -1;
+
 /*** PRIVATE *****************************************************************/
 
 static NTSTATUS
 FdoLocateChildDevice(
     PPCI_DEVICE *Device,
     PFDO_DEVICE_EXTENSION DeviceExtension,
+    ULONG BusNumber,
     PCI_SLOT_NUMBER SlotNumber,
     PPCI_COMMON_CONFIG PciConfig)
 {
@@ -32,9 +35,12 @@ FdoLocateChildDevice(
         CurrentDevice = CONTAINING_RECORD(CurrentEntry, PCI_DEVICE, ListEntry);
 
         /* If both vendor ID and device ID match, it is the same device */
-        if ((PciConfig->VendorID == CurrentDevice->PciConfig.VendorID) &&
-            (PciConfig->DeviceID == CurrentDevice->PciConfig.DeviceID) &&
-            (SlotNumber.u.AsULONG == CurrentDevice->SlotNumber.u.AsULONG))
+        /* The debugger's device is kept under substitute IDs, so its slot alone identifies it */
+        if ((CurrentDevice->BusNumber == BusNumber) &&
+            (SlotNumber.u.AsULONG == CurrentDevice->SlotNumber.u.AsULONG) &&
+            (CurrentDevice->IsDebuggingDevice ||
+             ((PciConfig->VendorID == CurrentDevice->PciConfig.VendorID) &&
+              (PciConfig->DeviceID == CurrentDevice->PciConfig.DeviceID))))
         {
             *Device = CurrentDevice;
             DPRINT("Done\n");
@@ -49,31 +55,6 @@ FdoLocateChildDevice(
     return STATUS_UNSUCCESSFUL;
 }
 
-static
-BOOLEAN
-PciIsDebuggingDevice(
-    _In_ ULONG Bus,
-    _In_ PCI_SLOT_NUMBER SlotNumber)
-{
-    ULONG i;
-
-    if (!HasDebuggingDevice)
-        return FALSE;
-
-    for (i = 0; i < RTL_NUMBER_OF(PciDebuggingDevice); ++i)
-    {
-        if (PciDebuggingDevice[i].InUse &&
-            PciDebuggingDevice[i].BusNumber == Bus &&
-            PciDebuggingDevice[i].DeviceNumber == SlotNumber.u.bits.DeviceNumber &&
-            PciDebuggingDevice[i].FunctionNumber == SlotNumber.u.bits.FunctionNumber)
-        {
-            return TRUE;
-        }
-    }
-
-    return FALSE;
-}
-
 static NTSTATUS
 FdoEnumerateDevices(
     PDEVICE_OBJECT DeviceObject)
@@ -82,62 +63,95 @@ FdoEnumerateDevices(
     PCI_COMMON_CONFIG PciConfig;
     PPCI_DEVICE Device;
     PCI_SLOT_NUMBER SlotNumber;
+    PLIST_ENTRY CurrentEntry;
     ULONG DeviceNumber;
+    ULONG DeviceCount;
     ULONG FunctionNumber;
+    ULONG Bus;
     ULONG Size;
     NTSTATUS Status;
 
-    DPRINT("Called\n");
-
     DeviceExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+    DPRINT("PCI: FdoEnumerateDevices called (bus %lu, range %lu-%lu)\n",
+           DeviceExtension->BusNumber,
+           DeviceExtension->BusRangeStart, DeviceExtension->BusRangeEnd);
 
     DeviceExtension->DeviceListCount = 0;
+    for (CurrentEntry = DeviceExtension->DeviceListHead.Flink;
+         CurrentEntry != &DeviceExtension->DeviceListHead;
+         CurrentEntry = CurrentEntry->Flink)
+    {
+        CONTAINING_RECORD(CurrentEntry, PCI_DEVICE, ListEntry)->Reported = FALSE;
+    }
 
-    /* Enumerate devices on the PCI bus */
+    /*
+     * A PCI FDO owns and enumerates exactly one bus.  BusRangeStart/End is
+     * kept for routing and arbitration, but subordinate buses are enumerated
+     * by the FDO attached to the PCI-to-PCI bridge that owns them.
+     */
+    Bus = DeviceExtension->BusNumber;
+    if (!PciIsBusInRange(DeviceExtension, Bus))
+    {
+        DPRINT1("PCI: Bus %lu is outside FDO range %lu-%lu\n",
+                Bus,
+                DeviceExtension->BusRangeStart,
+                DeviceExtension->BusRangeEnd);
+        return STATUS_INVALID_PARAMETER;
+    }
+
     SlotNumber.u.AsULONG = 0;
-    for (DeviceNumber = 0; DeviceNumber < PCI_MAX_DEVICES; DeviceNumber++)
+
+    DeviceCount = PCI_MAX_DEVICES;
+    if (DeviceExtension->ParentPdo != NULL)
+    {
+        UCHAR PortType = PciPdoExpressPortType(DeviceExtension->ParentPdo);
+
+        if (PortType == PciExpressRootPort || PortType == PciExpressDownstreamSwitchPort)
+            DeviceCount = 1;
+    }
+
+    /* Enumerate devices on this bus */
+    for (DeviceNumber = 0; DeviceNumber < DeviceCount; DeviceNumber++)
     {
         SlotNumber.u.bits.DeviceNumber = DeviceNumber;
         for (FunctionNumber = 0; FunctionNumber < PCI_MAX_FUNCTION; FunctionNumber++)
         {
             SlotNumber.u.bits.FunctionNumber = FunctionNumber;
 
-            DPRINT("Bus %1lu  Device %2lu  Func %1lu\n",
-                   DeviceExtension->BusNumber,
-                   DeviceNumber,
-                   FunctionNumber);
-
             RtlZeroMemory(&PciConfig,
                           sizeof(PCI_COMMON_CONFIG));
 
-            Size = HalGetBusData(PCIConfiguration,
-                                 DeviceExtension->BusNumber,
-                                 SlotNumber.u.AsULONG,
-                                 &PciConfig,
-                                 PCI_COMMON_HDR_LENGTH);
-            DPRINT("Size %lu\n", Size);
+            Size = PciHalReadConfig(DeviceExtension->BusSegment,
+                                    Bus,
+                                    SlotNumber.u.AsULONG,
+                                    &PciConfig,
+                                    0,
+                                    PCI_COMMON_HDR_LENGTH);
+
             if (Size != PCI_COMMON_HDR_LENGTH ||
                 PciConfig.VendorID == PCI_INVALID_VENDORID ||
                 PciConfig.VendorID == 0)
             {
                 if (FunctionNumber == 0)
                 {
+                    /* No device at this slot, try next device number */
                     break;
                 }
                 else
                 {
+                    /* No function at this number, try next function */
                     continue;
                 }
             }
 
-            DPRINT("Bus %1lu  Device %2lu  Func %1lu  VenID 0x%04hx  DevID 0x%04hx\n",
-                   DeviceExtension->BusNumber,
+            DPRINT("PCI: Found Bus %1lu  Device %2lu  Func %1lu  VenID 0x%04hx  DevID 0x%04hx\n",
+                   Bus,
                    DeviceNumber,
                    FunctionNumber,
                    PciConfig.VendorID,
                    PciConfig.DeviceID);
 
-            Status = FdoLocateChildDevice(&Device, DeviceExtension, SlotNumber, &PciConfig);
+            Status = FdoLocateChildDevice(&Device, DeviceExtension, Bus, SlotNumber, &PciConfig);
             if (!NT_SUCCESS(Status))
             {
                 Device = ExAllocatePoolWithTag(NonPagedPool, sizeof(PCI_DEVICE), TAG_PCI);
@@ -150,9 +164,10 @@ FdoEnumerateDevices(
                 RtlZeroMemory(Device,
                               sizeof(PCI_DEVICE));
 
-                Device->BusNumber = DeviceExtension->BusNumber;
+                Device->BusNumber = Bus;
+                Device->Segment = DeviceExtension->BusSegment;
 
-                if (PciIsDebuggingDevice(DeviceExtension->BusNumber, SlotNumber))
+                if (PciIsDeviceDebugging(Bus, SlotNumber))
                 {
                     Device->IsDebuggingDevice = TRUE;
 
@@ -170,6 +185,9 @@ FdoEnumerateDevices(
                     {
                         PciConfig.VendorID = 0xDEAD;
                         PciConfig.DeviceID = 0xBEEF;
+                        PciConfig.BaseClass = PCI_CLASS_NOT_DEFINED;
+                        PciConfig.SubClass = 0;
+                        PciConfig.ProgIf = 0;
                     }
                 }
 
@@ -187,6 +205,7 @@ FdoEnumerateDevices(
                     &DeviceExtension->DeviceListLock);
             }
 
+            Device->Reported = TRUE;
             DeviceExtension->DeviceListCount++;
 
             /* Skip to next device if the current one is not a multifunction device */
@@ -223,7 +242,7 @@ FdoQueryBusRelations(
 
     UNREFERENCED_PARAMETER(IrpSp);
 
-    DPRINT("Called\n");
+    DPRINT("PCI: FdoQueryBusRelations called\n");
 
     ErrorStatus = STATUS_INSUFFICIENT_RESOURCES;
 
@@ -231,9 +250,16 @@ FdoQueryBusRelations(
 
     ErrorOccurred = FALSE;
 
+    /* Acquire the global PCI lock to serialize bus enumeration */
+    KeEnterCriticalRegion();
+    KeWaitForSingleObject(&((PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension)->LinkQuiescentLock, Executive, KernelMode, FALSE, NULL);
+    KeWaitForSingleObject(&PciGlobalLock, Executive, KernelMode, FALSE, NULL);
+
     FdoEnumerateDevices(DeviceObject);
 
     DeviceExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+    DPRINT("PCI: FdoQueryBusRelations enumerated %lu devices\n",
+            DeviceExtension->DeviceListCount);
 
     if (Irp->IoStatus.Information)
     {
@@ -246,7 +272,12 @@ FdoQueryBusRelations(
            sizeof(Relations->Objects) * (DeviceExtension->DeviceListCount - 1);
     Relations = ExAllocatePoolWithTag(PagedPool, Size, TAG_PCI);
     if (!Relations)
+    {
+        KeSetEvent(&PciGlobalLock, IO_NO_INCREMENT, FALSE);
+        KeSetEvent(&DeviceExtension->LinkQuiescentLock, IO_NO_INCREMENT, FALSE);
+        KeLeaveCriticalRegion();
         return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     Relations->Count = DeviceExtension->DeviceListCount;
 
@@ -255,18 +286,40 @@ FdoQueryBusRelations(
     while (CurrentEntry != &DeviceExtension->DeviceListHead)
     {
         Device = CONTAINING_RECORD(CurrentEntry, PCI_DEVICE, ListEntry);
+        CurrentEntry = CurrentEntry->Flink;
 
         PdoDeviceExtension = NULL;
 
+        if (!Device->Reported)
+        {
+            if (!Device->Pdo)
+            {
+                KIRQL OldIrql;
+
+                KeAcquireSpinLock(&DeviceExtension->DeviceListLock, &OldIrql);
+                RemoveEntryList(&Device->ListEntry);
+                KeReleaseSpinLock(&DeviceExtension->DeviceListLock, OldIrql);
+                ExFreePoolWithTag(Device, TAG_PCI);
+            }
+            continue;
+        }
+
         if (!Device->Pdo)
         {
+            WCHAR PdoNameBuffer[32];
+            UNICODE_STRING PdoName;
+
+            RtlStringCbPrintfW(PdoNameBuffer, sizeof(PdoNameBuffer), L"\\Device\\NTPNP_PCI%04ld",
+                               InterlockedIncrement(&PciPdoSequenceNumber));
+            RtlInitUnicodeString(&PdoName, PdoNameBuffer);
+
             /* Create a physical device object for the
                device as it does not already have one */
             Status = IoCreateDevice(DeviceObject->DriverObject,
                                     sizeof(PDO_DEVICE_EXTENSION),
-                                    NULL,
+                                    &PdoName,
                                     FILE_DEVICE_CONTROLLER,
-                                    FILE_AUTOGENERATED_DEVICE_NAME,
+                                    0,
                                     FALSE,
                                     &Device->Pdo);
             if (!NT_SUCCESS(Status))
@@ -285,6 +338,8 @@ FdoQueryBusRelations(
 
             RtlZeroMemory(PdoDeviceExtension, sizeof(PDO_DEVICE_EXTENSION));
 
+            IoInitializeRemoveLock(&PdoDeviceExtension->RemoveLock, TAG_PCI, 0, 0);
+
             PdoDeviceExtension->Common.IsFDO = FALSE;
 
             PdoDeviceExtension->Common.DeviceObject = Device->Pdo;
@@ -295,6 +350,10 @@ FdoQueryBusRelations(
 
             PdoDeviceExtension->PciDevice = Device;
 
+            /* Initialize Wait/Wake support */
+            KeInitializeSpinLock(&PdoDeviceExtension->WaitWakeSpinLock);
+            PdoDeviceExtension->WaitWakeState = 0;
+
             /* Add Device ID string */
             Status = PciCreateDeviceIDString(&PdoDeviceExtension->DeviceID, Device);
             if (!NT_SUCCESS(Status))
@@ -304,7 +363,8 @@ FdoQueryBusRelations(
                 break;
             }
 
-            DPRINT("DeviceID: %S\n", PdoDeviceExtension->DeviceID.Buffer);
+            DPRINT("PCI: Created PDO for DeviceID: %S\n",
+                   PdoDeviceExtension->DeviceID.Buffer);
 
             /* Add Instance ID string */
             Status = PciCreateInstanceIDString(&PdoDeviceExtension->InstanceID, Device);
@@ -359,9 +419,12 @@ FdoQueryBusRelations(
         Relations->Objects[i] = Device->Pdo;
 
         i++;
-
-        CurrentEntry = CurrentEntry->Flink;
     }
+
+    /* Release the global PCI lock */
+    KeSetEvent(&PciGlobalLock, IO_NO_INCREMENT, FALSE);
+    KeSetEvent(&((PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension)->LinkQuiescentLock, IO_NO_INCREMENT, FALSE);
+    KeLeaveCriticalRegion();
 
     if (ErrorOccurred)
     {
@@ -389,6 +452,142 @@ FdoQueryBusRelations(
 }
 
 
+static
+VOID
+NTAPI
+FdoSlotNotify(
+    _In_ PVOID Context,
+    _In_ ULONG NotifyCode)
+{
+    PPCI_SLOT_NOTIFY Slot = Context;
+    PFDO_DEVICE_EXTENSION DeviceExtension = Slot->FdoExtension;
+    PDEVICE_OBJECT Pdo = NULL;
+    PLIST_ENTRY CurrentEntry;
+    KIRQL OldIrql;
+
+    DPRINT("PCI: notify %#lx for slot %lu on bus %lu\n", NotifyCode, Slot->DeviceNumber, DeviceExtension->BusNumber);
+
+    switch (NotifyCode)
+    {
+        case PCI_ACPI_NOTIFY_BUS_CHECK:
+        case PCI_ACPI_NOTIFY_DEVICE_CHECK:
+            IoInvalidateDeviceRelations(DeviceExtension->PhysicalDeviceObject, BusRelations);
+            break;
+
+        case PCI_ACPI_NOTIFY_EJECT_REQUEST:
+            KeAcquireSpinLock(&DeviceExtension->DeviceListLock, &OldIrql);
+            for (CurrentEntry = DeviceExtension->DeviceListHead.Flink;
+                 CurrentEntry != &DeviceExtension->DeviceListHead;
+                 CurrentEntry = CurrentEntry->Flink)
+            {
+                PPCI_DEVICE Device = CONTAINING_RECORD(CurrentEntry, PCI_DEVICE, ListEntry);
+
+                if (Device->Reported && Device->Pdo != NULL &&
+                    Device->SlotNumber.u.bits.DeviceNumber == Slot->DeviceNumber &&
+                    Device->SlotNumber.u.bits.FunctionNumber == 0)
+                {
+                    Pdo = Device->Pdo;
+                    ObReferenceObject(Pdo);
+                    break;
+                }
+            }
+            KeReleaseSpinLock(&DeviceExtension->DeviceListLock, OldIrql);
+
+            if (Pdo != NULL)
+            {
+                IoRequestDeviceEject(Pdo);
+                ObDereferenceObject(Pdo);
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+static
+VOID
+FdoRegisterSlotNotifications(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension)
+{
+    ACPI_INTERFACE_STANDARD2 Interface;
+    PPCI_SLOT_NOTIFY Slot;
+    ULONG DeviceNumber;
+
+    if (!IsListEmpty(&DeviceExtension->SlotNotifyListHead))
+        return;
+
+    for (DeviceNumber = 0; DeviceNumber < PCI_MAX_DEVICES; DeviceNumber++)
+    {
+        if (!NT_SUCCESS(PciAcpiQuerySlotNotifyInterface(DeviceExtension->BusSegment,
+                                                        DeviceExtension->BusNumber,
+                                                        DeviceNumber,
+                                                        0,
+                                                        &Interface)))
+        {
+            continue;
+        }
+
+        Slot = ExAllocatePoolWithTag(NonPagedPool, sizeof(*Slot), TAG_PCI);
+        if (Slot == NULL)
+        {
+            Interface.InterfaceDereference(Interface.Context);
+            return;
+        }
+
+        Slot->FdoExtension = DeviceExtension;
+        Slot->DeviceNumber = DeviceNumber;
+        Slot->Interface = Interface;
+        if (!NT_SUCCESS(Slot->Interface.RegisterForDeviceNotifications(Slot->Interface.Context, FdoSlotNotify, Slot)))
+        {
+            Slot->Interface.InterfaceDereference(Slot->Interface.Context);
+            ExFreePoolWithTag(Slot, TAG_PCI);
+            continue;
+        }
+
+        InsertTailList(&DeviceExtension->SlotNotifyListHead, &Slot->ListEntry);
+    }
+}
+
+static
+VOID
+FdoUnregisterSlotNotifications(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension)
+{
+    PPCI_SLOT_NOTIFY Slot;
+
+    while (!IsListEmpty(&DeviceExtension->SlotNotifyListHead))
+    {
+        Slot = CONTAINING_RECORD(RemoveHeadList(&DeviceExtension->SlotNotifyListHead), PCI_SLOT_NOTIFY, ListEntry);
+        Slot->Interface.UnregisterForDeviceNotifications(Slot->Interface.Context);
+        Slot->Interface.InterfaceDereference(Slot->Interface.Context);
+        ExFreePoolWithTag(Slot, TAG_PCI);
+    }
+}
+
+static BOOLEAN
+PciFdoReserveWindows(
+    _Inout_ PPCI_ADDRESS_WINDOW *Windows,
+    _Inout_ PULONG Capacity,
+    _In_ ULONG Needed)
+{
+    PPCI_ADDRESS_WINDOW NewWindows;
+
+    if (Needed <= *Capacity)
+        return TRUE;
+
+    NewWindows = ExAllocatePoolWithTag(NonPagedPool, Needed * sizeof(PCI_ADDRESS_WINDOW), TAG_PCI);
+    if (NewWindows == NULL)
+        return FALSE;
+
+    RtlZeroMemory(NewWindows, Needed * sizeof(PCI_ADDRESS_WINDOW));
+    if (*Windows != NULL)
+        ExFreePoolWithTag(*Windows, TAG_PCI);
+    *Windows = NewWindows;
+    *Capacity = Needed;
+    return TRUE;
+}
+
 static NTSTATUS
 FdoStartDevice(
     IN PDEVICE_OBJECT DeviceObject,
@@ -398,11 +597,17 @@ FdoStartDevice(
     PCM_RESOURCE_LIST AllocatedResources;
     PCM_PARTIAL_RESOURCE_DESCRIPTOR ResourceDescriptor;
     ULONG FoundBusNumber = FALSE;
+    ULONG IoWindowsNeeded = 0;
+    ULONG MemoryWindowsNeeded = 0;
     ULONG i;
-
-    DPRINT("Called\n");
+#ifdef HAL_PCI_HAS_MSI_SUPPORT_QUERY
+    BOOLEAN HalMsiSupported;
+    USHORT EffectiveSegment;
+#endif
 
     DeviceExtension = (PFDO_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+
+    DPRINT("PCI: FdoStartDevice called\n");
 
     AllocatedResources = IoGetCurrentIrpStackLocation(Irp)->Parameters.StartDevice.AllocatedResources;
     if (!AllocatedResources)
@@ -421,10 +626,35 @@ FdoStartDevice(
         AllocatedResources->List[0].PartialResourceList.Revision != 1)
         return STATUS_REVISION_MISMATCH;
 
-    ASSERT(DeviceExtension->State == dsStopped);
-
     /* By default, use the bus number in the resource list header */
     DeviceExtension->BusNumber = AllocatedResources->List[0].BusNumber;
+    DeviceExtension->BusSegment = 0;
+    DeviceExtension->BusRangeStart = DeviceExtension->BusNumber;
+    DeviceExtension->BusRangeEnd = DeviceExtension->BusNumber;
+    DeviceExtension->IoWindowCount = 0;
+    DeviceExtension->MemoryWindowCount = 0;
+
+    for (i = 0; i < AllocatedResources->List[0].PartialResourceList.Count; i++)
+    {
+        ResourceDescriptor = &AllocatedResources->List[0].PartialResourceList.PartialDescriptors[i];
+        if (ResourceDescriptor->Type == CmResourceTypePort &&
+            (ResourceDescriptor->Flags & CM_RESOURCE_PORT_WINDOW_DECODE))
+        {
+            IoWindowsNeeded++;
+        }
+        else if ((ResourceDescriptor->Type == CmResourceTypeMemory ||
+                  ResourceDescriptor->Type == CmResourceTypeMemoryLarge) &&
+                 (ResourceDescriptor->Flags & CM_RESOURCE_MEMORY_WINDOW_DECODE))
+        {
+            MemoryWindowsNeeded++;
+        }
+    }
+
+    if (!PciFdoReserveWindows(&DeviceExtension->IoWindows, &DeviceExtension->IoWindowCapacity, IoWindowsNeeded) ||
+        !PciFdoReserveWindows(&DeviceExtension->MemoryWindows, &DeviceExtension->MemoryWindowCapacity, MemoryWindowsNeeded))
+    {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
     for (i = 0; i < AllocatedResources->List[0].PartialResourceList.Count; i++)
     {
@@ -438,24 +668,121 @@ FdoStartDevice(
                 /* Use this one instead */
                 ASSERT(AllocatedResources->List[0].BusNumber == ResourceDescriptor->u.BusNumber.Start);
                 DeviceExtension->BusNumber = ResourceDescriptor->u.BusNumber.Start;
-                DPRINT("Found bus number resource: %lu\n", DeviceExtension->BusNumber);
-                FoundBusNumber = TRUE;
+                DeviceExtension->BusRangeStart = ResourceDescriptor->u.BusNumber.Start;
+                {
+                    ULONG length = ResourceDescriptor->u.BusNumber.Length;
+                    ULONG endBus = ResourceDescriptor->u.BusNumber.Start;
+
+                    if (length > 0)
+                    {
+                        endBus = ResourceDescriptor->u.BusNumber.Start + length - 1;
+                        if (endBus < ResourceDescriptor->u.BusNumber.Start)
+                            endBus = ResourceDescriptor->u.BusNumber.Start;
+                        if (endBus > 0xFF)
+                            endBus = 0xFF;
+                    }
+
+                    DeviceExtension->BusRangeEnd = endBus;
+                }
+                DPRINT("Found bus number resource: %lu-%lu\n",
+                       DeviceExtension->BusRangeStart,
+                       DeviceExtension->BusRangeEnd);
+               FoundBusNumber = TRUE;
+               break;
+
+            case CmResourceTypePort:
+                if ((ResourceDescriptor->Flags & CM_RESOURCE_PORT_WINDOW_DECODE) &&
+                    ResourceDescriptor->u.Port.Length != 0 &&
+                    DeviceExtension->IoWindowCount < DeviceExtension->IoWindowCapacity)
+                {
+                    PPCI_ADDRESS_WINDOW Window = &DeviceExtension->IoWindows[DeviceExtension->IoWindowCount];
+                    ULONGLONG Length = ResourceDescriptor->u.Port.Length;
+
+                    Window->Start = ResourceDescriptor->u.Port.Start.QuadPart;
+                    if (Window->Start > MAXULONGLONG - (Length - 1))
+                        break;
+                    Window->End = Window->Start + Length - 1;
+                    Window->Prefetchable = FALSE;
+                    DeviceExtension->IoWindowCount++;
+                    DPRINT("PCI: Bus %lu I/O aperture [0x%I64x-0x%I64x]\n",
+                            DeviceExtension->BusNumber,
+                            Window->Start,
+                            Window->End);
+                }
+                break;
+
+            case CmResourceTypeMemoryLarge:
+            case CmResourceTypeMemory:
+                if ((ResourceDescriptor->Flags & CM_RESOURCE_MEMORY_WINDOW_DECODE) &&
+                    PciMemoryDescriptorLength(ResourceDescriptor) != 0 &&
+                    DeviceExtension->MemoryWindowCount < DeviceExtension->MemoryWindowCapacity)
+                {
+                    PPCI_ADDRESS_WINDOW Window = &DeviceExtension->MemoryWindows[DeviceExtension->MemoryWindowCount];
+                    ULONGLONG Length = PciMemoryDescriptorLength(ResourceDescriptor);
+
+                    Window->Start = ResourceDescriptor->u.Memory.Start.QuadPart;
+                    if (Window->Start > MAXULONGLONG - (Length - 1))
+                        break;
+                    Window->End = Window->Start + Length - 1;
+                    Window->Prefetchable = !!(ResourceDescriptor->Flags & CM_RESOURCE_MEMORY_PREFETCHABLE);
+                    DeviceExtension->MemoryWindowCount++;
+                    DPRINT("PCI: Bus %lu memory aperture [0x%I64x-0x%I64x] prefetch=%u\n",
+                            DeviceExtension->BusNumber,
+                            Window->Start,
+                            Window->End,
+                            Window->Prefetchable);
+                }
                 break;
 
             default:
-                DPRINT("Unknown resource descriptor type 0x%x\n", ResourceDescriptor->Type);
+                DPRINT("Unknown resource descriptor type 0x%x\n",
+                       ResourceDescriptor->Type);
         }
     }
+
+    /*
+     * On x86 ACPI platforms, pci.sys owns the MSI policy decision. Where
+     * message interrupts additionally depend on platform interrupt
+     * controller routing, ask HAL before exposing MSI/MSI-X resources.
+     */
+#ifdef HAL_PCI_HAS_MSI_SUPPORT_QUERY
+    EffectiveSegment = DeviceExtension->BusSegment;
+    HalMsiSupported = HalQueryPciMsiSupport(DeviceExtension->BusSegment,
+                                            (UCHAR)DeviceExtension->BusNumber,
+                                            NULL,
+                                            &DeviceExtension->OscStatusFlags,
+                                            &DeviceExtension->OscControlGranted,
+                                            &EffectiveSegment,
+                                            &DeviceExtension->OscMasked);
+    DeviceExtension->BusSegment = EffectiveSegment;
+    DeviceExtension->MsiSupported = PciMsiEnabledByPolicy && HalMsiSupported;
+#else
+    DeviceExtension->MsiSupported = PciMsiEnabledByPolicy;
+#endif
 
     InitializeListHead(&DeviceExtension->DeviceListHead);
     KeInitializeSpinLock(&DeviceExtension->DeviceListLock);
     DeviceExtension->DeviceListCount = 0;
-    DeviceExtension->State = dsStarted;
+
+    InitializeListHead(&DeviceExtension->ArbiterListHead);
+    PciCreateFdoArbiters(DeviceExtension);
+
+    /* Initialize power management S-to-D mapping */
+    DeviceExtension->SystemPowerState = PowerSystemWorking;
+    DeviceExtension->StoD_PowerMapping[PowerSystemWorking] = PowerDeviceD0;
+    DeviceExtension->StoD_PowerMapping[PowerSystemSleeping1] = PowerDeviceD3;
+    DeviceExtension->StoD_PowerMapping[PowerSystemSleeping2] = PowerDeviceD3;
+    DeviceExtension->StoD_PowerMapping[PowerSystemSleeping3] = PowerDeviceD3;
+    DeviceExtension->StoD_PowerMapping[PowerSystemHibernate] = PowerDeviceD3;
+    DeviceExtension->StoD_PowerMapping[PowerSystemShutdown] = PowerDeviceD3;
+    KeInitializeSpinLock(&DeviceExtension->WaitWakeSpinLock);
 
     ExInterlockedInsertTailList(
         &DriverExtension->BusListHead,
         &DeviceExtension->ListEntry,
         &DriverExtension->BusListLock);
+
+    FdoRegisterSlotNotifications(DeviceExtension);
 
   Irp->IoStatus.Information = 0;
 
@@ -487,46 +814,68 @@ FdoPnpControl(
     DeviceExtension = DeviceObject->DeviceExtension;
 
     IrpSp = IoGetCurrentIrpStackLocation(Irp);
+
+    Status = IoAcquireRemoveLock(&DeviceExtension->RemoveLock, Irp);
+    if (!NT_SUCCESS(Status))
+    {
+        Irp->IoStatus.Status = Status;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return Status;
+    }
+
     switch (IrpSp->MinorFunction)
     {
-#if 0
         case IRP_MN_CANCEL_REMOVE_DEVICE:
-            Status = STATUS_NOT_IMPLEMENTED;
-            break;
-
-        case IRP_MN_CANCEL_STOP_DEVICE:
-            Status = STATUS_NOT_IMPLEMENTED;
+            Status = STATUS_SUCCESS;
             break;
 
         case IRP_MN_DEVICE_USAGE_NOTIFICATION:
-            Status = STATUS_NOT_IMPLEMENTED;
-            break;
-
-        case IRP_MN_FILTER_RESOURCE_REQUIREMENTS:
-            Status = STATUS_NOT_IMPLEMENTED;
-            break;
-#endif
-        case IRP_MN_QUERY_DEVICE_RELATIONS:
-            if (IrpSp->Parameters.QueryDeviceRelations.Type != BusRelations)
-                break;
-
-            Status = FdoQueryBusRelations(DeviceObject, Irp, IrpSp);
+            Status = STATUS_UNSUCCESSFUL;
+            if (IoForwardIrpSynchronously(DeviceExtension->Ldo, Irp))
+            {
+                Status = Irp->IoStatus.Status;
+            }
+            IoReleaseRemoveLock(&DeviceExtension->RemoveLock, Irp);
             Irp->IoStatus.Status = Status;
             IoCompleteRequest(Irp, IO_NO_INCREMENT);
             return Status;
-#if 0
-        case IRP_MN_QUERY_PNP_DEVICE_STATE:
-            Status = STATUS_NOT_IMPLEMENTED;
+
+        case IRP_MN_QUERY_DEVICE_RELATIONS:
+            if (IrpSp->Parameters.QueryDeviceRelations.Type != BusRelations)
+            {
+                Status = Irp->IoStatus.Status;
+                break;
+            }
+
+            Status = FdoQueryBusRelations(DeviceObject, Irp, IrpSp);
+            if (!NT_SUCCESS(Status))
+            {
+                IoReleaseRemoveLock(&DeviceExtension->RemoveLock, Irp);
+                Irp->IoStatus.Status = Status;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return Status;
+            }
             break;
 
         case IRP_MN_QUERY_REMOVE_DEVICE:
-            Status = STATUS_NOT_IMPLEMENTED;
+            /* Succeed query - don't change state yet */
+            Status = STATUS_SUCCESS;
             break;
-#endif
+
         case IRP_MN_START_DEVICE:
             DPRINT("IRP_MN_START_DEVICE received\n");
-            Status = STATUS_UNSUCCESSFUL;
 
+            /* Begin transition to Started before forwarding */
+            Status = PciBeginStateTransition(DeviceExtension, PciStarted);
+            if (!NT_SUCCESS(Status))
+            {
+                IoReleaseRemoveLock(&DeviceExtension->RemoveLock, Irp);
+                Irp->IoStatus.Status = Status;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return Status;
+            }
+
+            Status = STATUS_UNSUCCESSFUL;
             if (IoForwardIrpSynchronously(DeviceExtension->Ldo, Irp))
             {
                 Status = Irp->IoStatus.Status;
@@ -536,46 +885,85 @@ FdoPnpControl(
                 }
             }
 
+            if (NT_SUCCESS(Status))
+            {
+                PciCommitStateTransition(DeviceExtension, PciStarted);
+            }
+            else
+            {
+                PciCancelStateTransition(DeviceExtension, PciStarted);
+            }
+
+            IoReleaseRemoveLock(&DeviceExtension->RemoveLock, Irp);
             Irp->IoStatus.Status = Status;
             IoCompleteRequest(Irp, IO_NO_INCREMENT);
             return Status;
 
         case IRP_MN_QUERY_STOP_DEVICE:
-            /* We don't support stopping yet */
-            Status = STATUS_UNSUCCESSFUL;
-            Irp->IoStatus.Status = Status;
-            IoCompleteRequest(Irp, IO_NO_INCREMENT);
-            return Status;
+            /* Begin transition to Stopped to indicate willingness to stop */
+            Status = PciBeginStateTransition(DeviceExtension, PciStopped);
+            if (!NT_SUCCESS(Status))
+            {
+                IoReleaseRemoveLock(&DeviceExtension->RemoveLock, Irp);
+                Irp->IoStatus.Status = Status;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return Status;
+            }
+            break;
+
+        case IRP_MN_CANCEL_STOP_DEVICE:
+            /* Restore previous state since stop was cancelled */
+            PciCancelStateTransition(DeviceExtension, PciStopped);
+            Status = STATUS_SUCCESS;
+            break;
 
         case IRP_MN_STOP_DEVICE:
-            /* We can't fail this one so we fail the QUERY_STOP request that precedes it */
+            /* Commit the stop transition that was begun in QUERY_STOP */
+            PciCommitStateTransition(DeviceExtension, PciStopped);
+            Status = STATUS_SUCCESS;
             break;
-#if 0
+
         case IRP_MN_SURPRISE_REMOVAL:
-            Status = STATUS_NOT_IMPLEMENTED;
+            PciBeginStateTransition(DeviceExtension, PciSurpriseRemoved);
+            Status = STATUS_SUCCESS;
             break;
-#endif
 
         case IRP_MN_FILTER_RESOURCE_REQUIREMENTS:
+            Status = Irp->IoStatus.Status;
             break;
 
         case IRP_MN_REMOVE_DEVICE:
-            /* Detach the device object from the device stack */
+            PciBeginStateTransition(DeviceExtension, PciDeleted);
+            FdoUnregisterSlotNotifications(DeviceExtension);
+            if (DeviceExtension->ListEntry.Flink != NULL)
+            {
+                KIRQL OldIrql;
+
+                KeAcquireSpinLock(&DriverExtension->BusListLock, &OldIrql);
+                RemoveEntryList(&DeviceExtension->ListEntry);
+                KeReleaseSpinLock(&DriverExtension->BusListLock, OldIrql);
+            }
+            PciDestroyFdoArbiters(DeviceExtension);
+            IoReleaseRemoveLockAndWait(&DeviceExtension->RemoveLock, Irp);
+            Irp->IoStatus.Status = STATUS_SUCCESS;
+            IoSkipCurrentIrpStackLocation(Irp);
+            Status = IoCallDriver(DeviceExtension->Ldo, Irp);
             IoDetachDevice(DeviceExtension->Ldo);
-
-            /* Delete the device object */
+            if (DeviceExtension->IoWindows != NULL)
+                ExFreePoolWithTag(DeviceExtension->IoWindows, TAG_PCI);
+            if (DeviceExtension->MemoryWindows != NULL)
+                ExFreePoolWithTag(DeviceExtension->MemoryWindows, TAG_PCI);
             IoDeleteDevice(DeviceObject);
-
-            /* Return success */
-            Status = STATUS_SUCCESS;
-            break;
+            return Status;
 
         case IRP_MN_QUERY_CAPABILITIES:
         case IRP_MN_QUERY_PNP_DEVICE_STATE:
             /* Don't print the warning, too much noise */
+            Status = Irp->IoStatus.Status;
             break;
 
         default:
+            Status = Irp->IoStatus.Status;
             DPRINT1("Unknown PNP minor function 0x%x\n", IrpSp->MinorFunction);
             break;
     }
@@ -583,12 +971,78 @@ FdoPnpControl(
     Irp->IoStatus.Status = Status;
     IoSkipCurrentIrpStackLocation(Irp);
     Status = IoCallDriver(DeviceExtension->Ldo, Irp);
+    IoReleaseRemoveLock(&DeviceExtension->RemoveLock, Irp);
 
     DPRINT("Leaving. Status 0x%lx\n", Status);
 
     return Status;
 }
 
+
+static VOID NTAPI
+FdoDevicePowerComplete(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ UCHAR MinorFunction,
+    _In_ POWER_STATE PowerState,
+    _In_opt_ PVOID Context,
+    _In_ PIO_STATUS_BLOCK IoStatus)
+{
+    PIRP SystemIrp = (PIRP)Context;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(MinorFunction);
+    UNREFERENCED_PARAMETER(PowerState);
+
+    /* Complete the original system power IRP */
+    SystemIrp->IoStatus.Status = IoStatus->Status;
+    PoStartNextPowerIrp(SystemIrp);
+    IoCompleteRequest(SystemIrp, IO_NO_INCREMENT);
+}
+
+static IO_COMPLETION_ROUTINE FdoSystemPowerComplete;
+static NTSTATUS
+NTAPI
+FdoSystemPowerComplete(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp,
+    _In_ PVOID Context)
+{
+    PFDO_DEVICE_EXTENSION DeviceExtension = (PFDO_DEVICE_EXTENSION)Context;
+    PIO_STACK_LOCATION IrpSp = IoGetCurrentIrpStackLocation(Irp);
+    SYSTEM_POWER_STATE SystemState;
+    DEVICE_POWER_STATE DeviceState;
+    POWER_STATE PowerState;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    if (!NT_SUCCESS(Irp->IoStatus.Status))
+    {
+        PoStartNextPowerIrp(Irp);
+        return STATUS_SUCCESS;
+    }
+
+    SystemState = IrpSp->Parameters.Power.State.SystemState;
+    DeviceState = DeviceExtension->StoD_PowerMapping[SystemState];
+
+    /* Request corresponding device power IRP */
+    PowerState.DeviceState = DeviceState;
+    Status = PoRequestPowerIrp(DeviceExtension->Common.DeviceObject,
+                                IRP_MN_SET_POWER,
+                                PowerState,
+                                FdoDevicePowerComplete,
+                                Irp,
+                                NULL);
+
+    if (!NT_SUCCESS(Status))
+    {
+        Irp->IoStatus.Status = Status;
+        PoStartNextPowerIrp(Irp);
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    }
+
+    return STATUS_MORE_PROCESSING_REQUIRED;
+}
 
 NTSTATUS
 FdoPowerControl(
@@ -604,19 +1058,61 @@ FdoPowerControl(
  */
 {
     PFDO_DEVICE_EXTENSION DeviceExtension;
-    NTSTATUS Status;
+    PIO_STACK_LOCATION IrpSp;
 
     DPRINT("Called\n");
 
     DeviceExtension = DeviceObject->DeviceExtension;
+    IrpSp = IoGetCurrentIrpStackLocation(Irp);
 
-    PoStartNextPowerIrp(Irp);
-    IoSkipCurrentIrpStackLocation(Irp);
-    Status = PoCallDriver(DeviceExtension->Ldo, Irp);
+    switch (IrpSp->MinorFunction)
+    {
+        case IRP_MN_SET_POWER:
+            if (IrpSp->Parameters.Power.Type == SystemPowerState)
+            {
+                DPRINT("FDO IRP_MN_SET_POWER: System state S%d\n",
+                       IrpSp->Parameters.Power.State.SystemState - PowerSystemWorking);
 
-    DPRINT("Leaving. Status 0x%X\n", Status);
+                /* System power: forward down, then request device power on completion */
+                DeviceExtension->SystemPowerState = IrpSp->Parameters.Power.State.SystemState;
+                IoMarkIrpPending(Irp);
+                IoCopyCurrentIrpStackLocationToNext(Irp);
+                IoSetCompletionRoutine(Irp, FdoSystemPowerComplete, DeviceExtension, TRUE, TRUE, TRUE);
+                PoCallDriver(DeviceExtension->Ldo, Irp);
+                return STATUS_PENDING;
+            }
+            else
+            {
+                DPRINT("FDO IRP_MN_SET_POWER: Device state D%d\n",
+                       IrpSp->Parameters.Power.State.DeviceState - PowerDeviceD0);
 
-    return Status;
+                /* Device power: just forward down */
+                PoStartNextPowerIrp(Irp);
+                IoSkipCurrentIrpStackLocation(Irp);
+                return PoCallDriver(DeviceExtension->Ldo, Irp);
+            }
+
+        case IRP_MN_QUERY_POWER:
+            DPRINT("FDO IRP_MN_QUERY_POWER: Type %d\n",
+                   IrpSp->Parameters.Power.Type);
+            /* Always succeed */
+            PoStartNextPowerIrp(Irp);
+            Irp->IoStatus.Status = STATUS_SUCCESS;
+            IoSkipCurrentIrpStackLocation(Irp);
+            return PoCallDriver(DeviceExtension->Ldo, Irp);
+
+        case IRP_MN_WAIT_WAKE:
+            DPRINT("FDO IRP_MN_WAIT_WAKE\n");
+            PoStartNextPowerIrp(Irp);
+            IoSkipCurrentIrpStackLocation(Irp);
+            return PoCallDriver(DeviceExtension->Ldo, Irp);
+
+        default:
+            DPRINT("FDO power IRP minor 0x%x\n", IrpSp->MinorFunction);
+            PoStartNextPowerIrp(Irp);
+            IoSkipCurrentIrpStackLocation(Irp);
+            return PoCallDriver(DeviceExtension->Ldo, Irp);
+    }
 }
 
 /* EOF */

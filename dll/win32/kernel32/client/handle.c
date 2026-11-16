@@ -40,22 +40,18 @@ WINAPI
 GetHandleInformation(IN HANDLE hObject,
                      OUT LPDWORD lpdwFlags)
 {
-    OBJECT_HANDLE_FLAG_INFORMATION HandleFlags;
+    OBJECT_HANDLE_ATTRIBUTE_INFORMATION HandleInfo;
     ULONG BytesWritten;
     NTSTATUS Status;
     DWORD Flags;
 
     hObject = TranslateStdHandle(hObject);
 
-    if (IsConsoleHandle(hObject))
-    {
-        return GetConsoleHandleInformation(hObject, lpdwFlags);
-    }
 
     Status = NtQueryObject(hObject,
                            ObjectHandleFlagInformation,
-                           &HandleFlags,
-                           sizeof(HandleFlags),
+                           &HandleInfo,
+                           sizeof(OBJECT_HANDLE_ATTRIBUTE_INFORMATION),
                            &BytesWritten);
     if (!NT_SUCCESS(Status))
     {
@@ -64,8 +60,8 @@ GetHandleInformation(IN HANDLE hObject,
     }
 
     Flags = 0;
-    if (HandleFlags.Inherit) Flags |= HANDLE_FLAG_INHERIT;
-    if (HandleFlags.ProtectFromClose) Flags |= HANDLE_FLAG_PROTECT_FROM_CLOSE;
+    if (HandleInfo.Inherit) Flags |= HANDLE_FLAG_INHERIT;
+    if (HandleInfo.ProtectFromClose) Flags |= HANDLE_FLAG_PROTECT_FROM_CLOSE;
     *lpdwFlags = Flags;
     return TRUE;
 }
@@ -79,21 +75,17 @@ SetHandleInformation(IN HANDLE hObject,
                      IN DWORD dwMask,
                      IN DWORD dwFlags)
 {
-    OBJECT_HANDLE_FLAG_INFORMATION HandleFlags;
+    OBJECT_HANDLE_ATTRIBUTE_INFORMATION HandleInfo;
     ULONG BytesWritten;
     NTSTATUS Status;
 
     hObject = TranslateStdHandle(hObject);
 
-    if (IsConsoleHandle(hObject))
-    {
-        return SetConsoleHandleInformation(hObject, dwMask, dwFlags);
-    }
 
     Status = NtQueryObject(hObject,
                            ObjectHandleFlagInformation,
-                           &HandleFlags,
-                           sizeof(HandleFlags),
+                           &HandleInfo,
+                           sizeof(OBJECT_HANDLE_ATTRIBUTE_INFORMATION),
                            &BytesWritten);
     if (!NT_SUCCESS(Status))
     {
@@ -103,18 +95,18 @@ SetHandleInformation(IN HANDLE hObject,
 
     if (dwMask & HANDLE_FLAG_INHERIT)
     {
-        HandleFlags.Inherit = (dwFlags & HANDLE_FLAG_INHERIT) != 0;
+        HandleInfo.Inherit = (dwFlags & HANDLE_FLAG_INHERIT) != 0;
     }
 
     if (dwMask & HANDLE_FLAG_PROTECT_FROM_CLOSE)
     {
-        HandleFlags.ProtectFromClose = (dwFlags & HANDLE_FLAG_PROTECT_FROM_CLOSE) != 0;
+        HandleInfo.ProtectFromClose = (dwFlags & HANDLE_FLAG_PROTECT_FROM_CLOSE) != 0;
     }
 
     Status = NtSetInformationObject(hObject,
                                     ObjectHandleFlagInformation,
-                                    &HandleFlags,
-                                    sizeof(HandleFlags));
+                                    &HandleInfo,
+                                    sizeof(HandleInfo));
     if (NT_SUCCESS(Status)) return TRUE;
 
     BaseSetLastNTError(Status);
@@ -131,8 +123,6 @@ CloseHandle(IN HANDLE hObject)
     NTSTATUS Status;
 
     hObject = TranslateStdHandle(hObject);
-
-    if (IsConsoleHandle(hObject)) return CloseConsoleHandle(hObject);
 
     Status = NtClose(hObject);
     if (NT_SUCCESS(Status)) return TRUE;
@@ -155,37 +145,8 @@ DuplicateHandle(IN HANDLE hSourceProcessHandle,
                 IN DWORD dwOptions)
 {
     NTSTATUS Status;
-    HANDLE hTargetHandle;
 
     hSourceHandle = TranslateStdHandle(hSourceHandle);
-
-    if ((IsConsoleHandle(hSourceHandle)) &&
-        ((hSourceHandle != NtCurrentProcess()) &&
-         (hSourceHandle != NtCurrentThread())))
-    {
-        /*
-         * We can duplicate console handles only if both the source
-         * and the target processes are in fact the current process.
-         */
-        if ((hSourceProcessHandle != NtCurrentProcess()) ||
-            (hTargetProcessHandle != NtCurrentProcess()))
-        {
-            BaseSetLastNTError(STATUS_INVALID_PARAMETER);
-            return FALSE;
-        }
-
-        hTargetHandle = DuplicateConsoleHandle(hSourceHandle,
-                                               dwDesiredAccess,
-                                               bInheritHandle,
-                                               dwOptions);
-        if (hTargetHandle != INVALID_HANDLE_VALUE)
-        {
-            if (lpTargetHandle) *lpTargetHandle = hTargetHandle;
-            return TRUE;
-        }
-
-        return FALSE;
-    }
 
     Status = NtDuplicateObject(hSourceProcessHandle,
                                hSourceHandle,

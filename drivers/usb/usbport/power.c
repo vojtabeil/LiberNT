@@ -10,6 +10,10 @@
 #define NDEBUG
 #include <debug.h>
 
+NTSTATUS
+NTAPI
+USBPORT_ResumeController(IN PDEVICE_OBJECT FdoDevice);
+
 VOID
 NTAPI
 USBPORT_CompletePdoWaitWake(IN PDEVICE_OBJECT FdoDevice)
@@ -54,6 +58,8 @@ USBPORT_HcWakeDpc(IN PRKDPC Dpc,
                   IN PVOID SystemArgument1,
                   IN PVOID SystemArgument2)
 {
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+
     DPRINT("USBPORT_HcWakeDpc: ... \n");
     USBPORT_CompletePdoWaitWake((PDEVICE_OBJECT)DeferredContext);
 }
@@ -103,8 +109,22 @@ VOID
 NTAPI
 USBPORT_DoSetPowerD0(IN PDEVICE_OBJECT FdoDevice)
 {
-    DPRINT("USBPORT_DoSetPowerD0: FIXME!\n");
-    return;
+    PUSBPORT_DEVICE_EXTENSION FdoExtension;
+
+    FdoExtension = FdoDevice->DeviceExtension;
+
+    if (FdoExtension->CommonExtension.DevicePowerState != PowerDeviceD0 ||
+        !(FdoExtension->Flags & USBPORT_FLAG_HC_SUSPEND))
+    {
+        return;
+    }
+
+    if (InterlockedCompareExchange(&FdoExtension->SetPowerLockCounter, 1, 0) != 0)
+        return;
+
+    USBPORT_ResumeController(FdoDevice);
+
+    InterlockedExchange(&FdoExtension->SetPowerLockCounter, 0);
 }
 
 VOID
@@ -114,7 +134,7 @@ USBPORT_SuspendController(IN PDEVICE_OBJECT FdoDevice)
     PUSBPORT_DEVICE_EXTENSION  FdoExtension;
     PUSBPORT_REGISTRATION_PACKET Packet;
 
-    DPRINT1("USBPORT_SuspendController \n");
+    DPRINT("USBPORT_SuspendController \n");
 
     FdoExtension = FdoDevice->DeviceExtension;
     Packet = &FdoExtension->MiniPortInterface->Packet;
@@ -151,7 +171,7 @@ USBPORT_ResumeController(IN PDEVICE_OBJECT FdoDevice)
     KIRQL OldIrql;
     MPSTATUS MpStatus;
 
-    DPRINT1("USBPORT_ResumeController: ... \n");
+    DPRINT("USBPORT_ResumeController: ... \n");
 
     FdoExtension = FdoDevice->DeviceExtension;
     Packet = &FdoExtension->MiniPortInterface->Packet;
@@ -190,6 +210,7 @@ USBPORT_ResumeController(IN PDEVICE_OBJECT FdoDevice)
     KeReleaseSpinLock(&FdoExtension->TimerFlagsSpinLock, OldIrql);
 
     USBPORT_MiniportInterrupts(FdoDevice, FALSE);
+    USBPORT_StopIsrDpcRundown(FdoExtension);
 
     Packet->StopController(FdoExtension->MiniPortExt, 1);
 
@@ -209,6 +230,7 @@ USBPORT_ResumeController(IN PDEVICE_OBJECT FdoDevice)
 
     if (!MpStatus)
     {
+        USBPORT_StartIsrDpcRundown(FdoExtension);
         USBPORT_MiniportInterrupts(FdoDevice, TRUE);
     }
 
@@ -246,15 +268,14 @@ USBPORT_PdoDevicePowerState(IN PDEVICE_OBJECT PdoDevice,
 
     State = IoStack->Parameters.Power.State;
 
-    DPRINT1("USBPORT_PdoDevicePowerState: Irp - %p, State - %x\n",
-            Irp,
-            State.DeviceState);
+    DPRINT("USBPORT_PdoDevicePowerState: Irp - %p, State - %x\n",
+           Irp,
+           State.DeviceState);
 
     if (State.DeviceState == PowerDeviceD0)
     {
         if (FdoExtension->CommonExtension.DevicePowerState == PowerDeviceD0)
         {
-            // FIXME FdoExtension->Flags
             while (FdoExtension->SetPowerLockCounter)
             {
                 USBPORT_Wait(FdoDevice, 10);
@@ -269,12 +290,30 @@ USBPORT_PdoDevicePowerState(IN PDEVICE_OBJECT PdoDevice,
         }
         else
         {
-            DPRINT1("USBPORT_PdoDevicePowerState: FdoExtension->Flags - %lx\n",
-                    FdoExtension->Flags);
+            DPRINT("USBPORT_PdoDevicePowerState: FdoExtension->Flags - %lx\n",
+                   FdoExtension->Flags);
 
-            DbgBreakPoint();
-            Status = STATUS_UNSUCCESSFUL;
+            InterlockedIncrement(&FdoExtension->SetPowerLockCounter);
+
+            if (FdoExtension->Flags & USBPORT_FLAG_HC_SUSPEND)
+                Status = USBPORT_ResumeController(FdoDevice);
+
+            if (NT_SUCCESS(Status))
+            {
+                FdoExtension->CommonExtension.DevicePowerState = PowerDeviceD0;
+                PdoExtension->CommonExtension.DevicePowerState = PowerDeviceD0;
+                USBPORT_CompletePdoWaitWake(FdoDevice);
+                USBPORT_CompletePendingIdleIrp(PdoDevice);
+            }
+
+            InterlockedDecrement(&FdoExtension->SetPowerLockCounter);
         }
+    }
+    else if (State.DeviceState == PowerDeviceD3 &&
+             IoStack->Parameters.Power.ShutdownType == PowerActionHibernate &&
+             FdoExtension->HibernationPathCount != 0)
+    {
+        DPRINT1("USBPORT_PdoDevicePowerState: root hub stays powered for the hibernation file\n");
     }
     else if (State.DeviceState  == PowerDeviceD1 ||
              State.DeviceState  == PowerDeviceD2 ||
@@ -381,6 +420,7 @@ USBPORT_PdoPower(IN PDEVICE_OBJECT PdoDevice,
               PdoExtension->WakeIrp = Irp;
 
               KeReleaseSpinLock(&FdoExtension->PowerWakeSpinLock, OldIrql);
+              USBPORT_ArmHcWake(FdoDevice);
               return STATUS_PENDING;
           }
           else
@@ -400,9 +440,9 @@ USBPORT_PdoPower(IN PDEVICE_OBJECT PdoDevice,
               }
               else
               {
-                  ASSERT(FALSE);
                   KeReleaseSpinLock(&FdoExtension->PowerWakeSpinLock, OldIrql);
-                  return Status;
+                  Status = STATUS_CANCELLED;
+                  break;
               }
           }
 
@@ -457,13 +497,82 @@ USBPORT_PdoPower(IN PDEVICE_OBJECT PdoDevice,
     return Status;
 }
 
+static REQUEST_POWER_COMPLETE USBPORT_HcWakeComplete;
+
+static
+VOID
+NTAPI
+USBPORT_HcWakeComplete(IN PDEVICE_OBJECT DeviceObject,
+                       IN UCHAR MinorFunction,
+                       IN POWER_STATE PowerState,
+                       IN PVOID Context,
+                       IN PIO_STATUS_BLOCK IoStatus)
+{
+    PDEVICE_OBJECT FdoDevice = Context;
+    PUSBPORT_DEVICE_EXTENSION FdoExtension = FdoDevice->DeviceExtension;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(MinorFunction);
+    UNREFERENCED_PARAMETER(PowerState);
+
+    if (InterlockedExchange(&FdoExtension->HcWakeState, 0) == 2)
+    {
+        KeSetEvent(&FdoExtension->HcWakeDone, IO_NO_INCREMENT, FALSE);
+        return;
+    }
+
+    if (NT_SUCCESS(IoStatus->Status))
+        USBPORT_CompletePdoWaitWake(FdoDevice);
+}
+
+VOID
+NTAPI
+USBPORT_ArmHcWake(IN PDEVICE_OBJECT FdoDevice)
+{
+    PUSBPORT_DEVICE_EXTENSION FdoExtension = FdoDevice->DeviceExtension;
+    POWER_STATE PowerState;
+
+    if (FdoExtension->Capabilities.SystemWake <= PowerSystemWorking ||
+        FdoExtension->Capabilities.DeviceWake == PowerDeviceUnspecified ||
+        InterlockedCompareExchange(&FdoExtension->HcWakeState, 1, 0) != 0)
+    {
+        return;
+    }
+
+    PowerState.SystemState = FdoExtension->Capabilities.SystemWake;
+    PoRequestPowerIrp(FdoExtension->CommonExtension.LowerPdoDevice,
+                      IRP_MN_WAIT_WAKE,
+                      PowerState,
+                      USBPORT_HcWakeComplete,
+                      FdoDevice,
+                      &FdoExtension->HcWakeIrp);
+}
+
+VOID
+NTAPI
+USBPORT_DisarmHcWake(IN PDEVICE_OBJECT FdoDevice)
+{
+    PUSBPORT_DEVICE_EXTENSION FdoExtension = FdoDevice->DeviceExtension;
+
+    KeClearEvent(&FdoExtension->HcWakeDone);
+    if (InterlockedCompareExchange(&FdoExtension->HcWakeState, 2, 1) == 1)
+    {
+        IoCancelIrp(FdoExtension->HcWakeIrp);
+        KeWaitForSingleObject(&FdoExtension->HcWakeDone, Executive, KernelMode, FALSE, NULL);
+    }
+}
+
 NTSTATUS
 NTAPI
 USBPORT_HcWake(IN PDEVICE_OBJECT FdoDevice,
                IN PIRP Irp)
 {
-    DPRINT1("USBPORT_HcWake: UNIMPLEMENTED. FIXME. \n");
-    return STATUS_SUCCESS;
+    PUSBPORT_DEVICE_EXTENSION FdoExtension;
+
+    FdoExtension = FdoDevice->DeviceExtension;
+
+    IoCopyCurrentIrpStackLocationToNext(Irp);
+    return PoCallDriver(FdoExtension->CommonExtension.LowerDevice, Irp);
 }
 
 NTSTATUS
@@ -471,8 +580,58 @@ NTAPI
 USBPORT_DevicePowerState(IN PDEVICE_OBJECT FdoDevice,
                          IN PIRP Irp)
 {
-    DPRINT1("USBPORT_DevicePowerState: UNIMPLEMENTED. FIXME. \n");
-    return STATUS_SUCCESS;
+    PUSBPORT_DEVICE_EXTENSION FdoExtension;
+    PIO_STACK_LOCATION IoStack;
+    POWER_STATE State;
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    FdoExtension = FdoDevice->DeviceExtension;
+    IoStack = IoGetCurrentIrpStackLocation(Irp);
+    State = IoStack->Parameters.Power.State;
+
+    switch (State.DeviceState)
+    {
+        case PowerDeviceD0:
+            InterlockedIncrement(&FdoExtension->SetPowerLockCounter);
+
+            if (FdoExtension->Flags & USBPORT_FLAG_HC_SUSPEND)
+                Status = USBPORT_ResumeController(FdoDevice);
+
+            if (NT_SUCCESS(Status))
+            {
+                FdoExtension->CommonExtension.DevicePowerState = PowerDeviceD0;
+
+                if (FdoExtension->RootHubPdo)
+                {
+                    USBPORT_CompletePdoWaitWake(FdoDevice);
+                    USBPORT_CompletePendingIdleIrp(FdoExtension->RootHubPdo);
+                }
+            }
+
+            InterlockedDecrement(&FdoExtension->SetPowerLockCounter);
+            break;
+
+        case PowerDeviceD1:
+        case PowerDeviceD2:
+        case PowerDeviceD3:
+            if (State.DeviceState == PowerDeviceD3 &&
+                IoStack->Parameters.Power.ShutdownType == PowerActionHibernate &&
+                FdoExtension->HibernationPathCount != 0)
+            {
+                DPRINT1("USBPORT_DevicePowerState: controller stays powered for the hibernation file\n");
+                break;
+            }
+            USBPORT_SuspendController(FdoDevice);
+            FdoExtension->CommonExtension.DevicePowerState = State.DeviceState;
+            break;
+
+        default:
+            Status = STATUS_INVALID_PARAMETER;
+            break;
+    }
+
+    Irp->IoStatus.Status = Status;
+    return Status;
 }
 
 NTSTATUS
@@ -480,7 +639,48 @@ NTAPI
 USBPORT_SystemPowerState(IN PDEVICE_OBJECT FdoDevice,
                          IN PIRP Irp)
 {
-    DPRINT1("USBPORT_SystemPowerState: UNIMPLEMENTED. FIXME. \n");
+    PIO_STACK_LOCATION IoStack;
+    POWER_STATE State;
+
+    IoStack = IoGetCurrentIrpStackLocation(Irp);
+    State = IoStack->Parameters.Power.State;
+
+    DPRINT("USBPORT_SystemPowerState: SystemState=%x\n",
+           State.SystemState);
+
+    switch (State.SystemState)
+    {
+        case PowerSystemWorking:
+            /* Resume to S0 – per‑device D‑state flows will handle
+             * full controller restart via USBPORT_ResumeController. */
+            break;
+
+        case PowerSystemSleeping1:
+        case PowerSystemSleeping2:
+        case PowerSystemSleeping3:
+        case PowerSystemHibernate:
+        case PowerSystemShutdown:
+            /*
+             * System is transitioning away from S0. Ensure the host
+             * controller is quiesced so any saved memory image (S4) or
+             * firmware shutdown (S5) sees the controller halted and
+             * interrupts disabled. This funnels down into the miniport’s
+             * SuspendController/StopController as appropriate.
+             */
+            if (State.SystemState == PowerSystemHibernate &&
+                ((PUSBPORT_DEVICE_EXTENSION)FdoDevice->DeviceExtension)->HibernationPathCount != 0)
+            {
+                DPRINT1("USBPORT_SystemPowerState: controller stays powered for the hibernation file\n");
+                break;
+            }
+            USBPORT_SuspendController(FdoDevice);
+            break;
+
+        default:
+            break;
+    }
+
+    Irp->IoStatus.Status = STATUS_SUCCESS;
     return STATUS_SUCCESS;
 }
 

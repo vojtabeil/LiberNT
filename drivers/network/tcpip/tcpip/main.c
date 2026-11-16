@@ -16,10 +16,12 @@
 
 #include <dispatch.h>
 #include <fileobjs.h>
+#include <tcpip_undoc.h>
 
 PDEVICE_OBJECT TCPDeviceObject   = NULL;
 PDEVICE_OBJECT UDPDeviceObject   = NULL;
 PDEVICE_OBJECT IPDeviceObject    = NULL;
+PDEVICE_OBJECT IP6DeviceObject   = NULL;
 PDEVICE_OBJECT RawIPDeviceObject = NULL;
 NDIS_HANDLE GlobalPacketPool     = NULL;
 NDIS_HANDLE GlobalBufferPool     = NULL;
@@ -32,6 +34,8 @@ UDP_STATISTICS UDPStats;
 /* Network timers */
 KTIMER IPTimer;
 KDPC IPTimeoutDpc;
+KTIMER NeighborTimer;
+KDPC NeighborTimeoutDpc;
 
 VOID TiWriteErrorLog(
     PDRIVER_OBJECT DriverContext,
@@ -101,6 +105,26 @@ VOID TiWriteErrorLog(
     IoWriteErrorLogEntry(LogEntry);
 }
 
+static BOOLEAN TiIsDualStackAddress(
+    PTA_IP_ADDRESS Address,
+    ULONG Length)
+{
+    PTA_ADDRESS Next;
+    ULONG Offset;
+
+    if (Address->Address[0].AddressType != TDI_ADDRESS_TYPE_IP6)
+        return FALSE;
+
+    Offset = FIELD_OFFSET(TA_IP_ADDRESS, Address[0].Address) + Address->Address[0].AddressLength;
+    if (Length < Offset + FIELD_OFFSET(TA_ADDRESS, Address) + TDI_ADDRESS_LENGTH_IP)
+        return FALSE;
+
+    Next = (PTA_ADDRESS)((PUCHAR)Address + Offset);
+    return (Next->AddressType == TDI_ADDRESS_TYPE_IP) &&
+           (Next->AddressLength >= TDI_ADDRESS_LENGTH_IP) &&
+           (((PTDI_ADDRESS_IP)Next->Address)->in_addr == 0);
+}
+
 /*
  * FUNCTION: Creates a file object
  * ARGUMENTS:
@@ -123,6 +147,7 @@ NTSTATUS TiCreateFileObject(
     NTSTATUS Status;
     ULONG Protocol;
     BOOLEAN Shared;
+    BOOLEAN Exclusive;
 
     TI_DbgPrint(DEBUG_IRP, ("Called. DeviceObject is at (0x%X), IRP is at (0x%X).\n", DeviceObject, Irp));
 
@@ -161,10 +186,15 @@ NTSTATUS TiCreateFileObject(
 
         Address = (PTA_IP_ADDRESS)(EaInfo->EaName + EaInfo->EaNameLength + 1); //0-term
 
-        if ((EaInfo->EaValueLength < sizeof(TA_IP_ADDRESS)) ||
-            (Address->TAAddressCount != 1) ||
-            (Address->Address[0].AddressLength < TDI_ADDRESS_LENGTH_IP) ||
-            (Address->Address[0].AddressType != TDI_ADDRESS_TYPE_IP))
+        if ((EaInfo->EaValueLength < FIELD_OFFSET(TA_IP_ADDRESS, Address[0].Address)) ||
+            ((Address->TAAddressCount != 1) &&
+             ((Address->TAAddressCount != 2) || !TiIsDualStackAddress(Address, EaInfo->EaValueLength))) ||
+            !(((Address->Address[0].AddressType == TDI_ADDRESS_TYPE_IP) &&
+               (EaInfo->EaValueLength >= sizeof(TA_IP_ADDRESS)) &&
+               (Address->Address[0].AddressLength >= TDI_ADDRESS_LENGTH_IP)) ||
+              ((Address->Address[0].AddressType == TDI_ADDRESS_TYPE_IP6) &&
+               (EaInfo->EaValueLength >= sizeof(TA_IP6_ADDRESS)) &&
+               (Address->Address[0].AddressLength >= TDI_ADDRESS_LENGTH_IP6))))
         {
             TI_DbgPrint(MIN_TRACE, ("Parameters are invalid:\n"));
             TI_DbgPrint(MIN_TRACE, ("AddressCount: %d\n", Address->TAAddressCount));
@@ -206,12 +236,13 @@ NTSTATUS TiCreateFileObject(
             return STATUS_INVALID_PARAMETER;
         }
 
-        Shared = (IrpSp->Parameters.Create.ShareAccess != 0);
+        Shared = ((IrpSp->Parameters.Create.ShareAccess & FILE_SHARE_WRITE) != 0);
+        Exclusive = (IrpSp->Parameters.Create.ShareAccess == 0);
 
-        Status = FileOpenAddress(&Request, Address, Protocol, Shared, NULL);
+        Status = FileOpenAddress(&Request, Address, Protocol, DeviceObject == RawIPDeviceObject, Shared, Exclusive, NULL);
         if (NT_SUCCESS(Status))
         {
-            IrpSp->FileObject->FsContext2 = (PVOID)TDI_TRANSPORT_ADDRESS_FILE;
+            IrpSp->FileObject->FsContext2 = (PVOID)(ULONG_PTR)TDI_TRANSPORT_ADDRESS_FILE;
             Context->Handle.AddressHandle = Request.Handle.AddressHandle;
         }
 
@@ -250,7 +281,7 @@ NTSTATUS TiCreateFileObject(
         Status = FileOpenConnection(&Request, ClientContext);
         if (NT_SUCCESS(Status))
         {
-            IrpSp->FileObject->FsContext2 = (PVOID)TDI_CONNECTION_FILE;
+            IrpSp->FileObject->FsContext2 = (PVOID)(ULONG_PTR)TDI_CONNECTION_FILE;
             Context->Handle.ConnectionContext = Request.Handle.ConnectionContext;
         }
     }
@@ -260,7 +291,7 @@ NTSTATUS TiCreateFileObject(
         Status = FileOpenControlChannel(&Request);
         if (NT_SUCCESS(Status))
         {
-            IrpSp->FileObject->FsContext2 = (PVOID)TDI_CONTROL_CHANNEL_FILE;
+            IrpSp->FileObject->FsContext2 = (PVOID)(ULONG_PTR)TDI_CONTROL_CHANNEL_FILE;
             Context->Handle.ControlChannel = Request.Handle.ControlChannel;
         }
     }
@@ -315,6 +346,8 @@ NTSTATUS TiCloseFileObject(
             break;
 
         case TDI_CONTROL_CHANNEL_FILE:
+            IGMPLeaveAllGroups(IrpSp->FileObject);
+            LibIP6LeaveAllGroups(IrpSp->FileObject);
             Request.Handle.ControlChannel = Context->Handle.ControlChannel;
             Status = FileCloseControlChannel(&Request);
             break;
@@ -488,6 +521,120 @@ TiDispatchInternal(
  * @return
  *   Status of the operation
  */
+static LIST_ENTRY TiChangeIrps;
+static KSPIN_LOCK TiChangeLock;
+static ULONG TiChangeGeneration;
+
+static
+VOID
+NTAPI
+TiChangeCancel(
+    PDEVICE_OBJECT DeviceObject,
+    PIRP Irp)
+{
+    KIRQL OldIrql;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+    KeAcquireSpinLock(&TiChangeLock, &OldIrql);
+    RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
+    KeReleaseSpinLock(&TiChangeLock, OldIrql);
+    Irp->IoStatus.Status = STATUS_CANCELLED;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
+static
+NTSTATUS
+TiWaitChange(
+    PIRP Irp,
+    PIO_STACK_LOCATION IrpSp)
+{
+    PULONG Generation = Irp->AssociatedIrp.SystemBuffer;
+    KIRQL OldIrql;
+
+    if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(ULONG) ||
+        IrpSp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(ULONG))
+        return STATUS_INVALID_PARAMETER;
+
+    KeAcquireSpinLock(&TiChangeLock, &OldIrql);
+    if (*Generation != TiChangeGeneration)
+    {
+        *Generation = TiChangeGeneration;
+        KeReleaseSpinLock(&TiChangeLock, OldIrql);
+        Irp->IoStatus.Information = sizeof(ULONG);
+        return STATUS_SUCCESS;
+    }
+    IoSetCancelRoutine(Irp, TiChangeCancel);
+    if (Irp->Cancel && IoSetCancelRoutine(Irp, NULL))
+    {
+        KeReleaseSpinLock(&TiChangeLock, OldIrql);
+        return STATUS_CANCELLED;
+    }
+    IoMarkIrpPending(Irp);
+    InsertTailList(&TiChangeIrps, &Irp->Tail.Overlay.ListEntry);
+    KeReleaseSpinLock(&TiChangeLock, OldIrql);
+    return STATUS_PENDING;
+}
+
+static
+NTSTATUS
+TiChangeMembership(
+    PVOID Owner,
+    PIP_MEMBERSHIP_REQUEST Request)
+{
+    PIP_INTERFACE Interface;
+    IPv4_RAW_ADDRESS Group;
+    ULONG Index;
+
+    if (Request->Family == TDI_ADDRESS_TYPE_IP6)
+        return LibIP6ChangeMembership(Owner, Request->Interface, Request->Group, Request->Join != 0);
+    if (Request->Family != TDI_ADDRESS_TYPE_IP)
+        return STATUS_INVALID_PARAMETER;
+
+    Interface = GetMulticastInterface(Request->Interface);
+    if (!Interface)
+        return STATUS_INVALID_PARAMETER;
+    Index = Interface->Index;
+    IPDereferenceInterface(Interface);
+    RtlCopyMemory(&Group, Request->Group, sizeof(Group));
+    return Request->Join ? IGMPJoinGroup(Owner, Index, Group) : IGMPLeaveGroup(Owner, Index, Group);
+}
+
+VOID
+TiSignalChange(VOID)
+{
+    LIST_ENTRY Completed;
+    PLIST_ENTRY Entry, Next;
+    KIRQL OldIrql;
+
+    InitializeListHead(&Completed);
+    KeAcquireSpinLock(&TiChangeLock, &OldIrql);
+    TiChangeGeneration++;
+    for (Entry = TiChangeIrps.Flink; Entry != &TiChangeIrps; Entry = Next)
+    {
+        PIRP Irp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+
+        Next = Entry->Flink;
+        if (!IoSetCancelRoutine(Irp, NULL))
+            continue;
+        RemoveEntryList(Entry);
+        *(PULONG)Irp->AssociatedIrp.SystemBuffer = TiChangeGeneration;
+        InsertTailList(&Completed, Entry);
+    }
+    KeReleaseSpinLock(&TiChangeLock, OldIrql);
+
+    while (!IsListEmpty(&Completed))
+    {
+        PIRP Irp = CONTAINING_RECORD(RemoveHeadList(&Completed), IRP, Tail.Overlay.ListEntry);
+
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = sizeof(ULONG);
+        IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+    }
+}
+
 NTSTATUS NTAPI
 TiDispatch(
     PDEVICE_OBJECT DeviceObject,
@@ -501,6 +648,14 @@ TiDispatch(
     TI_DbgPrint(DEBUG_IRP, ("[TCPIP, TiDispatch] Called. IRP is at (0x%X).\n", Irp));
 
     Irp->IoStatus.Information = 0;
+
+    if (Irp->RequestorMode == UserMode &&
+        (ULONG_PTR)IrpSp->FileObject->FsContext2 != TDI_CONTROL_CHANNEL_FILE &&
+        IrpSp->Parameters.DeviceIoControl.IoControlCode != IOCTL_TCP_QUERY_INFORMATION_EX &&
+        IrpSp->Parameters.DeviceIoControl.IoControlCode != IOCTL_TCP_SET_INFORMATION_EX)
+    {
+        return IRPFinish(Irp, STATUS_ACCESS_DENIED);
+    }
 
 #if 0
     Status = TdiMapUserRequest(DeviceObject, Irp, IrpSp);
@@ -537,15 +692,215 @@ TiDispatch(
                 Status = DispTdiDeleteIPAddress(Irp, IrpSp);
                 break;
 
-            case IOCTL_QUERY_IP_HW_ADDRESS:
+            case IOCTL_IP_GET_BEST_SOURCE:
+                Status = DispTdiGetBestSource(Irp, IrpSp);
+                break;
+
+            case IOCTL_IP_RESOLVE_NEIGHBOR:
                 TI_DbgPrint(MIN_TRACE, ("QUERY_IP_HW_ADDRESS\n"));
                 Status = DispTdiQueryIpHwAddress(DeviceObject, Irp, IrpSp);
                 break;
 
             case IOCTL_ICMP_ECHO_REQUEST:
                 TI_DbgPrint(MIN_TRACE, ("ICMP_ECHO_REQUEST\n"));
-                Status = DispEchoRequest(DeviceObject, Irp, IrpSp);
+                if (DeviceObject == IP6DeviceObject)
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                else
+                    Status = DispEchoRequest(DeviceObject, Irp, IrpSp);
                 break;
+
+            case IOCTL_ICMPV6_ECHO_REQUEST:
+                if (DeviceObject == IP6DeviceObject)
+                    Status = LibICMP6EchoRequest(DeviceObject, Irp, IrpSp);
+                else
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                break;
+
+            case IOCTL_IP_INTERFACE_INFO:
+                Status = STATUS_INVALID_PARAMETER;
+                break;
+
+            case IOCTL_IP6_SET_ADDRESS:
+                if (DeviceObject != IP6DeviceObject)
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                else if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(IP6_ADDRESS_SET))
+                    Status = STATUS_INVALID_PARAMETER;
+                else
+                    Status = LibIP6SetAddress(Irp->AssociatedIrp.SystemBuffer);
+                break;
+
+            case IOCTL_IP6_SET_ROUTE:
+                if (DeviceObject != IP6DeviceObject)
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                else if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(IP6_ROUTE_SET))
+                    Status = STATUS_INVALID_PARAMETER;
+                else
+                    Status = LibIP6SetRoute(Irp->AssociatedIrp.SystemBuffer);
+                break;
+
+            case IOCTL_IP6_SET_INTERFACE:
+                if (DeviceObject != IP6DeviceObject)
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                else if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(IP6_INTERFACE_SET))
+                    Status = STATUS_INVALID_PARAMETER;
+                else
+                    Status = LibIP6SetInterface(Irp->AssociatedIrp.SystemBuffer);
+                break;
+
+            case IOCTL_IP6_SET_NEIGHBOR:
+                if (DeviceObject != IP6DeviceObject)
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                else if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(IP6_NEIGHBOR_SET))
+                    Status = STATUS_INVALID_PARAMETER;
+                else
+                    Status = LibIP6SetNeighbor(Irp->AssociatedIrp.SystemBuffer);
+                break;
+
+            case IOCTL_IP_QUERY_INTERFACE:
+            case IOCTL_IP_SET_INTERFACE:
+                if (DeviceObject != IPDeviceObject)
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                else if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(IP4_INTERFACE_INFO) ||
+                         (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_IP_QUERY_INTERFACE &&
+                          IrpSp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(IP4_INTERFACE_INFO)))
+                    Status = STATUS_INVALID_PARAMETER;
+                else if (IrpSp->Parameters.DeviceIoControl.IoControlCode == IOCTL_IP_SET_INTERFACE)
+                    Status = IPSetInterfaceV4(Irp->AssociatedIrp.SystemBuffer);
+                else
+                {
+                    Status = IPQueryInterfaceV4(Irp->AssociatedIrp.SystemBuffer);
+                    if (NT_SUCCESS(Status))
+                        Irp->IoStatus.Information = sizeof(IP4_INTERFACE_INFO);
+                }
+                break;
+
+            case IOCTL_IP_WAIT_CHANGE:
+                if (DeviceObject != IPDeviceObject)
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                else
+                    Status = TiWaitChange(Irp, IrpSp);
+                break;
+
+            case IOCTL_IP_CHANGE_MEMBERSHIP:
+                if (DeviceObject != IPDeviceObject)
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                else if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(IP_MEMBERSHIP_REQUEST))
+                    Status = STATUS_INVALID_PARAMETER;
+                else
+                    Status = TiChangeMembership(IrpSp->FileObject, Irp->AssociatedIrp.SystemBuffer);
+                break;
+
+            case IOCTL_IP_QUERY_PATHS:
+                if (DeviceObject == IPDeviceObject)
+                    Status = PathQuery(Irp->AssociatedIrp.SystemBuffer,
+                                       IrpSp->Parameters.DeviceIoControl.OutputBufferLength,
+                                       (PULONG)&Irp->IoStatus.Information);
+                else if (DeviceObject == IP6DeviceObject)
+                    Status = LibIP6QueryPaths(Irp->AssociatedIrp.SystemBuffer,
+                                              IrpSp->Parameters.DeviceIoControl.OutputBufferLength,
+                                              (PULONG)&Irp->IoStatus.Information);
+                else
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                break;
+
+            case IOCTL_IP_FLUSH_PATHS:
+                if (DeviceObject == IPDeviceObject)
+                {
+                    PathFlush();
+                    Status = STATUS_SUCCESS;
+                }
+                else if (DeviceObject == IP6DeviceObject)
+                    Status = LibIP6FlushPaths();
+                else
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                break;
+
+            case IOCTL_IP_QUERY_ROUTE:
+                if (DeviceObject != IPDeviceObject)
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                else if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(IP4_ROUTE_INFO) ||
+                         IrpSp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(IP4_ROUTE_INFO))
+                    Status = STATUS_INVALID_PARAMETER;
+                else
+                {
+                    Status = RouterQueryRouteV4(Irp->AssociatedIrp.SystemBuffer);
+                    if (NT_SUCCESS(Status))
+                        Irp->IoStatus.Information = sizeof(IP4_ROUTE_INFO);
+                }
+                break;
+
+            case IOCTL_IP_SET_ROUTE:
+                if (DeviceObject != IPDeviceObject)
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                else if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(IP4_ROUTE_INFO))
+                    Status = STATUS_INVALID_PARAMETER;
+                else
+                    Status = RouterSetRouteV4(Irp->AssociatedIrp.SystemBuffer);
+                break;
+
+            case IOCTL_IP_SET_ADDRESS:
+                if (DeviceObject != IPDeviceObject)
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                else if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(IP4_ADDRESS_INFO) ||
+                         IrpSp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(IP4_ADDRESS_INFO))
+                    Status = STATUS_INVALID_PARAMETER;
+                else
+                {
+                    Status = IPSetAddressV4(Irp->AssociatedIrp.SystemBuffer);
+                    if (NT_SUCCESS(Status))
+                        Irp->IoStatus.Information = sizeof(IP4_ADDRESS_INFO);
+                }
+                break;
+
+            case IOCTL_IP_QUERY_ADDRESS:
+                if (DeviceObject != IPDeviceObject)
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                else if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(IP4_ADDRESS_INFO) ||
+                         IrpSp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(IP4_ADDRESS_INFO))
+                    Status = STATUS_INVALID_PARAMETER;
+                else
+                {
+                    Status = IPQueryAddressV4(Irp->AssociatedIrp.SystemBuffer);
+                    if (NT_SUCCESS(Status))
+                        Irp->IoStatus.Information = sizeof(IP4_ADDRESS_INFO);
+                }
+                break;
+
+            case IOCTL_IP6_GET_BEST_ROUTE:
+                if (DeviceObject != IP6DeviceObject)
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                else if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(IP6_BEST_ROUTE) ||
+                         IrpSp->Parameters.DeviceIoControl.OutputBufferLength < sizeof(IP6_BEST_ROUTE))
+                    Status = STATUS_INVALID_PARAMETER;
+                else
+                {
+                    Status = LibIP6GetBestRoute(Irp->AssociatedIrp.SystemBuffer);
+                    if (NT_SUCCESS(Status))
+                        Irp->IoStatus.Information = sizeof(IP6_BEST_ROUTE);
+                }
+                break;
+
+            case IOCTL_IP6_QUERY_TABLE:
+            {
+                ULONG TableId;
+
+                if (DeviceObject != IP6DeviceObject)
+                {
+                    Status = STATUS_INVALID_DEVICE_REQUEST;
+                    break;
+                }
+                if (IrpSp->Parameters.DeviceIoControl.InputBufferLength < sizeof(ULONG))
+                {
+                    Status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
+                TableId = *(PULONG)Irp->AssociatedIrp.SystemBuffer;
+                Status = InfoIp6QueryTable(TableId,
+                                           Irp->AssociatedIrp.SystemBuffer,
+                                           IrpSp->Parameters.DeviceIoControl.OutputBufferLength,
+                                           (PULONG)&Irp->IoStatus.Information);
+                break;
+            }
 
             default:
                 TI_DbgPrint(MIN_TRACE, ("Unknown IOCTL 0x%X\n",
@@ -557,11 +912,27 @@ TiDispatch(
 
     TI_DbgPrint(DEBUG_IRP, ("[TCPIP, TiDispatch] Leaving. Status = (0x%X).\n", Status));
 
+    if (Status == STATUS_SUCCESS)
+    {
+        switch (IrpSp->Parameters.DeviceIoControl.IoControlCode)
+        {
+            case IOCTL_IP6_SET_ADDRESS:
+            case IOCTL_IP6_SET_ROUTE:
+            case IOCTL_IP6_SET_INTERFACE:
+            case IOCTL_IP6_SET_NEIGHBOR:
+            case IOCTL_IP_SET_INTERFACE:
+                TiSignalChange();
+                break;
+        }
+    }
+
     return IRPFinish(Irp, Status);
 }
 
 static
 NTSTATUS TiCreateSecurityDescriptor(
+    _In_ ACCESS_MASK WorldAccess,
+    _In_ ACCESS_MASK RestrictedAccess,
     _Out_ PSECURITY_DESCRIPTOR *SecurityDescriptor)
 {
     NTSTATUS Status;
@@ -581,9 +952,10 @@ NTSTATUS TiCreateSecurityDescriptor(
 
     /* Setup a DACL */
     DaclSize = sizeof(ACL) +
+               sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeWorldSid) +
                sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeLocalSystemSid) +
                sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeAliasAdminsSid) +
-               sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeNetworkServiceSid);
+               sizeof(ACCESS_ALLOWED_ACE) + RtlLengthSid(SeExports->SeRestrictedSid);
     Dacl = ExAllocatePoolWithTag(PagedPool,
                                  DaclSize,
                                  DEVICE_OBJ_SECURITY_TAG);
@@ -606,6 +978,16 @@ NTSTATUS TiCreateSecurityDescriptor(
     /* Setup access */
     Status = RtlAddAccessAllowedAce(Dacl,
                                     ACL_REVISION,
+                                    WorldAccess,
+                                    SeExports->SeWorldSid);
+    if (!NT_SUCCESS(Status))
+    {
+        TI_DbgPrint(MIN_TRACE, ("Failed to add access allowed ACE for World SID (0x%X)\n", Status));
+        goto Quit;
+    }
+
+    Status = RtlAddAccessAllowedAce(Dacl,
+                                    ACL_REVISION,
                                     GENERIC_ALL,
                                     SeExports->SeLocalSystemSid);
     if (!NT_SUCCESS(Status))
@@ -626,11 +1008,11 @@ NTSTATUS TiCreateSecurityDescriptor(
 
     Status = RtlAddAccessAllowedAce(Dacl,
                                     ACL_REVISION,
-                                    GENERIC_ALL,
-                                    SeExports->SeNetworkServiceSid);
+                                    RestrictedAccess,
+                                    SeExports->SeRestrictedSid);
     if (!NT_SUCCESS(Status))
     {
-        TI_DbgPrint(MIN_TRACE, ("Failed to add access allowed ACE for Network Service SID (0x%X)\n", Status));
+        TI_DbgPrint(MIN_TRACE, ("Failed to add access allowed ACE for Restricted SID (0x%X)\n", Status));
         goto Quit;
     }
 
@@ -715,14 +1097,16 @@ Quit:
 
 static
 NTSTATUS TiSetupTcpDeviceSD(
-    _In_ PDEVICE_OBJECT DeviceObject)
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ ACCESS_MASK WorldAccess,
+    _In_ ACCESS_MASK RestrictedAccess)
 {
     NTSTATUS Status;
-    PSECURITY_DESCRIPTOR Sd;
+    PSECURITY_DESCRIPTOR Sd = NULL;
     SECURITY_INFORMATION Info = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
 
     /* Obtain a security descriptor */
-    Status = TiCreateSecurityDescriptor(&Sd);
+    Status = TiCreateSecurityDescriptor(WorldAccess, RestrictedAccess, &Sd);
     if (!NT_SUCCESS(Status))
     {
         TI_DbgPrint(MIN_TRACE, ("Failed to create a security descriptor for the device object\n"));
@@ -749,14 +1133,18 @@ NTSTATUS TiSecurityStartup(
     NTSTATUS Status;
 
     /* Set security data for the TCP and IP device objects */
-    Status = TiSetupTcpDeviceSD(TCPDeviceObject);
+    Status = TiSetupTcpDeviceSD(TCPDeviceObject,
+                                FILE_GENERIC_EXECUTE,
+                                FILE_GENERIC_EXECUTE);
     if (!NT_SUCCESS(Status))
     {
         TI_DbgPrint(MIN_TRACE, ("Failed to set security data for TCP device object\n"));
         return Status;
     }
 
-    Status = TiSetupTcpDeviceSD(IPDeviceObject);
+    Status = TiSetupTcpDeviceSD(IPDeviceObject,
+                                FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE,
+                                FILE_GENERIC_READ | FILE_GENERIC_EXECUTE);
     if (!NT_SUCCESS(Status))
     {
         TI_DbgPrint(MIN_TRACE, ("Failed to set security data for IP device object\n"));
@@ -786,6 +1174,7 @@ VOID NTAPI TiUnload(
 #endif
     /* Cancel timer */
     KeCancelTimer(&IPTimer);
+    KeCancelTimer(&NeighborTimer);
 
     /* Unregister loopback adapter */
     LoopUnregisterAdapter(NULL);
@@ -798,6 +1187,7 @@ VOID NTAPI TiUnload(
     UDPShutdown();
     RawIPShutdown();
     ICMPShutdown();
+    IGMPShutdown();
 
     /* Shutdown network level protocol subsystem */
     IPShutdown();
@@ -813,13 +1203,37 @@ VOID NTAPI TiUnload(
     /* Release all device objects */
 
     if (TCPDeviceObject)
+    {
+        UNICODE_STRING strTcpLinkName;
+        UNICODE_STRING strTcp6DeviceName;
+
+        RtlInitUnicodeString(&strTcpLinkName, L"\\DosDevices\\Tcp");
+        RtlInitUnicodeString(&strTcp6DeviceName, DD_TCPV6_DEVICE_NAME);
+        IoDeleteSymbolicLink(&strTcpLinkName);
+        IoDeleteSymbolicLink(&strTcp6DeviceName);
         IoDeleteDevice(TCPDeviceObject);
+    }
 
     if (UDPDeviceObject)
+    {
+        UNICODE_STRING strUdp6DeviceName;
+
+        RtlInitUnicodeString(&strUdp6DeviceName, DD_UDPV6_DEVICE_NAME);
+        IoDeleteSymbolicLink(&strUdp6DeviceName);
         IoDeleteDevice(UDPDeviceObject);
+    }
 
     if (RawIPDeviceObject)
+    {
+        UNICODE_STRING strRaw6DeviceName;
+
+        RtlInitUnicodeString(&strRaw6DeviceName, DD_RAWIPV6_DEVICE_NAME);
+        IoDeleteSymbolicLink(&strRaw6DeviceName);
         IoDeleteDevice(RawIPDeviceObject);
+    }
+
+    if (IP6DeviceObject)
+        IoDeleteDevice(IP6DeviceObject);
 
     if (IPDeviceObject) {
         ChewShutdown();
@@ -846,13 +1260,31 @@ DriverEntry(
  */
 {
     NTSTATUS Status;
-    UNICODE_STRING strIpDeviceName = RTL_CONSTANT_STRING(DD_IP_DEVICE_NAME);
-    UNICODE_STRING strRawDeviceName = RTL_CONSTANT_STRING(DD_RAWIP_DEVICE_NAME);
-    UNICODE_STRING strUdpDeviceName = RTL_CONSTANT_STRING(DD_UDP_DEVICE_NAME);
-    UNICODE_STRING strTcpDeviceName = RTL_CONSTANT_STRING(DD_TCP_DEVICE_NAME);
-    UNICODE_STRING strNdisDeviceName = RTL_CONSTANT_STRING(TCPIP_PROTOCOL_NAME);
+    UNICODE_STRING strIpDeviceName;
+    UNICODE_STRING strIp6DeviceName;
+    UNICODE_STRING strRawDeviceName;
+    UNICODE_STRING strUdpDeviceName;
+    UNICODE_STRING strTcpDeviceName;
+    UNICODE_STRING strTcpLinkName;
+    UNICODE_STRING strTcp6DeviceName;
+    UNICODE_STRING strUdp6DeviceName;
+    UNICODE_STRING strRaw6DeviceName;
+    UNICODE_STRING strNdisDeviceName;
     NDIS_STATUS NdisStatus;
     LARGE_INTEGER DueTime;
+
+    RtlInitUnicodeString(&strIpDeviceName, DD_IP_DEVICE_NAME);
+    RtlInitUnicodeString(&strIp6DeviceName, DD_IPV6_DEVICE_NAME);
+    RtlInitUnicodeString(&strRawDeviceName, DD_RAWIP_DEVICE_NAME);
+    RtlInitUnicodeString(&strUdpDeviceName, DD_UDP_DEVICE_NAME);
+    RtlInitUnicodeString(&strTcpDeviceName, DD_TCP_DEVICE_NAME);
+    RtlInitUnicodeString(&strTcpLinkName, L"\\DosDevices\\Tcp");
+    RtlInitUnicodeString(&strTcp6DeviceName, DD_TCPV6_DEVICE_NAME);
+    RtlInitUnicodeString(&strUdp6DeviceName, DD_UDPV6_DEVICE_NAME);
+    RtlInitUnicodeString(&strRaw6DeviceName, DD_RAWIPV6_DEVICE_NAME);
+    RtlInitUnicodeString(&strNdisDeviceName, TCPIP_PROTOCOL_NAME);
+    InitializeListHead(&TiChangeIrps);
+    KeInitializeSpinLock(&TiChangeLock);
 
     TI_DbgPrint(MAX_TRACE, ("[TCPIP, DriverEntry] Called\n"));
 
@@ -864,6 +1296,8 @@ DriverEntry(
         timer expires, the IPTimeout deferred procedure call (DPC) is queued */
     KeInitializeDpc(&IPTimeoutDpc, IPTimeoutDpcFn, NULL);
     KeInitializeTimer(&IPTimer);
+    KeInitializeDpc(&NeighborTimeoutDpc, NeighborTimeoutDpcFn, NULL);
+    KeInitializeTimer(&NeighborTimer);
 
     /* Create IP device object */
     Status = IoCreateDevice(DriverObject, 0, &strIpDeviceName,
@@ -875,6 +1309,14 @@ DriverEntry(
     }
 
     ChewInit( IPDeviceObject );
+
+    Status = IoCreateDevice(DriverObject, 0, &strIp6DeviceName,
+        FILE_DEVICE_NETWORK, 0, FALSE, &IP6DeviceObject);
+    if (!NT_SUCCESS(Status)) {
+        TI_DbgPrint(MIN_TRACE, ("Failed to create IPv6 device object. Status (0x%X).\n", Status));
+        TiUnload(DriverObject);
+        return Status;
+    }
 
     /* Create RawIP device object */
     Status = IoCreateDevice(DriverObject, 0, &strRawDeviceName,
@@ -902,6 +1344,22 @@ DriverEntry(
         TiUnload(DriverObject);
         return Status;
     }
+
+    Status = IoCreateSymbolicLink(&strTcpLinkName, &strTcpDeviceName);
+    if (!NT_SUCCESS(Status))
+        TI_DbgPrint(MIN_TRACE, ("Failed to create the Tcp symbolic link. Status (0x%X).\n", Status));
+
+    Status = IoCreateSymbolicLink(&strTcp6DeviceName, &strTcpDeviceName);
+    if (!NT_SUCCESS(Status))
+        TI_DbgPrint(MIN_TRACE, ("Failed to create the Tcp6 device link. Status (0x%X).\n", Status));
+
+    Status = IoCreateSymbolicLink(&strUdp6DeviceName, &strUdpDeviceName);
+    if (!NT_SUCCESS(Status))
+        TI_DbgPrint(MIN_TRACE, ("Failed to create the Udp6 device link. Status (0x%X).\n", Status));
+
+    Status = IoCreateSymbolicLink(&strRaw6DeviceName, &strRawDeviceName);
+    if (!NT_SUCCESS(Status))
+        TI_DbgPrint(MIN_TRACE, ("Failed to create the RawIp6 device link. Status (0x%X).\n", Status));
 
     /* Setup network layer and transport layer entities */
     KeInitializeSpinLock(&EntityListLock);
@@ -971,6 +1429,12 @@ DriverEntry(
         return Status;
     }
 
+    Status = IGMPStartup();
+    if( !NT_SUCCESS(Status) ) {
+        TiUnload(DriverObject);
+        return Status;
+    }
+
     /* Initialize security */
     Status = TiSecurityStartup();
     if (!NT_SUCCESS(Status))
@@ -1022,6 +1486,8 @@ DriverEntry(
         relative expiration time of IP_TIMEOUT milliseconds */
     DueTime.QuadPart = -(LONGLONG)IP_TIMEOUT * 10000;
     KeSetTimerEx(&IPTimer, DueTime, IP_TIMEOUT, &IPTimeoutDpc);
+    DueTime.QuadPart = -(LONGLONG)NB_FAST_TIMEOUT * 10000;
+    KeSetTimerEx(&NeighborTimer, DueTime, NB_FAST_TIMEOUT, &NeighborTimeoutDpc);
 
     TI_DbgPrint(MAX_TRACE, ("[TCPIP, DriverEntry] Finished\n"));
 

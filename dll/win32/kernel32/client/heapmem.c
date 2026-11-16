@@ -35,6 +35,24 @@ BaseDllInitializeMemoryManager(VOID)
                              NULL);
 }
 
+static
+VOID
+BaseProbeHeapPointer(HANDLE hMem)
+{
+    if (!hMem)
+        return;
+
+    _SEH2_TRY
+    {
+        (VOID)*((volatile UCHAR *)hMem - 1);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        RtlFailFast(FAST_FAIL_INVALID_ARG);
+    }
+    _SEH2_END;
+}
+
 /* PUBLIC FUNCTIONS ***********************************************************/
 
 /*
@@ -50,7 +68,8 @@ HeapCreate(DWORD flOptions,
     ULONG Flags;
 
     /* Remove non-Win32 flags and tag this allocation */
-    Flags = (flOptions & (HEAP_GENERATE_EXCEPTIONS | HEAP_NO_SERIALIZE)) |
+    Flags = (flOptions & (HEAP_GENERATE_EXCEPTIONS | HEAP_NO_SERIALIZE |
+                          HEAP_CREATE_ENABLE_EXECUTE)) |
             HEAP_CLASS_1;
 
     /* Check if heap is growable and ensure max size is correct */
@@ -63,6 +82,8 @@ HeapCreate(DWORD flOptions,
            Fix it up by bumping it to the initial size whatever it is. */
         dwMaximumSize = dwInitialSize;
     }
+    else if (dwInitialSize > dwMaximumSize)
+        dwMaximumSize = dwInitialSize;
 
     /* Call RTL Heap */
     hRet = RtlCreateHeap(Flags,
@@ -229,25 +250,54 @@ BOOL
 WINAPI
 HeapSummary(HANDLE hHeap,
             DWORD dwFlags,
-            PVOID Summary)
+            LPHEAP_SUMMARY lpSummary)
 {
+    RTL_HEAP_WALK_ENTRY Entry;
+    SIZE_T Allocated = 0;
+    SIZE_T Committed = 0;
+    SIZE_T UnCommitted = 0;
     NTSTATUS Status;
-    RTL_HEAP_USAGE Usage;
 
-    /* Fill in the length information */
-    Usage.Length = sizeof(Usage);
+    UNREFERENCED_PARAMETER(dwFlags);
 
-    /* Call RTL. Gone in Vista, so commented out */
-    Status = STATUS_NOT_IMPLEMENTED; //RtlUsageHeap(hHeap, dwFlags, &Usage);
-    if (!NT_SUCCESS(Status))
+    if (lpSummary->cb != sizeof(*lpSummary))
     {
-        /* We failed */
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (!RtlLockHeap(hHeap))
+    {
+        BaseSetLastNTError(STATUS_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    RtlZeroMemory(&Entry, sizeof(Entry));
+    while (NT_SUCCESS(Status = RtlWalkHeap(hHeap, &Entry)))
+    {
+        if (Entry.Flags & RTL_HEAP_ENTRY_BUSY)
+        {
+            Allocated += Entry.DataSize;
+        }
+        else if (Entry.Flags & RTL_HEAP_ENTRY_REGION)
+        {
+            Committed += Entry.Segment.CommittedSize;
+            UnCommitted += Entry.Segment.UnCommittedSize;
+        }
+    }
+
+    RtlUnlockHeap(hHeap);
+
+    if (Status != STATUS_NO_MORE_ENTRIES)
+    {
         BaseSetLastNTError(Status);
         return FALSE;
     }
 
-    /* FIXME: Summary == Usage?! */
-    RtlCopyMemory(Summary, &Usage, sizeof(Usage));
+    lpSummary->cbAllocated = Allocated;
+    lpSummary->cbCommitted = Committed;
+    lpSummary->cbReserved = Committed + UnCommitted;
+    lpSummary->cbMaxReserve = lpSummary->cbReserved;
     return TRUE;
 }
 
@@ -291,18 +341,47 @@ WINAPI
 HeapWalk(HANDLE	hHeap,
          LPPROCESS_HEAP_ENTRY lpEntry)
 {
+    RTL_HEAP_WALK_ENTRY Entry = {0};
     NTSTATUS Status;
 
-    DPRINT1("Warning, HeapWalk is calling RtlWalkHeap with Win32 parameters\n");
+    if (!lpEntry)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
 
-    Status = RtlWalkHeap(hHeap, lpEntry);
+    Entry.DataAddress = lpEntry->lpData;
+    Entry.DataSize = lpEntry->cbData;
+    Entry.OverheadBytes = lpEntry->cbOverhead;
+    Entry.SegmentIndex = lpEntry->iRegionIndex;
+    if (lpEntry->wFlags & PROCESS_HEAP_ENTRY_BUSY)
+        Entry.Flags |= RTL_HEAP_ENTRY_BUSY;
+    if (lpEntry->wFlags & PROCESS_HEAP_REGION)
+        Entry.Flags |= RTL_HEAP_ENTRY_REGION;
+    if (lpEntry->wFlags & PROCESS_HEAP_UNCOMMITTED_RANGE)
+        Entry.Flags |= RTL_HEAP_ENTRY_UNCOMMITTED;
+    RtlCopyMemory(&Entry.Segment, &lpEntry->Region, sizeof(lpEntry->Region));
 
+    Status = RtlWalkHeap(hHeap, &Entry);
     if (!NT_SUCCESS(Status))
     {
         SetLastError(RtlNtStatusToDosError(Status));
         return FALSE;
     }
 
+    lpEntry->lpData = Entry.DataAddress;
+    lpEntry->cbData = Entry.DataSize;
+    lpEntry->cbOverhead = Entry.OverheadBytes;
+    lpEntry->iRegionIndex = Entry.SegmentIndex;
+    if (Entry.Flags & RTL_HEAP_ENTRY_BUSY)
+        lpEntry->wFlags = PROCESS_HEAP_ENTRY_BUSY;
+    else if (Entry.Flags & RTL_HEAP_ENTRY_REGION)
+        lpEntry->wFlags = PROCESS_HEAP_REGION;
+    else if (Entry.Flags & RTL_HEAP_ENTRY_UNCOMMITTED)
+        lpEntry->wFlags = PROCESS_HEAP_UNCOMMITTED_RANGE;
+    else
+        lpEntry->wFlags = 0;
+    RtlCopyMemory(&lpEntry->Region, &Entry.Segment, sizeof(lpEntry->Region));
     return TRUE;
 }
 
@@ -617,6 +696,8 @@ GlobalFree(HGLOBAL hMem)
     /* Check if this was a simple allocated heap entry */
     if (!((ULONG_PTR)hMem & BASE_HEAP_IS_HANDLE_ENTRY))
     {
+        BaseProbeHeapPointer(hMem);
+
         /* Free it with the RTL Heap Manager */
         if (RtlFreeHeap(BaseHeap, 0, hMem))
         {
@@ -755,7 +836,7 @@ NTAPI
 GlobalLock(HGLOBAL hMem)
 {
     PBASE_HEAP_HANDLE_ENTRY HandleEntry;
-    LPVOID Ptr;
+    LPVOID Ptr = NULL;
 
     /* Check if this was a simple allocated heap entry */
     if (!((ULONG_PTR)hMem & BASE_HEAP_IS_HANDLE_ENTRY))
@@ -1065,6 +1146,7 @@ GlobalReAlloc(HGLOBAL hMem,
     else
     {
         /* Otherwise, this is a simple RTL Managed Heap, so just call it */
+        BaseProbeHeapPointer(hMem);
         hMem = RtlReAllocateHeap(BaseHeap,
                                  Flags | HEAP_NO_SERIALIZE,
                                  hMem,
@@ -1210,7 +1292,6 @@ GlobalUnlock(HGLOBAL hMem)
             /* It's not, fail */
             BASE_TRACE_FAILURE();
             SetLastError(ERROR_INVALID_HANDLE);
-            RetVal = FALSE;
         }
         else
         {
@@ -1300,12 +1381,12 @@ GlobalMemoryStatusEx(LPMEMORYSTATUSEX lpBuffer)
                                       BaseStaticServerData->SysInfo.NumberOfPhysicalPages;
 
     /* Save physical memory */
-    PhysicalMemory = BaseStaticServerData->SysInfo.NumberOfPhysicalPages *
+    PhysicalMemory = (ULONGLONG)BaseStaticServerData->SysInfo.NumberOfPhysicalPages *
                      BaseStaticServerData->SysInfo.PageSize;
     lpBuffer->ullTotalPhys = PhysicalMemory;
 
     /* Now save available physical memory */
-    PhysicalMemory = PerformanceInfo.AvailablePages *
+    PhysicalMemory = (ULONGLONG)PerformanceInfo.AvailablePages *
                      BaseStaticServerData->SysInfo.PageSize;
     lpBuffer->ullAvailPhys = PhysicalMemory;
 
@@ -1365,6 +1446,11 @@ NTAPI
 GlobalMemoryStatus(LPMEMORYSTATUS lpBuffer)
 {
     MEMORYSTATUSEX lpBufferEx;
+    PIMAGE_NT_HEADERS NtHeaders = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
+    ULONGLONG PhysicalLimit = MAXULONG_PTR;
+
+    if (NtHeaders && !(NtHeaders->FileHeader.Characteristics & IMAGE_FILE_LARGE_ADDRESS_AWARE))
+        PhysicalLimit = MAXLONG_PTR;
 
     /* Call the extended function */
     lpBufferEx.dwLength = sizeof(MEMORYSTATUSEX);
@@ -1373,8 +1459,8 @@ GlobalMemoryStatus(LPMEMORYSTATUS lpBuffer)
         /* Reset the right size and fill out the information */
         lpBuffer->dwLength = sizeof(MEMORYSTATUS);
         lpBuffer->dwMemoryLoad = lpBufferEx.dwMemoryLoad;
-        lpBuffer->dwTotalPhys = (SIZE_T)min(lpBufferEx.ullTotalPhys, MAXULONG_PTR);
-        lpBuffer->dwAvailPhys = (SIZE_T)min(lpBufferEx.ullAvailPhys, MAXULONG_PTR);
+        lpBuffer->dwTotalPhys = (SIZE_T)min(lpBufferEx.ullTotalPhys, PhysicalLimit);
+        lpBuffer->dwAvailPhys = (SIZE_T)min(lpBufferEx.ullAvailPhys, PhysicalLimit);
         lpBuffer->dwTotalPageFile = (SIZE_T)min(lpBufferEx.ullTotalPageFile, MAXULONG_PTR);
         lpBuffer->dwAvailPageFile = (SIZE_T)min(lpBufferEx.ullAvailPageFile, MAXULONG_PTR);
         lpBuffer->dwTotalVirtual = (SIZE_T)min(lpBufferEx.ullTotalVirtual, MAXULONG_PTR);
@@ -1527,6 +1613,9 @@ LocalFlags(HLOCAL hMem)
     /* Start by locking the heap */
     RtlLockHeap(BaseHeap);
 
+    _SEH2_TRY
+    {
+
     /* Check if this is a simple RTL Heap Managed block */
     if (!((ULONG_PTR)hMem & BASE_HEAP_IS_HANDLE_ENTRY))
     {
@@ -1581,6 +1670,13 @@ LocalFlags(HLOCAL hMem)
     /* Check if by now, we still haven't gotten any useful flags */
     if (uFlags == LMEM_INVALID_HANDLE) SetLastError(ERROR_INVALID_HANDLE);
 
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        BaseSetLastNTError(_SEH2_GetExceptionCode());
+    }
+    _SEH2_END;
+
     /* All done! Unlock heap and return Win32 Flags */
     RtlUnlockHeap(BaseHeap);
     return uFlags;
@@ -1615,9 +1711,18 @@ LPVOID
 NTAPI
 LocalLock(HLOCAL hMem)
 {
+    DWORD LastError;
+    LPVOID Pointer;
+
     /* This is the same as a GlobalLock, assuming these never change */
     C_ASSERT(LMEM_LOCKCOUNT == GMEM_LOCKCOUNT);
-    return GlobalLock(hMem);
+    if ((ULONG_PTR)hMem & BASE_HEAP_IS_HANDLE_ENTRY)
+        return GlobalLock(hMem);
+
+    LastError = GetLastError();
+    Pointer = GlobalLock(hMem);
+    SetLastError(LastError);
+    return Pointer;
 }
 
 HLOCAL
@@ -1629,6 +1734,13 @@ LocalReAlloc(HLOCAL hMem,
     PBASE_HEAP_HANDLE_ENTRY HandleEntry;
     LPVOID Ptr;
     ULONG Flags = 0;
+
+    if ((uFlags & ~(LMEM_VALID_FLAGS | LMEM_MODIFY)) ||
+        ((uFlags & LMEM_DISCARDABLE) && !(uFlags & LMEM_MODIFY)))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
 
     /* Convert ZEROINIT */
     if (uFlags & LMEM_ZEROINIT) Flags |= HEAP_ZERO_MEMORY;
@@ -1757,6 +1869,7 @@ LocalReAlloc(HLOCAL hMem,
     else if (!(uFlags & LMEM_MODIFY))
     {
         /* Otherwise, this is a simple RTL Managed Heap, so just call it */
+        BaseProbeHeapPointer(hMem);
         hMem = RtlReAllocateHeap(BaseHeap,
                                  Flags | HEAP_NO_SERIALIZE,
                                  hMem,

@@ -108,7 +108,9 @@ CompositeMonikerImpl_QueryInterface(IMoniker* iface,REFIID riid,void** ppvObject
 
     /* Compare the riid with the interface IDs implemented by this object.*/
     if (IsEqualIID(&IID_IUnknown, riid) ||
+#ifndef __REACTOS__
         IsEqualIID(&IID_IPersist, riid) ||
+#endif
         IsEqualIID(&IID_IPersistStream, riid) ||
         IsEqualIID(&IID_IMoniker, riid)
        )
@@ -117,6 +119,13 @@ CompositeMonikerImpl_QueryInterface(IMoniker* iface,REFIID riid,void** ppvObject
         *ppvObject = &This->IROTData_iface;
     else if (IsEqualIID(&IID_IMarshal, riid))
         *ppvObject = &This->IMarshal_iface;
+#ifdef __REACTOS__
+    else if (IsEqualGUID(&CLSID_CompositeMoniker, riid))
+    {
+        *ppvObject = iface;
+        return S_OK;
+    }
+#endif
 
     /* Check that we obtained an interface.*/
     if ((*ppvObject)==0)
@@ -296,7 +305,11 @@ CompositeMonikerImpl_GetSizeMax(IMoniker* iface,ULARGE_INTEGER* pcbSize)
     if (!pcbSize)
         return E_POINTER;
 
+#ifdef __REACTOS__
+    pcbSize->QuadPart = sizeof(DWORD) + sizeof(CLSID);
+#else
     pcbSize->QuadPart = sizeof(DWORD);
+#endif
 
     IMoniker_Enum(iface,TRUE,&enumMk);
 
@@ -1025,7 +1038,11 @@ static HRESULT composite_get_moniker_comparison_data(IMoniker *moniker,
     if (FAILED(hr = IMoniker_QueryInterface(moniker, &IID_IROTData, (void **)&rot_data)))
     {
         WARN("Failed to get IROTData for component moniker, hr %#lx.\n", hr);
+#ifdef __REACTOS__
+        return E_NOTIMPL;
+#else
         return hr;
+#endif
     }
 
     hr = IROTData_GetComparisonData(rot_data, data, max_len, ret_len);
@@ -1033,6 +1050,23 @@ static HRESULT composite_get_moniker_comparison_data(IMoniker *moniker,
 
     return hr;
 }
+
+#ifdef __REACTOS__
+static HRESULT composite_get_right_comparison_data(IMoniker *moniker,
+        BYTE *data, ULONG max_len, ULONG *ret_len)
+{
+    IROTData *rot_data;
+
+    if (FAILED(IMoniker_QueryInterface(moniker, &IID_IROTData, (void **)&rot_data)))
+    {
+        *ret_len = 0;
+        return S_OK;
+    }
+    IROTData_Release(rot_data);
+
+    return composite_get_moniker_comparison_data(moniker, data, max_len, ret_len);
+}
+#endif
 
 static HRESULT WINAPI CompositeMonikerROTDataImpl_GetComparisonData(IROTData *iface,
         BYTE *data, ULONG max_len, ULONG *ret_len)
@@ -1056,16 +1090,26 @@ static HRESULT WINAPI CompositeMonikerROTDataImpl_GetComparisonData(IROTData *if
     else
     {
         WARN("Failed to get comparison data length for left component, hr %#lx.\n", hr);
+#ifdef __REACTOS__
+        *ret_len = 0;
+#endif
         return hr;
     }
 
     len = 0;
+#ifdef __REACTOS__
+    hr = composite_get_right_comparison_data(moniker->right, NULL, 0, &len);
+#else
     hr = composite_get_moniker_comparison_data(moniker->right, NULL, 0, &len);
+#endif
     if (SUCCEEDED(hr) || hr == E_OUTOFMEMORY)
         *ret_len += len;
     else
     {
         WARN("Failed to get comparison data length for right component, hr %#lx.\n", hr);
+#ifdef __REACTOS__
+        *ret_len = 0;
+#endif
         return hr;
     }
 
@@ -1082,7 +1126,11 @@ static HRESULT WINAPI CompositeMonikerROTDataImpl_GetComparisonData(IROTData *if
     }
     data += len;
     max_len -= len;
+#ifdef __REACTOS__
+    if (FAILED(hr = composite_get_right_comparison_data(moniker->right, data, max_len, &len)))
+#else
     if (FAILED(hr = composite_get_moniker_comparison_data(moniker->right, data, max_len, &len)))
+#endif
     {
         WARN("Failed to get comparison data for right component, hr %#lx.\n", hr);
         return hr;
@@ -1819,8 +1867,107 @@ HRESULT WINAPI CreateGenericComposite(IMoniker *left, IMoniker *right, IMoniker 
 HRESULT WINAPI
 MonikerCommonPrefixWith(IMoniker* pmkThis,IMoniker* pmkOther,IMoniker** ppmkCommon)
 {
+#ifdef __REACTOS__
+    IMoniker **this_components, **other_components, *prefix = NULL, *c;
+    unsigned int this_count, other_count, count, i;
+    BOOL this_composite, other_composite;
+    HRESULT hr;
+
+    TRACE("%p, %p, %p.\n", pmkThis, pmkOther, ppmkCommon);
+
+    if (!ppmkCommon)
+        return E_INVALIDARG;
+    *ppmkCommon = NULL;
+
+    if (!pmkThis || !pmkOther)
+        return MK_E_NOPREFIX;
+
+    this_composite = unsafe_impl_from_IMoniker(pmkThis) != NULL;
+    other_composite = unsafe_impl_from_IMoniker(pmkOther) != NULL;
+    if (!this_composite && !other_composite)
+        return MK_E_NOPREFIX;
+
+    if (FAILED(hr = composite_get_components_alloc(pmkThis, &this_count, &this_components)))
+        return hr;
+    if (FAILED(hr = composite_get_components_alloc(pmkOther, &other_count, &other_components)))
+    {
+        free(this_components);
+        return hr;
+    }
+
+    if (!this_composite || !other_composite)
+    {
+        IMoniker *leftmost = this_composite ? this_components[0] : other_components[0];
+        IMoniker *single = this_composite ? pmkOther : pmkThis;
+
+        if (IMoniker_IsEqual(leftmost, single) == S_OK)
+        {
+            prefix = leftmost;
+            IMoniker_AddRef(prefix);
+            hr = this_composite ? MK_S_HIM : MK_S_ME;
+        }
+        else
+        {
+            hr = IMoniker_CommonPrefixWith(leftmost, single, &prefix);
+            if (SUCCEEDED(hr))
+            {
+                if (hr == MK_S_US || hr == MK_S_HIM)
+                    hr = this_composite ? MK_S_HIM : MK_S_ME;
+                else
+                    hr = S_OK;
+            }
+        }
+    }
+    else
+    {
+        count = min(this_count, other_count);
+        for (i = 0; i < count; ++i)
+        {
+            if (IMoniker_IsEqual(this_components[i], other_components[i]) != S_OK)
+                break;
+        }
+        count = i;
+        hr = S_OK;
+
+        for (i = 0; i < count && SUCCEEDED(hr); ++i)
+        {
+            if (!prefix)
+            {
+                prefix = this_components[i];
+                IMoniker_AddRef(prefix);
+                continue;
+            }
+            hr = CreateGenericComposite(prefix, this_components[i], &c);
+            IMoniker_Release(prefix);
+            prefix = SUCCEEDED(hr) ? c : NULL;
+        }
+
+        if (SUCCEEDED(hr) && count)
+        {
+            if (count == this_count && count == other_count)
+                hr = MK_S_US;
+            else if (count == this_count)
+                hr = MK_S_ME;
+            else if (count == other_count)
+                hr = MK_S_HIM;
+        }
+    }
+
+    free(this_components);
+    free(other_components);
+
+    if (FAILED(hr))
+    {
+        if (prefix) IMoniker_Release(prefix);
+        return hr;
+    }
+
+    *ppmkCommon = prefix;
+    return hr;
+#else
     FIXME("(),stub!\n");
     return E_NOTIMPL;
+#endif
 }
 
 HRESULT WINAPI CompositeMoniker_CreateInstance(IClassFactory *iface,

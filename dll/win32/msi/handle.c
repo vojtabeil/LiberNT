@@ -31,7 +31,11 @@
 #include "msiquery.h"
 
 #include "msipriv.h"
+#ifdef __REACTOS__
 #include "winemsi_s.h"
+#else
+#include "winemsi.h"
+#endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(msi);
 
@@ -346,5 +350,8 @@ UINT WINAPI MsiCloseAllHandles(void)
 
 UINT __cdecl s_remote_CloseHandle(MSIHANDLE handle)
 {
+#ifdef __REACTOS__
+    custom_release_remote_handle(handle);
+#endif
     return MsiCloseHandle(handle);
 }

@@ -4,42 +4,12 @@
  *
  *****************************************************************************/
 
-/*
- * Copyright (C) 2000 - 2022, Intel Corp.
- * All rights reserved.
+/******************************************************************************
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
+ * Copyright (c) 1999 - 2026, Intel Corp.
+ * SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0-only
  *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
+ *****************************************************************************/
 
 #include "acpi.h"
 #include "accommon.h"
@@ -83,7 +53,6 @@ AcpiExSystemMemorySpaceHandler (
     ACPI_MEM_MAPPING        *Mm = MemInfo->CurMm;
     UINT32                  Length;
     ACPI_SIZE               MapLength;
-    ACPI_SIZE               PageBoundaryMapLength;
 #ifdef ACPI_MISALIGNMENT_NOT_SUPPORTED
     UINT32                  Remainder;
 #endif
@@ -190,32 +159,22 @@ AcpiExSystemMemorySpaceHandler (
         MapLength = (ACPI_SIZE)
             ((MemInfo->Address + MemInfo->Length) - Address);
 
-        /*
-         * If mapping the entire remaining portion of the region will cross
-         * a page boundary, just map up to the page boundary, do not cross.
-         * On some systems, crossing a page boundary while mapping regions
-         * can cause warnings if the pages have different attributes
-         * due to resource management.
-         *
-         * This has the added benefit of constraining a single mapping to
-         * one page, which is similar to the original code that used a 4k
-         * maximum window.
-         */
-        PageBoundaryMapLength = (ACPI_SIZE)
-            (ACPI_ROUND_UP (Address, ACPI_DEFAULT_PAGE_SIZE) - Address);
-        if (PageBoundaryMapLength == 0)
+        if (MapLength > ACPI_DEFAULT_PAGE_SIZE)
         {
-            PageBoundaryMapLength = ACPI_DEFAULT_PAGE_SIZE;
-        }
-
-        if (MapLength > PageBoundaryMapLength)
-        {
-            MapLength = PageBoundaryMapLength;
+            MapLength = ACPI_DEFAULT_PAGE_SIZE;
         }
 
         /* Create a new mapping starting at the address given */
 
+#if defined(__REACTOS__) && defined(_M_ARM64)
+        /* ACPI tables are normal memory, but OperationRegions can be MMIO or
+         * shared firmware buffers and must not inherit the table mapping's
+         * cached ARM64 alias. MmNonCached selects Device memory for MMIO and
+         * Normal-NC for RAM-backed communication buffers. */
+        LogicalAddrPtr = AcpiOsMapOperationRegion(Address, MapLength);
+#else
         LogicalAddrPtr = AcpiOsMapMemory(Address, MapLength);
+#endif
         if (!LogicalAddrPtr)
         {
             ACPI_ERROR ((AE_INFO,
@@ -260,6 +219,10 @@ access:
      * transfer up into smaller (byte-size) chunks because the AML specifically
      * asked for a transfer width that the hardware may require.
      */
+#if defined(__REACTOS__) && defined(_M_ARM64)
+    /* Order Normal-NC shared-buffer accesses against Device MMIO doorbells. */
+    KeMemoryBarrier();
+#endif
     switch (Function)
     {
     case ACPI_READ:
@@ -332,6 +295,10 @@ access:
         Status = AE_BAD_PARAMETER;
         break;
     }
+
+#if defined(__REACTOS__) && defined(_M_ARM64)
+    KeMemoryBarrier();
+#endif
 
     return_ACPI_STATUS (Status);
 }

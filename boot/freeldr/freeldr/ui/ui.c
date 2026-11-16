@@ -19,6 +19,8 @@
 
 #include <freeldr.h>
 
+extern const UIVTBL FbGuiVtbl;
+
 #include <debug.h>
 DBG_DEFAULT_CHANNEL(UI);
 
@@ -43,9 +45,9 @@ BOOLEAN UiShowTime;             // Whether to draw the time
 BOOLEAN UiMenuBox;              // Whether to draw a box around the menu
 BOOLEAN UiCenterMenu;           // Whether to use a centered or left-aligned menu
 BOOLEAN UiUseSpecialEffects;    // Whether to use fade effects
+BOOLEAN UiKeepFirmwareScreen;
 
 CHAR UiTitleBoxTitleText[260] = "Boot Menu";    // Title box's title text
-CHAR UiTimeText[260] = "[Time Remaining: %d]";
 
 const PCSTR UiMonthNames[12] = { "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" };
 
@@ -107,6 +109,9 @@ BOOLEAN UiInitialize(BOOLEAN ShowUi)
         return TRUE;
     }
 
+    /* The menu UI must not inherit progress state from a failed OS load. */
+    UiProgressBar.Show = FALSE;
+
     TRACE("Initializing User Interface.\n");
     TRACE("Reading UI settings from [Display] section.\n");
 
@@ -130,23 +135,34 @@ BOOLEAN UiInitialize(BOOLEAN ShowUi)
     }
 
     if (UiDisplayMode == VideoGraphicsMode)
-#if 0 // We don't support a GUI mode yet.
-        UiVtbl = GuiVtbl;
-#else
     {
-        // Switch back to text mode.
+#ifdef UEFIBOOT
+        /* UEFI graphics uses the framebuffer UI backend. */
+        UiVtbl = FbGuiVtbl;
+#else
+        /* Graphics-mode UI is only implemented for UEFI. */
         MachVideoSetDisplayMode(NULL, TRUE);
         UiDisplayMode = VideoTextMode;
-    }
-#endif
-    else // if (UiDisplayMode == VideoTextMode)
         UiVtbl = (UiMinimal ? MiniTuiVtbl : TuiVtbl);
+        UiKeepFirmwareScreen = FALSE;
+#endif
+    }
+    else
+    {
+        UiVtbl = (UiMinimal ? MiniTuiVtbl : TuiVtbl);
+        UiKeepFirmwareScreen = FALSE;
+    }
 
     /* Load the UI and initialize its default settings */
     if (!UiVtbl.Initialize())
     {
-        MachVideoSetDisplayMode(NULL, FALSE);
-        return FALSE;
+        UiVtbl = MiniTuiVtbl;
+        UiKeepFirmwareScreen = FALSE;
+        if (!UiVtbl.Initialize())
+        {
+            MachVideoSetDisplayMode(NULL, FALSE);
+            return FALSE;
+        }
     }
 
     /* Load the user UI settings */
@@ -161,7 +177,6 @@ BOOLEAN UiInitialize(BOOLEAN ShowUi)
         } Settings[] =
         {
             {"TitleText", &UiTitleBoxTitleText, sizeof(UiTitleBoxTitleText), 0},
-            {"TimeText" , &UiTimeText, sizeof(UiTimeText), 0},
 
             {"ShowTime"      , &UiShowTime         , 0, 1},
             {"MenuBox"       , &UiMenuBox          , 0, 1},
@@ -221,8 +236,21 @@ BOOLEAN UiInitialize(BOOLEAN ShowUi)
     return TRUE;
 }
 
+VOID
+UiDiscardFirmwareScreen(VOID)
+{
+    if (!UiKeepFirmwareScreen)
+        return;
+
+    UiKeepFirmwareScreen = FALSE;
+    UiProgressBar.Show = FALSE;
+    MachVideoClearScreen(ATTR(UiBackdropFgColor, UiBackdropBgColor));
+    UiFadeInBackdrop();
+}
+
 VOID UiUnInitialize(PCSTR BootText)
 {
+    UiDiscardFirmwareScreen();
     UiDrawBackdrop(UiGetScreenHeight());
     UiDrawStatusText(BootText);
     UiInfoBox(BootText);
@@ -427,12 +455,12 @@ UiIndicateProgress(VOID)
                        UiProgressBar.Indicator.Expected;
     Percentage = min(Percentage, 99);
 
-    if (Percentage != UiProgressBar.Indicator.Percentage)
-    {
-        /* Percentage has changed, update the progress bar */
-        UiProgressBar.Indicator.Percentage = Percentage;
-        UiUpdateProgressBar(Percentage, NULL);
-    }
+    /*
+     * Always redraw so a caller-updated progress label remains visible
+     * after the indeterminate percentage reaches its 99-percent ceiling.
+     */
+    UiProgressBar.Indicator.Percentage = Percentage;
+    UiUpdateProgressBar(Percentage, NULL);
 }
 
 VOID
@@ -515,7 +543,7 @@ UiEscapeString(PCHAR String)
             String[Idx] = '\n';
 
             // Move the rest of the string up
-            strcpy(&String[Idx+1], &String[Idx+2]);
+            memmove(&String[Idx+1], &String[Idx+2], strlen(&String[Idx+2]) + 1);
         }
     }
 }
@@ -614,10 +642,29 @@ UiDisplayMenu(
     IN UiMenuKeyPressFilterCallback KeyPressFilter OPTIONAL,
     IN PVOID Context OPTIONAL)
 {
+    return UiDisplayMenuWithIcons(MenuHeader, MenuFooter, MenuItemList, MenuItemCount,
+                                   DefaultMenuItem, MenuTimeOut, SelectedMenuItem,
+                                   CanEscape, NULL, KeyPressFilter, Context);
+}
+
+BOOLEAN
+UiDisplayMenuWithIcons(
+    IN PCSTR MenuHeader,
+    IN PCSTR MenuFooter OPTIONAL,
+    IN PCSTR MenuItemList[],
+    IN ULONG MenuItemCount,
+    IN ULONG DefaultMenuItem,
+    IN LONG MenuTimeOut,
+    OUT PULONG SelectedMenuItem,
+    IN BOOLEAN CanEscape,
+    IN const UI_MENU_ICON* MenuItemIcons OPTIONAL,
+    IN UiMenuKeyPressFilterCallback KeyPressFilter OPTIONAL,
+    IN PVOID Context OPTIONAL)
+{
     return UiVtbl.DisplayMenu(MenuHeader, MenuFooter,
                               MenuItemList, MenuItemCount, DefaultMenuItem,
                               MenuTimeOut, SelectedMenuItem, CanEscape,
-                              KeyPressFilter, Context);
+                              MenuItemIcons, KeyPressFilter, Context);
 }
 
 VOID UiFadeInBackdrop(VOID)
@@ -638,6 +685,7 @@ BOOLEAN UiEditBox(PCSTR MessageText, PCHAR EditTextBuffer, ULONG Length)
 VOID
 UiResetForSOS(VOID)
 {
+    UiKeepFirmwareScreen = FALSE;
 #ifdef _M_ARM
     /* Re-initialize the UI */
     UiInitialize(TRUE);

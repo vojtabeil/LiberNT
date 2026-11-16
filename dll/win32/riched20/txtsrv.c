@@ -29,7 +29,9 @@
 #include "textserv.h"
 #include "wine/debug.h"
 #include "editstr.h"
+#ifdef __REACTOS__
 #include "riched20.h"
+#endif
 
 WINE_DEFAULT_DEBUG_CHANNEL(richedit);
 
@@ -82,6 +84,7 @@ static ULONG WINAPI ITextServicesImpl_Release(IUnknown *iface)
     {
         richole_release_children( services );
         ME_DestroyEditor( services->editor );
+        if (services->file != INVALID_HANDLE_VALUE) CloseHandle( services->file );
         free( services );
     }
     return ref;
@@ -586,6 +589,7 @@ HRESULT create_text_services( IUnknown *outer, ITextHost *text_host, IUnknown **
     services = malloc( sizeof(*services) );
     if (services == NULL) return E_OUTOFMEMORY;
     services->ref = 1;
+    services->file = INVALID_HANDLE_VALUE;
     services->IUnknown_inner.lpVtbl = &textservices_inner_vtbl;
     services->ITextServices_iface.lpVtbl = &textservices_vtbl;
     services->IRichEditOle_iface.lpVtbl = &re_ole_vtbl;

@@ -249,6 +249,7 @@ GetUserNameA(LPSTR lpszName,
     UNICODE_STRING NameW;
     ANSI_STRING NameA;
     BOOL Ret;
+    DWORD LastError = GetLastError();
 
     /* apparently Win doesn't check whether lpSize is valid at all! */
 
@@ -276,6 +277,7 @@ GetUserNameA(LPSTR lpszName,
 
     LocalFree(NameW.Buffer);
 
+    if (Ret) SetLastError(LastError);
     return Ret;
 }
 
@@ -299,6 +301,7 @@ GetUserNameW(LPWSTR lpszName,
     SID_NAME_USE snu = SidTypeUser;
     WCHAR* domain_name = NULL;
     DWORD dn_len = 0;
+    DWORD LastError = GetLastError();
 
     if (!OpenThreadToken (GetCurrentThread(), TOKEN_QUERY, FALSE, &hToken))
     {
@@ -391,6 +394,7 @@ GetUserNameW(LPWSTR lpszName,
     LocalFree(domain_name);
     LocalFree(tu_buf);
     *lpSize = an_len + 1;
+    SetLastError(LastError);
     return TRUE;
 }
 
@@ -660,6 +664,10 @@ LookupAccountNameW(LPCWSTR lpSystemName,
         return FALSE;
     }
 
+#ifdef __REACTOS__
+    if (!lpAccountName || !*lpAccountName)
+        lpAccountName = L"BUILTIN";
+#endif
     RtlInitUnicodeString(&AccountName,
                          lpAccountName);
 
@@ -680,9 +688,15 @@ LookupAccountNameW(LPCWSTR lpSystemName,
     {
         pDomainSid = ReferencedDomains->Domains[TranslatedSid->DomainIndex].Sid;
         nSubAuthorities = *GetSidSubAuthorityCount(pDomainSid);
+#ifdef __REACTOS__
+        dwSidLength = GetSidLengthRequired(nSubAuthorities + (TranslatedSid->Use != SidTypeDomain));
+
+        dwDomainNameLength = ReferencedDomains->Domains[TranslatedSid->DomainIndex].Name.Length / sizeof(WCHAR);
+#else
         dwSidLength = GetSidLengthRequired(nSubAuthorities + 1);
 
         dwDomainNameLength = ReferencedDomains->Domains->Name.Length / sizeof(WCHAR);
+#endif
 
         if (*cbSid < dwSidLength ||
             *cchReferencedDomainName < dwDomainNameLength + 1)
@@ -695,10 +709,21 @@ LookupAccountNameW(LPCWSTR lpSystemName,
         else
         {
             CopySid(*cbSid, Sid, pDomainSid);
+#ifdef __REACTOS__
+            if (TranslatedSid->Use != SidTypeDomain)
+            {
+                *GetSidSubAuthorityCount(Sid) = nSubAuthorities + 1;
+                *GetSidSubAuthority(Sid, (DWORD)nSubAuthorities) = TranslatedSid->RelativeId;
+            }
+
+            RtlCopyMemory(ReferencedDomainName, ReferencedDomains->Domains[TranslatedSid->DomainIndex].Name.Buffer,
+                          dwDomainNameLength * sizeof(WCHAR));
+#else
             *GetSidSubAuthorityCount(Sid) = nSubAuthorities + 1;
             *GetSidSubAuthority(Sid, (DWORD)nSubAuthorities) = TranslatedSid->RelativeId;
 
             RtlCopyMemory(ReferencedDomainName, ReferencedDomains->Domains->Name.Buffer, dwDomainNameLength * sizeof(WCHAR));
+#endif
             ReferencedDomainName[dwDomainNameLength] = L'\0';
 
             *cchReferencedDomainName = dwDomainNameLength;
@@ -969,14 +994,13 @@ pGetSecurityInfoCheck(SECURITY_INFORMATION SecurityInfo,
                       PACL *ppSacl,
                       PSECURITY_DESCRIPTOR* ppSecurityDescriptor)
 {
-    if ((SecurityInfo & (OWNER_SECURITY_INFORMATION |
-                         GROUP_SECURITY_INFORMATION |
-                         DACL_SECURITY_INFORMATION |
-                         SACL_SECURITY_INFORMATION)) &&
-        ppSecurityDescriptor == NULL)
+    if ((!ppsidOwner && !ppsidGroup && !ppDacl && !ppSacl && !ppSecurityDescriptor) ||
+        (!ppSecurityDescriptor &&
+         (((SecurityInfo & OWNER_SECURITY_INFORMATION) && !ppsidOwner) ||
+          ((SecurityInfo & GROUP_SECURITY_INFORMATION) && !ppsidGroup) ||
+          ((SecurityInfo & DACL_SECURITY_INFORMATION) && !ppDacl) ||
+          ((SecurityInfo & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) && !ppSacl))))
     {
-        /* if one of the SIDs or ACLs are present, the security descriptor
-           most not be NULL */
         return ERROR_INVALID_PARAMETER;
     }
     else
@@ -997,16 +1021,18 @@ pGetSecurityInfoCheck(SECURITY_INFORMATION SecurityInfo,
         {
             *ppDacl = NULL;
         }
-        if ((SecurityInfo & SACL_SECURITY_INFORMATION) &&
+        if ((SecurityInfo & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) &&
             ppSacl != NULL)
         {
             *ppSacl = NULL;
         }
 
-        if (SecurityInfo & (OWNER_SECURITY_INFORMATION |
-                            GROUP_SECURITY_INFORMATION |
-                            DACL_SECURITY_INFORMATION |
-                            SACL_SECURITY_INFORMATION))
+        if (ppSecurityDescriptor &&
+            (SecurityInfo & (OWNER_SECURITY_INFORMATION |
+                             GROUP_SECURITY_INFORMATION |
+                             DACL_SECURITY_INFORMATION |
+                             SACL_SECURITY_INFORMATION |
+                             LABEL_SECURITY_INFORMATION)))
         {
             *ppSecurityDescriptor = NULL;
         }
@@ -1099,7 +1125,7 @@ ProtectDacl:
         }
     }
 
-    if (SecurityInfo & SACL_SECURITY_INFORMATION)
+    if (SecurityInfo & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION))
     {
         if (pSacl != NULL)
         {
@@ -1517,7 +1543,7 @@ TreeResetNamedSecurityInfoW(LPWSTR pObjectName,
 
                         ||
 
-                        ((SecurityInfo & SACL_SECURITY_INFORMATION) &&
+                        ((SecurityInfo & (SACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION)) &&
                          (SecurityInfo & (PROTECTED_SACL_SECURITY_INFORMATION | UNPROTECTED_SACL_SECURITY_INFORMATION)) ==
                              (PROTECTED_SACL_SECURITY_INFORMATION | UNPROTECTED_SACL_SECURITY_INFORMATION)))
                     {
@@ -1553,7 +1579,7 @@ TreeResetNamedSecurityInfoW(LPWSTR pObjectName,
     return ErrorCode;
 }
 
-#ifdef HAS_FN_PROGRESSW
+#if defined(HAS_FN_PROGRESSW) && !defined(__REACTOS__)
 
 typedef struct _INTERNAL_FNPROGRESSW_DATA
 {
@@ -1630,6 +1656,9 @@ TreeResetNamedSecurityInfoA(LPSTR pObjectName,
                             PROG_INVOKE_SETTING ProgressInvokeSetting,
                             PVOID Args)
 {
+#ifdef __REACTOS__
+    return ERROR_CALL_NOT_IMPLEMENTED;
+#else
 #ifndef HAS_FN_PROGRESSW
     /* That's all this function does, at least up to w2k3... Even MS was too
        lazy to implement it... */
@@ -1663,6 +1692,26 @@ TreeResetNamedSecurityInfoA(LPSTR pObjectName,
 
     return Ret;
 #endif
+#endif
 }
+
+#ifdef __REACTOS__
+DWORD
+WINAPI
+TreeSetNamedSecurityInfoA(LPSTR pObjectName,
+                         SE_OBJECT_TYPE ObjectType,
+                         SECURITY_INFORMATION SecurityInfo,
+                         PSID pOwner,
+                         PSID pGroup,
+                         PACL pDacl,
+                         PACL pSacl,
+                         DWORD Action,
+                         FN_PROGRESS Progress,
+                         PROG_INVOKE_SETTING InvokeSetting,
+                         PVOID Args)
+{
+    return ERROR_CALL_NOT_IMPLEMENTED;
+}
+#endif
 
 /* EOF */

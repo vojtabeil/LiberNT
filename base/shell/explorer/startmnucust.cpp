@@ -61,6 +61,7 @@ static BOOL RecentHasShortcut(HWND hwnd)
 static const PCWSTR g_MruKeys[] = 
 {
     L"Software\\Microsoft\\Internet Explorer\\TypedURLs",
+    L"Software\\ReactOS\\StartMenu2\\RecentApps",
     L"Explorer\\RunMRU",
     L"Explorer\\Comdlg32\\OpenSaveMRU",
     L"Explorer\\Comdlg32\\LastVisitedMRU",
@@ -208,7 +209,7 @@ static VOID AddCustomItem(HWND hTreeView, const CUSTOM_ENTRY *entry)
     BOOL bChecked = entry->fnGetValue(entry);
     TRACE("%p: %d\n", entry->id, bChecked);
 
-    TV_INSERTSTRUCT Insert = { TVI_ROOT, TVI_LAST, { TVIF_TEXT | TVIF_STATE | TVIF_PARAM } };
+    TV_INSERTSTRUCT Insert = { TVI_ROOT, TVI_LAST, { { TVIF_TEXT | TVIF_STATE | TVIF_PARAM } } };
     Insert.item.pszText = szText;
     Insert.item.lParam = entry->id;
     Insert.item.stateMask = TVIS_STATEIMAGEMASK;

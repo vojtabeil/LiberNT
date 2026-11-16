@@ -20,6 +20,7 @@
 #include <userenv.h>
 #include <ndk/setypes.h>
 #include <ndk/sefuncs.h>
+#include <reactos/desktopready.h>
 
 /* GLOBALS ******************************************************************/
 
@@ -29,7 +30,6 @@
 #define IDHK_CTRL_ALT_DEL   0
 #define IDHK_CTRL_SHIFT_ESC 1
 #define IDHK_WIN_L          2
-#define IDHK_WIN_U          3
 
 // #define EWX_FLAGS_MASK  0x00000014
 // #define EWX_ACTION_MASK ~EWX_FLAGS_MASK
@@ -45,6 +45,7 @@ typedef struct tagLOGOFF_SHUTDOWN_DATA
 } LOGOFF_SHUTDOWN_DATA, *PLOGOFF_SHUTDOWN_DATA;
 
 static BOOL ExitReactOSInProgress = FALSE;
+static UINT ExitWindowsFlags = 0;
 
 LUID LuidNone = {0, 0};
 
@@ -85,12 +86,139 @@ StartTaskManager(
 }
 
 static BOOL
+StartSystemShell(VOID)
+{
+    WCHAR Shell[MAX_PATH] = L"explorer.exe";
+    WCHAR CommandLine[MAX_PATH];
+    DWORD Size = sizeof(Shell) - sizeof(UNICODE_NULL);
+    DWORD Type;
+    HKEY hKey;
+    LPVOID lpEnvironment = NULL;
+    STARTUPINFOW StartupInfo;
+    PROCESS_INFORMATION ProcessInformation;
+    BOOL ret;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
+                      0,
+                      KEY_QUERY_VALUE,
+                      &hKey) == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW(hKey, L"Shell", NULL, &Type, (LPBYTE)Shell, &Size) != ERROR_SUCCESS ||
+            (Type != REG_SZ && Type != REG_EXPAND_SZ) || Size < sizeof(WCHAR))
+        {
+            StringCchCopyW(Shell, ARRAYSIZE(Shell), L"explorer.exe");
+        }
+        else
+        {
+            Shell[Size / sizeof(WCHAR)] = UNICODE_NULL;
+        }
+        RegCloseKey(hKey);
+    }
+
+    Size = ExpandEnvironmentStringsW(Shell, CommandLine, ARRAYSIZE(CommandLine));
+    if (!Size || Size > ARRAYSIZE(CommandLine))
+        return FALSE;
+
+    if (!CreateEnvironmentBlock(&lpEnvironment, NULL, TRUE))
+        lpEnvironment = NULL;
+
+    ZeroMemory(&StartupInfo, sizeof(StartupInfo));
+    StartupInfo.cb = sizeof(StartupInfo);
+    StartupInfo.lpDesktop = L"WinSta0\\Default";
+
+    ret = CreateProcessW(NULL,
+                         CommandLine,
+                         NULL,
+                         NULL,
+                         FALSE,
+                         CREATE_UNICODE_ENVIRONMENT,
+                         lpEnvironment,
+                         NULL,
+                         &StartupInfo,
+                         &ProcessInformation);
+    if (ret)
+    {
+        CloseHandle(ProcessInformation.hThread);
+        CloseHandle(ProcessInformation.hProcess);
+    }
+    else
+    {
+        ERR("WL: Failed to restart the shell %s (error %lu)\n", debugstr_w(CommandLine), GetLastError());
+    }
+
+    if (lpEnvironment)
+        DestroyEnvironmentBlock(lpEnvironment);
+    return ret;
+}
+
+static HANDLE
+CreateUserDesktopReadyEvent(
+    _In_ PWLSESSION Session)
+{
+    HANDLE ReadyEvent;
+    BOOL Impersonated = FALSE;
+
+    if (Session->UserToken)
+    {
+        Impersonated = ImpersonateLoggedOnUser(Session->UserToken);
+        if (!Impersonated)
+            ERR("WL: Could not impersonate the user for the desktop ready event (error %lu)\n", GetLastError());
+    }
+
+    ReadyEvent = CreateEventW(NULL, TRUE, FALSE, REACTOS_USER_DESKTOP_READY_EVENT);
+    if (Impersonated && !RevertToSelf())
+        ERR("WL: RevertToSelf failed (error %lu)\n", GetLastError());
+    if (!ReadyEvent)
+    {
+        ERR("WL: Could not create the desktop ready event (error %lu)\n", GetLastError());
+        return NULL;
+    }
+
+    ResetEvent(ReadyEvent);
+    return ReadyEvent;
+}
+
+static VOID
+WaitForUserDesktopReady(
+    _In_ HANDLE ReadyEvent)
+{
+    DWORD Start = GetTickCount();
+    DWORD Elapsed;
+    DWORD Result;
+    MSG Msg;
+
+    for (;;)
+    {
+        PeekMessageW(&Msg, NULL, 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+        Elapsed = GetTickCount() - Start;
+        Result = MsgWaitForMultipleObjects(1,
+                                           &ReadyEvent,
+                                           FALSE,
+                                           Elapsed < REACTOS_USER_DESKTOP_READY_TIMEOUT_MS ?
+                                               REACTOS_USER_DESKTOP_READY_TIMEOUT_MS - Elapsed : 0,
+                                           QS_SENDMESSAGE);
+        if (Result != WAIT_OBJECT_0 + 1)
+            break;
+    }
+
+    if (Result == WAIT_TIMEOUT)
+        WARN("WL: The user desktop was not ready after %lu ms\n", (DWORD)REACTOS_USER_DESKTOP_READY_TIMEOUT_MS);
+    else if (Result != WAIT_OBJECT_0)
+        ERR("WL: Waiting for the user desktop failed (result %lu, error %lu)\n", Result, GetLastError());
+}
+
+static BOOL
 StartUserShell(
     IN OUT PWLSESSION Session)
 {
     LPVOID lpEnvironment = NULL;
+    HANDLE ReadyEvent;
     BOOLEAN Old;
     BOOL ret;
+
+    if (!Session->UserToken)
+        return StartSystemShell();
 
     /* Create environment block for the user */
     if (!CreateEnvironmentBlock(&lpEnvironment, Session->UserToken, TRUE))
@@ -104,13 +232,156 @@ StartUserShell(
     /* FIXME: reverting to lower privileges after creating user shell? */
     RtlAdjustPrivilege(SE_ASSIGNPRIMARYTOKEN_PRIVILEGE, TRUE, FALSE, &Old);
 
+    ReadyEvent = CreateUserDesktopReadyEvent(Session);
     ret = Session->Gina.Functions.WlxActivateUserShell(
                 Session->Gina.Context,
                 L"Default",
                 NULL, /* FIXME */
                 lpEnvironment);
+    if (ret && ReadyEvent)
+        WaitForUserDesktopReady(ReadyEvent);
+    if (ReadyEvent)
+        CloseHandle(ReadyEvent);
 
     DestroyEnvironmentBlock(lpEnvironment);
+    return ret;
+}
+
+static BOOL
+GetWinlogonShell(
+    IN HKEY hRootKey,
+    OUT PWSTR Shell,
+    IN DWORD cchShell)
+{
+    DWORD Size = (cchShell - 1) * sizeof(WCHAR);
+    DWORD Type;
+    HKEY hKey;
+    LONG rc;
+
+    if (RegOpenKeyExW(hRootKey,
+                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
+                      0,
+                      KEY_QUERY_VALUE,
+                      &hKey) != ERROR_SUCCESS)
+    {
+        return FALSE;
+    }
+
+    rc = RegQueryValueExW(hKey, L"Shell", NULL, &Type, (LPBYTE)Shell, &Size);
+    RegCloseKey(hKey);
+    if (rc != ERROR_SUCCESS || (Type != REG_SZ && Type != REG_EXPAND_SZ) || Size < sizeof(WCHAR))
+        return FALSE;
+
+    Shell[Size / sizeof(WCHAR)] = UNICODE_NULL;
+    return Shell[0] != UNICODE_NULL;
+}
+
+static BOOL
+IsAutoRestartShellEnabled(VOID)
+{
+    DWORD Value = 1;
+    DWORD Size = sizeof(Value);
+    DWORD Type;
+    HKEY hKey;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                      L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
+                      0,
+                      KEY_QUERY_VALUE,
+                      &hKey) == ERROR_SUCCESS)
+    {
+        if (RegQueryValueExW(hKey, L"AutoRestartShell", NULL, &Type, (LPBYTE)&Value, &Size) != ERROR_SUCCESS ||
+            Type != REG_DWORD)
+        {
+            Value = 1;
+        }
+        RegCloseKey(hKey);
+    }
+
+    return Value != 0;
+}
+
+static BOOL
+RestartUserShell(
+    IN OUT PWLSESSION Session)
+{
+    WCHAR Shell[MAX_PATH];
+    WCHAR CommandLine[MAX_PATH];
+    STARTUPINFOW StartupInfo;
+    PROCESS_INFORMATION ProcessInformation;
+    LPVOID lpEnvironment = NULL;
+    HANDLE hToken = NULL;
+    HKEY hKeyUser;
+    BOOLEAN Old;
+    BOOL Found = FALSE;
+    BOOL ret;
+
+    if (!IsAutoRestartShellEnabled())
+        return FALSE;
+
+    if (!Session->UserToken)
+        return StartSystemShell();
+
+    if (ImpersonateLoggedOnUser(Session->UserToken))
+    {
+        if (RegOpenCurrentUser(KEY_QUERY_VALUE, &hKeyUser) == ERROR_SUCCESS)
+        {
+            Found = GetWinlogonShell(hKeyUser, Shell, ARRAYSIZE(Shell));
+            RegCloseKey(hKeyUser);
+        }
+        RevertToSelf();
+    }
+    if (!Found && !GetWinlogonShell(HKEY_LOCAL_MACHINE, Shell, ARRAYSIZE(Shell)))
+        StringCchCopyW(Shell, ARRAYSIZE(Shell), L"explorer.exe");
+
+    if (!ExpandEnvironmentStringsForUserW(Session->UserToken, Shell, CommandLine, ARRAYSIZE(CommandLine)))
+    {
+        ERR("WL: Failed to expand the shell command line %s (error %lu)\n", debugstr_w(Shell), GetLastError());
+        return FALSE;
+    }
+
+    if (!DuplicateTokenEx(Session->UserToken, MAXIMUM_ALLOWED, NULL, SecurityImpersonation, TokenPrimary, &hToken))
+    {
+        ERR("WL: DuplicateTokenEx() failed with error %lu\n", GetLastError());
+        return FALSE;
+    }
+
+    if (!CreateEnvironmentBlock(&lpEnvironment, Session->UserToken, TRUE))
+    {
+        ERR("WL: CreateEnvironmentBlock() failed with error %lu\n", GetLastError());
+        CloseHandle(hToken);
+        return FALSE;
+    }
+
+    RtlAdjustPrivilege(SE_ASSIGNPRIMARYTOKEN_PRIVILEGE, TRUE, FALSE, &Old);
+
+    ZeroMemory(&StartupInfo, sizeof(StartupInfo));
+    StartupInfo.cb = sizeof(StartupInfo);
+    StartupInfo.lpDesktop = L"WinSta0\\Default";
+
+    ret = CreateProcessAsUserW(hToken,
+                               NULL,
+                               CommandLine,
+                               NULL,
+                               NULL,
+                               FALSE,
+                               CREATE_UNICODE_ENVIRONMENT,
+                               lpEnvironment,
+                               NULL,
+                               &StartupInfo,
+                               &ProcessInformation);
+    if (ret)
+    {
+        CloseHandle(ProcessInformation.hThread);
+        CloseHandle(ProcessInformation.hProcess);
+    }
+    else
+    {
+        ERR("WL: Failed to restart the shell %s (error %lu)\n", debugstr_w(CommandLine), GetLastError());
+    }
+
+    DestroyEnvironmentBlock(lpEnvironment);
+    CloseHandle(hToken);
     return ret;
 }
 
@@ -252,15 +523,25 @@ PlaySoundRoutine(
 {
     typedef BOOL (WINAPI *PLAYSOUNDW)(LPCWSTR,HMODULE,DWORD);
     typedef UINT (WINAPI *WAVEOUTGETNUMDEVS)(VOID);
+    static HMODULE hWinmm;
     PLAYSOUNDW Play;
     WAVEOUTGETNUMDEVS waveOutGetNumDevs;
     UINT NumDevs;
     HMODULE hLibrary;
     BOOL Ret = FALSE;
 
-    hLibrary = LoadLibraryW(L"winmm.dll");
+    hLibrary = hWinmm;
     if (!hLibrary)
-        return FALSE;
+    {
+        hLibrary = LoadLibraryW(L"winmm.dll");
+        if (!hLibrary)
+            return FALSE;
+        if (InterlockedCompareExchangePointer((PVOID *)&hWinmm, hLibrary, NULL) != NULL)
+        {
+            FreeLibrary(hLibrary);
+            hLibrary = hWinmm;
+        }
+    }
 
     waveOutGetNumDevs = (WAVEOUTGETNUMDEVS)GetProcAddress(hLibrary, "waveOutGetNumDevs");
     Play = (PLAYSOUNDW)GetProcAddress(hLibrary, "PlaySoundW");
@@ -287,8 +568,6 @@ PlaySoundRoutine(
             FileName ? FileName : L"(n/a)", _SEH2_GetExceptionCode());
     }
     _SEH2_END;
-
-    FreeLibrary(hLibrary);
 
     return Ret;
 }
@@ -351,7 +630,7 @@ PlayLogonSoundThread(
 
     /* Sound subsystem is running. Play logon sound. */
     TRACE("Playing %s sound\n", SoundData->IsStartup ? "startup" : "logon");
-    if (!ImpersonateLoggedOnUser(SoundData->UserToken))
+    if (SoundData->UserToken && !ImpersonateLoggedOnUser(SoundData->UserToken))
     {
         ERR("ImpersonateLoggedOnUser failed (%x)\n", GetLastError());
     }
@@ -360,7 +639,8 @@ PlayLogonSoundThread(
         PlaySoundRoutine(SoundData->IsStartup ? L"SystemStart" : L"WindowsLogon",
                          TRUE,
                          SND_ALIAS | SND_NODEFAULT);
-        RevertToSelf();
+        if (SoundData->UserToken)
+            RevertToSelf();
     }
 
 Cleanup:
@@ -398,7 +678,7 @@ PlayLogoffShutdownSound(
     _In_ PWLSESSION Session,
     _In_ BOOL bShutdown)
 {
-    if (!ImpersonateLoggedOnUser(Session->UserToken))
+    if (Session->UserToken && !ImpersonateLoggedOnUser(Session->UserToken))
         return;
 
     /* NOTE: Logoff and shutdown sounds play synchronously */
@@ -406,7 +686,8 @@ PlayLogoffShutdownSound(
                      FALSE,
                      SND_ALIAS | SND_NODEFAULT);
 
-    RevertToSelf();
+    if (Session->UserToken)
+        RevertToSelf();
 }
 
 static
@@ -417,12 +698,13 @@ PlayEventSound(
 {
     BOOL bRet;
 
-    if (!ImpersonateLoggedOnUser(Session->UserToken))
+    if (Session->UserToken && !ImpersonateLoggedOnUser(Session->UserToken))
         return FALSE;
 
     bRet = PlaySoundRoutine(EventName, FALSE, SND_ALIAS | SND_ASYNC | SND_NODEFAULT);
 
-    RevertToSelf();
+    if (Session->UserToken)
+        RevertToSelf();
 
     return bRet;
 }
@@ -572,6 +854,10 @@ HandleLogon(
     IN OUT PWLSESSION Session)
 {
     BOOL ret = FALSE;
+    ULONG SessionId = NtCurrentPeb()->SessionId;
+
+    if (!SetTokenInformation(Session->UserToken, TokenSessionId, &SessionId, sizeof(SessionId)))
+        ERR("WL: SetTokenInformation(TokenSessionId) failed (error %lu)\n", GetLastError());
 
     /* Loading personal settings */
     DisplayStatusMessage(Session, Session->WinlogonDesktop, IDS_LOADINGYOURPERSONALSETTINGS);
@@ -698,10 +984,9 @@ cleanup:
     FreeWlxMprInfo(&Session->MprNotifyInfo);
     ZeroMemory(&Session->MprNotifyInfo, sizeof(Session->MprNotifyInfo));
 
-    RemoveStatusMessage(Session);
-
     if (!ret)
     {
+        RemoveStatusMessage(Session);
         RtlFreeHeap(RtlGetProcessHeap(), 0, Session->UserName);
         RtlFreeHeap(RtlGetProcessHeap(), 0, Session->Domain);
         Session->UserName = Session->Domain = NULL;
@@ -717,6 +1002,7 @@ cleanup:
         // (revert what security.c!AllowAccessOnSession() does).
         SetWindowStationUser(Session->InteractiveWindowStation,
                              &LuidNone, NULL, 0);
+        UpdateNamedObjectAccess(Session->UserToken, FALSE);
 
         /* Switch back to default SYSTEM user */
         CloseHandle(Session->UserToken);
@@ -726,6 +1012,7 @@ cleanup:
     else // if (ret)
     {
         SwitchDesktop(Session->ApplicationDesktop);
+        RemoveStatusMessage(Session);
         Session->LogonState = STATE_LOGGED_ON;
     }
     return ret;
@@ -754,7 +1041,9 @@ LogoffShutdownThread(
     // uFlags = EWX_INTERNAL_KILL_USER_APPS | (LSData->Flags & EWX_FLAGS_MASK) |
              // ((LSData->Flags & EWX_ACTION_MASK) == EWX_LOGOFF ? EWX_CALLER_WINLOGON_LOGOFF : 0);
 
-    uFlags = EWX_CALLER_WINLOGON | (LSData->Flags & 0x0F);
+    uFlags = EWX_CALLER_WINLOGON |
+             (LSData->Flags & (EWX_SHUTDOWN | EWX_REBOOT | EWX_POWEROFF |
+                              EWX_FORCE | EWX_FORCEIFHUNG));
 
     TRACE("In LogoffShutdownThread with uFlags == 0x%x; exit_in_progress == %s\n",
         uFlags, ExitReactOSInProgress ? "TRUE" : "FALSE");
@@ -818,13 +1107,13 @@ RunLogoffShutdownThread(
     }
     else // if (WLX_SHUTTINGDOWN(wlxAction))
     {
-        /* Because we are shutting down the OS, force processes termination too */
-        LSData->Flags = EWX_SHUTDOWN | EWX_FORCE;
+        LSData->Flags = EWX_SHUTDOWN;
         if (wlxAction == WLX_SAS_ACTION_SHUTDOWN_POWER_OFF)
             LSData->Flags |= EWX_POWEROFF;
         else if (wlxAction == WLX_SAS_ACTION_SHUTDOWN_REBOOT)
             LSData->Flags |= EWX_REBOOT;
     }
+    LSData->Flags |= ExitWindowsFlags & (EWX_FORCE | EWX_FORCEIFHUNG);
 
     LSData->Session = Session;
 
@@ -1086,6 +1375,7 @@ HandleLogoff(
 
     // TODO: Remove session access to window station
     // (revert what security.c!AllowAccessOnSession() does).
+    UpdateNamedObjectAccess(Session->UserToken, FALSE);
 
     /* Switch back to default SYSTEM user */
     CloseHandle(Session->UserToken);
@@ -1145,6 +1435,30 @@ UninitializeSAS(
     UnregisterClassW(WINLOGON_SAS_CLASS, hAppInstance);
 }
 
+static
+VOID
+ShutdownSessionZero(VOID)
+{
+    HANDLE Request, Complete;
+
+    Request = OpenEventW(EVENT_MODIFY_STATE, FALSE, L"Global\\WininitShutdownRequest");
+    Complete = OpenEventW(SYNCHRONIZE, FALSE, L"Global\\WininitShutdownComplete");
+    if (Request && Complete)
+    {
+        SetEvent(Request);
+        WaitForSingleObject(Complete, INFINITE);
+    }
+    else
+    {
+        ERR("WL: Could not reach wininit for the session 0 shutdown (error %lu)\n", GetLastError());
+    }
+
+    if (Complete)
+        CloseHandle(Complete);
+    if (Request)
+        CloseHandle(Request);
+}
+
 NTSTATUS
 HandleShutdown(
     IN OUT PWLSESSION Session,
@@ -1163,24 +1477,39 @@ HandleShutdown(
     // SwitchDesktop(Session->WinlogonDesktop);
     DisplayStatusMessage(Session, Session->WinlogonDesktop, uMsgId);
 
-    /* Invoke Shutdown notifications and notify GINA */
-    CallNotificationDlls(Session, ShutdownHandler);
-    Session->Gina.Functions.WlxShutdown(Session->Gina.Context, wlxAction);
+    if (Session->LogonState != STATE_INIT)
+    {
+        /* The interactive user has already agreed to log off. */
+        CallNotificationDlls(Session, ShutdownHandler);
+        Session->Gina.Functions.WlxShutdown(Session->Gina.Context, wlxAction);
+    }
 
-    /* Run the shutdown thread. *IGNORE* all failures as we want to force shutting down! */
+    /* Setup and LiveCD shells also need a chance to save work or cancel. */
     Status = RunLogoffShutdownThread(Session, NULL, wlxAction);
     if (!NT_SUCCESS(Status))
+    {
         ERR("Failed to start the Shutdown thread, Status 0x%08lx\n", Status);
+        return Status;
+    }
+
+    if (Session->LogonState == STATE_INIT)
+    {
+        /* A setup shell has no separate user-logoff phase. */
+        CallNotificationDlls(Session, ShutdownHandler);
+        Session->Gina.Functions.WlxShutdown(Session->Gina.Context, wlxAction);
+    }
 
     /* Show again the shutdown message */
     // SwitchDesktop(Session->WinlogonDesktop); // Re-enable if you notice the desktop may have switched to something else.
     DisplayStatusMessage(Session, Session->WinlogonDesktop, uMsgId);
 
+    ShutdownSessionZero();
+
     /* Destroy SAS window */
     UninitializeSAS(Session);
 
     /* Now we can shut down NT */
-    ERR("Shutting down NT...\n");
+    TRACE("Shutting down NT...\n");
     RtlAdjustPrivilege(SE_SHUTDOWN_PRIVILEGE, TRUE, FALSE, &Old);
     if (wlxAction == WLX_SAS_ACTION_SHUTDOWN_REBOOT)
     {
@@ -1201,6 +1530,34 @@ HandleShutdown(
     }
     RtlAdjustPrivilege(SE_SHUTDOWN_PRIVILEGE, Old, FALSE, &Old);
     return STATUS_SUCCESS;
+}
+
+static
+VOID
+HandleSuspend(
+    IN DWORD wlxAction)
+{
+    BOOLEAN Hibernate = (wlxAction == WLX_SAS_ACTION_SHUTDOWN_HIBERNATE);
+    SYSTEM_POWER_CAPABILITIES Capabilities;
+    NTSTATUS Status;
+    BOOLEAN Old;
+
+    if (!Hibernate &&
+        NT_SUCCESS(NtPowerInformation(SystemPowerCapabilities, NULL, 0, &Capabilities, sizeof(Capabilities))) &&
+        Capabilities.AoAc)
+    {
+        DefWindowProcW(GetDesktopWindow(), WM_SYSCOMMAND, SC_MONITORPOWER, 2);
+        return;
+    }
+
+    RtlAdjustPrivilege(SE_SHUTDOWN_PRIVILEGE, TRUE, FALSE, &Old);
+    Status = NtInitiatePowerAction(Hibernate ? PowerActionHibernate : PowerActionSleep,
+                                   Hibernate ? PowerSystemHibernate : PowerSystemSleeping1,
+                                   POWER_ACTION_QUERY_ALLOWED | POWER_ACTION_UI_ALLOWED,
+                                   TRUE);
+    RtlAdjustPrivilege(SE_SHUTDOWN_PRIVILEGE, Old, FALSE, &Old);
+    if (!NT_SUCCESS(Status))
+        ERR("Power action for SAS action 0x%lx failed, Status 0x%08lx\n", wlxAction, Status);
 }
 
 static
@@ -1245,6 +1602,7 @@ DoGenericAction(
                 {
                     Session->LogonState = STATE_LOCKED;
                     SwitchDesktop(Session->WinlogonDesktop);
+                    ReplyMessage(TRUE);
                     /* We may be on the Logged-On SAS dialog, in which case
                      * we need to close it if the lock action came via Win-L */
                     CloseAllDialogWindows();
@@ -1282,8 +1640,13 @@ DoGenericAction(
                 if (!NT_SUCCESS(HandleShutdown(Session, wlxAction)))
                 {
                     RemoveStatusMessage(Session);
-                    Session->LogonState = STATE_LOGGED_OFF;
-                    Session->Gina.Functions.WlxDisplaySASNotice(Session->Gina.Context);
+                    if (Session->LogonState == STATE_INIT)
+                        SwitchDesktop(Session->ApplicationDesktop);
+                    else
+                    {
+                        Session->LogonState = STATE_LOGGED_OFF;
+                        Session->Gina.Functions.WlxDisplaySASNotice(Session->Gina.Context);
+                    }
                 }
             }
             else
@@ -1303,12 +1666,19 @@ DoGenericAction(
                 StartTaskManager(Session);
             }
             break;
+        case WLX_SAS_ACTION_SHUTDOWN_SLEEP: /* 0x0c */
+        case WLX_SAS_ACTION_SHUTDOWN_SLEEP2: /* 0x0d */
+        case WLX_SAS_ACTION_SHUTDOWN_HIBERNATE: /* 0x0e */
+            HandleSuspend(wlxAction);
+            DoGenericAction(Session, WLX_SAS_ACTION_NONE);
+            break;
         case WLX_SAS_ACTION_UNLOCK_WKSTA: /* 0x08 */
             if ((Session->LogonState == STATE_LOCKED) ||
                 (Session->LogonState == STATE_LOCKED_SAS))
             {
                 CallNotificationDlls(Session, UnlockHandler);
                 SwitchDesktop(Session->ApplicationDesktop);
+                RemoveStatusMessage(Session);
                 Session->LogonState = STATE_LOGGED_ON;
             }
             break;
@@ -1334,6 +1704,7 @@ DispatchSAS(
             {
                 case STATE_INIT:
                     Session->LogonState = STATE_LOGGED_OFF;
+                    RemoveStatusMessage(Session);
                     Session->Gina.Functions.WlxDisplaySASNotice(Session->Gina.Context);
                     return;
 
@@ -1430,6 +1801,20 @@ DispatchSAS(
     }
 
     DoGenericAction(Session, wlxAction);
+
+    if (dwSasType != WLX_SAS_TYPE_CTRL_ALT_DEL)
+        return;
+
+    if (Session->LogonState == STATE_LOGGED_ON_SAS)
+    {
+        SwitchDesktop(Session->ApplicationDesktop);
+        Session->LogonState = STATE_LOGGED_ON;
+    }
+    else if (Session->LogonState == STATE_LOCKED_SAS)
+    {
+        Session->LogonState = STATE_LOCKED;
+        Session->Gina.Functions.WlxDisplayLockedNotice(Session->Gina.Context);
+    }
 }
 
 static
@@ -1455,11 +1840,6 @@ RegisterHotKeys(
     if (!Session->LockWkStaHotkey)
         WARN("WL: Unable to register Win+L hotkey\n");
 
-    /* Register Win+U "Accessibility Utility" hotkey (optional) */
-    Session->UtilManHotkey = RegisterHotKey(hwndSAS, IDHK_WIN_U, MOD_WIN, 'U');
-    if (!Session->UtilManHotkey)
-        WARN("WL: Unable to register Win+U hotkey\n");
-
     return TRUE;
 }
 
@@ -1477,9 +1857,6 @@ UnregisterHotKeys(
 
     if (Session->LockWkStaHotkey)
         UnregisterHotKey(hwndSAS, IDHK_WIN_L);
-
-    if (Session->UtilManHotkey)
-        UnregisterHotKey(hwndSAS, IDHK_WIN_U);
 
     return TRUE;
 }
@@ -1555,12 +1932,6 @@ SASWindowProc(
                 {
                     TRACE("SAS: WIN+L\n");
                     PostMessageW(Session->SASWindow, WM_LOGONNOTIFY, LN_LOCK_WORKSTATION, 0);
-                    return TRUE;
-                }
-                case IDHK_WIN_U:
-                {
-                    TRACE("SAS: WIN+U\n");
-                    // PostMessageW(Session->SASWindow, WM_LOGONNOTIFY, LN_ACCESSIBILITY, 0);
                     return TRUE;
                 }
             }
@@ -1675,6 +2046,7 @@ SASWindowProc(
                             wlxAction = WLX_SAS_ACTION_LOGOFF;
                         Action &= ~(EWX_LOGOFF | EWX_FORCE);
                     }
+                    Action &= ~EWX_FORCE;
                     if (Action)
                         ERR("Unhandled EWX_* action flags: 0x%x\n", Action);
 
@@ -1699,7 +2071,9 @@ SASWindowProc(
                     }
 #endif
                     /* Now do the shutdown action proper */
+                    ExitWindowsFlags = Flags & (EWX_FORCE | EWX_FORCEIFHUNG);
                     DoGenericAction(Session, wlxAction);
+                    ExitWindowsFlags = 0;
                     return 1;
                 }
                 case LN_LOGOFF_CANCELED:
@@ -1708,6 +2082,7 @@ SASWindowProc(
                         ExitReactOSInProgress ? "TRUE" : "FALSE");
 
                     ExitReactOSInProgress = FALSE;
+                    TerminateSystemShutdown();
                     return 1;
                 }
                 default:
@@ -1722,13 +2097,20 @@ SASWindowProc(
             if (wParam == 1)
             {
                 KillTimer(hwndDlg, 1);
-                StartUserShell(Session);
+                RestartUserShell(Session);
             }
             break;
         }
         case WLX_WM_SAS:
         {
             DispatchSAS(Session, (DWORD)wParam);
+            return TRUE;
+        }
+        case WL_WM_SETUP_DONE:
+        {
+            RegisterHotKeys(Session, hwndDlg);
+            SwitchDesktop(Session->WinlogonDesktop);
+            PostMessageW(hwndDlg, WLX_WM_SAS, WLX_SAS_TYPE_CTRL_ALT_DEL, 0);
             return TRUE;
         }
     }

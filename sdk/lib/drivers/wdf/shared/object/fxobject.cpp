@@ -40,7 +40,7 @@ extern "C" {
 #if defined(EVENT_TRACING)
 #include "FxObject.tmh"
 #else
-ULONG DebugLevel = TRACE_LEVEL_INFORMATION;
+ULONG DebugLevel = TRACE_LEVEL_CRITICAL;
 ULONG DebugFlag = 0xff;
 #endif
 
@@ -286,7 +286,7 @@ FxObject::AllocateTagTracker(
         // don't track references.
         //
 
-        (void) FxTagTracker::CreateAndInitialize(
+        (void)!FxTagTracker::CreateAndInitialize(
             &GetDebugExtension()->TagTracker,
             m_Globals,
             FxTagTrackerTypeHandle,
@@ -676,11 +676,13 @@ FxObject::AddContext(
             // the creation of the object itself, FxObject::Commit would have done
             // this assignment.
             //
-            Header->EvtDestroyCallback = Attributes->EvtDestroyCallback;
+            if (Attributes != NULL) {
+                Header->EvtDestroyCallback = Attributes->EvtDestroyCallback;
 
-            if (Attributes->EvtCleanupCallback != NULL) {
-                Header->EvtCleanupCallback = Attributes->EvtCleanupCallback;
-                m_ObjectFlags |= FXOBJECT_FLAGS_HAS_CLEANUP;
+                if (Attributes->EvtCleanupCallback != NULL) {
+                    Header->EvtCleanupCallback = Attributes->EvtCleanupCallback;
+                    m_ObjectFlags |= FXOBJECT_FLAGS_HAS_CLEANUP;
+                }
             }
 
         }
@@ -695,6 +697,53 @@ FxObject::AddContext(
 
     m_SpinLock.Release(irql);
 
+    return status;
+}
+
+_Must_inspect_result_
+NTSTATUS
+FxObject::MoveContexts(
+    _In_ FxObject* TargetObject
+    )
+{
+    NTSTATUS status;
+    FxContextHeader *header, *current, *next;
+    KIRQL irql;
+
+    status = STATUS_SUCCESS;
+    header = GetContextHeader();
+    if (header == NULL) {
+        return status;
+    }
+
+    if (header->ContextTypeInfo != NULL || TargetObject->IsCommitted() == FALSE) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    m_SpinLock.Acquire(&irql);
+
+    while ((current = header->NextHeader) != NULL) {
+        next = current->NextHeader;
+        current->Object = TargetObject;
+        current->NextHeader = NULL;
+
+        status = TargetObject->AddContext(current,
+                                          NULL,
+                                          WDF_NO_OBJECT_ATTRIBUTES);
+        if (status == STATUS_OBJECT_NAME_EXISTS) {
+            status = STATUS_DUPLICATE_NAME;
+        }
+
+        if (!NT_SUCCESS(status)) {
+            current->Object = this;
+            current->NextHeader = next;
+            break;
+        }
+
+        header->NextHeader = next;
+    }
+
+    m_SpinLock.Release(irql);
     return status;
 }
 

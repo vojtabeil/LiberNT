@@ -9,22 +9,152 @@
  */
 
 #include "afd.h"
+#include <tdikrnl.h>
 
 static IO_COMPLETION_ROUTINE SendComplete;
+
+static NTSTATUS
+NTAPI
+AfdBufferedSendComplete(PDEVICE_OBJECT DeviceObject, PIRP Irp, PVOID Context)
+{
+    /* Release the transport resources before SendComplete can signal FCB
+     * rundown and allow the socket's paged send window to be freed. */
+    MmUnlockPages(Irp->MdlAddress);
+    IoFreeMdl(Irp->MdlAddress);
+    Irp->MdlAddress = NULL;
+    SendComplete(DeviceObject, Irp, Context);
+    IoFreeIrp(Irp);
+    return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+static NTSTATUS
+AfdSubmitBufferedSend(PAFD_FCB FCB)
+{
+    PDEVICE_OBJECT DeviceObject;
+    PIRP Irp;
+    PMDL Mdl;
+    NTSTATUS Status = STATUS_SUCCESS;
+    ULONG Length = FCB->Send.BytesUsed, Flags = 0;
+
+    ASSERT(!FCB->SendIrp.InFlightRequest);
+    ASSERT(FCB->Send.BytesUsed);
+
+    if (FCB->SendUrgentEnd && FCB->SendUrgentEnd <= Length)
+    {
+        Length = FCB->SendUrgentEnd;
+        Flags = TDI_SEND_EXPEDITED;
+    }
+    DeviceObject = IoGetRelatedDeviceObject(FCB->Connection.Object);
+
+    /* IoBuildDeviceIoControlRequest associates its IRP with the calling
+     * thread. An accepted buffered send must survive that thread's exit. */
+    Irp = IoAllocateIrp(DeviceObject->StackSize, FALSE);
+    if (!Irp)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    Mdl = IoAllocateMdl(FCB->Send.Window, Length, FALSE, FALSE, Irp);
+    if (!Mdl)
+    {
+        IoFreeIrp(Irp);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    _SEH2_TRY
+    {
+        MmProbeAndLockPages(Mdl, KernelMode, IoReadAccess);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        Status = _SEH2_GetExceptionCode();
+    }
+    _SEH2_END;
+
+    if (!NT_SUCCESS(Status))
+    {
+        IoFreeMdl(Mdl);
+        IoFreeIrp(Irp);
+        return Status;
+    }
+
+    Irp->RequestorMode = KernelMode;
+    TdiBuildSend(Irp, DeviceObject, FCB->Connection.Object, AfdBufferedSendComplete, FCB, Mdl, Flags, Length);
+    FCB->SendIrp.InFlightRequest = Irp;
+    return IoCallDriver(DeviceObject, Irp);
+}
+
+static NTSTATUS
+AfdStartBufferedSend(PAFD_FCB FCB)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+
+    if (FCB->SendStartActive)
+    {
+        FCB->SendStartPending = TRUE;
+        return STATUS_SUCCESS;
+    }
+
+    FCB->SendStartActive = TRUE;
+
+    do
+    {
+        FCB->SendStartPending = FALSE;
+
+        if (FCB->SendIrp.InFlightRequest || !FCB->Send.BytesUsed) break;
+
+        Status = AfdSubmitBufferedSend(FCB);
+    } while (NT_SUCCESS(Status) && FCB->SendStartPending);
+
+    FCB->SendStartActive = FALSE;
+
+    return Status;
+}
+
+/* The send window owns buffered bytes independently of the caller's IRP. */
+static VOID
+AfdFailSendQueue(PAFD_FCB FCB, NTSTATUS Status)
+{
+    PLIST_ENTRY Entry;
+    PIRP Irp;
+    PIO_STACK_LOCATION IrpSp;
+    PAFD_SEND_INFO SendReq;
+
+    FCB->Send.BytesUsed = 0;
+    FCB->SendUrgentEnd = 0;
+    FCB->PollState &= ~AFD_EVENT_SEND;
+    FCB->PollState |= AFD_EVENT_ABORT;
+    FCB->PollStatus[FD_CLOSE_BIT] = Status;
+
+    while (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]))
+    {
+        Entry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]);
+        Irp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+        IrpSp = IoGetCurrentIrpStackLocation(Irp);
+        SendReq = GetLockedData(Irp, IrpSp);
+        Irp->IoStatus.Status = Status;
+        Irp->IoStatus.Information = 0;
+        (void)IoSetCancelRoutine(Irp, NULL);
+        UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
+        if (Irp->MdlAddress) UnlockRequest(Irp, IrpSp);
+        IoCompleteRequest(Irp, IO_NETWORK_INCREMENT);
+    }
+
+    PollReeval(FCB->DeviceExt, FCB->FileObject);
+}
+
 static NTSTATUS NTAPI SendComplete
 ( PDEVICE_OBJECT DeviceObject,
   PIRP Irp,
   PVOID Context ) {
     NTSTATUS Status = Irp->IoStatus.Status;
     PAFD_FCB FCB = (PAFD_FCB)Context;
-    PLIST_ENTRY NextIrpEntry;
+    PLIST_ENTRY NextIrpEntry, Entry;
     PIRP NextIrp = NULL;
     PIO_STACK_LOCATION NextIrpSp;
     PAFD_SEND_INFO SendReq = NULL;
     PAFD_MAPBUF Map;
-    SIZE_T TotalBytesCopied = 0, TotalBytesProcessed = 0, SpaceAvail, i;
-    UINT SendLength, BytesCopied;
-    BOOLEAN HaltSendQueue;
+    SIZE_T BytesAlreadyCopied, CompletionOffset, RequestLength;
+    SIZE_T TotalBytesCopied = 0, SpaceAvail, i;
+    UINT BufferOffset, SendLength, BytesCopied;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -65,83 +195,65 @@ static NTSTATUS NTAPI SendComplete
 
         RetryDisconnectCompletion(FCB);
 
+        if (FCB->TdiRundownEvent) AfdSignalTdiRundown(FCB);
         SocketStateUnlock( FCB );
         return STATUS_FILE_CLOSED;
     }
 
     if( !NT_SUCCESS(Status) ) {
-        /* Complete all following send IRPs with error */
-
-        while( !IsListEmpty( &FCB->PendingIrpList[FUNCTION_SEND] ) ) {
-            NextIrpEntry =
-                RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]);
-            NextIrp =
-                CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
-            NextIrpSp = IoGetCurrentIrpStackLocation( NextIrp );
-            SendReq = GetLockedData(NextIrp, NextIrpSp);
-
-            UnlockBuffers( SendReq->BufferArray,
-                           SendReq->BufferCount,
-                           FALSE );
-
-            NextIrp->IoStatus.Status = Status;
-            NextIrp->IoStatus.Information = 0;
-
-            if ( NextIrp->MdlAddress ) UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
-            (void)IoSetCancelRoutine(NextIrp, NULL);
-            IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
-        }
-
+        AfdFailSendQueue(FCB, Status);
         RetryDisconnectCompletion(FCB);
 
+        if (FCB->TdiRundownEvent) AfdSignalTdiRundown(FCB);
         SocketStateUnlock( FCB );
 
         return STATUS_SUCCESS;
     }
 
-    RtlMoveMemory( FCB->Send.Window,
-                   FCB->Send.Window + Irp->IoStatus.Information,
-                   FCB->Send.BytesUsed - Irp->IoStatus.Information );
-
-    TotalBytesProcessed = 0;
+    ASSERT(Irp->IoStatus.Information <= FCB->Send.BytesUsed);
     SendLength = Irp->IoStatus.Information;
-    HaltSendQueue = FALSE;
-    while (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]) && SendLength > 0) {
-        NextIrpEntry = RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]);
+    FCB->Send.BytesUsed -= SendLength;
+    FCB->SendUrgentEnd = (FCB->SendUrgentEnd > SendLength) ? FCB->SendUrgentEnd - SendLength : 0;
+    RtlMoveMemory(FCB->Send.Window, FCB->Send.Window + SendLength, FCB->Send.BytesUsed);
+
+    /* DriverContext[3] is the end of this IRP's data relative to the start
+     * of the send window, or zero if it has not been buffered yet. Update
+     * every buffered IRP by the same consumed byte count. Nonblocking sends
+     * and cancelled IRPs may have data in the window without a queued IRP. */
+    Entry = FCB->PendingIrpList[FUNCTION_SEND].Flink;
+    while (Entry != &FCB->PendingIrpList[FUNCTION_SEND]) {
+        NextIrpEntry = Entry;
+        Entry = Entry->Flink;
         NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
+        CompletionOffset = (ULONG_PTR)NextIrp->Tail.Overlay.DriverContext[3];
+        if (!CompletionOffset)
+            break;
+
+        if (CompletionOffset > SendLength)
+        {
+            NextIrp->Tail.Overlay.DriverContext[3] = (PVOID)(CompletionOffset - SendLength);
+            continue;
+        }
+
         NextIrpSp = IoGetCurrentIrpStackLocation( NextIrp );
         SendReq = GetLockedData(NextIrp, NextIrpSp);
-        Map = (PAFD_MAPBUF)(SendReq->BufferArray + SendReq->BufferCount);
-
-        TotalBytesCopied = (ULONG_PTR)NextIrp->Tail.Overlay.DriverContext[3];
-        ASSERT(TotalBytesCopied != 0);
-
-        /* If we didn't get enough, keep waiting */
-        if (TotalBytesCopied > SendLength)
-        {
-            /* Update the bytes left to copy */
-            TotalBytesCopied -= SendLength;
-            NextIrp->Tail.Overlay.DriverContext[3] = (PVOID)TotalBytesCopied;
-
-            /* Update the state variables */
-            FCB->Send.BytesUsed -= SendLength;
-            TotalBytesProcessed += SendLength;
-            SendLength = 0;
-
-            /* Pend the IRP */
-            InsertHeadList(&FCB->PendingIrpList[FUNCTION_SEND],
-                           &NextIrp->Tail.Overlay.ListEntry);
-            HaltSendQueue = TRUE;
-            break;
-        }
 
         ASSERT(NextIrp->IoStatus.Information != 0);
 
-        NextIrp->IoStatus.Status = Irp->IoStatus.Status;
+        RequestLength = 0;
+        for (i = 0; i < SendReq->BufferCount; i++)
+            RequestLength += SendReq->BufferArray[i].len;
 
-        FCB->Send.BytesUsed -= TotalBytesCopied;
-        TotalBytesProcessed += TotalBytesCopied;
-        SendLength -= TotalBytesCopied;
+        ASSERT(NextIrp->IoStatus.Information <= RequestLength);
+        if (NextIrp->IoStatus.Information < RequestLength)
+        {
+            NextIrp->Tail.Overlay.DriverContext[3] = NULL;
+            break;
+        }
+
+        RemoveEntryList(NextIrpEntry);
+
+        NextIrp->IoStatus.Status = Irp->IoStatus.Status;
 
         (void)IoSetCancelRoutine(NextIrp, NULL);
 
@@ -154,9 +266,7 @@ static NTSTATUS NTAPI SendComplete
         IoCompleteRequest(NextIrp, IO_NETWORK_INCREMENT);
     }
 
-    ASSERT(SendLength == 0);
-
-   if ( !HaltSendQueue && !IsListEmpty( &FCB->PendingIrpList[FUNCTION_SEND] ) ) {
+   if (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND])) {
         NextIrpEntry = FCB->PendingIrpList[FUNCTION_SEND].Flink;
         NextIrp = CONTAINING_RECORD(NextIrpEntry, IRP, Tail.Overlay.ListEntry);
         NextIrpSp = IoGetCurrentIrpStackLocation( NextIrp );
@@ -165,21 +275,32 @@ static NTSTATUS NTAPI SendComplete
 
         AFD_DbgPrint(MID_TRACE,("SendReq @ %p\n", SendReq));
 
-        SpaceAvail = FCB->Send.Size - FCB->Send.BytesUsed;
+        SpaceAvail = (FCB->Send.BytesUsed < FCB->Send.Size) ? FCB->Send.Size - FCB->Send.BytesUsed : 0;
         TotalBytesCopied = 0;
 
         /* Count the total transfer size */
-        SendLength = 0;
+        RequestLength = 0;
         for (i = 0; i < SendReq->BufferCount; i++)
         {
-            SendLength += SendReq->BufferArray[i].len;
+            RequestLength += SendReq->BufferArray[i].len;
         }
 
+        BytesAlreadyCopied = NextIrp->IoStatus.Information;
+        ASSERT(BytesAlreadyCopied <= RequestLength);
+        RequestLength -= BytesAlreadyCopied;
+
+        /* A partially consumed IRP is already in the window. */
+        if (NextIrp->Tail.Overlay.DriverContext[3])
+            NextIrp = NULL;
+
+        if (SpaceAvail && RequestLength <= FCB->Send.Size)
+            SpaceAvail = RequestLength;
+
         /* Make sure we've got the space */
-        if (SendLength > SpaceAvail)
+        if (RequestLength > SpaceAvail)
         {
            /* Blocking sockets have to wait here */
-           if (SendLength <= FCB->Send.Size && !((SendReq->AfdFlags & AFD_IMMEDIATE) || (FCB->NonBlocking)))
+           if (RequestLength <= FCB->Send.Size && !((SendReq->AfdFlags & AFD_IMMEDIATE) || (FCB->NonBlocking)))
            {
                FCB->PollState &= ~AFD_EVENT_SEND;
 
@@ -191,23 +312,31 @@ static NTSTATUS NTAPI SendComplete
            {
                FCB->PollState &= ~AFD_EVENT_SEND;
 
-               /* We should never be non-overlapped and get to this point */
-               ASSERT(SendReq->AfdFlags & AFD_OVERLAPPED);
-
+               /* Blocking and overlapped requests wait for buffer space. */
                NextIrp = NULL;
            }
         }
 
         if (NextIrp != NULL)
         {
-            for( i = 0; i < SendReq->BufferCount; i++ ) {
-                BytesCopied = MIN(SendReq->BufferArray[i].len, SpaceAvail);
+            for (i = 0; SpaceAvail > 0 && i < SendReq->BufferCount; i++) {
+                if (BytesAlreadyCopied >= SendReq->BufferArray[i].len)
+                {
+                    BytesAlreadyCopied -= SendReq->BufferArray[i].len;
+                    continue;
+                }
+
+                BufferOffset = (UINT)BytesAlreadyCopied;
+                BytesAlreadyCopied = 0;
+                BytesCopied = MIN(SendReq->BufferArray[i].len - BufferOffset, SpaceAvail);
+                if (!BytesCopied)
+                    continue;
 
                 Map[i].BufferAddress =
                    MmMapLockedPages( Map[i].Mdl, KernelMode );
 
                 RtlCopyMemory( FCB->Send.Window + FCB->Send.BytesUsed,
-                               Map[i].BufferAddress,
+                               (PUCHAR)Map[i].BufferAddress + BufferOffset,
                                BytesCopied );
 
                 MmUnmapLockedPages( Map[i].BufferAddress, Map[i].Mdl );
@@ -217,12 +346,14 @@ static NTSTATUS NTAPI SendComplete
                 FCB->Send.BytesUsed += BytesCopied;
             }
 
-            NextIrp->IoStatus.Information = TotalBytesCopied;
-            NextIrp->Tail.Overlay.DriverContext[3] = (PVOID)NextIrp->IoStatus.Information;
+            NextIrp->IoStatus.Information += TotalBytesCopied;
+            NextIrp->Tail.Overlay.DriverContext[3] = (PVOID)(ULONG_PTR)FCB->Send.BytesUsed;
+            if ((SendReq->TdiFlags & TDI_SEND_EXPEDITED) && TotalBytesCopied == RequestLength)
+                FCB->SendUrgentEnd = FCB->Send.BytesUsed;
         }
     }
 
-    if (FCB->Send.Size - FCB->Send.BytesUsed != 0 && !FCB->SendClosed &&
+    if (FCB->Send.BytesUsed < FCB->Send.Size && !FCB->SendClosed &&
         IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]))
     {
         FCB->PollState |= AFD_EVENT_SEND;
@@ -238,13 +369,12 @@ static NTSTATUS NTAPI SendComplete
     /* Some data is still waiting */
     if( FCB->Send.BytesUsed )
     {
-        Status = TdiSend( &FCB->SendIrp.InFlightRequest,
-                          FCB->Connection.Object,
-                          0,
-                          FCB->Send.Window,
-                          FCB->Send.BytesUsed,
-                          SendComplete,
-                          FCB );
+        Status = AfdStartBufferedSend(FCB);
+        if (!NT_SUCCESS(Status))
+        {
+            AfdFailSendQueue(FCB, Status);
+            RetryDisconnectCompletion(FCB);
+        }
     }
     else
     {
@@ -252,6 +382,7 @@ static NTSTATUS NTAPI SendComplete
         RetryDisconnectCompletion(FCB);
     }
 
+    if (FCB->TdiRundownEvent) AfdSignalTdiRundown(FCB);
     SocketStateUnlock( FCB );
 
     return STATUS_SUCCESS;
@@ -280,6 +411,12 @@ static NTSTATUS NTAPI PacketSocketSendComplete
     FCB->SendIrp.InFlightRequest = NULL;
     /* Request is not in flight any longer */
 
+    if (FCB->SendDatagramBuffer)
+    {
+        ExFreePoolWithTag(FCB->SendDatagramBuffer, TAG_AFD_DATA_BUFFER);
+        FCB->SendDatagramBuffer = NULL;
+    }
+
     if( FCB->SharedData.State == SOCKET_STATE_CLOSED ) {
         /* Cleanup our IRP queue because the FCB is being destroyed */
         while( !IsListEmpty( &FCB->PendingIrpList[FUNCTION_SEND] ) ) {
@@ -293,6 +430,7 @@ static NTSTATUS NTAPI PacketSocketSendComplete
             UnlockRequest( NextIrp, IoGetCurrentIrpStackLocation( NextIrp ) );
             IoCompleteRequest( NextIrp, IO_NETWORK_INCREMENT );
         }
+        if (FCB->TdiRundownEvent) AfdSignalTdiRundown(FCB);
         SocketStateUnlock( FCB );
         return STATUS_FILE_CLOSED;
     }
@@ -320,9 +458,74 @@ static NTSTATUS NTAPI PacketSocketSendComplete
     FCB->PollStatus[FD_WRITE_BIT] = STATUS_SUCCESS;
     PollReeval(FCB->DeviceExt, FCB->FileObject);
 
+    if (FCB->TdiRundownEvent) AfdSignalTdiRundown(FCB);
     SocketStateUnlock(FCB);
 
     return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+AfdSendDatagram(PAFD_FCB FCB,
+                PAFD_SEND_INFO SendReq,
+                PTDI_CONNECTION_INFORMATION TargetAddress,
+                PUINT SendLength)
+{
+    PAFD_MAPBUF Map = (PAFD_MAPBUF)(SendReq->BufferArray + SendReq->BufferCount);
+    PCHAR Buffer, Source;
+    UINT i, Total = 0;
+    NTSTATUS Status;
+
+    if (SendReq->BufferCount == 1)
+    {
+        *SendLength = SendReq->BufferArray[0].len;
+        return TdiSendDatagram(&FCB->SendIrp.InFlightRequest,
+                               FCB->AddressFile.Object,
+                               SendReq->BufferArray[0].buf,
+                               SendReq->BufferArray[0].len,
+                               TargetAddress,
+                               PacketSocketSendComplete,
+                               FCB);
+    }
+
+    for (i = 0; i < SendReq->BufferCount; i++)
+    {
+        if (SendReq->BufferArray[i].len > MAXUSHORT - Total)
+            return STATUS_BUFFER_OVERFLOW;
+        Total += SendReq->BufferArray[i].len;
+    }
+
+    Buffer = ExAllocatePoolWithTag(NonPagedPool, max(Total, 1), TAG_AFD_DATA_BUFFER);
+    if (!Buffer)
+        return STATUS_NO_MEMORY;
+
+    Total = 0;
+    for (i = 0; i < SendReq->BufferCount; i++)
+    {
+        if (!SendReq->BufferArray[i].len || !Map[i].Mdl)
+            continue;
+
+        Source = MmMapLockedPages(Map[i].Mdl, KernelMode);
+        RtlCopyMemory(Buffer + Total, Source, SendReq->BufferArray[i].len);
+        MmUnmapLockedPages(Source, Map[i].Mdl);
+        Total += SendReq->BufferArray[i].len;
+    }
+
+    *SendLength = Total;
+    FCB->SendDatagramBuffer = Buffer;
+    Status = TdiSendDatagram(&FCB->SendIrp.InFlightRequest,
+                             FCB->AddressFile.Object,
+                             Buffer,
+                             Total,
+                             TargetAddress,
+                             PacketSocketSendComplete,
+                             FCB);
+    if (Status != STATUS_PENDING && FCB->SendDatagramBuffer == Buffer)
+    {
+        ExFreePoolWithTag(Buffer, TAG_AFD_DATA_BUFFER);
+        FCB->SendDatagramBuffer = NULL;
+    }
+
+    return Status;
 }
 
 NTSTATUS NTAPI
@@ -334,6 +537,8 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PAFD_SEND_INFO SendReq;
     UINT TotalBytesCopied = 0, i, SpaceAvail = 0, BytesCopied, SendLength;
     KPROCESSOR_MODE LockMode;
+    BOOLEAN Immediate;
+    NTSTATUS SendStatus;
 
     UNREFERENCED_PARAMETER(DeviceObject);
     UNREFERENCED_PARAMETER(Short);
@@ -342,15 +547,18 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     if( !SocketAcquireStateLock( FCB ) ) return LostSocket( Irp );
 
-    FCB->EventSelectDisabled &= ~AFD_EVENT_SEND;
-
     if( FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS )
     {
         PAFD_SEND_INFO_UDP SendReq;
+
+        FCB->EventSelectDisabled &= ~AFD_EVENT_SEND;
         PTDI_CONNECTION_INFORMATION TargetAddress;
 
+        if( !FCB->RemoteAddress )
+            return UnlockAndMaybeComplete( FCB, STATUS_INVALID_CONNECTION, Irp, 0 );
+
         /* Check that the socket is bound */
-        if( FCB->SharedData.State != SOCKET_STATE_BOUND || !FCB->RemoteAddress )
+        if( FCB->SharedData.State != SOCKET_STATE_BOUND )
         {
             AFD_DbgPrint(MIN_TRACE,("Invalid parameter\n"));
             return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp,
@@ -361,10 +569,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             return UnlockAndMaybeComplete( FCB, STATUS_NO_MEMORY, Irp, 0 );
 
         /* Must lock buffers before handing off user data */
-        SendReq->BufferArray = LockBuffers( SendReq->BufferArray,
-                                            SendReq->BufferCount,
-                                            NULL, NULL,
-                                            FALSE, FALSE, LockMode );
+        SendReq->BufferArray = LockBuffers(SendReq->BufferArray, SendReq->BufferCount, NULL, NULL, FALSE, FALSE, LockMode, AfdIs32bitIoctl(Irp));
 
         if( !SendReq->BufferArray ) {
             return UnlockAndMaybeComplete( FCB, STATUS_ACCESS_VIOLATION,
@@ -379,22 +584,12 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             Status = QueueUserModeIrp(FCB, Irp, FUNCTION_SEND);
             if (Status == STATUS_PENDING)
             {
-                if (SendReq->BufferCount > 1)
-                {
-                    AFD_DbgPrint(MIN_TRACE,("WARN: More than one buffer %ld\n", SendReq->BufferCount));
-                }
-                Status = TdiSendDatagram(&FCB->SendIrp.InFlightRequest,
-                                         FCB->AddressFile.Object,
-                                         SendReq->BufferArray[0].buf,
-                                         SendReq->BufferArray[0].len,
-                                         TargetAddress,
-                                         PacketSocketSendComplete,
-                                         FCB);
+                Status = AfdSendDatagram(FCB, (PAFD_SEND_INFO)SendReq, TargetAddress, &SendLength);
                 if (Status != STATUS_PENDING)
                 {
                     NT_VERIFY(RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]) == &Irp->Tail.Overlay.ListEntry);
                     Irp->IoStatus.Status = Status;
-                    Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? SendReq->BufferArray[0].len : 0);
+                    Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? SendLength : 0);
                     (void)IoSetCancelRoutine(Irp, NULL);
                     UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
                     UnlockRequest(Irp, IoGetCurrentIrpStackLocation(Irp));
@@ -443,10 +638,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         return UnlockAndMaybeComplete
             ( FCB, STATUS_NO_MEMORY, Irp, 0 );
 
-    SendReq->BufferArray = LockBuffers( SendReq->BufferArray,
-                                        SendReq->BufferCount,
-                                        NULL, NULL,
-                                        FALSE, FALSE, LockMode );
+    SendReq->BufferArray = LockBuffers(SendReq->BufferArray, SendReq->BufferCount, NULL, NULL, FALSE, FALSE, LockMode, AfdIs32bitIoctl(Irp));
 
     if( !SendReq->BufferArray ) {
         return UnlockAndMaybeComplete( FCB, STATUS_ACCESS_VIOLATION,
@@ -464,7 +656,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     AFD_DbgPrint(MID_TRACE,("FCB->Send.BytesUsed = %u\n",
                             FCB->Send.BytesUsed));
 
-    SpaceAvail = FCB->Send.Size - FCB->Send.BytesUsed;
+    SpaceAvail = (FCB->Send.BytesUsed < FCB->Send.Size) ? FCB->Send.Size - FCB->Send.BytesUsed : 0;
 
     AFD_DbgPrint(MID_TRACE,("We can accept %u bytes\n",
                             SpaceAvail));
@@ -474,6 +666,32 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     for (i = 0; i < SendReq->BufferCount; i++)
     {
         SendLength += SendReq->BufferArray[i].len;
+    }
+
+    if (SpaceAvail && SendLength <= FCB->Send.Size)
+        SpaceAvail = SendLength;
+
+    Irp->Tail.Overlay.DriverContext[3] = NULL;
+    Irp->IoStatus.Information = 0;
+    Immediate = !(SendReq->AfdFlags & AFD_OVERLAPPED) && ((SendReq->AfdFlags & AFD_IMMEDIATE) || FCB->NonBlocking);
+
+    if (!SendLength)
+    {
+        UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
+        return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, 0);
+    }
+
+    /* Do not let a later write overtake an unbuffered pending request. */
+    if (!IsListEmpty(&FCB->PendingIrpList[FUNCTION_SEND]))
+    {
+        FCB->PollState &= ~AFD_EVENT_SEND;
+        if (Immediate)
+        {
+            FCB->EventSelectDisabled &= ~AFD_EVENT_SEND;
+            UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
+            return UnlockAndMaybeComplete(FCB, STATUS_CANT_WAIT, Irp, 0);
+        }
+        return LeaveIrpUntilLater(FCB, Irp, FUNCTION_SEND);
     }
 
     /* Make sure we've got the space */
@@ -494,6 +712,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             /* Non-overlapped sockets will fail if we can send nothing */
             if (!(SendReq->AfdFlags & AFD_OVERLAPPED))
             {
+                FCB->EventSelectDisabled &= ~AFD_EVENT_SEND;
                 UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
                 return UnlockAndMaybeComplete( FCB, STATUS_CANT_WAIT, Irp, 0 );
             }
@@ -526,6 +745,9 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     Irp->IoStatus.Information = TotalBytesCopied;
 
+    if ((SendReq->TdiFlags & TDI_SEND_EXPEDITED) && TotalBytesCopied == SendLength)
+        FCB->SendUrgentEnd = FCB->Send.BytesUsed;
+
     if( TotalBytesCopied == 0 ) {
         AFD_DbgPrint(MID_TRACE,("Empty send\n"));
         UnlockBuffers( SendReq->BufferArray, SendReq->BufferCount, FALSE );
@@ -533,7 +755,7 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         ( FCB, STATUS_SUCCESS, Irp, TotalBytesCopied );
     }
 
-    if (SpaceAvail)
+    if (FCB->Send.BytesUsed < FCB->Send.Size)
     {
         FCB->PollState |= AFD_EVENT_SEND;
         FCB->PollStatus[FD_WRITE_BIT] = STATUS_SUCCESS;
@@ -544,24 +766,40 @@ AfdConnectedSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         FCB->PollState &= ~AFD_EVENT_SEND;
     }
 
-    /* We use the IRP tail for some temporary storage here */
-    Irp->Tail.Overlay.DriverContext[3] = (PVOID)Irp->IoStatus.Information;
+    if (TotalBytesCopied < SendLength)
+        FCB->EventSelectDisabled &= ~AFD_EVENT_SEND;
+
+    if (Immediate || TotalBytesCopied == SendLength)
+    {
+        /* The user buffer is no longer needed. Waiting for the TDI send
+         * here can deadlock an event loop whose peer has not begun reading. */
+        UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
+        if (!FCB->SendIrp.InFlightRequest)
+        {
+            SendStatus = AfdStartBufferedSend(FCB);
+            if (!NT_SUCCESS(SendStatus))
+            {
+                AfdFailSendQueue(FCB, SendStatus);
+                return UnlockAndMaybeComplete(FCB, SendStatus, Irp, 0);
+            }
+        }
+        return UnlockAndMaybeComplete(FCB, STATUS_SUCCESS, Irp, TotalBytesCopied);
+    }
+
+    /* Completion includes any previously buffered nonblocking data. */
+    Irp->Tail.Overlay.DriverContext[3] = (PVOID)(ULONG_PTR)FCB->Send.BytesUsed;
 
     Status = QueueUserModeIrp(FCB, Irp, FUNCTION_SEND);
-    if (Status == STATUS_PENDING && !FCB->SendIrp.InFlightRequest)
+    if (!FCB->SendIrp.InFlightRequest)
     {
-        TdiSend(&FCB->SendIrp.InFlightRequest,
-                FCB->Connection.Object,
-                0,
-                FCB->Send.Window,
-                FCB->Send.BytesUsed,
-                SendComplete,
-                FCB);
+        SendStatus = AfdStartBufferedSend(FCB);
+        if (!NT_SUCCESS(SendStatus))
+            AfdFailSendQueue(FCB, SendStatus);
     }
 
     SocketStateUnlock(FCB);
 
-    return STATUS_PENDING;
+    return Status;
 }
 
 NTSTATUS NTAPI
@@ -573,6 +811,7 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
     PAFD_FCB FCB = FileObject->FsContext;
     PAFD_SEND_INFO_UDP SendReq;
     KPROCESSOR_MODE LockMode;
+    UINT SendLength;
 
     UNREFERENCED_PARAMETER(DeviceObject);
 
@@ -622,10 +861,7 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
             ( FCB, STATUS_NO_MEMORY, Irp, 0 );
     }
 
-    SendReq->BufferArray = LockBuffers( SendReq->BufferArray,
-                                        SendReq->BufferCount,
-                                        NULL, NULL,
-                                        FALSE, FALSE, LockMode );
+    SendReq->BufferArray = LockBuffers(SendReq->BufferArray, SendReq->BufferCount, NULL, NULL, FALSE, FALSE, LockMode, AfdIs32bitIoctl(Irp));
 
     if( !SendReq->BufferArray )
         return UnlockAndMaybeComplete( FCB, STATUS_ACCESS_VIOLATION,
@@ -649,22 +885,12 @@ AfdPacketSocketWriteData(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         Status = QueueUserModeIrp(FCB, Irp, FUNCTION_SEND);
         if (Status == STATUS_PENDING)
         {
-            if (SendReq->BufferCount > 1)
-            {
-                AFD_DbgPrint(MIN_TRACE,("WARN: More than one buffer %ld\n", SendReq->BufferCount));
-            }
-            Status = TdiSendDatagram(&FCB->SendIrp.InFlightRequest,
-                                     FCB->AddressFile.Object,
-                                     SendReq->BufferArray[0].buf,
-                                     SendReq->BufferArray[0].len,
-                                     TargetAddress,
-                                     PacketSocketSendComplete,
-                                     FCB);
+            Status = AfdSendDatagram(FCB, (PAFD_SEND_INFO)SendReq, TargetAddress, &SendLength);
             if (Status != STATUS_PENDING)
             {
                 NT_VERIFY(RemoveHeadList(&FCB->PendingIrpList[FUNCTION_SEND]) == &Irp->Tail.Overlay.ListEntry);
                 Irp->IoStatus.Status = Status;
-                Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? SendReq->BufferArray[0].len : 0);
+                Irp->IoStatus.Information = ((Status == STATUS_SUCCESS) ? SendLength : 0);
                 (void)IoSetCancelRoutine(Irp, NULL);
                 UnlockBuffers(SendReq->BufferArray, SendReq->BufferCount, FALSE);
                 UnlockRequest(Irp, IoGetCurrentIrpStackLocation(Irp));

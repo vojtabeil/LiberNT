@@ -15,6 +15,7 @@
 #include <olectl.h>
 #include <cguid.h>
 #include <msctf.h>
+#include <ctffunc.h>
 #include <msctf_undoc.h>
 #include <tchar.h>
 #include <strsafe.h>
@@ -42,6 +43,7 @@ extern "C" {
 #define COOKIE_MAGIC_UIELEMENTSINK 0x00a0
 #define COOKIE_MAGIC_INPUTPROCESSORPROFILEACTIVATIONSINK 0x00b0
 #define COOKIE_MAGIC_ACTIVELANGSINK 0x00c0
+#define COOKIE_MAGIC_CONTEXTOWNER 0x00d0
 
 extern DWORD g_dwTLSIndex;
 extern TfClientId g_processId;
@@ -57,10 +59,19 @@ HRESULT CompartmentMgr_Constructor(IUnknown *pUnkOuter, REFIID riid, IUnknown **
 HRESULT CompartmentMgr_Destructor(ITfCompartmentMgr *This);
 HRESULT LangBarMgr_Constructor(IUnknown *pUnkOuter, IUnknown **ppOut);
 HRESULT DisplayAttributeMgr_Constructor(IUnknown *pUnkOuter, IUnknown **ppOut);
+HRESULT LangBarItemMgr_Constructor(ITfLangBarItemMgr **ppOut);
+VOID TipInputModeIndicator_Uninit(VOID);
 
 HRESULT Context_Initialize(ITfContext *cxt, ITfDocumentMgr *manager);
+HRESULT Context_Cleanup(ITfContext *cxt, TfClientId tid);
 HRESULT Context_Uninitialize(ITfContext *cxt);
+void Context_AddRange(ITfContext *context, struct list *entry);
+HRESULT Context_CheckLock(ITfContext *context, TfEditCookie ec, BOOL fWrite);
+ITextStoreACP *Context_GetTextStore(ITfContext *context);
+HRESULT Context_ReplaceText(ITfContext *context, DWORD dwFlags, LONG start, LONG end,
+                            const WCHAR *text, LONG cch, TS_TEXTCHANGE *change);
 void ThreadMgr_OnDocumentMgrDestruction(ITfThreadMgr *tm, ITfDocumentMgr *mgr);
+void ThreadMgr_CleanupContextSinks(ITfThreadMgrEx *tm, TfClientId tid);
 HRESULT TF_SELECTION_to_TS_SELECTION_ACP(const TF_SELECTION *tf, TS_SELECTION_ACP *tsAcp);
 
 /* cookie function */
@@ -73,10 +84,14 @@ DWORD enumerate_Cookie(DWORD magic, DWORD *index);
 /* activated text services functions */
 HRESULT add_active_textservice(TF_LANGUAGEPROFILE *lp);
 BOOL get_active_textservice(REFCLSID rclsid, TF_LANGUAGEPROFILE *lp);
+BOOL get_active_textservice_by_category(REFGUID catid, TF_LANGUAGEPROFILE *profile);
 HRESULT activate_textservices(ITfThreadMgrEx *tm);
+HRESULT activate_default_textservice(LANGID langid);
+void deactivate_textservice_by_category(REFGUID catid);
 HRESULT deactivate_textservices(void);
 
 CLSID get_textservice_clsid(TfClientId tid);
+BOOL is_textservice_in_transition(TfClientId tid);
 HRESULT get_textservice_sink(TfClientId tid, REFCLSID iid, IUnknown** sink);
 HRESULT set_textservice_sink(TfClientId tid, REFCLSID iid, IUnknown* sink);
 
@@ -105,8 +120,8 @@ void free_sinks(struct list *sink_list);
 #define szwSystemTIPKey L"SOFTWARE\\Microsoft\\CTF\\TIP"
 #define szwSystemCTFKey L"SOFTWARE\\Microsoft\\CTF"
 
-HRESULT __wine_register_resources(HMODULE module);
-HRESULT __wine_unregister_resources(HMODULE module);
+HRESULT __wine_register_resources(void);
+HRESULT __wine_unregister_resources(void);
 
 BOOL ProcessAttach(HINSTANCE hinstDLL);
 VOID ProcessDetach(HINSTANCE hinstDLL);

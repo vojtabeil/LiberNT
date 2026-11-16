@@ -1,17 +1,12 @@
 #include "precomp.h"
 
-#define NDEBUG
-#include <reactos/debug.h>
-
-#define SEC_ENTRY WINAPI
-
-typedef PVOID PSECURITY_PACKAGE_OPTIONS, PSecurityUserData;
+WINE_DEFAULT_DEBUG_CHANNEL(secur32);
 
 SECURITY_STATUS
 SEC_ENTRY
 DeleteSecurityPackageA(LPSTR pszPackageName)
 {
-    UNIMPLEMENTED;
+    FIXME("stub\n");
     return STATUS_UNSUCCESSFUL;
 }
 
@@ -19,7 +14,7 @@ SECURITY_STATUS
 SEC_ENTRY
 DeleteSecurityPackageW(LPWSTR pszPackageName)
 {
-    UNIMPLEMENTED;
+    FIXME("stub\n");
     return STATUS_UNSUCCESSFUL;
 }
 
@@ -27,7 +22,7 @@ SECURITY_STATUS
 SEC_ENTRY
 AddSecurityPackageA(LPSTR pszPackageName, PSECURITY_PACKAGE_OPTIONS pOptions)
 {
-    UNIMPLEMENTED;
+    FIXME("stub\n");
     return STATUS_UNSUCCESSFUL;
 }
 
@@ -35,7 +30,7 @@ SECURITY_STATUS
 SEC_ENTRY
 AddSecurityPackageW(LPWSTR pszPackageName, PSECURITY_PACKAGE_OPTIONS pOptions)
 {
-    UNIMPLEMENTED;
+    FIXME("stub\n");
     return STATUS_UNSUCCESSFUL;
 }
 
@@ -46,6 +41,6 @@ GetSecurityUserInfo(
     ULONG Flags,
     PSecurityUserData *UserInformation)
 {
-    UNIMPLEMENTED;
+    FIXME("stub\n");
     return STATUS_UNSUCCESSFUL;
 }

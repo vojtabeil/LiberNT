@@ -226,7 +226,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
     PIRP_CONTEXT IrpContext = NULL;
 
     BOOLEAN TopLevel;
@@ -307,7 +307,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
     PIRP_CONTEXT IrpContext = NULL;
 
     BOOLEAN TopLevel;
@@ -361,8 +361,8 @@ Return Value:
 _Requires_lock_held_(_Global_critical_region_)
 NTSTATUS
 FatCommonQueryInformation (
-    IN PIRP_CONTEXT IrpContext,
-    IN PIRP Irp
+    IN PIRP_CONTEXT _SEH2_VOLATILE IrpContext,
+    IN PIRP _SEH2_VOLATILE Irp
     )
 
 /*++
@@ -383,7 +383,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status;
+    NTSTATUS _SEH2_VOLATILE Status;
 
     PIO_STACK_LOCATION IrpSp;
 
@@ -398,8 +398,10 @@ Return Value:
     PFCB Fcb;
     PCCB Ccb;
 
-    BOOLEAN FcbAcquired = FALSE;
-    BOOLEAN VcbAcquired = FALSE;
+    /* PSEH may re-enter the finally block through a returns-twice path.
+     * Preserve changes made in the try block, including posted IRP pointers. */
+    BOOLEAN _SEH2_VOLATILE FcbAcquired = FALSE;
+    BOOLEAN _SEH2_VOLATILE VcbAcquired = FALSE;
 
     PFILE_ALL_INFORMATION AllInfo;
 
@@ -661,8 +663,8 @@ Return Value:
 _Requires_lock_held_(_Global_critical_region_)
 NTSTATUS
 FatCommonSetInformation (
-    IN PIRP_CONTEXT IrpContext,
-    IN PIRP Irp
+    IN PIRP_CONTEXT _SEH2_VOLATILE IrpContext,
+    IN PIRP _SEH2_VOLATILE Irp
     )
 
 /*++
@@ -683,7 +685,7 @@ Return Value:
 --*/
 
 {
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS _SEH2_VOLATILE Status = STATUS_SUCCESS;
 
     PIO_STACK_LOCATION IrpSp;
 
@@ -695,8 +697,8 @@ Return Value:
     PFCB Fcb;
     PCCB Ccb;
 
-    BOOLEAN VcbAcquired = FALSE;
-    BOOLEAN FcbAcquired = FALSE;
+    BOOLEAN _SEH2_VOLATILE VcbAcquired = FALSE;
+    BOOLEAN _SEH2_VOLATILE FcbAcquired = FALSE;
 
     PAGED_CODE();
 
@@ -1073,6 +1075,8 @@ Return Value:
 --*/
 
 {
+    LARGE_INTEGER FatSystemJanOne1980;
+
     PAGED_CODE();
 
     UNREFERENCED_PARAMETER( FileObject );
@@ -1110,6 +1114,27 @@ Return Value:
         Buffer->LastWriteTime = Fcb->LastWriteTime;
         Buffer->CreationTime = Fcb->CreationTime;
         Buffer->LastAccessTime = Fcb->LastAccessTime;
+    }
+
+    ExLocalTimeToSystemTime( &FatJanOne1980,
+                             &FatSystemJanOne1980 );
+
+    if ((Buffer->LastWriteTime.QuadPart != 0) &&
+        (Buffer->LastWriteTime.QuadPart < FatSystemJanOne1980.QuadPart)) {
+
+        Buffer->LastWriteTime = FatSystemJanOne1980;
+    }
+
+    if ((Buffer->CreationTime.QuadPart != 0) &&
+        (Buffer->CreationTime.QuadPart < FatSystemJanOne1980.QuadPart)) {
+
+        Buffer->CreationTime = FatSystemJanOne1980;
+    }
+
+    if ((Buffer->LastAccessTime.QuadPart != 0) &&
+        (Buffer->LastAccessTime.QuadPart < FatSystemJanOne1980.QuadPart)) {
+
+        Buffer->LastAccessTime = FatSystemJanOne1980;
     }
 
     Buffer->FileAttributes = Fcb->DirentFatFlags;
@@ -2729,11 +2754,13 @@ Return Value:
     BOOLEAN AllLowerComponent;
     BOOLEAN AllLowerExtension;
     BOOLEAN CaseOnlyRename;
-    BOOLEAN ContinueWithRename;
+    /* Phase-one cleanup must not free the name buffer after ownership has
+     * passed to phase two; PSEH re-enters that cleanup through returns-twice. */
+    BOOLEAN _SEH2_VOLATILE ContinueWithRename;
     BOOLEAN CreateLfn = FALSE;
     BOOLEAN DeleteSourceDirent;
     BOOLEAN DeleteTarget;
-    BOOLEAN NewDirentFromPool;
+    BOOLEAN _SEH2_VOLATILE NewDirentFromPool;
     BOOLEAN RenamedAcrossDirectories;
     BOOLEAN ReplaceIfExists;
 
@@ -2809,9 +2836,9 @@ Return Value:
     BOOLEAN HaveTunneledInformation = FALSE;
     BOOLEAN UsingTunneledLfn = FALSE;
 
-    BOOLEAN InvalidateFcbOnRaise = FALSE;
+    BOOLEAN _SEH2_VOLATILE InvalidateFcbOnRaise = FALSE;
 
-    PFILE_OBJECT DirectoryFileObject = NULL;
+    PFILE_OBJECT _SEH2_VOLATILE DirectoryFileObject = NULL;
     ULONG Flags = 0;
 
     PAGED_CODE();
@@ -5182,5 +5209,4 @@ FatDeleteFile (
         FatDeleteFcb( IrpContext, &Fcb );
     } _SEH2_END;
 }
-
 

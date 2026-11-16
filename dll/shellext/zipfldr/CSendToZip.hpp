@@ -13,9 +13,12 @@ class CSendToZip :
     public CComCoClass<CSendToZip, &CLSID_ZipFolderSendTo>,
     public CComObjectRootEx<CComMultiThreadModelNoCS>,
     public IDropTarget,
-    public IPersistFile
+    public IPersistFile,
+    public IObjectWithSite
 {
     CComPtr<IDataObject> m_pDataObject;
+    CComPtr<IUnknown> m_pUnkMarshaler;
+    CComPtr<IUnknown> m_pSite;
     BOOL m_fCanDragDrop;
 
 public:
@@ -30,38 +33,54 @@ public:
     }
 
     // *** IShellFolder2 methods ***
-    STDMETHODIMP DragEnter(IDataObject *pDataObj, DWORD grfKeyState, POINTL pt, DWORD *pdwEffect);
-    STDMETHODIMP DragOver(DWORD grfKeyState, POINTL pt, DWORD *pdwEffect);
-    STDMETHODIMP DragLeave();
-    STDMETHODIMP Drop(IDataObject *pDataObj, DWORD grfKeyState, POINTL pt, DWORD *pdwEffect);
+    STDMETHODIMP DragEnter(IDataObject *pDataObj, DWORD grfKeyState, POINTL pt, DWORD *pdwEffect) override;
+    STDMETHODIMP DragOver(DWORD grfKeyState, POINTL pt, DWORD *pdwEffect) override;
+    STDMETHODIMP DragLeave() override;
+    STDMETHODIMP Drop(IDataObject *pDataObj, DWORD grfKeyState, POINTL pt, DWORD *pdwEffect) override;
 
     // *** IPersistFile methods ***
-    STDMETHODIMP IsDirty()
+    STDMETHODIMP IsDirty() override
     {
         return S_FALSE;
     }
-    STDMETHODIMP Load(LPCOLESTR pszFileName, DWORD dwMode)
+    STDMETHODIMP Load(LPCOLESTR pszFileName, DWORD dwMode) override
     {
         return S_OK;
     }
-    STDMETHODIMP Save(LPCOLESTR pszFileName, BOOL fRemember)
+    STDMETHODIMP Save(LPCOLESTR pszFileName, BOOL fRemember) override
     {
         return E_NOTIMPL;
     }
-    STDMETHODIMP SaveCompleted(LPCOLESTR pszFileName)
+    STDMETHODIMP SaveCompleted(LPCOLESTR pszFileName) override
     {
         return E_NOTIMPL;
     }
-    STDMETHODIMP GetCurFile(LPOLESTR *ppszFileName)
+    STDMETHODIMP GetCurFile(LPOLESTR *ppszFileName) override
     {
         return E_NOTIMPL;
     }
 
     // *** IPersist methods ***
-    STDMETHODIMP GetClassID(CLSID *pclsid)
+    STDMETHODIMP GetClassID(CLSID *pclsid) override
     {
         *pclsid = CLSID_ZipFolderSendTo;
         return S_OK;
+    }
+
+    // *** IObjectWithSite methods ***
+    STDMETHODIMP SetSite(IUnknown *pUnkSite) override
+    {
+        m_pSite = pUnkSite;
+        return S_OK;
+    }
+    STDMETHODIMP GetSite(REFIID riid, void **ppvSite) override
+    {
+        if (!ppvSite)
+            return E_POINTER;
+        *ppvSite = NULL;
+        if (!m_pSite)
+            return E_FAIL;
+        return m_pSite->QueryInterface(riid, ppvSite);
     }
 
 public:
@@ -70,10 +89,22 @@ public:
 
     DECLARE_PROTECT_FINAL_CONSTRUCT()
 
+    HRESULT FinalConstruct()
+    {
+        return CoCreateFreeThreadedMarshaler(static_cast<IDropTarget *>(this), &m_pUnkMarshaler);
+    }
+
+    static HRESULT WINAPI QueryMarshaler(void *pv, REFIID riid, LPVOID *ppv, DWORD_PTR dw)
+    {
+        return static_cast<CSendToZip *>(pv)->m_pUnkMarshaler->QueryInterface(riid, ppv);
+    }
+
     BEGIN_COM_MAP(CSendToZip)
         COM_INTERFACE_ENTRY_IID(IID_IDropTarget, IDropTarget)
         COM_INTERFACE_ENTRY_IID(IID_IPersistFile, IPersistFile)
         COM_INTERFACE_ENTRY_IID(IID_IPersist, IPersist)
+        COM_INTERFACE_ENTRY_IID(IID_IObjectWithSite, IObjectWithSite)
+        COM_INTERFACE_ENTRY_FUNC(IID_IMarshal, 0, QueryMarshaler)
     END_COM_MAP()
 };
 

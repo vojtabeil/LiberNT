@@ -26,6 +26,7 @@ extern "C" {
 static inline ULONG
 Win32DbgPrint(const char *filename, int line, const char *lpFormat, ...)
 {
+#if DBG
     char szMsg[512];
     char *szMsgStart;
     const char *fname;
@@ -51,13 +52,22 @@ Win32DbgPrint(const char *filename, int line, const char *lpFormat, ...)
     va_end(vl);
 
     OutputDebugStringA(szMsg);
+#else
+    (void)filename;
+    (void)line;
+    (void)lpFormat;
+#endif
 
     /* Return STATUS_SUCCESS, since we are supposed to mimic DbgPrint */
     return 0;
 }
 
+#if DBG
 #define DbgPrint(fmt, ...) \
     Win32DbgPrint(__FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#else
+#define DbgPrint(fmt, ...) (0 ? Win32DbgPrint(__FILE__, __LINE__, fmt, ##__VA_ARGS__) : 0)
+#endif
 
 #ifdef __cplusplus
 #   define IID_PPV_ARG(Itype, ppType) IID_##Itype, reinterpret_cast<void**>((static_cast<Itype**>(ppType)))
@@ -73,7 +83,7 @@ static inline HRESULT HResultFromWin32(DWORD hr)
     return HRESULT_FROM_WIN32(hr);
 }
 
-#if 1
+#if DBG
 
 static inline BOOL _ROS_FAILED_HELPER(HRESULT hr, const char* expr, const char* filename, int line)
 {
@@ -117,7 +127,7 @@ SHELL_ErrorBoxHelper(HWND hwndOwner, UINT Error)
     return Error;
 }
 #ifdef __cplusplus
-template<class H> static UINT
+template<class H> inline UINT
 SHELL_ErrorBox(H hwndOwner, UINT Error = GetLastError())
 {
     return SHELL_ErrorBoxHelper(const_cast<HWND>(hwndOwner), Error);
@@ -126,61 +136,7 @@ SHELL_ErrorBox(H hwndOwner, UINT Error = GetLastError())
 #define SHELL_ErrorBox SHELL_ErrorBoxHelper
 #endif
 
-static inline HRESULT
-SHELL_RegGetStringEx(HKEY hKey, PCWSTR pszPath, PCWSTR pszName, UINT SRRF, PWSTR pszOut, DWORD cchMax)
-{
-#ifndef SRRF_RT_REG_SZ
-    LSTATUS WINAPI SHRegGetValueW(HKEY h, LPCWSTR p, LPCWSTR n, UINT f, LPDWORD t, LPVOID d, LPDWORD s);
-#endif
-    DWORD cb = cchMax * sizeof(*pszOut);
-    UINT err = SHRegGetValueW(hKey, pszPath, pszName, SRRF, NULL, pszOut, &cb);
-    return err ? HRESULT_FROM_WIN32(err) : (cb / sizeof(*pszOut));
-}
-
-static inline HRESULT
-SHELL_RegGetString(HKEY hKey, PCWSTR pszPath, PCWSTR pszName, PWSTR pszOut, DWORD cchMax)
-{
-    return SHELL_RegGetStringEx(hKey, pszPath, pszName, 1 << REG_SZ, pszOut, cchMax);
-}
-
 #ifdef __cplusplus
-#if _SHELL32_ || _SHLWAPI_
-template<class T> static HRESULT
-SHELL_RegGetValueAlloc(HKEY hKey, PCWSTR pszPath, PCWSTR pszName, T &pOut, UINT SRRF = 0, DWORD *pType = NULL)
-{
-#ifndef SRRF_RT_REG_SZ
-    LSTATUS WINAPI SHRegGetValueW(HKEY h, LPCWSTR p, LPCWSTR n, UINT f, LPDWORD t, LPVOID d, LPDWORD s);
-#endif
-    pOut = NULL;
-    DWORD type, cb = 0;
-    if (!pType)
-        pType = &type;
-    UINT err = SHRegGetValueW(hKey, pszPath, pszName, SRRF, pType, NULL, &cb);
-    if (err != ERROR_SUCCESS)
-      return HRESULT_FROM_WIN32(err);
-    do
-    {
-        void *pAlloc = SHAlloc(cb);
-        if (!pAlloc)
-            return E_OUTOFMEMORY;
-        err = SHRegGetValueW(hKey, pszPath, pszName, SRRF, pType, pAlloc, &cb);
-        if (err == ERROR_SUCCESS)
-        {
-            pOut = (T)pAlloc;
-            return cb;
-        }
-        SHFree(pAlloc);
-    } while (err == ERROR_MORE_DATA);
-    return HRESULT_FROM_WIN32(err);
-}
-
-static inline HRESULT
-SHELL_RegGetStringAlloc(HKEY hKey, PCWSTR pszPath, PCWSTR pszName, PWSTR &pszOut, UINT SRRF = 1 << REG_SZ, DWORD *pType = NULL)
-{
-    return SHELL_RegGetValueAlloc(hKey, pszPath, pszName, pszOut, SRRF, pType);
-}
-#endif
-
 #ifdef DECLARE_CLASSFACTORY // ATL
 template <typename T>
 class CComCreatorCentralInstance

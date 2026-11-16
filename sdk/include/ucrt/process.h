@@ -10,9 +10,9 @@
 #ifndef _INC_PROCESS // include guard for 3rd party interop
 #define _INC_PROCESS
 
-#include <corecrt.h>
-#include <corecrt_startup.h>
-#include <corecrt_wprocess.h>
+#include "corecrt.h"
+#include "corecrt_startup.h"
+#include "corecrt_wprocess.h"
 
 #pragma warning(push)
 #pragma warning(disable: _UCRT_DISABLED_WARNINGS)
@@ -253,6 +253,11 @@ _ACRTIMP void __cdecl _endthreadex(
             _In_      int      _Action
             );
 
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wbuiltin-declaration-mismatch"
+#define _UCRT_RESTORE_BUILTIN_DECLARATION_MISMATCH
+#endif
         _CRT_NONSTDC_DEPRECATE(_execl)
         _DCRTIMP intptr_t __cdecl execl(
             _In_z_ char const* _FileName,
@@ -302,6 +307,10 @@ _ACRTIMP void __cdecl _endthreadex(
             _In_z_     char const* const* _Arguments,
             _In_opt_z_ char const* const* _Environment
             );
+#ifdef _UCRT_RESTORE_BUILTIN_DECLARATION_MISMATCH
+#pragma GCC diagnostic pop
+#undef _UCRT_RESTORE_BUILTIN_DECLARATION_MISMATCH
+#endif
 
         _CRT_NONSTDC_DEPRECATE(_spawnl)
         _DCRTIMP intptr_t __cdecl spawnl(

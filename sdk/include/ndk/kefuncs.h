@@ -33,6 +33,11 @@ extern "C"
 
 #ifndef NTOS_MODE_USER
 
+NTKERNELAPI
+KIRQL
+NTAPI
+KeGetEffectiveIrql(VOID);
+
 //
 // Affinity helpers
 //
@@ -79,6 +84,300 @@ FORCEINLINE BOOLEAN InterlockedBitTestAndResetAffinity(volatile KAFFINITY *Affin
     return InterlockedBitTestAndReset((PLONG)Affinity, Index);
 #endif
 }
+
+NTKERNELAPI
+KAFFINITY
+NTAPI
+KeQueryGroupAffinityEx(
+    _In_ PKAFFINITY_EX Affinity,
+    _In_ USHORT GroupNumber);
+
+NTKERNELAPI
+SIZE_T
+NTAPI
+KeSizeOfAffinityEx(
+    _In_ USHORT Count);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeInitializeAffinityEx(
+    _Out_ PKAFFINITY_EX Affinity);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeInitializeAffinityEx2(
+    _Out_ PKAFFINITY_EX Affinity,
+    _In_ USHORT Size);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeInitializeEnumerationContext(
+    _Out_ PKAFFINITY_ENUMERATION_CONTEXT Context,
+    _In_ PKAFFINITY_EX Affinity);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeInitializeEnumerationContextFromAffinity(
+    _Out_ PKAFFINITY_ENUMERATION_CONTEXT Context,
+    _In_ USHORT Group,
+    _In_ KAFFINITY Affinity);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeInitializeEnumerationContextFromGroup(
+    _Out_ PKAFFINITY_ENUMERATION_CONTEXT Context,
+    _In_ PGROUP_AFFINITY GroupAffinity);
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+KeEnumerateNextProcessor(
+    _Out_ PULONG ProcessorIndex,
+    _Inout_ PKAFFINITY_ENUMERATION_CONTEXT Context);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeProcessorGroupAffinity(
+    _Out_ PGROUP_AFFINITY GroupAffinity,
+    _In_ ULONG ProcessorIndex);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeAddProcessorGroupAffinity(
+    _Inout_ PGROUP_AFFINITY GroupAffinity,
+    _In_ ULONG ProcessorIndex);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeRemoveProcessorGroupAffinity(
+    _Inout_ PGROUP_AFFINITY GroupAffinity,
+    _In_ ULONG ProcessorIndex);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeCheckProcessorGroupAffinity(
+    _In_ PGROUP_AFFINITY GroupAffinity,
+    _In_ ULONG ProcessorIndex);
+
+NTKERNELAPI
+ULONG
+NTAPI
+KeCountSetBitsGroupAffinity(
+    _In_ PGROUP_AFFINITY GroupAffinity);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeReinitializeAffinityEx(
+    _Inout_ PKAFFINITY_EX Affinity);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeAddGroupAffinityEx(
+    _Inout_ PKAFFINITY_EX Affinity,
+    _In_ USHORT GroupNumber,
+    _In_ KAFFINITY ProcessorMask);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeRemoveGroupAffinityEx(
+    _Inout_ PKAFFINITY_EX Affinity,
+    _In_ USHORT GroupNumber,
+    _In_ KAFFINITY ProcessorMask);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeAddProcessorAffinityEx(
+    _Inout_ PKAFFINITY_EX Affinity,
+    _In_ ULONG ProcessorIndex);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeRemoveProcessorAffinityEx(
+    _Inout_ PKAFFINITY_EX Affinity,
+    _In_ ULONG ProcessorIndex);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeCheckProcessorAffinityEx(
+    _In_ PKAFFINITY_EX Affinity,
+    _In_ ULONG ProcessorIndex);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeInterlockedSetProcessorAffinityEx(
+    _Inout_ PKAFFINITY_EX Affinity,
+    _In_ ULONG ProcessorIndex);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeInterlockedClearProcessorAffinityEx(
+    _Inout_ PKAFFINITY_EX Affinity,
+    _In_ ULONG ProcessorIndex);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeIsEmptyAffinityEx(
+    _In_ PKAFFINITY_EX Affinity);
+
+NTKERNELAPI
+ULONG
+NTAPI
+KeCountSetBitsAffinityEx(
+    _In_ PKAFFINITY_EX Affinity);
+
+NTKERNELAPI
+ULONG
+NTAPI
+KeFindFirstSetLeftAffinityEx(
+    _In_ PKAFFINITY_EX Affinity);
+
+NTKERNELAPI
+ULONG
+NTAPI
+KeFindFirstSetLeftGroupAffinity(
+    _In_ PGROUP_AFFINITY GroupAffinity);
+
+NTKERNELAPI
+ULONG
+NTAPI
+KeFindFirstSetRightAffinityEx(
+    _In_ PKAFFINITY_EX Affinity);
+
+NTKERNELAPI
+ULONG
+NTAPI
+KeFindFirstSetRightGroupAffinity(
+    _In_ PGROUP_AFFINITY GroupAffinity);
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+KeFirstGroupAffinityEx(
+    _Out_ PGROUP_AFFINITY GroupAffinity,
+    _In_ PKAFFINITY_EX Affinity);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeAndAffinityEx(
+    _In_ PKAFFINITY_EX Affinity1,
+    _In_ PKAFFINITY_EX Affinity2,
+    _Out_opt_ PKAFFINITY_EX Result);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeAndAffinityEx2(
+    _In_ PKAFFINITY_EX Affinity1,
+    _In_ PKAFFINITY_EX Affinity2,
+    _Inout_opt_ PKAFFINITY_EX Result);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeAndGroupAffinityEx(
+    _In_ PKAFFINITY_EX Affinity,
+    _In_ PGROUP_AFFINITY GroupAffinity,
+    _Out_opt_ PGROUP_AFFINITY Result);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeComplementAffinityEx(
+    _Out_ PKAFFINITY_EX Result,
+    _In_ PKAFFINITY_EX Affinity);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeComplementAffinityEx2(
+    _Inout_ PKAFFINITY_EX Result,
+    _In_ PKAFFINITY_EX Affinity);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeSubtractAffinityEx(
+    _In_ PKAFFINITY_EX Affinity1,
+    _In_ PKAFFINITY_EX Affinity2,
+    _Out_opt_ PKAFFINITY_EX Result);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeSubtractAffinityEx2(
+    _In_ PKAFFINITY_EX Affinity1,
+    _In_ PKAFFINITY_EX Affinity2,
+    _Inout_opt_ PKAFFINITY_EX Result);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeCopyAffinityEx(
+    _Out_ PKAFFINITY_EX Destination,
+    _In_ PKAFFINITY_EX Source);
+
+NTKERNELAPI
+VOID
+NTAPI
+KeCopyAffinityEx2(
+    _Inout_ PKAFFINITY_EX Destination,
+    _In_ PKAFFINITY_EX Source);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeIsEqualAffinityEx(
+    _In_ PKAFFINITY_EX Affinity1,
+    _In_ PKAFFINITY_EX Affinity2);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeIsSingleGroupAffinityEx(
+    _In_ PKAFFINITY_EX Affinity,
+    _Out_opt_ PUSHORT Group);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeIsSubsetAffinityEx(
+    _In_ PKAFFINITY_EX Affinity1,
+    _In_ PKAFFINITY_EX Affinity2);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeOrAffinityEx(
+    _In_ PKAFFINITY_EX Affinity1,
+    _In_ PKAFFINITY_EX Affinity2,
+    _Out_opt_ PKAFFINITY_EX Result);
+
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeOrAffinityEx2(
+    _In_ PKAFFINITY_EX Affinity1,
+    _In_ PKAFFINITY_EX Affinity2,
+    _Inout_opt_ PKAFFINITY_EX Result);
 
 //
 // APC Functions
@@ -424,22 +723,41 @@ KiReadSystemTime(
 
 #ifndef NTOS_MODE_USER
 
+NTSYSAPI
+NTSTATUS
+NTAPI
+KeInitializeSecondaryInterruptServices(VOID);
+
+NTSYSAPI
+BOOLEAN
+NTAPI
+KeDispatchSecondaryInterrupt(
+    _In_ ULONG Vector,
+    _In_ ULONG_PTR Flags,
+    _In_opt_ PVOID Reserved);
+
 FORCEINLINE
 VOID
 KiWriteSystemTime(
     _Out_ volatile KSYSTEM_TIME *SystemTime,
     _In_ LARGE_INTEGER NewTime)
 {
-    /* Update High2Time first to indicate an update in progress */
-    SystemTime->High2Time = NewTime.HighPart;
-
 #ifdef _WIN64
+    /* Update High2Time first to indicate an update in progress. Release
+       ordering publishes the previous value before it on weakly ordered
+       processors; x86 stores are already ordered. */
+    WriteRelease(&SystemTime->High2Time, NewTime.HighPart);
+
     /* Do a single 'atomic' write. This isn't actually guaranteed to be atomic,
        if the address isn't 64 bit aligned. But as long as the entire 64 bits
        are within a single cache line, we should be good (on x64 at least,
-       when it comes to ARM64, all bets are off) This is also what Windows does. */
-    *(LONG64*)SystemTime = NewTime.QuadPart;
+       when it comes to ARM64, all bets are off) This is also what Windows does.
+       Release ordering publishes High2Time before the new value. */
+    WriteRelease64((volatile LONG64 *)SystemTime, NewTime.QuadPart);
 #else
+    /* Update High2Time first to indicate an update in progress */
+    SystemTime->High2Time = NewTime.HighPart;
+
     /* Update low part, then high part to allow readers detect partial updates. */
     SystemTime->LowPart = NewTime.LowPart;
     SystemTime->High1Time = NewTime.HighPart;
@@ -474,6 +792,14 @@ NTAPI
 NtContinue(
     _In_ PCONTEXT Context,
     _In_ BOOLEAN TestAlert
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtContinueEx(
+    _In_ PCONTEXT Context,
+    _In_opt_ PKCONTINUE_ARGUMENT ContinueArgument
 );
 
 NTSYSCALLAPI

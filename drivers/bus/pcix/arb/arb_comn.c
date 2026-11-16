@@ -27,62 +27,12 @@ PCHAR PciArbiterNames[] =
 
 VOID
 NTAPI
-PciArbiter_Reference(_In_ PVOID Context)
-{
-    PARBITER_INSTANCE Arbiter = (PARBITER_INSTANCE)Context;
-
-    InterlockedIncrement((PLONG)&Arbiter->ReferenceCount);
-}
-
-VOID
-NTAPI
-PciArbiter_Dereference(_In_ PVOID Context)
-{
-    PARBITER_INSTANCE Arbiter = (PARBITER_INSTANCE)Context;
-
-    InterlockedDecrement((PLONG)&Arbiter->ReferenceCount);
-}
-
-NTSTATUS
-NTAPI
-PciArbiterConstructor(_In_ PPCI_FDO_EXTENSION FdoExtension,
-                      _In_ PCI_SIGNATURE ArbiterType,
-                      _Out_ PARBITER_INTERFACE Interface)
-{
-    PPCI_ARBITER_INSTANCE Arbiter;
-    PAGED_CODE();
-
-    if (!FdoExtension->ArbitersInitialized) return STATUS_NOT_SUPPORTED;
-
-    /* Find the instance this bus built for the requested resource type */
-    Arbiter = (PVOID)PciFindNextSecondaryExtension(FdoExtension->
-                                                   SecondaryExtension.Next,
-                                                   ArbiterType);
-    if (!Arbiter)
-    {
-        DPRINT1("PCI - FDO ext 0x%p has no %s arbiter to hand out.\n",
-                FdoExtension,
-                PciArbiterNames[ArbiterType - PciArb_Io]);
-        return STATUS_NOT_SUPPORTED;
-    }
-
-    Interface->Size = sizeof(ARBITER_INTERFACE);
-    Interface->Version = ARBITER_INTERFACE_VERSION;
-    Interface->Context = &Arbiter->CommonInstance;
-    Interface->InterfaceReference = PciArbiter_Reference;
-    Interface->InterfaceDereference = PciArbiter_Dereference;
-    Interface->ArbiterHandler = ArbiterLibHandler;
-    Interface->Flags = 0;
-    return STATUS_SUCCESS;
-}
-
-VOID
-NTAPI
 PciArbiterDestructor(IN PPCI_ARBITER_INSTANCE Arbiter)
 {
-    PAGED_CODE();
-
-    ArbiterLibDeleteInstance(&Arbiter->CommonInstance);
+    UNREFERENCED_PARAMETER(Arbiter);
+    /* This function is not yet implemented */
+    UNIMPLEMENTED;
+    while (TRUE);
 }
 
 NTSTATUS
@@ -95,9 +45,6 @@ PciInitializeArbiters(IN PPCI_FDO_EXTENSION FdoExtension)
     NTSTATUS Status;
     PCI_SIGNATURE ArbiterType;
     ASSERT_FDO(FdoExtension);
-
-    /* A bus that ends up needing no arbiter at all is not a failure */
-    Status = STATUS_SUCCESS;
 
     /* Loop all the arbiters */
     for (ArbiterType = PciArb_Io; ArbiterType <= PciArb_BusNumber; ArbiterType++)
@@ -182,9 +129,11 @@ PciInitializeArbiterRanges(IN PPCI_FDO_EXTENSION DeviceExtension,
                            IN PCM_RESOURCE_LIST Resources)
 {
     PPCI_PDO_EXTENSION PdoExtension;
-    PPCI_ARBITER_INSTANCE Instance;
+    //CM_RESOURCE_TYPE DesiredType;
+    PVOID Instance;
     PCI_SIGNATURE ArbiterType;
-    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(Resources);
 
     /* Arbiters should not already be initialized */
     if (DeviceExtension->ArbitersInitialized)
@@ -210,30 +159,37 @@ PciInitializeArbiterRanges(IN PPCI_FDO_EXTENSION DeviceExtension,
         }
     }
 
-    /* Loop the arbiters that hand out the ranges a bus decodes */
+    /* Loop all arbiters */
     for (ArbiterType = PciArb_Io; ArbiterType <= PciArb_Memory; ArbiterType++)
     {
+        /* Pick correct resource type for each arbiter */
+        if (ArbiterType == PciArb_Io)
+        {
+            /* I/O Port */
+            //DesiredType = CmResourceTypePort;
+        }
+        else if (ArbiterType == PciArb_Memory)
+        {
+            /* Device RAM */
+            //DesiredType = CmResourceTypeMemory;
+        }
+        else
+        {
+            /* Ignore anything else */
+            continue;
+        }
+
         /* Find an arbiter of this type */
-        Instance = (PVOID)PciFindNextSecondaryExtension(DeviceExtension->
-                                                        SecondaryExtension.Next,
-                                                        ArbiterType);
+        Instance = PciFindNextSecondaryExtension(&DeviceExtension->SecondaryExtension,
+                                                 ArbiterType);
         if (Instance)
         {
             /*
-             * Hand it the resources this bus was started with. They describe
-             * the windows the bus actually decodes, which is what bounds the
-             * addresses it may hand out to the devices behind it.
+             * Now we should initialize it, not yet implemented because Arb
+             * library isn't yet implemented, not even the headers.
              */
-            Status = Instance->CommonInstance.StartArbiter(&Instance->CommonInstance,
-                                                           Resources);
-            if (!NT_SUCCESS(Status))
-            {
-                DPRINT1("PCI - FDO ext 0x%p %s arbiter failed to start: %X\n",
-                        DeviceExtension,
-                        PciArbiterNames[ArbiterType - PciArb_Io],
-                        Status);
-                return Status;
-            }
+            UNIMPLEMENTED;
+            //while (TRUE);
         }
         else
         {

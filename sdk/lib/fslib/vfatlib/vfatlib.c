@@ -34,8 +34,15 @@
 
 #include "vfatlib.h"
 
+#include <pseh/pseh2.h>
+
 #define NDEBUG
 #include <debug.h>
+
+#ifndef FSCTL_ALLOW_EXTENDED_DASD_IO
+#define FSCTL_ALLOW_EXTENDED_DASD_IO \
+    CTL_CODE(FILE_DEVICE_FILE_SYSTEM, 32, METHOD_NEITHER, FILE_ANY_ACCESS)
+#endif
 
 
 /* GLOBALS & FUNCTIONS ********************************************************/
@@ -44,6 +51,30 @@ PFMIFSCALLBACK ChkdskCallback = NULL;
 ULONG FsCheckFlags;
 PVOID FsCheckMemQueue;
 ULONG FsCheckTotalFiles;
+
+static
+VOID
+VfatFormatReport(
+    IN PFMIFSCALLBACK Callback,
+    IN PCSTR Format,
+    ...)
+{
+    TEXTOUTPUT TextOut;
+    CHAR TextBuf[256];
+    va_list Args;
+
+    if (!Callback)
+        return;
+
+    va_start(Args, Format);
+    _vsnprintf(TextBuf, sizeof(TextBuf) - 1, Format, Args);
+    va_end(Args);
+    TextBuf[sizeof(TextBuf) - 1] = ANSI_NULL;
+
+    TextOut.Lines = 1;
+    TextOut.Output = TextBuf;
+    Callback(OUTPUT, 0, &TextOut);
+}
 
 BOOLEAN
 NTAPI
@@ -68,7 +99,6 @@ VfatFormat(
     DPRINT("VfatFormat(DriveRoot '%wZ')\n", DriveRoot);
 
     // FIXME:
-    UNREFERENCED_PARAMETER(BackwardCompatible);
     UNREFERENCED_PARAMETER(MediaType);
 
     Context.TotalSectorCount = 0;
@@ -87,11 +117,12 @@ VfatFormat(
                         FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE,
                         &ObjectAttributes,
                         &Iosb,
-                        FILE_SHARE_READ,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
                         FILE_SYNCHRONOUS_IO_ALERT);
     if (!NT_SUCCESS(Status))
     {
         DPRINT1("NtOpenFile() failed with status 0x%08x\n", Status);
+        VfatFormatReport(Callback, "Unable to open the volume (status 0x%08lx)", Status);
         return FALSE;
     }
 
@@ -108,6 +139,7 @@ VfatFormat(
     if (!NT_SUCCESS(Status))
     {
         DPRINT("IOCTL_DISK_GET_DRIVE_GEOMETRY failed with status 0x%08x\n", Status);
+        VfatFormatReport(Callback, "Unable to query the drive geometry (status 0x%08lx)", Status);
         NtClose(FileHandle);
         return FALSE;
     }
@@ -137,6 +169,7 @@ VfatFormat(
         if (!NT_SUCCESS(Status))
         {
             DPRINT("IOCTL_DISK_GET_PARTITION_INFO_EX failed with status 0x%08x\n", Status);
+            VfatFormatReport(Callback, "Unable to query the partition information (status 0x%08lx)", Status);
             NtClose(FileHandle);
             return FALSE;
         }
@@ -253,6 +286,7 @@ VfatFormat(
         else
         {
             DPRINT1("The partition ist too large (> 32 GB) for the FAT file system!\n");
+            VfatFormatReport(Callback, "The partition is larger than 32 GB, too large for the FAT file system");
             NtClose(FileHandle);
             return FALSE;
         }
@@ -261,6 +295,12 @@ VfatFormat(
         DPRINT("PartitionLength %I64d\n", PartitionInfo.PartitionLength.QuadPart);
         DPRINT("PartitionNumber %d\n", PartitionInfo.PartitionNumber);
         DPRINT("RewritePartition %d\n", PartitionInfo.RewritePartition);
+    }
+
+    if (!BackwardCompatible && FatType != FAT_32 &&
+        PartitionInfo.PartitionLength.QuadPart >= 33LL * 1024LL * 1024LL)
+    {
+        FatType = FAT_32;
     }
 
     if (Callback != NULL)
@@ -279,9 +319,70 @@ VfatFormat(
                                  0,
                                  NULL,
                                  0);
+    if (!NT_SUCCESS(LockStatus) && Callback && Callback(VOLUMEINUSE, 0, NULL))
+    {
+        NtFsControlFile(FileHandle, NULL, NULL, NULL, &Iosb, FSCTL_DISMOUNT_VOLUME, NULL, 0, NULL, 0);
+        NtClose(FileHandle);
+
+        Status = NtOpenFile(&FileHandle,
+                            FILE_GENERIC_READ | FILE_GENERIC_WRITE | SYNCHRONIZE,
+                            &ObjectAttributes,
+                            &Iosb,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE,
+                            FILE_SYNCHRONOUS_IO_ALERT);
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("NtOpenFile() failed with status 0x%08x\n", Status);
+            VfatFormatReport(Callback, "Unable to open the volume (status 0x%08lx)", Status);
+            return FALSE;
+        }
+
+        LockStatus = NtFsControlFile(FileHandle, NULL, NULL, NULL, &Iosb, FSCTL_LOCK_VOLUME, NULL, 0, NULL, 0);
+    }
     if (!NT_SUCCESS(LockStatus))
     {
-        DPRINT1("WARNING: Failed to lock volume for formatting! Format may fail! (Status: 0x%x)\n", LockStatus);
+        DPRINT1("Failed to lock volume for formatting (Status: 0x%x)\n", LockStatus);
+        VfatFormatReport(Callback, "Unable to lock the volume (status 0x%08lx)", LockStatus);
+        NtClose(FileHandle);
+        return FALSE;
+    }
+
+    /*
+     * The mounted filesystem may expose only the size stored in its old boot
+     * sector. Formatting a recreated or enlarged partition needs raw access
+     * to the complete partition returned by the disk stack.
+     */
+    LockStatus = NtFsControlFile(FileHandle,
+                                 NULL,
+                                 NULL,
+                                 NULL,
+                                 &Iosb,
+                                 FSCTL_ALLOW_EXTENDED_DASD_IO,
+                                 NULL,
+                                 0,
+                                 NULL,
+                                 0);
+    /* RawFS and filesystems that already expose the full device need not
+     * implement this control. */
+    if (!NT_SUCCESS(LockStatus) &&
+        LockStatus != STATUS_INVALID_PARAMETER &&
+        LockStatus != STATUS_INVALID_DEVICE_REQUEST &&
+        LockStatus != STATUS_NOT_SUPPORTED)
+    {
+        DPRINT1("Failed to enable extended raw volume I/O (Status: 0x%x)\n", LockStatus);
+        VfatFormatReport(Callback, "Unable to enable raw access to the whole volume (status 0x%08lx)", LockStatus);
+        NtFsControlFile(FileHandle,
+                        NULL,
+                        NULL,
+                        NULL,
+                        &Iosb,
+                        FSCTL_UNLOCK_VOLUME,
+                        NULL,
+                        0,
+                        NULL,
+                        0);
+        NtClose(FileHandle);
+        return FALSE;
     }
 
     if (FatType == FAT_12)
@@ -321,6 +422,9 @@ VfatFormat(
     {
         Status = STATUS_INVALID_PARAMETER;
     }
+
+    if (!NT_SUCCESS(Status))
+        VfatFormatReport(Callback, "Unable to write the FAT structures (status 0x%08lx)", Status);
 
     /* Attempt to dismount formatted volume */
     LockStatus = NtFsControlFile(FileHandle,
@@ -459,10 +563,18 @@ VfatChkdsk(
 
     /* Open filesystem and lock it */
     Status = fs_open(DriveRoot, FsCheckFlags & FSCHECK_READ_WRITE);
+    if (!NT_SUCCESS(Status))
+    {
+        *ExitStatus = (ULONG)STATUS_DISK_CORRUPT_ERROR;
+        return FALSE;
+    }
+
+    if (FsCheckFlags & FSCHECK_READ_WRITE)
+        Status = fs_lock(TRUE);
     if (Status == STATUS_ACCESS_DENIED)
     {
         /* We failed to lock, ask the caller whether we should continue */
-        if (Callback(VOLUMEINUSE, 0, NULL))
+        if (Callback && Callback(VOLUMEINUSE, 0, NULL))
         {
             Status = STATUS_SUCCESS;
         }
@@ -495,84 +607,95 @@ VfatChkdsk(
         }
     }
 
-    read_boot(&fs);
-
-    if (verify)
-        VfatPrint("Starting check/repair pass.\n");
-
-    while (read_fat(&fs), scan_root(&fs))
-        qfree(&FsCheckMemQueue);
-
-    if (ScanDrive)
-        fix_bad(&fs);
-
-    if (salvage_files)
-        reclaim_file(&fs);
-    else
-        reclaim_free(&fs);
-
-    free_clusters = update_free(&fs);
-    file_unused();
-    qfree(&FsCheckMemQueue);
-    if (verify)
+    _SEH2_TRY
     {
-        FsCheckTotalFiles = 0;
-        VfatPrint("Starting verification pass.\n");
-        read_fat(&fs);
-        scan_root(&fs);
-        reclaim_free(&fs);
-        qfree(&FsCheckMemQueue);
-    }
+        read_boot(&fs);
 
-    if (fs_changed())
-    {
-        if (FsCheckFlags & FSCHECK_READ_WRITE)
+        if (verify)
+            VfatPrint("Starting check/repair pass.\n");
+
+        while (read_fat(&fs), scan_root(&fs))
+            qfree(&FsCheckMemQueue);
+
+        if (ScanDrive)
+            fix_bad(&fs);
+
+        if (salvage_files)
+            reclaim_file(&fs);
+        else
+            reclaim_free(&fs);
+
+        free_clusters = update_free(&fs);
+        file_unused();
+        qfree(&FsCheckMemQueue);
+        if (verify)
         {
-            if (FsCheckFlags & FSCHECK_INTERACTIVE)
+            FsCheckTotalFiles = 0;
+            VfatPrint("Starting verification pass.\n");
+            read_fat(&fs);
+            scan_root(&fs);
+            reclaim_free(&fs);
+            qfree(&FsCheckMemQueue);
+        }
+
+        if (fs_changed())
+        {
+            if (FsCheckFlags & FSCHECK_READ_WRITE)
             {
-                FixErrors = get_key("yn", "Perform changes ? (y/n)") == 'y';
-                if (FixErrors)
-                    FsCheckFlags |= FSCHECK_READ_WRITE;
+                if (FsCheckFlags & FSCHECK_INTERACTIVE)
+                {
+                    FixErrors = get_key("yn", "Perform changes ? (y/n)") == 'y';
+                    if (FixErrors)
+                        FsCheckFlags |= FSCHECK_READ_WRITE;
+                    else
+                        FsCheckFlags &= ~FSCHECK_READ_WRITE;
+                }
                 else
-                    FsCheckFlags &= ~FSCHECK_READ_WRITE;
+                    VfatPrint("Performing changes.\n");
             }
             else
-                VfatPrint("Performing changes.\n");
+            {
+                VfatPrint("Leaving filesystem unchanged.\n");
+            }
+        }
+
+        if (DriveRoot->Buffer[0] == '\\' && DriveRoot->Buffer[1] == '?' &&
+            DriveRoot->Buffer[2] == '?' && DriveRoot->Buffer[3] == '\\')
+        {
+            DriveLetter[0] = DriveRoot->Buffer[4] & 0x5F; // 0x5f for Uppercase letter
+            VfatPrint("Chkdsk complete for Volume %S.\n", DriveLetter);
+            VfatPrint("%10u files on disk.\n\n", FsCheckTotalFiles);
+            VfatPrint("%10u bytes per cluster.\n", fs.cluster_size);
+            VfatPrint("%10lu total clusters on the disk.\n", fs.data_clusters);
+            VfatPrint("%10lu clusters available on the disk.\n", free_clusters);
         }
         else
+            VfatPrint("%wZ: %u files, %lu/%lu clusters\n", DriveRoot,
+                FsCheckTotalFiles, fs.data_clusters - free_clusters, fs.data_clusters);
+
+        if (FsCheckFlags & FSCHECK_READ_WRITE)
         {
-            VfatPrint("Leaving filesystem unchanged.\n");
+            /* Dismount the volume */
+            fs_dismount();
+
+            /* Unlock the volume */
+            fs_lock(FALSE);
         }
-    }
 
-    if (DriveRoot->Buffer[0] == '\\' && DriveRoot->Buffer[1] == '?' &&
-        DriveRoot->Buffer[2] == '?' && DriveRoot->Buffer[3] == '\\')
+        // https://technet.microsoft.com/en-us/library/cc730714.aspx
+        // https://support.microsoft.com/en-us/kb/265533
+
+        /* Close the volume */
+        Status = (fs_close(FsCheckFlags & FSCHECK_READ_WRITE) == 0 ? STATUS_SUCCESS : STATUS_DISK_CORRUPT_ERROR);
+    }
+    _SEH2_EXCEPT(_SEH2_GetExceptionCode() == STATUS_DISK_CORRUPT_ERROR ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
     {
-        DriveLetter[0] = DriveRoot->Buffer[4] & 0x5F; // 0x5f for Uppercase letter
-        VfatPrint("Chkdsk complete for Volume %S.\n", DriveLetter);
-        VfatPrint("%10u files on disk.\n\n", FsCheckTotalFiles);
-        VfatPrint("%10u bytes per cluster.\n", fs.cluster_size);
-        VfatPrint("%10lu total clusters on the disk.\n", fs.data_clusters);
-        VfatPrint("%10lu clusters available on the disk.\n", free_clusters);
+        qfree(&FsCheckMemQueue);
+        fs_abort();
+        Status = STATUS_DISK_CORRUPT_ERROR;
     }
-    else
-        VfatPrint("%wZ: %u files, %lu/%lu clusters\n", DriveRoot,
-            FsCheckTotalFiles, fs.data_clusters - free_clusters, fs.data_clusters);
+    _SEH2_END;
 
-    if (FsCheckFlags & FSCHECK_READ_WRITE)
-    {
-        /* Dismount the volume */
-        fs_dismount();
-
-        /* Unlock the volume */
-        fs_lock(FALSE);
-    }
-
-    // https://technet.microsoft.com/en-us/library/cc730714.aspx
-    // https://support.microsoft.com/en-us/kb/265533
-
-    /* Close the volume */
-    Status = (fs_close(FsCheckFlags & FSCHECK_READ_WRITE) == 0 ? STATUS_SUCCESS : STATUS_DISK_CORRUPT_ERROR);
     *ExitStatus = (ULONG)Status;
     return (Status == STATUS_SUCCESS);
 }

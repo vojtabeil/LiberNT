@@ -66,6 +66,8 @@ StrStrCase(
 
         if (cch2 == 0)
             return (PWSTR)pszStr;
+        if (cch1 < cch2)
+            return NULL;
 
         for (i = 0; i <= cch1 - cch2; ++i)
         {
@@ -127,7 +129,8 @@ FindString(
     {
         ++lLineNumber;
 
-        bSubstringFound = (StrStrCase(szLineBuffer, pszSearchString, bIgnoreCase) != NULL);
+        bSubstringFound = (*pszSearchString != UNICODE_NULL &&
+                           StrStrCase(szLineBuffer, pszSearchString, bIgnoreCase) != NULL);
 
         /* Check if this line can be counted */
         if (bSubstringFound != bInvertSearch)

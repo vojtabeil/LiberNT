@@ -11,15 +11,33 @@
 #endif
 
 #if (defined(_X86_) && !defined(__x86_64))
-  __declspec(noreturn) __MINGW_NOTHROW void __cdecl _longjmpex(jmp_buf _Buf,int _Value);
 #define setjmp _setjmp
 #define longjmp _longjmpex
 #else
 #ifdef setjmp
 #undef setjmp
 #endif
+#if defined(_M_ARM64EC) || defined(__arm64ec__)
+/*
+ * Clang supplies the hidden frame argument only for its _setjmp builtin on
+ * ARM64EC.  Both Win64 entry points use the same frame-aware implementation,
+ * so retain the extended semantics while routing through that builtin.
+ */
+#define setjmp _setjmp
+#define setjmpex _setjmp
+#else
 #define setjmp _setjmpex
+#endif
 #endif
 
 #include <setjmp.h>
+
+#if (defined(_X86_) && !defined(__x86_64))
+/* jmp_buf and the CRT declaration macros must be defined first. Keep this
+ * declaration even when setjmp.h was included before setjmpex.h. */
+#ifdef __cplusplus
+extern "C"
+#endif
+  __declspec(noreturn) __MINGW_NOTHROW void __cdecl _longjmpex(jmp_buf _Buf,int _Value);
+#endif
 #endif

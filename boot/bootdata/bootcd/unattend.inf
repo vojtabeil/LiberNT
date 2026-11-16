@@ -6,10 +6,14 @@ Signature = "$ReactOS$"
 ; no - unattend setup disabled
 UnattendSetupEnabled = no
 
-; Install to \Device\Harddisk0\Partition1\ReactOS
+; Set SelfTest to yes to run the Setup disk selftest on blank disks instead of installing.
+; It is the same as running libernt.exe --selftest.
+;SelfTest = yes
+
+; Install to \Device\Harddisk0\Partition1\Windows
 DestinationDiskNumber = 0
 DestinationPartitionNumber = 1
-InstallationDirectory=ReactOS
+InstallationDirectory=Windows
 
 ; BootLoaderLocation=0  Skip installation
 ; BootLoaderLocation=1  Install on removable media (floppy)
@@ -84,7 +88,7 @@ InstallationType = 0
 ;[Env]
 ;WINETEST_PLATFORM=reactos
 
-; Enable this section to enable the default ReactOS theme.
+; Override the default Win8 visual style or select Classic with DefaultThemesOff = yes.
 ;[Shell]
 ;DefaultThemesOff = no
-;CustomDefaultThemeFile = "%WINDIR%\Resources\Themes\Lautus\lautus.msstyles"
+;CustomDefaultThemeFile = "%WINDIR%\Resources\Themes\Aero\aero.msstyles"

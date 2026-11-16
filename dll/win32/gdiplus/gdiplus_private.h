@@ -42,7 +42,7 @@
 #define VERSION_MAGIC  0xdbc01001
 #define VERSION_MAGIC2 0xdbc01002
 #define VALID_MAGIC(x) (((x) & 0xfffff000) == 0xdbc01000)
-#define TENSION_CONST (0.3)
+#define TENSION_CONST (0.333333333f)
 
 #define GIF_DISPOSE_UNSPECIFIED 0
 #define GIF_DISPOSE_DO_NOT_DISPOSE 1
@@ -52,11 +52,26 @@
 #define PIXELFORMATBPP(x) ((x) ? ((x) >> 8) & 255 : 24)
 
 
+struct span
+{
+    /* Represents a horizontal span between two scanline intersections */
+    int x[2];
+    int y;
+};
+
+struct span_list
+{
+    struct span *spans;
+    size_t capacity;
+    size_t length;
+};
+
 COLORREF ARGB2COLORREF(ARGB color);
 HBITMAP ARGB2BMP(ARGB color);
 extern INT arc2polybezier(GpPointF * points, REAL x1, REAL y1, REAL x2, REAL y2,
     REAL startAngle, REAL sweepAngle);
 extern REAL gdiplus_atan2(REAL dy, REAL dx);
+extern BOOL gdiplus_is_started(void);
 extern GpStatus hresult_to_status(HRESULT res);
 extern REAL units_to_pixels(REAL units, GpUnit unit, REAL dpi, BOOL printer_display);
 extern REAL pixels_to_units(REAL pixels, GpUnit unit, REAL dpi, BOOL printer_display);
@@ -149,7 +164,11 @@ extern GpStatus trace_path(GpGraphics *graphics, GpPath *path);
 typedef struct region_element region_element;
 extern void delete_element(region_element *element);
 
+extern GpStatus get_region_hrgn(struct region_element *element, const RECT *bounds, HRGN *hrgn);
+
 extern GpStatus get_hatch_data(GpHatchStyle hatchstyle, const unsigned char **result);
+
+extern GpStatus region_element_to_spans(const struct region_element *element, const RECT *bounds, struct span_list *spans);
 
 static inline INT gdip_round(REAL x)
 {
@@ -396,6 +415,19 @@ typedef enum EffectType {
 
 typedef struct CGpEffect{
     EffectType type;
+    union {
+        BYTE data[1];
+        struct BlurParams blur;
+        struct TintParams tint;
+        struct RedEyeCorrectionParams redeye;
+        ColorMatrix matrix;
+        struct ColorLUTParams lut;
+        struct BrightnessContrastParams brightness;
+        struct HueSaturationLightnessParams hue;
+        struct ColorBalanceParams balance;
+        struct LevelsParams levels;
+        struct ColorCurveParams curve;
+    } params;
 } CGpEffect;
 
 struct GpImage{
@@ -448,7 +480,9 @@ struct GpMetafile{
     GpUnit unit;
     MetafileType metafile_type;
     HENHMETAFILE hemf;
+    HMETAFILE hwmf;
     int preserve_hemf; /* if true, hemf belongs to the app and should not be deleted */
+    int preserve_hwmf; /* if true, hwmf belongs to the app and should not be deleted */
 
     /* recording */
     HDC record_dc;
@@ -459,9 +493,13 @@ struct GpMetafile{
     IStream *record_stream;
     BOOL auto_frame; /* If true, determine the frame automatically */
     GpPointF auto_frame_min, auto_frame_max;
+#ifdef __REACTOS__
+    RECT record_bounds;
+#endif
     DWORD next_object_id;
     UINT limit_dpi;
     BOOL printer_display;
+    BOOL recorded;
     REAL logical_dpix;
     REAL logical_dpiy;
 

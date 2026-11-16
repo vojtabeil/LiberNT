@@ -74,6 +74,11 @@ typedef struct {
 
     IBindStatusCallback *callback;
     IServiceProvider *service_provider;
+#ifdef __REACTOS__
+    IInternetProtocol *service_protocol;
+    BOOL service_protocol_queried;
+    BOOL start_not_impl;
+#endif
 
     BindProtocol *protocol;
 
@@ -176,6 +181,14 @@ static void stop_binding(Binding *binding, HRESULT hres, LPCWSTR str)
         binding->state &= ~BINDING_LOCKED;
     }
 
+#ifdef __REACTOS__
+    if(hres == S_OK && binding->start_not_impl) {
+        hres = S_FALSE;
+        if(IsEqualGUID(&binding->clsid, &CLSID_NULL))
+            binding->clsid = binding->protocol->clsid;
+    }
+#endif
+
     if(!(binding->state & BINDING_STOPPED)) {
         binding->state |= BINDING_STOPPED;
 
@@ -198,6 +211,10 @@ static LPWSTR get_mime_clsid(LPCWSTR mime, CLSID *clsid)
 
     len = lstrlenW(mime)+1;
     key_name = malloc(sizeof(mime_keyW) + len * sizeof(WCHAR));
+#ifdef __REACTOS__
+    if (!key_name)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     memcpy(key_name, mime_keyW, sizeof(mime_keyW));
     lstrcpyW(key_name + ARRAY_SIZE(mime_keyW), mime);
 
@@ -287,6 +304,25 @@ static HRESULT create_mime_object(Binding *binding, const CLSID *clsid, LPCWSTR 
     return S_OK;
 }
 
+#ifdef __REACTOS__
+static void query_code_install_window(Binding *binding)
+{
+    IWindowForBindingUI *window_ui = NULL;
+    HWND hwnd;
+    HRESULT hres;
+
+    hres = IBindStatusCallback_QueryInterface(binding->callback, &IID_IWindowForBindingUI, (void**)&window_ui);
+    if(FAILED(hres) && binding->service_provider)
+        hres = IServiceProvider_QueryService(binding->service_provider, &IID_IWindowForBindingUI,
+                &IID_IWindowForBindingUI, (void**)&window_ui);
+    if(FAILED(hres) || !window_ui)
+        return;
+
+    IWindowForBindingUI_GetWindow(window_ui, &IID_ICodeInstall, &hwnd);
+    IWindowForBindingUI_Release(window_ui);
+}
+
+#endif
 static void create_object(Binding *binding)
 {
     LPWSTR clsid_str;
@@ -311,6 +347,10 @@ static void create_object(Binding *binding)
         hres = REGDB_E_CLASSNOTREG;
     }
 
+#ifdef __REACTOS__
+    if(hres == REGDB_E_CLASSNOTREG)
+        query_code_install_window(binding);
+#endif
     IBindStatusCallback_OnProgress(binding->callback, 0, 0, BINDSTATUS_ENDSYNCOPERATION, NULL);
     binding->clsid = CLSID_NULL;
 
@@ -394,6 +434,10 @@ static const IUnknownVtbl StgMedUnkVtbl = {
 static stgmed_buf_t *create_stgmed_buf(IInternetProtocolEx *protocol)
 {
     stgmed_buf_t *ret = malloc(sizeof(*ret));
+#ifdef __REACTOS__
+    if (!ret)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     ret->IUnknown_iface.lpVtbl = &StgMedUnkVtbl;
     ret->ref = 1;
@@ -700,6 +744,10 @@ typedef struct {
 static stgmed_obj_t *create_stgmed_stream(stgmed_buf_t *buf)
 {
     ProtocolStream *ret = malloc(sizeof(ProtocolStream));
+#ifdef __REACTOS__
+    if (!ret)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     ret->stgmed_obj.vtbl = &stgmed_stream_vtbl;
     ret->IStream_iface.lpVtbl = &ProtocolStreamVtbl;
@@ -753,6 +801,10 @@ static const stgmed_obj_vtbl stgmed_file_vtbl = {
 static stgmed_obj_t *create_stgmed_file(stgmed_buf_t *buf)
 {
     stgmed_file_obj_t *ret = malloc(sizeof(*ret));
+#ifdef __REACTOS__
+    if (!ret)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     ret->stgmed_obj.vtbl = &stgmed_file_vtbl;
 
@@ -853,6 +905,10 @@ static ULONG WINAPI Binding_Release(IBinding *iface)
             IInternetProtocolEx_Release(&This->protocol->IInternetProtocolEx_iface);
         if(This->service_provider)
             IServiceProvider_Release(This->service_provider);
+#ifdef __REACTOS__
+        if(This->service_protocol)
+            IInternetProtocol_Release(This->service_protocol);
+#endif
         if(This->stgmed_buf)
             IUnknown_Release(&This->stgmed_buf->IUnknown_iface);
         if(This->stgmed_obj)
@@ -1175,6 +1231,10 @@ static HRESULT WINAPI InternetProtocolSink_ReportResult(IInternetProtocolSink *i
 
     TRACE("(%p)->(%08lx %ld %s)\n", This, hrResult, dwError, debugstr_w(szResult));
 
+#ifdef __REACTOS__
+    if(hrResult != S_OK && IsEqualGUID(&This->clsid, &CLSID_NULL))
+        This->clsid = IsEqualGUID(&This->protocol->clsid, &CLSID_NULL) ? CLSID_FtpProtocol : This->protocol->clsid;
+#endif
     stop_binding(This, hrResult, szResult);
 
     IInternetProtocolEx_Terminate(&This->protocol->IInternetProtocolEx_iface, 0);
@@ -1384,6 +1444,16 @@ static HRESULT WINAPI ServiceProvider_QueryService(IServiceProvider *iface,
 
     TRACE("(%p)->(%s %s %p)\n", This, debugstr_guid(guidService), debugstr_guid(riid), ppv);
 
+#ifdef __REACTOS__
+    if(This->service_protocol_queried && IsEqualGUID(&IID_IInternetProtocol, guidService)) {
+        if(!This->service_protocol) {
+            *ppv = NULL;
+            return E_NOINTERFACE;
+        }
+        return IInternetProtocol_QueryInterface(This->service_protocol, riid, ppv);
+    }
+#endif
+
     if(This->service_provider) {
         hres = IServiceProvider_QueryService(This->service_provider, guidService,
                                              riid, ppv);
@@ -1447,6 +1517,10 @@ static HRESULT Binding_Create(IMoniker *mon, Binding *binding_ctx, IUri *uri, IB
     URLMON_LockModule();
 
     ret = calloc(1, sizeof(Binding));
+#ifdef __REACTOS__
+    if (!ret)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     ret->IBinding_iface.lpVtbl = &BindingVtbl;
     ret->IInternetProtocolSink_iface.lpVtbl = &InternetProtocolSinkVtbl;
@@ -1562,6 +1636,18 @@ static HRESULT start_binding(IMoniker *mon, Binding *binding_ctx, IUri *uri, IBi
     if(FAILED(hres))
         return hres;
 
+#ifdef __REACTOS__
+    if(!binding_ctx) {
+        IInternetProtocol *service_protocol = NULL;
+
+        if(binding->service_provider
+           && SUCCEEDED(IServiceProvider_QueryService(binding->service_provider, &IID_IInternetProtocol,
+                                                      &IID_IInternetProtocol, (void**)&service_protocol)))
+            binding->service_protocol = service_protocol;
+        binding->service_protocol_queried = TRUE;
+    }
+#endif
+
     hres = IBindStatusCallback_OnStartBinding(binding->callback, 0, &binding->IBinding_iface);
     if(FAILED(hres)) {
         WARN("OnStartBinding failed: %08lx\n", hres);
@@ -1572,6 +1658,18 @@ static HRESULT start_binding(IMoniker *mon, Binding *binding_ctx, IUri *uri, IBi
         IBinding_Release(&binding->IBinding_iface);
         return hres;
     }
+
+#ifdef __REACTOS__
+    if(binding->service_provider) {
+        IUnknown *unk;
+
+        if(SUCCEEDED(IServiceProvider_QueryService(binding->service_provider, &SID_LiberNTStartNotImplemented,
+                                                   &SID_LiberNTStartNotImplemented, (void**)&unk))) {
+            IUnknown_Release(unk);
+            binding->start_not_impl = TRUE;
+        }
+    }
+#endif
 
     if(binding_ctx) {
         set_binding_sink(binding->protocol, &binding->IInternetProtocolSink_iface,
@@ -1588,7 +1686,17 @@ static HRESULT start_binding(IMoniker *mon, Binding *binding_ctx, IUri *uri, IBi
         TRACE("start ret %08lx\n", hres);
 
         if(FAILED(hres) && hres != E_PENDING) {
+#ifdef __REACTOS__
+            if(hres == MK_E_SYNTAX) {
+                BOOL has_scheme;
+
+                if(SUCCEEDED(IUri_HasProperty(uri, Uri_PROPERTY_SCHEME_NAME, &has_scheme)) && !has_scheme)
+                    hres = INET_E_UNKNOWN_PROTOCOL;
+            }
+            stop_binding(binding, binding->protocol->protocol ? S_OK : hres, NULL);
+#else
             stop_binding(binding, hres, NULL);
+#endif
             IBinding_Release(&binding->IBinding_iface);
 
             return hres;

@@ -74,11 +74,10 @@ GetPciIrqRoutingTable(VOID)
 }
 
 BOOLEAN
-PcFindPciBios(
-    _Out_ PPCI_REGISTRY_INFO BusData)
+PcFindPciBios(PPCI_REGISTRY_INFO BusData)
 {
-    REGS RegsIn;
-    REGS RegsOut;
+    REGS  RegsIn;
+    REGS  RegsOut;
 
     RegsIn.b.ah = 0xB1; /* Subfunction B1h */
     RegsIn.b.al = 0x01; /* PCI BIOS present */
@@ -111,8 +110,7 @@ PcFindPciBios(
 
 static
 VOID
-DetectPciIrqRoutingTable(
-    _In_ PCONFIGURATION_COMPONENT_DATA BusKey)
+DetectPciIrqRoutingTable(PCONFIGURATION_COMPONENT_DATA BusKey)
 {
     PCM_PARTIAL_RESOURCE_LIST PartialResourceList;
     PCM_PARTIAL_RESOURCE_DESCRIPTOR PartialDescriptor;
@@ -121,50 +119,50 @@ DetectPciIrqRoutingTable(
     ULONG Size;
 
     Table = GetPciIrqRoutingTable();
-    if (!Table)
-        return;
-
-    TRACE("Table size: %u\n", Table->TableSize);
-
-    /* Set 'Configuration Data' value */
-    Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors[2]) + Table->TableSize;
-    PartialResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
-    if (PartialResourceList == NULL)
+    if (Table != NULL)
     {
-        ERR("Failed to allocate resource descriptor\n");
-        return;
+        TRACE("Table size: %u\n", Table->TableSize);
+
+        /* Set 'Configuration Data' value */
+        Size = FIELD_OFFSET(CM_PARTIAL_RESOURCE_LIST, PartialDescriptors[2]) + Table->TableSize;
+        PartialResourceList = FrLdrHeapAlloc(Size, TAG_HW_RESOURCE_LIST);
+        if (PartialResourceList == NULL)
+        {
+            ERR("Failed to allocate resource descriptor\n");
+            return;
+        }
+
+        /* Initialize resource descriptor */
+        RtlZeroMemory(PartialResourceList, Size);
+        PartialResourceList->Version = 1;
+        PartialResourceList->Revision = 1;
+        PartialResourceList->Count = 2;
+
+        PartialDescriptor = &PartialResourceList->PartialDescriptors[0];
+        PartialDescriptor->Type = CmResourceTypeBusNumber;
+        PartialDescriptor->ShareDisposition = CmResourceShareDeviceExclusive;
+        PartialDescriptor->u.BusNumber.Start = 0;
+        PartialDescriptor->u.BusNumber.Length = 1;
+
+        PartialDescriptor = &PartialResourceList->PartialDescriptors[1];
+        PartialDescriptor->Type = CmResourceTypeDeviceSpecific;
+        PartialDescriptor->ShareDisposition = CmResourceShareUndetermined;
+        PartialDescriptor->u.DeviceSpecificData.DataSize = Table->TableSize;
+
+        RtlCopyMemory(&PartialResourceList->PartialDescriptors[2],
+                      Table, Table->TableSize);
+
+        FldrCreateComponentKey(BusKey,
+                               PeripheralClass,
+                               RealModeIrqRoutingTable,
+                               0,
+                               0,
+                               0xFFFFFFFF,
+                               "PCI Real-mode IRQ Routing Table",
+                               PartialResourceList,
+                               Size,
+                               &TableKey);
     }
-
-    /* Initialize resource descriptor */
-    RtlZeroMemory(PartialResourceList, Size);
-    PartialResourceList->Version = 1;
-    PartialResourceList->Revision = 1;
-    PartialResourceList->Count = 2;
-
-    PartialDescriptor = &PartialResourceList->PartialDescriptors[0];
-    PartialDescriptor->Type = CmResourceTypeBusNumber;
-    PartialDescriptor->ShareDisposition = CmResourceShareDeviceExclusive;
-    PartialDescriptor->u.BusNumber.Start = 0;
-    PartialDescriptor->u.BusNumber.Length = 1;
-
-    PartialDescriptor = &PartialResourceList->PartialDescriptors[1];
-    PartialDescriptor->Type = CmResourceTypeDeviceSpecific;
-    PartialDescriptor->ShareDisposition = CmResourceShareUndetermined;
-    PartialDescriptor->u.DeviceSpecificData.DataSize = Table->TableSize;
-
-    RtlCopyMemory(&PartialResourceList->PartialDescriptors[2],
-                  Table, Table->TableSize);
-
-    FldrCreateComponentKey(BusKey,
-                           PeripheralClass,
-                           RealModeIrqRoutingTable,
-                           0,
-                           0,
-                           0xFFFFFFFF,
-                           "PCI Real-mode IRQ Routing Table",
-                           PartialResourceList,
-                           Size,
-                           &TableKey);
 }
 
 VOID

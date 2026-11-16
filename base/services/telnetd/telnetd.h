@@ -73,7 +73,7 @@ typedef enum
 static BOOL WINAPI Cleanup(DWORD dwControlType);
 static void WaitForConnect(void);
 static BOOLEAN StartSocketInterface(void);
-static void CreateSocket(void);
+static BOOLEAN CreateSocket(void);
 static void UserLogin(int client_socket);
 static DWORD WINAPI UserLoginThread(LPVOID);
 static int DoTelnetHandshake(int sock);

@@ -23,211 +23,6 @@
 
 /* FUNCTIONS ****************************************************************/
 
-static BOOL
-LookupDirectoryById(
-    IN HINF InfHandle,
-    IN OUT PINFCONTEXT InfContext,
-    IN PCWSTR DirId,
-    OUT PCWSTR* pDirectory)
-{
-    BOOL Success;
-
-    // ReactOS-specific
-    Success = SpInfFindFirstLine(InfHandle, L"Directories", DirId, InfContext);
-    if (!Success)
-    {
-        // Windows-compatible
-        Success = SpInfFindFirstLine(InfHandle, L"WinntDirectories", DirId, InfContext);
-        if (!Success)
-            DPRINT1("SpInfFindFirstLine() failed\n");
-    }
-    if (Success)
-    {
-        Success = INF_GetData(InfContext, NULL, pDirectory);
-        if (!Success)
-            DPRINT1("INF_GetData() failed\n");
-    }
-
-    if (!Success)
-        DPRINT1("LookupDirectoryById(%S) - directory not found!\n", DirId);
-
-    return Success;
-}
-
-/*
- * Note: Modeled after SetupGetSourceFileLocation(), SetupGetSourceInfo()
- * and SetupGetTargetPath() APIs.
- * Technically the target path is the same for a given file section,
- * but here we try to remove this constraint.
- *
- * TXTSETUP.SIF entries syntax explained at:
- * https://msfn.org/board/topic/125480-txtsetupsif-syntax/
- */
-static NTSTATUS
-GetSourceFileAndTargetLocation(
-    IN HINF InfHandle,
-    IN PINFCONTEXT InfContext OPTIONAL,
-    IN PCWSTR SourceFileName OPTIONAL,
-    OUT PCWSTR* pSourceRootPath,
-    OUT PCWSTR* pSourcePath,
-    OUT PCWSTR* pTargetDirectory,
-    OUT PCWSTR* pTargetFileName)
-{
-    BOOL Success;
-    INFCONTEXT FileContext;
-    INFCONTEXT DirContext;
-    PCWSTR SourceRootDirId;
-    PCWSTR SourceRootDir;
-    PCWSTR SourceRelativePath;
-    PCWSTR TargetDirId;
-    PCWSTR TargetDir;
-    PCWSTR TargetFileName;
-
-    /* Either InfContext or SourceFileName must be specified */
-    if (!InfContext && !SourceFileName)
-        return STATUS_INVALID_PARAMETER;
-
-    /* InfContext to a file was not given, retrieve one corresponding to SourceFileName */
-    if (!InfContext)
-    {
-        /* Search for the SourceDisksFiles section */
-
-        /* Search in the optional platform-specific first (currently hardcoded; make it runtime-dependent?) */
-        Success = SpInfFindFirstLine(InfHandle, L"SourceDisksFiles." INF_ARCH, SourceFileName, &FileContext);
-        if (!Success)
-        {
-            /* Search in the global section */
-            Success = SpInfFindFirstLine(InfHandle, L"SourceDisksFiles", SourceFileName, &FileContext);
-        }
-        if (!Success)
-        {
-            // pSetupData->LastErrorNumber = ERROR_TXTSETUP_SECTION;
-            // if (pSetupData->ErrorRoutine)
-                // pSetupData->ErrorRoutine(pSetupData, SectionName);
-            return STATUS_NOT_FOUND;
-        }
-        InfContext = &FileContext;
-    }
-    // else, InfContext != NULL and ignore SourceFileName (that may or may not be == NULL).
-
-    /*
-     * Getting Source File Location -- SetupGetSourceFileLocation()
-     */
-
-    /* Get source root directory id */
-    if (!INF_GetDataField(InfContext, 1, &SourceRootDirId))
-    {
-        /* FIXME: Handle error! */
-        DPRINT1("INF_GetData() failed\n");
-        return STATUS_NOT_FOUND;
-    }
-
-    /* Lookup source root directory -- SetupGetSourceInfo() */
-    /* Search in the optional platform-specific first (currently hardcoded; make it runtime-dependent?) */
-    Success = SpInfFindFirstLine(InfHandle, L"SourceDisksNames." INF_ARCH, SourceRootDirId, &DirContext);
-    if (!Success)
-    {
-        /* Search in the global section */
-        Success = SpInfFindFirstLine(InfHandle, L"SourceDisksNames", SourceRootDirId, &DirContext);
-        if (!Success)
-            DPRINT1("SpInfFindFirstLine(\"SourceDisksNames\", \"%S\") failed\n", SourceRootDirId);
-    }
-    INF_FreeData(SourceRootDirId);
-    if (!Success)
-    {
-        /* FIXME: Handle error! */
-        // pSetupData->LastErrorNumber = ERROR_TXTSETUP_SECTION;
-        // if (pSetupData->ErrorRoutine)
-            // pSetupData->ErrorRoutine(pSetupData, SectionName);
-        return STATUS_NOT_FOUND;
-    }
-    if (!INF_GetDataField(&DirContext, 4, &SourceRootDir))
-    {
-        /* FIXME: Handle error! */
-        DPRINT1("INF_GetData() failed\n");
-        return STATUS_NOT_FOUND;
-    }
-
-    /* Get optional source relative directory */
-    if (!INF_GetDataField(InfContext, 2, &SourceRelativePath))
-    {
-        SourceRelativePath = NULL;
-    }
-    else if (!*SourceRelativePath)
-    {
-        INF_FreeData(SourceRelativePath);
-        SourceRelativePath = NULL;
-    }
-    if (!SourceRelativePath)
-    {
-        /* Use WinPE directory instead */
-        if (INF_GetDataField(InfContext, 13, &TargetDirId))
-        {
-            /* Lookup directory */
-            Success = LookupDirectoryById(InfHandle, &DirContext, TargetDirId, &SourceRelativePath);
-            INF_FreeData(TargetDirId);
-            if (!Success)
-            {
-                SourceRelativePath = NULL;
-            }
-            else if (!*SourceRelativePath)
-            {
-                INF_FreeData(SourceRelativePath);
-                SourceRelativePath = NULL;
-            }
-        }
-    }
-
-    /*
-     * Getting Target File Location -- SetupGetTargetPath()
-     */
-
-    /* Get target directory id */
-    if (!INF_GetDataField(InfContext, 8, &TargetDirId))
-    {
-        /* FIXME: Handle error! */
-        DPRINT1("INF_GetData() failed\n");
-        INF_FreeData(SourceRelativePath);
-        INF_FreeData(SourceRootDir);
-        return STATUS_NOT_FOUND;
-    }
-
-    /* Lookup target directory */
-    Success = LookupDirectoryById(InfHandle, &DirContext, TargetDirId, &TargetDir);
-    INF_FreeData(TargetDirId);
-    if (!Success)
-    {
-        /* FIXME: Handle error! */
-        INF_FreeData(SourceRelativePath);
-        INF_FreeData(SourceRootDir);
-        return STATUS_NOT_FOUND;
-    }
-
-    /* Get optional target file name */
-    if (!INF_GetDataField(InfContext, 11, &TargetFileName))
-        TargetFileName = NULL;
-    else if (!*TargetFileName)
-        TargetFileName = NULL;
-
-    DPRINT("GetSourceFileAndTargetLocation(%S) = "
-           "SrcRootDir: '%S', SrcRelPath: '%S' --> TargetDir: '%S', TargetFileName: '%S'\n",
-           SourceFileName, SourceRootDir, SourceRelativePath, TargetDir, TargetFileName);
-
-#if 0
-    INF_FreeData(TargetDir);
-    INF_FreeData(TargetFileName);
-    INF_FreeData(SourceRelativePath);
-    INF_FreeData(SourceRootDir);
-#endif
-
-    *pSourceRootPath  = SourceRootDir;
-    *pSourcePath      = SourceRelativePath;
-    *pTargetDirectory = TargetDir;
-    *pTargetFileName  = TargetFileName;
-
-    return STATUS_SUCCESS;
-}
-
 static NTSTATUS
 BuildFullDirectoryPath(
     IN PCWSTR RootPath,
@@ -273,55 +68,166 @@ BuildFullDirectoryPath(
 }
 
 
-/*
- * This code enumerates the list of files in reactos.dff / reactos.inf
- * that need to be extracted from reactos.cab and be installed in their
- * respective directories.
- */
-/*
- * IMPORTANT NOTE: The INF file specification used for the .CAB in ReactOS
- * is not compliant with respect to TXTSETUP.SIF syntax or the standard syntax.
- */
 static BOOLEAN
-AddSectionToCopyQueueCab(
+AddTreeToCopyQueue(
     IN PUSETUP_DATA pSetupData,
-    IN HINF InfFile,
-    IN PCWSTR SectionName,
-    IN PCWSTR SourceCabinet,
-    IN PCUNICODE_STRING DestinationPath)
+    IN PCWSTR SourceDirectory,
+    IN PCWSTR TargetDirectory,
+    IN PCWSTR MediaPath)
 {
-    BOOLEAN Success;
     NTSTATUS Status;
-    INFCONTEXT FilesContext;
-    INFCONTEXT DirContext;
-    PCWSTR SourceFileName;
-    PCWSTR TargetDirId;
-    PCWSTR TargetDir;
-    PCWSTR TargetFileName;
-    WCHAR FileDstPath[MAX_PATH];
-
-    /* Search for the SectionName section */
-    if (!SpInfFindFirstLine(InfFile, SectionName, NULL, &FilesContext))
+    UNICODE_STRING Name;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    HANDLE DirectoryHandle;
+    INFCONTEXT Context;
+    BOOLEAN RestartScan = TRUE;
+    BOOLEAN Success = TRUE;
+    BOOLEAN Excluded;
+    PWCHAR Paths, SubSource, SubTarget, SubMedia, FileName;
+    union
     {
-        DPRINT1("AddSectionToCopyQueueCab(): Unable to find section '%S' in cabinet file\n", SectionName);
+        FILE_DIRECTORY_INFORMATION Info;
+        UCHAR Buffer[sizeof(FILE_DIRECTORY_INFORMATION) + MAX_PATH * sizeof(WCHAR)];
+    } Entry;
+
+    Status = SetupCreateDirectory(TargetDirectory);
+    if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_COLLISION)
+    {
+        DPRINT1("Creating directory '%S' failed: Status = 0x%08lx\n", TargetDirectory, Status);
+        pSetupData->LastErrorNumber = ERROR_CREATE_DIR;
+        if (pSetupData->ErrorRoutine)
+            pSetupData->ErrorRoutine(pSetupData, TargetDirectory);
         return FALSE;
     }
 
-    /*
-     * Enumerate the files in the section and add them to the file queue.
-     */
+    RtlInitUnicodeString(&Name, SourceDirectory);
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &Name,
+                               OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               NULL);
+    Status = NtOpenFile(&DirectoryHandle,
+                        FILE_LIST_DIRECTORY | SYNCHRONIZE,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE,
+                        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("NtOpenFile(%S) failed (Status 0x%08lx)\n", SourceDirectory, Status);
+        return FALSE;
+    }
+
+    Paths = RtlAllocateHeap(ProcessHeap, 0, 4 * MAX_PATH * sizeof(WCHAR));
+    if (!Paths)
+    {
+        NtClose(DirectoryHandle);
+        return FALSE;
+    }
+    SubSource = Paths;
+    SubTarget = SubSource + MAX_PATH;
+    SubMedia = SubTarget + MAX_PATH;
+    FileName = SubMedia + MAX_PATH;
+
+    for (;;)
+    {
+        Status = NtQueryDirectoryFile(DirectoryHandle,
+                                      NULL,
+                                      NULL,
+                                      NULL,
+                                      &IoStatusBlock,
+                                      &Entry,
+                                      sizeof(Entry),
+                                      FileDirectoryInformation,
+                                      TRUE,
+                                      NULL,
+                                      RestartScan);
+        if (Status == STATUS_NO_MORE_FILES)
+            break;
+        if (!NT_SUCCESS(Status))
+        {
+            DPRINT1("NtQueryDirectoryFile(%S) failed (Status 0x%08lx)\n", SourceDirectory, Status);
+            Success = FALSE;
+            break;
+        }
+        RestartScan = FALSE;
+
+        RtlStringCchCopyNW(FileName, MAX_PATH,
+                           Entry.Info.FileName,
+                           Entry.Info.FileNameLength / sizeof(WCHAR));
+        if (!wcscmp(FileName, L".") || !wcscmp(FileName, L".."))
+            continue;
+
+        CombinePaths(SubMedia, MAX_PATH, 2, MediaPath, FileName);
+        Excluded = SpInfFindFirstLine(pSetupData->SetupInf, L"SystemTrees.Exclude", SubMedia, &Context);
+
+        if (Entry.Info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+        {
+            CombinePaths(SubSource, MAX_PATH, 2, SourceDirectory, FileName);
+            CombinePaths(SubTarget, MAX_PATH, 2, TargetDirectory, FileName);
+            if (Excluded)
+            {
+                SetupCreateDirectory(SubTarget);
+                continue;
+            }
+            if (!AddTreeToCopyQueue(pSetupData, SubSource, SubTarget, SubMedia))
+            {
+                Success = FALSE;
+                break;
+            }
+        }
+        else if (Excluded)
+        {
+            continue;
+        }
+        else if (!SpFileQueueCopy((HSPFILEQ)pSetupData->SetupFileQueue,
+                                  SourceDirectory,
+                                  NULL,
+                                  FileName,
+                                  NULL,
+                                  NULL,
+                                  TargetDirectory,
+                                  NULL,
+                                  0))
+        {
+            DPRINT1("SpFileQueueCopy(%S\\%S) failed\n", SourceDirectory, FileName);
+        }
+    }
+
+    RtlFreeHeap(ProcessHeap, 0, Paths);
+    NtClose(DirectoryHandle);
+    return Success;
+}
+
+static VOID
+AddComputerFilesToCopyQueue(
+    IN PUSETUP_DATA pSetupData,
+    IN PCWSTR SectionName,
+    IN PCWSTR SystemTreePath)
+{
+    INFCONTEXT Context;
+    PCWSTR SourceFileName;
+    PCWSTR Directory;
+    PCWSTR TargetFileName;
+    WCHAR SourceDirectory[MAX_PATH];
+    WCHAR TargetDirectory[MAX_PATH];
+
+    if (!SpInfFindFirstLine(pSetupData->SetupInf, SectionName, NULL, &Context))
+        return;
+
     do
     {
-        /* Get source file name and target directory id */
-        if (!INF_GetData(&FilesContext, &SourceFileName, &TargetDirId))
+        if (!INF_GetDataField(&Context, 0, &SourceFileName))
+            break;
+
+        if (!INF_GetDataField(&Context, 1, &Directory))
         {
-            /* FIXME: Handle error! */
-            DPRINT1("INF_GetData() failed\n");
+            INF_FreeData(SourceFileName);
             break;
         }
 
-        /* Get optional target file name */
-        if (!INF_GetDataField(&FilesContext, 2, &TargetFileName))
+        if (!INF_GetDataField(&Context, 2, &TargetFileName))
         {
             TargetFileName = NULL;
         }
@@ -331,354 +237,51 @@ AddSectionToCopyQueueCab(
             TargetFileName = NULL;
         }
 
-        /* Lookup target directory */
-        Success = LookupDirectoryById(InfFile, &DirContext, TargetDirId, &TargetDir);
-        INF_FreeData(TargetDirId);
-        if (!Success)
-        {
-            /* FIXME: Handle error! */
-            INF_FreeData(TargetFileName);
-            INF_FreeData(SourceFileName);
-            break;
-        }
-
-        DPRINT("GetSourceTargetFromCab(%S) = "
-               "SrcRootDir: '%S', SrcRelPath: '%S' --> TargetDir: '%S', TargetFileName: '%S'\n",
-               SourceFileName,
-               pSetupData->SourcePath.Buffer,
-               pSetupData->SourceRootDir.Buffer,
-               TargetDir, TargetFileName);
-
-        Status = CombinePaths(FileDstPath, ARRAYSIZE(FileDstPath), 2,
-                              pSetupData->DestinationPath.Buffer,
-                              TargetDir);
-        UNREFERENCED_PARAMETER(Status);
-        DPRINT("  --> FileDstPath = '%S'\n", FileDstPath);
-
-        INF_FreeData(TargetDir);
+        CombinePaths(SourceDirectory, ARRAYSIZE(SourceDirectory), 2,
+                     SystemTreePath, Directory);
+        CombinePaths(TargetDirectory, ARRAYSIZE(TargetDirectory), 2,
+                     pSetupData->DestinationPath.Buffer, Directory);
 
         if (!SpFileQueueCopy((HSPFILEQ)pSetupData->SetupFileQueue,
-                             pSetupData->SourcePath.Buffer, // SourcePath == SourceRootPath ++ SourceRootDir
+                             SourceDirectory,
                              NULL,
                              SourceFileName,
                              NULL,
-                             SourceCabinet,
                              NULL,
-                             FileDstPath,
+                             TargetDirectory,
                              TargetFileName,
-                             0 /* FIXME */))
+                             0))
         {
-            /* FIXME: Handle error! */
-            DPRINT1("SpFileQueueCopy() failed\n");
+            DPRINT1("SpFileQueueCopy(%S\\%S) failed\n", SourceDirectory, SourceFileName);
         }
 
         INF_FreeData(TargetFileName);
+        INF_FreeData(Directory);
         INF_FreeData(SourceFileName);
 
-    } while (SpInfFindNextLine(&FilesContext, &FilesContext));
-
-    return TRUE;
+    } while (SpInfFindNextLine(&Context, &Context));
 }
 
-// Note: Modeled after the SetupQueueCopySection() API
-/*
-BOOL SetupQueueCopySection(
-  _In_ HSPFILEQ QueueHandle,
-  _In_ PCTSTR   SourceRootPath,
-  _In_ HINF     InfHandle,
-  _In_ HINF     ListInfHandle,
-  _In_ PCTSTR   Section,
-  _In_ DWORD    CopyStyle
-);
-*/
-static BOOLEAN
-AddSectionToCopyQueue(
-    IN PUSETUP_DATA pSetupData,
-    IN HINF InfFile,
-    IN PCWSTR SectionName,
-    IN PCUNICODE_STRING DestinationPath)
+static VOID
+QueueComputerFiles(
+    _Inout_ PUSETUP_DATA pSetupData,
+    _In_ PCWSTR SystemTreePath)
 {
-    NTSTATUS Status;
-    INFCONTEXT FilesContext;
-    PCWSTR SourceFileName;
-    PCWSTR SourceRootPath;
-    PCWSTR SourcePath;
-    PCWSTR TargetDirectory;
-    PCWSTR TargetFileName;
-    WCHAR FileSrcRootPath[MAX_PATH];
-    WCHAR FileDstPath[MAX_PATH];
-
-    /*
-     * This code enumerates the list of files in txtsetup.sif
-     * that need to be installed in their respective directories.
-     */
-
-    /* Search for the SectionName section */
-    if (!SpInfFindFirstLine(InfFile, SectionName, NULL, &FilesContext))
-    {
-        DPRINT1("AddSectionToCopyQueue(): Unable to find section '%S' in TXTSETUP.SIF\n", SectionName);
-        return FALSE;
-    }
-
-    /*
-     * Enumerate the files in the section and add them to the file queue.
-     */
-    do
-    {
-        /* Get source file name */
-        if (!INF_GetDataField(&FilesContext, 0, &SourceFileName))
-        {
-            /* FIXME: Handle error! */
-            DPRINT1("INF_GetData() failed\n");
-            break;
-        }
-
-        Status = GetSourceFileAndTargetLocation(InfFile,
-                                                &FilesContext,
-                                                SourceFileName,
-                                                &SourceRootPath, // SourceRootDir
-                                                &SourcePath,
-                                                &TargetDirectory,
-                                                &TargetFileName);
-        if (!NT_SUCCESS(Status))
-        {
-            DPRINT1("Could not find source and target location for file '%S'\n", SourceFileName);
-            INF_FreeData(SourceFileName);
-
-            // FIXME: Another error?
-            pSetupData->LastErrorNumber = ERROR_TXTSETUP_SECTION;
-            if (pSetupData->ErrorRoutine)
-                pSetupData->ErrorRoutine(pSetupData, SectionName);
-            return FALSE;
-            // break;
-        }
-        /*
-         * SourcePath: '\Device\CdRom0\I386'
-         * SourceRootPath: '\Device\CdRom0'
-         * SourceRootDir: '\I386'
-         */
-
-        Status = CombinePaths(FileSrcRootPath, ARRAYSIZE(FileSrcRootPath), 2,
-                              pSetupData->SourceRootPath.Buffer,
-                              SourceRootPath);
-        UNREFERENCED_PARAMETER(Status);
-        // DPRINT1("Could not build the full path for '%S', skipping...\n", SourceRootPath);
-        DPRINT("  --> FileSrcRootPath = '%S'\n", FileSrcRootPath);
-
-        INF_FreeData(SourceRootPath);
-
-        Status = CombinePaths(FileDstPath, ARRAYSIZE(FileDstPath), 2,
-                              pSetupData->DestinationPath.Buffer,
-                              TargetDirectory);
-        UNREFERENCED_PARAMETER(Status);
-        // DPRINT1("Could not build the full path for '%S', skipping...\n", TargetDirectory);
-        DPRINT("  --> FileDstPath = '%S'\n", FileDstPath);
-
-        INF_FreeData(TargetDirectory);
-
-        if (!SpFileQueueCopy((HSPFILEQ)pSetupData->SetupFileQueue,
-                             FileSrcRootPath,
-                             SourcePath,
-                             SourceFileName,
-                             NULL,
-                             NULL, // No SourceCabinet
-                             NULL,
-                             FileDstPath,
-                             TargetFileName,
-                             0 /* FIXME */))
-        {
-            /* FIXME: Handle error! */
-            DPRINT1("SpFileQueueCopy() failed\n");
-        }
-
-        INF_FreeData(TargetFileName);
-        INF_FreeData(SourcePath);
-        INF_FreeData(SourceFileName);
-
-    } while (SpInfFindNextLine(&FilesContext, &FilesContext));
-
-    return TRUE;
-}
-
-BOOLEAN // ERROR_NUMBER
-PrepareCopyInfFile(
-    IN OUT PUSETUP_DATA pSetupData,
-    IN HINF InfFile,
-    IN PCWSTR SourceCabinet OPTIONAL)
-{
-    BOOLEAN Success;
-    NTSTATUS Status;
-    INFCONTEXT DirContext;
     PWCHAR AdditionalSectionName = NULL;
-    PCWSTR DirKeyValue;
-    WCHAR PathBuffer[MAX_PATH];
+    PGENERIC_LIST_ENTRY Entry;
 
-    if (SourceCabinet == NULL)
+    Entry = GetCurrentListEntry(pSetupData->ComputerList);
+    if (!Entry || SystemTreePath[0] == UNICODE_NULL)
+        return;
+
+    pSetupData->ComputerType = ((PGENENTRY)GetListEntryData(Entry))->Id;
+    if (pSetupData->ComputerType &&
+        ProcessComputerFiles(pSetupData->SetupInf, pSetupData->ComputerType, &AdditionalSectionName) &&
+        AdditionalSectionName)
     {
-        /* Add common files -- Search for the SourceDisksFiles section */
-        /* Search in the optional platform-specific first (currently hardcoded; make it runtime-dependent?) */
-        Success = AddSectionToCopyQueue(pSetupData, InfFile,
-                                        L"SourceDisksFiles." INF_ARCH,
-                                        &pSetupData->DestinationPath);
-        if (!Success)
-        {
-            DPRINT1("AddSectionToCopyQueue(%S) failed!\n", L"SourceDisksFiles." INF_ARCH);
-        }
-        /* Search in the global section */
-        Success = AddSectionToCopyQueue(pSetupData, InfFile,
-                                        L"SourceDisksFiles",
-                                        &pSetupData->DestinationPath);
-        if (!Success)
-        {
-            DPRINT1("AddSectionToCopyQueue(%S) failed!\n", L"SourceDisksFiles");
-            pSetupData->LastErrorNumber = ERROR_TXTSETUP_SECTION;
-            if (pSetupData->ErrorRoutine)
-                pSetupData->ErrorRoutine(pSetupData, L"SourceDisksFiles");
-            return FALSE;
-        }
-
-        /* Add specific files depending of computer type */
-        {
-        PGENERIC_LIST_ENTRY Entry;
-        Entry = GetCurrentListEntry(pSetupData->ComputerList);
-        ASSERT(Entry);
-        pSetupData->ComputerType = ((PGENENTRY)GetListEntryData(Entry))->Id;
-        ASSERT(pSetupData->ComputerType);
-
-        if (!ProcessComputerFiles(InfFile, pSetupData->ComputerType, &AdditionalSectionName))
-            return FALSE;
-        }
-
-        if (AdditionalSectionName &&
-            !AddSectionToCopyQueue(pSetupData, InfFile,
-                                   AdditionalSectionName,
-                                   &pSetupData->DestinationPath))
-        {
-            pSetupData->LastErrorNumber = ERROR_TXTSETUP_SECTION;
-            if (pSetupData->ErrorRoutine)
-                pSetupData->ErrorRoutine(pSetupData, AdditionalSectionName);
-            return FALSE;
-        }
+        AddComputerFilesToCopyQueue(pSetupData, AdditionalSectionName, SystemTreePath);
     }
-    else
-    {
-        /* Process a cabinet INF */
-        Success = AddSectionToCopyQueueCab(pSetupData, InfFile,
-                                           L"SourceFiles",
-                                           SourceCabinet,
-                                           &pSetupData->DestinationPath);
-        if (!Success)
-        {
-            DPRINT1("AddSectionToCopyQueueCab(%S) failed!\n", SourceCabinet);
-            pSetupData->LastErrorNumber = ERROR_CABINET_SECTION;
-            if (pSetupData->ErrorRoutine)
-                pSetupData->ErrorRoutine(pSetupData, L"SourceFiles");
-            return FALSE;
-        }
-    }
-
-    /* Create directories */
-
-    /*
-     * NOTE: This is technically optional since SpFileQueueCommit()
-     * does that. This is however needed if one wants to create
-     * empty directories.
-     */
-
-    /*
-     * FIXME:
-     * Copying files to pSetupData->DestinationRootPath should be done from within
-     * the SystemPartitionFiles section.
-     * At the moment we check whether we specify paths like '\foo' or '\\' for that.
-     * For installing to pSetupData->DestinationPath specify just '\' .
-     */
-
-    /* Get destination path */
-    RtlStringCchCopyW(PathBuffer, ARRAYSIZE(PathBuffer),
-                      pSetupData->DestinationPath.Buffer);
-
-    DPRINT("FullPath(1): '%S'\n", PathBuffer);
-
-    /* Create the install directory */
-    Status = SetupCreateDirectory(PathBuffer);
-    if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_COLLISION)
-    {
-        DPRINT1("Creating directory '%S' failed: Status = 0x%08lx\n", PathBuffer, Status);
-        pSetupData->LastErrorNumber = ERROR_CREATE_INSTALL_DIR;
-        if (pSetupData->ErrorRoutine)
-            pSetupData->ErrorRoutine(pSetupData, PathBuffer);
-        return FALSE;
-    }
-
-    /* Search for the 'Directories' section */
-    // ReactOS-specific
-    if (!SpInfFindFirstLine(InfFile, L"Directories", NULL, &DirContext))
-    {
-        // Windows-compatible
-        if (!SpInfFindFirstLine(InfFile, L"WinntDirectories", NULL, &DirContext))
-        {
-            if (SourceCabinet)
-                pSetupData->LastErrorNumber = ERROR_CABINET_SECTION;
-            else
-                pSetupData->LastErrorNumber = ERROR_TXTSETUP_SECTION;
-
-            if (pSetupData->ErrorRoutine)
-                pSetupData->ErrorRoutine(pSetupData, L"Directories");
-            return FALSE;
-        }
-    }
-
-    /* Enumerate the directory values and create the subdirectories */
-    do
-    {
-        if (!INF_GetData(&DirContext, NULL, &DirKeyValue))
-        {
-            DPRINT1("break\n");
-            break;
-        }
-
-        Status = BuildFullDirectoryPath(pSetupData->DestinationRootPath.Buffer,
-                                        pSetupData->InstallPath.Buffer,
-                                        DirKeyValue,
-                                        PathBuffer,
-                                        ARRAYSIZE(PathBuffer));
-        if (!NT_SUCCESS(Status))
-        {
-            DPRINT1("Could not build the full path for '%S', skipping...\n", DirKeyValue);
-            INF_FreeData(DirKeyValue);
-            continue;
-        }
-
-        if ((DirKeyValue[0] == UNICODE_NULL) || (DirKeyValue[0] == L'\\' && DirKeyValue[1] == UNICODE_NULL))
-        {
-            /*
-             * Installation path -- No need to create it
-             * because it has been already created above.
-             */
-        }
-        else
-        {
-            /* Arbitrary path -- Create it */
-            Status = SetupCreateDirectory(PathBuffer);
-            if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_COLLISION)
-            {
-                INF_FreeData(DirKeyValue);
-                DPRINT1("Creating directory '%S' failed: Status = 0x%08lx\n", PathBuffer, Status);
-                pSetupData->LastErrorNumber = ERROR_CREATE_DIR;
-                if (pSetupData->ErrorRoutine)
-                    pSetupData->ErrorRoutine(pSetupData, PathBuffer);
-                return FALSE;
-            }
-        }
-
-        INF_FreeData(DirKeyValue);
-    } while (SpInfFindNextLine(&DirContext, &DirContext));
-
-    return TRUE;
 }
-
-
-// #define USE_CABINET_INF
 
 BOOLEAN // ERROR_NUMBER
 NTAPI
@@ -686,16 +289,13 @@ PrepareFileCopy(
     IN OUT PUSETUP_DATA pSetupData,
     IN PFILE_COPY_STATUS_ROUTINE StatusRoutine OPTIONAL)
 {
-    HINF InfHandle;
-    INFCONTEXT CabinetsContext;
-    PCWSTR CabinetName;
-    UINT ErrorLine;
-#if defined(__REACTOS__) && defined(USE_CABINET_INF)
-    ULONG InfFileSize;
-    PVOID InfFileData;
-    CABINET_CONTEXT CabinetContext;
-#endif
-    WCHAR PathBuffer[MAX_PATH];
+    NTSTATUS Status;
+    INFCONTEXT TreesContext;
+    PCWSTR MediaDirectory;
+    PCWSTR TargetDirectory;
+    WCHAR SourcePath[MAX_PATH];
+    WCHAR TargetPath[MAX_PATH];
+    WCHAR SystemTreePath[MAX_PATH];
 
     /* Create the file queue */
     pSetupData->SetupFileQueue = (PVOID)SpFileQueueOpen();
@@ -707,119 +307,466 @@ PrepareFileCopy(
         return FALSE;
     }
 
-    /* Prepare the copy of the common files that are not in installation cabinets */
-    if (!PrepareCopyInfFile(pSetupData, pSetupData->SetupInf, NULL))
+    if (!SpInfFindFirstLine(pSetupData->SetupInf, L"SystemTrees", NULL, &TreesContext))
     {
-        /* FIXME: show an error dialog */
+        pSetupData->LastErrorNumber = ERROR_TXTSETUP_SECTION;
+        if (pSetupData->ErrorRoutine)
+            pSetupData->ErrorRoutine(pSetupData, L"SystemTrees");
         return FALSE;
     }
 
-    /* Search for the 'Cabinets' section */
-    if (!SpInfFindFirstLine(pSetupData->SetupInf, L"Cabinets", NULL, &CabinetsContext))
-    {
-        /* Skip this step and return success if no cabinet file is listed */
-        return TRUE;
-    }
-
-    /*
-     * Enumerate the installation cabinets listed in the
-     * 'Cabinets' section and parse their inf files.
-     */
+    SystemTreePath[0] = UNICODE_NULL;
     do
     {
-        if (!INF_GetData(&CabinetsContext, NULL, &CabinetName))
+        if (!INF_GetData(&TreesContext, &MediaDirectory, &TargetDirectory))
             break;
 
-        CombinePaths(PathBuffer, ARRAYSIZE(PathBuffer), 2,
-                     pSetupData->SourcePath.Buffer, CabinetName);
-
-#if defined(__REACTOS__) && defined(USE_CABINET_INF)
-        INF_FreeData(CabinetName);
-
-        CabinetInitialize(&CabinetContext);
-        CabinetSetEventHandlers(&CabinetContext, NULL, NULL, NULL);
-        CabinetSetCabinetName(&CabinetContext, PathBuffer);
-
-        if (CabinetOpen(&CabinetContext) == CAB_STATUS_SUCCESS)
+        CombinePaths(SourcePath, ARRAYSIZE(SourcePath), 2,
+                     pSetupData->SourceRootPath.Buffer, MediaDirectory);
+        Status = BuildFullDirectoryPath(pSetupData->DestinationRootPath.Buffer,
+                                        pSetupData->InstallPath.Buffer,
+                                        TargetDirectory,
+                                        TargetPath,
+                                        ARRAYSIZE(TargetPath));
+        if (NT_SUCCESS(Status) &&
+            ((TargetDirectory[0] == UNICODE_NULL) ||
+             (TargetDirectory[0] == L'\\' && TargetDirectory[1] == UNICODE_NULL)))
         {
-            DPRINT("Cabinet %S\n", PathBuffer);
+            RtlStringCchCopyW(SystemTreePath, ARRAYSIZE(SystemTreePath), SourcePath);
+        }
 
-            InfFileData = CabinetGetCabinetReservedArea(&CabinetContext, &InfFileSize);
-            if (InfFileData == NULL)
+        if (!NT_SUCCESS(Status) ||
+            !AddTreeToCopyQueue(pSetupData, SourcePath, TargetPath, MediaDirectory))
+        {
+            if (pSetupData->LastErrorNumber != ERROR_CREATE_DIR)
             {
-                CabinetCleanup(&CabinetContext);
-
-                pSetupData->LastErrorNumber = ERROR_CABINET_SCRIPT;
+                pSetupData->LastErrorNumber = ERROR_TXTSETUP_SECTION;
                 if (pSetupData->ErrorRoutine)
-                    pSetupData->ErrorRoutine(pSetupData, PathBuffer);
-                return FALSE;
+                    pSetupData->ErrorRoutine(pSetupData, MediaDirectory);
             }
-        }
-        else
-        {
-            DPRINT("Cannot open cabinet: %S.\n", PathBuffer);
-            CabinetCleanup(&CabinetContext);
-
-            pSetupData->LastErrorNumber = ERROR_CABINET_MISSING;
-            if (pSetupData->ErrorRoutine)
-                pSetupData->ErrorRoutine(pSetupData, PathBuffer);
+            INF_FreeData(TargetDirectory);
+            INF_FreeData(MediaDirectory);
             return FALSE;
         }
 
-        InfHandle = INF_OpenBufferedFileA((PSTR)InfFileData,
-                                          InfFileSize,
-                                          NULL,
-                                          INF_STYLE_WIN4,
-                                          pSetupData->LanguageId,
-                                          &ErrorLine);
+        INF_FreeData(TargetDirectory);
+        INF_FreeData(MediaDirectory);
 
-        CabinetCleanup(&CabinetContext);
-#else
+    } while (SpInfFindNextLine(&TreesContext, &TreesContext));
+
+    QueueComputerFiles(pSetupData, SystemTreePath);
+    return TRUE;
+}
+
+#define INVENTORY_IMAGE_LINE L"; Image "
+
+typedef struct _INVENTORY
+{
+    PWSTR Text;
+    PWSTR* Entries;
+    ULONG Count;
+    PCWSTR Image;
+} INVENTORY, *PINVENTORY;
+
+#define UPGRADE_MAX_TREES   8
+
+typedef struct _UPGRADE_TREE
+{
+    WCHAR Media[MAX_PATH];
+    WCHAR Target[MAX_PATH];
+} UPGRADE_TREE, *PUPGRADE_TREE;
+
+typedef struct _UPGRADE_PLAN
+{
+    PUSETUP_DATA SetupData;
+    UPGRADE_TREE Trees[UPGRADE_MAX_TREES];
+    ULONG TreeCount;
+    ULONG SystemTree;
+    WCHAR Name[MAX_PATH];
+    WCHAR Source[MAX_PATH];
+    WCHAR Target[MAX_PATH];
+    WCHAR Parent[MAX_PATH];
+} UPGRADE_PLAN, *PUPGRADE_PLAN;
+
+static int
+__cdecl
+CompareInventoryEntries(
+    const void* First,
+    const void* Second)
+{
+    return _wcsicmp(*(PCWSTR const*)First, *(PCWSTR const*)Second);
+}
+
+static VOID
+FreeInventory(
+    _Inout_ PINVENTORY Inventory)
+{
+    if (Inventory->Entries)
+        RtlFreeHeap(ProcessHeap, 0, Inventory->Entries);
+    if (Inventory->Text)
+        RtlFreeHeap(ProcessHeap, 0, Inventory->Text);
+    RtlZeroMemory(Inventory, sizeof(*Inventory));
+}
+
+static NTSTATUS
+LoadInventory(
+    _In_ PCWSTR Path,
+    _Out_ PINVENTORY Inventory)
+{
+    HANDLE FileHandle, SectionHandle;
+    PVOID View;
+    ULONG FileSize, cbText = 0, Lines = 1;
+    PWSTR Line, Next;
+    SIZE_T Length;
+    NTSTATUS Status;
+
+    RtlZeroMemory(Inventory, sizeof(*Inventory));
+    Status = OpenAndMapFile(NULL, Path, &FileHandle, &FileSize, &SectionHandle, &View, FALSE);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = RtlUTF8ToUnicodeN(NULL, 0, &cbText, View, FileSize);
+    if (NT_SUCCESS(Status))
+    {
+        Inventory->Text = RtlAllocateHeap(ProcessHeap, 0, cbText + sizeof(WCHAR));
+        if (!Inventory->Text)
+            Status = STATUS_NO_MEMORY;
+    }
+    if (NT_SUCCESS(Status))
+        Status = RtlUTF8ToUnicodeN(Inventory->Text, cbText, &cbText, View, FileSize);
+    UnMapAndCloseFile(FileHandle, SectionHandle, View);
+    if (!NT_SUCCESS(Status))
+    {
+        FreeInventory(Inventory);
+        return Status;
+    }
+    Inventory->Text[cbText / sizeof(WCHAR)] = UNICODE_NULL;
+
+    for (Line = Inventory->Text; *Line; Line++)
+    {
+        if (*Line == L'\n')
+            Lines++;
+    }
+
+    Inventory->Entries = RtlAllocateHeap(ProcessHeap, 0, Lines * sizeof(PWSTR));
+    if (!Inventory->Entries)
+    {
+        FreeInventory(Inventory);
+        return STATUS_NO_MEMORY;
+    }
+
+    for (Line = Inventory->Text; Line && *Line; Line = Next)
+    {
+        Next = wcschr(Line, L'\n');
+        if (Next)
+            *Next++ = UNICODE_NULL;
+        Length = wcslen(Line);
+        if (Length && Line[Length - 1] == L'\r')
+            Line[--Length] = UNICODE_NULL;
+        if (Length && *Line != L';')
+            Inventory->Entries[Inventory->Count++] = Line;
+        else if (!Inventory->Image && _wcsnicmp(Line, INVENTORY_IMAGE_LINE, ARRAYSIZE(INVENTORY_IMAGE_LINE) - 1) == 0)
+            Inventory->Image = Line + ARRAYSIZE(INVENTORY_IMAGE_LINE) - 1;
+    }
+
+    qsort(Inventory->Entries, Inventory->Count, sizeof(PWSTR), CompareInventoryEntries);
+    return STATUS_SUCCESS;
+}
+
+static BOOLEAN
+IsInInventory(
+    _In_ PINVENTORY Inventory,
+    _In_ PCWSTR Entry)
+{
+    return Inventory->Count != 0 &&
+           bsearch(&Entry, Inventory->Entries, Inventory->Count, sizeof(PWSTR), CompareInventoryEntries) != NULL;
+}
+
+static BOOLEAN
+InitUpgradePlan(
+    _In_ PUSETUP_DATA pSetupData,
+    _Out_ PUPGRADE_PLAN Plan)
+{
+    INFCONTEXT Context;
+    PCWSTR Media, Target;
+    PUPGRADE_TREE Tree;
+
+    RtlZeroMemory(Plan, sizeof(*Plan));
+    Plan->SetupData = pSetupData;
+    Plan->SystemTree = UPGRADE_MAX_TREES;
+
+    if (!SpInfFindFirstLine(pSetupData->SetupInf, L"SystemTrees", NULL, &Context))
+        return FALSE;
+
+    do
+    {
+        if (Plan->TreeCount >= UPGRADE_MAX_TREES || !INF_GetData(&Context, &Media, &Target))
+            break;
+
+        Tree = &Plan->Trees[Plan->TreeCount];
+        if (NT_SUCCESS(RtlStringCchCopyW(Tree->Media, ARRAYSIZE(Tree->Media), Media)) &&
+            NT_SUCCESS(BuildFullDirectoryPath(pSetupData->DestinationRootPath.Buffer,
+                                              pSetupData->InstallPath.Buffer,
+                                              Target,
+                                              Tree->Target,
+                                              ARRAYSIZE(Tree->Target))))
         {
-        PWCHAR ptr;
-
-        /* First find the filename */
-        ptr = wcsrchr(PathBuffer, L'\\');
-        if (!ptr) ptr = PathBuffer;
-
-        /* Then find its extension */
-        ptr = wcsrchr(ptr, L'.');
-        if (!ptr)
-            ptr = PathBuffer + wcslen(PathBuffer);
-
-        /* Replace it by '.inf' */
-        wcscpy(ptr, L".inf");
-
-        InfHandle = SpInfOpenInfFile(PathBuffer,
-                                     NULL,
-                                     INF_STYLE_WIN4,
-                                     pSetupData->LanguageId,
-                                     &ErrorLine);
+            if (Target[0] == UNICODE_NULL || (Target[0] == L'\\' && Target[1] == UNICODE_NULL))
+                Plan->SystemTree = Plan->TreeCount;
+            Plan->TreeCount++;
         }
-#endif
 
-        if (InfHandle == INVALID_HANDLE_VALUE)
+        INF_FreeData(Target);
+        INF_FreeData(Media);
+    } while (SpInfFindNextLine(&Context, &Context));
+
+    return Plan->SystemTree < Plan->TreeCount;
+}
+
+static BOOLEAN
+MapUpgradeEntry(
+    _Inout_ PUPGRADE_PLAN Plan,
+    _In_ PCWSTR Entry,
+    _Out_ PBOOLEAN Directory)
+{
+    INFCONTEXT Context;
+    PWCHAR Separator;
+    SIZE_T Length, MediaLength = 0;
+    BOOLEAN Excluded;
+    WCHAR Saved;
+    ULONG i;
+
+    *Directory = FALSE;
+    if (!NT_SUCCESS(RtlStringCchCopyW(Plan->Name, ARRAYSIZE(Plan->Name), Entry)))
+        return FALSE;
+
+    Length = wcslen(Plan->Name);
+    if (Length && Plan->Name[Length - 1] == L'\\')
+    {
+        *Directory = TRUE;
+        Plan->Name[--Length] = UNICODE_NULL;
+    }
+    if (Length == 0)
+        return FALSE;
+
+    for (i = 0; i < Plan->TreeCount; i++)
+    {
+        MediaLength = wcslen(Plan->Trees[i].Media);
+        if (_wcsnicmp(Plan->Name, Plan->Trees[i].Media, MediaLength) == 0 &&
+            (Plan->Name[MediaLength] == L'\\' || Plan->Name[MediaLength] == UNICODE_NULL))
         {
-            pSetupData->LastErrorNumber = ERROR_INVALID_CABINET_INF;
-            if (pSetupData->ErrorRoutine)
-                pSetupData->ErrorRoutine(pSetupData, PathBuffer);
+            break;
+        }
+    }
+    if (i == Plan->TreeCount)
+        return FALSE;
+
+    for (Separator = wcschr(Plan->Name, L'\\'); ; Separator = wcschr(Separator + 1, L'\\'))
+    {
+        Saved = Separator ? *Separator : UNICODE_NULL;
+        if (Separator)
+            *Separator = UNICODE_NULL;
+        Excluded = SpInfFindFirstLine(Plan->SetupData->SetupInf, L"SystemTrees.Exclude", Plan->Name, &Context);
+        if (Separator)
+            *Separator = Saved;
+        if (Excluded)
             return FALSE;
-        }
+        if (!Separator)
+            break;
+    }
 
-        if (!PrepareCopyInfFile(pSetupData, InfHandle, CabinetName))
+    return NT_SUCCESS(CombinePaths(Plan->Source, ARRAYSIZE(Plan->Source), 2,
+                                   Plan->SetupData->SourceRootPath.Buffer, Plan->Name)) &&
+           NT_SUCCESS(CombinePaths(Plan->Target, ARRAYSIZE(Plan->Target), 2,
+                                   Plan->Trees[i].Target, Plan->Name + MediaLength));
+}
+
+static BOOLEAN
+IsPreservedEntry(
+    _In_ PUPGRADE_PLAN Plan)
+{
+    INFCONTEXT Context;
+
+    return SpInfFindFirstLine(Plan->SetupData->SetupInf, L"SystemTrees.Preserve", Plan->Name, &Context);
+}
+
+static NTSTATUS
+RemoveEmptyDirectory(
+    _In_ PCWSTR Path)
+{
+    FILE_DISPOSITION_INFORMATION Disposition = { TRUE };
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    UNICODE_STRING Name;
+    HANDLE Handle;
+    NTSTATUS Status;
+
+    RtlInitUnicodeString(&Name, Path);
+    InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    Status = NtOpenFile(&Handle,
+                        DELETE | SYNCHRONIZE,
+                        &ObjectAttributes,
+                        &IoStatusBlock,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_FOR_BACKUP_INTENT);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtSetInformationFile(Handle, &IoStatusBlock, &Disposition, sizeof(Disposition),
+                                  FileDispositionInformation);
+    NtClose(Handle);
+    return Status;
+}
+
+static VOID
+DropObsoleteFiles(
+    _Inout_ PUPGRADE_PLAN Plan,
+    _In_ PINVENTORY Old,
+    _In_ PINVENTORY New)
+{
+    BOOLEAN Directory;
+    NTSTATUS Status;
+    ULONG i;
+
+    for (i = Old->Count; i > 0; i--)
+    {
+        if (IsInInventory(New, Old->Entries[i - 1]) ||
+            !MapUpgradeEntry(Plan, Old->Entries[i - 1], &Directory) ||
+            IsPreservedEntry(Plan))
         {
-#if !(defined(__REACTOS__) && defined(USE_CABINET_INF))
-            SpInfCloseInfFile(InfHandle);
-#endif
-            /* FIXME: show an error dialog */
-            return FALSE;
+            continue;
         }
 
-#if !(defined(__REACTOS__) && defined(USE_CABINET_INF))
-        SpInfCloseInfFile(InfHandle);
-#endif
-    } while (SpInfFindNextLine(&CabinetsContext, &CabinetsContext));
+        Status = Directory ? RemoveEmptyDirectory(Plan->Target) : SetupDeleteFile(Plan->Target, TRUE);
+        DPRINT1("Upgrade drops '%S' (Status 0x%08lx)\n", Plan->Target, Status);
+    }
+}
 
+static VOID
+QueueInventoryFiles(
+    _Inout_ PUPGRADE_PLAN Plan,
+    _In_ PINVENTORY New)
+{
+    PUSETUP_DATA pSetupData = Plan->SetupData;
+    PWCHAR SourceName, TargetName;
+    BOOLEAN Directory;
+    NTSTATUS Status;
+    ULONG i;
+
+    for (i = 0; i < New->Count; i++)
+    {
+        if (!MapUpgradeEntry(Plan, New->Entries[i], &Directory))
+            continue;
+
+        if (Directory)
+        {
+            Status = SetupCreateDirectory(Plan->Target);
+            if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_COLLISION)
+                DPRINT1("Creating '%S' failed (Status 0x%08lx)\n", Plan->Target, Status);
+            continue;
+        }
+
+        if (IsPreservedEntry(Plan) && DoesFileExist(NULL, Plan->Target))
+            continue;
+        if (!DoesFileExist(NULL, Plan->Source))
+        {
+            DPRINT1("'%S' is listed but missing from the source\n", Plan->Source);
+            continue;
+        }
+
+        SourceName = wcsrchr(Plan->Source, L'\\');
+        TargetName = wcsrchr(Plan->Target, L'\\');
+        if (!SourceName || !TargetName)
+            continue;
+        *SourceName++ = UNICODE_NULL;
+        *TargetName = UNICODE_NULL;
+
+        if (_wcsicmp(Plan->Parent, Plan->Target) != 0)
+        {
+            Status = SetupCreateDirectory(Plan->Target);
+            if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_COLLISION)
+                DPRINT1("Creating '%S' failed (Status 0x%08lx)\n", Plan->Target, Status);
+            RtlStringCchCopyW(Plan->Parent, ARRAYSIZE(Plan->Parent), Plan->Target);
+        }
+
+        if (!SpFileQueueCopy((HSPFILEQ)pSetupData->SetupFileQueue,
+                             Plan->Source,
+                             NULL,
+                             SourceName,
+                             NULL,
+                             NULL,
+                             Plan->Target,
+                             NULL,
+                             0))
+        {
+            DPRINT1("SpFileQueueCopy(%S\\%S) failed\n", Plan->Source, SourceName);
+        }
+    }
+}
+
+BOOLEAN
+NTAPI
+PrepareUpgradeFileCopy(
+    _Inout_ PUSETUP_DATA pSetupData,
+    _In_opt_ PFILE_COPY_STATUS_ROUTINE StatusRoutine)
+{
+    PUPGRADE_PLAN Plan;
+    INVENTORY New, Old;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(StatusRoutine);
+
+    pSetupData->SetupFileQueue = (PVOID)SpFileQueueOpen();
+    if (pSetupData->SetupFileQueue == NULL)
+    {
+        pSetupData->LastErrorNumber = ERROR_COPY_QUEUE;
+        if (pSetupData->ErrorRoutine)
+            pSetupData->ErrorRoutine(pSetupData);
+        return FALSE;
+    }
+
+    Plan = RtlAllocateHeap(ProcessHeap, 0, sizeof(*Plan));
+    if (!Plan)
+        return FALSE;
+
+    if (!InitUpgradePlan(pSetupData, Plan))
+    {
+        pSetupData->LastErrorNumber = ERROR_TXTSETUP_SECTION;
+        if (pSetupData->ErrorRoutine)
+            pSetupData->ErrorRoutine(pSetupData, L"SystemTrees");
+        RtlFreeHeap(ProcessHeap, 0, Plan);
+        return FALSE;
+    }
+
+    CombinePaths(Plan->Source, ARRAYSIZE(Plan->Source), 3, pSetupData->SourceRootPath.Buffer,
+                 Plan->Trees[Plan->SystemTree].Media, UPGRADE_INVENTORY_PATH);
+    Status = LoadInventory(Plan->Source, &New);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT1("Cannot read the file inventory '%S' (Status 0x%08lx)\n", Plan->Source, Status);
+        RtlFreeHeap(ProcessHeap, 0, Plan);
+        return FALSE;
+    }
+
+    CombinePaths(Plan->Target, ARRAYSIZE(Plan->Target), 2,
+                 Plan->Trees[Plan->SystemTree].Target, UPGRADE_INVENTORY_PATH);
+    Status = LoadInventory(Plan->Target, &Old);
+    DPRINT1("Upgrade from %lu to %lu inventory entries (Status 0x%08lx)\n", Old.Count, New.Count, Status);
+
+    if (Old.Image && New.Image && _wcsicmp(Old.Image, New.Image) == 0)
+        DropObsoleteFiles(Plan, &Old, &New);
+    else if (Old.Count)
+        DPRINT1("The system was installed from image '%S', this is image '%S'; nothing is dropped\n",
+                Old.Image ? Old.Image : L"unknown", New.Image ? New.Image : L"unknown");
+    QueueInventoryFiles(Plan, &New);
+
+    CombinePaths(Plan->Source, ARRAYSIZE(Plan->Source), 2, pSetupData->SourceRootPath.Buffer,
+                 Plan->Trees[Plan->SystemTree].Media);
+    QueueComputerFiles(pSetupData, Plan->Source);
+
+    FreeInventory(&Old);
+    FreeInventory(&New);
+    RtlFreeHeap(ProcessHeap, 0, Plan);
     return TRUE;
 }
 

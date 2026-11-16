@@ -3,6 +3,7 @@ Signature = "$Windows NT$"
 
 [AddReg]
 
+HKLM,"SYSTEM\CurrentControlSet\Control","BootDriverFlags",0x00010001,0x0000001C
 HKLM,"SYSTEM\CurrentControlSet\Control","CurrentUser",2,"USERNAME"
 HKLM,"SYSTEM\CurrentControlSet\Control","WaitToKillServiceTimeout",2,"20000"
 ;HKLM,"SYSTEM\CurrentControlSet\Control\Biosinfo","InfName",2,"biosinfo.inf"
@@ -11,251 +12,226 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Video",,0x00000012
 
 ; Critical Device Database
 
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0A03","Service",0x00000000,"pci"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0A03","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0A08","Service",0x00000000,"pci"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0A08","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0604","Service",0x00000000,"pci"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0604","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0601","Service",0x00000000,"isapnp"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0601","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1033&DEV_0001","Service",0x00000000,"isapnp"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1033&DEV_0001","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1033&DEV_002C","Service",0x00000000,"isapnp"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1033&DEV_002C","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1033&DEV_002D","Service",0x00000000,"isapnp"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1033&DEV_002D","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1033&DEV_003B","Service",0x00000000,"isapnp"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#VEN_1033&DEV_003B","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0C08","Service",0x00000000,"acpi"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0C08","ClassGUID",0x00000000,"{4D36E97D-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0C0300","Service",0x00000000,"usbuhci"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0C0300","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0C0310","Service",0x00000000,"usbohci"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0C0310","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0C0320","Service",0x00000000,"usbehci"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0C0320","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#Class_08&SubClass_06&Prot_50","Service",0x00000000,"usbstor"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#Class_08&SubClass_06&Prot_50","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#Class_08&SubClass_02&Prot_50","Service",0x00000000,"usbstor"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#Class_08&SubClass_02&Prot_50","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#Class_08&SubClass_05&Prot_50","Service",0x00000000,"usbstor"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#Class_08&SubClass_05&Prot_50","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#COMPOSITE","Service",0x00000000,"usbccgp"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#COMPOSITE","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#CLASS_09","Service",0x00000000,"usbhub"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#CLASS_09","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#ROOT_HUB","Service",0x00000000,"usbhub"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#ROOT_HUB","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#ROOT_HUB20","Service",0x00000000,"usbhub"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#ROOT_HUB20","ClassGUID",0x00000000,"{36FC9E60-C465-11CF-8056-444553540000}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0101","Service",0x00000000,"pciide"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0101","ClassGUID",0x00000000,"{4D36E96A-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0104","Service",0x00000000,"pciide"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0104","ClassGUID",0x00000000,"{4D36E96A-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0106","Service",0x00000000,"pciide"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0106","ClassGUID",0x00000000,"{4D36E96A-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0600","Service",0x00000000,"atapi"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0600","ClassGUID",0x00000000,"{4D36E96A-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\GenCdRom","Service",0x00000000,"cdrom"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\GenCdRom","ClassGUID",0x00000000,"{4D36E965-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\GenDisk","Service",0x00000000,"disk"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\GenDisk","ClassGUID",0x00000000,"{4D36E967-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#Class_03","Service",0x00000000,"hidusb"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\USB#Class_03","ClassGUID",0x00000000,"{745a17a0-74d3-11d0-b6fe-00a0c90f57da}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\GENERIC_HID_DEVICE","Service",0x00000000,"hidusb"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\GENERIC_HID_DEVICE","ClassGUID",0x00000000,"{745a17a0-74d3-11d0-b6fe-00a0c90f57da}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\HID_DEVICE_SYSTEM_KEYBOARD","Service",0x00000000,"kbdhid"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\HID_DEVICE_SYSTEM_KEYBOARD","ClassGUID",0x00000000,"{4D36E96B-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\HID_DEVICE_SYSTEM_MOUSE","Service",0x00000000,"mouhid"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\HID_DEVICE_SYSTEM_MOUSE","ClassGUID",0x00000000,"{4D36E96F-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0000","Service",0x00000000,"vga"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0000","ClassGUID",0x00000000,"{4D36E968-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0001","Service",0x00000000,"vga"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0001","ClassGUID",0x00000000,"{4D36E968-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0300","Service",0x00000000,"vga"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0300","ClassGUID",0x00000000,"{4D36E968-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0301","Service",0x00000000,"vga"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PCI#CC_0301","ClassGUID",0x00000000,"{4D36E968-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0303","Service",0x00000000,"i8042prt"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0303","ClassGUID",0x00000000,"{4D36E96B-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP030B","Service",0x00000000,"i8042prt"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP030B","ClassGUID",0x00000000,"{4D36E96B-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0F0E","Service",0x00000000,"i8042prt"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0F0E","ClassGUID",0x00000000,"{4D36E96F-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0F19","Service",0x00000000,"i8042prt"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0F19","ClassGUID",0x00000000,"{4D36E96F-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PS2_MOUSE","Service",0x00000000,"i8042prt"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\PS2_MOUSE","ClassGUID",0x00000000,"{4D36E96F-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0F13","Service",0x00000000,"i8042prt"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0F13","ClassGUID",0x00000000,"{4D36E96F-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*IBM3780","Service",0x00000000,"i8042prt"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*IBM3780","ClassGUID",0x00000000,"{4D36E96F-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0F12","Service",0x00000000,"i8042prt"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0F12","ClassGUID",0x00000000,"{4D36E96F-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0F03","Service",0x00000000,"i8042prt"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\*PNP0F03","ClassGUID",0x00000000,"{4D36E96F-E325-11CE-BFC1-08002BE10318}"
-
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\ROOT#SWENUM","Service",0x00000000,"swenum"
-HKLM,"SYSTEM\CurrentControlSet\Control\CriticalDeviceDatabase\ROOT#SWENUM","ClassGUID",0x00000000,"{4d36e97d-e325-11ce-bfc1-08002be10318}"
-
-
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot","AlternateShell",2,"cmd.exe"
 
 ; Safe Boot drivers
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\Ahcache.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\AppInfo","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\AppMgmt","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\AudioEndpointBuilder","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\AudioSrv","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\Base","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\BasicDisplay.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\BasicRender.sys","",0x00000000,"Driver"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\Boot Bus Extender","",0x00000000,"Driver Group"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\Boot File System","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\Boot file system","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\BrokerInfrastructure","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\CBDHSvc","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\cdd.dll","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\CoreMessagingRegistrar","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\CryptSvc","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\DcomLaunch","",0x00000000,"Service"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\dmadmin","",0x00000000,"Service"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\dmboot.sys","",0x00000000,"Driver"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\dmio.sys","",0x00000000,"Driver"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\dmload.sys","",0x00000000,"Driver"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\dmserver","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\DeviceInstall","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\dxgkrnl.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\EFS","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\EventLog","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\File system","",0x00000000,"Driver Group"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\Filter","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\FsDepends.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\HdAudAddService.Sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\HdAudBus.Sys","",0x00000000,"Driver"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\HelpSvc","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\HidSpiCx.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\KeyIso","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\LSM","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\Netlogon","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\NgcCtnrSvc","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\NgcSvc","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\NTDS","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\PCI Configuration","",0x00000000,"Driver Group"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\PlugPlay","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\PNP Filter","",0x00000000,"Driver Group"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\Primary Disk","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\Power","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\Primary disk","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\ProfSvc","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\RpcEptMapper","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\RpcSs","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\sacsvr","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\SCSI Class","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\SerCx2.sys","",0x00000000,"Driver"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\sermouse.sys","",0x00000000,"Driver"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\sr.sys","",0x00000000,"FSFilter System Recovery"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\SRService","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\SpbCx.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\StateRepository","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\SWPRV","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\System Bus Extender","",0x00000000,"Driver Group"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\vga.sys","",0x00000000,"Driver"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\vgasave.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\SystemEventsBroker","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\TBS","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\TextInputManagementService","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\TrustedInstaller","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\uefi.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\usbaudio.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\UserManager","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\VDS","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\vmms","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\volmgr.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\volmgrx.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\WinDefend","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\WinMgmt","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\WudfPf","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\WudfRd","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{13cfe1b1-6b17-424c-ac3f-16ace8733898}","",0x00000000,"I3C devices"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{36FC9E60-C465-11CF-8056-444553540000}","",0x00000000,"Universal Serial Bus controllers"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{4D36E965-E325-11CE-BFC1-08002BE10318}","",0x00000000,"CD-ROM Drive"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{4D36E967-E325-11CE-BFC1-08002BE10318}","",0x00000000,"DiskDrive"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{4D36E969-E325-11CE-BFC1-08002BE10318}","",0x00000000,"Standard floppy disk controller"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{4D36E96A-E325-11CE-BFC1-08002BE10318}","",0x00000000,"Hdc"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{4D36E96B-E325-11CE-BFC1-08002BE10318}","",0x00000000,"Keyboard"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{4D36E96C-E325-11CE-BFC1-08002BE10318}","",0x00000000,"Media"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{4D36E96F-E325-11CE-BFC1-08002BE10318}","",0x00000000,"Mouse"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{4D36E977-E325-11CE-BFC1-08002BE10318}","",0x00000000,"PCMCIA Adapters"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{4D36E97B-E325-11CE-BFC1-08002BE10318}","",0x00000000,"SCSIAdapter"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{4D36E97D-E325-11CE-BFC1-08002BE10318}","",0x00000000,"System"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{4D36E980-E325-11CE-BFC1-08002BE10318}","",0x00000000,"Floppy disk drive"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{5099944A-F6B9-4057-A056-8C550228544C}","",0x00000000,"Memory"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{533C5B84-EC70-11D2-9505-00C04F79DEAF}","",0x00000000,"Volume shadow copy"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{53966CB1-4D46-4166-BF23-C522403CD495}","",0x00000000,"ScmDisk"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{6BDD1FC1-810F-11D0-BEC7-08002BE2092F}","",0x00000000,"IEEE 1394 Bus host controllers"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{71A27CDD-812A-11D0-BEC7-08002BE2092F}","",0x00000000,"Volume"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{745A17A0-74D3-11D0-B6FE-00A0C90F57DA}","",0x00000000,"Human Interface Devices"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{9DA2B80F-F89F-4A49-A5C2-511B085B9E8A}","",0x00000000,"Enhanced Storage Devices"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{A0A588A4-C46F-4B37-B7EA-C82FE89870C6}","",0x00000000,"SDA Standard Compliant SD Host Controller"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{BBBE8734-08FA-4966-B6A6-4E5AD010CDD7}","",0x00000000,"Universal Serial Bus Function controllers"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{D48179BE-EC20-11D1-B6B8-00C04FA372A7}","",0x00000000,"SBP2 IEEE 1394 Devices"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{D94EE5D8-D189-4994-83D2-F68D7D41B0E6}","",0x00000000,"SecurityDevices"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{E6F1AA1C-7F3B-4473-B2E8-C97D8AC71D53}","",0x00000000,"USB Connector Managers"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\{F2E7DD72-6468-4E36-B6F1-6488F42C1B52}","",0x00000000,"Firmware"
 
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\AFD","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Ahcache.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\AppInfo","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\AppMgmt","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\AudioEndpointBuilder","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\AudioSrv","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Base","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\BasicDisplay.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\BasicRender.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\BFE","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Boot Bus Extender","",0x00000000,"Driver Group"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Boot File System","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Boot file system","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\bowser","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\BrokerInfrastructure","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Browser","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\CBDHSvc","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\cdd.dll","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\CoreMessagingRegistrar","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\CryptSvc","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\DcomLaunch","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\DeviceInstall","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\dfsc","",0x00000000,"Driver"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Dhcp","",0x00000000,"Service"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\dmadmin","",0x00000000,"Service"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\dmboot.sys","",0x00000000,"Driver"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\dmio.sys","",0x00000000,"Driver"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\dmload.sys","",0x00000000,"Driver"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\dmserver","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\DnsCache","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Dot3Svc","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\dxgkrnl.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Eaphost","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\EFS","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\EventLog","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\ExecutionContext.sys","",0x00000000,"Driver"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\File system","",0x00000000,"Driver Group"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Filter","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\FsDepends.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\HdAudAddService.Sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\HdAudBus.Sys","",0x00000000,"Driver"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\HelpSvc","",0x00000000,"Service"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\ip6fw.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\HidSpiCx.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\IKEEXT","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\ipnat.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\KeyIso","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\LanmanServer","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\LanmanWorkstation","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\LmHosts","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\LSM","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Messenger","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\MPSDrv","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\MPSSvc","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\mrxsmb","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\mrxsmb10","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\mrxsmb20","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\MsQuic","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\NativeWifiP","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\NDIS","",0x00000000,"Driver Group"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\NDIS Wrapper","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\ndiscap","",0x00000000,"Driver"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Ndisuio","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\netadaptercx.sys","",0x00000000,"Driver"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\NetBIOS","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\NetBIOSGroup","",0x00000000,"Driver Group"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\NetBT","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\NetDDEGroup","",0x00000000,"Driver Group"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Netlogon","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\NetMan","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\netprofm","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\NetSetupSvc","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Network","",0x00000000,"Driver Group"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\NetworkProvider","",0x00000000,"Driver Group"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\NtLmSsp","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\NgcCtnrSvc","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\NgcSvc","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Nsi","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\nsiproxy.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\NTDS","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\PCI Configuration","",0x00000000,"Driver Group"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\PlugPlay","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\PNP Filter","",0x00000000,"Driver Group"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\PNP_TDI","",0x00000000,"Driver Group"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Primary Disk","",0x00000000,"Driver Group"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\rdpcdd.sys","",0x00000000,"Driver"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\rdpdd.sys","",0x00000000,"Driver"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\rdpwd.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\PolicyAgent","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Power","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Primary disk","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\ProfSvc","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\rdbss","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\rdpencdd.sys","",0x00000000,"Driver"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\rdsessmgr","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\RpcEptMapper","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\RpcSs","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\sacsvr","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\SCardSvr","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\SCSI Class","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\SerCx2.sys","",0x00000000,"Driver"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\sermouse.sys","",0x00000000,"Driver"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\SharedAccess","",0x00000000,"Service"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\sr.sys","",0x00000000,"FSFilter System Recovery"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\SRService","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\SmartcardSimulator","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\SpbCx.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\StateRepository","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Streams Drivers","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\SWPRV","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\System Bus Extender","",0x00000000,"Driver Group"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\SystemEventsBroker","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\TBS","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Tcpip","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\TDI","",0x00000000,"Driver Group"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\tdpipe.sys","",0x00000000,"Driver"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\tdtcp.sys","",0x00000000,"Driver"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\termservice","",0x00000000,"Service"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\vga.sys","",0x00000000,"Driver"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\vgasave.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\TextInputManagementService","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\TrustedInstaller","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\uefi.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\usbaudio.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\UserManager","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\VaultSvc","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\VDS","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\VirtualSmartcardReader","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\vmms","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\volmgr.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\volmgrx.sys","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Wcmsvc","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\WinDefend","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\WinHttpAutoProxySvc","",0x00000000,"Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\WinMgmt","",0x00000000,"Service"
-HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\WZCSVC","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\Wlansvc","",0x00000000,"Service"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\WudfPf","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\WudfRd","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\WudfUsbccidDriver","",0x00000000,"Driver"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{13cfe1b1-6b17-424c-ac3f-16ace8733898}","",0x00000000,"I3C devices"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{36FC9E60-C465-11CF-8056-444553540000}","",0x00000000,"Universal Serial Bus controllers"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{4D36E965-E325-11CE-BFC1-08002BE10318}","",0x00000000,"CD-ROM Drive"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{4D36E967-E325-11CE-BFC1-08002BE10318}","",0x00000000,"DiskDrive"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{4D36E969-E325-11CE-BFC1-08002BE10318}","",0x00000000,"Standard floppy disk controller"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{4D36E96A-E325-11CE-BFC1-08002BE10318}","",0x00000000,"Hdc"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{4D36E96B-E325-11CE-BFC1-08002BE10318}","",0x00000000,"Keyboard"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{4D36E96C-E325-11CE-BFC1-08002BE10318}","",0x00000000,"Media"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{4D36E96F-E325-11CE-BFC1-08002BE10318}","",0x00000000,"Mouse"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{4D36E972-E325-11CE-BFC1-08002BE10318}","",0x00000000,"Net"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{4D36E973-E325-11CE-BFC1-08002BE10318}","",0x00000000,"NetClient"
@@ -265,8 +241,19 @@ HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{4D36E977-E325-11CE-BFC1
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{4D36E97B-E325-11CE-BFC1-08002BE10318}","",0x00000000,"SCSIAdapter"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{4D36E97D-E325-11CE-BFC1-08002BE10318}","",0x00000000,"System"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{4D36E980-E325-11CE-BFC1-08002BE10318}","",0x00000000,"Floppy disk drive"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{50DD5230-BA8A-11D1-BF5D-0000F805F530}","",0x00000000,"Smart card readers"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{533C5B84-EC70-11D2-9505-00C04F79DEAF}","",0x00000000,"Volume shadow copy"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{53966CB1-4D46-4166-BF23-C522403CD495}","",0x00000000,"ScmDisk"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{6BDD1FC1-810F-11D0-BEC7-08002BE2092F}","",0x00000000,"IEEE 1394 Bus host controllers"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{71A27CDD-812A-11D0-BEC7-08002BE2092F}","",0x00000000,"Volume"
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{745A17A0-74D3-11D0-B6FE-00A0C90F57DA}","",0x00000000,"Human Interface Devices"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{9DA2B80F-F89F-4A49-A5C2-511B085B9E8A}","",0x00000000,"Enhanced Storage Devices"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{A0A588A4-C46F-4B37-B7EA-C82FE89870C6}","",0x00000000,"SDA Standard Compliant SD Host Controller"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{BBBE8734-08FA-4966-B6A6-4E5AD010CDD7}","",0x00000000,"Universal Serial Bus Function controllers"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{D48179BE-EC20-11D1-B6B8-00C04FA372A7}","",0x00000000,"SBP2 IEEE 1394 Devices"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{D94EE5D8-D189-4994-83D2-F68D7D41B0E6}","",0x00000000,"SecurityDevices"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{E6F1AA1C-7F3B-4473-B2E8-C97D8AC71D53}","",0x00000000,"USB Connector Managers"
+HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Network\{F2E7DD72-6468-4E36-B6F1-6488F42C1B52}","",0x00000000,"Firmware"
 
 ; ReactOS specific - required to load in Safe Mode and for debugging in Safe Mode (until vga.sys and vgasave.sys are implemented)
 HKLM,"SYSTEM\CurrentControlSet\Control\SafeBoot\Minimal\Debug","",0x00000000,"Driver Group"
@@ -376,11 +363,71 @@ HKLM,"SYSTEM\CurrentControlSet\Control\FileSystem","Win95TruncatedExtensions",0x
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{36FC9E60-C465-11CF-8056-444553540000}",,0x00000000,"Universal Serial Bus controllers"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{36FC9E60-C465-11CF-8056-444553540000}","Class",0x00000000,"USB"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{36FC9E60-C465-11CF-8056-444553540000}","Icon",0x00000000,"-20"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{36FC9E60-C465-11CF-8056-444553540000}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-20"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{36FC9E60-C465-11CF-8056-444553540000}","NoInstallClass",0x00000000,"1"
+
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{88BAE032-5A81-49F0-BC3D-A4FF138216D6}",,0x00000000,"Universal Serial Bus devices"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{88BAE032-5A81-49F0-BC3D-A4FF138216D6}","Class",0x00000000,"USBDevice"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{88BAE032-5A81-49F0-BC3D-A4FF138216D6}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-20"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{88BAE032-5A81-49F0-BC3D-A4FF138216D6}","NoInstallClass",0x00000000,"1"
+
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{bbbe8734-08fa-4966-b6a6-4e5ad010cdd7}",,0x00000000,"USB Function Controller"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{bbbe8734-08fa-4966-b6a6-4e5ad010cdd7}","Class",0x00000000,"USBFunctionController"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{bbbe8734-08fa-4966-b6a6-4e5ad010cdd7}","Icon",0x00000000,"-20"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{bbbe8734-08fa-4966-b6a6-4e5ad010cdd7}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-20"
+
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{a0a588a4-c46f-4b37-b7ea-c82fe89870c6}",,0x00000000,"SD Host Controllers"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{a0a588a4-c46f-4b37-b7ea-c82fe89870c6}","Class",0x00000000,"SDHost"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{a0a588a4-c46f-4b37-b7ea-c82fe89870c6}","Icon",0x00000000,"-39"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{a0a588a4-c46f-4b37-b7ea-c82fe89870c6}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-39"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{a0a588a4-c46f-4b37-b7ea-c82fe89870c6}","NoInstallClass",0x00000000,"1"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{a0a588a4-c46f-4b37-b7ea-c82fe89870c6}","SilentInstall",0x00000000,"1"
+
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{72631E54-78A4-11D0-BCF7-00AA00B7B32A}",,0x00000000,"Batteries"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{72631E54-78A4-11D0-BCF7-00AA00B7B32A}","Class",0x00000000,"Battery"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{72631E54-78A4-11D0-BCF7-00AA00B7B32A}","Icon",0x00000000,"2"
+
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{E0CBF06C-CD8B-4647-BB8A-263B43F0F974}",,0x00000000,"Bluetooth Radios"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{E0CBF06C-CD8B-4647-BB8A-263B43F0F974}","Class",0x00000000,"Bluetooth"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{E0CBF06C-CD8B-4647-BB8A-263B43F0F974}","Icon",0x00000000,"201"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{E0CBF06C-CD8B-4647-BB8A-263B43F0F974}","Installer32",0x00000000,"bthci.dll,BluetoothClassInstaller"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{E0CBF06C-CD8B-4647-BB8A-263B43F0F974}","NoInstallClass",0x00000000,"1"
+
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96E-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Monitors"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96E-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"Monitor"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96E-E325-11CE-BFC1-08002BE10318}","Icon",0x00000000,"-35"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96E-E325-11CE-BFC1-08002BE10318}","Installer32",0x00000000,"desk.cpl,MonitorClassInstaller"
+
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E978-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Serial and parallel ports"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E978-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"Ports"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E978-E325-11CE-BFC1-08002BE10318}","Icon",0x00000000,"-23"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E978-E325-11CE-BFC1-08002BE10318}","Installer32",0x00000000,"msports.dll,PortsClassInstaller"
+
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E966-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Computer"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E966-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"Computer"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E966-E325-11CE-BFC1-08002BE10318}","Icon",0x00000000,"-13"
+
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{8ECC055D-047F-11D1-A537-0000F8753ED1}",,0x00000000,"Non-Plug and Play Drivers"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{8ECC055D-047F-11D1-A537-0000F8753ED1}","Class",0x00000000,"LegacyDriver"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{8ECC055D-047F-11D1-A537-0000F8753ED1}","Icon",0x00000000,"-19"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{8ECC055D-047F-11D1-A537-0000F8753ED1}","NoDisplayClass",0x00000000,"1"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{8ECC055D-047F-11D1-A537-0000F8753ED1}","EnumPropPages32",0x00000000,"syssetup.dll,LegacyDriverPropPageProvider"
+
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E97E-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Other Devices"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E97E-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"Unknown"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E97E-E325-11CE-BFC1-08002BE10318}","Icon",0x00000000,"-18"
+
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96A-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Hard disk controllers"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96A-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"HDC"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96A-E325-11CE-BFC1-08002BE10318}","Icon",0x00000000,"-9"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96A-E325-11CE-BFC1-08002BE10318}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-9"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96A-E325-11CE-BFC1-08002BE10318}","Installer32",0x00000000,"syssetup.dll,HdcClassInstaller"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96A-E325-11CE-BFC1-08002BE10318}","EnumPropPages32",0x00000000,"storprop.dll,HwPropPageProvider"
 
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E965-E325-11CE-BFC1-08002BE10318}",,0x00000000,"DVD/CD-ROM drives"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E965-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"CDROM"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E965-E325-11CE-BFC1-08002BE10318}","Icon",0x00000000,"-51"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E965-E325-11CE-BFC1-08002BE10318}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-51"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E965-E325-11CE-BFC1-08002BE10318}","Installer32",0x00000000,"storprop.dll,DvdClassInstaller"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E965-E325-11CE-BFC1-08002BE10318}","NoInstallClass",0x00000000,"1"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E965-E325-11CE-BFC1-08002BE10318}","SilentInstall",0x00000000,"1"
@@ -388,6 +435,7 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E965-E325-11CE-BFC1-08002BE103
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E967-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Disk drives"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E967-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"DiskDrive"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E967-E325-11CE-BFC1-08002BE10318}","Icon",0x00000000,"-53"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E967-E325-11CE-BFC1-08002BE10318}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-53"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E967-E325-11CE-BFC1-08002BE10318}","Installer32",0x00000000,"storprop.dll,DiskClassInstaller"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E967-E325-11CE-BFC1-08002BE10318}","NoInstallClass",0x00000000,"1"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E967-E325-11CE-BFC1-08002BE10318}","SilentInstall",0x00000000,"1"
@@ -396,11 +444,16 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E967-E325-11CE-BFC1-08002BE103
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Display adapters"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"Display"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}","Icon",0x00000000,"-1"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-1"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}\Properties","Security",0x00000001,01,00,04,90,00,00,00,00,00,00,00,00,00,00,00,00,14,00,00,00,02,00,1c,00,01,00,00,00,00,00,14,00,00,00,00,10,01,01,00,00,00,00,00,05,12,00,00,00
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}\Properties","DeviceType",0x00010001,0x00000023
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}\Properties","DeviceCharacteristics",0x00010001,0x00000100
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E968-E325-11CE-BFC1-08002BE10318}","Installer32",0x00000000,"desk.cpl,DisplayClassInstaller"
 
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96B-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Keyboard"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96B-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"Keyboard"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96B-E325-11CE-BFC1-08002BE10318}","Icon",0x00000000,"-3"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96B-E325-11CE-BFC1-08002BE10318}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-3"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96B-E325-11CE-BFC1-08002BE10318}","Installer32",0x00000000,"SysSetup.Dll,KeyboardClassInstaller"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96B-E325-11CE-BFC1-08002BE10318}","NoInstallClass",0x00000000,"1"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96B-E325-11CE-BFC1-08002BE10318}","UpperFilters",0x00010000,"kbdclass"
@@ -408,13 +461,19 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96B-E325-11CE-BFC1-08002BE103
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96F-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Mouse"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96F-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"Mouse"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96F-E325-11CE-BFC1-08002BE10318}","Icon",0x00000000,"-2"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96F-E325-11CE-BFC1-08002BE10318}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-2"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96F-E325-11CE-BFC1-08002BE10318}","Installer32",0x00000000,"SysSetup.Dll,MouseClassInstaller"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96F-E325-11CE-BFC1-08002BE10318}","NoInstallClass",0x00000000,"1"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E96F-E325-11CE-BFC1-08002BE10318}","UpperFilters",0x00010000,"mouclass"
 
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Network Adapters"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"Net"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E972-E325-11CE-BFC1-08002BE10318}","Installer32",0x00000000,"NetCfgx.dll,NetClassInstaller"
+
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E973-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Network Client"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E973-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"NetClient"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E973-E325-11CE-BFC1-08002BE10318}","Icon",0x00000000,"-7"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E973-E325-11CE-BFC1-08002BE10318}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-7"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E973-E325-11CE-BFC1-08002BE10318}","Installer32",0x00000000,"NetCfgx.dll,NetClassInstaller"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E973-E325-11CE-BFC1-08002BE10318}","NoDisplayClass",0x00000000,"1"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E973-E325-11CE-BFC1-08002BE10318}","NoInstallClass",0x00000000,"1"
@@ -422,6 +481,7 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E973-E325-11CE-BFC1-08002BE103
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E974-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Network Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E974-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"NetService"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E974-E325-11CE-BFC1-08002BE10318}","Icon",0x00000000,"-7"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E974-E325-11CE-BFC1-08002BE10318}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-7"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E974-E325-11CE-BFC1-08002BE10318}","Installer32",0x00000000,"NetCfgx.dll,NetClassInstaller"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E974-E325-11CE-BFC1-08002BE10318}","NoDisplayClass",0x00000000,"1"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E974-E325-11CE-BFC1-08002BE10318}","NoInstallClass",0x00000000,"1"
@@ -429,6 +489,7 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E974-E325-11CE-BFC1-08002BE103
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E975-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Network Protocol"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E975-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"NetTrans"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E975-E325-11CE-BFC1-08002BE10318}","Icon",0x00000000,"-6"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E975-E325-11CE-BFC1-08002BE10318}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-6"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E975-E325-11CE-BFC1-08002BE10318}","Installer32",0x00000000,"NetCfgx.dll,NetClassInstaller"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E975-E325-11CE-BFC1-08002BE10318}","NoDisplayClass",0x00000000,"1"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E975-E325-11CE-BFC1-08002BE10318}","NoInstallClass",0x00000000,"1"
@@ -436,34 +497,56 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E975-E325-11CE-BFC1-08002BE103
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E97D-E325-11CE-BFC1-08002BE10318}",,0x00000000,"System Devices"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E97D-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"System"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E97D-E325-11CE-BFC1-08002BE10318}","Icon",0x00000000,"-27"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4D36E97D-E325-11CE-BFC1-08002BE10318}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-27"
 
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{745A17A0-74D3-11D0-B6FE-00A0C90F57DA}",,0x00000000,"Human Interface Devices"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{745A17A0-74D3-11D0-B6FE-00A0C90F57DA}","Class",0x00000000,"HIDClass"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{745A17A0-74D3-11D0-B6FE-00A0C90F57DA}","Icon",0x00000000,"-24"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{745A17A0-74D3-11D0-B6FE-00A0C90F57DA}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-24"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{745A17A0-74D3-11D0-B6FE-00A0C90F57DA}\Properties","Security",0x00000001,01,00,04,90,00,00,00,00,00,00,00,00,00,00,00,00,14,00,00,00,02,00,5c,00,04,00,00,00,00,00,14,00,00,00,00,10,01,01,00,00,00,00,00,05,12,00,00,00,00,00,18,00,00,00,00,10,01,02,00,00,00,00,00,05,20,00,00,00,20,02,00,00,00,00,14,00,00,00,00,e0,01,01,00,00,00,00,00,01,00,00,00,00,00,00,14,00,00,00,00,a0,01,01,00,00,00,00,00,05,0c,00,00,00
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{745A17A0-74D3-11D0-B6FE-00A0C90F57DA}","NoInstallClass",0x00000000,"1"
 
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{9D6D66A6-0B0C-4563-9077-A0E9A7955AE4}",,0x00000000,"Ramdisk"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{9D6D66A6-0B0C-4563-9077-A0E9A7955AE4}","Class",0x00000000,"Ramdisk"
 HKLM,"SYSTEM\CurrentControlSet\Control\Class\{9D6D66A6-0B0C-4563-9077-A0E9A7955AE4}","Icon",0x00000000,"-5"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{9D6D66A6-0B0C-4563-9077-A0E9A7955AE4}","IconPath",0x00010000,"%SystemRoot%\System32\setupapi.dll,-5"
 
 ; Class Co-Installers
 HKLM,"SYSTEM\CurrentControlSet\Control\CoDeviceInstallers",,0x00000012
-HKLM,"SYSTEM\CurrentControlSet\Control\CoDeviceInstallers","{4D36E965-E325-11CE-BFC1-08002BE10318}",0x00010000,"syssetup.dll,StorageCoInstaller","syssetup.dll,CriticalDeviceCoInstaller"
-HKLM,"SYSTEM\CurrentControlSet\Control\CoDeviceInstallers","{4D36E967-E325-11CE-BFC1-08002BE10318}",0x00010000,"syssetup.dll,StorageCoInstaller","syssetup.dll,CriticalDeviceCoInstaller"
-HKLM,"SYSTEM\CurrentControlSet\Control\CoDeviceInstallers","{4D36E96A-E325-11CE-BFC1-08002BE10318}",0x00010000,"syssetup.dll,CriticalDeviceCoInstaller"
-HKLM,"SYSTEM\CurrentControlSet\Control\CoDeviceInstallers","{4D36E96B-E325-11CE-BFC1-08002BE10318}",0x00010000,"syssetup.dll,CriticalDeviceCoInstaller"
-HKLM,"SYSTEM\CurrentControlSet\Control\CoDeviceInstallers","{4D36E96F-E325-11CE-BFC1-08002BE10318}",0x00010000,"syssetup.dll,CriticalDeviceCoInstaller"
-HKLM,"SYSTEM\CurrentControlSet\Control\CoDeviceInstallers","{4D36E97B-E325-11CE-BFC1-08002BE10318}",0x00010000,"syssetup.dll,CriticalDeviceCoInstaller"
-HKLM,"SYSTEM\CurrentControlSet\Control\CoDeviceInstallers","{4D36E97D-E325-11CE-BFC1-08002BE10318}",0x00010000,"syssetup.dll,CriticalDeviceCoInstaller"
+HKLM,"SYSTEM\CurrentControlSet\Control\CoDeviceInstallers","{4D36E965-E325-11CE-BFC1-08002BE10318}",0x00010000,"syssetup.dll,StorageCoInstaller"
+HKLM,"SYSTEM\CurrentControlSet\Control\CoDeviceInstallers","{4D36E967-E325-11CE-BFC1-08002BE10318}",0x00010000,"syssetup.dll,StorageCoInstaller"
 
 
 ; Default computer name settings
 HKLM,"SYSTEM\CurrentControlSet\Control\ComputerName",,0x00000012
-HKLM,"SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName","ComputerName",0x00000002,"COMPUTERNAME"
+HKLM,"SYSTEM\CurrentControlSet\Control\ComputerName\ComputerName","ComputerName",0x00000002,"LBRNT"
 
 ; Crash Control
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default","Flags",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\SSL","Flags",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00000001","",0x00000000,"CRYPT_CIPHER_INTERFACE"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00000001","Functions",0x00010000,"AES","3DES","RC4","CHACHA20_POLY1305"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00000002","",0x00000000,"CRYPT_HASH_INTERFACE"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00000002","Functions",0x00010000,"SHA256","SHA384","SHA512","SHA1","MD5","MD4","MD2","AES-GMAC"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00000003","",0x00000000,"CRYPT_ASYMMETRIC_ENCRYPTION_INTERFACE"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00000003","Functions",0x00010000,"RSA"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00000004","",0x00000000,"CRYPT_SECRET_AGREEMENT_INTERFACE"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00000004","Functions",0x00010000,"DH","ECDH_P256","ECDH_P384","ECDH_P521","ECDH"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00000005","",0x00000000,"CRYPT_SIGNATURE_INTERFACE"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00000005","Functions",0x00010000,"RSA_SIGN","ECDSA_P256","ECDSA_P384","ECDSA_P521","ECDSA","DSA"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00000006","",0x00000000,"CRYPT_RNG_INTERFACE"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00000006","Functions",0x00010000,"RNG"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00000007","",0x00000000,"CRYPT_KEY_DERIVATION_INTERFACE"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00000007","Functions",0x00010000,"PBKDF2"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00010001","",0x00000000,"CRYPT_KEY_STORAGE_INTERFACE"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00010001","Functions",0x00010000,"KEY_STORAGE"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00010002","",0x00000000,"NCRYPT_SCHANNEL_INTERFACE"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\Default\00010002","Functions",0x00010000,"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384","TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256","TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384","TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256","TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384","TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256","TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384","TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256","TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA","TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA","TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA","TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA","TLS_RSA_WITH_AES_256_GCM_SHA384","TLS_RSA_WITH_AES_128_GCM_SHA256","TLS_RSA_WITH_AES_256_CBC_SHA256","TLS_RSA_WITH_AES_128_CBC_SHA256","TLS_RSA_WITH_AES_256_CBC_SHA","TLS_RSA_WITH_AES_128_CBC_SHA"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\SSL\00010002","",0x00000000,"NCRYPT_SCHANNEL_INTERFACE"
+HKLM,"SYSTEM\CurrentControlSet\Control\Cryptography\Configuration\Local\SSL\00010002","Functions",0x00010000,"TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384","TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256","TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384","TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256","TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA384","TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256","TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA384","TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256","TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA","TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA","TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA","TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA","TLS_RSA_WITH_AES_256_GCM_SHA384","TLS_RSA_WITH_AES_128_GCM_SHA256","TLS_RSA_WITH_AES_256_CBC_SHA256","TLS_RSA_WITH_AES_128_CBC_SHA256","TLS_RSA_WITH_AES_256_CBC_SHA","TLS_RSA_WITH_AES_128_CBC_SHA"
 HKLM,"SYSTEM\CurrentControlSet\Control\CrashControl","AutoReboot",0x00010003,0
-HKLM,"SYSTEM\CurrentControlSet\Control\CrashControl","CrashDumpEnabled",0x00010003,3
+HKLM,"SYSTEM\CurrentControlSet\Control\CrashControl","CrashDumpEnabled",0x00010003,7
+HKLM,"SYSTEM\CurrentControlSet\Control\CrashControl","DedicatedDumpPartitionType",0x00010003,0x0000007f
 HKLM,"SYSTEM\CurrentControlSet\Control\CrashControl","DumpFile",0x00020002,"%SystemRoot%\MEMORY.DMP"
 HKLM,"SYSTEM\CurrentControlSet\Control\CrashControl","LogEvent",0x00010003,0
 HKLM,"SYSTEM\CurrentControlSet\Control\CrashControl","MinidumpDir",0x00020002,"%SystemRoot%\Minidump"
@@ -493,9 +576,18 @@ HKLM,"SYSTEM\CurrentControlSet\Control\HAL","80867110",0x00010001,0x1
 
 ; Hardware profile settings
 HKLM,"SYSTEM\CurrentControlSet\Control\IDConfigDB",,0x00000012
-HKLM,"SYSTEM\CurrentControlSet\Control\IDConfigDB","CurrentConfig",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Control\IDConfigDB","CurrentConfig",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0000","FriendlyName",0x00000000,"New Hardware Profile"
-HKLM,"SYSTEM\CurrentControlSet\Hardware Profiles\Current\Software\Fonts","LogPixels",0x00010003,96
+HKLM,"SYSTEM\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0000","Aliasable",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0000","PreferenceOrder",0x00010001,0xffffffff
+HKLM,"SYSTEM\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0000","Pristine",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0001","PreferenceOrder",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0001","FriendlyName",0x00000000,"Undocked Profile"
+HKLM,"SYSTEM\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0001","Aliasable",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Control\IDConfigDB\Hardware Profiles\0001","Cloned",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Hardware Profiles\0000\Software\Fonts","LogPixels",0x00010003,96
+HKLM,"SYSTEM\CurrentControlSet\Hardware Profiles\0001\Software\Fonts","LogPixels",0x00010003,96
+HKLM,"SYSTEM\CurrentControlSet\Hardware Profiles\0001\System\CurrentControlSet",,0x00000012
 
 ; Keyboard Layouts
 HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000401","Layout File",0x00000000,"kbda1.dll"
@@ -792,6 +884,10 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000426","Layout File",
 HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000426","Layout Text",0x00000000,%LATVIAN%
 HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000426","Layout Display Name",0x00000000,"@%SystemRoot%\system32\input.dll,-5043"
 
+HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000429","Layout File",0x00000000,"kbdfa.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000429","Layout Text",0x00000000,%PERSIAN%
+HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00000429","Layout Display Name",0x00000000,"@%SystemRoot%\system32\input.dll,-5124"
+
 ; HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00010426","Layout File",0x00000000,"kbdlv1.dll"
 ; HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00010426","Layout Text",0x00000000,%LATVIAN_QWERTY%
 ; HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\00010426","Layout Id",0x00000000,"0015"
@@ -957,6 +1053,7 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Keyboard Layout\DosKeybIDs","00020408",2,
 ; Lsa
 HKLM,"SYSTEM\CurrentControlSet\Control\Lsa","Authentication Packages",0x00010000,"msv1_0"
 HKLM,"SYSTEM\CurrentControlSet\Control\Lsa","EveryoneIncludesAnonymous",0x00010001,0
+HKLM,"SYSTEM\CurrentControlSet\Control\Lsa","LimitBlankPasswordUse",0x00010001,1
 HKLM,"SYSTEM\CurrentControlSet\Control\Lsa\FipsAlgorithmPolicy","Enabled",0x00010001,0
 
 ; Network
@@ -966,6 +1063,14 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E973-E325-11CE-BFC1-08002BE1
 HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E973-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"NetClient"
 HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Network Service"
 HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"NetService"
+HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}\{DDB50DEB-F71C-464F-91D6-AC8825F5A2D9}\Ndi","Service",0x00000000,"Nwifi"
+HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}\{DDB50DEB-F71C-464F-91D6-AC8825F5A2D9}\Ndi","CoServices",0x00010000,"Nwifi"
+HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}\{DDB50DEB-F71C-464F-91D6-AC8825F5A2D9}\Ndi","FilterClass",0x00000000,"ms_medium_converter_top"
+HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}\{DDB50DEB-F71C-464F-91D6-AC8825F5A2D9}\Ndi","FilterType",0x00010001,0x00000002
+HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}\{DDB50DEB-F71C-464F-91D6-AC8825F5A2D9}\Ndi","FilterRunType",0x00010001,0x00000002
+HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}\{DDB50DEB-F71C-464F-91D6-AC8825F5A2D9}\Ndi\Interfaces","FilterMediaTypes",0x00000000,"wlan"
+HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}\{DDB50DEB-F71C-464F-91D6-AC8825F5A2D9}\Ndi\Interfaces","UpperRange",0x00000000,"ndis5"
+HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E974-E325-11CE-BFC1-08002BE10318}\{DDB50DEB-F71C-464F-91D6-AC8825F5A2D9}\Ndi\Interfaces","LowerRange",0x00000000,"wlan"
 HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E975-E325-11CE-BFC1-08002BE10318}",,0x00000000,"Network Protocol"
 HKLM,"SYSTEM\CurrentControlSet\Control\Network\{4D36E975-E325-11CE-BFC1-08002BE10318}","Class",0x00000000,"NetTrans"
 HKLM,"SYSTEM\CurrentControlSet\Control\NetworkProvider\Order","ProviderOrder",0x00000000,"nfs41_driver"
@@ -1322,8 +1427,8 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","00000417",0x00000000,"1"
 HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","00000418",0x00000000,"2"
 HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","00000419",0x00000000,"5"
 HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","0000041a",0x00000000,"2"
-HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","0000081a",0x00000000,"1"
-HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","00000c1a",0x00000000,"5"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","0000241a",0x00000000,"2"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","0000281a",0x00000000,"5"
 HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","0000041b",0x00000000,"2"
 HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","0000041c",0x00000000,"2"
 HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","0000041d",0x00000000,"1"
@@ -1363,6 +1468,133 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","00000455",0x00000000,"1"
 HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","00000456",0x00000000,"1"
 ;HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","0000048f",0x00000000,"1" ; tdd-Tale-CN, reserved
 ;HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Locale","00000490",0x00000000,"1" ; khb-Talu-CN, reserved
+
+; Unicode normalization data
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Normalization","1",0x00000000,"normnfc.nls"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Normalization","2",0x00000000,"normnfd.nls"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Normalization","5",0x00000000,"normnfkc.nls"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Normalization","6",0x00000000,"normnfkd.nls"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Normalization","d",0x00000000,"normidna.nls"
+
+; Unicode collation data, generated with the Wine 11.14 sort tables
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids",,0x00000000,"{00000001-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","arn",0x00000000,"{00000012-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","as",0x00000000,"{00000031-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","az",0x00000000,"{00000023-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ba",0x00000000,"{0000003d-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","bg",0x00000000,"{0000004a-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","bn",0x00000000,"{00000032-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","bo",0x00000000,"{00000034-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","br",0x00000000,"{0000000f-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","bs",0x00000000,"{00000019-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","co",0x00000000,"{0000000e-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","cs",0x00000000,"{0000001c-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","cy",0x00000000,"{0000002c-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","da",0x00000000,"{0000001f-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","de-DE_phoneb",0x00000000,"{0000003f-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","dv",0x00000000,"{00000045-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","es",0x00000000,"{0000002b-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","es-ES_tradnl",0x00000000,"{0000002a-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","et",0x00000000,"{00000027-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","fa",0x00000000,"{00000041-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","fa-AF",0x00000000,"{00000016-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","fi",0x00000000,"{0000001a-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","fr",0x00000000,"{00000003-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","fy",0x00000000,"{0000003e-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","gu",0x00000000,"{00000032-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","haw",0x00000000,"{00000002-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","hi",0x00000000,"{00000032-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","hr",0x00000000,"{00000019-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","hsb",0x00000000,"{00000013-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","hu",0x00000000,"{00000004-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","hu-HU_technl",0x00000000,"{00000026-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","is",0x00000000,"{00000025-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ja",0x00000000,"{00000046-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ja-JP_radstr",0x00000000,"{00000036-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ka-GE_modern",0x00000000,"{00000048-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","kk",0x00000000,"{0000000b-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","kl",0x00000000,"{0000001f-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","km",0x00000000,"{0000000c-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","kn",0x00000000,"{00000032-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ko",0x00000000,"{00000047-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","kok",0x00000000,"{00000032-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ky",0x00000000,"{0000004a-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","lo",0x00000000,"{0000002e-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","lt",0x00000000,"{00000028-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","lv",0x00000000,"{00000005-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","lv-LV_tradnl",0x00000000,"{00000006-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","mi",0x00000000,"{00000014-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","mk",0x00000000,"{0000000a-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ml",0x00000000,"{00000032-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","mn",0x00000000,"{0000004a-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","moh",0x00000000,"{00000010-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","mr",0x00000000,"{00000032-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","mt",0x00000000,"{0000002d-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","nb",0x00000000,"{00000020-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ne",0x00000000,"{00000033-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","nn",0x00000000,"{00000020-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","no",0x00000000,"{00000020-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","oc",0x00000000,"{00000003-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","or",0x00000000,"{00000032-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","pa",0x00000000,"{00000032-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","pa-Arab",0x00000000,"{00000007-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","pl",0x00000000,"{0000001d-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","prs",0x00000000,"{00000016-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ps",0x00000000,"{00000016-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","quc",0x00000000,"{0000002b-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","qut",0x00000000,"{0000002b-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","rm",0x00000000,"{00000011-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ro",0x00000000,"{00000024-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ru",0x00000000,"{0000004a-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","sa",0x00000000,"{00000032-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","sah",0x00000000,"{00000009-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","sd",0x00000000,"{00000007-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","se",0x00000000,"{00000021-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","se-FI",0x00000000,"{0000001b-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","se-SE",0x00000000,"{0000001b-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","si",0x00000000,"{00000032-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","sk",0x00000000,"{00000029-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","sl",0x00000000,"{0000001e-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","sma",0x00000000,"{0000001b-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","sma-NO",0x00000000,"{00000021-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","smj",0x00000000,"{0000001b-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","smj-NO",0x00000000,"{00000021-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","smn",0x00000000,"{0000001b-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","sms",0x00000000,"{0000001b-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","sq",0x00000000,"{00000018-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","sr",0x00000000,"{00000019-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","sv",0x00000000,"{0000001a-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","syr",0x00000000,"{00000044-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ta",0x00000000,"{00000032-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","te",0x00000000,"{00000032-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","tg",0x00000000,"{0000004a-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","th",0x00000000,"{0000002f-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ti",0x00000000,"{0000003c-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","tk",0x00000000,"{00000008-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","tr",0x00000000,"{00000022-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","tt",0x00000000,"{00000043-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","tzm",0x00000000,"{0000000d-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ug",0x00000000,"{00000017-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","uk",0x00000000,"{00000040-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","ur",0x00000000,"{00000015-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","uz-Cyrl",0x00000000,"{0000004a-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","vi",0x00000000,"{00000030-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","wo",0x00000000,"{00000003-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","x-IV_mathan",0x00000000,"{00000035-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","zh",0x00000000,"{0000003a-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","zh-CN_phoneb",0x00000000,"{0000004b-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","zh-CN_stroke",0x00000000,"{00000039-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","zh-HK",0x00000000,"{00000037-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","zh-HK_radstr",0x00000000,"{0000003b-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","zh-Hant",0x00000000,"{00000037-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","zh-MO",0x00000000,"{00000037-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","zh-MO_radstr",0x00000000,"{0000003b-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","zh-SG_phoneb",0x00000000,"{0000004b-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","zh-SG_stroke",0x00000000,"{00000039-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","zh-TW",0x00000000,"{00000037-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","zh-TW_pronun",0x00000000,"{00000038-57ee-1e5c-00b4-d0000bb1e11e}"
+HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Sorting\Ids","zh-TW_radstr",0x00000000,"{0000003b-57ee-1e5c-00b4-d0000bb1e11e}"
+
 
 HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Language Groups","1",0x00000000,"1"
 HKLM,"SYSTEM\CurrentControlSet\Control\Nls\Language Groups","2",0x00000000,"1"
@@ -1421,119 +1653,6 @@ HKLM,"SYSTEM\CurrentControlSet\Control\PnP\Pci\CardList","Toshiba",0x00030003,\
 HKLM,"SYSTEM\CurrentControlSet\Control\PnP\Pci\CardList","Ali",0x00030003,\
 01,00,00,00,b9,10,21,15,00,00,00,00,00,00,00,00
 
-; PCI IRQ routing miniport support (legacy, pre-ACPI machines).
-; The IrqMiniports table maps a south-bridge PCI interrupt router
-; this $PIR table is needed for PCI IRQ Routing without ACPI.
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting","Options",0x00010001,0x0000000F
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00001078","Name",0x00000002,"Cyrix 5520 Rev 0"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00001078","Instance",0x00010001,0x0000000E
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00001078","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00020E11","Name",0x00000002,"Compaq CMC-2"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00020E11","Instance",0x00010001,0x0000000D
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00020E11","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00021066","Name",0x00000002,"Vesuvius"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00021066","Instance",0x00010001,0x00000011
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00021066","Parameters",0x00010001,0x00000001
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00021078","Name",0x00000002,"Cyrix 5520 Rev 1"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00021078","Instance",0x00010001,0x0000000E
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00021078","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00061004","Name",0x00000002,"VLSI"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00061004","Instance",0x00010001,0x00000002
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00061004","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00081039","Name",0x00000002,"SiS5503"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00081039","Instance",0x00010001,0x00000004
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\00081039","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\0011100B","Name",0x00000002,"NS 87560"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\0011100B","Instance",0x00010001,0x00000007
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\0011100B","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\01021004","Name",0x00000002,"VLSI Eagle"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\01021004","Instance",0x00010001,0x00000005
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\01021004","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\04828086","Name",0x00000002,"Intel 82375EB/SB"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\04828086","Instance",0x00010001,0x00000000
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\04828086","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\04848086","Name",0x00000002,"Intel 82378"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\04848086","Instance",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\04848086","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\05861106","Name",0x00000002,"VT82C586B"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\05861106","Instance",0x00010001,0x0000000B
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\05861106","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\05961106","Name",0x00000002,"VT82C596B"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\05961106","Instance",0x00010001,0x0000000B
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\05961106","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\06021179","Name",0x00000002,"Toshiba"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\06021179","Instance",0x00010001,0x0000000F
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\06021179","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\06861106","Name",0x00000002,"VT82C686B"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\06861106","Instance",0x00010001,0x0000000B
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\06861106","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\122E8086","Name",0x00000002,"Intel 82371FB"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\122E8086","Instance",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\122E8086","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\12348086","Name",0x00000002,"Intel 82371MX"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\12348086","Instance",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\12348086","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\152310B9","Name",0x00000002,"ALi 1523"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\152310B9","Instance",0x00010001,0x00000006
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\152310B9","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\153310B9","Name",0x00000002,"ALi 1533"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\153310B9","Instance",0x00010001,0x00000009
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\153310B9","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\70008086","Name",0x00000002,"Intel 82371SB"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\70008086","Instance",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\70008086","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\71108086","Name",0x00000002,"Intel 82371AB/EB"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\71108086","Instance",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\71108086","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\76008086","Name",0x00000002,"Intel 82372FB"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\76008086","Instance",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\76008086","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\80021066","Name",0x00000002,"Vesuvius"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\80021066","Instance",0x00010001,0x00000011
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\80021066","Parameters",0x00010001,0x00000001
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\A0F30E11","Name",0x00000002,"Compaq OSB"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\A0F30E11","Instance",0x00010001,0x0000000C
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\A0F30E11","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\AE290E11","Name",0x00000002,"Compaq MISC-3"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\AE290E11","Instance",0x00010001,0x00000008
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\AE290E11","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\C5581045","Name",0x00000002,"Opti Viper"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\C5581045","Instance",0x00010001,0x00000003
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\C5581045","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\C5681045","Name",0x00000002,"Opti Viper Max"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\C5681045","Instance",0x00010001,0x00000003
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\C5681045","Parameters",0x00010001,0x00000000
-
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\C7001045","Name",0x00000002,"Opti Fire Star"
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\C7001045","Instance",0x00010001,0x0000000A
-HKLM,"SYSTEM\CurrentControlSet\Control\PnP\PciIrqRouting\IrqMiniports\C7001045","Parameters",0x00010001,0x00000000
-
 
 ; Printing
 HKLM,"SYSTEM\CurrentControlSet\Control\Print","BeepEnabled",0x00010001,0
@@ -1544,16 +1663,6 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Print","PriorityClass",0x00010001,0
 HKLM,"SYSTEM\CurrentControlSet\Control\Print","SchedulerThreadPriority",0x00010001,0
 
 HKLM,"SYSTEM\CurrentControlSet\Control\Print\Environments",,0x00000010
-HKLM,"SYSTEM\CurrentControlSet\Control\Print\Environments\Windows NT x86","Directory",,"W32X86"
-HKLM,"SYSTEM\CurrentControlSet\Control\Print\Environments\Windows NT x86\Print Processors",,0x00000010
-HKLM,"SYSTEM\CurrentControlSet\Control\Print\Environments\Windows NT x86\Print Processors\winprint","Driver",,"winprint.dll"
-
-[AddReg.NTamd64]
-HKLM,"SYSTEM\CurrentControlSet\Control\Print\Environments\Windows x64","Directory",,"x64"
-HKLM,"SYSTEM\CurrentControlSet\Control\Print\Environments\Windows x64\Print Processors",,0x00000010
-HKLM,"SYSTEM\CurrentControlSet\Control\Print\Environments\Windows x64\Print Processors\winprint","Driver",,"winprint.dll"
-
-[AddReg]
 
 HKLM,"SYSTEM\CurrentControlSet\Control\Print\Monitors",,0x00000010
 HKLM,"SYSTEM\CurrentControlSet\Control\Print\Monitors\Local Port","Driver",,"localmon.dll"
@@ -1561,18 +1670,33 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Print\Monitors\Local Port","Driver",,"loc
 HKLM,"SYSTEM\CurrentControlSet\Control\Print\Providers",,0x00000010
 
 
-HKLM,"SYSTEM\CurrentControlSet\Control\ProductOptions","ProductType",2,"ServerNT"
+HKLM,"SYSTEM\CurrentControlSet\Control\ProductOptions","ProductType",2,"WinNT"
 HKLM,"SYSTEM\CurrentControlSet\Control\ProductOptions","ProductSuite",0x00010002,"Terminal Server"
-; ReactOS specific - by default we report ourselves as Server for the user,
-; but we can also report as Workstation if some application needs it.
-HKLM,"SYSTEM\CurrentControlSet\Control\ReactOS\Settings\Version","ReportAsWorkstation",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Control\ProductOptions\LicenseInformation","Kernel-MUI-Language-Allowed",2,"EMPTY"
+HKLM,"SYSTEM\CurrentControlSet\Control\ProductOptions\LicenseInformation","Kernel-MUI-Number-Allowed",0x00010001,1
+; ReactOS specific - by default we report ourselves as Workstation for the user,
+; but we can also report as Server if some application needs it.
+HKLM,"SYSTEM\CurrentControlSet\Control\ReactOS\Settings\Version","ReportAsWorkstation",0x00010001,0x00000001
 ; Some installers check for SP2
 HKLM,"SYSTEM\CurrentControlSet\Control\Windows","CSDReleaseType",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Control\Windows","CSDVersion",0x00010001,0x00000200
 
+HKLM,"SYSTEM\CurrentControlSet\Control\Terminal Server","fDenyTSConnections",0x00010001,1
+HKLM,"SYSTEM\CurrentControlSet\Control\Terminal Server","fSingleSessionPerUser",0x00010001,1
+HKLM,"SYSTEM\CurrentControlSet\Control\Terminal Server","TSUserEnabled",0x00010001,0
+
+HKLM,"SYSTEM\CurrentControlSet\Control\TimeZoneInformation","Bias",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Control\TimeZoneInformation","StandardBias",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Control\TimeZoneInformation","DaylightBias",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Control\TimeZoneInformation","StandardName",0x00000000,"Coordinated Universal Time"
+HKLM,"SYSTEM\CurrentControlSet\Control\TimeZoneInformation","DaylightName",0x00000000,"Coordinated Universal Time"
+HKLM,"SYSTEM\CurrentControlSet\Control\TimeZoneInformation","TimeZoneKeyName",0x00000000,"UTC"
+HKLM,"SYSTEM\CurrentControlSet\Control\TimeZoneInformation","StandardStart",0x00000001,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+HKLM,"SYSTEM\CurrentControlSet\Control\TimeZoneInformation","DaylightStart",0x00000001,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00,00
+
 HKLM,"SYSTEM\CurrentControlSet\Control\Windows","Directory",0x00020002,"%SystemRoot%"
 HKLM,"SYSTEM\CurrentControlSet\Control\Windows","ErrorMode",0x00010003,0x00000000
-HKLM,"SYSTEM\CurrentControlSet\Control\Windows","NoInteractiveServices",0x00010003,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Control\Windows","NoInteractiveServices",0x00010003,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Control\Windows","ShellErrorMode",0x00010003,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Control\Windows","SystemDirectory",0x00020002,"%SystemRoot%\system32"
 
@@ -1667,7 +1791,7 @@ HKLM,"SYSTEM\CurrentControlSet\Control\GroupOrderList","SCSI Miniport", 0x000000
 
 ; Session Manager stuff
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager","BootExecute", 0x00010000, \
- "autocheck autochk"
+ "autocheck autochk *"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager","GlobalFlag", 0x00010003, 0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager","ObjectDirectories",0x00010000, \
  "\Windows", \
@@ -1684,7 +1808,7 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\DOS Devices","PRN",0x0000
 
 ; System environment settings
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","ComSpec",0x00020002,"%SystemRoot%\system32\cmd.exe"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","Path",0x00020002,"%SystemRoot%\bin;%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","Path",0x00020002,"%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","PATHEXT",0x00000002,".COM;.EXE;.BAT;.CMD"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","TEMP",0x00020002,"%SystemRoot%\TEMP"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","TMP",0x00020002,"%SystemRoot%\TEMP"
@@ -1695,27 +1819,41 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","windir",0x0
 
 ; Known DLLs
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","DllDirectory",0x00020000,"%SystemRoot%\system32"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","*kernel32",0x00000000,"kernel32.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","_wow64cpu",0x00000000,"wow64cpu.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","_wowarmhw",0x00000000,"wowarmhw.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","_xtajit",0x00000000,"xtajit.dll"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","advapi32",0x00000000,"advapi32.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","comdlg32",0x00000000,"comdlg32.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","clbcatq",0x00000000,"clbcatq.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","combase",0x00000000,"combase.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","COMDLG32",0x00000000,"COMDLG32.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","coml2",0x00000000,"coml2.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","DifxApi",0x00000000,"difxapi.dll"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","gdi32",0x00000000,"gdi32.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","imagehlp",0x00000000,"imagehlp.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","kernel32",0x00000000,"kernel32.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","lz32",0x00000000,"lz32.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","msvcrt",0x00000000,"msvcrt.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","gdiplus",0x00000000,"gdiplus.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","IMAGEHLP",0x00000000,"IMAGEHLP.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","IMM32",0x00000000,"IMM32.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","MSCTF",0x00000000,"MSCTF.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","MSVCRT",0x00000000,"MSVCRT.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","NORMALIZ",0x00000000,"NORMALIZ.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","NSI",0x00000000,"NSI.dll"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","ole32",0x00000000,"ole32.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","oleaut32",0x00000000,"oleaut32.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","olecli32",0x00000000,"olecli32.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","olesvr32",0x00000000,"olesvr32.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","olethk32",0x00000000,"olethk32.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","OLEAUT32",0x00000000,"OLEAUT32.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","PSAPI",0x00000000,"PSAPI.DLL"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","rpcrt4",0x00000000,"rpcrt4.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","setupapi",0x00000000,"setupapi.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","shell32",0x00000000,"shell32.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","url",0x00000000,"url.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","urlmon",0x00000000,"urlmon.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","sechost",0x00000000,"sechost.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","Setupapi",0x00000000,"Setupapi.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","SHCORE",0x00000000,"SHCORE.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","SHELL32",0x00000000,"SHELL32.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","SHLWAPI",0x00000000,"SHLWAPI.dll"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","user32",0x00000000,"user32.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","version",0x00000000,"version.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","wininet",0x00000000,"wininet.dll"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","wldap32",0x00000000,"wldap32.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","WLDAP32",0x00000000,"WLDAP32.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","wow64",0x00000000,"wow64.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","wow64base",0x00000000,"wow64base.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","wow64con",0x00000000,"wow64con.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","wow64win",0x00000000,"wow64win.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","WS2_32",0x00000000,"WS2_32.dll"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\KnownDlls","xtajit64",0x00000000,"xtajit64.dll"
 
 ; Memory Management
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management",,0x00000012
@@ -1726,7 +1864,7 @@ HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems","Kmode",0x000
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems","Optional",0x00010000,"Posix"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems","Posix",0x00020000,"%SystemRoot%\system32\psxss.exe"
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems","Required",0x00010000,"Debug","Windows"
-HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems","Windows",0x00020000,"%SystemRoot%\system32\csrss.exe ObjectDirectory=\Windows SharedSection=1024,12288,512 Windows=On SubSystemType=Windows ServerDll=basesrv,1 ServerDll=winsrv:UserServerDllInitialization,3 ServerDll=winsrv:ConServerDllInitialization,2 ProfileControl=Off MaxRequestThreads=16"
+HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\SubSystems","Windows",0x00020000,"%SystemRoot%\system32\csrss.exe ObjectDirectory=\Windows SharedSection=1024,12288,512 Windows=On SubSystemType=Windows ServerDll=basesrv,1 ServerDll=winsrv:UserServerDllInitialization,3 ProfileControl=Off MaxRequestThreads=16"
 
 ; This is an empty App Compat cache
 HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\AppCompatCache","AppCompatCache", 0x00000001, \
@@ -1746,6 +1884,25 @@ HKLM,"SYSTEM\CurrentControlSet\Services\swenum","ErrorControl",0x00010001,0x0000
 HKLM,"SYSTEM\CurrentControlSet\Services\swenum","ImagePath",0x00020000,"system32\drivers\swenum.sys"
 HKLM,"SYSTEM\CurrentControlSet\Services\swenum","Start",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\swenum","Type",0x00010001,0x00000001
+
+; Base Filtering Engine (BFE) — stub, dev-nt6-1 branch
+HKLM,"SYSTEM\CurrentControlSet\Services\BFE","DisplayName",0x00000000,"Base Filtering Engine"
+HKLM,"SYSTEM\CurrentControlSet\Services\BFE","Description",0x00000000,"Manages WFP filters and callouts. Stub — accepts filter add/delete but never evaluates them."
+HKLM,"SYSTEM\CurrentControlSet\Services\BFE","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\BFE","Group",0x00000000,"NetworkProvider"
+HKLM,"SYSTEM\CurrentControlSet\Services\BFE","ImagePath",0x00020000,"%SystemRoot%\system32\bfe.exe"
+HKLM,"SYSTEM\CurrentControlSet\Services\BFE","ObjectName",0x00000000,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\BFE","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\BFE","Type",0x00010001,0x00000010
+
+HKLM,"SYSTEM\CurrentControlSet\Services\MpsSvc","DisplayName",0x00000000,"Windows Defender Firewall"
+HKLM,"SYSTEM\CurrentControlSet\Services\MpsSvc","Description",0x00000000,"Applies Windows Firewall policy rules through the Windows Filtering Platform."
+HKLM,"SYSTEM\CurrentControlSet\Services\MpsSvc","DependOnService",0x00010000,"BFE"
+HKLM,"SYSTEM\CurrentControlSet\Services\MpsSvc","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\MpsSvc","ImagePath",0x00020000,"%SystemRoot%\system32\mpssvc.exe"
+HKLM,"SYSTEM\CurrentControlSet\Services\MpsSvc","ObjectName",0x00000000,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\MpsSvc","Start",0x00010001,0x00000002
+HKLM,"SYSTEM\CurrentControlSet\Services\MpsSvc","Type",0x00010001,0x00000010
 
 ; Audio Service
 HKLM,"SYSTEM\CurrentControlSet\Services\AudioSrv","DisplayName",0x00000000,%AUDIO_SERVICE%
@@ -1767,47 +1924,24 @@ HKLM,"SYSTEM\CurrentControlSet\Services\BITS","Start",0x00010001,0x00000003
 HKLM,"SYSTEM\CurrentControlSet\Services\BITS","Type",0x00010001,0x00000020
 HKLM,"SYSTEM\CurrentControlSet\Services\BITS\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\qmgr.dll"
 
-; BlueScreen device driver
-HKLM,"SYSTEM\CurrentControlSet\Services\Blue","ErrorControl",0x00010001,0x00000000
-HKLM,"SYSTEM\CurrentControlSet\Services\Blue","Group",0x00000000,"Video Init"
-HKLM,"SYSTEM\CurrentControlSet\Services\Blue","ImagePath",0x00020000,"system32\drivers\blue.sys"
-HKLM,"SYSTEM\CurrentControlSet\Services\Blue","Start",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Services\Blue","Type",0x00010001,0x00000001
-
-; Browser service
-HKLM,"SYSTEM\CurrentControlSet\Services\Browser",,0x00000010
-HKLM,"SYSTEM\CurrentControlSet\Services\Browser","DisplayName",0x00000000,%BROWSER_SERVICE%
-HKLM,"SYSTEM\CurrentControlSet\Services\Browser","Description",0x00000000,%BROWSER_SERVICE_DESCRIPTION%
-HKLM,"SYSTEM\CurrentControlSet\Services\Browser","DependOnService",0x00010000,"LanmanWorkstation","LanmanServer"
-HKLM,"SYSTEM\CurrentControlSet\Services\Browser","ErrorControl",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Services\Browser","ImagePath",0x00020000,"%SystemRoot%\system32\svchost.exe -k netsvcs"
-HKLM,"SYSTEM\CurrentControlSet\Services\Browser","ObjectName",0x00000000,"LocalSystem"
-HKLM,"SYSTEM\CurrentControlSet\Services\Browser","Start",0x00010001,0x00000002
-HKLM,"SYSTEM\CurrentControlSet\Services\Browser","Type",0x00010001,0x00000020
-HKLM,"SYSTEM\CurrentControlSet\Services\Browser\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\browser.dll"
-
-; EMS Serial Administration Console Driver
-HKLM,"SYSTEM\CurrentControlSet\Services\sacdrv","ErrorControl",0x00010001,0x00000000
-HKLM,"SYSTEM\CurrentControlSet\Services\sacdrv","Group",0x00000000,"EMS"
-HKLM,"SYSTEM\CurrentControlSet\Services\sacdrv","ImagePath",0x00020000,"system32\drivers\sacdrv.sys"
-HKLM,"SYSTEM\CurrentControlSet\Services\sacdrv","Start",0x00010001,0x00000000
-HKLM,"SYSTEM\CurrentControlSet\Services\sacdrv","Type",0x00010001,0x00000001
-
 ; Event logging service
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog",,0x00000010
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog","DisplayName",0x00000000,%EVENTLOG_SERVICE%
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog","Description",0x00000000,%EVENTLOG_SERVICE_DESCRIPTION%
-HKLM,"SYSTEM\CurrentControlSet\Services\EventLog","ErrorControl",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\EventLog","ErrorControl",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog","Group",0x00000000,"Event Log"
-HKLM,"SYSTEM\CurrentControlSet\Services\EventLog","ImagePath",0x00020000,"%SystemRoot%\system32\eventlog.exe"
+HKLM,"SYSTEM\CurrentControlSet\Services\EventLog","ImagePath",0x00020000,"%SystemRoot%\system32\svchost.exe -k LocalServiceNetworkRestricted -p"
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog","ObjectName",0x00000000,"LocalSystem"
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog","Start",0x00010001,0x00000002
-HKLM,"SYSTEM\CurrentControlSet\Services\EventLog","Type",0x00010001,0x00000010
+HKLM,"SYSTEM\CurrentControlSet\Services\EventLog","Type",0x00010001,0x00000020
+HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\wevtsvc.dll"
 
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Application",,0x00000010
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Application","File",0x00020000,"%SystemRoot%\system32\config\AppEvent.Evt"
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Application","MaxSize",0x00010003,5242880
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Application","Retention",0x00010003,0
+HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Application\Application Error","EventMessageFile",0x00020000,"%SystemRoot%\system32\wer.dll"
+HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Application\Application Error","ProviderGuid",0x00000000,"{a0e9b465-b939-57d7-b27d-95d8e925ff57}"
 
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Security",,0x00000010
 HKLM,"SYSTEM\CurrentControlSet\Services\EventLog\Security","File",0x00020000,"%SystemRoot%\system32\config\SecEvent.Evt"
@@ -1847,8 +1981,8 @@ HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation","DisplayName",0x00000
 HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation","Description",0x00000000,%WORKSTATION_SERVICE_DESCRIPTION%
 HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation","ErrorControl",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation","Group",0x00000000,"NetworkProvider"
-HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation","ImagePath",0x00020000,"%SystemRoot%\system32\svchost.exe -k netsvcs"
-HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation","ObjectName",0x00000000,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation","ImagePath",0x00020000,"%SystemRoot%\system32\svchost.exe -k NetworkService"
+HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation","ObjectName",0x00000000,"NT AUTHORITY\NetworkService"
 HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation","Start",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation","Type",0x00010001,0x00000020
 HKLM,"SYSTEM\CurrentControlSet\Services\lanmanworkstation\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\wkssvc.dll"
@@ -1861,12 +1995,15 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Mup","ImagePath",0x00020000,"system32\dr
 HKLM,"SYSTEM\CurrentControlSet\Services\Mup","Start",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\Mup","Type",0x00010001,0x00000002
 
+HKLM,"SYSTEM\CurrentControlSet\Services\Npfs\Aliases","ntsvcs",0x00010000,"svcctl"
+
 ; NDIS driver - needs to load before any drivers in the NDIS group
 HKLM,"SYSTEM\CurrentControlSet\Services\Ndis","ErrorControl",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\Ndis","Group",0x00000000,"NDIS Wrapper"
 HKLM,"SYSTEM\CurrentControlSet\Services\Ndis","ImagePath",0x00020000,"system32\drivers\ndis.sys"
 HKLM,"SYSTEM\CurrentControlSet\Services\Ndis","Start",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\Ndis","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\Ndis\Parameters\AdapterDefaults","Dot11dEnable",0x00000000,"1"
 
 ; NetLogon
 HKLM,"SYSTEM\CurrentControlSet\Services\NetLogon","DisplayName",0x00000000,%NETLOGON_SERVICE%
@@ -1876,14 +2013,27 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Netlogon","ImagePath",0x00020000,"%Syste
 HKLM,"SYSTEM\CurrentControlSet\Services\NetLogon","Start",0x00010001,0x00000003
 HKLM,"SYSTEM\CurrentControlSet\Services\Netlogon","Type",0x00010001,0x00000020
 
+; exFAT filesystem driver
+HKLM,"SYSTEM\CurrentControlSet\Services\ExFat","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\ExFat","Group",0x00000000,"Boot File System"
+HKLM,"SYSTEM\CurrentControlSet\Services\ExFat","ImagePath",0x00020000,"system32\drivers\exfat.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\ExFat","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\ExFat","Type",0x00010001,0x00000002
+
 ; NTFS filesystem driver
 HKLM,"SYSTEM\CurrentControlSet\Services\Ntfs","ErrorControl",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Services\Ntfs","Group",0x00000000,"File System"
+HKLM,"SYSTEM\CurrentControlSet\Services\Ntfs","Group",0x00000000,"Boot File System"
 HKLM,"SYSTEM\CurrentControlSet\Services\Ntfs","ImagePath",0x00020000,"system32\drivers\ntfs.sys"
-HKLM,"SYSTEM\CurrentControlSet\Services\Ntfs","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\Ntfs","Start",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\Ntfs","Type",0x00010001,0x00000002
 ; un-comment the line below to enable EXPERIMENTAL write-support on NTFS volumes:
-;HKLM,"SYSTEM\CurrentControlSet\Services\Ntfs","MyDataDoesNotMatterSoEnableExperimentalWriteSupportForEveryNTFSVolume",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\Ntfs","MyDataDoesNotMatterSoEnableExperimentalWriteSupportForEveryNTFSVolume",0x00010001,0x00000001
+; Console device driver
+HKLM,"SYSTEM\CurrentControlSet\Services\ConDrv","ErrorControl",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\ConDrv","Group",0x00000000,"Base"
+HKLM,"SYSTEM\CurrentControlSet\Services\ConDrv","ImagePath",0x00020000,"system32\drivers\condrv.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\ConDrv","Start",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\ConDrv","Type",0x00010001,0x00000001
 
 ; Null device driver
 HKLM,"SYSTEM\CurrentControlSet\Services\Null","ErrorControl",0x00010001,0x00000000
@@ -1893,12 +2043,12 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Null","Start",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\Null","Tag",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\Null","Type",0x00010001,0x00000001
 
-; NMI device driver
-HKLM,"SYSTEM\CurrentControlSet\Services\NMIDebug","ErrorControl",0x00010001,0x00000000
-HKLM,"SYSTEM\CurrentControlSet\Services\NMIDebug","Group",0x00000000,"Base"
-HKLM,"SYSTEM\CurrentControlSet\Services\NMIDebug","ImagePath",0x00020000,"system32\drivers\nmidebug.sys"
-HKLM,"SYSTEM\CurrentControlSet\Services\NMIDebug","Start",0x00010001,0x00000000
-HKLM,"SYSTEM\CurrentControlSet\Services\NMIDebug","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","Start",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","ImagePath",0x00020000,"system32\drivers\nwifi.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","Group",0x00000000,"NDIS"
+HKLM,"SYSTEM\CurrentControlSet\Services\Nwifi","DisplayName",0x00000000,"ReactOS Native WiFi Service"
 
 ; Packet driver
 HKLM,"SYSTEM\CurrentControlSet\Services\Packet","ErrorControl",0x00010001,0x00000001
@@ -1929,34 +2079,33 @@ HKLM,"SYSTEM\CurrentControlSet\Services\mouhid","Start",0x00010001,0x00000003
 HKLM,"SYSTEM\CurrentControlSet\Services\mouhid","Type",0x00010001,0x00000001
 
 ; USB hub driver
+HKLM,"SYSTEM\CurrentControlSet\Services\usbhub","BootFlags",0x00010001,0x00000004
 HKLM,"SYSTEM\CurrentControlSet\Services\usbhub","ErrorControl",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\usbhub","Group",0x00000000,"Boot Bus Extender"
 HKLM,"SYSTEM\CurrentControlSet\Services\usbhub","ImagePath",0x00020000,"system32\drivers\usbhub.sys"
 HKLM,"SYSTEM\CurrentControlSet\Services\usbhub","Start",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\usbhub","Type",0x00010001,0x00000001
 
-; EHCI controller driver
+; XHCI controller driver
+HKLM,"SYSTEM\CurrentControlSet\Services\usbxhci","BootFlags",0x00010001,0x00000010
+HKLM,"SYSTEM\CurrentControlSet\Services\usbxhci","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\usbxhci","Group",0x00000000,"Boot Bus Extender"
+HKLM,"SYSTEM\CurrentControlSet\Services\usbxhci","ImagePath",0x00020000,"system32\drivers\usbxhci.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\usbxhci\Interrupt Management",,0x00000010
+HKLM,"SYSTEM\CurrentControlSet\Services\usbxhci\Interrupt Management\MessageSignaledInterruptProperties",,0x00000010
+HKLM,"SYSTEM\CurrentControlSet\Services\usbxhci\Interrupt Management\MessageSignaledInterruptProperties","MSISupported",0x00010001,1
+HKLM,"SYSTEM\CurrentControlSet\Services\usbxhci","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\usbxhci","Type",0x00010001,0x00000001
+
+HKLM,"SYSTEM\CurrentControlSet\Services\usbehci","BootFlags",0x00010001,0x00000004
 HKLM,"SYSTEM\CurrentControlSet\Services\usbehci","ErrorControl",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Services\usbehci","Group",0x00000000,"Boot Bus Extender"
+HKLM,"SYSTEM\CurrentControlSet\Services\usbehci","Group",0x00000000,"Base"
 HKLM,"SYSTEM\CurrentControlSet\Services\usbehci","ImagePath",0x00020000,"system32\drivers\usbehci.sys"
-HKLM,"SYSTEM\CurrentControlSet\Services\usbehci","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\usbehci","Start",0x00010001,0x00000003
 HKLM,"SYSTEM\CurrentControlSet\Services\usbehci","Type",0x00010001,0x00000001
 
-; OHCI controller driver
-HKLM,"SYSTEM\CurrentControlSet\Services\usbohci","ErrorControl",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Services\usbohci","Group",0x00000000,"Boot Bus Extender"
-HKLM,"SYSTEM\CurrentControlSet\Services\usbohci","ImagePath",0x00020000,"system32\drivers\usbohci.sys"
-HKLM,"SYSTEM\CurrentControlSet\Services\usbohci","Start",0x00010001,0x00000000
-HKLM,"SYSTEM\CurrentControlSet\Services\usbohci","Type",0x00010001,0x00000001
-
-; UHCI controller driver
-HKLM,"SYSTEM\CurrentControlSet\Services\usbuhci","ErrorControl",0x00010001,0x00000001
-HKLM,"SYSTEM\CurrentControlSet\Services\usbuhci","Group",0x00000000,"Boot Bus Extender"
-HKLM,"SYSTEM\CurrentControlSet\Services\usbuhci","ImagePath",0x00020000,"system32\drivers\usbuhci.sys"
-HKLM,"SYSTEM\CurrentControlSet\Services\usbuhci","Start",0x00010001,0x00000000
-HKLM,"SYSTEM\CurrentControlSet\Services\usbuhci","Type",0x00010001,0x00000001
-
 ; USB storage driver
+HKLM,"SYSTEM\CurrentControlSet\Services\usbstor","BootFlags",0x00010001,0x00000014
 HKLM,"SYSTEM\CurrentControlSet\Services\usbstor","ErrorControl",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\usbstor","Group",0x00000000,"Primary Disk"
 HKLM,"SYSTEM\CurrentControlSet\Services\usbstor","ImagePath",0x00020000,"system32\drivers\usbstor.sys"
@@ -1964,11 +2113,128 @@ HKLM,"SYSTEM\CurrentControlSet\Services\usbstor","Start",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\usbstor","Type",0x00010001,0x00000001
 
 ; USB composite generic parent
+HKLM,"SYSTEM\CurrentControlSet\Services\usbccgp","BootFlags",0x00010001,0x00000014
 HKLM,"SYSTEM\CurrentControlSet\Services\usbccgp","ErrorControl",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\usbccgp","Group",0x00000000,"Boot Bus Extender"
 HKLM,"SYSTEM\CurrentControlSet\Services\usbccgp","ImagePath",0x00020000,"system32\drivers\usbccgp.sys"
 HKLM,"SYSTEM\CurrentControlSet\Services\usbccgp","Start",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\usbccgp","Type",0x00010001,0x00000001
+
+; Include PCI IDE drivers for AMD64 installations
+; pciide driver
+;HKLM,"SYSTEM\CurrentControlSet\Services\pciide","ErrorControl",0x00010001,0x00000001
+;HKLM,"SYSTEM\CurrentControlSet\Services\pciide","Group",0x00000000,"System Bus Extender"
+;HKLM,"SYSTEM\CurrentControlSet\Services\pciide","ImagePath",0x00020000,"system32\drivers\pciide.sys"
+;HKLM,"SYSTEM\CurrentControlSet\Services\pciide","Start",0x00010001,0x00000000
+;HKLM,"SYSTEM\CurrentControlSet\Services\pciide","Type",0x00010001,0x00000001
+
+; pciidex driver
+;HKLM,"SYSTEM\CurrentControlSet\Services\pciidex","ErrorControl",0x00010001,0x00000001
+;HKLM,"SYSTEM\CurrentControlSet\Services\pciidex","Group",0x00000000,"System Bus Extender"
+;HKLM,"SYSTEM\CurrentControlSet\Services\pciidex","ImagePath",0x00020000,"system32\drivers\pciidex.sys"
+;HKLM,"SYSTEM\CurrentControlSet\Services\pciidex","Start",0x00010001,0x00000000
+;HKLM,"SYSTEM\CurrentControlSet\Services\pciidex","Type",0x00010001,0x00000001
+
+; atapi driver
+;HKLM,"SYSTEM\CurrentControlSet\Services\atapi","ErrorControl",0x00010001,0x00000001
+;HKLM,"SYSTEM\CurrentControlSet\Services\atapi","Group",0x00000000,"SCSI Miniport"
+;HKLM,"SYSTEM\CurrentControlSet\Services\atapi","ImagePath",0x00020000,"system32\drivers\atapi.sys"
+;HKLM,"SYSTEM\CurrentControlSet\Services\atapi","Start",0x00010001,0x00000000
+;HKLM,"SYSTEM\CurrentControlSet\Services\atapi","Type",0x00010001,0x00000001
+
+; storport driver (StorPort port driver for storahci)
+HKLM,"SYSTEM\CurrentControlSet\Services\storport","ErrorControl",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\storport","Group",0x00000000,"SCSI Miniport"
+HKLM,"SYSTEM\CurrentControlSet\Services\storport","ImagePath",0x00020000,"system32\drivers\storport.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\storport","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\storport","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\storport","Tag",0x00010001,0x00000001
+
+; storahci driver (StorPort AHCI miniport)
+HKLM,"SYSTEM\CurrentControlSet\Services\storahci","ErrorControl",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\storahci","Group",0x00000000,"SCSI Miniport"
+HKLM,"SYSTEM\CurrentControlSet\Services\storahci","ImagePath",0x00020000,"system32\drivers\storahci.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\storahci","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\storahci","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\storahci","Tag",0x00010001,0x00000005
+
+; stornvme driver (StorPort NVMe miniport)
+HKLM,"SYSTEM\CurrentControlSet\Services\stornvme","ErrorControl",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\stornvme","Group",0x00000000,"SCSI Miniport"
+HKLM,"SYSTEM\CurrentControlSet\Services\stornvme","ImagePath",0x00020000,"system32\drivers\stornvme.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\stornvme","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\stornvme","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\stornvme","Tag",0x00010001,0x00000006
+
+; vioblk driver (StorPort VirtIO block miniport)
+HKLM,"SYSTEM\CurrentControlSet\Services\vioblk","ErrorControl",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\vioblk","Group",0x00000000,"SCSI Miniport"
+HKLM,"SYSTEM\CurrentControlSet\Services\vioblk","ImagePath",0x00020000,"system32\drivers\vioblk.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\vioblk","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\vioblk","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\vioblk\Parameters","BusType",0x00010001,0x00000001
+
+HKLM,"SYSTEM\CurrentControlSet\Services\LSI_SAS","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\LSI_SAS","Group",0x00000000,"SCSI Miniport"
+HKLM,"SYSTEM\CurrentControlSet\Services\LSI_SAS","ImagePath",0x00020000,"system32\drivers\lsi_sas.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\LSI_SAS","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\LSI_SAS","Type",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\LSI_SAS","Tag",0x00010001,0x00000007
+HKLM,"SYSTEM\CurrentControlSet\Services\LSI_SAS\Parameters","BusType",0x00010001,0x0000000A
+
+; SD Bus driver (bus FDO on SD Host Controller, creates child PDOs for cards)
+HKLM,"SYSTEM\CurrentControlSet\Services\sdbus","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\sdbus","Group",0x00000000,"System Bus Extender"
+HKLM,"SYSTEM\CurrentControlSet\Services\sdbus","ImagePath",0x00020000,"system32\drivers\sdbus.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\sdbus","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\sdbus","Type",0x00010001,0x00000001
+
+; SD Flash Disk class driver (block I/O on SD/MMC/eMMC card PDOs)
+HKLM,"SYSTEM\CurrentControlSet\Services\sffdisk","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\sffdisk","Group",0x00000000,"SCSI Class"
+HKLM,"SYSTEM\CurrentControlSet\Services\sffdisk","ImagePath",0x00020000,"system32\drivers\sffdisk.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\sffdisk","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\sffdisk","Type",0x00010001,0x00000001
+
+; SD Port driver (port/miniport framework, alternative to sdbus direct access)
+HKLM,"SYSTEM\CurrentControlSet\Services\sdport","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\sdport","Group",0x00000000,"System Bus Extender"
+HKLM,"SYSTEM\CurrentControlSet\Services\sdport","ImagePath",0x00020000,"system32\drivers\sdport.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\sdport","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\sdport","Type",0x00010001,0x00000001
+
+; SDHCI miniport (registers with sdport, alternative stack)
+HKLM,"SYSTEM\CurrentControlSet\Services\sdhc","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\sdhc","Group",0x00000000,"System Bus Extender"
+HKLM,"SYSTEM\CurrentControlSet\Services\sdhc","ImagePath",0x00020000,"system32\drivers\sdhc.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\sdhc","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\sdhc","Type",0x00010001,0x00000001
+
+; SD Storage Function Protocol driver (boot-start for eMMC boot support)
+HKLM,"SYSTEM\CurrentControlSet\Services\sffp_sd","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\sffp_sd","Group",0x00000000,"SCSI Class"
+HKLM,"SYSTEM\CurrentControlSet\Services\sffp_sd","ImagePath",0x00020000,"system32\drivers\sffp_sd.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\sffp_sd","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\sffp_sd","Type",0x00010001,0x00000001
+
+; Partition manager (disk-class upper filter; creates \Device\HarddiskN\PartitionM)
+HKLM,"SYSTEM\CurrentControlSet\Services\partmgr","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\partmgr","Group",0x00000000,"System Bus Extender"
+HKLM,"SYSTEM\CurrentControlSet\Services\partmgr","ImagePath",0x00020000,"system32\drivers\partmgr.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\partmgr","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\partmgr","Type",0x00010001,0x00000001
+
+; UniATA: disable legacy detection to avoid pre-PnP IDE claiming
+HKLM,"SYSTEM\CurrentControlSet\Services\UniATA\Parameters","LegacyDetection",0x00010001,0x00000000
+
+; pci driver (critical for device enumeration)
+HKLM,"SYSTEM\CurrentControlSet\Services\pci","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\pci","Group",0x00000000,"Boot Bus Extender"
+HKLM,"SYSTEM\CurrentControlSet\Services\pci","ImagePath",0x00020000,"system32\drivers\pci.sys"
+HKLM,"SYSTEM\CurrentControlSet\Services\pci","Start",0x00010001,0x00000000
+HKLM,"SYSTEM\CurrentControlSet\Services\pci","Tag",0x00010001,0x00000002
+HKLM,"SYSTEM\CurrentControlSet\Services\pci","Type",0x00010001,0x00000001
+; End AMD64 PCI IDE driver entries
 
 ; MountMgr driver
 HKLM,"SYSTEM\CurrentControlSet\Services\MountMgr","ErrorControl",0x00010001,0x00000001
@@ -2213,12 +2479,12 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","Description",0x00000000,%SCHE
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","DisplayName",0x00000000,%SCHEDULE_SERVICE%
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","ErrorControl",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","Group",0x00000000,"SchedulerGroup"
-HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","ImagePath",0x00020000,"%SystemRoot%\system32\svchost.exe -k netsvcs"
+HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","ImagePath",0x00020000,"%SystemRoot%\system32\svchost.exe -k Schedule"
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","ObjectName",0x00000000,"LocalSystem"
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","Start",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule","Type",0x00010001,0x00000020
 HKLM,"SYSTEM\CurrentControlSet\Services\Schedule\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\schedsvc.dll"
-HKLM,"SYSTEM\CurrentControlSet\Services\Schedule\Parameters","ServiceMain",0x00000000,"SchedServiceMain"
+HKLM,"SYSTEM\CurrentControlSet\Services\Schedule\Parameters","ServiceMain",0x00000000,"ServiceMain"
 
 ; Secondary Logon service
 HKLM,"SYSTEM\CurrentControlSet\Services\Seclogon","DependOnService",0x00010000,"RPCSS"
@@ -2230,6 +2496,16 @@ HKLM,"SYSTEM\CurrentControlSet\Services\Seclogon","ImagePath",0x00020000,"%Syste
 HKLM,"SYSTEM\CurrentControlSet\Services\Seclogon","ObjectName",0x00000000,"LocalSystem"
 HKLM,"SYSTEM\CurrentControlSet\Services\Seclogon","Start",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\Seclogon","Type",0x00010001,0x00000020
+
+; Windows Time service
+HKLM,"SYSTEM\CurrentControlSet\Services\W32Time","Description",0x00000000,%W32TIME_SERVICE_DESCRIPTION%
+HKLM,"SYSTEM\CurrentControlSet\Services\W32Time","DisplayName",0x00000000,%W32TIME_SERVICE%
+HKLM,"SYSTEM\CurrentControlSet\Services\W32Time","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\W32Time","Group",0x00000000,"Time"
+HKLM,"SYSTEM\CurrentControlSet\Services\W32Time","ImagePath",0x00020000,"%SystemRoot%\system32\svchost.exe -k LocalService"
+HKLM,"SYSTEM\CurrentControlSet\Services\W32Time","ObjectName",0x00000000,"NT AUTHORITY\LocalService"
+HKLM,"SYSTEM\CurrentControlSet\Services\W32Time","Start",0x00010001,0x00000002
+HKLM,"SYSTEM\CurrentControlSet\Services\W32Time","Type",0x00010001,0x00000020
 HKLM,"SYSTEM\CurrentControlSet\Services\Seclogon\Parameters","ServiceDll",0x00020000,"%SystemRoot%\system32\seclogon.dll"
 HKLM,"SYSTEM\CurrentControlSet\Services\Seclogon\Parameters","ServiceMain",0x00000000,"SvcEntry_Seclogon"
 
@@ -2257,6 +2533,15 @@ HKLM,"SYSTEM\CurrentControlSet\Services\WlanSvc","ImagePath",0x00020000,"%System
 HKLM,"SYSTEM\CurrentControlSet\Services\WlanSvc","ObjectName",0x00000000,"LocalSystem"
 HKLM,"SYSTEM\CurrentControlSet\Services\WlanSvc","Start",0x00010001,0x00000002
 HKLM,"SYSTEM\CurrentControlSet\Services\WlanSvc","Type",0x00010001,0x00000110
+
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","DependOnService",0x00010000,"RPCSS","PlugPlay"
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","DisplayName",0x00000000,"Smart Card"
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","Description",0x00000000,"Manages access to smart cards read by this computer."
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","ImagePath",0x00020000,"%SystemRoot%\system32\scardsvr.exe"
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","ObjectName",0x00000000,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","Start",0x00010001,0x00000002
+HKLM,"SYSTEM\CurrentControlSet\Services\SCardSvr","Type",0x00010001,0x00000010
 
 ; Simple TCP services
 HKLM,"SYSTEM\CurrentControlSet\Services\tcpsvcs","Description",0x00000000,%TCPSVCS_SERVICE_DECRIPTION%
@@ -2361,7 +2646,7 @@ HKLM,"SYSTEM\CurrentControlSet\Services\RamDisk","Type",0x00010001,0x00000001
 HKLM,"SYSTEM\CurrentControlSet\Services\fltmgr","ErrorControl",0x00010001,0x00000003
 HKLM,"SYSTEM\CurrentControlSet\Services\fltmgr","Group",0x00000000,"FSFilter Infrastructure"
 HKLM,"SYSTEM\CurrentControlSet\Services\fltmgr","ImagePath",0x00020000,"system32\drivers\fltmgr.sys"
-HKLM,"SYSTEM\CurrentControlSet\Services\fltmgr","Start",0x00010001,0x00000003
+HKLM,"SYSTEM\CurrentControlSet\Services\fltmgr","Start",0x00010001,0x00000000
 HKLM,"SYSTEM\CurrentControlSet\Services\fltmgr","Type",0x00010001,0x00000002
 
 ; ControlSet selection settings
@@ -2371,10 +2656,10 @@ HKLM,"SYSTEM\Select","Failed",0x00010003,0x00000000
 HKLM,"SYSTEM\Select","LastKnownGood",0x00010003,0x00000001
 
 ; System setup settings
-HKLM,"SYSTEM\Setup","CmdLine",0x00000000,"setup -newsetup"
-HKLM,"SYSTEM\Setup","SetupType",0x00010001,0x00000001
+HKLM,"SYSTEM\Setup","CmdLine",0x00000000,""
+HKLM,"SYSTEM\Setup","SetupType",0x00010001,0x00000000
 HKLM,"SYSTEM\Setup","SystemPrefix",0x00000001
-HKLM,"SYSTEM\Setup","SystemSetupInProgress",0x00010001,0x00000001
+HKLM,"SYSTEM\Setup","SystemSetupInProgress",0x00010001,0x00000000
 
 ; Debug channels
 ;HKLM,"SYSTEM\CurrentControlSet\Control\Session Manager\Environment","DEBUGCHANNEL",0x00020000,"+ole,+rpc"
@@ -2387,8 +2672,8 @@ HKLM,"SYSTEM\CurrentControlSet\Control\PriorityControl","Win32PrioritySeparation
 HKLM,"SYSTEM\CurrentControlSet\Control\FontAssoc\Associated Charset","ANSI(00)",0x00000000,"NO"
 HKLM,"SYSTEM\CurrentControlSet\Control\FontAssoc\Associated Charset","OEM(FF)",0x00000000,"NO"
 HKLM,"SYSTEM\CurrentControlSet\Control\FontAssoc\Associated Charset","SYMBOL(02)",0x00000000,"NO"
-HKLM,"SYSTEM\CurrentControlSet\Control\FontAssoc\Associated DefaultFonts","AssocSystemFont",0x00000000,"DroidSansFallback.ttf"
-HKLM,"SYSTEM\CurrentControlSet\Control\FontAssoc\Associated DefaultFonts","FontPackage",0x00000000,"Droid Sans Fallback"
+HKLM,"SYSTEM\CurrentControlSet\Control\FontAssoc\Associated DefaultFonts","AssocSystemFont",0x00000000,"NotoSansJP-Regular.otf"
+HKLM,"SYSTEM\CurrentControlSet\Control\FontAssoc\Associated DefaultFonts","FontPackage",0x00000000,"Noto Sans JP"
 
 [AddReg.NTarm]
 ; RAM Disk class driver
@@ -2413,10 +2698,10 @@ BROWSER_SERVICE_DESCRIPTION="Maintains an updated list of computers on the netwo
 DCOMLAUNCH_SERVICE="DcomLaunch service"
 DCOMLAUNCH_SERVICE_DESCRIPTION="DcomLaunch service stub."
 
-EVENTLOG_SERVICE="Event Logger"
+EVENTLOG_SERVICE="Windows Event Log"
 EVENTLOG_SERVICE_DESCRIPTION="Logs events or messages sent by the operating system in a database accessible via the event log viewer."
 
-MSISERVER_SERVICE="ReactOS Installer"
+MSISERVER_SERVICE="LiberNT Installer"
 MSISERVER_SERVICE_DESCRIPTION="Controls installation, maintenance, and removal of software packaged as an MSI (Windows Installer)."
 
 NETLOGON_SERVICE="Net Logon"
@@ -2433,6 +2718,8 @@ SAMSS_SERVICE_DESCRIPTION="The startup of this service signals other services th
 
 SCHEDULE_SERVICE="Scheduler service"
 SCHEDULE_SERVICE_DESCRIPTION="Allows starting of programs at specific times."
+W32TIME_SERVICE="Time Service"
+W32TIME_SERVICE_DESCRIPTION="Maintains date and time synchronization on all clients and servers on the network."
 
 SECLOGON_SERVICE="Secondary Logon"
 SECLOGON_SERVICE_DESCRIPTION="Allows to start processes under alternative credentials."
@@ -2446,13 +2733,13 @@ SPOOLER_SERVICE_DESCRIPTION="Loads files to memory for later printing."
 TCPSVCS_SERVICE="Simple TCP/IP Services"
 TCPSVCS_SERVICE_DECRIPTION="Supports the following TCP/IP services: Chargen, Daytime, Discard, Echo, QOTD."
 
-TELNETD_SERVICE="ReactOS Telnet Service"
-TELNETD_SERVICE_DESCRIPTION="ReactOS Telnet Service"
+TELNETD_SERVICE="LiberNT Telnet Service"
+TELNETD_SERVICE_DESCRIPTION="LiberNT Telnet Service"
 
 THEMES_SERVICE="Themes"
 THEMES_SERVICE_DESCRIPTION="Themes support"
 
-WINMGMT_SERVICE="ReactOS Management Infrastructure"
+WINMGMT_SERVICE="LiberNT Management Infrastructure"
 WINMGMT_SERVICE_DESCRIPTION="Provides interface to system management information."
 
 WLANSVC_SERVICE="WLAN Service"
@@ -2494,6 +2781,7 @@ DEVANAGARI = "Devanagari - INSCRIPT"
 DUTCH = "Dutch"
 ESPERANTO = "Esperanto"
 ESTONIAN = "Estonian"
+PERSIAN = "Persian"
 GERMAN_ERGO = "German (de_ergo)"
 GERMAN_EXTENDED1 = "German Extended (E1)"
 GERMAN_IBM = "German (IBM)"
@@ -2561,7 +2849,7 @@ VIETNAMESE = "Vietnamese"
 [Strings.000A]
 
 ; Services names and descriptions
-AUDIO_SERVICE="Audio de ReactOS"
+AUDIO_SERVICE="Audio de LiberNT"
 AUDIO_SERVICE_DESCRIPTION="Proporciona facilidades de audio para las aplicaciones."
 
 BITS_SERVICE="Servicio de transferencia inteligente en segundo plano (BITS)"
@@ -2576,7 +2864,7 @@ DCOMLAUNCH_SERVICE_DESCRIPTION="Servicio simulado del iniciador Dcom."
 EVENTLOG_SERVICE="Registrador de Eventos"
 EVENTLOG_SERVICE_DESCRIPTION="Registro de eventos o mensajes enviados por el sistema operativo en una base de datos accesible desde el Visor de Eventos."
 
-MSISERVER_SERVICE="Instalador MSI de ReactOS"
+MSISERVER_SERVICE="Instalador MSI de LiberNT"
 MSISERVER_SERVICE_DESCRIPTION="Controla la instalación, mantenimiento y desinstalado del software empaquetado en un MSI (Windows Installer)."
 
 NETLOGON_SERVICE="Net Logon"
@@ -2606,13 +2894,13 @@ SPOOLER_SERVICE_DESCRIPTION="Carga los archivos a la memoria para una posterior 
 TCPSVCS_SERVICE="Servicios sencillos TCP/IP"
 TCPSVCS_SERVICE_DECRIPTION="Soporta los siguientes servicios de TCP/IP: Chargen, Daytime, Discard, Echo, QOTD."
 
-TELNETD_SERVICE="Servicio Telnet de ReactOS"
-TELNETD_SERVICE_DESCRIPTION="Servicio Telnet de ReactOS."
+TELNETD_SERVICE="Servicio Telnet de LiberNT"
+TELNETD_SERVICE_DESCRIPTION="Servicio Telnet de LiberNT."
 
 THEMES_SERVICE="Temas"
 THEMES_SERVICE_DESCRIPTION="Soporte para los diferentes Temas."
 
-WINMGMT_SERVICE="Instrumental de administración de ReactOS"
+WINMGMT_SERVICE="Instrumental de administración de LiberNT"
 WINMGMT_SERVICE_DESCRIPTION="Proporciona una interfaz para la gestión de la información del sistema (winmgmt)."
 
 WLANSVC_SERVICE="Servicio de WLAN"
@@ -2736,7 +3024,7 @@ DCOMLAUNCH_SERVICE_DESCRIPTION="Namiastka usługi DcomLaunch"
 EVENTLOG_SERVICE="Dziennik zdarzeń"
 EVENTLOG_SERVICE_DESCRIPTION="Zapisuje zdarzenia lub wiadomości wysyłane przez system operacyjny do bazy danych dostępnej za pomocą podglądu zdarzeń."
 
-MSISERVER_SERVICE="Instalator ReactOS"
+MSISERVER_SERVICE="Instalator LiberNT"
 MSISERVER_SERVICE_DESCRIPTION="Dodaje, modyfikuje i usuwa aplikacje dostarczane jako pakiet MSI (Windows Installer)."
 
 NETLOGON_SERVICE="Logowanie do sieci"
@@ -2766,13 +3054,13 @@ SPOOLER_SERVICE_DESCRIPTION="Ładuje pliki do pamięci w celu późniejszego wyd
 TCPSVCS_SERVICE="Podstawowe usługi TCP/IP"
 TCPSVCS_SERVICE_DECRIPTION="Oferuje następujące usługi TCP/IP: Chargen, Daytime, Discard, Echo, QOTD."
 
-TELNETD_SERVICE="Usługa ReactOS Telnet"
-TELNETD_SERVICE_DESCRIPTION="Usługa ReactOS Telnet"
+TELNETD_SERVICE="Usługa LiberNT Telnet"
+TELNETD_SERVICE_DESCRIPTION="Usługa LiberNT Telnet"
 
 THEMES_SERVICE="Motywy"
 THEMES_SERVICE_DESCRIPTION="Oferuje wsparcie dla motywów."
 
-WINMGMT_SERVICE="Infrastruktura zarządzania ReactOS"
+WINMGMT_SERVICE="Infrastruktura zarządzania LiberNT"
 WINMGMT_SERVICE_DESCRIPTION="Dostarcza interfejs w celu uzyskiwania dostępu do informacji zarządzania o systemie operacyjnym, urządzeniach, aplikacjach i usługach."
 
 WLANSVC_SERVICE="Usługa WLAN"
@@ -2881,7 +3169,7 @@ VIETNAMESE = "Wietnamski"
 [Strings.0016]
 
 ; Services names and descriptions
-AUDIO_SERVICE="Serviços de Audio do ReactOS"
+AUDIO_SERVICE="Serviços de Audio do LiberNT"
 AUDIO_SERVICE_DESCRIPTION="Fornece recursos de áudio para aplicações"
 
 BITS_SERVICE="Serviço de transferência inteligente em segundo plano"
@@ -2896,7 +3184,7 @@ DCOMLAUNCH_SERVICE_DESCRIPTION="Fornece funcionalidades de lançamento para serv
 EVENTLOG_SERVICE="Registo de Eventos"
 EVENTLOG_SERVICE_DESCRIPTION="Regista eventos ou mensagens enviadas pelo sistema operativo num banco de dados acessíveis através do visualizador de eventos."
 
-MSISERVER_SERVICE="Instalador do ReactOS"
+MSISERVER_SERVICE="Instalador do LiberNT"
 MSISERVER_SERVICE_DESCRIPTION="Controla a instalação, manutenção e remoção de software empacotado como um MSI (Instalador do Windows)."
 
 NETLOGON_SERVICE="Inicio de sessão de rede"
@@ -2926,13 +3214,13 @@ SPOOLER_SERVICE_DESCRIPTION="Carrega ficheiros na memória para impressão poste
 TCPSVCS_SERVICE="Serviços TCP/IP simples"
 TCPSVCS_SERVICE_DECRIPTION="Soporta os seguintes serviços TCP/IP: Chargen, Daytime, Discard, Echo, QOTD."
 
-TELNETD_SERVICE="Serviço Telnet do ReactOS"
+TELNETD_SERVICE="Serviço Telnet do LiberNT"
 TELNETD_SERVICE_DESCRIPTION="Permite que um utilizador remoto inicie sessão e execute programas neste computador."
 
 THEMES_SERVICE="Temas"
 THEMES_SERVICE_DESCRIPTION="Fornece a gestão de temas por parte dos utilizadores.."
 
-WINMGMT_SERVICE="Infra-estrutura de gestão do ReactOS"
+WINMGMT_SERVICE="Infra-estrutura de gestão do LiberNT"
 WINMGMT_SERVICE_DESCRIPTION="Fornece interface para informações de gestão do sistema."
 
 WLANSVC_SERVICE="Serviço WLAN"
@@ -2942,7 +3230,7 @@ WORKSTATION_SERVICE="Estação de trabalho"
 WORKSTATION_SERVICE_DESCRIPTION="Cria e mantém cliente de ligações de rede a servidores remotos."
 
 WUAUSERV_SERVICE="Actualizações automáticas"
-WUAUSERV_SERVICE_DESCRIPTION="Permite a transferência e instalação de actualizações do ReactOS."
+WUAUSERV_SERVICE_DESCRIPTION="Permite a transferência e instalação de actualizações do LiberNT."
 
 ; Keyboard layouts
 ALBANIAN = "Albanês"
@@ -3053,7 +3341,7 @@ DCOMLAUNCH_SERVICE_DESCRIPTION="Serviciu simulat de lansare Dcom."
 EVENTLOG_SERVICE="Jurnal de evenimente"
 EVENTLOG_SERVICE_DESCRIPTION="Jurnalizează mesajele sau evenimentele transmise de sistemul de operare într-o bază de date accesibilă cu instrumentul „observator de evenimente”."
 
-MSISERVER_SERVICE="Instalare ReactOS"
+MSISERVER_SERVICE="Instalare LiberNT"
 MSISERVER_SERVICE_DESCRIPTION="Controlează instalarea, mentenanța, și eliminarea de programe de instalare MSI (Windows Installer)."
 
 NETLOGON_SERVICE="Autentificare în rețea"
@@ -3084,7 +3372,7 @@ TCPSVCS_SERVICE="Servicii TCP/IP simple"
 TCPSVCS_SERVICE_DECRIPTION="Permite următoarele servicii (protocoale) TCP/IP: Chargen, Daytime, Discard, Echo, QOTD."
 
 TELNETD_SERVICE="Serviciu Telnet"
-TELNETD_SERVICE_DESCRIPTION="Serviciul Telnet al ReactOS."
+TELNETD_SERVICE_DESCRIPTION="Serviciul Telnet al LiberNT."
 
 THEMES_SERVICE="Teme"
 THEMES_SERVICE_DESCRIPTION="Permite teme pentru interfața grafică de utilizare."
@@ -3213,7 +3501,7 @@ DCOMLAUNCH_SERVICE_DESCRIPTION="DcomLaunch service stub."
 EVENTLOG_SERVICE="Журнал событий"
 EVENTLOG_SERVICE_DESCRIPTION="Регистрирует события или сообщения, отправленные операционной системой в базе данных, доступной через средство просмотра журнала событий."
 
-MSISERVER_SERVICE="Установщик ReactOS"
+MSISERVER_SERVICE="Установщик LiberNT"
 MSISERVER_SERVICE_DESCRIPTION="Управляет установкой, изменением и удалением программ, упакованных в MSI (установщик Windows)."
 
 NETLOGON_SERVICE="Сетевой вход в систему"
@@ -3243,13 +3531,13 @@ SPOOLER_SERVICE_DESCRIPTION="Загружает файлы в память дл�
 TCPSVCS_SERVICE="Простые службы TCP/IP"
 TCPSVCS_SERVICE_DECRIPTION="Поддержка следующих служб TCP/IP: Chargen, Daytime, Discard, Echo, QOTD."
 
-TELNETD_SERVICE="Служба ReactOS Telnet"
-TELNETD_SERVICE_DESCRIPTION="Служба ReactOS Telnet"
+TELNETD_SERVICE="Служба LiberNT Telnet"
+TELNETD_SERVICE_DESCRIPTION="Служба LiberNT Telnet"
 
 THEMES_SERVICE="Темы"
 THEMES_SERVICE_DESCRIPTION="Поддержка тем оформления."
 
-WINMGMT_SERVICE="Инструментарий управления ReactOS"
+WINMGMT_SERVICE="Инструментарий управления LiberNT"
 WINMGMT_SERVICE_DESCRIPTION="Предоставляет общий интерфейс для доступа к информации об управлении операционной системой."
 
 WLANSVC_SERVICE="Беспроводная локальная сеть (WLAN)"
@@ -3373,7 +3661,7 @@ DCOMLAUNCH_SERVICE_DESCRIPTION="DcomLaunch hizmetinin taslağı."
 EVENTLOG_SERVICE="Olay Günlüğü"
 EVENTLOG_SERVICE_DESCRIPTION="İşletim sisteminin gönderdiği olayları veya iletileri, olay görüntüsü ile erişilebilen bir veritabanına kaydeder."
 
-MSISERVER_SERVICE="ReactOS Yükleyicisi"
+MSISERVER_SERVICE="LiberNT Yükleyicisi"
 MSISERVER_SERVICE_DESCRIPTION="MSI (Windows Yükleyicisi) olarak paketlenmiş yazılımların yüklenmesini, bakımını ve kaldırılmasını denetler."
 
 NETLOGON_SERVICE="Ağda Oturum Açma"
@@ -3403,13 +3691,13 @@ SPOOLER_SERVICE_DESCRIPTION="Dosyaları, sonra yazdırılması için belleğe y�
 TCPSVCS_SERVICE="Basit TCP/IP Hizmetleri"
 TCPSVCS_SERVICE_DECRIPTION="Şu TCP/IP hizmetlerini destekler: Güçlendirme, Günışığı, Kesme, Yankı ve QOTD."
 
-TELNETD_SERVICE="ReactOS Telnet Hizmeti"
-TELNETD_SERVICE_DESCRIPTION="ReactOS Telnet Hizmeti"
+TELNETD_SERVICE="LiberNT Telnet Hizmeti"
+TELNETD_SERVICE_DESCRIPTION="LiberNT Telnet Hizmeti"
 
 THEMES_SERVICE="Temalar"
 THEMES_SERVICE_DESCRIPTION="Tema desteği"
 
-WINMGMT_SERVICE="ReactOS Yönetim Altyapısı"
+WINMGMT_SERVICE="LiberNT Yönetim Altyapısı"
 WINMGMT_SERVICE_DESCRIPTION="Sistem yönetim bilgisine arayüz sağlar."
 
 WLANSVC_SERVICE="WLAN Hizmeti"

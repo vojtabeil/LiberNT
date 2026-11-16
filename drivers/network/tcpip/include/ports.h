@@ -10,11 +10,15 @@
 
 #pragma once
 
+#define DYNAMIC_PORT_FIRST 49152
+#define DYNAMIC_PORT_LAST  65535
+
 typedef struct _PORT_SET {
     RTL_BITMAP ProtoBitmap;
     PVOID ProtoBitBuffer;
     UINT StartingPort;
     UINT PortsToOversee;
+    UINT NextPort;
     KSPIN_LOCK Lock;
 } PORT_SET, *PPORT_SET;
 
@@ -26,3 +30,5 @@ VOID DeallocatePort( PPORT_SET PortSet, ULONG Port );
 BOOLEAN AllocatePort( PPORT_SET PortSet, ULONG Port );
 ULONG AllocateAnyPort( PPORT_SET PortSet );
 ULONG AllocatePortFromRange( PPORT_SET PortSet, ULONG Lowest, ULONG Highest );
+ULONG AllocatePortFromRangeExcluding( PPORT_SET PortSet, ULONG Lowest, ULONG Highest,
+                                      PPORT_SET ExcludeSet );

@@ -19,37 +19,40 @@
 
 CTrayShowDesktopButton::CTrayShowDesktopButton() :
     m_nClickedTime(0),
-    m_inset({2, 2}),
+    m_inset({ShellScaleForDpi(2), ShellScaleForDpi(2)}),
     m_icon(NULL),
     m_highContrastMode(FALSE),
     m_drawWithDedicatedBackground(FALSE),
     m_bHovering(FALSE),
     m_hWndTaskbar(NULL),
     m_bPressed(FALSE),
-    m_bHorizontal(FALSE)
+    m_bHorizontal(FALSE),
+    m_bModern(FALSE)
 {
 }
 
 INT CTrayShowDesktopButton::WidthOrHeight() const
 {
+    if (m_bModern)
+        return ShellScaleForDpi(12);
+
     if (IsThemeActive() && !m_highContrastMode)
     {
         if (m_drawWithDedicatedBackground)
         {
             if (GetSystemMetrics(SM_TABLETPC))
             {
-                //TODO: DPI scaling - return logical-to-physical conversion of 24, not fixed value
-                return 24;
+                return ShellScaleForDpi(24);
             }
             else
-                return 15;
+                return ShellScaleForDpi(15);
         }
         else
         {
             INT CurMargin = m_bHorizontal
                 ? (m_ContentMargins.cxLeftWidth + m_ContentMargins.cxRightWidth)
                 : (m_ContentMargins.cyTopHeight + m_ContentMargins.cyBottomHeight);
-            return max(16 + CurMargin, 18) + 6;
+            return max(ShellScaleForDpi(16) + CurMargin, ShellScaleForDpi(18)) + ShellScaleForDpi(6);
         }
     }
     else
@@ -199,13 +202,13 @@ VOID CTrayShowDesktopButton::EnsureWindowTheme(BOOL setTheme)
     MARGINS contentMargins;
     if (GetThemeMargins(GetWindowTheme(GetParent().m_hWnd), NULL, TNP_BACKGROUND, 0, TMT_CONTENTMARGINS, NULL, &contentMargins) == S_OK)
     {
-        m_inset.cx = max(0, contentMargins.cxRightWidth - 5);
-        m_inset.cy = max(0, contentMargins.cyBottomHeight - 5);
+        m_inset.cx = max(0, contentMargins.cxRightWidth - ShellScaleForDpi(5));
+        m_inset.cy = max(0, contentMargins.cyBottomHeight - ShellScaleForDpi(5));
     }
     else
     {
-        m_inset.cx = 2;
-        m_inset.cy = 2;
+        m_inset.cx = ShellScaleForDpi(2);
+        m_inset.cy = ShellScaleForDpi(2);
     }
 
     m_drawWithDedicatedBackground = FALSE;
@@ -318,6 +321,28 @@ VOID CTrayShowDesktopButton::OnDraw(HDC hdc, LPRECT prc)
     RECT rc = { prc->left, prc->top, prc->right, prc->bottom };
     LPRECT lpRc = &rc;
     HBRUSH hbrBackground = NULL;
+
+    if (m_bModern)
+    {
+        ::DrawThemeParentBackground(m_hWnd, hdc, prc);
+        if (m_bHovering || m_bPressed)
+        {
+            INT x = prc->left + ShellScaleForDpi(6);
+            INT cyLine = ShellScaleForDpi(16);
+            INT y = (prc->top + prc->bottom - cyLine) / 2;
+            COLORREF crBack = GetPixel(hdc, x, y);
+            BOOL bLight = (crBack != CLR_INVALID) &&
+                          (GetRValue(crBack) * 299 + GetGValue(crBack) * 587 + GetBValue(crBack) * 114) / 1000 >= 140;
+            RECT rcLine = { x, y, x + ShellScaleForDpi(1), y + cyLine };
+            HBRUSH hbrLine = CreateSolidBrush(bLight ? RGB(118, 118, 118) : RGB(152, 152, 152));
+            if (hbrLine)
+            {
+                FillRect(hdc, &rcLine, hbrLine);
+                DeleteObject(hbrLine);
+            }
+        }
+        return;
+    }
 
     if (m_hTheme)
     {

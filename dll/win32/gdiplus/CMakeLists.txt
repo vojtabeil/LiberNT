@@ -1,9 +1,8 @@
 
-remove_definitions(-D_WIN32_WINNT=0x502 -DWINVER=0x502)
+remove_definitions(-D_WIN32_WINNT=${REACTOS_TARGET_NT} -DWINVER=${REACTOS_TARGET_NT})
 add_definitions(-D_WIN32_WINNT=0x601)
 
 add_definitions(
-    -D__ROS_LONG64__
     -D_USE_MATH_DEFINES
     -Dwcsicmp=_wcsicmp
     -Dfmin=min
@@ -47,14 +46,12 @@ if(MSVC)
         /wd4305 # Disable warning C4305: '=': truncation from 'double' to 'REAL'
         /wd4334 # Disable warning C4334: '<<': result of 32-bit shift implicitly converted to 64 bits (was 64-bit shift intended?)
     )
-else()
-    target_compile_options(gdiplus PRIVATE -Wno-incompatible-pointer-types)
 endif()
 
 set_module_type(gdiplus win32dll)
-target_link_libraries(gdiplus wine)
-add_delay_importlibs(gdiplus windowscodecs)
-add_importlibs(gdiplus mlang msvcrt shlwapi oleaut32 ole32 user32 gdi32 kernel32 kernel32_vista ntdll ntdll_vista)
+target_link_libraries(gdiplus wine uuid)
+add_delay_importlibs(gdiplus mlang windowscodecs)
+add_importlibs(gdiplus msvcrt shlwapi oleaut32 ole32 user32 gdi32 kernel32 kernel32_vista ntdll ntdll_vista)
 
 add_cd_file(TARGET gdiplus DESTINATION reactos/system32 FOR all)
 

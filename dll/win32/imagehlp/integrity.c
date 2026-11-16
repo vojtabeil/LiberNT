@@ -23,12 +23,14 @@
  */
 
 #include <stdarg.h>
+#include <stdlib.h>
 
 #include "windef.h"
 #include "winbase.h"
 #include "winerror.h"
 #include "winternl.h"
 #include "winnt.h"
+#include "winver.h"
 #include "imagehlp.h"
 #include "wine/debug.h"
 
@@ -160,7 +162,7 @@ static BOOL IMAGEHLP_GetSecurityDirOffset( HANDLE handle,
     else
         return FALSE;
 
-    TRACE("ret = %d size = %x addr = %x\n", ret, sd->Size, sd->VirtualAddress);
+    TRACE("ret = %d size = %lx addr = %lx\n", ret, sd->Size, sd->VirtualAddress);
 
     *pdwSize = sd->Size;
     *pdwOfs = sd->VirtualAddress;
@@ -208,7 +210,7 @@ static BOOL IMAGEHLP_SetSecurityDirOffset(HANDLE handle,
     sd->Size = dwSize;
     sd->VirtualAddress = dwOfs;
 
-    TRACE("size = %x addr = %x\n", sd->Size, sd->VirtualAddress);
+    TRACE("size = %lx addr = %lx\n", sd->Size, sd->VirtualAddress);
 
     /* write the header back again */
     count = SetFilePointer(handle, pe_offset, NULL, FILE_BEGIN);
@@ -244,6 +246,13 @@ static BOOL IMAGEHLP_GetCertificateOffset( HANDLE handle, DWORD num,
     r = IMAGEHLP_GetSecurityDirOffset( handle, &sd_VirtualAddr, &size );
     if( !r )
         return FALSE;
+#ifdef __REACTOS__
+    if( !size )
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+#endif
 
     offset = 0;
     /* take the n'th certificate */
@@ -276,13 +285,18 @@ static BOOL IMAGEHLP_GetCertificateOffset( HANDLE handle, DWORD num,
             offset += 8 - (len % 8);
 
         if( offset >= size )
+        {
+#ifdef __REACTOS__
+            SetLastError( ERROR_INVALID_PARAMETER );
+#endif
             return FALSE;
+        }
     }
 
     *pdwOfs = sd_VirtualAddr + offset;
     *pdwSize = len;
 
-    TRACE("len = %x addr = %x\n", len, sd_VirtualAddr + offset);
+    TRACE("len = %lx addr = %lx\n", len, sd_VirtualAddr + offset);
 
     return TRUE;
 }
@@ -447,6 +461,17 @@ BOOL WINAPI ImageAddCertificate(
 
         if (sd_VirtualAddr == INVALID_SET_FILE_POINTER)
             return FALSE;
+#ifdef __REACTOS__
+
+        if (sd_VirtualAddr % 8)
+        {
+            static const BYTE padding[8];
+
+            if (!WriteFile(FileHandle, padding, 8 - (sd_VirtualAddr % 8), &count, NULL))
+                return FALSE;
+            sd_VirtualAddr += count;
+        }
+#endif
     }
 
     /* Write the certificate to the file */
@@ -492,7 +517,7 @@ BOOL WINAPI ImageEnumerateCertificates(
     const size_t cert_hdr_size = sizeof hdr - sizeof hdr.bCertificate;
     BOOL r;
 
-    TRACE("%p %hd %p %p %d\n",
+    TRACE("%p %hd %p %p %ld\n",
            handle, TypeFilter, CertificateCount, Indices, IndexCount);
 
     r = IMAGEHLP_GetSecurityDirOffset( handle, &sd_VirtualAddr, &size );
@@ -515,7 +540,7 @@ BOOL WINAPI ImageEnumerateCertificates(
         if( count != cert_hdr_size )
             return FALSE;
 
-        TRACE("Size = %08x  id = %08hx\n",
+        TRACE("Size = %08lx  id = %08hx\n",
                hdr.dwLength, hdr.wCertificateType );
 
         /* check the certificate is not too big or too small */
@@ -556,7 +581,7 @@ BOOL WINAPI ImageGetCertificateData(
 {
     DWORD r, offset, ofs, size, count;
 
-    TRACE("%p %d %p %p\n", handle, Index, Certificate, RequiredLength);
+    TRACE("%p %ld %p %p\n", handle, Index, Certificate, RequiredLength);
 
     if( !RequiredLength)
     {
@@ -607,7 +632,7 @@ BOOL WINAPI ImageGetCertificateHeader(
     DWORD r, offset, ofs, size, count;
     const size_t cert_hdr_size = sizeof *pCert - sizeof pCert->bCertificate;
 
-    TRACE("%p %d %p\n", handle, index, pCert);
+    TRACE("%p %ld %p\n", handle, index, pCert);
 
     if( !IMAGEHLP_GetCertificateOffset( handle, index, &ofs, &size ) )
         return FALSE;
@@ -660,7 +685,7 @@ static DWORD IMAGEHLP_GetSectionOffset( IMAGE_SECTION_HEADER *hdr,
 static BOOL IMAGEHLP_ReportSectionFromOffset( DWORD offset, DWORD size,
     BYTE *map, DWORD fileSize, DIGEST_FUNCTION DigestFunction, DIGEST_HANDLE DigestHandle )
 {
-    if( offset + size > fileSize )
+    if( offset > fileSize || size > fileSize - offset )
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
@@ -681,7 +706,7 @@ static BOOL IMAGEHLP_ReportSection( IMAGE_SECTION_HEADER *section_headers,
     offset = IMAGEHLP_GetSectionOffset( section_headers, num_sections, section,
         &size, NULL );
     if( !offset )
-        return FALSE;
+        return TRUE;
     return IMAGEHLP_ReportSectionFromOffset( offset, size, map, fileSize,
             DigestFunction, DigestHandle );
 }
@@ -709,7 +734,19 @@ static BOOL IMAGEHLP_ReportCodeSections( IMAGE_SECTION_HEADER *hdr, DWORD num_se
  * import section.
  * FIXME: if it's not set, the function currently fails.
  */
-static BOOL IMAGEHLP_ReportImportSection( IMAGE_SECTION_HEADER *hdr,
+struct digest_exclusion
+{
+    DWORD start, end;
+};
+
+static int __cdecl IMAGEHLP_CompareExclusions(const void *left, const void *right)
+{
+    const struct digest_exclusion *a = left, *b = right;
+
+    return (a->start > b->start) - (a->start < b->start);
+}
+
+static BOOL IMAGEHLP_ReportImportSection( IMAGE_NT_HEADERS *nt_hdr, IMAGE_SECTION_HEADER *hdr,
     DWORD num_sections, BYTE *map, DWORD fileSize, DWORD DigestLevel,
     DIGEST_FUNCTION DigestFunction, DIGEST_HANDLE DigestHandle )
 {
@@ -720,7 +757,7 @@ static BOOL IMAGEHLP_ReportImportSection( IMAGE_SECTION_HEADER *hdr,
     offset = IMAGEHLP_GetSectionOffset( hdr, num_sections, ".idata", &size,
         &base );
     if( !offset )
-        return FALSE;
+        return TRUE;
 
     /* If CERT_PE_IMAGE_DIGEST_ALL_IMPORT_INFO is set, the entire
      * section is reported.  Otherwise, the debug info section is
@@ -733,12 +770,79 @@ static BOOL IMAGEHLP_ReportImportSection( IMAGE_SECTION_HEADER *hdr,
                 DigestFunction, DigestHandle );
     else
     {
-        FIXME("not supported except for CERT_PE_IMAGE_DIGEST_ALL_IMPORT_INFO\n");
-        SetLastError(ERROR_INVALID_PARAMETER);
-        ret = FALSE;
+        IMAGE_IMPORT_DESCRIPTOR *imports;
+        struct digest_exclusion *excluded;
+        DWORD import_size, count, i, cursor, thunk_size;
+        BYTE *thunk, *end;
+
+        if (offset > fileSize || size > fileSize - offset)
+            goto invalid_parameter;
+        imports = ImageDirectoryEntryToData(map, FALSE, IMAGE_DIRECTORY_ENTRY_IMPORT, &import_size);
+        if (!imports)
+            return IMAGEHLP_ReportSectionFromOffset(offset, size, map, fileSize,
+                                                   DigestFunction, DigestHandle);
+        if ((BYTE *)imports < map + offset || (BYTE *)imports > map + offset + size ||
+            import_size > map + offset + size - (BYTE *)imports)
+            goto invalid_parameter;
+        for (count = 0; count < import_size / sizeof(*imports); ++count)
+            if (!imports[count].Name) break;
+        if (count == import_size / sizeof(*imports))
+            goto invalid_parameter;
+        excluded = HeapAlloc(GetProcessHeap(), 0, (SIZE_T)count * 2 * sizeof(*excluded));
+        if (!excluded)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        thunk_size = nt_hdr->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC ?
+            sizeof(IMAGE_THUNK_DATA64) : sizeof(IMAGE_THUNK_DATA32);
+        end = map + offset + size;
+        for (i = 0; i < count; ++i)
+        {
+            ULONGLONG value = 1;
+
+            excluded[2 * i].start = (BYTE *)&imports[i].TimeDateStamp - map;
+            excluded[2 * i].end = (BYTE *)&imports[i].Name - map;
+            thunk = ImageRvaToVa(nt_hdr, map, imports[i].FirstThunk, NULL);
+            if (!thunk || thunk < map + offset || thunk > end)
+                break;
+            excluded[2 * i + 1].start = thunk - map;
+            do
+            {
+                if (end - thunk < thunk_size) break;
+                value = 0;
+                memcpy(&value, thunk, thunk_size);
+                thunk += thunk_size;
+            } while (value);
+            if (value)
+                break;
+            excluded[2 * i + 1].end = thunk - map;
+        }
+        if (i != count)
+        {
+            HeapFree(GetProcessHeap(), 0, excluded);
+            goto invalid_parameter;
+        }
+        qsort(excluded, count * 2, sizeof(*excluded), IMAGEHLP_CompareExclusions);
+        cursor = offset;
+        ret = TRUE;
+        for (i = 0; ret && i < count * 2; ++i)
+        {
+            if (excluded[i].start > cursor)
+                ret = DigestFunction(DigestHandle, map + cursor, excluded[i].start - cursor);
+            if (excluded[i].end > cursor)
+                cursor = excluded[i].end;
+        }
+        if (ret && cursor < offset + size)
+            ret = DigestFunction(DigestHandle, map + cursor, offset + size - cursor);
+        HeapFree(GetProcessHeap(), 0, excluded);
     }
 
     return ret;
+
+invalid_parameter:
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return FALSE;
 }
 
 /***********************************************************************
@@ -765,7 +869,6 @@ static BOOL IMAGEHLP_ReportImportSection( IMAGE_SECTION_HEADER *hdr,
  *  FALSE if unsuccessful.  GetLastError returns more about the error.
  *
  * NOTES
- *  Only supports 32-bit PE files, not tested with any other format.
  *  Reports data in the following order:
  *  1. The file headers are reported first
  *  2. Any code sections are reported next.
@@ -792,11 +895,11 @@ BOOL WINAPI ImageGetDigestStream(
     IMAGE_NT_HEADERS *nt_hdr;
     IMAGE_SECTION_HEADER *section_headers;
 
-    TRACE("(%p, %d, %p, %p)\n", FileHandle, DigestLevel, DigestFunction,
+    TRACE("(%p, %ld, %p, %p)\n", FileHandle, DigestLevel, DigestFunction,
         DigestHandle);
 
     /* Get the file size */
-    if( !FileHandle )
+    if( !FileHandle || !DigestFunction )
         goto invalid_parameter;
     fileSize = GetFileSize( FileHandle, NULL );
     if(fileSize == INVALID_FILE_SIZE )
@@ -804,7 +907,7 @@ BOOL WINAPI ImageGetDigestStream(
 
     /* map file */
     hMap = CreateFileMappingW( FileHandle, NULL, PAGE_READONLY, 0, 0, NULL );
-    if( hMap == INVALID_HANDLE_VALUE )
+    if( !hMap )
         goto invalid_parameter;
     map = MapViewOfFile( hMap, FILE_MAP_COPY, 0, 0, 0 );
     if( !map )
@@ -825,18 +928,27 @@ BOOL WINAPI ImageGetDigestStream(
         goto end;
 
     /* Read the NT header */
-    if( offset + sizeof(IMAGE_NT_HEADERS) > fileSize )
+    if( sizeof(IMAGE_NT_HEADERS32) > fileSize - offset )
         goto invalid_parameter;
     nt_hdr = (IMAGE_NT_HEADERS *)(map + offset);
     if( nt_hdr->Signature != IMAGE_NT_SIGNATURE )
+        goto invalid_parameter;
+    if( nt_hdr->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC &&
+        nt_hdr->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC )
+        goto invalid_parameter;
+    size = sizeof(nt_hdr->Signature) + sizeof(nt_hdr->FileHeader) +
+        nt_hdr->FileHeader.SizeOfOptionalHeader;
+    if( size > fileSize - offset ||
+        (nt_hdr->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC &&
+         nt_hdr->FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER32)) ||
+        (nt_hdr->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC &&
+         nt_hdr->FileHeader.SizeOfOptionalHeader < sizeof(IMAGE_OPTIONAL_HEADER64)) )
         goto invalid_parameter;
     /* It's clear why the checksum is cleared, but why only these size headers?
      */
     nt_hdr->OptionalHeader.SizeOfInitializedData = 0;
     nt_hdr->OptionalHeader.SizeOfImage = 0;
     nt_hdr->OptionalHeader.CheckSum = 0;
-    size = sizeof(nt_hdr->Signature) + sizeof(nt_hdr->FileHeader) +
-        nt_hdr->FileHeader.SizeOfOptionalHeader;
     ret = DigestFunction( DigestHandle, map + offset, size );
     if( !ret )
         goto end;
@@ -845,32 +957,32 @@ BOOL WINAPI ImageGetDigestStream(
     offset += size;
     num_sections = nt_hdr->FileHeader.NumberOfSections;
     size = num_sections * sizeof(IMAGE_SECTION_HEADER);
-    if( offset + size > fileSize )
+    if( size > fileSize - offset )
         goto invalid_parameter;
     ret = DigestFunction( DigestHandle, map + offset, size );
     if( !ret )
         goto end;
 
     section_headers = (IMAGE_SECTION_HEADER *)(map + offset);
-    IMAGEHLP_ReportCodeSections( section_headers, num_sections,
-        map, fileSize, DigestFunction, DigestHandle );
-    IMAGEHLP_ReportSection( section_headers, num_sections, ".data",
-        map, fileSize, DigestFunction, DigestHandle );
-    IMAGEHLP_ReportSection( section_headers, num_sections, ".rdata",
-        map, fileSize, DigestFunction, DigestHandle );
-    IMAGEHLP_ReportImportSection( section_headers, num_sections,
+    ret = IMAGEHLP_ReportCodeSections( section_headers, num_sections,
+        map, fileSize, DigestFunction, DigestHandle ) &&
+        IMAGEHLP_ReportSection( section_headers, num_sections, ".data",
+        map, fileSize, DigestFunction, DigestHandle ) &&
+        IMAGEHLP_ReportSection( section_headers, num_sections, ".rdata",
+        map, fileSize, DigestFunction, DigestHandle ) &&
+        IMAGEHLP_ReportImportSection( nt_hdr, section_headers, num_sections,
         map, fileSize, DigestLevel, DigestFunction, DigestHandle );
-    if( DigestLevel & CERT_PE_IMAGE_DIGEST_DEBUG_INFO )
-        IMAGEHLP_ReportSection( section_headers, num_sections, ".debug",
+    if( ret && (DigestLevel & CERT_PE_IMAGE_DIGEST_RESOURCES) )
+        ret = IMAGEHLP_ReportSection( section_headers, num_sections, ".rsrc",
             map, fileSize, DigestFunction, DigestHandle );
-    if( DigestLevel & CERT_PE_IMAGE_DIGEST_RESOURCES )
-        IMAGEHLP_ReportSection( section_headers, num_sections, ".rsrc",
+    if( ret && (DigestLevel & CERT_PE_IMAGE_DIGEST_DEBUG_INFO) )
+        ret = IMAGEHLP_ReportSection( section_headers, num_sections, ".debug",
             map, fileSize, DigestFunction, DigestHandle );
 
 end:
     if( map )
         UnmapViewOfFile( map );
-    if( hMap != INVALID_HANDLE_VALUE )
+    if( hMap && hMap != INVALID_HANDLE_VALUE )
         CloseHandle( hMap );
     if( error )
         SetLastError(error);
@@ -878,6 +990,7 @@ end:
 
 invalid_parameter:
     error = ERROR_INVALID_PARAMETER;
+    ret = FALSE;
     goto end;
 }
 
@@ -891,7 +1004,7 @@ BOOL WINAPI ImageRemoveCertificate(HANDLE FileHandle, DWORD Index)
     LPVOID cert_data;
     BOOL r;
 
-    TRACE("(%p, %d)\n", FileHandle, Index);
+    TRACE("(%p, %ld)\n", FileHandle, Index);
 
     r = ImageEnumerateCertificates(FileHandle, CERT_SECTION_TYPE_ANY, &count, NULL, 0);
 

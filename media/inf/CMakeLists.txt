@@ -4,10 +4,14 @@ list(APPEND INF_FILES
     battery.inf
     bda.inf
     bth.inf
+    c_firmware.inf
     c_image.inf
+    c_smartcardreader.inf
+    c_wpd.inf
     display.inf
     fdc.inf
     flpydisk.inf
+    cpu.inf
     hal.inf
     hdc.inf
     input.inf
@@ -15,21 +19,28 @@ list(APPEND INF_FILES
     ks.inf
     kscaptur.inf
     legcydrv.inf
+    lntuvc.inf
     machine.inf
     monitor.inf
     msmouse.inf
+    msports.inf
     ndisuio.inf
     NET_NIC.inf
     nettcpip.inf
-    ports.inf
     scsi.inf
     shortcuts.inf
     unknown.inf
     usb.inf
+    usbaudio.inf
     usbport.inf
     volume.inf
     wdmaudio.inf
-    wmiacpi.inf)
+    wmiacpi.inf
+    wpdmtp.inf)
+
+if(REACTOS_USE_XPDM)
+    list(APPEND INF_FILES display_xpdm.inf)
+endif()
 
 list(APPEND UTF8_INF_FILES
     defltwk.inf

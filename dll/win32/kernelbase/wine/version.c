@@ -29,7 +29,6 @@
 #include <sys/types.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winver.h"
@@ -154,7 +153,7 @@ static const struct
     },
     /* Windows 10 */
     {
-        { 10, 0, 19043 },
+        { 10, 0, 19045 },
         {0x8e0f7a12,0xbfb3,0x4fe8,{0xb9,0xa5,0x48,0xfd,0x50,0xa1,0x5a,0x9a}}
     }
 };
@@ -794,9 +793,20 @@ DWORD WINAPI GetFileVersionInfoSizeExW( DWORD flags, LPCWSTR filename, LPDWORD r
     }
     else
     {
+#ifdef __REACTOS__
+        DWORD error = GetLastError();
+#endif
         HANDLE handle = CreateFileW( filename, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                      NULL, OPEN_EXISTING, 0, 0 );
+#ifdef __REACTOS__
+        if (handle == INVALID_HANDLE_VALUE)
+        {
+            SetLastError( error );
+            return 0;
+        }
+#else
         if (handle == INVALID_HANDLE_VALUE) return 0;
+#endif
         magic = find_version_resource( handle, &len, &offset, flags );
         CloseHandle( handle );
     }
@@ -856,6 +866,45 @@ DWORD WINAPI GetFileVersionInfoSizeExA( DWORD flags, LPCSTR filename, LPDWORD ha
 
     return retval;
 }
+
+#ifdef __REACTOS__
+static void apply_file_version_lie( LPCWSTR filename, VS_VERSION_INFO_STRUCT32 *vvis, DWORD datasize )
+{
+    RTL_OSVERSIONINFOEXW real;
+    OSVERSIONINFOW reported;
+    VS_FIXEDFILEINFO *ffi;
+    WCHAR path[MAX_PATH + 4], dir[MAX_PATH];
+    const WCHAR *name = path;
+    HANDLE file;
+    BOOL wow64 = FALSE;
+    DWORD len, dir_len;
+
+    if (datasize < sizeof(*vvis) || vvis->wValueLength < sizeof(*ffi)) return;
+    ffi = (VS_FIXEDFILEINFO *)VersionInfo32_Value( vvis );
+    if ((LPBYTE)(ffi + 1) > (LPBYTE)vvis + datasize || ffi->dwSignature != VS_FFI_SIGNATURE) return;
+
+    real.dwOSVersionInfoSize = sizeof(real);
+    reported.dwOSVersionInfoSize = sizeof(reported);
+    if (RtlGetVersion( &real ) || !GetVersionExW( &reported )) return;
+    if (reported.dwMajorVersion == real.dwMajorVersion && reported.dwMinorVersion == real.dwMinorVersion) return;
+    if (ffi->dwFileVersionMS != MAKELONG( real.dwMinorVersion, real.dwMajorVersion )) return;
+
+    file = CreateFileW( filename, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        NULL, OPEN_EXISTING, 0, 0 );
+    if (file == INVALID_HANDLE_VALUE) return;
+    len = GetFinalPathNameByHandleW( file, path, ARRAY_SIZE(path), FILE_NAME_NORMALIZED | VOLUME_NAME_DOS );
+    CloseHandle( file );
+    if (!len || len >= ARRAY_SIZE(path)) return;
+    if (!wcsncmp( name, L"\\\\?\\", 4 )) name += 4;
+
+    IsWow64Process( GetCurrentProcess(), &wow64 );
+    dir_len = wow64 ? GetSystemWow64DirectoryW( dir, ARRAY_SIZE(dir) ) : GetSystemDirectoryW( dir, ARRAY_SIZE(dir) );
+    if (!dir_len || dir_len >= ARRAY_SIZE(dir)) return;
+    if (wcsnicmp( name, dir, dir_len ) || name[dir_len] != '\\') return;
+
+    ffi->dwFileVersionMS = MAKELONG( reported.dwMinorVersion, reported.dwMajorVersion );
+}
+#endif
 
 /***********************************************************************
  *           GetFileVersionInfoExW           (kernelbase.@)
@@ -920,6 +969,9 @@ BOOL WINAPI GetFileVersionInfoExW( DWORD flags, LPCWSTR filename, DWORD ignored,
         return TRUE;
 
     case IMAGE_NT_SIGNATURE:
+#ifdef __REACTOS__
+        apply_file_version_lie( filename, vvis, min( len, datasize ) );
+#endif
         /* We have a 32bit resource.
          *
          * XP/W2K/W2K3 uses a buffer which is 2 times the actual needed space + 4 bytes "FE2X"
@@ -1069,6 +1121,7 @@ static BOOL VersionInfo16_QueryValue( const VS_VERSION_INFO_STRUCT16 *info, LPCS
 static BOOL VersionInfo32_QueryValue( const VS_VERSION_INFO_STRUCT32 *info, LPCWSTR lpSubBlock,
                                       LPVOID *lplpBuffer, UINT *puLen, BOOL *pbText )
 {
+    PVOID ptr;
     TRACE("lpSubBlock : (%s)\n", debugstr_w(lpSubBlock));
 
     while ( *lpSubBlock )
@@ -1100,7 +1153,11 @@ static BOOL VersionInfo32_QueryValue( const VS_VERSION_INFO_STRUCT32 *info, LPCW
     }
 
     /* Return value */
-    *lplpBuffer = VersionInfo32_Value( info );
+    ptr = VersionInfo32_Value(info);
+    if ((PBYTE)ptr >= ((PBYTE)info + info->wLength))  /* empty value */
+        ptr = (WCHAR*)info->szKey + wcslen(info->szKey);
+
+    *lplpBuffer = ptr;
     if (puLen)
         *puLen = info->wValueLength;
     if (pbText)
@@ -1542,14 +1599,53 @@ BOOL WINAPI GetVersionExW( OSVERSIONINFOW *info )
     return TRUE;
 }
 
+/***********************************************************************
+ *         GetCurrentApplicationUserModelId   (kernelbase.@)
+ */
+#ifdef __REACTOS__
+static LONG get_package_identity( HANDLE process )
+{
+    HANDLE token;
+    NTSTATUS status;
+
+    if ((status = NtOpenProcessToken( process, TOKEN_QUERY, &token )))
+        return RtlNtStatusToDosError( status );
+    NtClose( token );
+    /* TODO: read the package identity of a packaged process from its token; LiberNT deploys no packages */
+    return APPMODEL_ERROR_NO_PACKAGE;
+}
+#endif
+
+LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentApplicationUserModelId( UINT32 *length, WCHAR *id )
+{
+#ifdef __REACTOS__
+    LONG ret;
+
+    TRACE( "(%p %p)\n", length, id );
+
+    if (!length) return ERROR_INVALID_PARAMETER;
+    ret = get_package_identity( GetCurrentProcess() );
+    return ret == APPMODEL_ERROR_NO_PACKAGE ? APPMODEL_ERROR_NO_APPLICATION : ret;
+#else
+    FIXME( "(%p %p): stub\n", length, id );
+    return APPMODEL_ERROR_NO_APPLICATION;
+#endif
+}
 
 /***********************************************************************
  *         GetCurrentPackageFamilyName   (kernelbase.@)
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFamilyName( UINT32 *length, WCHAR *name )
 {
+#ifdef __REACTOS__
+    TRACE( "(%p %p)\n", length, name );
+
+    if (!length) return ERROR_INVALID_PARAMETER;
+    return get_package_identity( GetCurrentProcess() );
+#else
     FIXME( "(%p %p): stub\n", length, name );
     return APPMODEL_ERROR_NO_PACKAGE;
+#endif
 }
 
 
@@ -1568,8 +1664,15 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFullName( UINT32 *length, W
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageId( UINT32 *len, BYTE *buffer )
 {
+#ifdef __REACTOS__
+    TRACE( "(%p %p)\n", len, buffer );
+
+    if (!len) return ERROR_INVALID_PARAMETER;
+    return get_package_identity( GetCurrentProcess() );
+#else
     FIXME( "(%p %p): stub\n", len, buffer );
     return APPMODEL_ERROR_NO_PACKAGE;
+#endif
 }
 
 /***********************************************************************
@@ -1577,8 +1680,15 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageId( UINT32 *len, BYTE *buff
  */
 LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE *buffer, UINT32 *count )
 {
+#ifdef __REACTOS__
+    TRACE( "(%#x %p %p %p)\n", flags, buffer_size, buffer, count );
+
+    if (!buffer_size) return ERROR_INVALID_PARAMETER;
+    return get_package_identity( GetCurrentProcess() );
+#else
     FIXME( "(%#x %p %p %p): stub\n", flags, buffer_size, buffer, count );
     return APPMODEL_ERROR_NO_PACKAGE;
+#endif
 }
 
 /***********************************************************************
@@ -1586,8 +1696,15 @@ LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackagePath( UINT32 *length, WCHAR *path )
 {
+#ifdef __REACTOS__
+    TRACE( "(%p %p)\n", length, path );
+
+    if (!length) return ERROR_INVALID_PARAMETER;
+    return get_package_identity( GetCurrentProcess() );
+#else
     FIXME( "(%p %p): stub\n", length, path );
     return APPMODEL_ERROR_NO_PACKAGE;
+#endif
 }
 
 
@@ -1596,8 +1713,15 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackagePath( UINT32 *length, WCHAR
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFullName( HANDLE process, UINT32 *length, WCHAR *name )
 {
+#ifdef __REACTOS__
+    TRACE( "(%p %p %p)\n", process, length, name );
+
+    if (!process || !length) return ERROR_INVALID_PARAMETER;
+    return get_package_identity( process );
+#else
     FIXME( "(%p %p %p): stub\n", process, length, name );
     return APPMODEL_ERROR_NO_PACKAGE;
+#endif
 }
 
 
@@ -1606,8 +1730,20 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFullName( HANDLE process, UINT32 *
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFamilyName( HANDLE process, UINT32 *length, WCHAR *name )
 {
+#ifdef __REACTOS__
+    TRACE( "(%p %p %p)\n", process, length, name );
+#else
     FIXME( "(%p %p %p): stub\n", process, length, name );
+#endif
+
+    if (!process || !length)
+        return ERROR_INVALID_PARAMETER;
+
+#ifdef __REACTOS__
+    return get_package_identity( process );
+#else
     return APPMODEL_ERROR_NO_PACKAGE;
+#endif
 }
 
 /***********************************************************************

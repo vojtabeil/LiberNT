@@ -171,7 +171,6 @@ static const tConfigurationEntries defaultConfiguration =
 static void ParaNdis_ResetVirtIONetDevice(PARANDIS_ADAPTER *pContext)
 {
     virtio_device_reset(&pContext->IODevice);
-    DPrintf(0, ("[%s] Done", __FUNCTION__));
     /* reset all the features in the device */
     pContext->ulCurrentVlansFilterSet = 0;
     pContext->ullGuestFeatures = 0;
@@ -330,8 +329,9 @@ static void ReadNicConfiguration(PARANDIS_ADAPTER *pContext, PUCHAR *ppNewMACAdd
             pContext->Limits.nPrintDiagnostic = pConfiguration->LogStatistics.ulValue;
             pContext->uNumberOfHandledRXPacketsInDPC = pConfiguration->NumberOfHandledRXPackersInDPC.ulValue;
             pContext->bDoSupportPriority = pConfiguration->PrioritySupport.ulValue != 0;
-            pContext->ulFormalLinkSpeed  = pConfiguration->ConnectRate.ulValue;
-            pContext->ulFormalLinkSpeed *= 1000000;
+            pContext->ulConfiguredLinkSpeed  = pConfiguration->ConnectRate.ulValue;
+            pContext->ulConfiguredLinkSpeed *= 1000000;
+            pContext->ulFormalLinkSpeed = pContext->ulConfiguredLinkSpeed;
             pContext->bDoHwPacketFiltering = pConfiguration->PacketFiltering.ulValue != 0;
             pContext->bUseScatterGather  = pConfiguration->ScatterGather.ulValue != 0;
             pContext->bBatchReceive      = pConfiguration->BatchReceive.ulValue != 0;
@@ -459,15 +459,25 @@ static BOOLEAN GetAdapterResources(NDIS_HANDLE MiniportHandle, PNDIS_RESOURCE_LI
     UINT i;
     int read, bar = -1;
     PCI_COMMON_HEADER pci_config;
+    BOOLEAN InterruptFound = FALSE;
     NdisZeroMemory(pResources, sizeof(*pResources));
 
     // read the PCI config space header
+#ifdef __REACTOS__
+    read = NdisMGetBusData(
+       MiniportHandle,
+       PCI_WHICHSPACE_CONFIG,
+       0,
+       &pci_config,
+       sizeof(pci_config));
+#else
     read = NdisReadPciSlotInformation(
        MiniportHandle,
        0 /* SlotNumber, reserved */,
        0 /* Offset */,
        &pci_config,
        sizeof(pci_config));
+#endif
     if (read != sizeof(pci_config)) {
        return FALSE;
     }
@@ -479,7 +489,6 @@ static BOOLEAN GetAdapterResources(NDIS_HANDLE MiniportHandle, PNDIS_RESOURCE_LI
         {
             PHYSICAL_ADDRESS Start = RList->PartialDescriptors[i].u.Port.Start;
             ULONG len = RList->PartialDescriptors[i].u.Port.Length;
-            DPrintf(0, ("Found IO ports at %08lX(%d)", Start.LowPart, len));
             bar = virtio_get_bar_index(&pci_config, Start);
             if (bar < 0) {
                break;
@@ -492,7 +501,6 @@ static BOOLEAN GetAdapterResources(NDIS_HANDLE MiniportHandle, PNDIS_RESOURCE_LI
         {
             PHYSICAL_ADDRESS Start = RList->PartialDescriptors[i].u.Memory.Start;
             ULONG len = RList->PartialDescriptors[i].u.Memory.Length;
-            DPrintf(0, ("Found IO memory at %08I64X(%d)", Start.QuadPart, len));
             bar = virtio_get_bar_index(&pci_config, Start);
             if (bar < 0) {
                break;
@@ -507,11 +515,10 @@ static BOOLEAN GetAdapterResources(NDIS_HANDLE MiniportHandle, PNDIS_RESOURCE_LI
             pResources->Level = RList->PartialDescriptors[i].u.Interrupt.Level;
             pResources->Affinity = RList->PartialDescriptors[i].u.Interrupt.Affinity;
             pResources->InterruptFlags = RList->PartialDescriptors[i].Flags;
-            DPrintf(0, ("Found Interrupt vector %d, level %d, affinity %X, flags %X",
-                pResources->Vector, pResources->Level, (ULONG)pResources->Affinity, pResources->InterruptFlags));
+            InterruptFound = TRUE;
         }
     }
-    return bar >= 0 && pResources->Vector;
+    return bar >= 0 && InterruptFound;
 }
 
 static void DumpVirtIOFeatures(PARANDIS_ADAPTER *pContext)
@@ -546,7 +553,6 @@ static void DumpVirtIOFeatures(PARANDIS_ADAPTER *pContext)
     {
         if (VirtIODeviceGetHostFeature(pContext, Features[i].bitmask))
         {
-            DPrintf(0, ("VirtIO Host Feature %s", Features[i].Name));
         }
     }
 }
@@ -640,6 +646,31 @@ static NDIS_STATUS FinalizeFeatures(PARANDIS_ADAPTER *pContext)
     return NTStatusToNdisStatus(nt_status);
 }
 
+static BOOLEAN UpdateLinkProperties(PARANDIS_ADAPTER *pContext)
+{
+    ULONGLONG ulLinkSpeed = pContext->ulConfiguredLinkSpeed;
+    NDIS_MEDIA_DUPLEX_STATE DuplexState = MediaDuplexStateFull;
+    BOOLEAN bChanged;
+
+    if (pContext->bSpeedDuplexSupported)
+    {
+        ULONG ulSpeed = 0;
+        UCHAR uDuplex = 0;
+
+        virtio_get_config(&pContext->IODevice, VIRTIO_NET_CONFIG_SPEED_OFFSET, &ulSpeed, sizeof(ulSpeed));
+        virtio_get_config(&pContext->IODevice, VIRTIO_NET_CONFIG_DUPLEX_OFFSET, &uDuplex, sizeof(uDuplex));
+        if (ulSpeed <= MAXLONG)
+            ulLinkSpeed = (ULONGLONG)ulSpeed * 1000000;
+        if (uDuplex == VIRTIO_NET_DUPLEX_HALF)
+            DuplexState = MediaDuplexStateHalf;
+    }
+
+    bChanged = ulLinkSpeed != pContext->ulFormalLinkSpeed || DuplexState != pContext->MediaDuplexState;
+    pContext->ulFormalLinkSpeed = ulLinkSpeed;
+    pContext->MediaDuplexState = DuplexState;
+    return bChanged;
+}
+
 /**********************************************************
 Initializes the context structure
 Major variables, received from NDIS on initialization, must be be set before this call
@@ -719,11 +750,13 @@ NDIS_STATUS ParaNdis_InitializeContext(
         DumpVirtIOFeatures(pContext);
         JustForCheckClearInterrupt(pContext, "init 3");
         pContext->bLinkDetectSupported = 0 != VirtIODeviceGetHostFeature(pContext, VIRTIO_NET_F_STATUS);
+        pContext->bSpeedDuplexSupported = 0 != VirtIODeviceGetHostFeature(pContext, VIRTIO_NET_F_SPEED_DUPLEX);
+        if (pContext->bSpeedDuplexSupported)
+            VirtIODeviceEnableGuestFeature(pContext, VIRTIO_NET_F_SPEED_DUPLEX);
 
         if(pContext->bLinkDetectSupported) {
             virtio_get_config(&pContext->IODevice, sizeof(pContext->CurrentMacAddress), &linkStatus, sizeof(linkStatus));
             pContext->bConnected = (linkStatus & VIRTIO_NET_S_LINK_UP) != 0;
-            DPrintf(0, ("[%s] Link status on driver startup: %d", __FUNCTION__, pContext->bConnected));
         }
 
         if (VirtIODeviceGetHostFeature(pContext, VIRTIO_F_VERSION_1))
@@ -789,13 +822,6 @@ NDIS_STATUS ParaNdis_InitializeContext(
             pContext->PermanentMacAddress[4] = 0x01;
             pContext->PermanentMacAddress[5] = 0x80 | (UCHAR)(pContext->ulUniqueID & 0xFF);
         }
-        DPrintf(0,("Device MAC = %02x-%02x-%02x-%02x-%02x-%02x",
-            pContext->PermanentMacAddress[0],
-            pContext->PermanentMacAddress[1],
-            pContext->PermanentMacAddress[2],
-            pContext->PermanentMacAddress[3],
-            pContext->PermanentMacAddress[4],
-            pContext->PermanentMacAddress[5]));
 
         if (ETH_IS_EMPTY(pContext->CurrentMacAddress))
         {
@@ -884,11 +910,13 @@ NDIS_STATUS ParaNdis_InitializeContext(
     if (VirtIODeviceGetHostFeature(pContext, VIRTIO_NET_F_CTRL_RX_EXTRA) &&
         pContext->bDoHwPacketFiltering)
     {
-        DPrintf(0, ("[%s] Using hardware packet filtering", __FUNCTION__));
         pContext->bHasHardwareFilters = TRUE;
     }
 
-    status = FinalizeFeatures(pContext);
+    if (status == NDIS_STATUS_SUCCESS)
+        status = FinalizeFeatures(pContext);
+    if (status == NDIS_STATUS_SUCCESS)
+        UpdateLinkProperties(pContext);
 
     pContext->ReuseBufferProc = (tReuseReceiveBufferProc)ReuseReceiveBufferRegular;
 
@@ -1021,8 +1049,6 @@ static void PrepareTransmitBuffers(PARANDIS_ADAPTER *pContext)
     pContext->maxFreeTxDescriptors = pContext->nofFreeTxDescriptors;
     pContext->nofFreeHardwareBuffers = pContext->nofFreeTxDescriptors * 2;
     pContext->maxFreeHardwareBuffers = pContext->minFreeHardwareBuffers = pContext->nofFreeHardwareBuffers;
-    DPrintf(0, ("[%s] available %d Tx descriptors, %d hw buffers",
-        __FUNCTION__, pContext->nofFreeTxDescriptors, pContext->nofFreeHardwareBuffers));
 }
 
 static BOOLEAN AddRxBufferToQueue(PARANDIS_ADAPTER *pContext, pIONetDescriptor pBufferDescriptor)
@@ -1086,7 +1112,6 @@ static int PrepareReceiveBuffers(PARANDIS_ADAPTER *pContext)
     }
 
     pContext->NetMaxReceiveBuffers = pContext->NetNofReceiveBuffers;
-    DPrintf(0, ("[%s] MaxReceiveBuffers %d\n", __FUNCTION__, pContext->NetMaxReceiveBuffers) );
 
     virtqueue_kick(pContext->NetReceiveQueue);
 
@@ -1225,6 +1250,14 @@ NDIS_STATUS ParaNdis_FinishInitialization(PARANDIS_ADAPTER *pContext)
         virtio_device_ready(&pContext->IODevice);
         JustForCheckClearInterrupt(pContext, "start 4");
         ParaNdis_UpdateDeviceFilters(pContext);
+
+        DPrintf(0, ("MAC %02x-%02x-%02x-%02x-%02x-%02x, link %s, %d tx descriptors, %d rx buffers, hardware filters %s",
+            pContext->CurrentMacAddress[0], pContext->CurrentMacAddress[1],
+            pContext->CurrentMacAddress[2], pContext->CurrentMacAddress[3],
+            pContext->CurrentMacAddress[4], pContext->CurrentMacAddress[5],
+            pContext->bConnected ? "up" : "down",
+            pContext->nofFreeTxDescriptors, pContext->NetMaxReceiveBuffers,
+            pContext->bHasHardwareFilters ? "on" : "off"));
     }
     else
     {
@@ -2188,7 +2221,7 @@ static UINT ParaNdis_ProcessRxPath(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacket
     NdisReleaseSpinLock(&pContext->ReceiveLock);
     if (nReceived && pBatchOfPackets)
     {
-        DPrintf(1, ("[%s]%d: received %d buffers of max %d", __FUNCTION__, KeGetCurrentProcessorNumber(), nReceived, ulMaxPacketsToIndicate));
+        DPrintf(1, ("[%s]%d: received %d buffers of max %d", __FUNCTION__, ParaNdisCurrentProcessorIndex(), nReceived, ulMaxPacketsToIndicate));
         ParaNdis_IndicateReceivedBatch(pContext, pBatchOfPackets, nReceived);
     }
     if (pBatchOfPackets) NdisFreeMemory(pBatchOfPackets, 0, 0);
@@ -2206,6 +2239,8 @@ void ParaNdis_ReportLinkStatus(PARANDIS_ADAPTER *pContext, BOOLEAN bForce)
         virtio_get_config(&pContext->IODevice, offset, &linkStatus, sizeof(linkStatus));
         bConnected = (linkStatus & VIRTIO_NET_S_LINK_UP) != 0;
     }
+    if (UpdateLinkProperties(pContext))
+        bForce = TRUE;
     ParaNdis_IndicateConnect(pContext, bConnected, bForce);
 }
 
@@ -2245,7 +2280,7 @@ ULONG ParaNdis_DPCWorkBody(PARANDIS_ADAPTER *pContext, ULONG ulMaxPacketsToIndic
             InterlockedExchange(&pContext->bDPCInactive, 0);
             interruptSources = InterlockedExchange(&pContext->InterruptStatus, 0);
             ParaNdis_DebugHistory(pContext, hopDPC, (PVOID)1, interruptSources, 0, 0);
-            if ((interruptSources & isControl) && pContext->bLinkDetectSupported)
+            if ((interruptSources & isControl) && (pContext->bLinkDetectSupported || pContext->bSpeedDuplexSupported))
             {
                 ParaNdis_ReportLinkStatus(pContext, FALSE);
             }
@@ -2540,6 +2575,9 @@ VOID ParaNdis_OnPnPEvent(
         pContext->nPnpEventIndex = 0;
 }
 
+#define VIRTIO_NET_CTRL_POLL_US    10
+#define VIRTIO_NET_CTRL_TIMEOUT_US 100000
+
 static BOOLEAN SendControlMessage(
     PARANDIS_ADAPTER *pContext,
     UCHAR cls,
@@ -2587,6 +2625,14 @@ static BOOLEAN SendControlMessage(
             offset = (offset + 3) & ~3;
             nOut++;
         }
+        {
+            UINT staleLen;
+            while (virtqueue_get_buf(pContext->NetControlQueue, &staleLen) != NULL)
+            {
+                DPrintf(0, ("%s - discarding a late control completion", __FUNCTION__));
+            }
+        }
+
         sg[nOut].physAddr = phBase;
         sg[nOut].physAddr.QuadPart += offset;
         sg[nOut].length = sizeof(virtio_net_ctrl_ack);
@@ -2596,11 +2642,18 @@ static BOOLEAN SendControlMessage(
         {
             UINT len;
             void *p;
+            ULONG waited = 0;
             virtqueue_kick_always(pContext->NetControlQueue);
             p = virtqueue_get_buf(pContext->NetControlQueue, &len);
+            while (p == NULL && waited < VIRTIO_NET_CTRL_TIMEOUT_US)
+            {
+                NdisStallExecution(VIRTIO_NET_CTRL_POLL_US);
+                waited += VIRTIO_NET_CTRL_POLL_US;
+                p = virtqueue_get_buf(pContext->NetControlQueue, &len);
+            }
             if (!p)
             {
-                DPrintf(0, ("%s - ERROR: get_buf failed", __FUNCTION__));
+                DPrintf(0, ("%s - ERROR: no completion after %lu us", __FUNCTION__, waited));
             }
             else if (len != sizeof(virtio_net_ctrl_ack))
             {

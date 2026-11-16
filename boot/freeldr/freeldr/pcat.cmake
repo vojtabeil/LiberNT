@@ -82,7 +82,7 @@ if(ARCH STREQUAL "i386")
             arch/i386/xbox/xboxmem.c
             arch/i386/xbox/xboxrtc.c
             arch/i386/xbox/xboxvideo.c)
-        if(NOT MSVC)
+        if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
             # Prevent a warning when doing a memcmp with address 0
             set_source_files_properties(arch/i386/xbox/xboxmem.c PROPERTIES COMPILE_OPTIONS "-Wno-nonnull")
         endif()
@@ -117,12 +117,14 @@ elseif(ARCH STREQUAL "amd64")
 
     list(APPEND PCATLDR_COMMON_ASM_SOURCE
         arch/amd64/entry.S
+        arch/amd64/amd64trap.S
         arch/amd64/int386.S
         arch/amd64/pnpbios.S
         arch/amd64/linux.S)
 
     list(APPEND PCATLDR_ARC_SOURCE
         lib/fs/pxe.c
+        arch/amd64/amd64trap.c
         arch/i386/drivemap.c
         arch/i386/hwacpi.c
         arch/i386/hwapm.c
@@ -159,6 +161,10 @@ add_library(freeldr_common
     ${PCATLDR_BOOTMGR_SOURCE}
 )
 target_compile_definitions(freeldr_common PRIVATE _FRLDRLIB_)
+if(FREELDR_WIM_RAMDISK)
+    target_compile_definitions(freeldr_common PRIVATE FREELDR_WIM_RAMDISK=1)
+endif()
+target_link_libraries(freeldr_common fatfs)
 
 if(MSVC AND CMAKE_C_COMPILER_ID STREQUAL "Clang")
     # We need to reduce the binary size
@@ -167,6 +173,9 @@ endif()
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
     # Prevent using SSE (no support in freeldr)
     target_compile_options(freeldr_common PUBLIC -mno-sse)
+endif()
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(freeldr_common PRIVATE --param=min-pagesize=0)
 endif()
 
 set(PCH_SOURCE
@@ -190,6 +199,7 @@ list(APPEND PCATLDR_BASE_SOURCE
     ${FREELDR_BASE_SOURCE})
 
 add_executable(freeldr_pe ${PCATLDR_BASE_SOURCE})
+target_compile_definitions(freeldr_pe PRIVATE _FRLDRLIB_)
 
 set_target_properties(freeldr_pe
     PROPERTIES
@@ -208,11 +218,14 @@ if(MSVC)
     remove_target_compile_option(freeldr_common "/hotpatch")
 else()
     target_link_options(freeldr_pe PRIVATE -Wl,--exclude-all-symbols,--file-alignment,0x200,--section-alignment,0x200)
+    if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        target_link_options(freeldr_pe PRIVATE -Wl,/driver)
+    endif()
     add_linker_script(freeldr_pe freeldr_gcc.lds)
-    # Strip everything, including rossym data
+    # Strip everything, including the compressed symbol section
     add_custom_command(TARGET freeldr_pe
                     POST_BUILD
-                    COMMAND ${CMAKE_STRIP} --remove-section=.rossym $<TARGET_FILE:freeldr_pe>
+                    COMMAND ${CMAKE_STRIP} --remove-section=.symz $<TARGET_FILE:freeldr_pe>
                     COMMAND ${CMAKE_STRIP} --strip-all $<TARGET_FILE:freeldr_pe>)
 endif()
 
@@ -221,6 +234,9 @@ set_subsystem(freeldr_pe native)
 set_entrypoint(freeldr_pe RealEntryPoint)
 
 target_link_libraries(freeldr_pe freeldr_common cportlib libcntpr blrtl)
+if(FREELDR_WIM_RAMDISK)
+    target_link_libraries(freeldr_pe freeldr_wimcore)
+endif()
 if(ARCH STREQUAL "i386")
     target_link_libraries(freeldr_pe mini_hal)
 endif()
@@ -255,4 +271,4 @@ else()
     add_custom_target(freeldr ALL DEPENDS freeldr_pe)
 endif()
 
-add_cd_file(TARGET freeldr FILE ${CMAKE_CURRENT_BINARY_DIR}/freeldr.sys DESTINATION loader NO_CAB FOR bootcd regtest)
+add_cd_file(TARGET freeldr FILE ${CMAKE_CURRENT_BINARY_DIR}/freeldr.sys DESTINATION loader NO_CAB FOR bootcd livecd)

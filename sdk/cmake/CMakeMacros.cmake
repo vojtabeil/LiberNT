@@ -31,25 +31,44 @@ function(add_dependency_footer)
 endfunction()
 
 function(add_message_headers _type)
+    set(_files ${ARGN})
+    set(_resource_only FALSE)
+    list(FIND _files RESOURCE_ONLY _resource_only_index)
+    if(NOT _resource_only_index EQUAL -1)
+        set(_resource_only TRUE)
+        list(REMOVE_AT _files ${_resource_only_index})
+    endif()
+
     if(${_type} STREQUAL UNICODE)
         set(_flag "-U")
     else()
         set(_flag "-A")
     endif()
-    foreach(_file ${ARGN})
+    foreach(_file ${_files})
         get_filename_component(_file_name ${_file} NAME_WE)
         set(_converted_file ${CMAKE_CURRENT_BINARY_DIR}/${_file}) ## ${_file_name}.mc
         set(_source_file ${CMAKE_CURRENT_SOURCE_DIR}/${_file})    ## ${_file_name}.mc
+        if(_resource_only)
+            set(_header_dir ${CMAKE_CURRENT_BINARY_DIR}/message_headers)
+            set(_target_name ${_file_name}_message_resources)
+        else()
+            set(_header_dir ${CMAKE_CURRENT_BINARY_DIR})
+            set(_target_name ${_file_name})
+        endif()
+        set(_mc_depends "${_converted_file}")
+        if(TARGET ${CMAKE_MC_COMPILER})
+            list(APPEND _mc_depends ${CMAKE_MC_COMPILER})
+        endif()
         utf16le_convert(${_source_file} ${_converted_file} nobom)
-        macro_mc(${_flag} ${_converted_file})
         add_custom_command(
-            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${_file_name}.h ${CMAKE_CURRENT_BINARY_DIR}/${_file_name}.rc
-            COMMAND ${COMMAND_MC}
-            DEPENDS "${_converted_file}")
+            OUTPUT ${_header_dir}/${_file_name}.h ${CMAKE_CURRENT_BINARY_DIR}/${_file_name}.rc
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${_header_dir}
+            COMMAND ${CMAKE_MC_COMPILER} -u ${_flag} -b -h ${_header_dir}/ -r ${CMAKE_CURRENT_BINARY_DIR}/ ${_converted_file}
+            DEPENDS ${_mc_depends})
         set_source_files_properties(
-            ${CMAKE_CURRENT_BINARY_DIR}/${_file_name}.h ${CMAKE_CURRENT_BINARY_DIR}/${_file_name}.rc
+            ${_header_dir}/${_file_name}.h ${CMAKE_CURRENT_BINARY_DIR}/${_file_name}.rc
             PROPERTIES GENERATED TRUE)
-        add_custom_target(${_file_name} ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${_file_name}.h ${CMAKE_CURRENT_BINARY_DIR}/${_file_name}.rc)
+        add_custom_target(${_target_name} ALL DEPENDS ${_header_dir}/${_file_name}.h ${CMAKE_CURRENT_BINARY_DIR}/${_file_name}.rc)
     endforeach()
 endfunction()
 
@@ -94,176 +113,8 @@ function(add_link name path)
         VERBATIM)
 endfunction()
 
-#
-# WARNING!
-# Please keep the numbering in this list in sync with
-# boot/bootdata/packages/reactos.dff.in
-#
-macro(dir_to_num dir var)
-    if(${dir} STREQUAL reactos)
-        set(${var} 1)
-    elseif(${dir} STREQUAL reactos/system32)
-        set(${var} 2)
-    elseif(${dir} STREQUAL reactos/system32/drivers)
-        set(${var} 3)
-    elseif(${dir} STREQUAL reactos/Fonts)
-        set(${var} 4)
-    elseif(${dir} STREQUAL reactos/system32/drivers/etc)
-        set(${var} 5)
-    elseif(${dir} STREQUAL reactos/inf)
-        set(${var} 6)
-    elseif(${dir} STREQUAL reactos/bin)
-        set(${var} 7)
-    elseif(${dir} STREQUAL reactos/bin/testdata)
-        set(${var} 8)
-    elseif(${dir} STREQUAL reactos/media)
-        set(${var} 9)
-    elseif(${dir} STREQUAL reactos/Microsoft.NET)
-        set(${var} 10)
-    elseif(${dir} STREQUAL reactos/Microsoft.NET/Framework)
-        set(${var} 11)
-    elseif(${dir} STREQUAL reactos/Microsoft.NET/Framework/v1.0.3705)
-        set(${var} 12)
-    elseif(${dir} STREQUAL reactos/Microsoft.NET/Framework/v1.1.4322)
-        set(${var} 13)
-    elseif(${dir} STREQUAL reactos/Microsoft.NET/Framework/v2.0.50727)
-        set(${var} 14)
-    elseif(${dir} STREQUAL reactos/Resources)
-        set(${var} 15)
-    elseif(${dir} STREQUAL reactos/Resources/Themes)
-        set(${var} 16)
-    elseif(${dir} STREQUAL reactos/system32/wbem)
-        set(${var} 17)
-    elseif(${dir} STREQUAL reactos/Resources/Themes/Lautus)
-        set(${var} 18)
-    elseif(${dir} STREQUAL reactos/Help)
-        set(${var} 19)
-    elseif(${dir} STREQUAL reactos/Config)
-        set(${var} 20)
-    elseif(${dir} STREQUAL reactos/Cursors)
-        set(${var} 21)
-    elseif(${dir} STREQUAL reactos/system32/ShellExt)
-        set(${var} 22)
-    elseif(${dir} STREQUAL reactos/Temp)
-        set(${var} 23)
-    elseif(${dir} STREQUAL reactos/system32/spool)
-        set(${var} 24)
-    elseif(${dir} STREQUAL reactos/system32/spool/drivers)
-        set(${var} 25)
-    elseif(${dir} STREQUAL reactos/system32/spool/drivers/color)
-        set(${var} 26)
-    elseif(${dir} STREQUAL reactos/system32/spool/drivers/w32x86)
-        set(${var} 27)
-    elseif(${dir} STREQUAL reactos/system32/spool/drivers/w32x86/3)
-        set(${var} 28)
-    elseif(${dir} STREQUAL reactos/system32/spool/prtprocs)
-        set(${var} 29)
-    elseif(${dir} STREQUAL reactos/system32/spool/prtprocs/w32x86)
-        set(${var} 30)
-    elseif(${dir} STREQUAL reactos/system32/spool/PRINTERS)
-        set(${var} 31)
-    elseif(${dir} STREQUAL reactos/system32/wbem/Repository)
-        set(${var} 32)
-    elseif(${dir} STREQUAL reactos/system32/wbem/Repository/FS)
-        set(${var} 33)
-    elseif(${dir} STREQUAL reactos/system32/wbem/mof/good)
-        set(${var} 34)
-    elseif(${dir} STREQUAL reactos/system32/wbem/mof/bad)
-        set(${var} 35)
-    elseif(${dir} STREQUAL reactos/system32/wbem/AdStatus)
-        set(${var} 36)
-    elseif(${dir} STREQUAL reactos/system32/wbem/xml)
-        set(${var} 37)
-    elseif(${dir} STREQUAL reactos/system32/wbem/Logs)
-        set(${var} 38)
-    elseif(${dir} STREQUAL reactos/system32/wbem/AutoRecover)
-        set(${var} 39)
-    elseif(${dir} STREQUAL reactos/system32/wbem/snmp)
-        set(${var} 40)
-    elseif(${dir} STREQUAL reactos/system32/wbem/Performance)
-        set(${var} 41)
-    elseif(${dir} STREQUAL reactos/twain_32)
-        set(${var} 42)
-    elseif(${dir} STREQUAL reactos/repair)
-        set(${var} 43)
-    elseif(${dir} STREQUAL reactos/Web)
-        set(${var} 44)
-    elseif(${dir} STREQUAL reactos/Web/Wallpaper)
-        set(${var} 45)
-    elseif(${dir} STREQUAL reactos/Prefetch)
-        set(${var} 46)
-    elseif(${dir} STREQUAL reactos/security)
-        set(${var} 47)
-    elseif(${dir} STREQUAL reactos/security/Database)
-        set(${var} 48)
-    elseif(${dir} STREQUAL reactos/security/logs)
-        set(${var} 49)
-    elseif(${dir} STREQUAL reactos/security/templates)
-        set(${var} 50)
-    elseif(${dir} STREQUAL reactos/system32/CatRoot)
-        set(${var} 51)
-    elseif(${dir} STREQUAL reactos/system32/CatRoot2)
-        set(${var} 52)
-    elseif(${dir} STREQUAL reactos/AppPatch)
-        set(${var} 53)
-    elseif(${dir} STREQUAL reactos/winsxs)
-        set(${var} 54)
-    elseif(${dir} STREQUAL reactos/winsxs/manifests)
-        set(${var} 55)
-    elseif(${dir} STREQUAL reactos/winsxs/x86_microsoft.windows.common-controls_6595b64144ccf1df_5.82.2600.2982_none_deadbeef)
-        set(${var} 56)
-    elseif(${dir} STREQUAL reactos/winsxs/x86_microsoft.windows.common-controls_6595b64144ccf1df_6.0.2600.2982_none_deadbeef)
-        set(${var} 57)
-    elseif(${dir} STREQUAL reactos/winsxs/x86_microsoft.windows.gdiplus_6595b64144ccf1df_1.1.7601.23038_none_deadbeef)
-        set(${var} 58)
-    elseif(${dir} STREQUAL reactos/bin/suppl)
-        set(${var} 60)
-    elseif(${dir} STREQUAL reactos/winsxs/x86_microsoft.windows.gdiplus_6595b64144ccf1df_1.0.14393.0_none_deadbeef)
-        set(${var} 61)
-    elseif(${dir} STREQUAL reactos/Resources/Themes/Modern)
-        set(${var} 62)
-    elseif(${dir} STREQUAL reactos/3rdParty)
-        set(${var} 63)
-    elseif(${dir} STREQUAL reactos/Resources/Themes/Lunar)
-        set(${var} 64)
-    elseif(${dir} STREQUAL reactos/Resources/Themes/Mizu)
-        set(${var} 65)
-    elseif(${dir} STREQUAL reactos/system32/spool/prtprocs/x64)
-        set(${var} 66)
-    elseif(${dir} STREQUAL reactos/winsxs/amd64_microsoft.windows.common-controls_6595b64144ccf1df_5.82.2600.2982_none_deadbeef)
-        set(${var} 67)
-    elseif(${dir} STREQUAL reactos/winsxs/amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.2600.2982_none_deadbeef)
-        set(${var} 68)
-    elseif(${dir} STREQUAL reactos/winsxs/amd64_microsoft.windows.gdiplus_6595b64144ccf1df_1.1.7601.23038_none_deadbeef)
-        set(${var} 69)
-    elseif(${dir} STREQUAL reactos/winsxs/amd64_microsoft.windows.gdiplus_6595b64144ccf1df_1.0.14393.0_none_deadbeef)
-        set(${var} 71)
-
-    elseif(${dir} STREQUAL reactos/winsxs/arm_microsoft.windows.common-controls_6595b64144ccf1df_5.82.2600.2982_none_deadbeef)
-        set(${var} 72)
-    elseif(${dir} STREQUAL reactos/winsxs/arm_microsoft.windows.common-controls_6595b64144ccf1df_6.0.2600.2982_none_deadbeef)
-        set(${var} 73)
-    elseif(${dir} STREQUAL reactos/winsxs/arm_microsoft.windows.gdiplus_6595b64144ccf1df_1.1.7601.23038_none_deadbeef)
-        set(${var} 74)
-    elseif(${dir} STREQUAL reactos/winsxs/arm_microsoft.windows.gdiplus_6595b64144ccf1df_1.0.14393.0_none_deadbeef)
-        set(${var} 76)
-
-    elseif(${dir} STREQUAL reactos/winsxs/arm64_microsoft.windows.common-controls_6595b64144ccf1df_5.82.2600.2982_none_deadbeef)
-        set(${var} 77)
-    elseif(${dir} STREQUAL reactos/winsxs/arm64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.2600.2982_none_deadbeef)
-        set(${var} 78)
-    elseif(${dir} STREQUAL reactos/winsxs/arm64_microsoft.windows.gdiplus_6595b64144ccf1df_1.1.7601.23038_none_deadbeef)
-        set(${var} 79)
-    elseif(${dir} STREQUAL reactos/winsxs/arm64_microsoft.windows.gdiplus_6595b64144ccf1df_1.0.14393.0_none_deadbeef)
-        set(${var} 81)
-
-    else()
-        message(FATAL_ERROR "Wrong destination: ${dir}")
-    endif()
-endmacro()
-
 function(add_cd_file)
-    cmake_parse_arguments(_CD "NO_CAB" "DESTINATION;NAME_ON_CD;TARGET" "FILE;FOR" ${ARGN})
+    cmake_parse_arguments(_CD "NO_CAB;OPTIONAL" "DESTINATION;NAME_ON_CD;TARGET" "FILE;FOR" ${ARGN})
     if(NOT (_CD_TARGET OR _CD_FILE))
         message(FATAL_ERROR "You must provide a target or a file to install!")
     endif()
@@ -278,65 +129,50 @@ function(add_cd_file)
         message(FATAL_ERROR "You must provide a cd name (or \"all\" for all of them) to install the file on!")
     endif()
 
+    # Trust exact OS build artifacts, independently of their runtime path.
+    # The kernel embeds these hashes for code-integrity image policy checks.
+    if(_CD_TARGET AND NOT _CD_OPTIONAL AND _CD_DESTINATION MATCHES "^reactos/(system32|winsxs)(/|$)")
+        if(TARGET ${_CD_TARGET})
+            get_target_property(_ci_module_type ${_CD_TARGET} REACTOS_MODULE_TYPE)
+            if(_ci_module_type MATCHES "^(nativedll|win32dll|win32ocx|cpl|module)$")
+                set_property(GLOBAL APPEND PROPERTY CI_SYSTEM_TARGETS ${_CD_TARGET})
+            endif()
+        endif()
+    endif()
+
+    if(_CD_OPTIONAL)
+        set(_cd_list OPTIONAL_FILE_LIST)
+    else()
+        set(_cd_list FILE_LIST)
+    endif()
+
     # get file if we need to
     if(NOT _CD_FILE)
-        set(_CD_FILE "$<TARGET_FILE:${_CD_TARGET}>")
+        set_property(GLOBAL APPEND PROPERTY CD_TARGET_FILES ${_CD_TARGET})
+        set(_CD_FILE "$<IF:$<BOOL:$<TARGET_PROPERTY:${_CD_TARGET},ARM64X_FILE>>,$<TARGET_PROPERTY:${_CD_TARGET},ARM64X_FILE>,$<TARGET_FILE:${_CD_TARGET}>>")
         if(NOT _CD_NAME_ON_CD)
             set(_CD_NAME_ON_CD "$<TARGET_FILE_NAME:${_CD_TARGET}>")
         endif()
     endif()
 
     # do we add it to all CDs?
+    set(_cd_for_all FALSE)
     list(FIND _CD_FOR "all" __cd)
     if(NOT __cd EQUAL -1)
+        set(_cd_for_all TRUE)
         list(REMOVE_ITEM _CD_FOR "all")
-        list(APPEND _CD_FOR "bootcd;livecd;regtest")
+        list(APPEND _CD_FOR "bootcd;livecd;preinstall")
     endif()
 
     # do we add it to bootcd?
     list(FIND _CD_FOR bootcd __cd)
-    if(NOT __cd EQUAL -1)
-        # whether or not we should put it in reactos.cab or directly on cd
+    if(NOT __cd EQUAL -1 AND NOT _cd_for_all)
         if(_CD_NO_CAB)
-            # directly on cd - replace the "reactos/" directory name by the current build architecture name
+            # setup file - replace the "reactos/" directory name by the current build architecture name
             # WARNING: CMake REGEXes are always case-sensitive!
             string(REGEX REPLACE "^reactos([\\\\/]+|$)" "${ARCH}\\1" _CD_ARCH_DESTINATION "${_CD_DESTINATION}")
-            foreach(item ${_CD_FILE})
-                if(_CD_NAME_ON_CD)
-                    # rename it in the cd tree
-                    set(__file ${_CD_NAME_ON_CD})
-                else()
-                    get_filename_component(__file ${item} NAME)
-                endif()
-                set_property(GLOBAL APPEND PROPERTY BOOTCD_FILE_LIST "${_CD_ARCH_DESTINATION}/${__file}=${item}")
-            endforeach()
-            # manage dependency
-            if(_CD_TARGET)
-                add_dependencies(bootcd ${_CD_TARGET} registry_inf)
-            endif()
         else()
-            dir_to_num(${_CD_DESTINATION} _num)
-            foreach(item ${_CD_FILE})
-                # add it in reactos.cab
-                file(APPEND ${REACTOS_BINARY_DIR}/boot/bootdata/packages/reactos.dff.cmake "\"${item}\" ${_num}\n")
-
-                # manage dependency - file level
-                set_property(GLOBAL APPEND PROPERTY REACTOS_CAB_DEPENDS ${item})
-            endforeach()
-
-            # manage dependency - target level
-            if(_CD_TARGET)
-                add_dependencies(reactos_cab_inf ${_CD_TARGET})
-            endif()
-        endif()
-    endif() #end bootcd
-
-    # do we add it to livecd?
-    list(FIND _CD_FOR livecd __cd)
-    if(NOT __cd EQUAL -1)
-        # manage dependency
-        if(_CD_TARGET)
-            add_dependencies(livecd ${_CD_TARGET} registry_inf)
+            set(_CD_ARCH_DESTINATION "${_CD_DESTINATION}")
         endif()
         foreach(item ${_CD_FILE})
             if(_CD_NAME_ON_CD)
@@ -345,68 +181,64 @@ function(add_cd_file)
             else()
                 get_filename_component(__file ${item} NAME)
             endif()
-            set_property(GLOBAL APPEND PROPERTY LIVECD_FILE_LIST "${_CD_DESTINATION}/${__file}=${item}")
+            set_property(GLOBAL APPEND PROPERTY BOOTCD_${_cd_list} "${_CD_ARCH_DESTINATION}/${__file}=${item}")
+        endforeach()
+        # manage dependency
+        if(_CD_TARGET AND NOT _CD_OPTIONAL)
+            add_dependencies(bootcd ${_CD_TARGET} registry_inf)
+        endif()
+    endif() #end bootcd
+
+    # do we add it to livecd?
+    list(FIND _CD_FOR livecd __cd)
+    if(NOT __cd EQUAL -1)
+        # manage dependency
+        if(_CD_TARGET AND NOT _CD_OPTIONAL)
+            add_dependencies(bootcd ${_CD_TARGET} registry_inf)
+            add_dependencies(livecd_files ${_CD_TARGET} registry_inf)
+        endif()
+        foreach(item ${_CD_FILE})
+            if(_CD_NAME_ON_CD)
+                # rename it in the cd tree
+                set(__file ${_CD_NAME_ON_CD})
+            else()
+                get_filename_component(__file ${item} NAME)
+            endif()
+            set_property(GLOBAL APPEND PROPERTY LIVECD_${_cd_list} "${_CD_DESTINATION}/${__file}=${item}")
         endforeach()
     endif() #end livecd
 
-    # do we add it to regtest?
-    list(FIND _CD_FOR regtest __cd)
+
+    # do we add it to preinstall?
+    list(FIND _CD_FOR preinstall __cd)
     if(NOT __cd EQUAL -1)
-        # whether or not we should put it in reactos.cab or directly on cd
-        if(_CD_NO_CAB)
-            # directly on cd - replace the "reactos/" directory name by the current build architecture name
-            # WARNING: CMake REGEXes are always case-sensitive!
-            string(REGEX REPLACE "^reactos([\\\\/]+|$)" "${ARCH}\\1" _CD_ARCH_DESTINATION "${_CD_DESTINATION}")
-            foreach(item ${_CD_FILE})
-                if(_CD_NAME_ON_CD)
-                    # rename it in the cd tree
-                    set(__file ${_CD_NAME_ON_CD})
-                else()
-                    get_filename_component(__file ${item} NAME)
-                endif()
-                set_property(GLOBAL APPEND PROPERTY BOOTCDREGTEST_FILE_LIST "${_CD_ARCH_DESTINATION}/${__file}=${item}")
-            endforeach()
-            # manage dependency
-            if(_CD_TARGET)
-                add_dependencies(bootcdregtest ${_CD_TARGET} registry_inf)
-            endif()
-        else()
-            #add it in reactos.cab
-            #dir_to_num(${_CD_DESTINATION} _num)
-            #file(APPEND ${REACTOS_BINARY_DIR}/boot/bootdata/packages/reactos.dff.dyn "${_CD_FILE} ${_num}\n")
-            #if(_CD_TARGET)
-            #    #manage dependency
-            #    add_dependencies(reactos_cab ${_CD_TARGET})
-            #endif()
+        # manage dependency
+        if(_CD_TARGET AND NOT _CD_OPTIONAL)
+            add_dependencies(preinstall_partition ${_CD_TARGET} registry_inf)
         endif()
-    endif() #end bootcd
+        foreach(item ${_CD_FILE})
+            if(_CD_NAME_ON_CD)
+                # rename it in the cd tree
+                set(__file ${_CD_NAME_ON_CD})
+            else()
+                get_filename_component(__file ${item} NAME)
+            endif()
+            set_property(GLOBAL APPEND PROPERTY PREINSTALL_${_cd_list} "${_CD_DESTINATION}/${__file}=${item}")
+        endforeach()
+    endif() #end preinstall
+endfunction()
+
+function(create_txtsetup_sif)
+    set(_source ${REACTOS_SOURCE_DIR}/boot/bootdata/txtsetup.sif)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_source})
+
+    file(GENERATE
+         OUTPUT ${REACTOS_BINARY_DIR}/boot/bootdata/txtsetup.$<CONFIG>.sif
+         INPUT ${_source})
 endfunction()
 
 function(create_iso_lists)
-    # Generate reactos.cab before anything else
-    get_property(_filelist GLOBAL PROPERTY REACTOS_CAB_DEPENDS)
-
-    # Begin with reactos.inf. We want this command to be always executed, so we pretend it generates another file although it will never do.
-    add_custom_command(
-        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/reactos.inf ${CMAKE_CURRENT_BINARY_DIR}/__some_non_existent_file
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${REACTOS_BINARY_DIR}/boot/bootdata/packages/reactos.inf ${CMAKE_CURRENT_BINARY_DIR}/reactos.inf
-        DEPENDS ${REACTOS_BINARY_DIR}/boot/bootdata/packages/reactos.inf reactos_cab_inf)
-
-    # Now build reactos.cab itself
-    add_custom_command(
-        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/reactos.cab
-        COMMAND native-cabman -C ${REACTOS_BINARY_DIR}/boot/bootdata/packages/reactos.dff -RC ${CMAKE_CURRENT_BINARY_DIR}/reactos.inf -N -P ${REACTOS_SOURCE_DIR}
-        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.inf native-cabman ${_filelist})
-
-    add_custom_target(reactos_cab DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/reactos.cab)
-    add_dependencies(reactos_cab reactos_cab_inf)
-
-    # Add reactos.cab into the BootCD
-    add_cd_file(
-        TARGET reactos_cab
-        FILE ${CMAKE_CURRENT_BINARY_DIR}/reactos.cab
-        DESTINATION reactos
-        NO_CAB FOR bootcd regtest)
+    create_txtsetup_sif()
 
 if(FALSE) ## Disabled until we want a RAMDISK ISO
     # Add the LiveImage into the BootCD
@@ -419,8 +251,19 @@ endif()
 
     # Write the LiveImage file list
     get_property(_filelist GLOBAL PROPERTY LIVECD_FILE_LIST)
-    string(REPLACE ";" "\n" _filelist "${_filelist}")
-    file(APPEND ${REACTOS_BINARY_DIR}/boot/livecd.cmake.lst "${_filelist}")
+    if(_filelist)
+        string(REPLACE ";" "\n" _filelist "${_filelist}")
+        file(APPEND ${REACTOS_BINARY_DIR}/boot/livecd.cmake.lst "${_filelist}\n")
+    endif()
+    unset(_filelist)
+
+    # Build-local LiveCD overlays are written after the regular image entries
+    # so that a matching destination replaces the default file.
+    get_property(_filelist GLOBAL PROPERTY LIVECD_OVERLAY_FILE_LIST)
+    if(_filelist)
+        string(REPLACE ";" "\n" _filelist "${_filelist}")
+        file(APPEND ${REACTOS_BINARY_DIR}/boot/livecd.cmake.lst "${_filelist}\n")
+    endif()
     unset(_filelist)
     file(GENERATE
          OUTPUT ${REACTOS_BINARY_DIR}/boot/livecd.$<CONFIG>.lst
@@ -428,26 +271,64 @@ endif()
 
     # Write the BootCD file list
     get_property(_filelist GLOBAL PROPERTY BOOTCD_FILE_LIST)
+    foreach(_entry IN LISTS _filelist)
+        string(REGEX REPLACE "=.*$" "" _destination "${_entry}")
+        string(MD5 _key "${_destination}")
+        set(_bootcd_destination_${_key} TRUE)
+    endforeach()
     string(REPLACE ";" "\n" _filelist "${_filelist}")
     file(APPEND ${REACTOS_BINARY_DIR}/boot/bootcd.cmake.lst "${_filelist}")
     unset(_filelist)
     # Also, append the file contents list of the LiveImage to the BootCD file list
     file(APPEND ${REACTOS_BINARY_DIR}/boot/bootcd.cmake.lst "\n")
-    file(READ ${REACTOS_BINARY_DIR}/boot/livecd.cmake.lst _filelist)
-    file(APPEND ${REACTOS_BINARY_DIR}/boot/bootcd.cmake.lst "${_filelist}")
+    file(STRINGS ${REACTOS_BINARY_DIR}/boot/livecd.cmake.lst _filelist)
+    set(_livecd_entries "")
+    foreach(_entry IN LISTS _filelist)
+        string(REGEX REPLACE "=.*$" "" _destination "${_entry}")
+        string(MD5 _key "${_destination}")
+        if(NOT _bootcd_destination_${_key})
+            string(APPEND _livecd_entries "${_entry}\n")
+        endif()
+    endforeach()
+    file(APPEND ${REACTOS_BINARY_DIR}/boot/bootcd.cmake.lst "${_livecd_entries}")
+    unset(_livecd_entries)
     unset(_filelist)
     file(GENERATE
          OUTPUT ${REACTOS_BINARY_DIR}/boot/bootcd.$<CONFIG>.lst
          INPUT ${REACTOS_BINARY_DIR}/boot/bootcd.cmake.lst)
 
-    # Write the BootCDRegTest file list
-    get_property(_filelist GLOBAL PROPERTY BOOTCDREGTEST_FILE_LIST)
-    string(REPLACE ";" "\n" _filelist "${_filelist}")
-    file(APPEND ${REACTOS_BINARY_DIR}/boot/bootcdregtest.cmake.lst "${_filelist}")
+    get_property(_filelist GLOBAL PROPERTY PREINSTALL_FILE_LIST)
+    if(_filelist)
+        string(REPLACE ";" "\n" _filelist "${_filelist}")
+        file(APPEND ${REACTOS_BINARY_DIR}/boot/preinstall.cmake.lst "${_filelist}\n")
+    endif()
+    unset(_filelist)
+
+    # Build-local preinstall overlays are deliberately written after every
+    # regular image entry so that a matching destination replaces the default.
+    get_property(_filelist GLOBAL PROPERTY PREINSTALL_OVERLAY_FILE_LIST)
+    if(_filelist)
+        string(REPLACE ";" "\n" _filelist "${_filelist}")
+        file(APPEND ${REACTOS_BINARY_DIR}/boot/preinstall.cmake.lst "${_filelist}\n")
+    endif()
     unset(_filelist)
     file(GENERATE
-         OUTPUT ${REACTOS_BINARY_DIR}/boot/bootcdregtest.$<CONFIG>.lst
-         INPUT ${REACTOS_BINARY_DIR}/boot/bootcdregtest.cmake.lst)
+         OUTPUT ${REACTOS_BINARY_DIR}/boot/preinstall.$<CONFIG>.lst
+         INPUT ${REACTOS_BINARY_DIR}/boot/preinstall.cmake.lst)
+
+    foreach(_image livecd bootcd preinstall)
+        string(TOUPPER "${_image}" _property)
+        get_property(_filelist GLOBAL PROPERTY ${_property}_OPTIONAL_FILE_LIST)
+        if(_image STREQUAL "bootcd")
+            get_property(_livecd_filelist GLOBAL PROPERTY LIVECD_OPTIONAL_FILE_LIST)
+            list(APPEND _filelist ${_livecd_filelist})
+        endif()
+        string(REPLACE ";" "\n" _filelist "${_filelist}")
+        file(WRITE ${REACTOS_BINARY_DIR}/boot/${_image}.optional.cmake.lst "${_filelist}\n")
+        file(GENERATE
+             OUTPUT ${REACTOS_BINARY_DIR}/boot/${_image}.optional.$<CONFIG>.lst
+             INPUT ${REACTOS_BINARY_DIR}/boot/${_image}.optional.cmake.lst)
+    endforeach()
 endfunction()
 
 # Create module_clean targets
@@ -550,7 +431,20 @@ endif()
 
 function(add_importlibs _module)
     add_dependency_node(${_module})
+
+    if(ARM64EC_RUNTIME AND NOT _module STREQUAL "ntdll_chpe")
+        # Prefer native ABI bridge exports over regular ntdll syscall stubs.
+        list(FIND ARGN "ntdll" _ntdll_index)
+        if(NOT _ntdll_index EQUAL -1)
+            target_link_libraries(${_module} libntdll_chpe)
+            add_dependency_edge(${_module} ntdll_chpe)
+        endif()
+    endif()
+
     foreach(LIB ${ARGN})
+        if(LIB STREQUAL "msvcrt")
+            target_link_libraries(${_module} msvcrtex)
+        endif()
         target_link_libraries(${_module} lib${LIB})
         add_dependency_edge(${_module} ${LIB})
     endforeach()
@@ -594,8 +488,85 @@ endfunction()
 # set_module_type(my_driver kernelmodedriver)
 # sign_driver_if_needed(my_driver)
 
+function(add_kernel_ubsan TARGET)
+    if(ENABLE_KERNEL_UBSAN)
+        target_compile_options(${TARGET} PRIVATE
+            "$<$<COMPILE_LANGUAGE:C,CXX>:-fsanitize=shift,integer-divide-by-zero,signed-integer-overflow,bounds,bool,enum,vla-bound,builtin,float-cast-overflow,nonnull-attribute,returns-nonnull-attribute;-fno-autolink>")
+    endif()
+endfunction()
+
+function(add_kernel_module_ubsan MODULE TYPE)
+    get_target_property(_ubsan_libraries ${MODULE} LINK_LIBRARIES)
+    if(TYPE STREQUAL kernel)
+        add_kernel_ubsan(${MODULE})
+        target_link_libraries(${MODULE} kubsan_ntos)
+        set_property(GLOBAL APPEND PROPERTY KERNEL_UBSAN_MODULES ${MODULE})
+    elseif("libntoskrnl" IN_LIST _ubsan_libraries)
+        add_kernel_ubsan(${MODULE})
+        target_link_libraries(${MODULE} kubsan)
+        set_property(GLOBAL APPEND PROPERTY KERNEL_UBSAN_MODULES ${MODULE})
+    endif()
+endfunction()
+
+function(_kernel_ubsan_directory_targets DIRECTORY OUTPUT)
+    get_property(_targets DIRECTORY ${DIRECTORY} PROPERTY BUILDSYSTEM_TARGETS)
+    get_property(_subdirectories DIRECTORY ${DIRECTORY} PROPERTY SUBDIRECTORIES)
+    foreach(_subdirectory IN LISTS _subdirectories)
+        _kernel_ubsan_directory_targets(${_subdirectory} _subtargets)
+        list(APPEND _targets ${_subtargets})
+    endforeach()
+    set(${OUTPUT} ${_targets} PARENT_SCOPE)
+endfunction()
+
+function(_kernel_ubsan_static_closure TARGET PROPERTY_NAME)
+    get_target_property(_links ${TARGET} LINK_LIBRARIES)
+    foreach(_link IN LISTS _links)
+        string(REGEX REPLACE "^\\$<LINK_ONLY:(.*)>$" "\\1" _link "${_link}")
+        if(NOT TARGET "${_link}")
+            continue()
+        endif()
+        get_target_property(_type ${_link} TYPE)
+        get_property(_seen GLOBAL PROPERTY ${PROPERTY_NAME})
+        if(_type MATCHES "^(STATIC|OBJECT)_LIBRARY$" AND NOT _link IN_LIST _seen)
+            set_property(GLOBAL APPEND PROPERTY ${PROPERTY_NAME} ${_link})
+            _kernel_ubsan_static_closure(${_link} ${PROPERTY_NAME})
+        endif()
+    endforeach()
+endfunction()
+
+function(add_kernel_library_ubsan)
+    get_property(_kernel_modules GLOBAL PROPERTY KERNEL_UBSAN_MODULES)
+    _kernel_ubsan_directory_targets(${CMAKE_SOURCE_DIR} _targets)
+    foreach(_target IN LISTS _targets)
+        get_target_property(_type ${_target} TYPE)
+        if(NOT _type MATCHES "^(EXECUTABLE|SHARED_LIBRARY|MODULE_LIBRARY)$")
+            continue()
+        endif()
+        if(_target IN_LIST _kernel_modules)
+            _kernel_ubsan_static_closure(${_target} KERNEL_UBSAN_KERNEL_LIBRARIES)
+        else()
+            _kernel_ubsan_static_closure(${_target} KERNEL_UBSAN_OTHER_LIBRARIES)
+        endif()
+    endforeach()
+    get_property(_kernel_libraries GLOBAL PROPERTY KERNEL_UBSAN_KERNEL_LIBRARIES)
+    get_property(_other_libraries GLOBAL PROPERTY KERNEL_UBSAN_OTHER_LIBRARIES)
+    foreach(_library IN LISTS _kernel_libraries)
+        get_target_property(_source_dir ${_library} SOURCE_DIR)
+        get_target_property(_imported ${_library} IMPORTED)
+        if(_imported OR _library IN_LIST _other_libraries OR _library MATCHES "^kubsan" OR
+           NOT _source_dir MATCHES "^${REACTOS_SOURCE_DIR}/sdk/lib/")
+            continue()
+        endif()
+        add_kernel_ubsan(${_library})
+    endforeach()
+endfunction()
+
+if(ENABLE_KERNEL_UBSAN)
+    cmake_language(DEFER DIRECTORY ${CMAKE_SOURCE_DIR} CALL add_kernel_library_ubsan)
+endif()
+
 function(set_module_type MODULE TYPE)
-    cmake_parse_arguments(__module "UNICODE" "IMAGEBASE" "ENTRYPOINT" ${ARGN})
+    cmake_parse_arguments(__module "UNICODE" "IMAGEBASE;KMDF_VERSION;KMDF_MINIMUM_VERSION" "ENTRYPOINT" ${ARGN})
 
     if(__module_UNPARSED_ARGUMENTS)
         message(STATUS "set_module_type : unparsed arguments ${__module_UNPARSED_ARGUMENTS}, module : ${MODULE}")
@@ -619,13 +590,22 @@ function(set_module_type MODULE TYPE)
         set_subsystem(${MODULE} native)
     elseif(${TYPE} STREQUAL win32cui)
         set_subsystem(${MODULE} console)
-    elseif(${TYPE} STREQUAL win32gui)
+    else()
         set_subsystem(${MODULE} windows)
     endif()
 
     # Set unicode definitions
     if(__module_UNICODE)
         target_compile_definitions(${MODULE} PRIVATE UNICODE _UNICODE)
+    endif()
+
+    if(TYPE IN_LIST KERNEL_MODULE_TYPES)
+        target_compile_definitions(${MODULE} PRIVATE _GCC_SAL_CHECK_RETURN)
+        set_target_properties(${MODULE} PROPERTIES RV64X_EXCLUDE ON)
+        # The debugger transports and boot video print the reports, so they stay uninstrumented.
+        if(ENABLE_KERNEL_UBSAN AND NOT MODULE MATCHES "^(kd|bootvid)")
+            cmake_language(EVAL CODE "cmake_language(DEFER CALL add_kernel_module_ubsan [[${MODULE}]] [[${TYPE}]])")
+        endif()
     endif()
 
     # Set entry point
@@ -666,16 +646,14 @@ function(set_module_type MODULE TYPE)
         if(NOT ${__module_IMAGEBASE} STREQUAL "default")
             set_image_base(${MODULE} ${__module_IMAGEBASE})
         endif()
-    elseif(${TYPE} STREQUAL win32dll)
-        if(DEFINED baseaddress_${MODULE})
-            set_image_base(${MODULE} ${baseaddress_${MODULE}})
-        else()
-            message(STATUS "${MODULE} has no base address")
-        endif()
     elseif(TYPE IN_LIST KERNEL_MODULE_TYPES)
         # special case for kernel
-        if (TYPE STREQUAL kernel)
+        if ((TYPE STREQUAL kernel) AND MSVC AND (ARCH STREQUAL "arm64"))
+            set_image_base(${MODULE} 0x140000000)
+        elseif (TYPE STREQUAL kernel)
             set_image_base(${MODULE} 0x00400000)
+        elseif(ARCH STREQUAL "arm64")
+            set_image_base(${MODULE} 0x140000000)
         else()
             set_image_base(${MODULE} 0x00010000)
         endif()
@@ -701,9 +679,49 @@ function(set_module_type MODULE TYPE)
     endif()
 
     if(TYPE STREQUAL kmdfdriver)
-        target_include_directories(${MODULE} PUBLIC ${REACTOS_SOURCE_DIR}/sdk/include/wdf/kmdf/1.17)
+        if(NOT __module_KMDF_VERSION)
+            set(__module_KMDF_VERSION "1.17")
+        endif()
+
+        if(NOT __module_KMDF_VERSION MATCHES "^1\\.([0-9]+)$")
+            message(FATAL_ERROR "Invalid KMDF version '${__module_KMDF_VERSION}' for ${MODULE}")
+        endif()
+
+        set(_kmdf_minor ${CMAKE_MATCH_1})
+        set(_kmdf_include_dir ${REACTOS_SOURCE_DIR}/sdk/include/wdf/kmdf/${__module_KMDF_VERSION})
+        if(NOT EXISTS ${_kmdf_include_dir}/wdf.h)
+            message(FATAL_ERROR "KMDF ${__module_KMDF_VERSION} headers are not available for ${MODULE}")
+        endif()
+
+        if(__module_KMDF_VERSION STREQUAL "1.17")
+            set(_wdfdriverentry_target wdfdriverentry)
+        else()
+            string(REPLACE "." "_" _kmdf_version_suffix ${__module_KMDF_VERSION})
+            set(_wdfdriverentry_target wdfdriverentry_${_kmdf_version_suffix})
+        endif()
+
+        target_include_directories(${MODULE} PUBLIC ${_kmdf_include_dir})
+        target_compile_definitions(${MODULE} PRIVATE
+            KMDF_VERSION_MAJOR=1
+            KMDF_VERSION_MINOR=${_kmdf_minor})
+
+        if(__module_KMDF_MINIMUM_VERSION)
+            if(NOT __module_KMDF_MINIMUM_VERSION MATCHES "^1\\.([0-9]+)$")
+                message(FATAL_ERROR "Invalid minimum KMDF version '${__module_KMDF_MINIMUM_VERSION}' for ${MODULE}")
+            endif()
+            set(_kmdf_minimum_minor ${CMAKE_MATCH_1})
+            if(_kmdf_minor LESS 25 OR
+               _kmdf_minimum_minor LESS 25 OR
+               _kmdf_minimum_minor GREATER _kmdf_minor)
+                message(FATAL_ERROR
+                    "KMDF minimum version ${__module_KMDF_MINIMUM_VERSION} is invalid for target ${__module_KMDF_VERSION}")
+            endif()
+            target_compile_definitions(${MODULE} PRIVATE
+                KMDF_MINIMUM_VERSION_REQUIRED=${_kmdf_minimum_minor})
+        endif()
+
         add_importlibs(${MODULE} wdfldr)
-        target_link_libraries(${MODULE} wdfdriverentry)
+        target_link_libraries(${MODULE} ${_wdfdriverentry_target} wdmsec)
     endif()
 
     if(${TYPE} STREQUAL win32ocx)
@@ -776,12 +794,129 @@ function(get_defines OUTPUT_VAR)
     set(${OUTPUT_VAR} ${__tmp_var} PARENT_SCOPE)
 endfunction()
 
+function(export_sdk_libraries _target _directory)
+    cmake_parse_arguments(_export "" "FROM" "LIBRARIES;FILES;DEPENDS" ${ARGN})
+    set(_commands)
+    foreach(_file IN LISTS _export_FILES)
+        get_filename_component(_name "${_file}" NAME)
+        list(APPEND _commands
+            COMMAND ${CMAKE_COMMAND} -E rm -f "${_directory}/${_name}"
+            COMMAND ${CMAKE_AR} qcL "${_directory}/${_name}" "${_file}")
+    endforeach()
+    foreach(_library IN LISTS _export_LIBRARIES)
+        set(_source "$<TARGET_FILE:${_library}>")
+        if(_export_FROM)
+            set(_source "${_export_FROM}/$<PATH:RELATIVE_PATH,$<TARGET_FILE:${_library}>,${REACTOS_BINARY_DIR}>")
+        endif()
+        set(_archive "${_directory}/$<TARGET_FILE_NAME:${_library}>")
+        list(APPEND _commands
+            COMMAND ${CMAKE_COMMAND} -E rm -f "${_archive}"
+            COMMAND ${CMAKE_AR} qcL "${_archive}" "${_source}")
+    endforeach()
+    add_custom_target(${_target}
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_directory}"
+        ${_commands}
+        DEPENDS ${_export_DEPENDS}
+        COMMENT "Exporting SDK libraries to ${_directory}"
+        VERBATIM)
+endfunction()
+
+# Wine marks a small number of sources with `#pragma makedep arm64ec_x64`.
+# They contain genuine AMD64 call thunks which must be linked into the hybrid
+# image as AMD64 objects; compiling their ARM64 branch changes the ABI.
+function(add_arm64ec_x64_source OUTPUT_VAR SOURCE_FILE)
+    if(NOT (ARCH STREQUAL "arm64" AND ARM64EC_RUNTIME))
+        set(${OUTPUT_VAR} "${SOURCE_FILE}" PARENT_SCOPE)
+        return()
+    endif()
+
+    if(NOT CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        message(FATAL_ERROR "ARM64EC x64 source objects require Clang")
+    endif()
+
+    get_filename_component(_source_path "${SOURCE_FILE}" ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    get_filename_component(_source_name "${SOURCE_FILE}" NAME_WE)
+    set(_object_path "${CMAKE_CURRENT_BINARY_DIR}/${_source_name}.arm64ec_x64.obj")
+    set(_depfile_path "${_object_path}.d")
+    set(_x64_compiler "${CMAKE_C_COMPILER}")
+
+    get_includes(_x64_includes)
+    if(CMAKE_INCLUDE_CURRENT_DIR)
+        list(APPEND _x64_includes "-I${CMAKE_CURRENT_SOURCE_DIR}" "-I${CMAKE_CURRENT_BINARY_DIR}")
+    endif()
+    get_defines(_directory_defines)
+    foreach(_define IN LISTS _directory_defines)
+        if(NOT _define MATCHES "^-D(_ARM64EC_|_M_ARM64EC|__arm64ec__)(=.*)?$")
+            list(APPEND _x64_defines "${_define}")
+        endif()
+    endforeach()
+    foreach(_define IN LISTS ARGN)
+        list(APPEND _x64_defines "-D${_define}")
+    endforeach()
+    list(APPEND _x64_defines -D__arm64ec_x64__)
+
+    set(_debug_flags)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        list(APPEND _debug_flags -gdwarf-2 -ggdb)
+    endif()
+
+    if(POLICY CMP0116)
+        cmake_policy(SET CMP0116 NEW)
+    endif()
+
+    add_custom_command(
+        OUTPUT "${_object_path}"
+        COMMAND "${_x64_compiler}"
+            --target=x86_64-w64-mingw32
+            ${_x64_defines}
+            -isystem "${CLANG_RESOURCE_DIR}/include"
+            ${_x64_includes}
+            -std=gnu99
+            -ffile-prefix-map=${REACTOS_SOURCE_DIR}=
+            -ffile-prefix-map=../../=
+            -fms-extensions
+            -fno-strict-aliasing
+            -fno-common
+            -nostdlibinc
+            -Wno-microsoft-anon-tag
+            -O1
+            -fno-optimize-sibling-calls
+            -fno-omit-frame-pointer
+            ${_debug_flags}
+            -MMD -MF "${_depfile_path}" -MT "${_object_path}"
+            -c "${_source_path}" -o "${_object_path}"
+        DEPENDS "${_source_path}"
+        DEPFILE "${_depfile_path}"
+        COMMAND_EXPAND_LISTS
+        VERBATIM)
+
+    set_source_files_properties("${_object_path}" PROPERTIES GENERATED TRUE EXTERNAL_OBJECT TRUE)
+    set(${OUTPUT_VAR} "${_object_path}" PARENT_SCOPE)
+endfunction()
+
 function(add_registry_inf)
     # Add to the inf files list
     foreach(_file ${ARGN})
-        set(_source_file "${CMAKE_CURRENT_SOURCE_DIR}/${_file}")
+        if(IS_ABSOLUTE "${_file}")
+            set(_source_file "${_file}")
+        else()
+            set(_source_file "${CMAKE_CURRENT_SOURCE_DIR}/${_file}")
+        endif()
         set_property(GLOBAL APPEND PROPERTY REGISTRY_INF_LIST ${_source_file})
     endforeach()
+endfunction()
+
+function(add_optional_registry_inf)
+    cmake_parse_arguments(_REG "" "INF;REQUIRES" "" ${ARGN})
+    if(NOT _REG_INF OR NOT _REG_REQUIRES)
+        message(FATAL_ERROR "add_optional_registry_inf requires INF and REQUIRES")
+    endif()
+    if(IS_ABSOLUTE "${_REG_INF}")
+        set(_source_file "${_REG_INF}")
+    else()
+        set(_source_file "${CMAKE_CURRENT_SOURCE_DIR}/${_REG_INF}")
+    endif()
+    set_property(GLOBAL APPEND PROPERTY REGISTRY_OPTIONAL_INF_LIST "${_REG_REQUIRES}|${_source_file}")
 endfunction()
 
 function(create_registry_hives)
@@ -802,45 +937,133 @@ function(create_registry_hives)
         list(APPEND _converted_files ${_converted_file})
     endforeach()
 
+    get_property(_driver_infs GLOBAL PROPERTY DRIVER_INF_LIST)
+    get_property(_driver_inf_targets GLOBAL PROPERTY DRIVER_INF_TARGETS)
+    if(ARCH STREQUAL "i386")
+        set(_driver_database_arch x86)
+    else()
+        set(_driver_database_arch ${ARCH})
+    endif()
+    set(_driver_database_list "${CMAKE_BINARY_DIR}/boot/bootdata/driverdb_infs.txt")
+    set(_driver_database_inf "${CMAKE_BINARY_DIR}/boot/bootdata/driverdb.inf")
+    string(REPLACE ";" "\n" _driver_database_text "${_driver_infs}")
+    file(GENERATE OUTPUT ${_driver_database_list} CONTENT "${_driver_database_text}\n")
+    set(_driver_database_registry_list "${CMAKE_BINARY_DIR}/boot/bootdata/driverdb_registry_infs.txt")
+    string(REPLACE ";" "\n" _driver_database_registry_text "${_converted_files}")
+    file(GENERATE OUTPUT ${_driver_database_registry_list} CONTENT "${_driver_database_registry_text}\n")
+    add_custom_command(
+        OUTPUT ${_driver_database_inf}
+        COMMAND native-mkdrvdb ${_driver_database_arch} ${_driver_database_inf} ${_driver_database_list} ${_driver_database_registry_list}
+        DEPENDS native-mkdrvdb ${_driver_database_list} ${_driver_database_registry_list} ${_driver_infs} ${_driver_inf_targets} ${_converted_files}
+        VERBATIM)
+    utf16le_convert(${_driver_database_inf} ${CMAKE_BINARY_DIR}/boot/bootdata/driverdb_utf16.inf)
+    list(APPEND _converted_files ${CMAKE_BINARY_DIR}/boot/bootdata/driverdb_utf16.inf)
+
     # Concatenate all registry files to registry.inf
-    concatenate_files(${_registry_inf} ${_converted_files})
+    set(_registry_base_inf "${CMAKE_BINARY_DIR}/boot/bootdata/registry_base.inf")
+    concatenate_files(${_registry_base_inf} ${_converted_files})
+
+    get_property(_optional_infs GLOBAL PROPERTY REGISTRY_OPTIONAL_INF_LIST)
+    set(_optional_inf_list "")
+    set(_converted_optional_files "")
+    foreach(_entry ${_optional_infs})
+        string(FIND "${_entry}" "|" _separator)
+        string(SUBSTRING "${_entry}" 0 ${_separator} _required)
+        math(EXPR _start "${_separator} + 1")
+        string(SUBSTRING "${_entry}" ${_start} -1 _file)
+        get_filename_component(_file_name ${_file} NAME_WE)
+        file(RELATIVE_PATH _subdir ${CMAKE_SOURCE_DIR} ${_file})
+        get_filename_component(_subdir ${_subdir} DIRECTORY)
+        set(_converted_file ${CMAKE_BINARY_DIR}/${_subdir}/${_file_name}_utf16.inf)
+        utf16le_convert(${_file} ${_converted_file})
+        list(APPEND _converted_optional_files ${_converted_file})
+        string(APPEND _optional_inf_list "${_required}|${_converted_file}\n")
+    endforeach()
+    file(WRITE ${CMAKE_BINARY_DIR}/boot/bootdata/registry_optional.txt "${_optional_inf_list}")
+
+    add_custom_command(
+        OUTPUT ${_registry_inf} ${_registry_inf}.always
+        COMMAND ${CMAKE_COMMAND} -DMODE=binary
+            -DBASE=${_registry_base_inf}
+            -DOPTIONAL=${CMAKE_BINARY_DIR}/boot/bootdata/registry_optional.txt
+            -DOUTPUT=${_registry_inf}
+            -P ${CMAKE_SOURCE_DIR}/sdk/cmake/optional_files.cmake
+        DEPENDS ${_registry_base_inf} ${_converted_optional_files}
+        VERBATIM)
+    set_source_files_properties(${_registry_inf}.always PROPERTIES SYMBOLIC TRUE)
 
     # Add registry.inf to bootcd
     add_custom_target(registry_inf DEPENDS ${_registry_inf})
     add_cd_file(TARGET registry_inf
                 FILE ${_registry_inf}
                 DESTINATION reactos
-                NO_CAB FOR bootcd regtest)
+                NO_CAB FOR bootcd)
+    add_cd_file(TARGET registry_inf
+                FILE ${_registry_inf}
+                DESTINATION ${ARCH}
+                FOR preinstall)
 
-    # BootCD setup system hive
+    find_program(MKCOMREG_PYTHON_EXECUTABLE NAMES python3 python REQUIRED NO_CMAKE_FIND_ROOT_PATH)
+    set(_syssetup_inf ${CMAKE_SOURCE_DIR}/media/inf/syssetup.inf)
+    set(_comreg_code_inf ${CMAKE_SOURCE_DIR}/boot/bootdata/comreg_code.inf)
+    set(_comreg_inf ${CMAKE_BINARY_DIR}/boot/bootdata/comreg.inf)
+    set(_comreg_list ${CMAKE_BINARY_DIR}/boot/bootdata/comreg_modules-$<CONFIG>.txt)
+    get_property(_comreg_targets GLOBAL PROPERTY CI_SYSTEM_TARGETS)
+    list(REMOVE_DUPLICATES _comreg_targets)
+    set(_comreg_modules "")
+    foreach(_comreg_target IN LISTS _comreg_targets)
+        string(APPEND _comreg_modules "$<TARGET_FILE_NAME:${_comreg_target}>|$<TARGET_FILE:${_comreg_target}>\n")
+    endforeach()
+    file(GENERATE OUTPUT ${_comreg_list} CONTENT "${_comreg_modules}")
+    set(_comreg_wow64_list ${CMAKE_BINARY_DIR}/boot/bootdata/comreg_wow64_modules.txt)
+    set(_comreg_wow64_modules "")
+    foreach(_comreg_wow64_file IN LISTS WOW64_I386_FILES)
+        get_filename_component(_comreg_wow64_name ${_comreg_wow64_file} NAME)
+        string(APPEND _comreg_wow64_modules "${_comreg_wow64_name}|${_comreg_wow64_file}\n")
+    endforeach()
+    file(GENERATE OUTPUT ${_comreg_wow64_list} CONTENT "${_comreg_wow64_modules}")
     add_custom_command(
-        OUTPUT ${CMAKE_BINARY_DIR}/boot/bootdata/SETUPREG.HIV
-        COMMAND native-mkhive -h:SETUPREG -u -d:${CMAKE_BINARY_DIR}/boot/bootdata ${_registry_inf} ${CMAKE_SOURCE_DIR}/boot/bootdata/setupreg.inf
-        DEPENDS native-mkhive ${_registry_inf})
-
-    add_custom_target(bootcd_hives
-        DEPENDS ${CMAKE_BINARY_DIR}/boot/bootdata/SETUPREG.HIV)
-
-    add_cd_file(
-        FILE ${CMAKE_BINARY_DIR}/boot/bootdata/SETUPREG.HIV
-        TARGET bootcd_hives
-        DESTINATION reactos
-        NO_CAB FOR bootcd regtest)
+        OUTPUT ${_comreg_inf}
+        COMMAND ${MKCOMREG_PYTHON_EXECUTABLE} ${CMAKE_SOURCE_DIR}/sdk/tools/mkcomreg.py ${_syssetup_inf} ${_comreg_code_inf} ${_comreg_list} ${_comreg_wow64_list} ${_comreg_inf}
+        DEPENDS ${_comreg_targets} ${WOW64_I386_FILES} ${_syssetup_inf} ${_comreg_code_inf} ${CMAKE_SOURCE_DIR}/sdk/tools/mkcomreg.py ${_comreg_list} ${_comreg_wow64_list}
+        VERBATIM)
+    add_custom_target(comreg_inf DEPENDS ${_comreg_inf})
+    add_cd_file(TARGET comreg_inf
+                FILE ${_comreg_inf}
+                DESTINATION reactos
+                NO_CAB FOR bootcd)
+    add_cd_file(TARGET comreg_inf
+                FILE ${_comreg_inf}
+                DESTINATION ${ARCH}
+                FOR preinstall)
 
     # LiveCD hives
     list(APPEND _livecd_inf_files
         ${_registry_inf}
         ${CMAKE_SOURCE_DIR}/boot/bootdata/livecd.inf
         ${CMAKE_SOURCE_DIR}/boot/bootdata/caroots.inf)
-    if(SARCH STREQUAL "xbox")
+    if(REACTOS_USE_XPDM AND (SARCH STREQUAL "xbox"))
         list(APPEND _livecd_inf_files
             ${CMAKE_SOURCE_DIR}/boot/bootdata/hiveinst_xbox.inf)
-    elseif(SARCH STREQUAL "pc98")
+    elseif(REACTOS_USE_XPDM AND (SARCH STREQUAL "pc98"))
         list(APPEND _livecd_inf_files
             ${CMAKE_SOURCE_DIR}/boot/bootdata/hiveinst_pc98.inf)
     else()
         list(APPEND _livecd_inf_files
             ${CMAKE_SOURCE_DIR}/boot/bootdata/hiveinst.inf)
+    endif()
+    foreach(_livecd_extra_registry_inf IN LISTS LIVECD_EXTRA_REGISTRY_INF)
+        if(_livecd_extra_registry_inf STREQUAL "")
+            continue()
+        endif()
+        get_filename_component(_livecd_extra_registry_inf "${_livecd_extra_registry_inf}" ABSOLUTE BASE_DIR "${REACTOS_BINARY_DIR}")
+        list(APPEND _livecd_inf_files ${_livecd_extra_registry_inf})
+    endforeach()
+    list(APPEND _livecd_inf_files ${_comreg_inf})
+    list(APPEND _livecd_inf_files
+        ${CMAKE_SOURCE_DIR}/boot/bootdata/app_launcher.inf)
+    if(ENABLE_WOW64)
+        list(APPEND _livecd_inf_files ${CMAKE_SOURCE_DIR}/boot/bootdata/hivewow64_live.inf)
     endif()
 
     add_custom_command(
@@ -869,8 +1092,61 @@ function(create_registry_hives)
         DESTINATION reactos/system32/config
         FOR livecd)
 
+    # Preinstall hives (same as LiveCD but with preinstall.inf instead of livecd.inf)
+    file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall)
+
+    list(APPEND _preinstall_inf_files
+        ${_registry_inf}
+        ${CMAKE_SOURCE_DIR}/boot/bootdata/preinstall.inf
+        ${CMAKE_SOURCE_DIR}/boot/bootdata/caroots.inf)
+    list(APPEND _preinstall_inf_files
+        ${CMAKE_SOURCE_DIR}/boot/bootdata/app_launcher.inf)
+    if(REACTOS_USE_XPDM AND (SARCH STREQUAL "xbox"))
+        list(APPEND _preinstall_inf_files
+            ${CMAKE_SOURCE_DIR}/boot/bootdata/hiveinst_xbox.inf)
+    elseif(REACTOS_USE_XPDM AND (SARCH STREQUAL "pc98"))
+        list(APPEND _preinstall_inf_files
+            ${CMAKE_SOURCE_DIR}/boot/bootdata/hiveinst_pc98.inf)
+    else()
+        list(APPEND _preinstall_inf_files
+            ${CMAKE_SOURCE_DIR}/boot/bootdata/hiveinst.inf)
+    endif()
+    list(APPEND _preinstall_inf_files ${_comreg_inf})
+    if(ENABLE_WOW64)
+        list(APPEND _preinstall_inf_files ${CMAKE_SOURCE_DIR}/boot/bootdata/hivewow64_live.inf)
+    endif()
+    get_property(_preinstall_registry_infs GLOBAL PROPERTY PREINSTALL_REGISTRY_INF_LIST)
+    list(APPEND _preinstall_inf_files ${_preinstall_registry_infs})
+
+    add_custom_command(
+        OUTPUT ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/system
+               ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/software
+               ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/default
+               ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/sam
+               ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/security
+        COMMAND native-mkhive -h:SYSTEM,SOFTWARE,DEFAULT,SAM,SECURITY -d:${CMAKE_BINARY_DIR}/boot/bootdata/preinstall ${_preinstall_inf_files}
+        DEPENDS native-mkhive ${_preinstall_inf_files})
+
+    add_custom_target(preinstall_hives
+        DEPENDS ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/system
+                ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/software
+                ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/default
+                ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/sam
+                ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/security)
+
+    add_cd_file(
+        FILE ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/system
+             ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/software
+             ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/default
+             ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/sam
+             ${CMAKE_BINARY_DIR}/boot/bootdata/preinstall/security
+        TARGET preinstall_hives
+        DESTINATION reactos/system32/config
+        FOR preinstall)
+
     # BCD hive (for EFI-compatible platforms)
-    if(NOT ARCH STREQUAL "i386" OR NOT (SARCH STREQUAL "pc98" OR SARCH STREQUAL "xbox"))
+    get_property(_bootloader_uefi GLOBAL PROPERTY BOOTLOADER_UEFI)
+    if(NOT _bootloader_uefi AND (NOT ARCH STREQUAL "i386" OR NOT (SARCH STREQUAL "pc98" OR SARCH STREQUAL "xbox")))
         add_custom_command(
             OUTPUT ${CMAKE_BINARY_DIR}/boot/bootdata/BCD
             COMMAND native-mkhive -h:BCD -u -d:${CMAKE_BINARY_DIR}/boot/bootdata ${CMAKE_BINARY_DIR}/boot/bootdata/hivebcd_utf16.inf
@@ -883,7 +1159,7 @@ function(create_registry_hives)
             FILE ${CMAKE_BINARY_DIR}/boot/bootdata/BCD
             TARGET bcd_hive
             DESTINATION efi/boot
-            NO_CAB FOR bootcd regtest)
+            NO_CAB FOR bootcd livecd)
     endif()
 
 endfunction()
@@ -891,24 +1167,39 @@ endfunction()
 function(add_driver_inf _module)
     # Add to the inf files list
     foreach(_file ${ARGN})
+        if(IS_ABSOLUTE ${_file})
+            set(_source_item ${_file})
+            get_filename_component(_file ${_file} NAME)
+        else()
+            set(_source_item ${CMAKE_CURRENT_SOURCE_DIR}/${_file})
+        endif()
         set(_converted_item ${CMAKE_CURRENT_BINARY_DIR}/${_file})
-        set(_source_item ${CMAKE_CURRENT_SOURCE_DIR}/${_file})
         utf16le_convert(${_source_item} ${_converted_item})
         list(APPEND _converted_inf_files ${_converted_item})
     endforeach()
 
     add_custom_target(${_module}_inf_files DEPENDS ${_converted_inf_files})
     add_cd_file(FILE ${_converted_inf_files} TARGET ${_module}_inf_files DESTINATION reactos/inf FOR all)
+    set_property(GLOBAL APPEND PROPERTY DRIVER_INF_LIST ${_converted_inf_files})
+    set_property(GLOBAL APPEND PROPERTY DRIVER_INF_TARGETS ${_module}_inf_files)
 endfunction()
 
-if(KDBG)
-    set(ROSSYM_LIB "rossym")
-else()
-    set(ROSSYM_LIB "")
-endif()
 
 function(add_rc_deps _target_rc)
     set_source_files_properties(${_target_rc} PROPERTIES OBJECT_DEPENDS "${ARGN}")
+endfunction()
+
+function(add_neutral_resource_file _target _module_rc _neutral_rc)
+    set_property(SOURCE ${_module_rc} APPEND PROPERTY COMPILE_DEFINITIONS NEUTRAL_RESOURCES_IN_MUN)
+    get_source_file_property(_deps ${_module_rc} OBJECT_DEPENDS)
+    if(_deps)
+        set_source_files_properties(${_neutral_rc} PROPERTIES OBJECT_DEPENDS "${_deps}")
+    endif()
+    add_library(${_target}_mun MODULE ${_neutral_rc})
+    set_module_type(${_target}_mun module UNICODE ENTRYPOINT 0)
+    add_dependencies(${_target}_mun xdk)
+    add_cd_file(TARGET ${_target}_mun DESTINATION reactos/SystemResources
+                NAME_ON_CD $<TARGET_FILE_NAME:${_target}>.mun FOR all)
 endfunction()
 
 add_custom_target(rostests_install COMMAND ${CMAKE_COMMAND} -DCOMPONENT=rostests -P ${CMAKE_BINARY_DIR}/cmake_install.cmake)
@@ -959,6 +1250,22 @@ else()
     endmacro()
 endif()
 
+# Some targets rely on declarations in their PCH source even when PCH is
+# disabled. Include it for only the sources that normally receive the PCH;
+# callers leave their PCH_SKIP_SOURCE files out of the list.
+function(add_pch_fallback _header)
+    if(PCH)
+        return()
+    endif()
+
+    if(MSVC)
+        set(_include_option "/FI${CMAKE_CURRENT_SOURCE_DIR}/${_header}")
+    else()
+        set(_include_option "-include;${CMAKE_CURRENT_SOURCE_DIR}/${_header}")
+    endif()
+    set_source_files_properties(${ARGN} PROPERTIES COMPILE_OPTIONS "${_include_option}")
+endfunction()
+
 function(set_target_cpp_properties _target)
     cmake_parse_arguments(_CPP "WITH_EXCEPTIONS;WITH_RTTI" "" "" ${ARGN})
 
@@ -969,4 +1276,10 @@ function(set_target_cpp_properties _target)
     if (_CPP_WITH_RTTI)
         set_target_properties(${_target} PROPERTIES WITH_CXX_RTTI TRUE)
     endif()
+endfunction()
+
+function(libernt_standard_disk_signature _signature)
+    string(UUID _disk NAMESPACE 354fa6e5-5e45-49af-91bf-1fd2754e470a NAME "LiberNT standard disk" TYPE SHA1)
+    string(SUBSTRING "${_disk}" 0 8 _value)
+    set(${_signature} ${_value} PARENT_SCOPE)
 endfunction()

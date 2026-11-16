@@ -19,7 +19,7 @@ Severity=Informational
 Facility=System
 SymbolicName=WINDOWS_NT_BANNER
 Language=English
-ReactOS Version %s
+LiberNT Version %s
 Build %s
 Reporting NT %s (Build %u%s)
 .
@@ -69,9 +69,9 @@ Severity=Informational
 Facility=System
 SymbolicName=REACTOS_COPYRIGHT_NOTICE
 Language=English
-\n\nReactOS is free software, covered by the GNU General Public License,
+\n\nLiberNT is free software, covered by the GNU General Public License,
  and you\n are welcome to change it and/or distribute copies of it under
- certain\n conditions. There is absolutely no warranty for ReactOS.\n
+ certain\n conditions. There is absolutely no warranty for LiberNT.\n
 .
 
 MessageId=0x7F
@@ -79,7 +79,7 @@ Severity=Warning
 Facility=System
 SymbolicName=BUGCHECK_MESSAGE_INTRO
 Language=English
-A problem has been detected and ReactOS has been shut down to prevent damage
+A problem has been detected and LiberNT has been shut down to prevent damage
 to your computer.
 .
 
@@ -110,7 +110,7 @@ SymbolicName=BUGCODE_PSS_MESSAGE
 Language=English
 Check to make sure any new hardware or software is properly installed.
 If this is a new installation, ask your hardware or software manufacturer
-for any ReactOS updates you might need.
+for any LiberNT updates you might need.
 
 If problems continue, disable or remove any newly installed hardware
 or software. Disable BIOS memory options such as caching or shadowing.
@@ -1225,6 +1225,14 @@ If this is the first time you have seen this error screen, read
 If problems continue, remove all nonfree software from your computer.
 .
 
+MessageId=0x9C
+Severity=Success
+Facility=System
+SymbolicName=MACHINE_CHECK_EXCEPTION
+Language=English
+MACHINE_CHECK_EXCEPTION
+.
+
 MessageId=0x9F
 Severity=Success
 Facility=System
@@ -1343,7 +1351,7 @@ Severity=Success
 Facility=System
 SymbolicName=BUGCODE_PSS_MESSAGE_SIGNATURE
 Language=English
-A system file that is owned by ReactOS was replaced by an application
+A system file that is owned by LiberNT was replaced by an application
 running on your system.  The operating system detected this and tried to
 verify the validity of the file's signature.  The operating system found that
 the file signature is not valid and put the original, correct file back
@@ -1367,7 +1375,7 @@ A device driver has pool.
 
 Check to make sure any new hardware or software is properly installed.
 If this is a new installation, ask your hardware or software manufacturer
-for any ReactOS updates you might need.
+for any LiberNT updates you might need.
 
 Run the driver verifier against any new (or suspect) drivers.
 If that doesn't reveal the corrupting driver, try enabling special pool.
@@ -1387,6 +1395,14 @@ Language=English
 A device driver attempting to corrupt the system has been caught.
 The faulty driver currently on the kernel stack must be replaced
 with a working version.
+.
+
+MessageId=0xC7
+Severity=Success
+Facility=System
+SymbolicName=TIMER_OR_DPC_INVALID
+Language=English
+A driver supplied an invalid timer or DPC.
 .
 
 MessageId=0xC8
@@ -1560,12 +1576,12 @@ SymbolicName=ACPI_BIOS_FATAL_ERROR
 Language=English
 
 Your computer (BIOS) has reported that a component in your system is faulty and
-has prevented ReactOS from operating.  You can determine which component is
+has prevented LiberNT from operating.  You can determine which component is
 faulty by running the diagnostic disk or tool that came with your computer.
 
 If you do not have this tool, you must contact your system vendor and report
 this error message to them.  They will be able to assist you in correcting this
-hardware problem thereby allowing ReactOS to operate.
+hardware problem thereby allowing LiberNT to operate.
 .
 
 MessageId=0xE1
@@ -1734,10 +1750,68 @@ Language=English
 A fatal error occurred in the USB driver stack.
 .
 
+MessageId=0x101
+Severity=Success
+Facility=System
+SymbolicName=CLOCK_WATCHDOG_TIMEOUT
+Language=English
+A clock interrupt expected on a secondary processor was not received within
+the allocated interval.
+.
+
+MessageId=0x133
+Severity=Success
+Facility=System
+SymbolicName=DPC_WATCHDOG_VIOLATION
+Language=English
+A watchdog detected that the system stopped making forward progress.
+
+If Parameter1 is 0, a single DPC or ISR ran longer than its time allotment:
+Parameter2 is the DPC time count and Parameter3 the allotment, in clock ticks.
+If Parameter1 is 1, the processor stayed at DISPATCH_LEVEL or above for longer
+than the watchdog period in Parameter2.
+
+If Parameter1 is 2, the internal-debugger log made no progress for the number
+of seconds in Parameter2. Parameter3 is the configured timeout in seconds and
+Parameter4 is the processor that detected the stall.
+.
+
 MessageId=0x139
 Severity=Success
 Facility=System
 SymbolicName=KERNEL_SECURITY_CHECK_FAILURE
 Language=English
 A critical kernel security check failed.
+.
+
+MessageId=0x117
+Severity=Success
+Facility=System
+SymbolicName=VIDEO_TDR_TIMEOUT_DETECTED
+Language=English
+The display driver failed to recover from a timeout.
+.
+
+MessageId=0x121
+Severity=Success
+Facility=System
+SymbolicName=DRIVER_VIOLATION
+Language=English
+A driver has caused a violation.
+.
+
+MessageId=0x141
+Severity=Success
+Facility=System
+SymbolicName=VIDEO_ENGINE_TIMEOUT_DETECTED
+Language=English
+A display engine failed to respond within the permitted interval.
+.
+
+MessageId=0x1DB
+Severity=Success
+Facility=System
+SymbolicName=IPI_WATCHDOG_TIMEOUT
+Language=English
+A processor remained in an interprocessor interrupt loop beyond the permitted time.
 .

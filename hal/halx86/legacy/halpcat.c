@@ -9,6 +9,13 @@
 
 #include <hal.h>
 
+VOID
+NTAPI
+HalpAcpiReset(VOID)
+{
+    /* Legacy HALs have no firmware reset register. */
+}
+
 #define NDEBUG
 #include <debug.h>
 
@@ -28,6 +35,14 @@ PWCHAR HalName = L"PC Compatible Eisa/Isa HAL";
 #endif
 
 /* PRIVATE FUNCTIONS **********************************************************/
+
+BOOLEAN
+NTAPI
+HalpGetPmTimer(OUT PULONG Port,
+               OUT PULONG Mask)
+{
+    return FALSE;
+}
 
 CODE_SEG("INIT")
 NTSTATUS
@@ -66,6 +81,14 @@ HalpIs16BitPortDecodeSupported(VOID)
 {
     /* Only EISA systems support this */
     return (HalpBusType == MACHINE_TYPE_EISA) ? CM_RESOURCE_PORT_16_BIT_DECODE : 0;
+}
+
+BOOLEAN
+HalpQueryAcpiRootPointer(
+    _Out_ PPHYSICAL_ADDRESS Address)
+{
+    Address->QuadPart = 0;
+    return FALSE;
 }
 
 #if 0

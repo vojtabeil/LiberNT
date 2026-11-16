@@ -5,6 +5,10 @@ add_definitions(
     -DPROXY_DELEGATION
     -DWINE_REGISTER_DLL)
 
+# PROXY_CLSID_IS contains braces and commas that get shell-expanded on macOS.
+# Define it via a force-included header instead of the command line.
+add_compile_options(-include${CMAKE_CURRENT_SOURCE_DIR}/proxy_clsid.h)
+
 spec2def(urlmon.dll urlmon.spec ADD_IMPORTLIB)
 add_rpcproxy_files(urlmon_urlmon.idl)
 
@@ -34,7 +38,8 @@ list(APPEND SOURCE
     umstream.c
     uri.c
     urlmon_main.c
-    usrmarshal.c)
+    usrmarshal.c
+    zone_id.c)
 
 list(APPEND PCH_SKIP_SOURCE
     ${CMAKE_CURRENT_BINARY_DIR}/proxy.dlldata.c
@@ -48,17 +53,8 @@ add_library(urlmon MODULE
     ${CMAKE_CURRENT_BINARY_DIR}/urlmon.def)
 
 set_module_type(urlmon win32dll)
-add_idl_reg_scripts(urlmon registry urlmon_urlmon.idl)
-target_link_libraries(urlmon msvcrtex uuid wine oldnames)
+target_link_libraries(urlmon uuid wine ${PSEH_LIB} oldnames)
 add_delay_importlibs(urlmon advpack)
-add_importlibs(urlmon rpcrt4 propsys ole32 oleaut32 shlwapi shell32 wininet normaliz user32 advapi32 kernel32_vista msvcrt kernel32 ntdll)
-add_pch(urlmon precomp.h "${PCH_SKIP_SOURCE}")
+add_importlibs(urlmon rpcrt4 ole32 oleaut32 shlwapi shell32 wininet user32 advapi32 iertutil kernel32_vista msvcrt kernel32 ntdll)
 add_cd_file(TARGET urlmon DESTINATION reactos/system32 FOR all)
 set_wine_module_FIXME(urlmon) # CORE-5743: No ARRAY_SIZE macro
-
-# Hack for CMake not being able to properly escape command line GUID definition on some Unix hosts.
-if (CMAKE_HOST_WIN32)
-    add_compile_definitions(PROXY_CLSID_IS={0x79EAC9F1,0xBAF9,0x11CE,{0x8C,0x82,0x00,0xAA,0x00,0x4B,0xA9,0x0B}})
-else()
-    target_compile_options(urlmon PRIVATE -include ${CMAKE_SOURCE_DIR}/dll/win32/urlmon/clsid.h)
-endif()

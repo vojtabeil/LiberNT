@@ -2,7 +2,7 @@
 
 #include "resource.h"
 
-#define REACTOS_STR_FILE_DESCRIPTION    "ReactOS Drive Letter Mapper Utility"
+#define REACTOS_STR_FILE_DESCRIPTION    "LiberNT Drive Letter Mapper Utility"
 #define REACTOS_STR_INTERNAL_NAME       "subst"
 #define REACTOS_STR_ORIGINAL_FILENAME   "subst.exe"
 #include <reactos/version.rc>
@@ -33,6 +33,9 @@
 #endif
 #ifdef LANGUAGE_IT_IT
     #include "lang/it-IT.rc"
+#endif
+#ifdef LANGUAGE_JA_JP
+    #include "lang/ja-JP.rc"
 #endif
 #ifdef LANGUAGE_PL_PL
     #include "lang/pl-PL.rc"

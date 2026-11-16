@@ -80,11 +80,35 @@ static int wchar2digit(wchar_t c, int base) {
 #undef SECURE
 #include "scanf.h"
 
+#ifdef _LIBCNT_
+/* Fixed-argument entry for the ARM64EC NTDLL bridge's variadic sscanf. */
+int CDECL ChpeVsscanf(const char *str, const char *format, __ms_va_list args)
+{
+    return vsscanf_l(str, format, NULL, args);
+}
+#endif
+
 /* vswscanf_l */
 #define WIDE_SCANF 1
 #undef CONSOLE
 #define STRING 1
 #undef SECURE
+#include "scanf.h"
+
+/* vsscanf_s_l */
+#undef WIDE_SCANF
+#undef CONSOLE
+#define STRING 1
+#undef STRING_LEN
+#define SECURE 1
+#include "scanf.h"
+
+/* vswscanf_s_l */
+#define WIDE_SCANF 1
+#undef CONSOLE
+#define STRING 1
+#undef STRING_LEN
+#define SECURE 1
 #include "scanf.h"
 
 /* vsnscanf_l */
@@ -102,6 +126,31 @@ static int wchar2digit(wchar_t c, int base) {
 #define STRING_LEN 1
 #undef SECURE
 #include "scanf.h"
+
+/* vsnwscanf_s_l */
+#define WIDE_SCANF 1
+#undef CONSOLE
+#define STRING 1
+#define STRING_LEN 1
+#define SECURE 1
+#include "scanf.h"
+
+#ifdef _LIBCNT_
+int CDECL ChpeVsscanf_s(const char *str, const char *format, __ms_va_list args)
+{
+    return vsscanf_s_l(str, format, NULL, args);
+}
+
+int CDECL ChpeVswscanf_s(const wchar_t *str, const wchar_t *format, __ms_va_list args)
+{
+    return vswscanf_s_l(str, format, NULL, args);
+}
+
+int CDECL ChpeVsnwscanf_s(const wchar_t *input, size_t length, const wchar_t *format, __ms_va_list args)
+{
+    return vsnwscanf_s_l(input, length, format, NULL, args);
+}
+#endif
 
 #ifndef _LIBCNT_
 /* vcscanf_l */
@@ -200,6 +249,39 @@ int CDECL swscanf(const wchar_t *str, const wchar_t *format, ...)
     return res;
 }
 
+
+/*********************************************************************
+ *		sscanf_s (MSVCRT.@)
+ *
+ * The bounds-checked form: every %s, %S or %[ conversion takes the buffer
+ * size as an extra argument after the buffer itself.
+ */
+int CDECL sscanf_s(const char *str, const char *format, ...)
+{
+    __ms_va_list valist;
+    int res;
+
+    __ms_va_start(valist, format);
+    res = vsscanf_s_l(str, format, NULL, valist);
+    __ms_va_end(valist);
+    return res;
+}
+
+
+/*********************************************************************
+ *		swscanf_s (MSVCRT.@)
+ */
+int CDECL swscanf_s(const wchar_t *str, const wchar_t *format, ...)
+{
+    __ms_va_list valist;
+    int res;
+
+    __ms_va_start(valist, format);
+    res = vswscanf_s_l(str, format, NULL, valist);
+    __ms_va_end(valist);
+    return res;
+}
+
 #ifndef _LIBCNT_
 /*********************************************************************
  *		_cscanf (MSVCRT.@)
@@ -227,6 +309,21 @@ int WINAPIV _snwscanf(const wchar_t *input, size_t length,
 
     __ms_va_start(valist, format);
     res = vsnwscanf_l(input, length, format, NULL, valist);
+    __ms_va_end(valist);
+    return res;
+}
+
+/*********************************************************************
+ *              _snwscanf_s (MSVCRT.@)
+ */
+int WINAPIV _snwscanf_s(const wchar_t *input, size_t length,
+        const wchar_t *format, ...)
+{
+    __ms_va_list valist;
+    int res;
+
+    __ms_va_start(valist, format);
+    res = vsnwscanf_s_l(input, length, format, NULL, valist);
     __ms_va_end(valist);
     return res;
 }

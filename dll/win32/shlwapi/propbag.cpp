@@ -86,7 +86,10 @@ public:
     }
 
 #if (_WIN32_WINNT < _WIN32_WINNT_VISTA) || defined(__REACTOS__)
-    // IPropertyBag2 interface (stubs)
+    // IPropertyBag2 interface (stubs).
+    // Keep the IPropertyBag Read/Write overloads in scope (the IPropertyBag2 ones below hide them).
+    using IPropertyBag::Read;
+    using IPropertyBag::Write;
     STDMETHODIMP Read(
         _In_ ULONG cProperties,
         _In_ PROPBAG2 *pPropBag,
@@ -99,7 +102,7 @@ public:
     STDMETHODIMP Write(
         _In_ ULONG cProperties,
         _In_ PROPBAG2 *pPropBag,
-        _In_ VARIANT *pvarValue)
+        _In_ VARIANT *pvarValue) override
     {
         return E_NOTIMPL;
     }
@@ -147,6 +150,10 @@ protected:
 public:
     CMemPropertyBag(DWORD dwMode) : CBasePropertyBag(dwMode) { }
 
+    // Unhide the base IPropertyBag2 Read/Write overloads.
+    using CBasePropertyBag::Read;
+    using CBasePropertyBag::Write;
+
     STDMETHODIMP Read(_In_z_ LPCWSTR pszPropName, _Inout_ VARIANT *pvari,
                       _Inout_opt_ IErrorLog *pErrorLog) override;
     STDMETHODIMP Write(_In_z_ LPCWSTR pszPropName, _In_ VARIANT *pvari) override;
@@ -162,9 +169,10 @@ CMemPropertyBag::Read(
 
     TRACE("%p: %s %p %p\n", this, debugstr_w(pszPropName), pvari, pErrorLog);
 
-    VARTYPE vt = V_VT(pvari);
+    VARTYPE vt = pvari ? V_VT(pvari) : VT_EMPTY;
 
-    ::VariantInit(pvari);
+    if (pvari)
+        ::VariantInit(pvari);
 
     if (GetProcessOsVersion() < _WIN32_WINNT_VISTA)
     {
@@ -298,6 +306,21 @@ public:
 
     HRESULT Init(HKEY hKey, LPCWSTR lpSubKey);
 
+    STDMETHODIMP QueryInterface(REFIID riid, void **ppvObject) override
+    {
+        if (ppvObject && ::IsEqualGUID(riid, IID_IPropertyBag2))
+        {
+            AddRef();
+            *ppvObject = static_cast<IPropertyBag2*>(this);
+            return S_OK;
+        }
+        return CBasePropertyBag::QueryInterface(riid, ppvObject);
+    }
+
+    // Unhide the base IPropertyBag2 Read/Write overloads.
+    using CBasePropertyBag::Read;
+    using CBasePropertyBag::Write;
+
     STDMETHODIMP Read(_In_z_ LPCWSTR pszPropName, _Inout_ VARIANT *pvari,
                       _Inout_opt_ IErrorLog *pErrorLog) override;
     STDMETHODIMP Write(_In_z_ LPCWSTR pszPropName, _In_ VARIANT *pvari) override;
@@ -319,7 +342,7 @@ HRESULT CRegPropertyBag::Init(HKEY hKey, LPCWSTR lpSubKey)
 
     if (error != ERROR_SUCCESS)
     {
-        ERR("%p %s 0x%08X\n", hKey, debugstr_w(lpSubKey), error);
+        WARN("%p %s 0x%08X\n", hKey, debugstr_w(lpSubKey), error);
         return HRESULT_FROM_WIN32(error);
     }
 
@@ -373,7 +396,7 @@ CRegPropertyBag::_ReadBinary(
     DWORD uBytes)
 {
     HRESULT hr = E_FAIL;
-    if (vt != VT_UNKNOWN || uBytes < sizeof(GUID))
+    if ((vt != VT_UNKNOWN && vt != VT_EMPTY) || uBytes < sizeof(GUID))
         return hr;
 
     LPBYTE pbData = (LPBYTE)::LocalAlloc(LMEM_ZEROINIT, uBytes);
@@ -441,7 +464,7 @@ CRegPropertyBag::Read(
     DWORD dwType, cbValue;
     LONG error = SHGetValueW(m_hKey, NULL, pszPropName, &dwType, NULL, &cbValue);
     if (error != ERROR_SUCCESS)
-        hr = E_FAIL;
+        hr = HRESULT_FROM_WIN32(error);
     else if (dwType == REG_SZ)
         hr = _ReadString(pszPropName, pvari, cbValue);
     else if (dwType == REG_BINARY)
@@ -505,7 +528,7 @@ CRegPropertyBag::Write(_In_z_ LPCWSTR pszPropName, _In_ VARIANT *pvari)
 
     HRESULT hr;
     LONG error;
-    VARIANTARG vargTemp = { 0 };
+    VARIANTARG vargTemp = {};
     switch (V_VT(pvari))
     {
         case VT_EMPTY:
@@ -634,7 +657,8 @@ SHGetIniStringW(
     if (pszWideBuff.IsEmpty()) // It's empty or not found
     {
         // Try the normal section name
-        return GetPrivateProfileStringW(appName, keyName, NULL, out, outLen, filename);
+        GetPrivateProfileStringW(appName, keyName, NULL, out, outLen, filename);
+        return lstrlenW(out);
     }
 
     // Okay, now ".W" version is valid. Its value is a UTF-7 string in UTF-16
@@ -807,6 +831,10 @@ public:
 
     HRESULT Init(LPCWSTR pszIniFile, LPCWSTR pszSection);
 
+    // Unhide the base IPropertyBag2 Read/Write overloads.
+    using CBasePropertyBag::Read;
+    using CBasePropertyBag::Write;
+
     STDMETHODIMP Read(
         _In_z_ LPCWSTR pszPropName,
         _Inout_ VARIANT *pvari,
@@ -918,7 +946,7 @@ CIniPropertyBag::Write(_In_z_ LPCWSTR pszPropName, _In_ VARIANT *pvari)
 
     HRESULT hr;
     BSTR bstr;
-    VARIANTARG vargTemp = { 0 };
+    VARIANTARG vargTemp = {};
     switch (V_VT(pvari))
     {
         case VT_EMPTY:
@@ -1031,6 +1059,10 @@ protected:
 
 public:
     CDesktopUpgradePropertyBag() : CBasePropertyBag(STGM_READ) { }
+
+    // Unhide the base IPropertyBag2 Read/Write overloads.
+    using CBasePropertyBag::Read;
+    using CBasePropertyBag::Write;
 
     STDMETHODIMP Read(
         _In_z_ LPCWSTR pszPropName,
@@ -1310,6 +1342,10 @@ public:
     HRESULT Init(_In_opt_ LPCITEMIDLIST pidl, _In_opt_ LPCWSTR pszPath, _In_ DWORD dwVspbFlags);
     BOOL IsSameBag(LPCITEMIDLIST pidl, LPCWSTR pszPath, DWORD dwVspbFlags) const;
 
+    // Unhide the base IPropertyBag2 Read/Write overloads.
+    using CBasePropertyBag::Read;
+    using CBasePropertyBag::Write;
+
     STDMETHODIMP Read(
         _In_z_ LPCWSTR pszPropName,
         _Inout_ VARIANT *pvari,
@@ -1477,8 +1513,9 @@ CViewStatePropertyBag::_GetMRUSlots(
         return hr;
 
     hr = pMruList->QueryPidl(pidl, cSlots, puSlots, pcSlots);
+    INT nUsed = 0;
     if (hr == S_OK || MODE_CAN_WRITE(dwMode)) // FIXME: HACK! (Without this, a new pidl can never be saved)
-        hr = pMruList->UsePidl(pidl, puSlots);
+        hr = pMruList->UsePidl(pidl, puSlots, &nUsed);
     else if (cSlots == 1)
         hr = E_FAIL;
 

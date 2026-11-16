@@ -11,8 +11,8 @@
 #define NEW_CONTENT "NewContent"
 #define NEW_CONTENT_LEN sizeof(NEW_CONTENT)
 #define IsInvalidParamStatus(Status) \
-    (Status == STATUS_INVALID_PARAMETER || Status == STATUS_INVALID_PARAMETER_MIX || \
-    (Status >= STATUS_INVALID_PARAMETER_1 && Status <= STATUS_INVALID_PARAMETER_12))
+    (((Status) == STATUS_INVALID_PARAMETER) || ((Status) == STATUS_INVALID_PARAMETER_MIX) || \
+    (((Status) >= STATUS_INVALID_PARAMETER_1) && ((Status) <= STATUS_INVALID_PARAMETER_12)))
 #define ok_invalid_parameter(Status) ok(IsInvalidParamStatus(Status), "Invalid status code (0x%X)\n", Status)
 
 static UNICODE_STRING FileReadOnlyPath = RTL_CONSTANT_STRING(L"\\SystemRoot\\system32\\ntdll.dll");
@@ -85,6 +85,9 @@ KmtInitTestFiles(PHANDLE ReadOnlyFile, PHANDLE WriteOnlyFile, PHANDLE Executable
     //INIT THE WRITE-ONLY FILE
     //TODO: Delete the file when the tests are all executed
     Status = ZwCreateFile(WriteOnlyFile, (GENERIC_WRITE | SYNCHRONIZE), &KmtestFileObject, &IoStatusBlock, NULL, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_WRITE, FILE_SUPERSEDE, (FILE_NON_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE), NULL, 0);
+    if (skip(NT_SUCCESS(Status) && *WriteOnlyFile != NULL,
+             "Could not create writable section test file: 0x%lx\n", Status))
+        return;
     ok_eq_hex(Status, STATUS_SUCCESS);
     ok_eq_ulongptr(IoStatusBlock.Information, FILE_CREATED);
     ok(*WriteOnlyFile != NULL, "WriteOnlyFile is NULL\n");
@@ -322,6 +325,13 @@ CompareFileContents(HANDLE FileHandle, ULONG BufferLength, PVOID Buffer)
     {
         Status = ZwReadFile(FileHandle, NULL, NULL, NULL, &IoStatusBlock, FileContent, BufferLength, &ByteOffset, NULL);
         ok(Status == STATUS_SUCCESS || Status == STATUS_PENDING, "Unexpected status (0x%X).\n", Status);
+        if (Status == STATUS_PENDING)
+        {
+            Status = ZwWaitForSingleObject(FileHandle, FALSE, NULL);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            Status = IoStatusBlock.Status;
+        }
+        ok_eq_hex(Status, STATUS_SUCCESS);
         ok_eq_ulongptr(IoStatusBlock.Information, BufferLength);
 
         Match = 0;
@@ -502,7 +512,7 @@ BehaviorChecks(HANDLE FileHandleReadOnly, HANDLE FileHandleWriteOnly)
     if (!skip(NT_SUCCESS(Status), "Error mapping view with PAGE_NOACCESS priv. Error = %p\n", Status))
     {
         KmtStartSeh()
-            RtlCompareMemory(BaseAddress, TestString, TestStringSize);
+            (VOID)!RtlCompareMemory(BaseAddress, TestString, TestStringSize);
         KmtEndSeh(STATUS_ACCESS_VIOLATION);
 
         ZwUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
@@ -513,14 +523,14 @@ BehaviorChecks(HANDLE FileHandleReadOnly, HANDLE FileHandleWriteOnly)
     ViewSize = 0;
     SectionOffset.QuadPart = 0;
     Status = ZwMapViewOfSection(WriteSectionHandle, NtCurrentProcess(), &BaseAddress, 0, 0, &SectionOffset, &ViewSize, ViewUnmap, 0, PAGE_GUARD | PAGE_READWRITE);
-    if (!skip(NT_SUCCESS(Status), "Error mapping view with PAGE_GUARD priv. Error = %p\n", Status))
+    if (ok(NT_SUCCESS(Status), "Error mapping view with PAGE_GUARD priv. Error = %p\n", Status))
     {
         KmtStartSeh()
-            RtlCompareMemory(BaseAddress, TestString, TestStringSize);
+            (VOID)!RtlCompareMemory(BaseAddress, TestString, TestStringSize);
         KmtEndSeh(STATUS_GUARD_PAGE_VIOLATION);
 
         KmtStartSeh()
-            RtlCompareMemory(BaseAddress, TestString, TestStringSize);
+            (VOID)!RtlCompareMemory(BaseAddress, TestString, TestStringSize);
         KmtEndSeh(STATUS_SUCCESS);
 
         ZwUnmapViewOfSection(NtCurrentProcess(), BaseAddress);
@@ -641,10 +651,14 @@ START_TEST(ZwMapViewOfSection)
 
     KmtInitTestFiles(&FileHandleReadOnly, &FileHandleWriteOnly, &ExecutableFileHandle);
 
-    SimpleErrorChecks(FileHandleReadOnly, FileHandleWriteOnly, ExecutableFileHandle);
-    AdvancedErrorChecks(FileHandleReadOnly, FileHandleWriteOnly);
-    BehaviorChecks(FileHandleReadOnly, FileHandleWriteOnly);
-    PageFileBehaviorChecks();
+    if (!skip(FileHandleReadOnly && FileHandleWriteOnly && ExecutableFileHandle,
+              "Missing one or more file handles\n"))
+    {
+        SimpleErrorChecks(FileHandleReadOnly, FileHandleWriteOnly, ExecutableFileHandle);
+        AdvancedErrorChecks(FileHandleReadOnly, FileHandleWriteOnly);
+        BehaviorChecks(FileHandleReadOnly, FileHandleWriteOnly);
+        PageFileBehaviorChecks();
+    }
 
     if (FileHandleReadOnly)
         ZwClose(FileHandleReadOnly);

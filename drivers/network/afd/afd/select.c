@@ -31,13 +31,67 @@ static VOID PrintEvents( ULONG Events ) {
 #endif
 }
 
-static VOID CopyBackStatus( PAFD_HANDLE HandleArray,
-                            UINT HandleCount ) {
+static NTSTATUS
+AfdGetPollStatus(PAFD_FCB FCB, ULONG Events)
+{
+    static const struct
+    {
+        ULONG Event;
+        ULONG StatusIndex;
+    } EventStatusMap[] =
+    {
+        { AFD_EVENT_RECEIVE, FD_READ_BIT },
+        { AFD_EVENT_OOB_RECEIVE, FD_OOB_BIT },
+        { AFD_EVENT_SEND, FD_WRITE_BIT },
+        { AFD_EVENT_DISCONNECT, FD_CLOSE_BIT },
+        { AFD_EVENT_ABORT, FD_CLOSE_BIT },
+        { AFD_EVENT_CLOSE, FD_CLOSE_BIT },
+        { AFD_EVENT_CONNECT, FD_CONNECT_BIT },
+        { AFD_EVENT_ACCEPT, FD_ACCEPT_BIT },
+        { AFD_EVENT_CONNECT_FAIL, FD_CONNECT_BIT },
+        { AFD_EVENT_QOS, FD_QOS_BIT },
+        { AFD_EVENT_GROUP_QOS, FD_GROUP_QOS_BIT },
+        { AFD_EVENT_ROUTING_INTERFACE_CHANGE, FD_ROUTING_INTERFACE_CHANGE_BIT },
+        { AFD_EVENT_ADDRESS_LIST_CHANGE, FD_ADDRESS_LIST_CHANGE_BIT }
+    };
+    NTSTATUS EventStatus;
     UINT i;
 
-    for( i = 0; i < HandleCount; i++ ) {
-        HandleArray[i].Events = HandleArray[i].Status;
-        HandleArray[i].Status = 0;
+    for (i = 0; i < RTL_NUMBER_OF(EventStatusMap); i++)
+    {
+        if (!(Events & EventStatusMap[i].Event))
+            continue;
+
+        EventStatus = FCB->PollStatus[EventStatusMap[i].StatusIndex];
+        if (EventStatus != STATUS_SUCCESS)
+            return EventStatus;
+    }
+
+    return STATUS_SUCCESS;
+}
+
+static VOID
+CopyBackStatus(PIRP Irp, PAFD_POLL_INFO PollReq)
+{
+    PAFD_HANDLE LockedHandles = AFD_HANDLES(Irp);
+    PFILE_OBJECT FileObject;
+    PAFD_FCB FCB;
+    ULONG Events;
+    UINT i;
+
+    for (i = 0; i < PollReq->HandleCount; i++)
+    {
+        Events = PollReq->Handles[i].Status;
+        PollReq->Handles[i].Events = Events;
+        PollReq->Handles[i].Status = STATUS_SUCCESS;
+
+        if (!Events || !LockedHandles[i].Handle)
+            continue;
+
+        FileObject = (PFILE_OBJECT)LockedHandles[i].Handle;
+        FCB = FileObject->FsContext;
+        if (FCB)
+            PollReq->Handles[i].Status = AfdGetPollStatus(FCB, Events);
     }
 }
 
@@ -51,31 +105,166 @@ VOID ZeroEvents( PAFD_HANDLE HandleArray,
     }
 }
 
+static NTSTATUS
+AfdCapturePollRequest(PIRP Irp, PIO_STACK_LOCATION IrpSp, PAFD_POLL_INFO *PollReq)
+{
+    ULONG Length = min(IrpSp->Parameters.DeviceIoControl.InputBufferLength,
+                       IrpSp->Parameters.DeviceIoControl.OutputBufferLength);
+    PAFD_POLL_INFO32 Request32 = Irp->AssociatedIrp.SystemBuffer;
+    PAFD_POLL_INFO Request = Irp->AssociatedIrp.SystemBuffer;
+    ULONG i;
 
-/* you must pass either Poll OR Irp */
-VOID SignalSocket(
-   PAFD_ACTIVE_POLL Poll OPTIONAL,
-   PIRP _Irp OPTIONAL,
-   PAFD_POLL_INFO PollReq,
-   NTSTATUS Status
-   )
+    ASSERT(!Irp->MdlAddress);
+    Irp->Tail.Overlay.DriverContext[0] = NULL;
+    Irp->Tail.Overlay.DriverContext[1] = NULL;
+
+    if (!AfdIs32bitIoctl(Irp))
+    {
+        if (Length < FIELD_OFFSET(AFD_POLL_INFO, Handles) ||
+            Request->HandleCount > (Length - FIELD_OFFSET(AFD_POLL_INFO, Handles)) / sizeof(AFD_HANDLE))
+        {
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        *PollReq = Request;
+        return STATUS_SUCCESS;
+    }
+
+    if (Length < FIELD_OFFSET(AFD_POLL_INFO32, Handles) ||
+        Request32->HandleCount > (Length - FIELD_OFFSET(AFD_POLL_INFO32, Handles)) / sizeof(AFD_HANDLE32))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Request = ExAllocatePoolWithTag(NonPagedPool,
+                                    FIELD_OFFSET(AFD_POLL_INFO, Handles) +
+                                    max(Request32->HandleCount, 1) * sizeof(AFD_HANDLE),
+                                    TAG_AFD_POLL_HANDLE);
+    if (!Request)
+        return STATUS_NO_MEMORY;
+
+    Request->Timeout = Request32->Timeout;
+    Request->HandleCount = Request32->HandleCount;
+    Request->Exclusive = Request32->Exclusive;
+    for (i = 0; i < Request32->HandleCount; i++)
+    {
+        Request->Handles[i].Handle = Request32->Handles[i].Handle;
+        Request->Handles[i].Events = Request32->Handles[i].Events;
+        Request->Handles[i].Status = Request32->Handles[i].Status;
+    }
+
+    Irp->Tail.Overlay.DriverContext[0] = Request32;
+    Irp->AssociatedIrp.SystemBuffer = Request;
+    *PollReq = Request;
+    return STATUS_SUCCESS;
+}
+
+static VOID
+AfdReleasePollRequest(PIRP Irp, PAFD_POLL_INFO PollReq)
+{
+    PAFD_POLL_INFO32 Request32 = Irp->Tail.Overlay.DriverContext[0];
+    ULONG i;
+
+    if (!Request32)
+        return;
+
+    Request32->HandleCount = PollReq->HandleCount;
+    for (i = 0; i < PollReq->HandleCount; i++)
+    {
+        Request32->Handles[i].Events = PollReq->Handles[i].Events;
+        Request32->Handles[i].Status = PollReq->Handles[i].Status;
+    }
+
+    if (Irp->IoStatus.Information)
+    {
+        Irp->IoStatus.Information =
+            FIELD_OFFSET(AFD_POLL_INFO32, Handles) + sizeof(AFD_HANDLE32) * PollReq->HandleCount;
+    }
+
+    Irp->Tail.Overlay.DriverContext[0] = NULL;
+    Irp->AssociatedIrp.SystemBuffer = Request32;
+    ExFreePoolWithTag(PollReq, TAG_AFD_POLL_HANDLE);
+}
+
+
+static VOID
+AfdDereferencePoll(PAFD_ACTIVE_POLL Poll)
+{
+    LONG References = InterlockedDecrement(&Poll->References);
+
+    ASSERT(References >= 0);
+    if (References == 0)
+        ExFreePoolWithTag(Poll, TAG_AFD_ACTIVE_POLL);
+}
+
+/* Called with DeviceExt->Lock held. */
+static BOOLEAN
+AfdClaimPoll(PAFD_ACTIVE_POLL Poll, BOOLEAN CancelOwner)
+{
+    PDRIVER_CANCEL CancelRoutine;
+    KIRQL CancelIrql;
+
+    ASSERT(Poll->Active);
+
+    if (!CancelOwner)
+    {
+        /*
+         * Clearing the cancel routine under the cancel spin lock decides
+         * whether this path or an already selected cancel routine owns the
+         * IRP completion.
+         */
+        IoAcquireCancelSpinLock(&CancelIrql);
+        CancelRoutine = IoSetCancelRoutine(Poll->Irp, NULL);
+        if (!CancelRoutine && Poll->Irp->Cancel)
+        {
+            IoReleaseCancelSpinLock(CancelIrql);
+            return FALSE;
+        }
+        IoReleaseCancelSpinLock(CancelIrql);
+    }
+
+    Poll->Active = FALSE;
+    RemoveEntryList(&Poll->ListEntry);
+
+    /* A successfully cancelled timer will never transfer its reference. */
+    if (KeCancelTimer(&Poll->Timer))
+        AfdDereferencePoll(Poll);
+
+    return TRUE;
+}
+
+/* You must pass either Poll OR Irp. DeviceExt->Lock protects Poll ownership. */
+BOOLEAN SignalSocket(PAFD_ACTIVE_POLL Poll OPTIONAL, PIRP _Irp OPTIONAL, PAFD_POLL_INFO PollReq, NTSTATUS Status, BOOLEAN CancelOwner)
 {
     UINT i;
-    PIRP Irp = _Irp ? _Irp : Poll->Irp;
+    PIRP Irp;
+
     AFD_DbgPrint(MID_TRACE,("Called (Status %x)\n", Status));
 
     if (Poll)
     {
-        KeCancelTimer( &Poll->Timer );
-        RemoveEntryList( &Poll->ListEntry );
-        ExFreePoolWithTag(Poll, TAG_AFD_ACTIVE_POLL);
+        if (!AfdClaimPoll(Poll, CancelOwner))
+            return FALSE;
+
+        Irp = Poll->Irp;
+        if (!PollReq)
+            PollReq = Irp->AssociatedIrp.SystemBuffer;
     }
+    else
+    {
+        Irp = _Irp;
+    }
+
+    ASSERT(Irp != NULL);
+    ASSERT(PollReq != NULL);
+
+    if ((Status == STATUS_TIMEOUT) || (Status == STATUS_CANCELLED))
+        ZeroEvents(PollReq->Handles, PollReq->HandleCount);
 
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information =
         FIELD_OFFSET(AFD_POLL_INFO, Handles) + sizeof(AFD_HANDLE) * PollReq->HandleCount;
-    CopyBackStatus( PollReq->Handles,
-                    PollReq->HandleCount );
+    CopyBackStatus(Irp, PollReq);
     for( i = 0; i < PollReq->HandleCount; i++ ) {
         AFD_DbgPrint
             (MAX_TRACE,
@@ -84,12 +273,21 @@ VOID SignalSocket(
               PollReq->Handles[i].Events,
               PollReq->Handles[i].Status));
     }
-    UnlockHandles( AFD_HANDLES(PollReq), PollReq->HandleCount );
+    UnlockHandles( AFD_HANDLES(Irp), PollReq->HandleCount );
+    if (Status == STATUS_TIMEOUT)
+    {
+        PollReq->HandleCount = 0;
+        Irp->IoStatus.Information = FIELD_OFFSET(AFD_POLL_INFO, Handles);
+    }
+    AfdReleasePollRequest( Irp, PollReq );
     if( Irp->MdlAddress ) UnlockRequest( Irp, IoGetCurrentIrpStackLocation( Irp ) );
     AFD_DbgPrint(MID_TRACE,("Completing\n"));
-    (void)IoSetCancelRoutine(Irp, NULL);
     IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
+    if (Poll)
+        AfdDereferencePoll(Poll);
     AFD_DbgPrint(MID_TRACE,("Done\n"));
+
+    return TRUE;
 }
 
 static KDEFERRED_ROUTINE SelectTimeout;
@@ -97,27 +295,27 @@ static VOID NTAPI SelectTimeout( PKDPC Dpc,
                            PVOID DeferredContext,
                            PVOID SystemArgument1,
                            PVOID SystemArgument2 ) {
-    PAFD_ACTIVE_POLL Poll = DeferredContext;
-    PAFD_POLL_INFO PollReq;
-    PIRP Irp;
+    PAFD_ACTIVE_POLL Poll;
     KIRQL OldIrql;
-    PAFD_DEVICE_EXTENSION DeviceExt;
+    PAFD_DEVICE_EXTENSION DeviceExt = DeferredContext;
 
-    UNREFERENCED_PARAMETER(Dpc);
     UNREFERENCED_PARAMETER(SystemArgument1);
     UNREFERENCED_PARAMETER(SystemArgument2);
 
     AFD_DbgPrint(MID_TRACE,("Called\n"));
 
-    Irp = Poll->Irp;
-    DeviceExt = Poll->DeviceExt;
-    PollReq = Irp->AssociatedIrp.SystemBuffer;
-
-    ZeroEvents( PollReq->Handles, PollReq->HandleCount );
+    Poll = CONTAINING_RECORD(Dpc, AFD_ACTIVE_POLL, TimeoutDpc);
 
     KeAcquireSpinLock( &DeviceExt->Lock, &OldIrql );
-    SignalSocket( Poll, NULL, PollReq, STATUS_TIMEOUT );
+
+    /* DeviceExt->Lock selects exactly one completion owner. */
+    if (Poll->Active)
+        SignalSocket(Poll, NULL, NULL, STATUS_TIMEOUT, FALSE);
+
     KeReleaseSpinLock( &DeviceExt->Lock, OldIrql );
+
+    /* Drop the reference transferred from the expired timer. */
+    AfdDereferencePoll(Poll);
 
     AFD_DbgPrint(MID_TRACE,("Timeout\n"));
 }
@@ -143,15 +341,23 @@ VOID KillSelectsForFCB( PAFD_DEVICE_EXTENSION DeviceExt,
         ListEntry = ListEntry->Flink;
         Irp = Poll->Irp;
         PollReq = Irp->AssociatedIrp.SystemBuffer;
-        HandleArray = AFD_HANDLES(PollReq);
+        HandleArray = AFD_HANDLES(Irp);
 
         for( i = 0; i < PollReq->HandleCount; i++ ) {
             AFD_DbgPrint(MAX_TRACE,("Req: %u, This %p\n",
                                     HandleArray[i].Handle, FileObject));
             if( (PVOID)HandleArray[i].Handle == FileObject &&
                 (!OnlyExclusive || (OnlyExclusive && Poll->Exclusive)) ) {
-                ZeroEvents( PollReq->Handles, PollReq->HandleCount );
-                SignalSocket( Poll, NULL, PollReq, STATUS_CANCELLED );
+                if (OnlyExclusive)
+                {
+                    SignalSocket(Poll, NULL, PollReq, STATUS_CANCELLED, FALSE);
+                }
+                else
+                {
+                    PollReq->Handles[i].Status |= AFD_EVENT_CLOSE;
+                    SignalSocket(Poll, NULL, PollReq, STATUS_SUCCESS, FALSE);
+                }
+                break;
             }
         }
     }
@@ -167,34 +373,43 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     NTSTATUS Status = STATUS_NO_MEMORY;
     PAFD_FCB FCB;
     PFILE_OBJECT FileObject;
-    PAFD_POLL_INFO PollReq = Irp->AssociatedIrp.SystemBuffer;
+    PAFD_POLL_INFO PollReq;
     PAFD_DEVICE_EXTENSION DeviceExt = DeviceObject->DeviceExtension;
     KIRQL OldIrql;
     UINT i, Signalled = 0;
-    ULONG Exclusive = PollReq->Exclusive;
+    ULONG Exclusive;
 
-    UNREFERENCED_PARAMETER(IrpSp);
+    Status = AfdCapturePollRequest( Irp, IrpSp, &PollReq );
+    if( !NT_SUCCESS(Status) ) {
+        Irp->IoStatus.Status = Status;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
+        return Status;
+    }
+
+    Exclusive = PollReq->Exclusive;
 
     AFD_DbgPrint(MID_TRACE,("Called (HandleCount %u Timeout %d)\n",
                             PollReq->HandleCount,
                             (INT)(PollReq->Timeout.QuadPart)));
 
-    SET_AFD_HANDLES(PollReq,
-                    LockHandles( PollReq->Handles, PollReq->HandleCount ));
+    SET_AFD_HANDLES(Irp,
+                    LockHandles( PollReq->Handles, PollReq->HandleCount, DeviceObject ));
 
-    if( !AFD_HANDLES(PollReq) ) {
+    if( !AFD_HANDLES(Irp) ) {
         Irp->IoStatus.Status = STATUS_NO_MEMORY;
         Irp->IoStatus.Information = 0;
+        AfdReleasePollRequest( Irp, PollReq );
         IoCompleteRequest( Irp, IO_NETWORK_INCREMENT );
         return STATUS_NO_MEMORY;
     }
 
     if( Exclusive ) {
         for( i = 0; i < PollReq->HandleCount; i++ ) {
-            if( !AFD_HANDLES(PollReq)[i].Handle ) continue;
+            if( !AFD_HANDLES(Irp)[i].Handle ) continue;
 
             KillSelectsForFCB( DeviceExt,
-                               (PFILE_OBJECT)AFD_HANDLES(PollReq)[i].Handle,
+                               (PFILE_OBJECT)AFD_HANDLES(Irp)[i].Handle,
                                TRUE );
         }
     }
@@ -202,9 +417,9 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     KeAcquireSpinLock( &DeviceExt->Lock, &OldIrql );
 
     for( i = 0; i < PollReq->HandleCount; i++ ) {
-        if( !AFD_HANDLES(PollReq)[i].Handle ) continue;
+        if( !AFD_HANDLES(Irp)[i].Handle ) continue;
 
-        FileObject = (PFILE_OBJECT)AFD_HANDLES(PollReq)[i].Handle;
+        FileObject = (PFILE_OBJECT)AFD_HANDLES(Irp)[i].Handle;
         FCB = FileObject->FsContext;
 
         AFD_DbgPrint(MID_TRACE, ("AFD: Select Events: "));
@@ -223,7 +438,7 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     if( Signalled ) {
         Status = STATUS_SUCCESS;
         Irp->IoStatus.Status = Status;
-        SignalSocket( NULL, Irp, PollReq, Status );
+        SignalSocket(NULL, Irp, PollReq, Status, FALSE);
     } else {
 
        PAFD_ACTIVE_POLL Poll = NULL;
@@ -234,23 +449,35 @@ AfdSelect( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
        if (Poll){
           Poll->Irp = Irp;
-          Poll->DeviceExt = DeviceExt;
           Poll->Exclusive = Exclusive;
+          Poll->Active = TRUE;
+          Poll->References = 2; /* Poll list and timer/DPC. */
 
           KeInitializeTimerEx( &Poll->Timer, NotificationTimer );
 
-          KeInitializeDpc( (PRKDPC)&Poll->TimeoutDpc, SelectTimeout, Poll );
+          KeInitializeDpc( (PRKDPC)&Poll->TimeoutDpc, SelectTimeout, DeviceExt );
 
           InsertTailList( &DeviceExt->Polls, &Poll->ListEntry );
 
           KeSetTimer( &Poll->Timer, PollReq->Timeout, &Poll->TimeoutDpc );
 
-          Status = STATUS_PENDING;
-          IoMarkIrpPending( Irp );
-          (void)IoSetCancelRoutine(Irp, AfdCancelHandler);
+          IoAcquireCancelSpinLock(&Irp->CancelIrql);
+          if (!Irp->Cancel)
+          {
+              (void)IoSetCancelRoutine(Irp, AfdCancelHandler);
+              IoMarkIrpPending(Irp);
+              IoReleaseCancelSpinLock(Irp->CancelIrql);
+              Status = STATUS_PENDING;
+          }
+          else
+          {
+              IoReleaseCancelSpinLock(Irp->CancelIrql);
+              SignalSocket(Poll, NULL, PollReq, STATUS_CANCELLED, TRUE);
+              Status = STATUS_CANCELLED;
+          }
        } else {
-          AFD_DbgPrint(MAX_TRACE, ("FIXME: do something with the IRP!\n"));
           Status = STATUS_NO_MEMORY;
+          SignalSocket(NULL, Irp, PollReq, Status, FALSE);
        }
     }
 
@@ -368,6 +595,8 @@ AfdEnumEvents( PDEVICE_OBJECT DeviceObject, PIRP Irp,
 
     /* Copy the poll state, masking out disabled events */
     EnumReq->PollEvents = (FCB->PollState & ~FCB->EventSelectDisabled);
+    if (FCB->EventSelect)
+        EnumReq->PollEvents &= FCB->EventSelectTriggers;
     RtlCopyMemory( EnumReq->EventStatus,
                    FCB->PollStatus,
                    sizeof(EnumReq->EventStatus) );
@@ -388,9 +617,9 @@ static BOOLEAN UpdatePollWithFCB( PAFD_ACTIVE_POLL Poll, PFILE_OBJECT FileObject
     ASSERT( KeGetCurrentIrql() == DISPATCH_LEVEL );
 
     for( i = 0; i < PollReq->HandleCount; i++ ) {
-        if( !AFD_HANDLES(PollReq)[i].Handle ) continue;
+        if( !AFD_HANDLES(Poll->Irp)[i].Handle ) continue;
 
-        FileObject = (PFILE_OBJECT)AFD_HANDLES(PollReq)[i].Handle;
+        FileObject = (PFILE_OBJECT)AFD_HANDLES(Poll->Irp)[i].Handle;
         FCB = FileObject->FsContext;
 
         PollReq->Handles[i].Status = PollReq->Handles[i].Events & FCB->PollState;
@@ -435,7 +664,7 @@ VOID PollReeval( PAFD_DEVICE_EXTENSION DeviceExt, PFILE_OBJECT FileObject ) {
         if( UpdatePollWithFCB( Poll, FileObject ) ) {
             ThePollEnt = ThePollEnt->Flink;
             AFD_DbgPrint(MID_TRACE,("Signalling socket\n"));
-            SignalSocket( Poll, NULL, PollReq, STATUS_SUCCESS );
+            SignalSocket(Poll, NULL, PollReq, STATUS_SUCCESS, FALSE);
         } else
             ThePollEnt = ThePollEnt->Flink;
     }

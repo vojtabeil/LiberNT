@@ -25,9 +25,18 @@ Author:
 #include <umtypes.h>
 #include <iotypes.h>
 
+struct _FILE_IO_COMPLETION_INFORMATION;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+NTSYSCALLAPI NTSTATUS NTAPI NtCreateWaitCompletionPacket(_Out_ PHANDLE WaitCompletionPacketHandle, _In_ ACCESS_MASK DesiredAccess, _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes);
+NTSYSCALLAPI NTSTATUS NTAPI NtAssociateWaitCompletionPacket(_In_ HANDLE WaitCompletionPacketHandle, _In_ HANDLE IoCompletionHandle, _In_ HANDLE TargetObjectHandle, _In_opt_ PVOID KeyContext, _In_opt_ PVOID ApcContext, _In_ NTSTATUS IoStatus, _In_ ULONG_PTR IoStatusInformation, _Out_opt_ PBOOLEAN AlreadySignaled);
+NTSYSCALLAPI NTSTATUS NTAPI NtCancelWaitCompletionPacket(_In_ HANDLE WaitCompletionPacketHandle, _In_ BOOLEAN RemoveSignaledPacket);
+NTSYSAPI NTSTATUS NTAPI ZwCreateWaitCompletionPacket(_Out_ PHANDLE WaitCompletionPacketHandle, _In_ ACCESS_MASK DesiredAccess, _In_opt_ POBJECT_ATTRIBUTES ObjectAttributes);
+NTSYSAPI NTSTATUS NTAPI ZwAssociateWaitCompletionPacket(_In_ HANDLE WaitCompletionPacketHandle, _In_ HANDLE IoCompletionHandle, _In_ HANDLE TargetObjectHandle, _In_opt_ PVOID KeyContext, _In_opt_ PVOID ApcContext, _In_ NTSTATUS IoStatus, _In_ ULONG_PTR IoStatusInformation, _Out_opt_ PBOOLEAN AlreadySignaled);
+NTSYSAPI NTSTATUS NTAPI ZwCancelWaitCompletionPacket(_In_ HANDLE WaitCompletionPacketHandle, _In_ BOOLEAN RemoveSignaledPacket);
 
 //
 // I/O Functions
@@ -70,6 +79,16 @@ IoReportHalResourceUsage(
     _In_ PCM_RESOURCE_LIST TranslatedResourceList,
     _In_ ULONG ResourceListSize
 );
+
+NTKERNELAPI
+ULONG
+NTAPI
+IoPnPDeliverServicePowerNotification(
+    _In_ POWER_ACTION PowerOperation,
+    _In_ ULONG PowerNotificationCode,
+    _In_ ULONG PowerNotificationData,
+    _In_ BOOLEAN Synchronous
+);
 #endif
 
 //
@@ -96,6 +115,24 @@ NTSTATUS
 NTAPI
 NtCancelIoFile(
     _In_ HANDLE FileHandle,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCancelIoFileEx(
+    _In_ HANDLE FileHandle,
+    _In_opt_ PIO_STATUS_BLOCK IoRequestToCancel,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtCancelSynchronousIoFile(
+    _In_ HANDLE ThreadHandle,
+    _In_opt_ PIO_STATUS_BLOCK IoRequestToCancel,
     _Out_ PIO_STATUS_BLOCK IoStatusBlock
 );
 
@@ -224,6 +261,24 @@ NtFlushBuffersFile(
     _Out_ PIO_STATUS_BLOCK IoStatusBlock
 );
 
+__kernel_entry
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtFlushBuffersFileEx(
+    _In_ HANDLE FileHandle,
+    _In_ ULONG Flags,
+    _In_reads_bytes_(ParametersSize) PVOID Parameters,
+    _In_ ULONG ParametersSize,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock
+);
+
+__kernel_entry
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtFlushProcessWriteBuffers(VOID);
+
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -298,6 +353,35 @@ NtNotifyChangeDirectoryFile(
     _In_ BOOLEAN WatchTree
 );
 
+#ifdef NTOS_MODE_USER
+//
+// Output format selector for NtNotifyChangeDirectoryFileEx
+// (in kernel mode this comes from wdm.h)
+//
+typedef enum _DIRECTORY_NOTIFY_INFORMATION_CLASS
+{
+    DirectoryNotifyInformation = 1,
+    DirectoryNotifyExtendedInformation
+} DIRECTORY_NOTIFY_INFORMATION_CLASS, *PDIRECTORY_NOTIFY_INFORMATION_CLASS;
+#endif
+
+__kernel_entry
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtNotifyChangeDirectoryFileEx(
+    _In_ HANDLE FileHandle,
+    _In_opt_ HANDLE Event,
+    _In_opt_ PIO_APC_ROUTINE ApcRoutine,
+    _In_opt_ PVOID ApcContext,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+    _Out_writes_bytes_(BufferSize) PVOID Buffer,
+    _In_ ULONG BufferSize,
+    _In_ ULONG CompletionFilter,
+    _In_ BOOLEAN WatchTree,
+    _In_ DIRECTORY_NOTIFY_INFORMATION_CLASS DirectoryNotifyInformationClass
+);
+
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -368,6 +452,23 @@ NtQueryDirectoryFile(
     _In_ BOOLEAN RestartScan
 );
 
+__kernel_entry
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtQueryDirectoryFileEx(
+    _In_ HANDLE FileHandle,
+    _In_opt_ HANDLE Event,
+    _In_opt_ PIO_APC_ROUTINE ApcRoutine,
+    _In_opt_ PVOID ApcContext,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+    _Out_writes_bytes_(Length) PVOID FileInformation,
+    _In_ ULONG Length,
+    _In_ FILE_INFORMATION_CLASS FileInformationClass,
+    _In_ ULONG QueryFlags,
+    _In_opt_ PUNICODE_STRING FileName
+);
+
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
@@ -397,6 +498,17 @@ NTSTATUS
 NTAPI
 NtQueryInformationFile(
     _In_ HANDLE FileHandle,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+    _Out_writes_bytes_(Length) PVOID FileInformation,
+    _In_ ULONG Length,
+    _In_ FILE_INFORMATION_CLASS FileInformationClass
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtQueryInformationByName(
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
     _Out_ PIO_STATUS_BLOCK IoStatusBlock,
     _Out_writes_bytes_(Length) PVOID FileInformation,
     _In_ ULONG Length,
@@ -488,6 +600,18 @@ NtRemoveIoCompletion(
 NTSYSCALLAPI
 NTSTATUS
 NTAPI
+NtRemoveIoCompletionEx(
+    _In_ HANDLE IoCompletionHandle,
+    _Out_writes_to_(Count, *NumEntriesRemoved) struct _FILE_IO_COMPLETION_INFORMATION *IoCompletionInformation,
+    _In_ ULONG Count,
+    _Out_ PULONG NumEntriesRemoved,
+    _In_opt_ PLARGE_INTEGER Timeout,
+    _In_ BOOLEAN Alertable
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
 NtSetBootEntryOrder(
     _In_ PULONG Ids,
     _In_ PULONG Count
@@ -538,7 +662,19 @@ NtSetIoCompletion(
     _In_ PVOID CompletionKey,
     _In_ PVOID CompletionContext,
     _In_ NTSTATUS CompletionStatus,
-    _In_ ULONG CompletionInformation
+    _In_ SIZE_T CompletionInformation
+);
+
+NTSYSCALLAPI
+NTSTATUS
+NTAPI
+NtSetIoCompletionEx(
+    _In_ HANDLE IoCompletionPortHandle,
+    _In_ HANDLE IoCompletionReserveHandle,
+    _In_ PVOID CompletionKey,
+    _In_ PVOID CompletionContext,
+    _In_ NTSTATUS CompletionStatus,
+    _In_ SIZE_T CompletionInformation
 );
 
 NTSYSCALLAPI
@@ -636,6 +772,15 @@ NTSTATUS
 NTAPI
 ZwCancelIoFile(
     _In_ HANDLE FileHandle,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwCancelIoFileEx(
+    _In_ HANDLE FileHandle,
+    _In_opt_ PIO_STATUS_BLOCK IoRequestToCancel,
     _Out_ PIO_STATUS_BLOCK IoStatusBlock
 );
 
@@ -742,6 +887,24 @@ ZwFlushBuffersFile(
     _Out_ PIO_STATUS_BLOCK IoStatusBlock
 );
 
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwFlushBuffersFileEx(
+    _In_ HANDLE FileHandle,
+    _In_ ULONG Flags,
+    _In_reads_bytes_(ParametersSize) PVOID Parameters,
+    _In_ ULONG ParametersSize,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock
+);
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwFlushProcessWriteBuffers(VOID);
+
 NTSYSAPI
 NTSTATUS
 NTAPI
@@ -807,6 +970,22 @@ ZwNotifyChangeDirectoryFile(
 NTSYSAPI
 NTSTATUS
 NTAPI
+ZwNotifyChangeDirectoryFileEx(
+    _In_ HANDLE FileHandle,
+    _In_opt_ HANDLE Event,
+    _In_opt_ PIO_APC_ROUTINE ApcRoutine,
+    _In_opt_ PVOID ApcContext,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+    _Out_writes_bytes_(BufferSize) PVOID Buffer,
+    _In_ ULONG BufferSize,
+    _In_ ULONG CompletionFilter,
+    _In_ BOOLEAN WatchTree,
+    _In_ DIRECTORY_NOTIFY_INFORMATION_CLASS DirectoryNotifyInformationClass
+);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
 ZwOpenFile(
     _Out_ PHANDLE FileHandle,
     _In_ ACCESS_MASK DesiredAccess,
@@ -851,6 +1030,23 @@ ZwQueryDirectoryFile(
     _In_ BOOLEAN RestartScan
 );
 
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwQueryDirectoryFileEx(
+    _In_ HANDLE FileHandle,
+    _In_opt_ HANDLE Event,
+    _In_opt_ PIO_APC_ROUTINE ApcRoutine,
+    _In_opt_ PVOID ApcContext,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+    _Out_writes_bytes_(Length) PVOID FileInformation,
+    _In_ ULONG Length,
+    _In_ FILE_INFORMATION_CLASS FileInformationClass,
+    _In_ ULONG QueryFlags,
+    _In_opt_ PUNICODE_STRING FileName
+);
+
 #ifdef NTOS_MODE_USER
 NTSYSAPI
 NTSTATUS
@@ -882,6 +1078,18 @@ NTSTATUS
 NTAPI
 ZwQueryInformationFile(
     _In_ HANDLE FileHandle,
+    _Out_ PIO_STATUS_BLOCK IoStatusBlock,
+    _Out_writes_bytes_(Length) PVOID FileInformation,
+    _In_ ULONG Length,
+    _In_ FILE_INFORMATION_CLASS FileInformationClass
+);
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwQueryInformationByName(
+    _In_ POBJECT_ATTRIBUTES ObjectAttributes,
     _Out_ PIO_STATUS_BLOCK IoStatusBlock,
     _Out_writes_bytes_(Length) PVOID FileInformation,
     _In_ ULONG Length,
@@ -968,6 +1176,18 @@ ZwRemoveIoCompletion(
     _In_opt_ PLARGE_INTEGER Timeout
 );
 
+NTSYSAPI
+NTSTATUS
+NTAPI
+ZwRemoveIoCompletionEx(
+    _In_ HANDLE IoCompletionHandle,
+    _Out_writes_to_(Count, *NumEntriesRemoved) struct _FILE_IO_COMPLETION_INFORMATION *IoCompletionInformation,
+    _In_ ULONG Count,
+    _Out_ PULONG NumEntriesRemoved,
+    _In_opt_ PLARGE_INTEGER Timeout,
+    _In_ BOOLEAN Alertable
+);
+
 #ifdef NTOS_MODE_USER
 NTSYSAPI
 NTSTATUS
@@ -1000,7 +1220,7 @@ ZwSetIoCompletion(
     _In_ PVOID CompletionKey,
     _In_ PVOID CompletionContext,
     _In_ NTSTATUS CompletionStatus,
-    _In_ ULONG CompletionInformation
+    _In_ SIZE_T CompletionInformation
 );
 
 NTSYSAPI
@@ -1079,5 +1299,3 @@ ZwWriteFileGather(
 #endif
 
 #endif
-
-

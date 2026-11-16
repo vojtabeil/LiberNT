@@ -123,10 +123,6 @@ set_module_type(glu32 win32dll)
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     target_compile_options(glu32 PRIVATE -Wno-write-strings)
     target_compile_options(glu32 PRIVATE -Wno-unused-but-set-variable)
-    target_compile_options(glu32 PRIVATE -Wno-uninitialized)
-    target_compile_options(glu32 PRIVATE -Wno-stringop-overflow)
-    # Prevent a warning when comparing 'this' against 0
-    set_source_files_properties(src/libnurbs/internals/arc.cc PROPERTIES COMPILE_OPTIONS "-Wno-nonnull-compare")
 endif()
 
 if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
@@ -138,3 +134,11 @@ endif()
 add_importlibs(glu32 opengl32 gdi32 msvcrt kernel32 ntdll)
 add_pch(glu32 precomp.h "${PCH_SKIP_SOURCE}")
 add_cd_file(TARGET glu32 DESTINATION reactos/system32 FOR all)
+
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    set_property(SOURCE src/libnurbs/internals/backend.cc APPEND PROPERTY COMPILE_OPTIONS -Wno-unused-private-field)
+    set_property(SOURCE
+        src/libnurbs/nurbtess/directedLine.cc
+        src/libnurbs/nurbtess/sampleCompTop.cc
+        APPEND PROPERTY COMPILE_OPTIONS -Wno-unused-but-set-variable)
+endif()

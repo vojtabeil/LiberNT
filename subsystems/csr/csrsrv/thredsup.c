@@ -39,22 +39,22 @@ NTAPI
 ProtectHandle(IN HANDLE ObjectHandle)
 {
     NTSTATUS Status;
-    OBJECT_HANDLE_FLAG_INFORMATION HandleFlags;
+    OBJECT_HANDLE_ATTRIBUTE_INFORMATION HandleInfo;
 
     /* Query current state */
     Status = NtQueryObject(ObjectHandle,
                            ObjectHandleFlagInformation,
-                           &HandleFlags,
-                           sizeof(HandleFlags),
+                           &HandleInfo,
+                           sizeof(HandleInfo),
                            NULL);
     if (NT_SUCCESS(Status))
     {
         /* Enable protect from close */
-        HandleFlags.ProtectFromClose = TRUE;
+        HandleInfo.ProtectFromClose = TRUE;
         Status = NtSetInformationObject(ObjectHandle,
                                         ObjectHandleFlagInformation,
-                                        &HandleFlags,
-                                        sizeof(HandleFlags));
+                                        &HandleInfo,
+                                        sizeof(HandleInfo));
         if (NT_SUCCESS(Status)) return TRUE;
     }
 
@@ -78,22 +78,22 @@ NTAPI
 UnProtectHandle(IN HANDLE ObjectHandle)
 {
     NTSTATUS Status;
-    OBJECT_HANDLE_FLAG_INFORMATION HandleFlags;
+    OBJECT_HANDLE_ATTRIBUTE_INFORMATION HandleInfo;
 
     /* Query current state */
     Status = NtQueryObject(ObjectHandle,
                            ObjectHandleFlagInformation,
-                           &HandleFlags,
-                           sizeof(HandleFlags),
+                           &HandleInfo,
+                           sizeof(HandleInfo),
                            NULL);
     if (NT_SUCCESS(Status))
     {
         /* Disable protect from close */
-        HandleFlags.ProtectFromClose = FALSE;
+        HandleInfo.ProtectFromClose = FALSE;
         Status = NtSetInformationObject(ObjectHandle,
                                         ObjectHandleFlagInformation,
-                                        &HandleFlags,
-                                        sizeof(HandleFlags));
+                                        &HandleInfo,
+                                        sizeof(HandleInfo));
         if (NT_SUCCESS(Status)) return TRUE;
     }
 
@@ -640,6 +640,7 @@ CsrCreateRemoteThread(IN HANDLE hThread,
     if (!NT_SUCCESS(Status))
     {
         /* Bail out */
+        UnProtectHandle(CsrThread->ThreadHandle);
         if (CsrThread->ThreadHandle != hThread) NtClose(CsrThread->ThreadHandle);
         CsrUnlockProcess(CsrProcess);
         CsrDeallocateThread(CsrThread);
@@ -745,6 +746,7 @@ CsrCreateThread(IN PCSR_PROCESS CsrProcess,
     if (!NT_SUCCESS(Status))
     {
         /* Bail out */
+        UnProtectHandle(CsrThread->ThreadHandle);
         CsrUnlockProcess(CsrProcess);
         CsrDeallocateThread(CsrThread);
         return Status;

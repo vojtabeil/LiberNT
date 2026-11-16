@@ -519,6 +519,26 @@ static void create_test_file(LPCSTR name, LPCSTR data, DWORD size)
     CloseHandle(hfile);
 }
 
+static void age_test_file(LPCSTR name)
+{
+    ULARGE_INTEGER time;
+    FILETIME ft;
+    HANDLE hfile;
+
+    GetSystemTimeAsFileTime(&ft);
+    time.LowPart = ft.dwLowDateTime;
+    time.HighPart = ft.dwHighDateTime;
+    time.QuadPart -= 30000000;
+    ft.dwLowDateTime = time.LowPart;
+    ft.dwHighDateTime = time.HighPart;
+
+    hfile = CreateFileA(name, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    ok(hfile != INVALID_HANDLE_VALUE, "cannot open %s\n", name);
+    ok(SetFileTime(hfile, NULL, NULL, &ft), "SetFileTime failed, error %lu\n", GetLastError());
+    CloseHandle(hfile);
+}
+
 static BOOL emptystr_ok(CHAR emptystr[MAX_PATH])
 {
     int i;
@@ -589,8 +609,8 @@ static void test_GetPrivateProfileString(const char *content, const char *descri
     create_test_file(filename, content, lstrlenA(content));
 
     /* Run this test series with caching. Wine won't cache profile
-       files younger than 2.1 seconds. */
-    Sleep(2500);
+       files younger than 2.1 seconds, so the file is made older. */
+    age_test_file(filename);
 
     /* lpAppName is NULL */
     memset(buf, 0xc, sizeof(buf));
@@ -1183,17 +1203,9 @@ static void test_profile_struct(void)
     todo_wine ok(GetLastError() == ERROR_BAD_LENGTH, "got error %lu\n", GetLastError());
 
     /* Test deleting struct */
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: Deleting private profile struct crashes on ReactOS!\n");
-    } else {
-#endif
     ret = WritePrivateProfileStructA("s", "key", NULL, sizeof("abacus"), "./winetest.ini");
     ok(ret, "got error %lu\n", GetLastError());
     ok(check_file_data("./winetest.ini", expect_data_empty), "file doesn't match\n");
-#ifdef __REACTOS__
-    }
-#endif
 
     ret = DeleteFileA("./winetest.ini");
     ok(ret, "got error %lu\n", GetLastError());

@@ -19,6 +19,7 @@
 #include <kmt_public.h>
 #define KMT_DEFINE_TEST_FUNCTIONS
 #include <kmt_test.h>
+#include "../ntos_po/PoFxState_pnp.h"
 
 /* Usermode callback definitions */
 typedef struct _KMT_USER_WORK_ENTRY
@@ -34,6 +35,8 @@ typedef struct _KMT_USER_WORK_LIST
     LIST_ENTRY ListHead;
     FAST_MUTEX Lock;
     KEVENT NewWorkEvent;
+    KEVENT WaiterReadyEvent;
+    volatile LONG CancelWait;
 } KMT_USER_WORK_LIST, *PKMT_USER_WORK_LIST;
 
 extern
@@ -58,7 +61,7 @@ static PDEVICE_OBJECT MainDeviceObject;
 PDRIVER_OBJECT KmtDriverObject = NULL;
 static KMT_USER_WORK_LIST WorkList;
 static ULONG RequestId = 0;
-static const LONGLONG TimeoutDuration = -30LL * (1000 * 1000 * 10); // 30 seconds
+static const LONGLONG TimeoutDuration = -30LL * (1000 * 1000 * 10);
 
 /* Entry */
 /**
@@ -111,6 +114,7 @@ DriverEntry(
     DeviceExtension = MainDeviceObject->DeviceExtension;
     DeviceExtension->ResultBuffer = NULL;
     DeviceExtension->Mdl = NULL;
+    ExInitializeFastMutex(&DeviceExtension->ResultBufferLock);
 
     DriverObject->DriverUnload = DriverUnload;
     DriverObject->MajorFunction[IRP_MJ_CREATE] = DriverCreate;
@@ -120,7 +124,10 @@ DriverEntry(
 
     ExInitializeFastMutex(&WorkList.Lock);
     KeInitializeEvent(&WorkList.NewWorkEvent, NotificationEvent, FALSE);
+    KeInitializeEvent(&WorkList.WaiterReadyEvent, NotificationEvent, FALSE);
     InitializeListHead(&WorkList.ListHead);
+    WorkList.CancelWait = FALSE;
+    KmtPoFxInitializePnp(DriverObject, MainDeviceObject);
 
 cleanup:
     if (MainDeviceObject && !NT_SUCCESS(Status))
@@ -238,17 +245,20 @@ DriverCleanup(
 
     ASSERT(IoStackLocation->FileObject->FsContext2 == NULL);
     DeviceExtension = DeviceObject->DeviceExtension;
+    ExAcquireFastMutex(&DeviceExtension->ResultBufferLock);
     if (DeviceExtension->Mdl && IoStackLocation->FileObject->FsContext == DeviceExtension->Mdl)
     {
         MmUnlockPages(DeviceExtension->Mdl);
         IoFreeMdl(DeviceExtension->Mdl);
         DeviceExtension->Mdl = NULL;
         ResultBuffer = DeviceExtension->ResultBuffer = NULL;
+        IoStackLocation->FileObject->FsContext = NULL;
     }
     else
     {
         ASSERT(IoStackLocation->FileObject->FsContext == NULL);
     }
+    ExReleaseFastMutex(&DeviceExtension->ResultBufferLock);
 
     Irp->IoStatus.Status = Status;
     Irp->IoStatus.Information = 0;
@@ -356,6 +366,7 @@ DriverIoControl(
         {
             ANSI_STRING TestName;
             PCKMT_TEST TestEntry;
+            LARGE_INTEGER ReadyTimeout;
 
             DPRINT("DriverIoControl. IOCTL_KMTEST_RUN_TEST, inlen=%lu, outlen=%lu\n",
                      IoStackLocation->Parameters.DeviceIoControl.InputBufferLength,
@@ -363,6 +374,9 @@ DriverIoControl(
             TestName.Length = TestName.MaximumLength = (USHORT)min(IoStackLocation->Parameters.DeviceIoControl.InputBufferLength, USHRT_MAX);
             TestName.Buffer = Irp->AssociatedIrp.SystemBuffer;
             DPRINT("DriverIoControl. Run test: %Z\n", &TestName);
+
+            ReadyTimeout.QuadPart = -5LL * 1000 * 1000 * 10;
+            KeWaitForSingleObject(&WorkList.WaiterReadyEvent, Executive, KernelMode, FALSE, &ReadyTimeout);
 
             for (TestEntry = TestList; TestEntry->TestName; ++TestEntry)
             {
@@ -395,15 +409,17 @@ DriverIoControl(
                     IoStackLocation->Parameters.DeviceIoControl.InputBufferLength,
                     IoStackLocation->Parameters.DeviceIoControl.OutputBufferLength);
 
+            ExAcquireFastMutex(&DeviceExtension->ResultBufferLock);
             if (DeviceExtension->Mdl)
             {
                 if (IoStackLocation->FileObject->FsContext != DeviceExtension->Mdl)
                 {
                     Status = STATUS_ACCESS_DENIED;
-                    break;
+                    goto resultbuffer_done;
                 }
                 MmUnlockPages(DeviceExtension->Mdl);
                 IoFreeMdl(DeviceExtension->Mdl);
+                DeviceExtension->Mdl = NULL;
                 IoStackLocation->FileObject->FsContext = NULL;
                 ResultBuffer = DeviceExtension->ResultBuffer = NULL;
             }
@@ -414,7 +430,7 @@ DriverIoControl(
             if (!DeviceExtension->Mdl)
             {
                 Status = STATUS_INSUFFICIENT_RESOURCES;
-                break;
+                goto resultbuffer_done;
             }
 
             _SEH2_TRY
@@ -424,17 +440,31 @@ DriverIoControl(
             _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
             {
                 Status = _SEH2_GetExceptionCode();
-                IoFreeMdl(DeviceExtension->Mdl);
-                DeviceExtension->Mdl = NULL;
-                break;
             } _SEH2_END;
 
+            if (!NT_SUCCESS(Status))
+            {
+                IoFreeMdl(DeviceExtension->Mdl);
+                DeviceExtension->Mdl = NULL;
+                goto resultbuffer_done;
+            }
+
             ResultBuffer = DeviceExtension->ResultBuffer = MmGetSystemAddressForMdlSafe(DeviceExtension->Mdl, NormalPagePriority);
+            if (!ResultBuffer)
+            {
+                MmUnlockPages(DeviceExtension->Mdl);
+                IoFreeMdl(DeviceExtension->Mdl);
+                DeviceExtension->Mdl = NULL;
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                goto resultbuffer_done;
+            }
             IoStackLocation->FileObject->FsContext = DeviceExtension->Mdl;
 
             DPRINT("DriverIoControl. ResultBuffer: %ld %ld %ld %ld\n",
                     ResultBuffer->Successes, ResultBuffer->Failures,
                     ResultBuffer->LogBufferLength, ResultBuffer->LogBufferMaxLength);
+resultbuffer_done:
+            ExReleaseFastMutex(&DeviceExtension->ResultBufferLock);
             break;
         }
         case IOCTL_KMTEST_USERMODE_AWAIT_REQ:
@@ -448,10 +478,18 @@ DriverIoControl(
 
             /* TODO: prevent multiple concurrent invocations */
             Timeout.QuadPart = TimeoutDuration;
+            KeSetEvent(&WorkList.WaiterReadyEvent, IO_NO_INCREMENT, FALSE);
             Status = KeWaitForSingleObject(&WorkList.NewWorkEvent, UserRequest, UserMode, FALSE, &Timeout);
 
+            if (InterlockedExchange(&WorkList.CancelWait, FALSE))
+            {
+                KeClearEvent(&WorkList.NewWorkEvent);
+                Status = STATUS_SUCCESS;
+                break;
+            }
+
             if (Status == STATUS_TIMEOUT)
-                DPRINT1("KeWaitForSingleObject timed out!\n");
+                DPRINT("User-mode callback wait timed out\n");
 
             if (Status == STATUS_USER_APC || Status == STATUS_KERNEL_APC || Status == STATUS_TIMEOUT)
                 break;
@@ -474,6 +512,19 @@ DriverIoControl(
             KeClearEvent(&WorkList.NewWorkEvent);
             break;
 
+        }
+        case IOCTL_KMTEST_USERMODE_CANCEL_WAIT:
+        {
+            InterlockedExchange(&WorkList.CancelWait, TRUE);
+            KeSetEvent(&WorkList.NewWorkEvent, IO_NO_INCREMENT, FALSE);
+            break;
+        }
+        case IOCTL_KMTEST_USERMODE_RESET_WAIT:
+        {
+            InterlockedExchange(&WorkList.CancelWait, FALSE);
+            KeClearEvent(&WorkList.NewWorkEvent);
+            KeClearEvent(&WorkList.WaiterReadyEvent);
+            break;
         }
         case IOCTL_KMTEST_USERMODE_SEND_RESPONSE:
         {

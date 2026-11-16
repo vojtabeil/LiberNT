@@ -43,7 +43,6 @@ ACPI_MODULE_NAME		("acpi_bus")
 #define HAS_SIBLINGS(d)		(((d)->parent) && ((d)->node.next != &(d)->parent->children))
 #define NODE_TO_DEVICE(n)	(list_entry(n, struct acpi_device, node))
 
-int			event_is_open;
 extern void acpi_pic_sci_set_trigger(unsigned int irq, UINT16 trigger);
 
 typedef int (*acpi_bus_walk_callback)(struct acpi_device*, int, void*);
@@ -51,9 +50,37 @@ typedef int (*acpi_bus_walk_callback)(struct acpi_device*, int, void*);
 struct acpi_device		*acpi_root;
 KSPIN_LOCK	acpi_bus_event_lock;
 LIST_HEAD(acpi_bus_event_list);
-//DECLARE_WAIT_QUEUE_HEAD(acpi_bus_event_queue);
-KEVENT AcpiEventQueue;
 KDPC event_dpc;
+
+/*
+ * Listening receivers (struct acpi_bus_event_waiter), each with its own wake
+ * event so that one receiver taking (or passing over) an event never
+ * consumes another's wake-up.  Guarded by acpi_bus_event_lock, as are the
+ * queued events and their count.
+ */
+static LIST_ENTRY acpi_bus_event_waiters;
+static ULONG acpi_bus_event_count;
+
+/* Events nobody takes are not kept forever. */
+#define ACPI_BUS_MAX_QUEUED_EVENTS	16
+
+/*
+ * Fixed-feature buttons raise events from the SCI handler, where neither
+ * pool nor the event lock can be used.  Each event is parked in a slot here
+ * and the DPC moves the slots, oldest first, onto the queue -- one DPC
+ * object alone would merge events raised before it ran.
+ */
+#define ACPI_BUS_PENDING_EVENTS		8
+#define ACPI_BUS_SLOT_FREE		0
+#define ACPI_BUS_SLOT_WRITING		1
+#define ACPI_BUS_SLOT_READY		2
+static struct {
+	volatile LONG		state;
+	LONG			sequence;
+	struct acpi_device	*device;
+	ULONG_PTR		type_data;
+} acpi_bus_pending_events[ACPI_BUS_PENDING_EVENTS];
+static volatile LONG acpi_bus_pending_sequence;
 
 int ProcessorCount, PowerDeviceCount, PowerButtonCount, FixedPowerButtonCount;
 int FixedSleepButtonCount, SleepButtonCount, ThermalZoneCount;
@@ -194,19 +221,19 @@ int acpi_bus_get_private_data(ACPI_HANDLE handle, void **data)
                                  Power Management
    -------------------------------------------------------------------------- */
 
-int
-acpi_bus_get_power (
-	ACPI_HANDLE		handle,
-	int			*state)
+static int
+acpi_bus_get_power_locked(
+	struct acpi_device *device,
+	int *state)
 {
 	int			result = 0;
 	ACPI_STATUS             status = 0;
-	struct acpi_device	*device = NULL;
 	unsigned long long		psc = 0;
 
-	result = acpi_bus_get_device(handle, &device);
-	if (result)
-		return_VALUE(result);
+	if (device->power.state == ACPI_STATE_D3_COLD) {
+		*state = ACPI_STATE_D3_COLD;
+		return_VALUE(0);
+	}
 
 	*state = ACPI_STATE_UNKNOWN;
 
@@ -244,6 +271,25 @@ acpi_bus_get_power (
 	return_VALUE(0);
 }
 
+int
+acpi_bus_get_power(
+	ACPI_HANDLE handle,
+	int *state)
+{
+	struct acpi_device *device = NULL;
+	int result;
+
+	if (!state)
+		return_VALUE(AE_BAD_PARAMETER);
+	result = acpi_bus_get_device(handle, &device);
+	if (result)
+		return_VALUE(result);
+	ExAcquireFastMutex(&device->power_lock);
+	result = acpi_bus_get_power_locked(device, state);
+	ExReleaseFastMutex(&device->power_lock);
+	return_VALUE(result);
+}
+
 
 int
 acpi_bus_set_power (
@@ -253,21 +299,26 @@ acpi_bus_set_power (
 	int			result = 0;
 	ACPI_STATUS		status = AE_OK;
 	struct acpi_device	*device = NULL;
-	char			object_name[5] = {'_','P','S','0'+state,'\0'};
+	int			parent_state;
+	char			object_name[5] = {'_','P','S','0'+min(state, ACPI_STATE_D3_HOT),'\0'};
 
 
 	result = acpi_bus_get_device(handle, &device);
 	if (result)
 		return_VALUE(result);
 
-	if ((state < ACPI_STATE_D0) || (state > ACPI_STATE_D3))
+	if ((state < ACPI_STATE_D0) || (state > ACPI_STATE_D3_COLD))
 		return_VALUE(AE_BAD_PARAMETER);
+	if (device->parent && device->parent->power.state == ACPI_STATE_UNKNOWN)
+		acpi_bus_get_power(device->parent->handle, &parent_state);
+	ExAcquireFastMutex(&device->power_lock);
 
 	/* Make sure this is a valid target state */
 
 	if (!device->flags.power_manageable) {
 		DPRINT1( "Device is not power manageable\n");
-		return_VALUE(AE_NOT_FOUND);
+		result = AE_NOT_FOUND;
+		goto end;
 	}
 	/*
 	 * Get device's current power state
@@ -283,20 +334,26 @@ acpi_bus_set_power (
 		 * So if the acpi_power_nocheck is set, it is unnecessary to
 		 * get the power state by calling acpi_bus_get_power.
 		 */
-		acpi_bus_get_power(device->handle, &device->power.state);
+		result = acpi_bus_get_power_locked(device, &device->power.state);
+		if (result)
+			goto end;
 	//}
 
 	if ((state == device->power.state) && !device->flags.force_power_state) {
-		DPRINT1("Device is already at D%d\n", state);
-		return 0;
+		DPRINT("Device is already at D%d\n", state);
+		goto end;
 	}
 	if (!device->power.states[state].flags.valid) {
 		DPRINT1( "Device does not support D%d\n", state);
-		return AE_NOT_FOUND;
+		result = AE_NOT_FOUND;
+		goto end;
 	}
-	if (device->parent && (state < device->parent->power.state)) {
+	if (device->parent &&
+	    device->parent->power.state != ACPI_STATE_UNKNOWN &&
+	    (state < device->parent->power.state)) {
 		DPRINT1( "Cannot set device to a higher-powered state than parent\n");
-		return AE_NOT_FOUND;
+		result = AE_NOT_FOUND;
+		goto end;
 	}
 
 	/*
@@ -338,6 +395,9 @@ acpi_bus_set_power (
 	}
 
 end:
+	if (!result)
+		device->power.state = state;
+	ExReleaseFastMutex(&device->power_lock);
 	if (result)
 		DPRINT( "Error transitioning device [%s] to D%d\n",
 			device->pnp.bus_id, state);
@@ -393,7 +453,7 @@ acpi_bus_get_power_flags (
 	/*
 	 * Enumerate supported power management states
 	 */
-	for (i = ACPI_STATE_D0; i <= ACPI_STATE_D3; i++) {
+	for (i = ACPI_STATE_D0; i <= ACPI_STATE_D3_HOT; i++) {
 		struct acpi_device_power_state *ps = &device->power.states[i];
 		char		object_name[5] = {'_','P','R','0'+i,'\0'};
 
@@ -424,8 +484,14 @@ acpi_bus_get_power_flags (
 	/* Set defaults for D0 and D3 states (always valid) */
 	device->power.states[ACPI_STATE_D0].flags.valid = 1;
 	device->power.states[ACPI_STATE_D0].power = 100;
-	device->power.states[ACPI_STATE_D3].flags.valid = 1;
-	device->power.states[ACPI_STATE_D3].power = 0;
+	device->power.states[ACPI_STATE_D3_HOT].flags.valid = 1;
+	device->power.states[ACPI_STATE_D3_HOT].power = 0;
+
+	device->power.states[ACPI_STATE_D3_COLD].flags.valid =
+		device->power.states[ACPI_STATE_D3_HOT].resources.count != 0;
+	device->power.states[ACPI_STATE_D3_COLD].flags.explicit_set =
+		device->power.states[ACPI_STATE_D3_HOT].flags.explicit_set;
+	device->power.states[ACPI_STATE_D3_COLD].power = 0;
 
 	device->power.state = ACPI_STATE_UNKNOWN;
 
@@ -453,19 +519,22 @@ acpi_bus_get_perf_flags (
                                 Event Management
    -------------------------------------------------------------------------- */
 
-void
-NTAPI
-acpi_bus_generate_event_dpc(PKDPC Dpc,
-                            PVOID DeferredContext,
-                            PVOID SystemArgument1,
-                            PVOID SystemArgument2)
+/*
+ * Queues one event for the receivers that want it.  DISPATCH_LEVEL.  An
+ * event no current receiver would take is dropped, as it always was when no
+ * one was listening.
+ */
+static void
+acpi_bus_queue_event(
+	struct acpi_device	*device,
+	ULONG_PTR		TypeData)
 {
 	struct acpi_bus_event *event;
-    struct acpi_device *device = SystemArgument1;
-    ULONG_PTR TypeData = (ULONG_PTR)SystemArgument2;
-	KIRQL OldIrql;
+	struct acpi_bus_event *oldest = NULL;
+	PLIST_ENTRY Entry;
+	BOOLEAN Wanted = FALSE;
 
-    event = ExAllocatePoolWithTag(NonPagedPool,sizeof(struct acpi_bus_event), 'epcA');
+	event = ExAllocatePoolWithTag(NonPagedPool,sizeof(struct acpi_bus_event), 'epcA');
 	if (!event)
 		return;
 
@@ -474,13 +543,83 @@ acpi_bus_generate_event_dpc(PKDPC Dpc,
 	event->type = (TypeData & 0xFF000000) >> 24;
 	event->data = (TypeData & 0x00FFFFFF);
 
-	KeAcquireSpinLock(&acpi_bus_event_lock, &OldIrql);
-	list_add_tail(&event->node, &acpi_bus_event_list);
-	KeReleaseSpinLock(&acpi_bus_event_lock, OldIrql);
+	KeAcquireSpinLockAtDpcLevel(&acpi_bus_event_lock);
+	for (Entry = acpi_bus_event_waiters.Flink;
+	     Entry != &acpi_bus_event_waiters;
+	     Entry = Entry->Flink)
+	{
+		struct acpi_bus_event_waiter *waiter =
+			CONTAINING_RECORD(Entry, struct acpi_bus_event_waiter, link);
 
-	KeSetEvent(&AcpiEventQueue, IO_NO_INCREMENT, FALSE);
+		if (!waiter->filter || waiter->filter(event, waiter->context))
+		{
+			Wanted = TRUE;
+			KeSetEvent(&waiter->wake, IO_NO_INCREMENT, FALSE);
+		}
+	}
+	if (Wanted)
+	{
+		if (acpi_bus_event_count >= ACPI_BUS_MAX_QUEUED_EVENTS)
+		{
+			oldest = list_entry(acpi_bus_event_list.next, struct acpi_bus_event, node);
+			list_del(&oldest->node);
+			acpi_bus_event_count--;
+		}
+		list_add_tail(&event->node, &acpi_bus_event_list);
+		acpi_bus_event_count++;
+	}
+	KeReleaseSpinLockFromDpcLevel(&acpi_bus_event_lock);
+
+	if (oldest)
+	{
+		DPRINT1("ACPI event queue full; oldest event dropped\n");
+		ExFreePoolWithTag(oldest, 'epcA');
+	}
+	if (!Wanted)
+		ExFreePoolWithTag(event, 'epcA');
 }
 
+void
+NTAPI
+acpi_bus_generate_event_dpc(PKDPC Dpc,
+                            PVOID DeferredContext,
+                            PVOID SystemArgument1,
+                            PVOID SystemArgument2)
+{
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+
+	for (;;)
+	{
+		LONG Next = -1;
+		LONG i;
+		struct acpi_device *device;
+		ULONG_PTR TypeData;
+
+		for (i = 0; i < ACPI_BUS_PENDING_EVENTS; i++)
+		{
+			if (acpi_bus_pending_events[i].state != ACPI_BUS_SLOT_READY)
+				continue;
+			if (Next < 0 ||
+			    (LONG)(acpi_bus_pending_events[i].sequence -
+			           acpi_bus_pending_events[Next].sequence) < 0)
+			{
+				Next = i;
+			}
+		}
+		if (Next < 0)
+			break;
+
+		device = acpi_bus_pending_events[Next].device;
+		TypeData = acpi_bus_pending_events[Next].type_data;
+		InterlockedExchange(&acpi_bus_pending_events[Next].state, ACPI_BUS_SLOT_FREE);
+
+		acpi_bus_queue_event(device, TypeData);
+	}
+}
+
+/*
+ * Raises an event.  Callable at any IRQL up to the SCI's.
+ */
 int
 acpi_bus_generate_event (
 	struct acpi_device	*device,
@@ -488,14 +627,16 @@ acpi_bus_generate_event (
 	int			data)
 {
     ULONG_PTR TypeData = 0;
+    LONG i;
 
 	DPRINT("acpi_bus_generate_event\n");
 
 	if (!device)
 		return_VALUE(AE_BAD_PARAMETER);
 
-	/* drop event on the floor if no one's listening */
-	if (!event_is_open)
+	/* drop event on the floor if no one's listening; the DPC checks
+	 * again, against what each receiver wants */
+	if (IsListEmpty(&acpi_bus_event_waiters))
 		return_VALUE(0);
 
     /* Data shouldn't even get near 24 bits */
@@ -504,53 +645,145 @@ acpi_bus_generate_event (
     TypeData = data;
     TypeData |= type << 24;
 
-	KeInsertQueueDpc(&event_dpc, device, (PVOID)TypeData);
+    for (i = 0; i < ACPI_BUS_PENDING_EVENTS; i++)
+    {
+        if (InterlockedCompareExchange(&acpi_bus_pending_events[i].state,
+                                       ACPI_BUS_SLOT_WRITING,
+                                       ACPI_BUS_SLOT_FREE) != ACPI_BUS_SLOT_FREE)
+        {
+            continue;
+        }
+        acpi_bus_pending_events[i].sequence = InterlockedIncrement(&acpi_bus_pending_sequence);
+        acpi_bus_pending_events[i].device = device;
+        acpi_bus_pending_events[i].type_data = TypeData;
+        InterlockedExchange(&acpi_bus_pending_events[i].state, ACPI_BUS_SLOT_READY);
+        KeInsertQueueDpc(&event_dpc, NULL, NULL);
+        return_VALUE(0);
+    }
 
+    DPRINT1("ACPI event dropped: %u events already pending\n", ACPI_BUS_PENDING_EVENTS);
 	return_VALUE(0);
+}
+
+/*
+ * Starts listening: from here on, events the filter accepts (every event
+ * when the filter is NULL) are kept for this receiver.  PASSIVE_LEVEL.  The
+ * filter runs under the event lock at DISPATCH_LEVEL.
+ */
+void
+acpi_bus_event_listen (
+	struct acpi_bus_event_waiter	*waiter,
+	acpi_bus_event_filter		filter,
+	void				*context)
+{
+	KIRQL OldIrql;
+
+	KeInitializeEvent(&waiter->wake, NotificationEvent, FALSE);
+	waiter->filter = filter;
+	waiter->context = context;
+
+	KeAcquireSpinLock(&acpi_bus_event_lock, &OldIrql);
+	InsertTailList(&acpi_bus_event_waiters, &waiter->link);
+	KeReleaseSpinLock(&acpi_bus_event_lock, OldIrql);
+}
+
+void
+acpi_bus_event_unlisten (
+	struct acpi_bus_event_waiter	*waiter)
+{
+	KIRQL OldIrql;
+
+	KeAcquireSpinLock(&acpi_bus_event_lock, &OldIrql);
+	RemoveEntryList(&waiter->link);
+	KeReleaseSpinLock(&acpi_bus_event_lock, OldIrql);
+}
+
+/*
+ * Waits for the oldest queued event the listening receiver's filter accepts
+ * and takes it off the queue.  PASSIVE_LEVEL.
+ */
+int
+acpi_bus_event_wait (
+	struct acpi_bus_event_waiter	*waiter,
+	struct acpi_bus_event		*event)
+{
+	struct acpi_bus_event	*entry;
+	struct list_head	*node;
+	KIRQL OldIrql;
+
+	DPRINT("acpi_bus_event_wait\n");
+
+	if (!event)
+		return AE_BAD_PARAMETER;
+
+	KeAcquireSpinLock(&acpi_bus_event_lock, &OldIrql);
+	for (;;)
+	{
+		entry = NULL;
+		list_for_each(node, &acpi_bus_event_list)
+		{
+			struct acpi_bus_event *candidate =
+				list_entry(node, struct acpi_bus_event, node);
+
+			if (!waiter->filter || waiter->filter(candidate, waiter->context))
+			{
+				entry = candidate;
+				break;
+			}
+		}
+		if (entry)
+		{
+			list_del(&entry->node);
+			acpi_bus_event_count--;
+			break;
+		}
+
+		/* Cleared under the lock: an event queued after this point sets
+		 * it again before the wait can miss it. */
+		KeClearEvent(&waiter->wake);
+		KeReleaseSpinLock(&acpi_bus_event_lock, OldIrql);
+		KeWaitForSingleObject(&waiter->wake,
+				      Executive,
+				      KernelMode,
+				      FALSE,
+				      NULL);
+		KeAcquireSpinLock(&acpi_bus_event_lock, &OldIrql);
+	}
+	KeReleaseSpinLock(&acpi_bus_event_lock, OldIrql);
+
+	memcpy(event, entry, sizeof(struct acpi_bus_event));
+
+	ExFreePoolWithTag(entry, 'epcA');
+	return_VALUE(0);
+}
+
+/*
+ * Waits for the next event the filter accepts.  Only events raised while
+ * the call waits are seen.
+ */
+int
+acpi_bus_receive_event_filtered (
+	acpi_bus_event_filter	filter,
+	void			*context,
+	struct acpi_bus_event	*event)
+{
+	struct acpi_bus_event_waiter waiter;
+	int result;
+
+	if (!event)
+		return AE_BAD_PARAMETER;
+
+	acpi_bus_event_listen(&waiter, filter, context);
+	result = acpi_bus_event_wait(&waiter, event);
+	acpi_bus_event_unlisten(&waiter);
+	return result;
 }
 
 int
 acpi_bus_receive_event (
 	struct acpi_bus_event	*event)
 {
-//	unsigned long		flags = 0;
-	struct acpi_bus_event	*entry = NULL;
-	KIRQL OldIrql;
-
-	//DECLARE_WAITQUEUE(wait, current);
-
-	DPRINT("acpi_bus_receive_event\n");
-
-	if (!event)
-		return AE_BAD_PARAMETER;
-
-	event_is_open++;
-	KeWaitForSingleObject(&AcpiEventQueue,
-			      Executive,
-			      KernelMode,
-			      FALSE,
-			      NULL);
-	event_is_open--;
-	KeClearEvent(&AcpiEventQueue);
-
-	if (list_empty(&acpi_bus_event_list))
-		return_VALUE(AE_NOT_FOUND);
-
-//	spin_lock_irqsave(&acpi_bus_event_lock, flags);
-	KeAcquireSpinLock(&acpi_bus_event_lock, &OldIrql);
-	entry = list_entry(acpi_bus_event_list.next, struct acpi_bus_event, node);
-	if (entry)
-		list_del(&entry->node);
-	KeReleaseSpinLock(&acpi_bus_event_lock, OldIrql);
-//	spin_unlock_irqrestore(&acpi_bus_event_lock, flags);
-
-	if (!entry)
-		return_VALUE(AE_NOT_FOUND);
-
-	memcpy(event, entry, sizeof(struct acpi_bus_event));
-
-	ExFreePoolWithTag(entry, 'epcA');
-	return_VALUE(0);
+	return acpi_bus_receive_event_filtered(NULL, NULL, event);
 }
 
 
@@ -722,6 +955,7 @@ acpi_bus_notify (
 	//	type, (void *)handle);
 
 	acpi_bus_get_device(handle, &device);
+	AcpiPciSlotNotify(handle, type);
 
 	switch (type) {
 
@@ -748,6 +982,7 @@ acpi_bus_notify (
 	case ACPI_NOTIFY_DEVICE_WAKE:
 		DPRINT("Received DEVICE WAKE notification for device [%s]\n",
 			device ? device->pnp.bus_id : "n/a");
+		AcpiWakeSignal(handle);
 		acpi_bus_check_device(handle);
 		/*
 		 * TBD: We'll need to outsource certain events to non-ACPI
@@ -1154,6 +1389,7 @@ acpi_bus_add (
 		return_VALUE(-12);
 	}
 	memset(device, 0, sizeof(struct acpi_device));
+	ExInitializeFastMutex(&device->power_lock);
 
 	device->handle = handle;
 	device->parent = parent;
@@ -1253,8 +1489,18 @@ acpi_bus_add (
 		}
 		if (info->Valid & ACPI_VALID_HID)
 			hid = info->HardwareId.String;
-		if (info->Valid & ACPI_VALID_UID)
+		if (info->Valid & ACPI_VALID_UID) {
+			ACPI_BUFFER UidBuffer = { ACPI_ALLOCATE_BUFFER, NULL };
 			uid = info->UniqueId.String;
+			if (ACPI_SUCCESS(AcpiEvaluateObject(handle, "_UID", NULL, &UidBuffer)) && UidBuffer.Pointer) {
+				ACPI_OBJECT *UidObject = UidBuffer.Pointer;
+				if (UidObject->Type == ACPI_TYPE_INTEGER) {
+					snprintf(static_uid_buffer, sizeof(static_uid_buffer), "%llx", (unsigned long long)UidObject->Integer.Value);
+					uid = static_uid_buffer;
+				}
+				AcpiOsFree(UidBuffer.Pointer);
+			}
+		}
 		if (info->Valid & ACPI_VALID_CID) {
 			cid_list = &info->CompatibleIdList;
 			device->pnp.cid_list = ExAllocatePoolWithTag(NonPagedPool,cid_list->ListSize, 'DpcA');
@@ -1274,6 +1520,11 @@ acpi_bus_add (
 			else
 				DPRINT("Memory allocation error\n");
 		}
+		if ((info->Valid & ACPI_VALID_CLS) && info->ClassCode.String) {
+			snprintf(device->pnp.class_code, sizeof(device->pnp.class_code),
+				"%s", info->ClassCode.String);
+			device->flags.class_code = 1;
+		}
 		if (info->Valid & ACPI_VALID_ADR) {
 			device->pnp.bus_address = info->Address;
 			device->flags.bus_address = 1;
@@ -1285,10 +1536,20 @@ acpi_bus_add (
 		snprintf(uid, sizeof(static_uid_buffer), "%d", (PowerDeviceCount++));
 		break;
 	case ACPI_BUS_TYPE_PROCESSOR:
+	{
+		ACPI_OBJECT processor;
+		ACPI_BUFFER processor_buffer = { sizeof(processor), &processor };
+
 		hid = ACPI_PROCESSOR_HID;
 		uid = static_uid_buffer;
 		snprintf(uid, sizeof(static_uid_buffer), "_%d", (ProcessorCount++));
+		if (ACPI_SUCCESS(AcpiEvaluateObject(handle, NULL, NULL, &processor_buffer)) &&
+		    processor.Type == ACPI_TYPE_PROCESSOR) {
+			device->pnp.processor_id = processor.Processor.ProcId;
+			device->flags.processor_id = 1;
+		}
 		break;
+	}
 	case ACPI_BUS_TYPE_SYSTEM:
 		hid = ACPI_SYSTEM_HID;
 		break;
@@ -1358,6 +1619,8 @@ acpi_bus_add (
 		if (result)
 			goto end;
 	}
+
+	AcpiWakeProbeDevice(device);
 
 	/*
 	 * Performance Management
@@ -1465,6 +1728,7 @@ acpi_bus_remove (
 	if (!device)
 		return_VALUE(AE_NOT_FOUND);
 
+	AcpiWakeRemoveDevice(device);
 	acpi_device_unregister(device);
 
 	if (device->pnp.cid_list)
@@ -1597,10 +1861,7 @@ acpi_bus_scan_fixed (
 	 * method power button is present. Otherwise, a fixed
 	 * power button is present.
 	 */
-	if (AcpiGbl_FADT.Flags & ACPI_FADT_POWER_BUTTON)
-		result = acpi_bus_add(&device, acpi_root,
-			NULL, ACPI_BUS_TYPE_POWER_BUTTON);
-	else
+	if (!AcpiGbl_ReducedHardware && !(AcpiGbl_FADT.Flags & ACPI_FADT_POWER_BUTTON))
 	{
 		/* Enable the fixed power button so we get notified if it is pressed */
 		AcpiWriteBitRegister(ACPI_BITREG_POWER_BUTTON_ENABLE, 1);
@@ -1616,10 +1877,7 @@ acpi_bus_scan_fixed (
 	 * a fixed sleep button. If the flag is set and there is a device object
 	 * the we have a control method button just like above.
 	 */
-	if (AcpiGbl_FADT.Flags & ACPI_FADT_SLEEP_BUTTON)
-		result = acpi_bus_add(&device, acpi_root,
-			NULL, ACPI_BUS_TYPE_SLEEP_BUTTON);
-	else
+	if (!AcpiGbl_ReducedHardware && !(AcpiGbl_FADT.Flags & ACPI_FADT_SLEEP_BUTTON))
 	{
 		/* Enable the fixed sleep button so we get notified if it is pressed */
 		AcpiWriteBitRegister(ACPI_BITREG_SLEEP_BUTTON_ENABLE, 1);
@@ -1658,13 +1916,53 @@ acpi_bus_init (void)
 	 * by looking for the ECDT table, and getting the EC parameters out
 	 * of that.
 	 */
-	//result = acpi_ec_ecdt_probe();
+	acpi_ec_ecdt_probe();
 	/* Ignore result. Not having an ECDT is not fatal. */
 
 	status = AcpiInitializeObjects(ACPI_FULL_INITIALIZATION);
 	if (ACPI_FAILURE(status)) {
 		DPRINT1("Unable to initialize ACPI objects\n");
 		goto error1;
+	}
+
+	acpi_ec_dsdt_probe();
+
+	status = AcpiUpdateAllGpes();
+	if (ACPI_FAILURE(status)) {
+		DPRINT1("Unable to enable runtime GPEs: %s\n", AcpiFormatException(status));
+	}
+
+	/*
+	 * Inform the firmware that the OS is using the IOAPIC. This switches
+	 * the _PRT routing returned by Link objects from PIC-mode legacy ISA
+	 * IRQs (0-15) to the IOAPIC input numbers (16+ for PIRQA..D on a
+	 * PIIX/ICH south bridge). Without this call, a kernel running in
+	 * APIC mode receives _PRT entries that do not correspond to the
+	 * IOAPIC pins where the virtual (and real) PCH actually asserts
+	 * PCI INTx, and level-triggered PCI interrupts are never delivered.
+	 *
+	 * A missing _PIC method is not fatal; some firmwares do not expose
+	 * it and default to returning APIC-ready routing unconditionally.
+	 */
+	{
+		ACPI_OBJECT_LIST ArgList;
+		ACPI_OBJECT Arg;
+
+		Arg.Type = ACPI_TYPE_INTEGER;
+		Arg.Integer.Value = 1; /* APIC interrupt model */
+		ArgList.Count = 1;
+		ArgList.Pointer = &Arg;
+
+		status = AcpiEvaluateObject(NULL, "\\_PIC", &ArgList, NULL);
+		if (status == AE_NOT_FOUND) {
+			DPRINT1("ACPI: _PIC method not present; firmware assumed APIC-ready\n");
+		} else if (ACPI_FAILURE(status)) {
+			DPRINT1("ACPI: _PIC(1) evaluation failed (0x%X)\n", status);
+		} else {
+			DPRINT("ACPI: _PIC(1) OK - firmware switched to APIC routing\n");
+		}
+		/* Reset status so a non-fatal _PIC failure does not stop init. */
+		status = AE_OK;
 	}
 
 	/*
@@ -1732,6 +2030,7 @@ acpi_bus_exit (void)
 	acpi_pci_root_exit();
 	acpi_pci_link_exit();
 #endif
+	acpi_fan_exit();
 #ifdef CONFIG_ACPI_EC
 	acpi_ec_exit();
 #endif
@@ -1760,7 +2059,7 @@ acpi_init (void)
 	DPRINT("Subsystem revision %08x\n",ACPI_CA_VERSION);
 
 	KeInitializeSpinLock(&acpi_bus_event_lock);
-	KeInitializeEvent(&AcpiEventQueue, NotificationEvent, FALSE);
+	InitializeListHead(&acpi_bus_event_waiters);
 	ExInitializeFastMutex(&acpi_bus_drivers_lock);
 
 	result = acpi_bus_init();
@@ -1790,12 +2089,14 @@ acpi_init (void)
 	acpi_system_init();	/* ACPI System */
 	acpi_power_init();	/* ACPI Bus Power Management */
 	acpi_button_init();
-	//acpi_ec_init();		/* ACPI Embedded Controller */
+	acpi_ged_init();
+	acpi_cmos_init();
+	acpi_ec_init();		/* ACPI Embedded Controller */
+	acpi_fan_init();		/* ACPI Fan */
+	acpi_thermal_init();	/* ACPI Thermal Zone */
 #ifdef CONFIG_ACPI_PCI
-	if (!acpi_pci_disabled) {
-		acpi_pci_link_init();	/* ACPI PCI Interrupt Link */
-		acpi_pci_root_init();	/* ACPI PCI Root Bridge */
-	}
+	acpi_pci_link_init();	/* ACPI PCI Interrupt Link */
+	acpi_pci_root_init();	/* ACPI PCI Root Bridge */
 #endif
 
 	//acpi_scan_init();
@@ -1823,4 +2124,3 @@ acpi_exit (void)
 
 	return_VOID;
 }
-

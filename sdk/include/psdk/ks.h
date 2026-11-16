@@ -54,6 +54,11 @@ extern "C" {
 #define KSDATAFORMAT_BIT_ATTRIBUTES 1
 #define KSDATAFORMAT_ATTRIBUTES (1 << KSDATAFORMAT_BIT_ATTRIBUTES)
 
+#define KSDATARANGE_BIT_ATTRIBUTES 1
+#define KSDATARANGE_ATTRIBUTES (1 << KSDATARANGE_BIT_ATTRIBUTES)
+#define KSDATARANGE_BIT_REQUIRED_ATTRIBUTES 2
+#define KSDATARANGE_REQUIRED_ATTRIBUTES (1 << KSDATARANGE_BIT_REQUIRED_ATTRIBUTES)
+
 #if defined(_NTDDK_)
 typedef PVOID PKSWORKER;
 #endif
@@ -88,8 +93,18 @@ typedef PVOID PKSWORKER;
 #define DEFINE_GUIDSTRUCT(guid, name) struct __declspec(uuid(guid)) name
 #define DEFINE_GUIDNAMED(name) __uuidof(struct name)
 #else
+extern "C++" {
+constexpr GUID __KsGuid(ULONG l, USHORT w1, USHORT w2, UCHAR b1, UCHAR b2, UCHAR b3, UCHAR b4, UCHAR b5, UCHAR b6, UCHAR b7, UCHAR b8)
+{
+    return GUID{l, w1, w2, {b1, b2, b3, b4, b5, b6, b7, b8}};
+}
+constexpr GUID __KsGuid(ULONG l, USHORT w1, USHORT w2, const UCHAR (&b)[8])
+{
+    return GUID{l, w1, w2, {b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]}};
+}
+}
 #define DEFINE_GUIDSTRUCT(guid, name) \
-  extern const DECLSPEC_SELECTANY GUID __uuid__##name={STATIC_##name};
+  extern const DECLSPEC_SELECTANY GUID __uuid__##name = __KsGuid(STATIC_##name);
 #define DEFINE_GUIDNAMED(name) __uuid__##name
 #endif
 
@@ -228,7 +243,7 @@ DEFINE_GUIDSTRUCT("97EBAACB-95BD-11D0-A3EA-00A0C9223196", KSCATEGORY_QUALITY);
     Common
 */
 
-typedef struct {
+typedef struct DECLSPEC_ALIGN(8) {
   GUID Set;
   ULONG Id;
   ULONG Flags;
@@ -433,6 +448,18 @@ typedef enum {
   KSEVENT_CONNECTION_ENDOFSTREAM
 } KSEVENT_CONNECTION;
 
+#define STATIC_KSEVENTSETID_Device \
+  0x288296ec, 0x9f94, 0x41b4, 0xa1, 0x53, 0xaa, 0x31, 0xae, 0xec, 0xb3, 0x3f
+DEFINE_GUIDSTRUCT("288296EC-9F94-41b4-A153-AA31AEECB33F", KSEVENTSETID_Device);
+#define KSEVENTSETID_Device DEFINE_GUIDNAMED(KSEVENTSETID_Device)
+
+typedef enum {
+  KSEVENT_DEVICE_LOST,
+  KSEVENT_DEVICE_PREEMPTED,
+  KSEVENT_DEVICE_THERMAL_HIGH,
+  KSEVENT_DEVICE_THERMAL_LOW
+} KSEVENT_DEVICE;
+
 /* ===============================================================
     General
     Properties/Methods/Events
@@ -616,6 +643,17 @@ typedef struct {
 DEFINE_GUIDSTRUCT("8C134960-51AD-11CF-878A-94F801C10000", KSPROPSETID_Pin);
 #define KSPROPSETID_Pin DEFINE_GUIDNAMED(KSPROPSETID_Pin)
 
+#define STATIC_KSEVENTSETID_PinCapsChange \
+  0xDD4F192EL, 0x3B78, 0x49AD, {0xA5, 0x34, 0x2C, 0x31, 0x5B, 0x82, 0x20, 0x00}
+DEFINE_GUIDSTRUCT("DD4F192E-3B78-49AD-A534-2C315B822000", KSEVENTSETID_PinCapsChange);
+#define KSEVENTSETID_PinCapsChange DEFINE_GUIDNAMED(KSEVENTSETID_PinCapsChange)
+
+typedef enum {
+  KSEVENT_PINCAPS_FORMATCHANGE,
+  KSEVENT_PINCAPS_JACKINFOCHANGE,
+  KSEVENT_PINCAPS_INVALIDATECLIENTS
+} KSEVENT_PINCAPS_CHANGENOTIFICATIONS;
+
 #define STATIC_KSNAME_Pin\
   0x146F1A80L, 0x4791, 0x11D0, {0xA5, 0xD6, 0x28, 0xDB, 0x04, 0xC1, 0x00, 0x00}
 DEFINE_GUIDSTRUCT("146F1A80-4791-11D0-A5D6-28DB04C10000", KSNAME_Pin);
@@ -636,14 +674,27 @@ typedef enum {
   KSPROPERTY_PIN_CATEGORY,
   KSPROPERTY_PIN_NAME,
   KSPROPERTY_PIN_CONSTRAINEDDATARANGES,
-  KSPROPERTY_PIN_PROPOSEDATAFORMAT
+  KSPROPERTY_PIN_PROPOSEDATAFORMAT,
+  KSPROPERTY_PIN_PROPOSEDATAFORMAT2
 } KSPROPERTY_PIN;
+
+#define KSPROPERTY_PIN_FLAGS_ATTRIBUTE_RANGE_AWARE 0x00000001
+#define KSPROPERTY_PIN_FLAGS_MASK KSPROPERTY_PIN_FLAGS_ATTRIBUTE_RANGE_AWARE
 
 typedef struct {
   KSPROPERTY Property;
   ULONG PinId;
-  ULONG Reserved;
+  union {
+    ULONG Reserved;
+    ULONG Flags;
+  };
 } KSP_PIN, *PKSP_PIN;
+
+typedef struct {
+  KSEVENT Event;
+  ULONG PinId;
+  ULONG Reserved;
+} KSE_PIN, *PKSE_PIN;
 
 #define KSINSTANCE_INDETERMINATE ((ULONG)-1)
 
@@ -818,6 +869,41 @@ typedef enum {
   KSEVENT_STREAMALLOCATOR_INTERNAL_FREEFRAME,
   KSEVENT_STREAMALLOCATOR_FREEFRAME
 } KSEVENT_STREAMALLOCATOR;
+
+#define STATIC_KSPROPSETID_MemoryTransport \
+  0xa3d1c5d, 0x5243, 0x4819, 0x9e, 0xd0, 0xae, 0xe8, 0x4, 0x4c, 0xee, 0x2b
+DEFINE_GUIDSTRUCT("0A3D1C5D-5243-4819-9ED0-AEE8044CEE2B", KSPROPSETID_MemoryTransport);
+#define KSPROPSETID_MemoryTransport DEFINE_GUIDNAMED(KSPROPSETID_MemoryTransport)
+
+enum {
+  KSPROPERTY_MEMORY_TRANSPORT = 1
+};
+
+typedef enum {
+  KSPIN_MDL_CACHING_NOTIFY_CLEANUP,
+  KSPIN_MDL_CACHING_NOTIFY_CLEANALL_WAIT,
+  KSPIN_MDL_CACHING_NOTIFY_CLEANALL_NOWAIT,
+  KSPIN_MDL_CACHING_NOTIFY_ADDSAMPLE
+} KSPIN_MDL_CACHING_EVENT;
+
+typedef struct {
+  KSPIN_MDL_CACHING_EVENT Event;
+  PVOID Buffer;
+} KSPIN_MDL_CACHING_NOTIFICATION, *PKSPIN_MDL_CACHING_NOTIFICATION;
+
+typedef struct {
+  KSPIN_MDL_CACHING_EVENT Event;
+  ULONG Buffer;
+} KSPIN_MDL_CACHING_NOTIFICATION32, *PKSPIN_MDL_CACHING_NOTIFICATION32;
+
+typedef enum {
+  KSPROPERTY_ALLOCATOR_CLEANUP_CACHEDMDLPAGES = 1
+} KSPPROPERTY_ALLOCATOR_MDLCACHING;
+
+#define STATIC_KSPROPSETID_PinMDLCacheClearProp \
+  0xbd718a7b, 0x97fc, 0x40c7, 0x88, 0xce, 0xd3, 0xff, 0x6, 0xf5, 0x5b, 0x16
+DEFINE_GUIDSTRUCT("BD718A7B-97FC-40C7-88CE-D3FF06F55B16", KSPROPSETID_PinMDLCacheClearProp);
+#define KSPROPSETID_PinMDLCacheClearProp DEFINE_GUIDNAMED(KSPROPSETID_PinMDLCacheClearProp)
 
 /* ===============================================================
     StreamInterface
@@ -1034,6 +1120,7 @@ typedef PVOID KSDEVICE_HEADER, KSOBJECT_HEADER, KSOBJECT_BAG;
 #define KSPROPERTY_TYPE_UNSERIALIZERAW 0x00004000
 #define KSPROPERTY_TYPE_SERIALIZESIZE  0x00008000
 #define KSPROPERTY_TYPE_DEFAULT_VALUES 0x00010000
+#define KSPROPERTY_TYPE_DEFAULTVALUES  0x00010000
 
 /* ===============================================================
     Topology Methods/Properties
@@ -2128,6 +2215,10 @@ typedef struct {
   _Field_size_(EventsCount) const KSEVENT_ITEM *EventItem;
 } KSEVENT_SET, *PKSEVENT_SET;
 
+#define KSEVENT_ENTRY_DELETED   1
+#define KSEVENT_ENTRY_ONESHOT   2
+#define KSEVENT_ENTRY_BUFFERED  4
+
 struct _KSEVENT_ENTRY {
   LIST_ENTRY ListEntry;
   PVOID Object;
@@ -2385,6 +2476,7 @@ typedef struct {
 #define KSFILTER_FLAG_CRITICAL_PROCESSING         0x00000002
 #define KSFILTER_FLAG_HYPERCRITICAL_PROCESSING    0x00000004
 #define KSFILTER_FLAG_RECEIVE_ZERO_LENGTH_SAMPLES 0x00000008
+#define KSFILTER_FLAG_PRIORITIZE_REFERENCEGUID    0x00000010
 #if (NTDDI_VERSION >= NTDDI_WINXPSP2)
 #define KSFILTER_FLAG_DENY_USERMODE_ACCESS        0x80000000
 #endif
@@ -3824,6 +3916,13 @@ KsPinGetLeadingEdgeStreamPointer(
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
 KSDDKAPI
+PKSSTREAM_POINTER
+NTAPI
+KsPinGetFirstCloneStreamPointer(
+  _In_ PKSPIN Pin);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+KSDDKAPI
 NTSTATUS
 NTAPI
 KsStreamPointerSetStatusCode(
@@ -3849,6 +3948,52 @@ KsStreamPointerClone(
     _In_ ULONG ContextSize,
     _Out_ PKSSTREAM_POINTER* CloneStreamPointer
 );
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+KSDDKAPI
+PKSSTREAM_POINTER
+NTAPI
+KsStreamPointerGetNextClone(
+  _In_ PKSSTREAM_POINTER StreamPointer);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+KSDDKAPI
+NTSTATUS
+NTAPI
+KsStreamPointerLock(
+  _In_ PKSSTREAM_POINTER StreamPointer);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+KSDDKAPI
+PIRP
+NTAPI
+KsStreamPointerGetIrp(
+  _In_ PKSSTREAM_POINTER StreamPointer,
+  _Out_opt_ PBOOLEAN FirstFrameInIrp,
+  _Out_opt_ PBOOLEAN LastFrameInIrp);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+KSDDKAPI
+PMDL
+NTAPI
+KsStreamPointerGetMdl(
+  _In_ PKSSTREAM_POINTER StreamPointer);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+KSDDKAPI
+VOID
+NTAPI
+KsStreamPointerScheduleTimeout(
+  _In_ PKSSTREAM_POINTER StreamPointer,
+  _In_ PFNKSSTREAMPOINTER Callback,
+  _In_ ULONGLONG Interval);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+KSDDKAPI
+VOID
+NTAPI
+KsStreamPointerCancelTimeout(
+  _In_ PKSSTREAM_POINTER StreamPointer);
 
 
 /* Does this belong here? */
@@ -4882,6 +5027,15 @@ KsDeviceRegisterAggregatedClientUnknown(
 
 #if defined(_UNKNOWN_H_) || defined(__IUnknown_INTERFACE_DEFINED__)
 
+#if !defined(DEFINE_ABSTRACT_UNKNOWN)
+#define DEFINE_ABSTRACT_UNKNOWN() \
+    STDMETHOD_(NTSTATUS, QueryInterface)(THIS_ \
+        _In_ REFIID InterfaceId, \
+        _COM_Outptr_ PVOID* Interface) PURE; \
+    STDMETHOD_(ULONG,AddRef)(THIS) PURE; \
+    STDMETHOD_(ULONG,Release)(THIS) PURE;
+#endif
+
 typedef interface IKsReferenceClock* PIKSREFERENCECLOCK;
 
 #undef INTERFACE
@@ -4960,6 +5114,67 @@ KsDeviceRegisterAdapterObject(
   _In_ PADAPTER_OBJECT AdapterObject,
   _In_ ULONG MaxMappingByteCount,
   _In_ ULONG MappingTableStride);
+
+typedef enum {
+  KSDEVICE_THERMAL_STATE_LOW,
+  KSDEVICE_THERMAL_STATE_HIGH
+} KSDEVICE_THERMAL_STATE;
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+typedef VOID
+(*PFNKSDEVICETHERMALACTIVECOOLING)(
+  _In_ PKSDEVICE KsDevice,
+  _In_ BOOLEAN Engaged,
+  _Out_ KSDEVICE_THERMAL_STATE *DeviceThermalState);
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+typedef VOID
+(*PFNKSDEVICETHERMALPASSIVECOOLING)(
+  _In_ PKSDEVICE KsDevice,
+  _In_ ULONG Percentage,
+  _Out_ KSDEVICE_THERMAL_STATE *DeviceThermalState);
+
+typedef struct _KSDEVICE_THERMAL_DISPATCH {
+  PFNKSDEVICETHERMALACTIVECOOLING ActiveCooling;
+  PFNKSDEVICETHERMALPASSIVECOOLING PassiveCooling;
+} KSDEVICE_THERMAL_DISPATCH, *PKSDEVICE_THERMAL_DISPATCH;
+
+KSDDKAPI
+NTSTATUS
+NTAPI
+KsDeviceRegisterThermalDispatch(
+  _In_ PKSDEVICE KsDevice,
+  _In_ PKSDEVICE_THERMAL_DISPATCH KsDeviceThermalDispatch);
+
+_IRQL_requires_max_(DISPATCH_LEVEL)
+typedef VOID
+(*PFNKSCANCELPINNEDMDL)(
+  _In_ GUID,
+  _In_ PVOID,
+  _In_ PVOID);
+
+_Must_inspect_result_
+_IRQL_requires_max_(PASSIVE_LEVEL)
+KSDDKAPI
+NTSTATUS
+NTAPI
+KsAcquireCachedMdl(
+  _In_ PIRP Irp,
+  _In_ REFGUID Guid,
+  _In_ PFNKSCANCELPINNEDMDL CancelRoutine,
+  _In_ PVOID CancelContext,
+  _Outptr_result_maybenull_ PMDL *MdlAddr,
+  _Outptr_result_maybenull_ PVOID *ReleaseContext);
+
+_Must_inspect_result_
+_IRQL_requires_max_(PASSIVE_LEVEL)
+KSDDKAPI
+NTSTATUS
+NTAPI
+KsReleaseCachedMdl(
+  _In_ REFGUID Guid,
+  _In_ PMDL MdlAddr,
+  _In_ HANDLE ReleaseContext);
 
 _IRQL_requires_max_(PASSIVE_LEVEL)
 KSDDKAPI
@@ -5059,6 +5274,242 @@ KsFilterReleaseProcessingMutex(
 
 /* etc. */
 #endif /* avstream */
+
+#define STATIC_KSCATEGORY_VIDEO_CAMERA \
+    0xe5323777, 0xf976, 0x4f5b, 0x9b, 0x55, 0xb9, 0x46, 0x99, 0xc4, 0x6e, 0x44
+
+#define STATIC_KS_TYPE_DONT_CARE    STATIC_GUID_NULL
+
+#define STATIC_KSMEMORY_TYPE_KERNEL_NONPAGED \
+    0x4a6d5fc4L, 0x7895, 0x11d1, 0xb0, 0x69, 0x00, 0xa0, 0xc9, 0x06, 0x28, 0x02
+
+#define DECLARE_SIMPLE_FRAMING_EX(FramingExName, MemoryType, Flags, Frames, Alignment, MinFrameSize, MaxFrameSize) \
+    const KSALLOCATOR_FRAMING_EX FramingExName = \
+    {\
+        1, \
+        0, \
+        {\
+            1, \
+            1, \
+            0 \
+        }, \
+        0, \
+        {\
+            {\
+                MemoryType, \
+                STATIC_KS_TYPE_DONT_CARE, \
+                0, \
+                0, \
+                Flags, \
+                Frames, \
+                Alignment, \
+                0, \
+                {\
+                    0, \
+                    (ULONG)-1, \
+                    1 \
+                }, \
+                {\
+                    {\
+                        MinFrameSize, \
+                        MaxFrameSize, \
+                        1 \
+                    }, \
+                    0, \
+                    0  \
+                }\
+            }\
+        }\
+    }
+
+#define NANOSECONDS 10000000
+
+#define KSCONVERT_PERFORMANCE_TIME(Frequency, PerformanceTime) \
+    ((((ULONGLONG)(ULONG)(PerformanceTime).HighPart * NANOSECONDS / (Frequency)) << 32) + \
+    ((((((ULONGLONG)(ULONG)(PerformanceTime).HighPart * NANOSECONDS) % (Frequency)) << 32) + \
+    ((ULONGLONG)(PerformanceTime).LowPart * NANOSECONDS)) / (Frequency)))
+
+#if ((NTDDI_VERSION >= NTDDI_WINXP))
+#if (defined(_NTDDK_))
+
+#define KSDEVICE_DESCRIPTOR_VERSION (0x100)
+
+#define DEFINE_KSFILTER_DESCRIPTOR_TABLE(table)\
+    const KSFILTER_DESCRIPTOR*const table[] =
+
+#endif
+#endif
+#if (defined(_NTDDK_))
+#if ((NTDDI_VERSION >= NTDDI_WINXP))
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+static
+__inline
+PKSDEVICE
+KsPinGetDevice(
+    _In_ PKSPIN Pin
+    )
+{
+    return KsGetDevice((PVOID) Pin);
+}
+
+#define KsEdit(Object,PointerToPointer,Tag)\
+    _KsEdit(\
+        (Object)->Bag,\
+        (PVOID*)(PointerToPointer),\
+        sizeof(**(PointerToPointer)),\
+        sizeof(**(PointerToPointer)),\
+        (Tag))
+
+#if (defined(_UNKNOWN_H_) || defined(__IUnknown_INTERFACE_DEFINED__))
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+KSDDKAPI
+NTSTATUS
+NTAPI
+KsPinGetReferenceClockInterface(
+    _In_ PKSPIN Pin,
+    _Out_ PIKSREFERENCECLOCK* Interface
+    );
+
+#endif
+#endif
+#endif
+
+#define KSSTREAM_HEADER_OPTIONSF_METADATA           0x00001000
+
+#define KSSTREAM_HEADER_OPTIONSF_ENDOFPHOTOSEQUENCE 0x00002000
+
+typedef struct {
+    ULONG       BufferSize;
+    ULONG       UsedSize;
+    _Field_size_bytes_(BufferSize)
+    PVOID       Data;
+    _Field_size_bytes_(BufferSize)
+    PVOID       SystemVa;
+    ULONG       Flags;
+    ULONG       Reserved;
+} KSSTREAM_METADATA_INFO, *PKSSTREAM_METADATA_INFO;
+
+typedef struct
+{
+	ULONG       PresentationTimeStamp;
+	ULONG       SourceClockReference;
+	union
+	{
+		struct
+		{
+			USHORT	Counter : 11;
+			USHORT  Reserved : 5;
+		};
+		USHORT	SCRToken;
+	};
+	USHORT      Reserved0;
+	ULONG       Reserved1;
+} KSSTREAM_UVC_METADATATYPE_TIMESTAMP, *PKSSTREAM_UVC_METADATATYPE_TIMESTAMP;
+
+typedef struct {
+    KSSTREAM_UVC_METADATATYPE_TIMESTAMP StartOfFrameTimestamp;
+    KSSTREAM_UVC_METADATATYPE_TIMESTAMP EndOfFrameTimestamp;
+} KSSTREAM_UVC_METADATA, *PKSSTREAM_UVC_METADATA;
+
+#if (defined(_NTDDK_))
+
+#define DEFINE_KSPROPERTY_SET(Set,\
+                              PropertiesCount,\
+                              PropertyItem,\
+                              FastIoCount,\
+                              FastIoTable)\
+{\
+    Set,\
+    PropertiesCount,\
+    PropertyItem,\
+    FastIoCount,\
+    FastIoTable\
+}
+
+#define DEFINE_KSPROPERTY_SET_TABLE(tablename)\
+    const KSPROPERTY_SET tablename[] =
+
+#define DEFINE_KSEVENT_TABLE(tablename)\
+    const KSEVENT_ITEM tablename[] =
+
+#define DEFINE_KSEVENT_ITEM(EventId, DataInput, ExtraEntryData,\
+                            AddHandler, RemoveHandler, SupportHandler)\
+{\
+    EventId,\
+    DataInput,\
+    ExtraEntryData,\
+    AddHandler,\
+    RemoveHandler,\
+    SupportHandler\
+}
+
+#define DEFINE_KSEVENT_SET(Set,\
+                           EventsCount,\
+                           EventItem)\
+{\
+    Set, EventsCount, EventItem\
+}
+
+#define DEFINE_KSEVENT_SET_TABLE(tablename)\
+    const KSEVENT_SET tablename[] =
+
+#endif
+#if ((NTDDI_VERSION >= NTDDI_WINXP))
+#if (defined(_NTDDK_))
+
+#define DEFINE_KSAUTOMATION_TABLE(table)\
+    const KSAUTOMATION_TABLE table =
+
+#define DEFINE_KSAUTOMATION_PROPERTIES(table)\
+    SIZEOF_ARRAY(table),\
+    sizeof(KSPROPERTY_ITEM),\
+    table
+
+#define DEFINE_KSAUTOMATION_EVENTS(table)\
+    SIZEOF_ARRAY(table),\
+    sizeof(KSEVENT_ITEM),\
+    table
+
+#define DEFINE_KSAUTOMATION_METHODS_NULL\
+    0,\
+    sizeof(KSMETHOD_ITEM),\
+    NULL
+
+#endif
+#endif
+#if (defined(_NTDDK_))
+#if ((NTDDI_VERSION >= NTDDI_WINXP))
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+KSDDKAPI
+PUNICODE_STRING
+NTAPI
+KsFilterFactoryGetSymbolicLink(
+    _In_ PKSFILTERFACTORY FilterFactory
+    );
+
+#if ((NTDDI_VERSION >= NTDDI_WINTHRESHOLD))
+
+typedef struct _KSDEVICE_PROFILE_INFO
+KSDEVICE_PROFILE_INFO, *PKSDEVICE_PROFILE_INFO;
+
+#endif
+
+_IRQL_requires_max_(PASSIVE_LEVEL)
+static
+__inline
+PKSDEVICE
+KsFilterGetDevice(
+    _In_ PKSFILTER Filter
+    )
+{
+    return KsGetDevice((PVOID) Filter);
+}
+
+#endif
+#endif
 
 #ifdef __cplusplus
 }

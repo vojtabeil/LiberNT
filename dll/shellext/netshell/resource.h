@@ -1,8 +1,5 @@
 #pragma once
 
-#define TRAYICONWINDOWCAPTION "Connections Tray"
-#define TRAYICONWINDOWCAPTIONW TEXT("Connections Tray")
-
 /* icons */
 
 #define IDI_SHELL_NETWORK_FOLDER 100
@@ -16,6 +13,26 @@
 #define IDI_NET_TRANS            108
 #define IDI_NET_TRANSREC         109
 #define IDI_NET_SETUP            110
+#define IDI_NET_TRAY_WIRED       120
+#define IDI_NET_TRAY_OFF         121
+#define IDI_NET_TRAY_WIFI1       122
+#define IDI_NET_TRAY_WIFI2       123
+#define IDI_NET_TRAY_WIFI3       124
+#define IDI_NET_TRAY_WIFI4       125
+#define IDI_NET_TRAY_WIFIOFF     126
+#define IDI_NET_TRAY_WIFI_WARN   127
+#define IDI_NET_TRAY_WIRED_WARN  128
+#define IDI_NET_TRAY_WIRED_X     129
+#define IDI_NET_TRAY_WIRED_LIGHT      1120
+#define IDI_NET_TRAY_OFF_LIGHT        1121
+#define IDI_NET_TRAY_WIFI1_LIGHT      1122
+#define IDI_NET_TRAY_WIFI2_LIGHT      1123
+#define IDI_NET_TRAY_WIFI3_LIGHT      1124
+#define IDI_NET_TRAY_WIFI4_LIGHT      1125
+#define IDI_NET_TRAY_WIFIOFF_LIGHT    1126
+#define IDI_NET_TRAY_WIFI_WARN_LIGHT  1127
+#define IDI_NET_TRAY_WIRED_WARN_LIGHT 1128
+#define IDI_NET_TRAY_WIRED_X_LIGHT    1129
 
 #define IDC_STATIC -1
 

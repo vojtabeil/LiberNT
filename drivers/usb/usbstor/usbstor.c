@@ -12,6 +12,33 @@
 #define NDEBUG
 #include <debug.h>
 
+static
+PVOID
+USBSTOR_AllocateBotDmaBuffer(
+    _Outptr_ PVOID *Allocation)
+{
+    PVOID RawBuffer;
+    ULONG_PTR Aligned;
+
+    // TODO: NonPagedPoolCacheAligned could avoid this manual 2x-align dance, but
+    // relies on the pool honoring cache alignment for sub-cacheline allocations.
+    RawBuffer = ExAllocatePoolWithTag(NonPagedPool,
+                                      SYSTEM_CACHE_ALIGNMENT_SIZE * 2,
+                                      USB_STOR_TAG);
+    if (!RawBuffer)
+    {
+        *Allocation = NULL;
+        return NULL;
+    }
+
+    Aligned = ((ULONG_PTR)RawBuffer + SYSTEM_CACHE_ALIGNMENT_SIZE - 1) &
+              ~((ULONG_PTR)SYSTEM_CACHE_ALIGNMENT_SIZE - 1);
+
+    RtlZeroMemory(RawBuffer, SYSTEM_CACHE_ALIGNMENT_SIZE * 2);
+    *Allocation = RawBuffer;
+
+    return (PVOID)Aligned;
+}
 
 NTSTATUS
 NTAPI
@@ -42,7 +69,7 @@ USBSTOR_AddDevice(
 
     KeInitializeSpinLock(&DeviceExtension->CommonLock);
 
-    IoInitializeTimer(DeviceObject, USBSTOR_TimerRoutine, (PVOID)DeviceExtension);
+    USBSTOR_InitializeRequestTimer(DeviceExtension);
 
     // did attaching fail
     if (!DeviceExtension->LowerDeviceObject)
@@ -50,6 +77,29 @@ USBSTOR_AddDevice(
         IoDeleteDevice(DeviceObject);
 
         return STATUS_DEVICE_REMOVED;
+    }
+
+    /*
+     * CBW/CSW are DMA buffers. Keep them cache-line isolated from the live
+     * URB/context state for non-coherent ARM64 DMA.
+     */
+    DeviceExtension->CurrentIrpContext.Cbw =
+        USBSTOR_AllocateBotDmaBuffer(&DeviceExtension->CurrentIrpContext.CbwAllocation);
+    if (!DeviceExtension->CurrentIrpContext.Cbw)
+    {
+        IoDetachDevice(DeviceExtension->LowerDeviceObject);
+        IoDeleteDevice(DeviceObject);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    DeviceExtension->CurrentIrpContext.Csw =
+        USBSTOR_AllocateBotDmaBuffer(&DeviceExtension->CurrentIrpContext.CswAllocation);
+    if (!DeviceExtension->CurrentIrpContext.Csw)
+    {
+        ExFreePoolWithTag(DeviceExtension->CurrentIrpContext.CbwAllocation, USB_STOR_TAG);
+        IoDetachDevice(DeviceExtension->LowerDeviceObject);
+        IoDeleteDevice(DeviceObject);
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     DeviceObject->Flags |= DO_BUFFERED_IO | DO_POWER_PAGABLE;
@@ -88,9 +138,30 @@ USBSTOR_DispatchDeviceControl(
     PDEVICE_OBJECT DeviceObject,
     PIRP Irp)
 {
+    PPDO_DEVICE_EXTENSION PDODeviceExtension = DeviceObject->DeviceExtension;
     NTSTATUS Status;
 
-    Status = USBSTOR_HandleDeviceControl(DeviceObject, Irp);
+    if (PDODeviceExtension->Common.IsFDO)
+    {
+        Status = USBSTOR_HandleDeviceControl(DeviceObject, Irp);
+    }
+    else
+    {
+        Status = IoAcquireRemoveLock(&PDODeviceExtension->RemoveLock, Irp);
+        if (NT_SUCCESS(Status))
+        {
+            if (PDODeviceExtension->Removed)
+                Status = STATUS_DEVICE_DOES_NOT_EXIST;
+            else
+                Status = USBSTOR_HandleDeviceControl(DeviceObject, Irp);
+            IoReleaseRemoveLock(&PDODeviceExtension->RemoveLock, Irp);
+        }
+        else
+        {
+            Status = STATUS_DEVICE_DOES_NOT_EXIST;
+        }
+    }
+
     Irp->IoStatus.Status = Status;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
     return Status;

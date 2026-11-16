@@ -306,41 +306,31 @@ public:
  */
 class CShell32Module : public CComModule
 {
-public:
-    void Term()
-    {
-        CComCreatorCentralInstance< ATL::CComObject< CDrivesFolder > >::Term();
-        CComCreatorCentralInstance< ATL::CComObject< CDesktopFolder > >::Term();
-        CComModule::Term();
-    }
 };
 
 
 BEGIN_OBJECT_MAP(ObjectMap)
     OBJECT_ENTRY(CLSID_ActiveDesktop, CActiveDesktop)
-    OBJECT_ENTRY(CLSID_ShellFSFolder, CFSFolder)
-    OBJECT_ENTRY(CLSID_MyComputer, CDrivesFolder)
-    OBJECT_ENTRY(CLSID_ShellDesktop, CDesktopFolder)
     OBJECT_ENTRY(CLSID_ShellFileDefExt, CFileDefExt)
     OBJECT_ENTRY(CLSID_ShellDrvDefExt, CDrvDefExt)
-    OBJECT_ENTRY(CLSID_ShellItem, CShellItem)
-    OBJECT_ENTRY(CLSID_ShellLink, CShellLink)
     OBJECT_ENTRY(CLSID_Shell, CShellDispatch)
-    OBJECT_ENTRY(CLSID_ShellLibrary, CShellLibrary)
     OBJECT_ENTRY(CLSID_DragDropHelper, CDropTargetHelper)
     OBJECT_ENTRY(CLSID_ControlPanel, CControlPanelFolder)
     OBJECT_ENTRY(CLSID_OpenControlPanel, COpenControlPanel)
     OBJECT_ENTRY(CLSID_MyDocuments, CMyDocsFolder)
     OBJECT_ENTRY(CLSID_NetworkPlaces, CNetFolder)
     OBJECT_ENTRY(CLSID_FontsFolderShortcut, CFontsFolder)
-    OBJECT_ENTRY(CLSID_Printers, CPrinterFolder)
-    OBJECT_ENTRY(CLSID_AdminFolderShortcut, CAdminToolsFolder)
     OBJECT_ENTRY(CLSID_ShellFldSetExt, CFolderOptions)
     OBJECT_ENTRY(CLSID_RecycleBin, CRecycleBin)
+    OBJECT_ENTRY(CLSID_RecycleBinEmptyCommand, CRecycleBinEmptyCommand)
+    OBJECT_ENTRY(CLSID_RecycleBinEmptyState, CRecycleBinEmptyState)
     OBJECT_ENTRY(CLSID_OpenWithMenu, COpenWithMenu)
     OBJECT_ENTRY(CLSID_NewMenu, CNewMenu)
     OBJECT_ENTRY(CLSID_SendToMenu, CSendToMenu)
     OBJECT_ENTRY(CLSID_CopyAsPathMenu, CCopyAsPathMenu)
+    OBJECT_ENTRY(CLSID_StartMenuPin, CStartMenuPin)
+    OBJECT_ENTRY(CLSID_TextPreviewHandler, CTextPreviewHandler)
+    OBJECT_ENTRY(CLSID_FileOperation, CFileOperation)
     OBJECT_ENTRY(CLSID_CopyToMenu, CCopyToMenu)
     OBJECT_ENTRY(CLSID_MoveToMenu, CMoveToMenu)
     OBJECT_ENTRY(CLSID_StartMenu, CStartMenuDummy)
@@ -349,9 +339,22 @@ BEGIN_OBJECT_MAP(ObjectMap)
     OBJECT_ENTRY(CLSID_MenuDeskBar, CMenuDeskBar)
     OBJECT_ENTRY(CLSID_MergedFolder, CMergedFolder)
     OBJECT_ENTRY(CLSID_ExeDropHandler, CExeDropHandler)
-    OBJECT_ENTRY(CLSID_QueryAssociations, CQueryAssociations)
     OBJECT_ENTRY(CLSID_UserNotification, CUserNotification)
-    OBJECT_ENTRY(CLSID_UserEventTimer, CUserEventTimer)
+    OBJECT_ENTRY(CLSID_ACLCustomMRU, CACLCustomMRU)
+    OBJECT_ENTRY(CLSID_ACLMRU, CACLMRU)
+    OBJECT_ENTRY(CLSID_ACLHistory, CACLHistory)
+    OBJECT_ENTRY(CLSID_ACLMulti, CACLMulti)
+    OBJECT_ENTRY(CLSID_ACListISF, CACListISF)
+    OBJECT_ENTRY(CLSID_AutoComplete, CAutoComplete)
+    OBJECT_ENTRY(CLSID_BandProxy, CBandProxy)
+    OBJECT_ENTRY(CLSID_CRegTreeOptions, CRegTreeOptions)
+    OBJECT_ENTRY(CLSID_UserAssist, CUserAssist)
+    OBJECT_ENTRY(CLSID_ProgressDialog, COperationsProgressDialog)
+    OBJECT_ENTRY(CLSID_ISFBand, CISFBand)
+    OBJECT_ENTRY(CLSID_QuickLinks, CQuickLinks)
+    OBJECT_ENTRY(CLSID_FolderItem, CFolderItem)
+    OBJECT_ENTRY(CLSID_FolderItemsFDF, CFolderItemsFDF)
+    OBJECT_ENTRY(CLSID_TrackShellMenu, CTrackShellMenu)
 END_OBJECT_MAP()
 
 CShell32Module  gModule;
@@ -470,6 +473,10 @@ STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppv)
     TRACE("CLSID:%s,IID:%s\n", shdebugstr_guid(&rclsid), shdebugstr_guid(&riid));
 
     hResult = gModule.DllGetClassObject(rclsid, riid, ppv);
+    if (hResult == CLASS_E_CLASSNOTAVAILABLE)
+        hResult = WineShell32_GetClassObject(rclsid, riid, ppv);
+    if (hResult == CLASS_E_CLASSNOTAVAILABLE)
+        hResult = SHELL32_GetInstanceObjectFactory(rclsid, riid, ppv);
     TRACE("-- pointer to class factory: %p\n", *ppv);
     return hResult;
 }
@@ -478,13 +485,22 @@ static HRESULT UpdateRegistryFromResource(BOOL Register)
 {
     static const BYTE resid[] =
     {
+        IDR_WINECLASSES,
         IDR_FOLDEROPTIONS,
         IDR_EXPLORER,
         IDR_SYSTEMFILEASSOC,
+        IDR_SEARCHBAND,
+    };
+    _ATL_REGMAP_ENTRY typelibMap[] =
+    {
+        { L"PLATFORM", sizeof(void *) == 8 ? L"win64" : L"win32" },
+        { NULL, NULL }
     };
     HRESULT hr = S_OK;
     for (SIZE_T i = 0; i < _countof(resid) && SUCCEEDED(hr); ++i)
         hr = gModule.UpdateRegistryFromResource(resid[i], Register, NULL);
+    if (SUCCEEDED(hr))
+        hr = gModule.UpdateRegistryFromResource(IDR_SHELL32TYPELIB, Register, typelibMap);
     return hr;
 }
 
@@ -495,7 +511,7 @@ STDAPI DllRegisterServer()
 {
     HRESULT hr;
 
-    hr = gModule.DllRegisterServer(TRUE);
+    hr = gModule.DllRegisterServer(FALSE);
     if (FAILED(hr))
         return hr;
 
@@ -516,7 +532,7 @@ STDAPI DllUnregisterServer()
 {
     HRESULT hr;
 
-    hr = gModule.DllUnregisterServer(TRUE);
+    hr = gModule.DllUnregisterServer(FALSE);
     if (FAILED(hr))
         return hr;
 

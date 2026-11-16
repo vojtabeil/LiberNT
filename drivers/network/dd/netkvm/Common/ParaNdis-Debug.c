@@ -104,38 +104,51 @@ KBUGCHECK_REASON_CALLBACK_RECORD CallbackRecord;
 #if !defined(WPP_EVENT_TRACING) || defined(WPP_USE_BYPASS)
 #if defined(DPFLTR_MASK)
 
-//common case, except Win2K
-static void __cdecl DebugPrint(const char *fmt, ...)
+static void __cdecl DebugPrintLine(const char *fmt, ...)
 {
     va_list list;
     va_start(list, fmt);
     PrintProcedure(DPFLTR_DEFAULT_ID, 9 | DPFLTR_MASK, fmt, list);
     va_end(list);
+}
+
+//common case, except Win2K
+static void __cdecl DebugPrint(const char *fmt, ...)
+{
+    va_list list;
+    NTSTATUS status;
+    char buf[512];
+    size_t len;
+
+    va_start(list, fmt);
+    status = RtlStringCbVPrintfA(buf, sizeof(buf), fmt, list);
+    va_end(list);
+
+    if (status != STATUS_SUCCESS && status != STATUS_BUFFER_OVERFLOW)
+        memcpy(buf, "Can't print", 12);
+
+    len = strlen(buf);
+    while (len > 0 && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
+        len--;
+    if (len + 2 > sizeof(buf))
+        len = sizeof(buf) - 2;
+    buf[len] = '\n';
+    buf[len + 1] = 0;
+
+    DebugPrintLine("%s", buf);
+
 #if defined(VIRTIO_DBG_USE_IOPORT)
+    // use this way of output only for DISPATCH_LEVEL,
+    // higher requires more protection
+    if (KeGetCurrentIrql() <= DISPATCH_LEVEL)
     {
-        NTSTATUS status;
-        // use this way of output only for DISPATCH_LEVEL,
-        // higher requires more protection
-        if (KeGetCurrentIrql() <= DISPATCH_LEVEL)
+        size_t i;
+        NdisAcquireSpinLock(&CrashLock);
+        for (i = 0; i < len + 1; ++i)
         {
-            char buf[256];
-            size_t len, i;
-            buf[0] = 0;
-            // The list was consumed above; start a fresh one for the second pass
-            va_start(list, fmt);
-            status = RtlStringCbVPrintfA(buf, sizeof(buf), fmt, list);
-            va_end(list);
-            if (status == STATUS_SUCCESS) len = strlen(buf);
-            else if (status == STATUS_BUFFER_OVERFLOW) len = sizeof(buf);
-            else { memcpy(buf, "Can't print", 11); len = 11; }
-            NdisAcquireSpinLock(&CrashLock);
-            for (i = 0; i < len; ++i)
-            {
-                NdisRawWritePortUchar(VIRTIO_DBG_USE_IOPORT, buf[i]);
-            }
-            NdisRawWritePortUchar(VIRTIO_DBG_USE_IOPORT, '\n');
-            NdisReleaseSpinLock(&CrashLock);
+            NdisRawWritePortUchar(VIRTIO_DBG_USE_IOPORT, buf[i]);
         }
+        NdisReleaseSpinLock(&CrashLock);
     }
 #endif
 }
@@ -153,21 +166,6 @@ DEBUGPRINTFUNC VirtioDebugPrintProc = DbgPrint;
 #endif //!defined(WPP_EVENT_TRACING) || defined(WPP_USE_BYPASS)
 
 
-
-void _LogOutEntry(int level, const char *s)
-{
-    DPrintf(level, ("[%s]=>", s));
-}
-
-void _LogOutExitValue(int level, const char *s, ULONG value)
-{
-    DPrintf(level, ("[%s]<=0x%X", s, value));
-}
-
-void _LogOutString(int level, const char *s)
-{
-    DPrintf(level, ("[%s]", s));
-}
 
 VOID WppEnableCallback(
     __in LPCGUID Guid,
@@ -285,13 +283,13 @@ VOID ParaNdis_PrepareBugCheckData()
     BugCheckData.StaticData.Header.ulMaxContexts = MAX_CONTEXTS;
     BugCheckData.StaticData.Header.SizeOfPointer = sizeof(PVOID);
     BugCheckData.StaticData.Header.PerNicData = (UINT_PTR)(PVOID)BugCheckData.StaticData.PerNicData;
-    BugCheckData.StaticData.Header.DataArea = (UINT64)&BugCheckData.StaticData.Data;
+    BugCheckData.StaticData.Header.DataArea = (UINT64)(UINT_PTR)&BugCheckData.StaticData.Data;
     BugCheckData.StaticData.Header.DataAreaSize = sizeof(BugCheckData.StaticData.Data);
     BugCheckData.StaticData.Data.HistoryDataVersion = PARANDIS_DEBUG_HISTORY_DATA_VERSION;
     BugCheckData.StaticData.Data.SizeOfHistory = MAX_HISTORY;
     BugCheckData.StaticData.Data.SizeOfHistoryEntry = sizeof(tBugCheckHistoryDataEntry);
     BugCheckData.StaticData.Data.HistoryData = (UINT_PTR)(PVOID)BugCheckData.StaticData.History;
-    BugCheckData.Location.Address = (UINT64)&BugCheckData;
+    BugCheckData.Location.Address = (UINT64)(UINT_PTR)&BugCheckData;
     BugCheckData.Location.Size = sizeof(BugCheckData);
 }
 
@@ -317,7 +315,7 @@ static UINT FillDataOnBugCheck()
     for (i = 0; i < MAX_CONTEXTS; ++i)
     {
         tBugCheckPerNicDataContent *pSave = &BugCheckData.StaticData.PerNicData[i];
-        PARANDIS_ADAPTER *p = (PARANDIS_ADAPTER *)pSave->Context;
+        PARANDIS_ADAPTER *p = (PARANDIS_ADAPTER *)(UINT_PTR)pSave->Context;
         if (!p) continue;
         pSave->nofPacketsToComplete = p->NetTxPacketsToReturn;
         pSave->nofReadyTxBuffers = p->nofFreeHardwareBuffers;
@@ -390,7 +388,7 @@ void ParaNdis_DebugHistory(
     phe->lParam4 = lParam4;
 #if (PARANDIS_DEBUG_HISTORY_DATA_VERSION == 1)
     phe->uIRQL = KeGetCurrentIrql();
-    phe->uProcessor = KeGetCurrentProcessorNumber();
+    phe->uProcessor = ParaNdisCurrentProcessorIndex();
 #endif
     NdisGetCurrentSystemTime(&phe->TimeStamp);
 }

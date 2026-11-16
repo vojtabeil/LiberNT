@@ -1,400 +1,228 @@
 /*
- * PROJECT:     ReactOS API Tests
- * LICENSE:     MIT (https://spdx.org/licenses/MIT)
- * PURPOSE:     Tests for the job object UI restrictions
- * COPYRIGHT:   Copyright 2026 Justin Miller <justin.miller@reactos.org>
+ * PROJECT:     LiberNT API tests
+ * LICENSE:     GPL-3.0-or-later (https://spdx.org/licenses/GPL-3.0-or-later)
+ * PURPOSE:     Test job object completion port notifications
  */
 
 #include "precomp.h"
 
-/*
- * Chromium 109, sandbox/win/src/job.cc. The JobLevel cases there fall through
- * into each other, so each level takes the flags of the ones below it too:
- * kLockdown adds the four here to kLimitedUser's, which comes to all eight.
- */
-#define JOB_LIMITEDUSER_UI (JOB_OBJECT_UILIMIT_DISPLAYSETTINGS | \
-                            JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS| \
-                            JOB_OBJECT_UILIMIT_DESKTOP         | \
-                            JOB_OBJECT_UILIMIT_EXITWINDOWS)
+#define SELF_JOB_EXIT_CODE 42
 
-#define JOB_LOCKDOWN_UI (JOB_LIMITEDUSER_UI                 | \
-                         JOB_OBJECT_UILIMIT_WRITECLIPBOARD  | \
-                         JOB_OBJECT_UILIMIT_READCLIPBOARD   | \
-                         JOB_OBJECT_UILIMIT_HANDLES         | \
-                         JOB_OBJECT_UILIMIT_GLOBALATOMS)
-
-static const ULONG SingleRestrictions[] =
+static BOOL expect_completion(HANDLE port, DWORD expected_message, ULONG_PTR expected_key, DWORD expected_pid)
 {
-    JOB_OBJECT_UILIMIT_HANDLES,
-    JOB_OBJECT_UILIMIT_READCLIPBOARD,
-    JOB_OBJECT_UILIMIT_WRITECLIPBOARD,
-    JOB_OBJECT_UILIMIT_SYSTEMPARAMETERS,
-    JOB_OBJECT_UILIMIT_DISPLAYSETTINGS,
-    JOB_OBJECT_UILIMIT_GLOBALATOMS,
-    JOB_OBJECT_UILIMIT_DESKTOP,
-    JOB_OBJECT_UILIMIT_EXITWINDOWS,
-};
+    OVERLAPPED *overlapped = NULL;
+    ULONG_PTR key = 0;
+    DWORD message = 0;
+    BOOL ret;
 
-static
-BOOL
-SetRestrictions(
-    _In_ HANDLE hJob,
-    _In_ ULONG Restrictions)
-{
-    JOBOBJECT_BASIC_UI_RESTRICTIONS Info;
+    ret = GetQueuedCompletionStatus(port, &message, &key, &overlapped, 2000);
+    ok(ret, "GetQueuedCompletionStatus failed with %lu\n", GetLastError());
+    if (!ret) return FALSE;
 
-    Info.UIRestrictionsClass = Restrictions;
-    return SetInformationJobObject(hJob,
-                                   JobObjectBasicUIRestrictions,
-                                   &Info,
-                                   sizeof(Info));
+    ok(message == expected_message, "Expected message %lu, got %lu\n", expected_message, message);
+    ok(key == expected_key, "Expected key %p, got %p\n", (PVOID)expected_key, (PVOID)key);
+    ok((DWORD)(ULONG_PTR)overlapped == expected_pid, "Expected process %lu, got %lu\n", expected_pid, (DWORD)(ULONG_PTR)overlapped);
+    return message == expected_message && key == expected_key && (DWORD)(ULONG_PTR)overlapped == expected_pid;
 }
 
-static
-void
-test_RoundTrip(void)
+static VOID test_kill_on_close(PCWSTR application)
 {
-    JOBOBJECT_BASIC_UI_RESTRICTIONS Info;
-    HANDLE hJob;
-    DWORD Returned;
-    BOOL Success;
-    ULONG i;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limit_info;
+    PROCESS_INFORMATION process_info;
+    STARTUPINFOW startup_info;
+    WCHAR command_line[MAX_PATH * 2];
+    HANDLE duplicate_job = NULL;
+    HANDLE job;
+    DWORD exit_code;
+    DWORD result;
+    DWORD suspend_count;
+    BOOL ret;
 
-    hJob = CreateJobObjectW(NULL, NULL);
-    ok(hJob != NULL, "CreateJobObject failed with %lu\n", GetLastError());
-    if (hJob == NULL)
+    RtlZeroMemory(&limit_info, sizeof(limit_info));
+    RtlZeroMemory(&process_info, sizeof(process_info));
+    RtlZeroMemory(&startup_info, sizeof(startup_info));
+    startup_info.cb = sizeof(startup_info);
+    StringCchPrintfW(command_line, _countof(command_line), L"\"%s\" JobObject child", application);
+
+    ret = CreateProcessW(application, command_line, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &startup_info, &process_info);
+    ok(ret, "CreateProcessW failed with %lu\n", GetLastError());
+    if (!ret) return;
+
+    job = CreateJobObjectW(NULL, NULL);
+    ok(job != NULL, "CreateJobObjectW failed with %lu\n", GetLastError());
+    if (!job) goto cleanup;
+
+    limit_info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    ret = SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limit_info, sizeof(limit_info));
+    ok(ret, "SetInformationJobObject failed with %lu\n", GetLastError());
+    if (!ret) goto cleanup;
+
+    ret = AssignProcessToJobObject(job, process_info.hProcess);
+    ok(ret, "AssignProcessToJobObject failed with %lu\n", GetLastError());
+    if (!ret) goto cleanup;
+
+    ret = DuplicateHandle(GetCurrentProcess(), job, GetCurrentProcess(), &duplicate_job, 0, FALSE, DUPLICATE_SAME_ACCESS);
+    ok(ret, "DuplicateHandle failed with %lu\n", GetLastError());
+    if (!ret) goto cleanup;
+
+    suspend_count = ResumeThread(process_info.hThread);
+    ok(suspend_count != (DWORD)-1, "ResumeThread failed with %lu\n", GetLastError());
+    if (suspend_count == (DWORD)-1) goto cleanup;
+
+    Sleep(100);
+    ret = CloseHandle(job);
+    ok(ret, "CloseHandle(job) failed with %lu\n", GetLastError());
+    if (!ret) goto cleanup;
+    job = NULL;
+    result = WaitForSingleObject(process_info.hProcess, 250);
+    ok(result == WAIT_TIMEOUT, "Child exited while a duplicate job handle remained: %#lx\n", result);
+    ret = CloseHandle(duplicate_job);
+    ok(ret, "CloseHandle(duplicate_job) failed with %lu\n", GetLastError());
+    if (!ret) goto cleanup;
+    duplicate_job = NULL;
+    result = WaitForSingleObject(process_info.hProcess, 5000);
+    ok(result == WAIT_OBJECT_0, "Kill-on-close child wait returned %#lx\n", result);
+    exit_code = STILL_ACTIVE;
+    ret = GetExitCodeProcess(process_info.hProcess, &exit_code);
+    ok(ret, "GetExitCodeProcess failed with %lu\n", GetLastError());
+    ok(exit_code == 0, "Expected kill-on-close exit code 0, got %#lx\n", exit_code);
+
+cleanup:
+    if (duplicate_job) CloseHandle(duplicate_job);
+    if (job) CloseHandle(job);
+    TerminateProcess(process_info.hProcess, 0);
+    WaitForSingleObject(process_info.hProcess, 5000);
+    CloseHandle(process_info.hProcess);
+    CloseHandle(process_info.hThread);
+}
+
+static VOID test_self_job_close_on_exit(PCWSTR application)
+{
+    PROCESS_INFORMATION process_info;
+    STARTUPINFOW startup_info;
+    WCHAR command_line[MAX_PATH * 2];
+    DWORD exit_code = STILL_ACTIVE;
+    DWORD result;
+    BOOL ret;
+
+    RtlZeroMemory(&process_info, sizeof(process_info));
+    RtlZeroMemory(&startup_info, sizeof(startup_info));
+    startup_info.cb = sizeof(startup_info);
+    StringCchPrintfW(command_line, _countof(command_line), L"\"%s\" JobObject self-job-exit", application);
+
+    ret = CreateProcessW(application, command_line, NULL, NULL, FALSE, 0, NULL, NULL, &startup_info, &process_info);
+    ok(ret, "CreateProcessW failed with %lu\n", GetLastError());
+    if (!ret)
         return;
 
-    /* A fresh job restricts nothing */
-    memset(&Info, 0xAA, sizeof(Info));
-    Returned = 0;
-    SetLastError(0xDEADBEEF);
-    Success = QueryInformationJobObject(hJob,
-                                        JobObjectBasicUIRestrictions,
-                                        &Info,
-                                        sizeof(Info),
-                                        &Returned);
-    ok(Success != FALSE, "QueryInformationJobObject failed with %lu\n", GetLastError());
-    ok_long(Info.UIRestrictionsClass, 0);
-    ok_long(Returned, sizeof(Info));
+    result = WaitForSingleObject(process_info.hProcess, 5000);
+    ok(result == WAIT_OBJECT_0, "Self-job child wait returned %#lx\n", result);
+    ret = GetExitCodeProcess(process_info.hProcess, &exit_code);
+    ok(ret, "GetExitCodeProcess failed with %lu\n", GetLastError());
+    ok(exit_code == SELF_JOB_EXIT_CODE, "Expected self-job exit code %u, got %#lx\n", SELF_JOB_EXIT_CODE, exit_code);
 
-    /* Every flag on its own, so one mistake cannot hide behind the others */
-    for (i = 0; i < _countof(SingleRestrictions); i++)
+    if (result != WAIT_OBJECT_0)
+        TerminateProcess(process_info.hProcess, 0);
+    CloseHandle(process_info.hProcess);
+    CloseHandle(process_info.hThread);
+}
+
+static DECLSPEC_NORETURN VOID run_self_job_exit_child(void)
+{
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limit_info;
+    HANDLE job;
+
+    RtlZeroMemory(&limit_info, sizeof(limit_info));
+    job = CreateJobObjectW(NULL, NULL);
+    if (!job)
+        ExitProcess(40);
+
+    limit_info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limit_info, sizeof(limit_info)))
     {
-        SetLastError(0xDEADBEEF);
-        Success = SetRestrictions(hJob, SingleRestrictions[i]);
-        ok(Success != FALSE, "Setting 0x%lx failed with %lu\n",
-           SingleRestrictions[i], GetLastError());
-        if (Success == FALSE)
-        {
-            /* Everything below only means something once it is set */
-            skip("0x%lx could not be set\n", SingleRestrictions[i]);
-            continue;
-        }
-
-        memset(&Info, 0xAA, sizeof(Info));
-        Returned = 0;
-        Success = QueryInformationJobObject(hJob,
-                                            JobObjectBasicUIRestrictions,
-                                            &Info,
-                                            sizeof(Info),
-                                            &Returned);
-        ok(Success != FALSE, "Querying 0x%lx failed with %lu\n",
-           SingleRestrictions[i], GetLastError());
-        if (Success == FALSE)
-        {
-            skip("0x%lx could not be queried\n", SingleRestrictions[i]);
-        }
-        else
-        {
-            ok_long(Info.UIRestrictionsClass, SingleRestrictions[i]);
-            ok_long(Returned, sizeof(Info));
-        }
-
-        /* Back to nothing, which drops the per-job state win32k keeps */
-        SetLastError(0xDEADBEEF);
-        Success = SetRestrictions(hJob, 0);
-        ok(Success != FALSE, "Clearing 0x%lx failed with %lu\n",
-           SingleRestrictions[i], GetLastError());
-        if (Success == FALSE)
-        {
-            /* The job stays restricted, so the round after this one would be
-               starting from the wrong place */
-            skip("0x%lx could not be cleared\n", SingleRestrictions[i]);
-            continue;
-        }
-
-        memset(&Info, 0xAA, sizeof(Info));
-        Success = QueryInformationJobObject(hJob,
-                                            JobObjectBasicUIRestrictions,
-                                            &Info,
-                                            sizeof(Info),
-                                            NULL);
-        ok(Success != FALSE, "QueryInformationJobObject failed with %lu\n", GetLastError());
-        if (Success != FALSE)
-            ok_long(Info.UIRestrictionsClass, 0);
+        ExitProcess(41);
     }
 
-    /* All of them at once */
-    SetLastError(0xDEADBEEF);
-    Success = SetRestrictions(hJob, JOB_OBJECT_UILIMIT_ALL);
-    ok(Success != FALSE, "Setting JOB_OBJECT_UILIMIT_ALL failed with %lu\n", GetLastError());
+    if (!AssignProcessToJobObject(job, GetCurrentProcess()))
+        ExitProcess(43);
 
-    memset(&Info, 0xAA, sizeof(Info));
-    Success = QueryInformationJobObject(hJob,
-                                        JobObjectBasicUIRestrictions,
-                                        &Info,
-                                        sizeof(Info),
-                                        NULL);
-    ok(Success != FALSE, "QueryInformationJobObject failed with %lu\n", GetLastError());
-    ok_long(Info.UIRestrictionsClass, JOB_OBJECT_UILIMIT_ALL);
-
-    /* Setting the same value twice is not an error */
-    SetLastError(0xDEADBEEF);
-    Success = SetRestrictions(hJob, JOB_OBJECT_UILIMIT_ALL);
-    ok(Success != FALSE, "Setting the same restrictions again failed with %lu\n",
-       GetLastError());
-
-    /* Close it while still restricted, to exercise the delete path */
-    CloseHandle(hJob);
-}
-
-static
-void
-test_InvalidParameters(void)
-{
-    JOBOBJECT_BASIC_UI_RESTRICTIONS Info;
-    HANDLE hJob;
-    DWORD Returned;
-    BOOL Success;
-
-    hJob = CreateJobObjectW(NULL, NULL);
-    ok(hJob != NULL, "CreateJobObject failed with %lu\n", GetLastError());
-    if (hJob == NULL)
-        return;
-
-    /* Undefined bits must be rejected, and must not be stored */
-    SetLastError(0xDEADBEEF);
-    Success = SetRestrictions(hJob, 0xDEAD0000);
-    ok(Success == FALSE, "Setting undefined restrictions succeeded\n");
-    ok_err(ERROR_INVALID_PARAMETER);
-
-    SetLastError(0xDEADBEEF);
-    Success = SetRestrictions(hJob, JOB_OBJECT_UILIMIT_ALL | 0x100);
-    ok(Success == FALSE, "Setting one undefined bit succeeded\n");
-    ok_err(ERROR_INVALID_PARAMETER);
-
-    memset(&Info, 0xAA, sizeof(Info));
-    Success = QueryInformationJobObject(hJob,
-                                        JobObjectBasicUIRestrictions,
-                                        &Info,
-                                        sizeof(Info),
-                                        NULL);
-    ok(Success != FALSE, "QueryInformationJobObject failed with %lu\n", GetLastError());
-    ok_long(Info.UIRestrictionsClass, 0);
-
-    /* The class is fixed length in both directions */
-    Info.UIRestrictionsClass = JOB_OBJECT_UILIMIT_HANDLES;
-    SetLastError(0xDEADBEEF);
-    Success = SetInformationJobObject(hJob,
-                                      JobObjectBasicUIRestrictions,
-                                      &Info,
-                                      sizeof(Info) - 1);
-    ok(Success == FALSE, "SetInformationJobObject with a short buffer succeeded\n");
-    ok_err(ERROR_BAD_LENGTH);
-
-    SetLastError(0xDEADBEEF);
-    Success = SetInformationJobObject(hJob,
-                                      JobObjectBasicUIRestrictions,
-                                      &Info,
-                                      sizeof(Info) + 1);
-    ok(Success == FALSE, "SetInformationJobObject with a long buffer succeeded\n");
-    ok_err(ERROR_BAD_LENGTH);
-
-    Returned = 0;
-    SetLastError(0xDEADBEEF);
-    Success = QueryInformationJobObject(hJob,
-                                        JobObjectBasicUIRestrictions,
-                                        &Info,
-                                        sizeof(Info) - 1,
-                                        &Returned);
-    ok(Success == FALSE, "QueryInformationJobObject with a short buffer succeeded\n");
-    ok_err(ERROR_BAD_LENGTH);
-
-    /* An inaccessible buffer must be reported, not raised */
-    SetLastError(0xDEADBEEF);
-    Success = SetInformationJobObject(hJob,
-                                      JobObjectBasicUIRestrictions,
-                                      NULL,
-                                      sizeof(Info));
-    ok(Success == FALSE, "SetInformationJobObject with a NULL buffer succeeded\n");
-    ok_err(ERROR_NOACCESS);
-
-    CloseHandle(hJob);
-}
-
-/* A handle without JOB_OBJECT_SET_ATTRIBUTES may not change the restrictions */
-static
-void
-test_Access(void)
-{
-    JOBOBJECT_BASIC_UI_RESTRICTIONS Info;
-    HANDLE hJob, hQueryOnly;
-    BOOL Success;
-
-    hJob = CreateJobObjectW(NULL, NULL);
-    ok(hJob != NULL, "CreateJobObject failed with %lu\n", GetLastError());
-    if (hJob == NULL)
-        return;
-
-    hQueryOnly = NULL;
-    Success = DuplicateHandle(GetCurrentProcess(),
-                              hJob,
-                              GetCurrentProcess(),
-                              &hQueryOnly,
-                              JOB_OBJECT_QUERY,
-                              FALSE,
-                              0);
-    ok(Success != FALSE, "DuplicateHandle failed with %lu\n", GetLastError());
-    if (Success)
-    {
-        SetLastError(0xDEADBEEF);
-        Success = SetRestrictions(hQueryOnly, JOB_OBJECT_UILIMIT_HANDLES);
-        ok(Success == FALSE, "Setting restrictions through a query handle succeeded\n");
-        ok_err(ERROR_ACCESS_DENIED);
-
-        memset(&Info, 0xAA, sizeof(Info));
-        Success = QueryInformationJobObject(hQueryOnly,
-                                            JobObjectBasicUIRestrictions,
-                                            &Info,
-                                            sizeof(Info),
-                                            NULL);
-        ok(Success != FALSE, "QueryInformationJobObject failed with %lu\n", GetLastError());
-        ok_long(Info.UIRestrictionsClass, 0);
-
-        CloseHandle(hQueryOnly);
-    }
-
-    CloseHandle(hJob);
-}
-
-/*
- * The two policies the Chromium sandbox builds, in the order it builds them.
- * The GPU one excepts every UI restriction away again, which has to end up
- * clearing them rather than failing.
- */
-static
-void
-test_SandboxPolicies(void)
-{
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION ExtendedLimit;
-    JOBOBJECT_BASIC_UI_RESTRICTIONS Info;
-    HANDLE hJob;
-    BOOL Success;
-
-    /* sandbox::Job::Init(JOB_LOCKDOWN) */
-    hJob = CreateJobObjectW(NULL, NULL);
-    ok(hJob != NULL, "CreateJobObject failed with %lu\n", GetLastError());
-    if (hJob == NULL)
-        return;
-
-    memset(&ExtendedLimit, 0, sizeof(ExtendedLimit));
-    ExtendedLimit.BasicLimitInformation.LimitFlags =
-        JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION |
-        JOB_OBJECT_LIMIT_ACTIVE_PROCESS |
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    ExtendedLimit.BasicLimitInformation.ActiveProcessLimit = 1;
-
-    SetLastError(0xDEADBEEF);
-    Success = SetInformationJobObject(hJob,
-                                      JobObjectExtendedLimitInformation,
-                                      &ExtendedLimit,
-                                      sizeof(ExtendedLimit));
-    ok(Success != FALSE, "Setting the lockdown limits failed with %lu\n", GetLastError());
-
-    SetLastError(0xDEADBEEF);
-    Success = SetRestrictions(hJob, JOB_LOCKDOWN_UI);
-    ok(Success != FALSE, "Setting the lockdown restrictions failed with %lu\n",
-       GetLastError());
-
-    memset(&Info, 0xAA, sizeof(Info));
-    Success = QueryInformationJobObject(hJob,
-                                        JobObjectBasicUIRestrictions,
-                                        &Info,
-                                        sizeof(Info),
-                                        NULL);
-    ok(Success != FALSE, "QueryInformationJobObject failed with %lu\n", GetLastError());
-    ok_long(Info.UIRestrictionsClass, JOB_LOCKDOWN_UI);
-
-    CloseHandle(hJob);
-
-    /* Job::Init(JobLevel::kLimitedUser), which does not take kLockdown's four */
-    hJob = CreateJobObjectW(NULL, NULL);
-    ok(hJob != NULL, "CreateJobObject failed with %lu\n", GetLastError());
-    if (hJob == NULL)
-        return;
-
-    memset(&ExtendedLimit, 0, sizeof(ExtendedLimit));
-    ExtendedLimit.BasicLimitInformation.LimitFlags =
-        JOB_OBJECT_LIMIT_ACTIVE_PROCESS |
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    ExtendedLimit.BasicLimitInformation.ActiveProcessLimit = 1;
-
-    SetLastError(0xDEADBEEF);
-    Success = SetInformationJobObject(hJob,
-                                      JobObjectExtendedLimitInformation,
-                                      &ExtendedLimit,
-                                      sizeof(ExtendedLimit));
-    ok(Success != FALSE, "Setting the limited user limits failed with %lu\n", GetLastError());
-
-    SetLastError(0xDEADBEEF);
-    Success = SetRestrictions(hJob, JOB_LIMITEDUSER_UI);
-    ok(Success != FALSE, "Setting the limited user restrictions failed with %lu\n",
-       GetLastError());
-
-    memset(&Info, 0xAA, sizeof(Info));
-    Success = QueryInformationJobObject(hJob,
-                                        JobObjectBasicUIRestrictions,
-                                        &Info,
-                                        sizeof(Info),
-                                        NULL);
-    ok(Success != FALSE, "QueryInformationJobObject failed with %lu\n", GetLastError());
-    ok_long(Info.UIRestrictionsClass, JOB_LIMITEDUSER_UI);
-
-    CloseHandle(hJob);
-
-    /*
-     * job.cc applies the caller's exceptions as
-     * jbur.UIRestrictionsClass &= ~ui_exceptions before its single
-     * SetInformationJobObject, so a delegate that excepts everything away asks
-     * for a mask of zero. That has to be accepted, not refused.
-     */
-    hJob = CreateJobObjectW(NULL, NULL);
-    ok(hJob != NULL, "CreateJobObject failed with %lu\n", GetLastError());
-    if (hJob == NULL)
-        return;
-
-    SetLastError(0xDEADBEEF);
-    Success = SetRestrictions(hJob, JOB_LOCKDOWN_UI & ~JOB_OBJECT_UILIMIT_ALL);
-    ok(Success != FALSE, "Excepting every restriction away failed with %lu\n",
-       GetLastError());
-
-    memset(&Info, 0xAA, sizeof(Info));
-    Success = QueryInformationJobObject(hJob,
-                                        JobObjectBasicUIRestrictions,
-                                        &Info,
-                                        sizeof(Info),
-                                        NULL);
-    ok(Success != FALSE, "QueryInformationJobObject failed with %lu\n", GetLastError());
-    ok_long(Info.UIRestrictionsClass, 0);
-
-    CloseHandle(hJob);
+    /* Keep the final job handle open so process handle rundown closes it. */
+    ExitProcess(SELF_JOB_EXIT_CODE);
 }
 
 START_TEST(JobObject)
 {
-    test_RoundTrip();
-    test_InvalidParameters();
-    test_Access();
-    test_SandboxPolicies();
+    JOBOBJECT_ASSOCIATE_COMPLETION_PORT port_info;
+    PROCESS_INFORMATION process_info;
+    STARTUPINFOW startup_info;
+    WCHAR application[MAX_PATH];
+    WCHAR command_line[MAX_PATH * 2];
+    HANDLE job = NULL;
+    HANDLE port = NULL;
+    BOOL ret;
+    int argc;
+    char **argv;
+
+    argc = winetest_get_mainargs(&argv);
+    if (argc >= 3 && !strcmp(argv[2], "child"))
+    {
+        Sleep(INFINITE);
+        return;
+    }
+    if (argc >= 3 && !strcmp(argv[2], "self-job-exit"))
+        run_self_job_exit_child();
+
+    RtlZeroMemory(&startup_info, sizeof(startup_info));
+    RtlZeroMemory(&process_info, sizeof(process_info));
+    startup_info.cb = sizeof(startup_info);
+
+    GetModuleFileNameW(NULL, application, _countof(application));
+    StringCchPrintfW(command_line, _countof(command_line), L"\"%s\" JobObject child", application);
+    ret = CreateProcessW(application, command_line, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &startup_info, &process_info);
+    if (!ret)
+    {
+        skip("CreateProcessW failed with %lu\n", GetLastError());
+        return;
+    }
+
+    job = CreateJobObjectW(NULL, NULL);
+    ok(job != NULL, "CreateJobObjectW failed with %lu\n", GetLastError());
+    if (!job) goto cleanup;
+
+    ret = AssignProcessToJobObject(job, process_info.hProcess);
+    ok(ret, "AssignProcessToJobObject failed with %lu\n", GetLastError());
+    if (!ret) goto cleanup;
+
+    port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
+    ok(port != NULL, "CreateIoCompletionPort failed with %lu\n", GetLastError());
+    if (!port) goto cleanup;
+
+    port_info.CompletionKey = job;
+    port_info.CompletionPort = port;
+    ret = SetInformationJobObject(job, JobObjectAssociateCompletionPortInformation, &port_info, sizeof(port_info));
+    ok(ret, "SetInformationJobObject failed with %lu\n", GetLastError());
+    if (!ret) goto cleanup;
+
+    expect_completion(port, JOB_OBJECT_MSG_NEW_PROCESS, (ULONG_PTR)job, process_info.dwProcessId);
+
+    ResumeThread(process_info.hThread);
+    ret = TerminateProcess(process_info.hProcess, 0);
+    ok(ret, "TerminateProcess failed with %lu\n", GetLastError());
+    WaitForSingleObject(process_info.hProcess, 5000);
+
+    expect_completion(port, JOB_OBJECT_MSG_EXIT_PROCESS, (ULONG_PTR)job, process_info.dwProcessId);
+    expect_completion(port, JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO, (ULONG_PTR)job, 0);
+
+cleanup:
+    if (process_info.hProcess)
+    {
+        TerminateProcess(process_info.hProcess, 0);
+        WaitForSingleObject(process_info.hProcess, 5000);
+        CloseHandle(process_info.hProcess);
+    }
+    if (process_info.hThread) CloseHandle(process_info.hThread);
+    if (port) CloseHandle(port);
+    if (job) CloseHandle(job);
+    test_kill_on_close(application);
+    test_self_job_close_on_exit(application);
 }

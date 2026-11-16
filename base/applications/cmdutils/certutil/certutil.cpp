@@ -14,20 +14,24 @@
 typedef struct
 {
     LPCWSTR Name;
-    BOOL (*pfn)(LPCWSTR Filename);
+    BOOL (*pfn)(LPCWSTR Filename, LPCWSTR Argument);
 } Verb;
 
 
 Verb verbs[] = {
     { L"hashfile", hash_file },
     { L"asn", asn_dump },
+    { L"decodehex", decode_hex },
 };
 
 static void print_usage()
 {
     ConPuts(StdOut, L"Verbs:\n");
     ConPuts(StdOut, L"  -hashfile           -- Display cryptographic hash over a file\n");
+    ConPuts(StdOut, L"                         Usage: -hashfile <file> [MD2|MD4|MD5|SHA1|SHA256|SHA384|SHA512]\n");
     ConPuts(StdOut, L"  -asn                -- Display ASN.1 encoding of a file\n");
+    ConPuts(StdOut, L"  -decodehex          -- Decode a hexadecimal-encoded file\n");
+    ConPuts(StdOut, L"                         Usage: -decodehex <infile> <outfile>\n");
     ConPuts(StdOut, L"\n");
     ConPuts(StdOut, L"CertUtil -?           -- Display a list of all verbs\n");
     ConPuts(StdOut, L"CertUtil -hashfile -? -- Display help text for the 'hashfile' verb\n");
@@ -50,7 +54,7 @@ Verb* MatchVerb(LPCWSTR arg)
     return NULL;
 }
 
-int wmain(int argc, WCHAR *argv[])
+EXTERN_C int wmain(int argc, WCHAR *argv[])
 {
     int n;
 
@@ -75,9 +79,11 @@ int wmain(int argc, WCHAR *argv[])
 
         if (verb)
         {
-            if (argc != 3)
+            /* The optional third argument selects the hash algorithm, the
+             * way Windows certutil takes it. */
+            if (argc != 3 && argc != 4)
             {
-                ConPrintf(StdOut, L"CertUtil: -%s expected 1 argument, got %d\n", verb->Name, argc - 2);
+                ConPrintf(StdOut, L"CertUtil: -%s expected 1 or 2 arguments, got %d\n", verb->Name, argc - 2);
                 return EXIT_FAILURE;
             }
 
@@ -87,7 +93,7 @@ int wmain(int argc, WCHAR *argv[])
                 return EXIT_SUCCESS;
             }
 
-            if (!verb->pfn(argv[n+1]))
+            if (!verb->pfn(argv[n+1], argc == 4 ? argv[n+2] : NULL))
             {
                 /* The verb prints the failure */
                 return EXIT_FAILURE;

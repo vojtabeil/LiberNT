@@ -133,8 +133,8 @@ KmtFltLoadDriver(
         Error = KmtFltUnload(TestServiceName);
         if (Error)
         {
-            // TODO
-            __debugbreak();
+            trace("KmtFltUnload failed while restarting %ls: %lu\n", TestServiceName, Error);
+            return Error;
         }
 
         Error = KmtFltLoad(TestServiceName);
@@ -182,8 +182,7 @@ KmtFltUnloadDriver(
 
     if (Error)
     {
-        // TODO
-        __debugbreak();
+        trace("KmtFltUnload failed for %ls: %lu\n", TestServiceName, Error);
     }
 
     return Error;
@@ -203,7 +202,11 @@ DWORD
 KmtFltConnectComms(
     _Out_ HANDLE *hPort)
 {
-    return KmtFltConnect(TestServiceName, hPort);
+    WCHAR PortName[MAX_PATH];
+
+    StringCbCopyW(PortName, sizeof(PortName), L"\\Device\\");
+    StringCbCatW(PortName, sizeof(PortName), TestServiceName);
+    return KmtFltConnect(PortName, hPort);
 }
 
 /**

@@ -9,14 +9,19 @@ FORCEINLINE struct _TEB * NtCurrentTeb(VOID)
 {
 #if defined(_M_IX86)
     return (struct _TEB *)__readfsdword(0x18);
+#elif defined(_M_ARM64EC) || defined(__arm64ec__)
+    return (struct _TEB *)__getReg(18);
 #elif defined(_M_AMD64)
     return (struct _TEB *)__readgsqword(FIELD_OFFSET(NT_TIB, Self));
 #elif defined(_M_ARM)
     // return (struct _TEB *)KeGetPcr()->Used_Self;
     return (struct _TEB *)(ULONG_PTR)_MoveFromCoprocessor(CP15_TPIDRURW);
 #elif defined (_M_ARM64)
-    //UNIMPLEMENTED;
-    return 0;
+    return (struct _TEB *)__getReg(18);
+#elif defined(_M_RISCV64)
+    struct _TEB *Teb;
+    __asm__("mv %0, tp" : "=r"(Teb));
+    return Teb;
 // #elif defined(_M_PPC)
 //     return (struct _TEB *)_read_teb_dword(0x18);
 #else

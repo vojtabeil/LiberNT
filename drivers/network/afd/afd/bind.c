@@ -12,6 +12,7 @@
 
 NTSTATUS WarmSocketForBind( PAFD_FCB FCB, ULONG ShareType ) {
     NTSTATUS Status;
+    ULONG ReceiveWindowAllocationSize;
 
     AFD_DbgPrint(MID_TRACE,("Called (AF %u)\n",
                             FCB->LocalAddress->Address[0].AddressType));
@@ -35,35 +36,38 @@ NTSTATUS WarmSocketForBind( PAFD_FCB FCB, ULONG ShareType ) {
 
     if (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)
     {
-        if (!FCB->Recv.Size)
-        {
-            Status = TdiQueryMaxDatagramLength(FCB->AddressFile.Object,
-                                               &FCB->Recv.Size);
-        }
-
         if (NT_SUCCESS(Status) && !FCB->Recv.Window)
         {
-            FCB->Recv.Window = ExAllocatePoolWithTag(PagedPool,
-                                                     FCB->Recv.Size,
+            ReceiveWindowAllocationSize = AfdReceiveWindowSize;
+
+            /* dev-nt6-1: NonPagedPool — tcpip's DGDeliverData runs from
+             * the network RX DPC at DISPATCH_LEVEL and writes into this
+             * buffer via RtlCopyMemory. PagedPool would bugcheck 0x50
+             * (PAGE_FAULT_IN_NONPAGED_AREA) on first delivery. The
+             * latent bug only surfaced once the NDIS 6 bridge actually
+             * delivered packets up the stack. */
+            FCB->Recv.Window = ExAllocatePoolWithTag(NonPagedPool,
+                                                     ReceiveWindowAllocationSize,
                                                      TAG_AFD_DATA_BUFFER);
 
             if (!FCB->Recv.Window)
                 Status = STATUS_NO_MEMORY;
+            else
+                FCB->ReceiveWindowAllocationSize = ReceiveWindowAllocationSize;
         }
 
-        if (NT_SUCCESS(Status) && FCB->Recv.Content < FCB->Recv.Size)
+        if (NT_SUCCESS(Status) && !FCB->RecvControl)
         {
-            Status = TdiReceiveDatagram(&FCB->ReceiveIrp.InFlightRequest,
-                                        FCB->AddressFile.Object,
-                                        0,
-                                        FCB->Recv.Window,
-                                        FCB->Recv.Size,
-                                        FCB->AddressFrom,
-                                        PacketSocketRecvComplete,
-                                        FCB);
+            FCB->RecvControl = ExAllocatePoolWithTag(NonPagedPool,
+                                                     AFD_RECV_CONTROL_SIZE,
+                                                     TAG_AFD_DATA_BUFFER);
+            if (!FCB->RecvControl)
+                Status = STATUS_NO_MEMORY;
+        }
 
-            /* We don't want to wait for this read to complete. */
-            if( Status == STATUS_PENDING ) Status = STATUS_SUCCESS;
+        if (NT_SUCCESS(Status))
+        {
+            Status = AfdRearmDatagram(FCB);
         }
     }
 
@@ -110,9 +114,9 @@ AfdBindSocket(PDEVICE_OBJECT DeviceObject, PIRP Irp,
         Status = ObOpenObjectByPointer(FCB->AddressFile.Object,
                                        0,
                                        NULL,
-                                       MAXIMUM_ALLOWED,
+                                       GENERIC_READ | GENERIC_WRITE,
                                        *IoFileObjectType,
-                                       Irp->RequestorMode,
+                                       KernelMode,
                                        &UserHandle);
         if (NT_SUCCESS(Status))
             FCB->SharedData.State = SOCKET_STATE_BOUND;

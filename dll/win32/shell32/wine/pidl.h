@@ -34,6 +34,13 @@
 #ifndef __WINE_PIDL_H
 #define __WINE_PIDL_H
 
+#include <stdarg.h>
+
+#include "windef.h"
+#include "winbase.h"
+#include "winuser.h"
+#include "shlobj.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -119,6 +126,7 @@ extern "C" {
 #define PT_INTERNET_URL         0x61
 #define PT_CONTROLS_OLDREGITEM  0x70
 #define PT_CONTROLS_NEWREGITEM  0x71
+#define PT_DELEGATE             0x74
 
 #define REGITEMLOCATION_CONTROLS CSIDL_DRIVES
 #define REGITEMLOCATION_PRINTERS CSIDL_CONTROLS
@@ -131,11 +139,7 @@ extern "C" {
 #define REGITEMORDER_MYDOCS_AFTERMYCOMPUTER  0x54 // accepts these two values.
 #define REGITEMORDER_MYDOCS_DEFAULT          0x48
 #define REGITEMORDER_NETHOOD                 0x58
-#if (REGITEMLOCATION_CONTROLS == CSIDL_DESKTOP)
 #define REGITEMORDER_RECYCLEBIN              0x78
-#else
-#define REGITEMORDER_RECYCLEBIN              0x60
-#endif
 #define REGITEMORDER_INTERNET                0x68
 #define REGITEMORDER_DESKTOP_CONTROLS        0x70 // NT6
 #define REGITEMORDER_MYCOMPUTER_CONTROLS     0x1E // NT5
@@ -146,13 +150,7 @@ static inline BYTE _ILGetType(LPCITEMIDLIST pidl)
     return pidl && pidl->mkid.cb >= 3 ? pidl->mkid.abID[0] : 0;
 }
 
-static inline BYTE _ILGetFSType(LPCITEMIDLIST pidl)
-{
-    const BYTE type = _ILGetType(pidl);
-    return (type & PT_FOLDERTYPEMASK) == PT_FS ? type : 0;
-}
-
-#include "pshpack1.h"
+#pragma pack(push, 1)
 typedef BYTE PIDLTYPE;
 
 typedef struct tagPIDLCPanelStruct
@@ -163,6 +161,10 @@ typedef struct tagPIDLCPanelStruct
     WORD offsComment;		/*08*/
     WCHAR szName[1];		/*10*/ /* terminated by 0x00, followed by display name and comment string */
 } PIDLCPanelStruct;
+
+#define ILGDN_FORPARSING  0
+#define ILGDN_NORMAL      1
+#define ILGDN_INFOLDER    2
 
 #ifdef __REACTOS__
 
@@ -250,7 +252,16 @@ typedef struct tagPIDLDATA
 #endif
 	}u;
 } PIDLDATA, *LPPIDLDATA;
-#include "poppack.h"
+#pragma pack(pop)
+
+static inline BYTE _ILGetFSType(LPCITEMIDLIST pidl)
+{
+    const BYTE type = _ILGetType(pidl);
+    if ((type & PT_FOLDERTYPEMASK) != PT_FS ||
+        pidl->mkid.cb < FIELD_OFFSET(SHITEMID, abID) + FIELD_OFFSET(PIDLDATA, u.file.szNames) + sizeof(CHAR))
+        return 0;
+    return type;
+}
 
 /*
  * getting special values from simple pidls

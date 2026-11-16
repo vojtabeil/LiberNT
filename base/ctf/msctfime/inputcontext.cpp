@@ -7,19 +7,17 @@
 
 #include "msctfime.h"
 
-WINE_DEFAULT_DEBUG_CHANNEL(msctfime);
-
 /***********************************************************************
  * CInputContextOwner
  */
 
-/// @unimplemented
 CInputContextOwner::CInputContextOwner(FN_IC_OWNER_CALLBACK fnCallback, LPVOID pCallbackPV)
+    : m_cRefs(1)
+    , m_pContext(NULL)
+    , m_dwCookie((DWORD)-1)
+    , m_fnCallback(fnCallback)
+    , m_pCallbackPV(pCallbackPV)
 {
-    m_dwCookie = -1;
-    m_fnCallback = fnCallback;
-    m_cRefs = 1;
-    m_pCallbackPV = pCallbackPV;
 }
 
 /// @implemented
@@ -32,16 +30,20 @@ HRESULT CInputContextOwner::_Advise(IUnknown *pContext)
 {
     ITfSource *pSource = NULL;
 
-    m_pContext = NULL;
+    if (!pContext)
+        return E_INVALIDARG;
+    if (m_pContext)
+        return E_UNEXPECTED;
 
-    HRESULT hr = E_FAIL;
-    if (SUCCEEDED(m_pContext->QueryInterface(IID_ITfSource, (LPVOID*)&pSource)) &&
-        SUCCEEDED(pSource->AdviseSink(IID_ITfContextOwner,
-                                      static_cast<ITfContextOwner*>(this), &m_dwCookie)))
+    HRESULT hr = pContext->QueryInterface(IID_ITfSource, (LPVOID*)&pSource);
+    if (SUCCEEDED(hr))
     {
-        m_pContext = pContext;
-        m_pContext->AddRef();
-        hr = S_OK;
+        hr = pSource->AdviseSink(IID_ITfContextOwner, static_cast<ITfContextOwner*>(this), &m_dwCookie);
+        if (SUCCEEDED(hr))
+        {
+            m_pContext = pContext;
+            m_pContext->AddRef();
+        }
     }
 
     if (pSource)
@@ -58,11 +60,9 @@ HRESULT CInputContextOwner::_Unadvise()
     HRESULT hr = E_FAIL;
     if (m_pContext)
     {
-        if (SUCCEEDED(m_pContext->QueryInterface(IID_ITfSource, (LPVOID*)&pSource)) &&
-            SUCCEEDED(pSource->UnadviseSink(m_dwCookie)))
-        {
-            hr = S_OK;
-        }
+        hr = m_pContext->QueryInterface(IID_ITfSource, (LPVOID*)&pSource);
+        if (SUCCEEDED(hr))
+            hr = pSource->UnadviseSink(m_dwCookie);
     }
 
     if (m_pContext)
@@ -73,6 +73,8 @@ HRESULT CInputContextOwner::_Unadvise()
 
     if (pSource)
         pSource->Release();
+
+    m_dwCookie = (DWORD)-1;
 
     return hr;
 }
@@ -116,7 +118,6 @@ CInputContextOwner::GetACPFromPoint(
     return E_NOTIMPL;
 }
 
-/// @unimplemented
 STDMETHODIMP
 CInputContextOwner::GetTextExt(
     LONG acpStart,
@@ -124,7 +125,10 @@ CInputContextOwner::GetTextExt(
     RECT *prc,
     BOOL *pfClipped)
 {
-    return E_NOTIMPL;
+    if (!prc || !pfClipped)
+        return E_INVALIDARG;
+    TEXT_EXT_ARGS args = { acpStart, acpEnd, prc, pfClipped };
+    return m_fnCallback(1, &args, m_pCallbackPV);
 }
 
 /// @implemented
@@ -178,15 +182,53 @@ STDMETHODIMP CInputContextOwner::UnadviseMouseSink(DWORD dwCookie)
  * CicInputContext
  */
 
-/// @unimplemented
 CicInputContext::CicInputContext(
     _In_ TfClientId cliendId,
     _Inout_ PCIC_LIBTHREAD pLibThread,
     _In_ HIMC hIMC)
+    : m_cRefs(1)
+    , m_hIMC(hIMC)
+    , m_pDocumentMgr(NULL)
+    , m_pContext(NULL)
+    , m_pContextOwnerServices(NULL)
+    , m_pICOwnerCallback(NULL)
+    , m_pTextEventSink(NULL)
+    , m_pCompEventSink1(NULL)
+    , m_pCompEventSink2(NULL)
+    , m_pInputContextOwner(NULL)
+    , m_dwQueryPos(0)
+    , m_dwUnknown5(0)
+    , m_dwUnknown6(0)
+    , m_bCandidateOpen(FALSE)
+    , m_bSelecting(FALSE)
+    , m_bReconverting(FALSE)
+    , m_cCompLocks(0)
+    , m_cGuidAtoms(0)
+    , m_padding(0)
+    , m_dwUnknown8(0)
+    , m_clientId(cliendId)
+    , m_dwUnknown9(0)
+    , m_pEditSink(NULL)
+    , m_pCategoryMgr(NULL)
+    , m_pDisplayAttributeMgr(NULL)
+    , m_fInComposition(FALSE)
+    , m_fCancelComposition(FALSE)
+    , m_pszLastComp(NULL)
+    , m_pLastAttr(NULL)
+    , m_cchLastComp(0)
+    , m_dwLastCursor(0)
+    , m_lCommitted(0)
 {
-    m_hIMC = hIMC;
-    m_dwQueryPos = 0;
-    m_cRefs = 1;
+    UNREFERENCED_PARAMETER(pLibThread);
+
+    ZeroMemory(m_dwUnknown3, sizeof(m_dwUnknown3));
+    ZeroMemory(m_dwUnknown4, sizeof(m_dwUnknown4));
+    ZeroMemory(m_dwUnknown6_5, sizeof(m_dwUnknown6_5));
+    ZeroMemory(m_dwUnknown7, sizeof(m_dwUnknown7));
+    ZeroMemory(m_adwGuidAtoms, sizeof(m_adwGuidAtoms));
+    ZeroMemory(&m_rcCandidate1, sizeof(m_rcCandidate1));
+    ZeroMemory(&m_CandForm, sizeof(m_CandForm));
+    ZeroMemory(&m_rcCandidate2, sizeof(m_rcCandidate2));
 }
 
 /// @implemented
@@ -196,6 +238,7 @@ STDMETHODIMP CicInputContext::QueryInterface(REFIID riid, LPVOID* ppvObj)
     {
         QITABENT(CicInputContext, ITfCleanupContextSink),
         QITABENT(CicInputContext, ITfContextOwnerCompositionSink),
+        QITABENT(CicInputContext, ITfCompositionSink),
         { NULL }
     };
     return ::QISearch(this, c_tab, riid, ppvObj);
@@ -251,6 +294,7 @@ CicInputContext::OnEndComposition(
     ITfCompositionView *pComposition)
 {
     --m_cCompLocks;
+    SyncComposition();
     return S_OK;
 }
 
@@ -275,17 +319,93 @@ CicInputContext::GetGuidAtom(
     return hr;
 }
 
-/// @unimplemented
 HRESULT
 CicInputContext::CreateInputContext(
     _Inout_ ITfThreadMgr *pThreadMgr,
     _Inout_ CicIMCLock& imcLock)
 {
-    //FIXME
-    return E_NOTIMPL;
+    ITfSourceSingle *pSource = NULL;
+    TfEditCookie ecTextStore = 0;
+    BOOL fCleanupSinkAdvised = FALSE;
+    BOOL fCompartmentSet = FALSE;
+    BOOL fPushed = FALSE;
+
+    UNREFERENCED_PARAMETER(imcLock);
+
+    if (!pThreadMgr)
+        return E_INVALIDARG;
+    if (m_pDocumentMgr || m_pContext)
+        return E_UNEXPECTED;
+
+    HRESULT hr = pThreadMgr->CreateDocumentMgr(&m_pDocumentMgr);
+    if (FAILED(hr))
+        goto Failure;
+
+    SetCompartmentDWORD(m_clientId, m_pDocumentMgr, GUID_COMPARTMENT_CTFIME_DIMFLAGS, TRUE, FALSE);
+
+    hr = m_pDocumentMgr->CreateContext(m_clientId, 0, static_cast<ITfContextOwnerCompositionSink*>(this), &m_pContext, &ecTextStore);
+    if (FAILED(hr))
+        goto Failure;
+
+    hr = AttachSinks();
+    if (FAILED(hr))
+        goto Failure;
+
+    hr = m_pContext->QueryInterface(IID_ITfContextOwnerServices, (void **)&m_pContextOwnerServices);
+    if (FAILED(hr))
+        goto Failure;
+
+    hr = SetCompartmentUnknown(m_clientId, m_pContext, GUID_COMPARTMENT_CTFIME_CICINPUTCONTEXT, static_cast<ITfCleanupContextSink*>(this));
+    if (FAILED(hr))
+        goto Failure;
+    fCompartmentSet = TRUE;
+
+    hr = m_pContext->QueryInterface(IID_ITfSourceSingle, (void **)&pSource);
+    if (FAILED(hr))
+        goto Failure;
+
+    hr = pSource->AdviseSingleSink(m_clientId, IID_ITfCleanupContextSink, static_cast<ITfCleanupContextSink*>(this));
+    if (FAILED(hr))
+        goto Failure;
+    fCleanupSinkAdvised = TRUE;
+
+    hr = m_pDocumentMgr->Push(m_pContext);
+    if (FAILED(hr))
+        goto Failure;
+    fPushed = TRUE;
+
+    pSource->Release();
+    return S_OK;
+
+Failure:
+    DetachSinks();
+    if (fPushed)
+        m_pDocumentMgr->Pop(TF_POPF_ALL);
+    if (fCleanupSinkAdvised)
+        pSource->UnadviseSingleSink(m_clientId, IID_ITfCleanupContextSink);
+    if (pSource)
+        pSource->Release();
+    if (fCompartmentSet)
+        ClearCompartment(m_clientId, m_pContext, GUID_COMPARTMENT_CTFIME_CICINPUTCONTEXT, FALSE);
+    if (m_pContextOwnerServices)
+    {
+        m_pContextOwnerServices->Release();
+        m_pContextOwnerServices = NULL;
+    }
+    if (m_pContext)
+    {
+        m_pContext->Release();
+        m_pContext = NULL;
+    }
+    if (m_pDocumentMgr)
+    {
+        m_pDocumentMgr->Release();
+        m_pDocumentMgr = NULL;
+    }
+    return hr;
 }
 
-/// @unimplemented
+/// @implemented
 HRESULT
 CicInputContext::DestroyInputContext()
 {
@@ -295,6 +415,8 @@ CicInputContext::DestroyInputContext()
         pSource->UnadviseSingleSink(m_clientId, IID_ITfCleanupContextSink);
 
     //FIXME: m_dwUnknown5
+
+    DetachSinks();
 
     if (m_pTextEventSink)
     {
@@ -324,8 +446,8 @@ CicInputContext::DestroyInputContext()
         m_pInputContextOwner = NULL;
     }
 
-    if (m_pDocumentMgr)
-        m_pDocumentMgr->Pop(1);
+    if (m_pDocumentMgr && m_pContext)
+        m_pDocumentMgr->Pop(TF_POPF_ALL);
 
     if (m_pContext)
     {
@@ -424,16 +546,14 @@ HRESULT CicInputContext::EscbClearDocFeedBuffer(CicIMCLock& imcLock, BOOL bFlag)
     return E_NOTIMPL;
 }
 
-/// @unimplemented
 HRESULT CicInputContext::EscbCompComplete(CicIMCLock& imcLock)
 {
-    return E_NOTIMPL;
+    return TerminateComposition(FALSE);
 }
 
-/// @unimplemented
 HRESULT CicInputContext::EscbCompCancel(CicIMCLock& imcLock)
 {
-    return E_NOTIMPL;
+    return TerminateComposition(TRUE);
 }
 
 /// @unimplemented
@@ -463,7 +583,7 @@ CicInputContext::MsImeMouseHandler(
 HRESULT
 CicInputContext::SetupReconvertString(
     CicIMCLock& imcLock,
-    ITfThreadMgr_P *pThreadMgr,
+    ITfThreadMgrEx *pThreadMgr,
     UINT uCodePage,
     UINT uMsg,
     BOOL bUndo)
@@ -489,7 +609,7 @@ HRESULT CicInputContext::EndReconvertString(CicIMCLock& imcLock)
 /// @unimplemented
 BOOL CicInputContext::SetCompositionString(
     CicIMCLock& imcLock,
-    ITfThreadMgr_P *pThreadMgr,
+    ITfThreadMgrEx *pThreadMgr,
     DWORD dwIndex,
     LPCVOID lpComp,
     DWORD dwCompLen,

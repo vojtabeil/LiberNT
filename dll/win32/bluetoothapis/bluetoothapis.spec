@@ -1,8 +1,9 @@
 @ stub BluetoothAddressToString
+@ stdcall BluetoothAuthenticateDeviceEx(ptr ptr ptr ptr long)
 @ stub BluetoothDisconnectDevice
-@ stub BluetoothEnableDiscovery
-@ stub BluetoothEnableIncomingConnections
-@ stub BluetoothEnumerateInstalledServices
+@ stdcall BluetoothEnableDiscovery(ptr long)
+@ stdcall BluetoothEnableIncomingConnections(ptr long)
+@ stdcall BluetoothEnumerateInstalledServices(ptr ptr ptr ptr)
 @ stub BluetoothEnumerateInstalledServicesEx
 @ stub BluetoothEnumerateLocalServices
 @ stub BluetoothFindBrowseGroupClose
@@ -30,37 +31,37 @@
 @ stub BluetoothFindProtocolEntryClose
 @ stdcall BluetoothFindRadioClose(ptr)
 @ stub BluetoothFindServiceClose
-@ stub BluetoothGATTAbortReliableWrite
-@ stub BluetoothGATTBeginReliableWrite
-@ stub BluetoothGATTEndReliableWrite
-@ stub BluetoothGATTGetCharacteristicValue
-@ stub BluetoothGATTGetCharacteristics
-@ stub BluetoothGATTGetDescriptorValue
-@ stub BluetoothGATTGetDescriptors
-@ stub BluetoothGATTGetIncludedServices
-@ stub BluetoothGATTGetServices
-@ stub BluetoothGATTRegisterEvent
-@ stub BluetoothGATTSetCharacteristicValue
-@ stub BluetoothGATTSetDescriptorValue
-@ stub BluetoothGATTUnregisterEvent
-@ stub BluetoothGetDeviceInfo
+@ stdcall BluetoothGATTAbortReliableWrite(ptr int64 long)
+@ stdcall BluetoothGATTBeginReliableWrite(ptr ptr long)
+@ stdcall BluetoothGATTEndReliableWrite(ptr int64 long)
+@ stdcall BluetoothGATTGetCharacteristicValue(ptr ptr long ptr ptr long)
+@ stdcall BluetoothGATTGetCharacteristics(ptr ptr long ptr ptr long)
+@ stdcall BluetoothGATTGetDescriptorValue(ptr ptr long ptr ptr long)
+@ stdcall BluetoothGATTGetDescriptors(ptr ptr long ptr ptr long)
+@ stdcall BluetoothGATTGetIncludedServices(ptr ptr long ptr ptr long)
+@ stdcall BluetoothGATTGetServices(ptr long ptr ptr long)
+@ stdcall BluetoothGATTRegisterEvent(ptr long ptr ptr ptr ptr long)
+@ stdcall BluetoothGATTSetCharacteristicValue(ptr ptr ptr int64 long)
+@ stdcall BluetoothGATTSetDescriptorValue(ptr ptr ptr long)
+@ stdcall BluetoothGATTUnregisterEvent(ptr long)
+@ stdcall BluetoothGetDeviceInfo(ptr long)
 @ stub BluetoothGetLocalServiceInfo
 @ stdcall BluetoothGetRadioInfo(ptr ptr)
 @ stub BluetoothGetServicePnpInstance
-@ stub BluetoothIsConnectable
-@ stub BluetoothIsDiscoverable
+@ stdcall BluetoothIsConnectable(ptr)
+@ stdcall BluetoothIsDiscoverable(ptr)
 @ stub BluetoothIsVersionAvailable
 @ stub BluetoothRegisterForAuthentication
 @ stdcall BluetoothRegisterForAuthenticationEx(ptr ptr ptr ptr)
-@ stub BluetoothRemoveDevice
+@ stdcall BluetoothRemoveDevice(ptr)
 @ stdcall BluetoothSdpEnumAttributes(ptr long ptr ptr)
 @ stdcall BluetoothSdpGetAttributeValue(ptr long long ptr)
 @ stdcall BluetoothSdpGetContainerElementData(ptr long ptr ptr)
 @ stdcall BluetoothSdpGetElementData(ptr long ptr)
 @ stub BluetoothSdpGetString
 @ stub BluetoothSendAuthenticationResponse
-@ stub BluetoothSendAuthenticationResponseEx
-@ stub BluetoothSetLocalServiceInfo
+@ stdcall BluetoothSendAuthenticationResponseEx(ptr ptr)
+@ stdcall BluetoothSetLocalServiceInfo(ptr ptr long ptr)
 @ stub BluetoothSetServiceState
 @ stub BluetoothSetServiceStateEx
 @ stdcall BluetoothUnregisterAuthentication(long)

@@ -289,6 +289,9 @@ private:
             case IDM_PROGRAMS:
             {
                 hr = AddStartMenuItems(pShellMenu, CSIDL_PROGRAMS, SMSET_TOP, m_psfPrograms);
+                /* LiveCD may lack the per-user Programs folder; match startup fallback. */
+                if (FAILED(hr))
+                    hr = AddStartMenuItems(pShellMenu, CSIDL_COMMON_PROGRAMS, SMSET_TOP);
                 break;
             }
             case IDM_FAVORITES:
@@ -459,7 +462,7 @@ public:
         LPSMDATA psmd,
         UINT uMsg,
         WPARAM wParam,
-        LPARAM lParam)
+        LPARAM lParam) override
     {
         switch (uMsg)
         {
@@ -564,11 +567,11 @@ static HRESULT GetMergedFolder(int folder1, int folder2, IShellFolder ** ppsfSta
         return hr;
     }
 
-    hr = pasf->AddNameSpace(NULL, psfUserStartMenu, pidlUserStartMenu, 0xFF00);
+    hr = pasf->AddNameSpace(NULL, psfUserStartMenu, pidlUserStartMenu, 0xFF00, 0);
     if (FAILED_UNEXPECTEDLY(hr))
         return hr;
 
-    hr = pasf->AddNameSpace(NULL, psfCommonStartMenu, pidlCommonStartMenu, 0);
+    hr = pasf->AddNameSpace(NULL, psfCommonStartMenu, pidlCommonStartMenu, 0, 0);
     if (FAILED_UNEXPECTEDLY(hr))
         return hr;
 

@@ -20,6 +20,8 @@
 	DEALINGS IN THE SOFTWARE.
 */
 
+/* Collided-unwind tests require longjmp to run termination handlers. */
+#include <setjmpex.h>
 #include <pseh/pseh2.h>
 
 #ifdef __cplusplus
@@ -1594,7 +1596,8 @@ int verify_xpointers(struct _EXCEPTION_POINTERS * ep, DWORD code, DWORD flags, D
 		ep->ExceptionRecord &&
 		ep->ContextRecord &&
 		ep->ExceptionRecord->ExceptionCode == code &&
-		ep->ExceptionRecord->ExceptionFlags == flags &&
+		/* RtlRaiseException may mark a software-originated exception. */
+		(ep->ExceptionRecord->ExceptionFlags & ~EXCEPTION_SOFTWARE_ORIGINATE) == flags &&
 		ep->ExceptionRecord->NumberParameters == argc &&
 		(argv || !argc) &&
 		memcmp(ep->ExceptionRecord->ExceptionInformation, argv, sizeof(argv[0]) * argc) == 0;
@@ -2535,6 +2538,34 @@ DEFINE_TEST(test_unvolatile_4)
     return result == 3;
 }
 
+static int released_resources;
+
+static DECLSPEC_NOINLINE void release_resource(void)
+{
+    released_resources++;
+}
+
+/* fastfat FatOpenVolume pattern: a status set in the try decides whether the finally releases a resource */
+DEFINE_TEST(test_finally_status)
+{
+    int status = return_minusone();
+
+    released_resources = 0;
+
+    _SEH2_TRY
+    {
+        status = return_zero();
+    }
+    _SEH2_FINALLY
+    {
+        if (_SEH2_AbnormalTermination() || status < 0)
+            release_resource();
+    }
+    _SEH2_END;
+
+    return released_resources == 0;
+}
+
 DEFINE_TEST(test_finally_goto)
 {
     volatile int val = 0;
@@ -2627,6 +2658,7 @@ struct volatile_context
 };
 #endif
 
+#if defined(__GNUC__) && defined(__i386__)
 static
 DECLSPEC_NOINLINE
 int sanity_check(int ret, struct volatile_context * before, struct volatile_context * after)
@@ -2639,8 +2671,9 @@ int sanity_check(int ret, struct volatile_context * before, struct volatile_cont
 
 	return ret;
 }
+#endif
 
-#ifndef _PSEH3_H_
+#if defined(_X86_) && !defined(_PSEH3_H_) && !defined(_MSC_VER)
 static
 int passthrough_handler(struct _EXCEPTION_RECORD * e, void * f, struct _CONTEXT * c, void * d)
 {
@@ -2653,7 +2686,9 @@ DECLSPEC_NOINLINE
 int call_test(int (* func)(void))
 {
 	static int ret;
+#if defined(__GNUC__) && defined(__i386__)
 	static struct volatile_context before, after;
+#endif
 	static LPTOP_LEVEL_EXCEPTION_FILTER prev_unhandled_exception;
 #if defined(_X86_) && !defined(_PSEH3_H_) && !defined(_MSC_VER)
 	static _SEH2Registration_t * prev_frame;
@@ -2974,6 +3009,151 @@ void Test_collided_unwind(void)
 #endif
 }
 
+void Test_except_inside_finally(void)
+{
+    volatile int Flags = 0;
+    volatile int Count = 0;
+
+    _SEH2_TRY
+    {
+        _SEH2_TRY
+        {
+            Flags |= 1;
+            RaiseException(0xE00DEAD1, 0, 0, NULL);
+        }
+        _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+        {
+            ok(Count == 0, "Count = %d\n", Count);
+            Flags |= 2;
+        }
+        _SEH2_END;
+
+        ok(Count == 0, "Count = %d\n", Count);
+        Flags |= 4;
+    }
+    _SEH2_FINALLY
+    {
+        Count++;
+        Flags |= 8;
+    }
+    _SEH2_END;
+
+    ok(Flags == (1 | 2 | 4 | 8), "Flags = %x\n", Flags);
+    ok(Count == 1, "Count = %d\n", Count);
+}
+
+void Test_exception_in_finally(void)
+{
+    volatile int Flags = 0;
+    volatile int Count = 0;
+
+    _SEH2_TRY
+    {
+        _SEH2_TRY
+        {
+            _SEH2_TRY
+            {
+                _SEH2_TRY
+                {
+                    Flags |= 1;
+                    RaiseException(0xE00DEAD1, 0, 0, NULL);
+                }
+                _SEH2_FINALLY
+                {
+                    Flags |= 2;
+                    RaiseException(0xE00DEAD2, 0, 0, NULL);
+                }
+                _SEH2_END;
+            }
+            _SEH2_EXCEPT(_SEH2_GetExceptionCode() == 0xE00DEAD1 ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+            {
+                Flags |= 4;
+            }
+            _SEH2_END;
+        }
+        _SEH2_FINALLY
+        {
+            Count++;
+            Flags |= 8;
+        }
+        _SEH2_END;
+    }
+    _SEH2_EXCEPT(_SEH2_GetExceptionCode() == 0xE00DEAD2 ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+    {
+        Flags |= 16;
+    }
+    _SEH2_END;
+
+    ok(Flags == (1 | 2 | 8 | 16), "Flags = %x\n", Flags);
+    ok(Count == 1, "Count = %d\n", Count);
+}
+
+static volatile int UnwoundFilterCalls;
+
+static int Unwound_frame_filter(unsigned int Code)
+{
+    if (Code == 0xE00DEAD2)
+        UnwoundFilterCalls++;
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+DECLSPEC_NOINLINE
+static void Do_raise_below_finally(void)
+{
+    _SEH2_TRY
+    {
+        RaiseException(0xE00DEAD1, 0, 0, NULL);
+    }
+    _SEH2_EXCEPT(Unwound_frame_filter(_SEH2_GetExceptionCode()))
+    {
+    }
+    _SEH2_END;
+}
+
+DECLSPEC_NOINLINE
+static void Do_raise_in_finally(volatile int *Flags)
+{
+    _SEH2_TRY
+    {
+        Do_raise_below_finally();
+    }
+    _SEH2_FINALLY
+    {
+        *Flags |= 2;
+        RaiseException(0xE00DEAD2, 0, 0, NULL);
+    }
+    _SEH2_END;
+}
+
+void Test_exception_in_finally_unwound_frame(void)
+{
+    volatile int Flags = 0;
+
+    UnwoundFilterCalls = 0;
+
+    _SEH2_TRY
+    {
+        _SEH2_TRY
+        {
+            Flags |= 1;
+            Do_raise_in_finally(&Flags);
+        }
+        _SEH2_EXCEPT(_SEH2_GetExceptionCode() == 0xE00DEAD1 ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+        {
+            Flags |= 4;
+        }
+        _SEH2_END;
+    }
+    _SEH2_EXCEPT(_SEH2_GetExceptionCode() == 0xE00DEAD2 ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH)
+    {
+        Flags |= 8;
+    }
+    _SEH2_END;
+
+    ok(Flags == (1 | 2 | 8), "Flags = %x\n", Flags);
+    ok(UnwoundFilterCalls == 0, "UnwoundFilterCalls = %d\n", UnwoundFilterCalls);
+}
+
 void Do_nested_from_except(void)
 {
     volatile unsigned int Flags = 0;
@@ -3032,7 +3212,15 @@ START_TEST(pseh)
     Test_structs_seh_finally();
     Test_structs_seh_nested();
 #endif
+    trace("Running Test_collided_unwind\n");
     Test_collided_unwind();
+    trace("Running Test_except_inside_finally\n");
+    Test_except_inside_finally();
+    trace("Running Test_exception_in_finally\n");
+    Test_exception_in_finally();
+    trace("Running Test_exception_in_finally_unwound_frame\n");
+    Test_exception_in_finally_unwound_frame();
+    trace("Running Test_nested_from_except\n");
     Test_nested_from_except();
 
 	const struct subtest testsuite[] =
@@ -3155,6 +3343,7 @@ START_TEST(pseh)
 #endif
 		USE_TEST(test_unvolatile_4),
 		USE_TEST(test_finally_goto),
+		USE_TEST(test_finally_status),
 		USE_TEST(test_nested_exception),
 		USE_TEST(test_PSEH3_bug),
 		USE_TEST(test_PSEH3_bug2),
@@ -3163,7 +3352,10 @@ START_TEST(pseh)
 	size_t i;
 
 	for(i = 0; i < sizeof(testsuite) / sizeof(testsuite[0]); ++ i)
+	{
+		subtest_(__FILE__, __LINE__)(testsuite[i].name);
 		ok(call_test(testsuite[i].func), "%s failed\n", testsuite[i].name);
+	}
 }
 
 /* EOF */

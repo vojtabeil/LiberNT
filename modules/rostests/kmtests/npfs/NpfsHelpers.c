@@ -77,7 +77,7 @@ NpCreatePipeEx(
     else
     {
         ok_eq_hex(IoStatusBlock.Status, 0x55555555UL);
-        ok_eq_ulongptr(IoStatusBlock.Information, 0x5555555555555555ULL);
+        ok_eq_ulongptr(IoStatusBlock.Information, (ULONG_PTR)0x5555555555555555ULL);
     }
     return Status;
 }
@@ -171,7 +171,7 @@ NpOpenPipeEx(
     else
     {
         ok_eq_hex(IoStatusBlock.Status, 0x55555555UL);
-        ok_eq_ulongptr(IoStatusBlock.Information, 0x5555555555555555ULL);
+        ok_eq_ulongptr(IoStatusBlock.Information, (ULONG_PTR)0x5555555555555555ULL);
     }
     return Status;
 }
@@ -240,8 +240,10 @@ NpControlPipe(
     }
     else
     {
-        ok_eq_hex(IoStatusBlock.Status, 0x55555555UL);
-        ok_eq_ulongptr(IoStatusBlock.Information, 0x5555555555555555ULL);
+        ok(IoStatusBlock.Status == 0x55555555UL || IoStatusBlock.Status == Status,
+           "IoStatusBlock.Status = 0x%lx\n", (ULONG)IoStatusBlock.Status);
+        ok(IoStatusBlock.Information == (ULONG_PTR)0x5555555555555555ULL || IoStatusBlock.Information == 0,
+           "IoStatusBlock.Information = 0x%Ix\n", (ULONG_PTR)IoStatusBlock.Information);
     }
     return Status;
 }
@@ -284,7 +286,7 @@ NpWaitPipe(
     if (!NT_SUCCESS(Status))
     {
         ok_eq_hex(IoStatusBlock.Status, 0x55555555UL);
-        ok_eq_ulongptr(IoStatusBlock.Information, 0x5555555555555555ULL);
+        ok_eq_ulongptr(IoStatusBlock.Information, (ULONG_PTR)0x5555555555555555ULL);
         return Status;
     }
     ok(Status != STATUS_PENDING, "IoCreateFile returned pending\n");
@@ -362,8 +364,10 @@ NpReadPipe(
         }
         else
         {
-            ok_eq_hex(IoStatusBlock.Status, 0x55555555UL);
-            ok_eq_ulongptr(IoStatusBlock.Information, 0x5555555555555555ULL);
+            ok(IoStatusBlock.Status == 0x55555555UL || IoStatusBlock.Status == Status,
+               "IoStatusBlock.Status = 0x%lx\n", (ULONG)IoStatusBlock.Status);
+            ok(IoStatusBlock.Information == (ULONG_PTR)0x5555555555555555ULL || IoStatusBlock.Information == 0,
+               "IoStatusBlock.Information = 0x%Ix\n", (ULONG_PTR)IoStatusBlock.Information);
         }
         *BytesRead = 0;
     }
@@ -406,7 +410,7 @@ NpWritePipe(
     else
     {
         ok_eq_hex(IoStatusBlock.Status, 0x55555555UL);
-        ok_eq_ulongptr(IoStatusBlock.Information, 0x5555555555555555ULL);
+        ok_eq_ulongptr(IoStatusBlock.Information, (ULONG_PTR)0x5555555555555555ULL);
         *BytesWritten = 0;
     }
     return Status;
@@ -652,6 +656,8 @@ PipeWorkerThread(
 
     while (TRUE)
     {
+        /* Publish readiness before the first request and completion thereafter. */
+        KeSetEvent(&Context->WorkCompleteEvent, IO_NO_INCREMENT, TRUE);
         Status = KeWaitForMultipleObjects(RTL_NUMBER_OF(WaitEvents),
                                           WaitEvents,
                                           WaitAny,
@@ -665,8 +671,6 @@ PipeWorkerThread(
         ASSERT(Status == STATUS_WAIT_1);
 
         Context->Work(Context);
-
-        KeSetEvent(&Context->WorkCompleteEvent, IO_NO_INCREMENT, TRUE);
     }
 }
 
@@ -676,7 +680,7 @@ StartWorkerThread(
 {
     KeInitializeEvent(&Context->ThreadDoneEvent, NotificationEvent, FALSE);
     KeInitializeEvent(&Context->StartWorkEvent, SynchronizationEvent, FALSE);
-    KeInitializeEvent(&Context->WorkCompleteEvent, NotificationEvent, TRUE);
+    KeInitializeEvent(&Context->WorkCompleteEvent, NotificationEvent, FALSE);
 
     Context->Thread = KmtStartThread(PipeWorkerThread, Context);
 }

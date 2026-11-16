@@ -16,10 +16,6 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#ifdef __REACTOS__
-#include <wine/config.h>
-#include <wine/port.h>
-#endif
 
 #include <math.h>
 #include <assert.h>
@@ -297,13 +293,8 @@ HRESULT variant_to_jsval(script_ctx_t *ctx, VARIANT *var, jsval_t *r)
                 hres = IWineJSDispatchHost_GetJSDispatch(disp_host, &jsdisp_iface);
                 IWineJSDispatchHost_Release(disp_host);
                 if(SUCCEEDED(hres)) {
-                    jsdisp_t *jsdisp = to_jsdisp((IDispatch *)jsdisp_iface);
-                    if(jsdisp->ctx == ctx) {
-                        *r = jsval_obj(jsdisp);
-                        return S_OK;
-                    }else {
-                        jsdisp_release(jsdisp);
-                    }
+                    *r = jsval_obj(as_jsdisp((IDispatch *)jsdisp_iface));
+                    return S_OK;
                 }
             }
         }
@@ -342,6 +333,10 @@ HRESULT variant_to_jsval(script_ctx_t *ctx, VARIANT *var, jsval_t *r)
         /* FIXME: Native converts VT_CY to a special kind number type, which is
          * never converted to VT_I4 when it's converted back to VARIANT. */
         *r = jsval_number((double)V_CY(var).int64 / 10000.0);
+#ifdef __REACTOS__
+        if(is_int32(get_number(*r)))
+            *r = jsval_currency(get_number(*r));
+#endif
         WARN("VT_CY: %lf\n", get_number(*r));
         return S_OK;
     case VT_UNKNOWN:
@@ -396,7 +391,11 @@ HRESULT jsval_to_variant(jsval_t val, VARIANT *retv)
     case JSV_NUMBER: {
         double n = get_number(val);
 
+#ifdef __REACTOS__
+        if(is_int32(n) && !is_currency(val)) {
+#else
         if(is_int32(n)) {
+#endif
             V_VT(retv) = VT_I4;
             V_I4(retv) = n;
         }else {
@@ -512,24 +511,6 @@ HRESULT to_boolean(jsval_t val, BOOL *ret)
 
     assert(0);
     return E_FAIL;
-}
-
-#if defined(__REACTOS__) && defined(__clang__)
-static inline __attribute__((always_inline)) int hex_to_int(WCHAR c)
-#else
-static int hex_to_int(WCHAR c)
-#endif
-{
-    if('0' <= c && c <= '9')
-        return c-'0';
-
-    if('a' <= c && c <= 'f')
-        return c-'a'+10;
-
-    if('A' <= c && c <= 'F')
-        return c-'A'+10;
-
-    return -1;
 }
 
 /* ECMA-262 3rd Edition    9.3.1 */
@@ -689,9 +670,14 @@ HRESULT to_integer(script_ctx_t *ctx, jsval_t v, double *ret)
     return S_OK;
 }
 
-static INT32 double_to_int32(double number)
+INT32 double_to_int32(double number)
 {
+#ifdef __REACTOS__
+    INT32 exp;
+    UINT32 result;
+#else
     INT32 exp, result;
+#endif
     union {
         double d;
         INT64 n;
@@ -714,21 +700,33 @@ static INT32 double_to_int32(double number)
      * to shift.  If the exponent is greater than 52 we need to shift the value
      * left by (exp - 52), if the value is less than 52 we need to shift right
      * accordingly. */
+#ifdef __REACTOS__
+    result = (exp > 52) ? (UINT64)bits.n << (exp - 52) : (UINT64)bits.n >> (52 - exp);
+#else
     result = (exp > 52) ? bits.n << (exp - 52) : bits.n >> (52 - exp);
+#endif
 
     /* IEEE-754 double precision values are stored omitting an implicit 1 before
      * the decimal point; we need to reinsert this now.  We may also the shifted
      * invalid bits into the result that are not a part of the mantissa (the sign
      * and exponent bits from the floatingpoint representation); mask these out. */
     if(exp < 32) {
+#ifdef __REACTOS__
+        UINT32 missing_one = 1U << exp;
+#else
         INT32 missing_one = 1 << exp;
+#endif
         result &= missing_one - 1;
         result += missing_one;
     }
 
     /* If the input value was negative (we could test either 'number' or 'bits',
      * but testing 'bits' is likely faster) invert the result appropriately. */
+#ifdef __REACTOS__
+    return bits.n < 0 ? (INT32)(0U - result) : (INT32)result;
+#else
     return bits.n < 0 ? -result : result;
+#endif
 }
 
 /* ECMA-262 3rd Edition    9.5 */
@@ -772,11 +770,7 @@ HRESULT double_to_string(double n, jsstr_t **str)
         *str = jsstr_alloc(n<0 ? L"-Infinity" : L"Infinity");
     }else if(is_int32(n)) {
         WCHAR buf[12];
-#ifdef __REACTOS__ /* FIXME: Inspect */
-        swprintf(buf, ARRAY_SIZE(buf), L"%d", (int)n);
-#else
         _ltow_s(n, buf, ARRAY_SIZE(buf), 10);
-#endif
         *str = jsstr_alloc(buf);
     }else {
         VARIANT strv, v;

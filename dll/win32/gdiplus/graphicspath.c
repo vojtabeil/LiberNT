@@ -202,6 +202,7 @@ static BOOL flatten_bezier(path_list_node_t *start, REAL x2, REAL y2, REAL x3, R
     struct list jobs;
     struct flatten_bezier_job *current, *next;
 
+    flatness = 0.62f * flatness;
     list_init( &jobs );
     flatten_bezier_add(&jobs, start, x2, y2, x3, y3, end);
     LIST_FOR_EACH_ENTRY( current, &jobs, struct flatten_bezier_job, entry )
@@ -238,7 +239,7 @@ static BOOL flatten_bezier(path_list_node_t *start, REAL x2, REAL y2, REAL x3, R
          * Also avoids limited-precision errors in flatness check
          */
         if((fabs(pt.X - mp[2].X) + fabs(pt.Y - mp[2].Y) +
-            fabs(pt_st.X - mp[2].X) + fabs(pt_st.Y - mp[2].Y) ) <= flatness * 0.5)
+            fabs(pt_st.X - mp[2].X) + fabs(pt_st.Y - mp[2].Y) ) <= flatness)
             continue;
 
         /* check flatness as a half of distance between middle point and a linearized path
@@ -250,7 +251,7 @@ static BOOL flatten_bezier(path_list_node_t *start, REAL x2, REAL y2, REAL x3, R
          */
         area_triangle = (pt.Y - pt_st.Y)*mp[2].X + (pt_st.X - pt.X)*mp[2].Y + (pt_st.Y*pt.X - pt_st.X*pt.Y);
         distance_start_end = hypotf(pt.Y - pt_st.Y, pt_st.X - pt.X);
-        if(fabs(area_triangle) <= (0.5 * flatness * distance_start_end)){
+        if(fabs(area_triangle) <= flatness * distance_start_end){
             continue;
         }
         else
@@ -323,6 +324,28 @@ static GpStatus extend_current_figure(GpPath *path, GDIPCONST PointF *points, IN
 
     return Ok;
 }
+
+static GpStatus add_closed_figure(GpPath *path, GDIPCONST PointF *points, INT count, BYTE type)
+{
+    INT insert_index = path->pathdata.Count;
+
+    if(!count)
+        return Ok;
+
+    if(!lengthen_path(path, count))
+        return OutOfMemory;
+
+    memcpy(path->pathdata.Points + insert_index, points, sizeof(GpPointF)*count);
+    path->pathdata.Types[insert_index] = PathPointTypeStart;
+    memset(path->pathdata.Types + insert_index + 1, type, count - 1);
+
+    path->newfigure = TRUE;
+    path->pathdata.Count += count;
+    path->pathdata.Types[path->pathdata.Count - 1] |= PathPointTypeCloseSubpath;
+
+    return Ok;
+}
+
 
 /*******************************************************************************
  * GdipAddPathArc   [GDIPLUS.1]
@@ -536,13 +559,7 @@ GpStatus WINGDIPAPI GdipAddPathClosedCurve2(GpPath *path, GDIPCONST GpPointF *po
     pt[len_pt-1].X = pt[0].X;
     pt[len_pt-1].Y = pt[0].Y;
 
-    stat = extend_current_figure(path, pt, len_pt, PathPointTypeBezier);
-
-    /* close figure */
-    if(stat == Ok){
-        path->pathdata.Types[path->pathdata.Count - 1] |= PathPointTypeCloseSubpath;
-        path->newfigure = TRUE;
-    }
+    stat = add_closed_figure(path, pt, len_pt, PathPointTypeBezier);
 
     free(pts);
     free(pt);
@@ -865,7 +882,6 @@ GpStatus WINGDIPAPI GdipAddPathPie(GpPath *path, REAL x, REAL y, REAL width, REA
     REAL startAngle, REAL sweepAngle)
 {
     GpPointF *ptf;
-    GpStatus status;
     INT i, count;
 
     TRACE("(%p, %.2f, %.2f, %.2f, %.2f, %.2f, %.2f)\n",
@@ -896,28 +912,29 @@ GpStatus WINGDIPAPI GdipAddPathPie(GpPath *path, REAL x, REAL y, REAL width, REA
 
     arc2polybezier(ptf, x, y, width, height, startAngle, sweepAngle);
 
-    status = GdipAddPathLine(path, x + width/2, y + height/2, ptf[0].X, ptf[0].Y);
-    if(status != Ok){
-        free(ptf);
-        return status;
-    }
-    /* one spline is already added as a line endpoint */
-    if(!lengthen_path(path, count - 1)){
+    if (!lengthen_path(path, count + 1))
+    {
         free(ptf);
         return OutOfMemory;
     }
 
-    memcpy(&(path->pathdata.Points[path->pathdata.Count]), &(ptf[1]),sizeof(GpPointF)*(count-1));
-    for(i = 0; i < count-1; i++)
-        path->pathdata.Types[path->pathdata.Count+i] = PathPointTypeBezier;
+    path->pathdata.Points[path->pathdata.Count].X = x + width/2;
+    path->pathdata.Points[path->pathdata.Count].Y = y + height/2;
+    path->pathdata.Types[path->pathdata.Count] = PathPointTypeStart;
 
-    path->pathdata.Count += count-1;
+    memcpy(&(path->pathdata.Points[path->pathdata.Count + 1]), ptf, sizeof(GpPointF)*(count));
+
+    path->pathdata.Types[path->pathdata.Count + 1] = PathPointTypeLine;
+    for(i = 0; i < count-1; i++)
+        path->pathdata.Types[path->pathdata.Count + 2 + i] = PathPointTypeBezier;
+
+    path->pathdata.Count += count + 1;
 
     GdipClosePathFigure(path);
 
     free(ptf);
 
-    return status;
+    return Ok;
 }
 
 GpStatus WINGDIPAPI GdipAddPathPieI(GpPath *path, INT x, INT y, INT width, INT height,
@@ -1378,6 +1395,10 @@ GpStatus WINGDIPAPI GdipCreatePath2I(GDIPCONST GpPoint* points,
     TRACE("(%p, %p, %d, %d, %p)\n", points, types, count, fill, path);
 
     ptF = malloc(sizeof(GpPointF) * count);
+#ifdef __REACTOS__
+    if (!ptF)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     for(i = 0;i < count; i++){
         ptF[i].X = (REAL)points[i].X;
@@ -1607,7 +1628,7 @@ GpStatus WINGDIPAPI GdipGetPathWorldBounds(GpPath* path, GpRectF* bounds,
 
     /* If path is empty just return. */
     count = path->pathdata.Count;
-    if(count == 0){
+    if(count < 2){
         bounds->X = bounds->Y = bounds->Width = bounds->Height = 0.0;
         return Ok;
     }
@@ -1653,13 +1674,35 @@ GpStatus WINGDIPAPI GdipGetPathWorldBounds(GpPath* path, GpRectF* bounds,
     }
 
     if(pen){
+#ifdef __REACTOS__
+        REAL scale = 1.0;
+
+#endif
         path_width = pen->width / 2.0;
+#ifdef __REACTOS__
+        if (matrix)
+        {
+            scale = (hypotf(matrix->matrix[0] + matrix->matrix[3],
+                            matrix->matrix[1] - matrix->matrix[2]) +
+                     hypotf(matrix->matrix[0] - matrix->matrix[3],
+                            matrix->matrix[1] + matrix->matrix[2])) / 2.0;
+            path_width = pen->width * scale;
+        }
+#endif
 
         if(count > 2)
+#ifdef __REACTOS__
+            path_width = max(path_width, pen->width * pen->miterlimit * scale / 2.0);
+#else
             path_width = max(path_width,  pen->width * pen->miterlimit / 2.0);
+#endif
         /* FIXME: this should probably also check for the startcap */
         if(pen->endcap & LineCapNoAnchor)
+#ifdef __REACTOS__
+            path_width = max(path_width, pen->width * (2.0 * scale + 0.2));
+#else
             path_width = max(path_width,  pen->width * 2.2);
+#endif
 
         low_x -= path_width;
         low_y -= path_width;
@@ -1732,20 +1775,24 @@ GpStatus WINGDIPAPI GdipReversePath(GpPath* path)
     }
 
     for(i = 0; i < count; i++){
-
         /* find next start point */
         if(path->pathdata.Types[count-i-1] == PathPointTypeStart){
             INT j;
             for(j = start; j <= i; j++){
+                /* copy points coordinate of subpath in reverse order */
                 revpath.Points[j] = path->pathdata.Points[count-j-1];
-                revpath.Types[j] = path->pathdata.Types[count-j-1];
+                /* copy points type shifted by one (j + 1), as the first point type is always PathPointTypeStart */
+                if (j < i)
+                    revpath.Types[j + 1] = path->pathdata.Types[count - j - 1];
             }
-            /* mark start point */
+            /* first point of subpath is always Start point */
             revpath.Types[start] = PathPointTypeStart;
-            /* set 'figure' endpoint type */
+            /* check if subpath contains more than 1 point */
             if(i-start > 1){
-                revpath.Types[i] = path->pathdata.Types[count-start-1] & ~PathPointTypePathTypeMask;
-                revpath.Types[i] |= revpath.Types[i-1];
+                /* add e.g. PathPointTypeCloseSubpath type to endpoint, if existing in original subpath */
+                revpath.Types[i] |= path->pathdata.Types[count - start - 1] & ~PathPointTypePathTypeMask;
+                /* remove e.g. PathPointTypeCloseSubpath type from second point */
+                revpath.Types[start + 1] &= PathPointTypePathTypeMask;
             }
             else
                 revpath.Types[i] = path->pathdata.Types[start];
@@ -1905,10 +1952,77 @@ GpStatus WINGDIPAPI GdipWarpPath(GpPath *path, GpMatrix* matrix,
     GDIPCONST GpPointF *points, INT count, REAL x, REAL y, REAL width,
     REAL height, WarpMode warpmode, REAL flatness)
 {
-    FIXME("(%p,%s,%p,%i,%0.2f,%0.2f,%0.2f,%0.2f,%i,%0.2f)\n", path, debugstr_matrix(matrix),
+    GpPointF quad[4];
+    REAL a, b, c, d, e, f, g = 0.0f, h = 0.0f, sx, sy, det, u, v, w;
+    GpStatus stat;
+    INT i;
+
+    TRACE("(%p,%s,%p,%i,%0.2f,%0.2f,%0.2f,%0.2f,%i,%0.2f)\n", path, debugstr_matrix(matrix),
         points, count, x, y, width, height, warpmode, flatness);
 
-    return NotImplemented;
+    if (!path || !points || count < 1) {
+        return InvalidParameter;
+    }
+
+    if (path->pathdata.Count == 0 || width == 0.0f || height == 0.0f)
+        return Ok;
+
+    stat = GdipFlattenPath(path, NULL, flatness);
+    if (stat != Ok)
+        return stat;
+
+    quad[0] = points[0];
+    quad[1] = points[1];
+    quad[2] = points[2];
+    if (count >= 4)
+        quad[3] = points[3];
+    else
+    {
+        quad[3].X = points[1].X + points[2].X - points[0].X;
+        quad[3].Y = points[1].Y + points[2].Y - points[0].Y;
+    }
+
+    sx = quad[0].X - quad[1].X + quad[3].X - quad[2].X;
+    sy = quad[0].Y - quad[1].Y + quad[3].Y - quad[2].Y;
+    det = (quad[1].X - quad[3].X) * (quad[2].Y - quad[3].Y) - (quad[2].X - quad[3].X) * (quad[1].Y - quad[3].Y);
+    if (warpmode == WarpModePerspective && det != 0.0f)
+    {
+        g = (sx * (quad[2].Y - quad[3].Y) - (quad[2].X - quad[3].X) * sy) / det;
+        h = ((quad[1].X - quad[3].X) * sy - sx * (quad[1].Y - quad[3].Y)) / det;
+    }
+    a = quad[1].X - quad[0].X + g * quad[1].X;
+    b = quad[2].X - quad[0].X + h * quad[2].X;
+    c = quad[0].X;
+    d = quad[1].Y - quad[0].Y + g * quad[1].Y;
+    e = quad[2].Y - quad[0].Y + h * quad[2].Y;
+    f = quad[0].Y;
+
+    for (i = 0; i < path->pathdata.Count; i++)
+    {
+        u = (path->pathdata.Points[i].X - x) / width;
+        v = (path->pathdata.Points[i].Y - y) / height;
+
+        if (warpmode == WarpModePerspective)
+        {
+            w = g * u + h * v + 1.0f;
+            if (w == 0.0f)
+                w = 1.0f;
+            path->pathdata.Points[i].X = (a * u + b * v + c) / w;
+            path->pathdata.Points[i].Y = (d * u + e * v + f) / w;
+        }
+        else
+        {
+            path->pathdata.Points[i].X = (1.0f - u) * (1.0f - v) * quad[0].X + u * (1.0f - v) * quad[1].X +
+                                         (1.0f - u) * v * quad[2].X + u * v * quad[3].X;
+            path->pathdata.Points[i].Y = (1.0f - u) * (1.0f - v) * quad[0].Y + u * (1.0f - v) * quad[1].Y +
+                                         (1.0f - u) * v * quad[2].Y + u * v * quad[3].Y;
+        }
+    }
+
+    if (matrix)
+        return GdipTransformMatrixPoints(matrix, path->pathdata.Points, path->pathdata.Count);
+
+    return Ok;
 }
 
 static void add_bevel_point(const GpPointF *endpoint, const GpPointF *nextpoint,
@@ -1942,11 +2056,85 @@ static void add_bevel_point(const GpPointF *endpoint, const GpPointF *nextpoint,
         endpoint->Y + bevel_dy, PathPointTypeLine);
 }
 
+#ifdef __REACTOS__
+static BOOL add_round_joint(const GpPointF *p1, const GpPointF *p2, const GpPointF *p3,
+    REAL pen_width, path_list_node_t **last_point)
+{
+    REAL dx1 = p1->X - p2->X, dy1 = p1->Y - p2->Y;
+    REAL dx2 = p3->X - p2->X, dy2 = p3->Y - p2->Y;
+    REAL length1 = hypotf(dx1, dy1), length2 = hypotf(dx2, dy2);
+    REAL distance = pen_width / 2.0;
+    REAL start_x, start_y, end_x, end_y;
+    REAL angle, step, sine, cosine, control;
+    int i, count;
+
+    if (length1 == 0.0 || length2 == 0.0)
+        return FALSE;
+
+    start_x = -dy1 / length1;
+    start_y = dx1 / length1;
+    end_x = dy2 / length2;
+    end_y = -dx2 / length2;
+    angle = atan2f(start_x * end_y - start_y * end_x,
+        start_x * end_x + start_y * end_y);
+    if (angle <= 0.0)
+        return FALSE;
+
+    count = angle > M_PI_2 ? 2 : 1;
+    step = angle / count;
+    sine = sinf(step);
+    cosine = cosf(step);
+    control = 4.0 / 3.0 * tanf(step / 4.0);
+
+    *last_point = add_path_list_node(*last_point, p2->X + distance * start_x,
+        p2->Y + distance * start_y, PathPointTypeLine);
+
+    for (i = 0; i < count; i++)
+    {
+        REAL next_x, next_y;
+
+        if (i == count - 1)
+        {
+            next_x = end_x;
+            next_y = end_y;
+        }
+        else
+        {
+            next_x = start_x * cosine - start_y * sine;
+            next_y = start_x * sine + start_y * cosine;
+        }
+
+        *last_point = add_path_list_node(*last_point,
+            p2->X + distance * (start_x - control * start_y),
+            p2->Y + distance * (start_y + control * start_x), PathPointTypeBezier);
+        *last_point = add_path_list_node(*last_point,
+            p2->X + distance * (next_x + control * next_y),
+            p2->Y + distance * (next_y - control * next_x), PathPointTypeBezier);
+        *last_point = add_path_list_node(*last_point, p2->X + distance * next_x,
+            p2->Y + distance * next_y, PathPointTypeBezier);
+
+        start_x = next_x;
+        start_y = next_y;
+    }
+
+    return TRUE;
+}
+#endif
+
 static void widen_joint(const GpPointF *p1, const GpPointF *p2, const GpPointF *p3,
     GpPen* pen, REAL pen_width, path_list_node_t **last_point)
 {
     switch (pen->join)
     {
+#ifdef __REACTOS__
+    case LineJoinRound:
+        if ((p2->X - p1->X) * (p3->Y - p1->Y) > (p2->Y - p1->Y) * (p3->X - p1->X) &&
+            add_round_joint(p1, p2, p3, pen_width, last_point))
+            break;
+        add_bevel_point(p2, p1, pen_width, 1, last_point);
+        add_bevel_point(p2, p3, pen_width, 0, last_point);
+        break;
+#endif
     case LineJoinMiter:
     case LineJoinMiterClipped:
         if ((p2->X - p1->X) * (p3->Y - p1->Y) > (p2->Y - p1->Y) * (p3->X - p1->X))
@@ -2021,8 +2209,8 @@ static void widen_cap(const GpPointF *endpoint, const GpPointF *nextpoint,
         }
         else if (cap == LineCapArrowAnchor)
         {
-            extend_dx = -3.0 * extend_dx;
-            extend_dy = -3.0 * extend_dy;
+            extend_dx = -2.0 * extend_dx;
+            extend_dy = -2.0 * extend_dy;
         }
 
         if (add_first_points)
@@ -2584,6 +2772,60 @@ GpStatus widen_flat_path_anchors(GpPath *flat_path, GpPen *pen, REAL pen_width, 
     return stat;
 }
 
+static BOOL points_equal(const PointF* points, int index1, int index2)
+{
+    return !memcmp(&points[index1], &points[index2], sizeof(*points));
+}
+
+static void remove_repeated_points(GpPath *path)
+{
+    int i, j=0, subpath_start=0, subpath_end=0, path_size = 0;
+
+    for (i = 0; i < path->pathdata.Count; i++)
+    {
+        BYTE t = path->pathdata.Types[i];
+
+        path->pathdata.Types[j] = path->pathdata.Types[i];
+        path->pathdata.Points[j] = path->pathdata.Points[i];
+
+        if ((t & PathPointTypePathTypeMask) == PathPointTypeStart)
+        {
+            subpath_start = j;
+            subpath_end = j;
+        }
+        else if ((t & PathPointTypeCloseSubpath) == PathPointTypeCloseSubpath)
+        {
+            if (i > 0 && !points_equal(path->pathdata.Points, i - 1, i) &&
+                !points_equal(path->pathdata.Points, subpath_start, i))
+                subpath_end = j;
+
+            if (subpath_end == subpath_start)
+            {
+                j = subpath_start;
+                continue;
+            }
+
+            path->pathdata.Types[subpath_end] |= PathPointTypeCloseSubpath;
+            j = path_size = subpath_end + 1;
+            continue;
+        }
+        else
+        {
+            if (i > 0 && points_equal(path->pathdata.Points, i - 1, i))
+                continue;
+
+            if (!points_equal(path->pathdata.Points, subpath_start, j))
+                subpath_end = j;
+
+            path_size = j + 1;
+        }
+
+        j++;
+    }
+
+    path->pathdata.Count = path_size;
+}
+
 GpStatus WINGDIPAPI GdipWidenPath(GpPath *path, GpPen *pen, GpMatrix *matrix,
     REAL flatness)
 {
@@ -2613,13 +2855,17 @@ GpStatus WINGDIPAPI GdipWidenPath(GpPath *path, GpPen *pen, GpMatrix *matrix,
         REAL pen_width = (pen->unit == UnitWorld) ? max(pen->width, 1.0) : pen->width;
         BYTE *types = flat_path->pathdata.Types;
 
+        remove_repeated_points(flat_path);
+
         last_point = points;
 
         if (pen->dashcap != DashCapFlat)
             FIXME("unimplemented dash cap %d\n", pen->dashcap);
 
+#ifndef __REACTOS__
         if (pen->join == LineJoinRound)
             FIXME("unimplemented line join %d\n", pen->join);
+#endif
 
         if (pen->align != PenAlignmentCenter)
             FIXME("unimplemented pen alignment %d\n", pen->align);

@@ -51,12 +51,6 @@ extern "C" {
 
 #include "regfuncs.h"
 
-#ifdef __REACTOS__
-#define MAXUINT64 ((UINT64)UINT64_MAX)
-#define MAXULONG64 ((ULONG64)ULONG64_MAX)
-#define MAXULONG32 ((ULONG32)ULONG_MAX)
-#endif
-
 NTSTATUS HDA_WaitForTransfer(
 	PFDO_CONTEXT fdoCtx,
 	UINT16 codecAddr,
@@ -77,11 +71,17 @@ static inline void mdelay(LONG msec) {
 	KeDelayExecutionThread(KernelMode, FALSE, &Interval);
 }
 
+#ifdef __REACTOS__
+static inline void udelay(LONG usec) {
+	KeStallExecutionProcessor((ULONG)usec);
+}
+#else
 static inline void udelay(LONG usec) {
 	LARGE_INTEGER Interval;
 	Interval.QuadPart = -10 * (LONGLONG)usec;
 	KeDelayExecutionThread(KernelMode, FALSE, &Interval);
 }
+#endif
 
 //
 // Helper macros
@@ -96,7 +96,7 @@ static inline void udelay(LONG usec) {
 #define DBG_PNP   2
 #define DBG_IOCTL 4
 
-#define SklHdAudBusDebugLevel 100
+#define SklHdAudBusDebugLevel DEBUG_LEVEL_ERROR
 #define SklHdAudBusDebugCategories (DBG_INIT | DBG_PNP | DBG_IOCTL)
 
 #define SklHdAudBusPrint(dbglevel, dbgcategory, fmt, ...) {          \

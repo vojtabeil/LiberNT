@@ -1285,7 +1285,7 @@ LsarLookupSids(
                             MappedCount,
                             0,
                             0);
-    if (!NT_SUCCESS(Status))
+    if (!NT_SUCCESS(Status) && Status != STATUS_NONE_MAPPED)
         return Status;
 
     TranslatedNames->Entries = SidEnumBuffer->Entries;
@@ -1447,7 +1447,7 @@ LsarpOpenAccount(
                               DesiredAccess,
                               PolicyObject->Trusted,
                               AccountObject);
-    if (!NT_SUCCESS(Status))
+    if (!NT_SUCCESS(Status) && Status != STATUS_OBJECT_NAME_NOT_FOUND)
     {
         ERR("LsapOpenDbObject(Accounts/%S) failed (Status 0x%08lx)\n", SidString, Status);
     }
@@ -2588,7 +2588,7 @@ LsarEnumerateAccountsWithUserRight(
     PPRIVILEGE_SET PrivilegeSet;
     PLSAPR_ACCOUNT_INFORMATION EnumBuffer = NULL, ReturnBuffer;
     ULONG SubKeyCount = 0;
-    ULONG EnumIndex, EnumCount;
+    ULONG EnumIndex, EnumCount = 0;
     ULONG Size, i;
     BOOL Found;
     NTSTATUS Status;
@@ -2897,12 +2897,12 @@ LsarEnumerateAccountRights(
         goto done;
     }
 
-    RightsCount = PrivilegeSet->PrivilegeCount;
+    RightsCount = PrivilegeSet ? PrivilegeSet->PrivilegeCount : 0;
 
     /* Count account rights */
     for (i = 0; i < sizeof(ACCESS_MASK) * 8; i++)
     {
-        if (SystemAccess & (1 << i))
+        if (SystemAccess & (1U << i))
             RightsCount++;
     }
 
@@ -2951,9 +2951,9 @@ LsarEnumerateAccountRights(
     /* Copy account rights into the buffer */
     for (i = 0; i < sizeof(ACCESS_MASK) * 8; i++)
     {
-        if (SystemAccess & (1 << i))
+        if (SystemAccess & (1U << i))
         {
-            Status = LsapLookupAccountRightName(1 << i,
+            Status = LsapLookupAccountRightName(1U << i,
                                                 &PrivilegeString);
             if (!NT_SUCCESS(Status))
             {
@@ -3651,6 +3651,11 @@ LsarRetrievePrivateData(
                               0,
                               PolicyObject->Trusted,
                               &SecretObject);
+    if (Status == STATUS_OBJECT_NAME_NOT_FOUND)
+    {
+        TRACE("No private data stored for %wZ\n", KeyName);
+        goto done;
+    }
     if (!NT_SUCCESS(Status))
     {
         ERR("LsapOpenDbObject failed (Status 0x%08lx)\n", Status);
@@ -3735,6 +3740,36 @@ LsarOpenPolicy2(
 }
 
 
+static
+NTSTATUS
+LsapDuplicateRpcString(
+    PRPC_UNICODE_STRING Source,
+    PRPC_UNICODE_STRING *Destination)
+{
+    PRPC_UNICODE_STRING String;
+
+    String = MIDL_user_allocate(sizeof(RPC_UNICODE_STRING));
+    if (String == NULL)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    String->Buffer = MIDL_user_allocate(Source->Length + sizeof(WCHAR));
+    if (String->Buffer == NULL)
+    {
+        MIDL_user_free(String);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    if (Source->Length != 0)
+        RtlCopyMemory(String->Buffer, Source->Buffer, Source->Length);
+    String->Buffer[Source->Length / sizeof(WCHAR)] = UNICODE_NULL;
+    String->Length = Source->Length;
+    String->MaximumLength = Source->Length + sizeof(WCHAR);
+
+    *Destination = String;
+    return STATUS_SUCCESS;
+}
+
+
 /* Function 45 */
 NTSTATUS
 WINAPI
@@ -3743,8 +3778,113 @@ LsarGetUserName(
     PRPC_UNICODE_STRING *UserName,
     PRPC_UNICODE_STRING *DomainName)
 {
-    UNIMPLEMENTED;
-    return STATUS_NOT_IMPLEMENTED;
+    LSAPR_SID_ENUM_BUFFER SidEnumBuffer;
+    LSAPR_SID_INFORMATION SidInfo;
+    LSAPR_TRANSLATED_NAMES_EX TranslatedNames = {0, NULL};
+    PLSAPR_REFERENCED_DOMAIN_LIST ReferencedDomains = NULL;
+    RPC_UNICODE_STRING EmptyString = {0, 0, NULL};
+    PTOKEN_USER TokenUserInfo = NULL;
+    HANDLE TokenHandle = NULL;
+    ULONG Length = 0;
+    ULONG MappedCount = 0;
+    LONG DomainIndex;
+    ULONG i;
+    NTSTATUS Status;
+
+    TRACE("LsarGetUserName(%S %p %p)\n", SystemName, UserName, DomainName);
+
+    Status = I_RpcMapWin32Status(RpcImpersonateClient(NULL));
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtOpenThreadToken(NtCurrentThread(),
+                               TOKEN_QUERY,
+                               TRUE,
+                               &TokenHandle);
+    RpcRevertToSelf();
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = NtQueryInformationToken(TokenHandle, TokenUser, NULL, 0, &Length);
+    if (Status != STATUS_BUFFER_TOO_SMALL)
+        goto done;
+
+    TokenUserInfo = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+    if (TokenUserInfo == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto done;
+    }
+
+    Status = NtQueryInformationToken(TokenHandle, TokenUser, TokenUserInfo, Length, &Length);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    SidInfo.Sid = (PRPC_SID)TokenUserInfo->User.Sid;
+    SidEnumBuffer.Entries = 1;
+    SidEnumBuffer.SidInfo = &SidInfo;
+
+    Status = LsapLookupSids(&SidEnumBuffer,
+                            &ReferencedDomains,
+                            &TranslatedNames,
+                            LsapLookupWksta,
+                            &MappedCount,
+                            0,
+                            0);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    Status = LsapDuplicateRpcString(&TranslatedNames.Names[0].Name, UserName);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    if (DomainName != NULL)
+    {
+        DomainIndex = TranslatedNames.Names[0].DomainIndex;
+        if (DomainIndex >= 0 && (ULONG)DomainIndex < ReferencedDomains->Entries)
+            Status = LsapDuplicateRpcString(&ReferencedDomains->Domains[DomainIndex].Name, DomainName);
+        else
+            Status = LsapDuplicateRpcString(&EmptyString, DomainName);
+
+        if (!NT_SUCCESS(Status))
+        {
+            MIDL_user_free((*UserName)->Buffer);
+            MIDL_user_free(*UserName);
+            *UserName = NULL;
+        }
+    }
+
+done:
+    if (TranslatedNames.Names != NULL)
+    {
+        for (i = 0; i < TranslatedNames.Entries; i++)
+        {
+            if (TranslatedNames.Names[i].Name.Buffer != NULL)
+                MIDL_user_free(TranslatedNames.Names[i].Name.Buffer);
+        }
+        MIDL_user_free(TranslatedNames.Names);
+    }
+
+    if (ReferencedDomains != NULL)
+    {
+        for (i = 0; i < ReferencedDomains->Entries; i++)
+        {
+            if (ReferencedDomains->Domains[i].Name.Buffer != NULL)
+                MIDL_user_free(ReferencedDomains->Domains[i].Name.Buffer);
+            if (ReferencedDomains->Domains[i].Sid != NULL)
+                MIDL_user_free(ReferencedDomains->Domains[i].Sid);
+        }
+        if (ReferencedDomains->Domains != NULL)
+            MIDL_user_free(ReferencedDomains->Domains);
+        MIDL_user_free(ReferencedDomains);
+    }
+
+    if (TokenUserInfo != NULL)
+        RtlFreeHeap(RtlGetProcessHeap(), 0, TokenUserInfo);
+
+    NtClose(TokenHandle);
+
+    return Status;
 }
 
 
@@ -3782,7 +3922,7 @@ WINAPI
 LsarQueryTrustedDomainInfoByName(
     LSAPR_HANDLE PolicyHandle,
     PRPC_UNICODE_STRING TrustedDomainName,
-    POLICY_INFORMATION_CLASS InformationClass,
+    TRUSTED_INFORMATION_CLASS InformationClass,
     PLSAPR_TRUSTED_DOMAIN_INFO *PolicyInformation)
 {
     /* Fail, if we are not a domain controller */
@@ -3800,7 +3940,7 @@ WINAPI
 LsarSetTrustedDomainInfoByName(
     LSAPR_HANDLE PolicyHandle,
     PRPC_UNICODE_STRING TrustedDomainName,
-    POLICY_INFORMATION_CLASS InformationClass,
+    TRUSTED_INFORMATION_CLASS InformationClass,
     PLSAPR_TRUSTED_DOMAIN_INFO PolicyInformation)
 {
     /* Fail, if we are not a domain controller */
@@ -3867,7 +4007,7 @@ NTSTATUS
 WINAPI
 LsarQueryDomainInformationPolicy(
     LSAPR_HANDLE PolicyHandle,
-    POLICY_INFORMATION_CLASS InformationClass,
+    POLICY_DOMAIN_INFORMATION_CLASS InformationClass,
     PLSAPR_POLICY_DOMAIN_INFORMATION *PolicyInformation)
 {
     UNIMPLEMENTED;
@@ -3880,7 +4020,7 @@ NTSTATUS
 WINAPI
 LsarSetDomainInformationPolicy(
     LSAPR_HANDLE PolicyHandle,
-    POLICY_INFORMATION_CLASS InformationClass,
+    POLICY_DOMAIN_INFORMATION_CLASS InformationClass,
     PLSAPR_POLICY_DOMAIN_INFORMATION PolicyInformation)
 {
     UNIMPLEMENTED;

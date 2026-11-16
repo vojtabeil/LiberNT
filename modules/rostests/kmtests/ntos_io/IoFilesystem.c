@@ -14,7 +14,34 @@ typedef enum
     Unknown
 } FSType;
 
-static FSType g_Filesystem;
+static FSType g_Filesystem = Unknown;
+
+static
+BOOLEAN
+IsWinPE(VOID)
+{
+    NTSTATUS Status;
+    UNICODE_STRING KeyNameString;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE KeyHandle;
+
+    RtlInitUnicodeString(&KeyNameString,
+                         L"\\REGISTRY\\MACHINE\\SYSTEM\\CurrentControlSet\\Control\\MiniNT");
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &KeyNameString,
+                               OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+                               NULL,
+                               NULL);
+
+    Status = ZwOpenKey(&KeyHandle, KEY_READ, &ObjectAttributes);
+    if (NT_SUCCESS(Status))
+    {
+        ObCloseHandle(KeyHandle, KernelMode);
+        return TRUE;
+    }
+
+    return FALSE;
+}
 
 static
 NTSTATUS
@@ -111,9 +138,9 @@ TestAllInformation(VOID)
         ok_eq_hex(Status, STATUS_SUCCESS);
         Status = IoStatus.Status;
     }
-    ok_eq_hex(Status, STATUS_SUCCESS);
     if (skip(NT_SUCCESS(Status), "No file handle, %lx\n", Status))
         return;
+    ok_eq_hex(Status, STATUS_SUCCESS);
 
     /* Find filesystem for the system */
     FsAttributeInfo = ExAllocatePoolWithTag(PagedPool, FSAttributeBufferSize, 'sySF');
@@ -370,6 +397,7 @@ TestRelativeNames(VOID)
         BOOLEAN IsDirectory_NTFS;
         NTSTATUS Status_NTFS;
         BOOLEAN IsDrive;
+        BOOLEAN Win10NotDirectory;
     } RelativeNameTest;
 
     RelativeNameTest Tests[] =
@@ -385,7 +413,7 @@ TestRelativeNames(VOID)
         { NULL,                         L"C:\\\\ReactOS\\",                 TRUE,   STATUS_SUCCESS,                 TRUE,   STATUS_SUCCESS },
         { NULL,                         L"C:\\ReactOS\\explorer.exe",       FALSE,  STATUS_SUCCESS,                 FALSE,  STATUS_SUCCESS},
         { NULL,                         L"C:\\ReactOS\\\\explorer.exe",     FALSE,  STATUS_OBJECT_NAME_INVALID,     FALSE,  STATUS_OBJECT_NAME_INVALID },
-        { NULL,                         L"C:\\ReactOS\\explorer.exe\\",     FALSE,  STATUS_OBJECT_NAME_INVALID,     FALSE,  STATUS_OBJECT_NAME_INVALID },
+        { NULL,                         L"C:\\ReactOS\\explorer.exe\\",     FALSE,  STATUS_OBJECT_NAME_INVALID,     FALSE,  STATUS_OBJECT_NAME_INVALID, FALSE, TRUE },
         { NULL,                         L"C:\\ReactOS\\explorer.exe\\file", FALSE,  STATUS_OBJECT_PATH_NOT_FOUND,   FALSE,  STATUS_OBJECT_PATH_NOT_FOUND },
         { NULL,                         L"C:\\ReactOS\\explorer.exe\\\\",   FALSE,  STATUS_OBJECT_NAME_INVALID,     TRUE,  STATUS_OBJECT_NAME_INVALID },
         /* This will never return STATUS_NOT_A_DIRECTORY. IsDirectory=TRUE is a little hacky but achieves that without special handling */
@@ -507,6 +535,8 @@ TestRelativeNames(VOID)
         {
             isDirectory = Tests[i].IsDirectory_NTFS;
             expectedStatus = Tests[i].Status_NTFS;
+            if (Tests[i].Win10NotDirectory && (GetNTVersion() >= _WIN32_WINNT_WIN10))
+                expectedStatus = STATUS_NOT_A_DIRECTORY;
         }
 
         /* Open parent directory first */
@@ -598,6 +628,9 @@ TestRelativeNames(VOID)
         if (isDirectory && NT_SUCCESS(expectedStatus))
             ok(Status == STATUS_FILE_IS_A_DIRECTORY,
                "[%lu] Status = %lx, expected STATUS_FILE_IS_A_DIRECTORY\n", i, Status);
+        else if (g_Filesystem != FAT32 && Tests[i].Win10NotDirectory && (GetNTVersion() >= _WIN32_WINNT_WIN10))
+            ok(Status == STATUS_OBJECT_NAME_INVALID,
+               "[%lu] Status = %lx, expected STATUS_OBJECT_NAME_INVALID\n", i, Status);
         else
             ok(Status == expectedStatus,
                "[%lu] Status = %lx, expected %lx\n", i, Status, expectedStatus);
@@ -677,6 +710,38 @@ TestRelativeNames(VOID)
     }
 
     ExFreePoolWithTag(Buffer, 'sFmK');
+}
+
+static
+VOID
+TestQueryAttributesMissing(VOID)
+{
+    static const struct
+    {
+        PCWSTR Path;
+        NTSTATUS ExpectedStatus;
+    } Tests[] =
+    {
+        { L"\\SystemRoot\\ReactOS-Kmtest-Missing", STATUS_OBJECT_NAME_NOT_FOUND },
+        { L"\\SystemRoot\\ReactOS-Kmtest-Missing\\file", STATUS_OBJECT_PATH_NOT_FOUND },
+    };
+    FILE_NETWORK_OPEN_INFORMATION Information;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UNICODE_STRING Path;
+    NTSTATUS Status;
+    ULONG Index;
+
+    for (Index = 0; Index < RTL_NUMBER_OF(Tests); Index++)
+    {
+        RtlInitUnicodeString(&Path, Tests[Index].Path);
+        InitializeObjectAttributes(&ObjectAttributes,
+                                   &Path,
+                                   OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+                                   NULL,
+                                   NULL);
+        Status = ZwQueryFullAttributesFile(&ObjectAttributes, &Information);
+        ok_eq_hex(Status, Tests[Index].ExpectedStatus);
+    }
 }
 
 static
@@ -783,7 +848,7 @@ TestSharedCacheMap(VOID)
     if (skip(NT_SUCCESS(Status), "No SystemRoot object\n"))
         goto Cleanup;
 
-    /* Before read, caching is not initialized */
+    /* The system may already have cached this file before the test starts. */
     ok_eq_pointer(SystemRootObject->SectionObjectPointer, NULL);
     for (i = 0; i < RTL_NUMBER_OF(Tests); i++)
     {
@@ -792,8 +857,6 @@ TestSharedCacheMap(VOID)
            "FileObject[%lu]->SectionObjectPointer = %p, expected %p\n",
            i, FileObject[i]->SectionObjectPointer, FileObject[0]->SectionObjectPointer);
     }
-    if (!skip(FileObject[0]->SectionObjectPointer != NULL, "No section object pointers\n"))
-        ok_eq_pointer(FileObject[0]->SectionObjectPointer->SharedCacheMap, NULL);
 
     /* Perform a read on one handle to initialize caching */
     FileOffset.QuadPart = 0;
@@ -842,10 +905,276 @@ Cleanup:
     }
 }
 
+static
+VOID
+TestReadAfterSmallWrites(VOID)
+{
+    UNICODE_STRING Name = RTL_CONSTANT_STRING(L"\\SystemRoot\\kmtest-read-after-write.tmp");
+    OBJECT_ATTRIBUTES Attributes;
+    IO_STATUS_BLOCK IoStatus;
+    LARGE_INTEGER Offset;
+    HANDLE Writer = NULL, Reader = NULL;
+    NTSTATUS Status;
+    PUCHAR Expected = NULL, Actual = NULL;
+    ULONG Mode, Index, Position;
+    const ULONG Length = 8192;
+    const ULONG Chunk = 1024;
+
+    /* Allocations larger than a page also satisfy unbuffered I/O alignment. */
+    Expected = ExAllocatePoolWithTag(NonPagedPool, Length, 'tFmK');
+    Actual = ExAllocatePoolWithTag(NonPagedPool, Length, 'tFmK');
+    if (skip(Expected && Actual, "No buffers for read-after-write test\n"))
+        goto Cleanup;
+
+    InitializeObjectAttributes(&Attributes, &Name,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL, NULL);
+    Status = ZwCreateFile(&Writer,
+                          FILE_READ_DATA | FILE_WRITE_DATA | DELETE | SYNCHRONIZE,
+                          &Attributes, &IoStatus, NULL, FILE_ATTRIBUTE_NORMAL,
+                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                          FILE_CREATE,
+                          FILE_NON_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE | FILE_SYNCHRONOUS_IO_NONALERT,
+                          NULL, 0);
+    if (skip(NT_SUCCESS(Status), "Cannot create scratch file: %lx\n", Status))
+        goto Cleanup;
+
+    /* Establish different durable contents before doing small buffered writes. */
+    RtlFillMemory(Expected, Length, 0x55);
+    Offset.QuadPart = 0;
+    Status = ZwWriteFile(Writer, NULL, NULL, NULL, &IoStatus, Expected, Length, &Offset, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+    ok_eq_size(IoStatus.Information, Length);
+    Status = ZwFlushBuffersFile(Writer, &IoStatus);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        goto Cleanup;
+
+    for (Mode = 0; Mode < 2; Mode++)
+    {
+        for (Index = 0; Index < Length; Index++)
+            Expected[Index] = (UCHAR)(Index * 17 + Mode + 1);
+        for (Position = 0; Position < Length; Position += Chunk)
+        {
+            Offset.QuadPart = Position;
+            Status = ZwWriteFile(Writer, NULL, NULL, NULL, &IoStatus,
+                                 Expected + Position, Chunk, &Offset, NULL);
+            ok_eq_hex(Status, STATUS_SUCCESS);
+            if (!NT_SUCCESS(Status))
+                goto Cleanup;
+            ok_eq_size(IoStatus.Information, Chunk);
+        }
+
+        /* Neither explicit flush nor closing Writer may be needed for another
+         * handle to observe completed writes, including unbuffered reads. */
+        Status = ZwOpenFile(&Reader, FILE_READ_DATA | SYNCHRONIZE,
+                            &Attributes, &IoStatus,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                            FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT |
+                            (Mode ? FILE_NO_INTERMEDIATE_BUFFERING : 0));
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status))
+            goto Cleanup;
+        Offset.QuadPart = 0;
+        RtlZeroMemory(Actual, Length);
+        Status = ZwReadFile(Reader, NULL, NULL, NULL, &IoStatus, Actual, Length, &Offset, NULL);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (NT_SUCCESS(Status))
+        {
+            ok_eq_size(IoStatus.Information, Length);
+            ok(RtlCompareMemory(Expected, Actual, Length) == Length,
+               "%s read returned stale data after small writes\n", Mode ? "Unbuffered" : "Cached");
+        }
+        ZwClose(Reader);
+        Reader = NULL;
+    }
+
+Cleanup:
+    if (Reader)
+        ZwClose(Reader);
+    if (Writer)
+        ZwClose(Writer);
+    if (Actual)
+        ExFreePoolWithTag(Actual, 'tFmK');
+    if (Expected)
+        ExFreePoolWithTag(Expected, 'tFmK');
+}
+
+static
+VOID
+TestCachedReadCleanup(VOID)
+{
+    UNICODE_STRING FileName = RTL_CONSTANT_STRING(L"\\SystemRoot\\system32\\ntoskrnl.exe");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatus;
+    LARGE_INTEGER Offset = {{0, 0}};
+    HANDLE FileHandle;
+    PFILE_OBJECT FileObject;
+    NTSTATUS Status;
+    UCHAR Buffer[64];
+
+    InitializeObjectAttributes(&ObjectAttributes, &FileName,
+                               OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+                               NULL, NULL);
+    Status = ZwOpenFile(&FileHandle, FILE_READ_DATA | SYNCHRONIZE,
+                        &ObjectAttributes, &IoStatus,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    Status = ObReferenceObjectByHandle(FileHandle, 0, *IoFileObjectType,
+                                       KernelMode, (PVOID *)&FileObject, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        ZwClose(FileHandle);
+        return;
+    }
+
+    Status = ZwReadFile(FileHandle, NULL, NULL, NULL, &IoStatus,
+                        Buffer, sizeof(Buffer), &Offset, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+        ok_eq_ulong(IoStatus.Information, sizeof(Buffer));
+    trace("Cached read private map before cleanup: %p\n", FileObject->PrivateCacheMap);
+
+    /* Keep the object alive to inspect cleanup independently of final close. */
+    Status = ZwClose(FileHandle);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok(FileObject->Flags & FO_CLEANUP_COMPLETE, "Cleanup did not complete\n");
+    ok_eq_pointer(FileObject->PrivateCacheMap, NULL);
+    ObDereferenceObject(FileObject);
+}
+
+typedef struct _DISPATCHED_QUERY_STATE
+{
+    KEVENT Event;
+    PETHREAD Thread;
+    BOOLEAN SameThread;
+    BOOLEAN ApcsDisabled;
+} DISPATCHED_QUERY_STATE, *PDISPATCHED_QUERY_STATE;
+
+static
+NTSTATUS
+NTAPI
+DispatchedQueryCompletion(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp,
+    _In_opt_ PVOID Context)
+{
+    PDISPATCHED_QUERY_STATE State = Context;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(Irp);
+
+    State->SameThread = (PsGetCurrentThread() == State->Thread);
+    State->ApcsDisabled = KeAreApcsDisabled();
+    KeSetEvent(&State->Event, IO_NO_INCREMENT, FALSE);
+
+    return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+static
+VOID
+TestDispatchedQuery(VOID)
+{
+    UNICODE_STRING FileName = RTL_CONSTANT_STRING(L"\\SystemRoot\\system32\\ntoskrnl.exe");
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    FILE_STANDARD_INFORMATION Info;
+    DISPATCHED_QUERY_STATE State;
+    IO_STATUS_BLOCK IoStatus;
+    PIO_STACK_LOCATION Stack;
+    PDEVICE_OBJECT DeviceObject;
+    PFILE_OBJECT FileObject;
+    HANDLE FileHandle;
+    NTSTATUS Status;
+    PIRP Irp;
+
+    if (skip(!KeAreApcsDisabled(), "The test thread already runs with APCs disabled\n"))
+        return;
+
+    InitializeObjectAttributes(&ObjectAttributes, &FileName,
+                               OBJ_KERNEL_HANDLE | OBJ_CASE_INSENSITIVE,
+                               NULL, NULL);
+    Status = ZwOpenFile(&FileHandle, FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                        &ObjectAttributes, &IoStatus,
+                        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                        FILE_NON_DIRECTORY_FILE);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+        return;
+
+    Status = ObReferenceObjectByHandle(FileHandle, 0, *IoFileObjectType,
+                                       KernelMode, (PVOID *)&FileObject, NULL);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status))
+    {
+        ZwClose(FileHandle);
+        return;
+    }
+
+    DeviceObject = IoGetRelatedDeviceObject(FileObject);
+    Irp = IoAllocateIrp(DeviceObject->StackSize, FALSE);
+    ok(Irp != NULL, "IoAllocateIrp failed\n");
+    if (Irp != NULL)
+    {
+        KeInitializeEvent(&State.Event, NotificationEvent, FALSE);
+        State.Thread = PsGetCurrentThread();
+        State.SameThread = FALSE;
+        State.ApcsDisabled = FALSE;
+
+        Irp->AssociatedIrp.SystemBuffer = &Info;
+        Irp->RequestorMode = KernelMode;
+        Irp->Tail.Overlay.Thread = PsGetCurrentThread();
+
+        Stack = IoGetNextIrpStackLocation(Irp);
+        Stack->MajorFunction = IRP_MJ_QUERY_INFORMATION;
+        Stack->FileObject = FileObject;
+        Stack->Parameters.QueryFile.Length = sizeof(Info);
+        Stack->Parameters.QueryFile.FileInformationClass = FileStandardInformation;
+        IoSetCompletionRoutine(Irp, DispatchedQueryCompletion, &State, TRUE, TRUE, TRUE);
+
+        Status = IoCallDriver(DeviceObject, Irp);
+        if (Status == STATUS_PENDING)
+        {
+            KeWaitForSingleObject(&State.Event, Executive, KernelMode, FALSE, NULL);
+            Status = Irp->IoStatus.Status;
+        }
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        ok_eq_ulongptr(Irp->IoStatus.Information, sizeof(Info));
+
+        if (!skip(State.SameThread, "The request completed on another thread\n"))
+        {
+            ok(State.ApcsDisabled,
+               "The file system completed the request with normal kernel APCs enabled\n");
+        }
+        ok(!KeAreApcsDisabled(), "The file system left normal kernel APCs disabled\n");
+
+        IoFreeIrp(Irp);
+    }
+
+    ObDereferenceObject(FileObject);
+    ZwClose(FileHandle);
+}
+
 START_TEST(IoFilesystem)
 {
+    if (skip(!IsWinPE(), "IoFilesystem path matrix requires an installed OS, not WinPE\n"))
+        return;
+
     /* TestAllInformation() has to be first since we detect the filesystem there */
     TestAllInformation();
+    if (skip(g_Filesystem != Unknown,
+             "IoFilesystem path matrix requires a FAT32 or NTFS SystemRoot backing store\n"))
+        return;
     TestRelativeNames();
+    TestQueryAttributesMissing();
     TestSharedCacheMap();
+    TestReadAfterSmallWrites();
+    TestCachedReadCleanup();
+    TestDispatchedQuery();
 }

@@ -2702,7 +2702,11 @@ AtapiResetController__(
                         AtapiReadPortEx4(NULL, (ULONGIO_PTR)(&deviceExtension->BaseIoAddressSATA_0),offs+4) & ((~(ULONG)0x0000000d) << (!Channel*16)) );
                 } else {
                     AtapiWritePortEx1(NULL, (ULONGIO_PTR)(&deviceExtension->BaseIoAddressSATA_0),offs+1,
+#ifdef __REACTOS__
+                        AtapiReadPortEx1(NULL, (ULONGIO_PTR)(&deviceExtension->BaseIoAddressSATA_0),offs+1) & ((~(ULONG)0x0d) << (!Channel*4)) );
+#else
                         AtapiReadPortEx1(NULL, (ULONGIO_PTR)(&deviceExtension->BaseIoAddressSATA_0),offs+1) & ((~(UCHAR)0x0d) << (!Channel*4)) );
+#endif
                 }
                 tmp16 = UniataSataPhyEnable(HwDeviceExtension, j, 0/* dev0*/, UNIATA_SATA_RESET_ENABLE);
 
@@ -10338,7 +10342,8 @@ uata_ctl_queue:
                     AtaCtl->AdapterInfo.NumberLuns = (UCHAR)deviceExtension->NumberLuns;
                     AtaCtl->AdapterInfo.AdapterInterfaceType = deviceExtension->AdapterInterfaceType;
                     if(deviceExtension->FullDevName) {
-                        strncpy(AtaCtl->AdapterInfo.DeviceName, deviceExtension->FullDevName, 64);
+                        strncpy(AtaCtl->AdapterInfo.DeviceName, deviceExtension->FullDevName, sizeof(AtaCtl->AdapterInfo.DeviceName) - 1);
+                        AtaCtl->AdapterInfo.DeviceName[sizeof(AtaCtl->AdapterInfo.DeviceName) - 1] = '\0';
                     }
                     AtaCtl->AdapterInfo.ChanInfoValid = FALSE;
                     AtaCtl->AdapterInfo.LunInfoValid = FALSE;
@@ -11297,9 +11302,17 @@ AtapiRegCheckDevLunValue(
 {
     WCHAR namex[160];
     ULONG val = Default;
+    ULONG baseVal;
 
-    val = AtapiRegCheckParameterValue(
+    baseVal = AtapiRegCheckParameterValue(
         HwDeviceExtension, NamePrefix, Name, val);
+
+    if(baseVal == val) {
+        /* Base prefix returned default - key likely doesn't exist.
+         * Skip Chan/Lun sub-paths since parent key is missing. */
+        return val;
+    }
+    val = baseVal;
 
     if(chan != CHAN_NOT_SPECIFIED) {
         swprintf(namex, L"%s\\Chan_%1.1d", NamePrefix, chan);
@@ -11513,6 +11526,22 @@ AtapiRegCheckDevValue(
 
     Returns:    Registry Key value
  */
+/*
+ * Static cache: remember which registry path suffixes don't exist
+ * to skip repeated ZwOpenKey calls on non-existent keys.
+ */
+#define REG_PATH_CACHE_SIZE 64
+static ULONG   RegPathCacheHash[REG_PATH_CACHE_SIZE];
+static BOOLEAN  RegPathCacheMiss[REG_PATH_CACHE_SIZE];
+static BOOLEAN  RegPathCacheInit = FALSE;
+
+static ULONG RegPathFullHash(IN PCWSTR Path)
+{
+    ULONG h = 0x811c9dc5;
+    while (*Path) { h ^= (ULONG)(*Path++); h *= 0x01000193; }
+    return h;
+}
+
 ULONG
 NTAPI
 AtapiRegCheckParameterValue(
@@ -11536,23 +11565,34 @@ AtapiRegCheckParameterValue(
     PUNICODE_STRING   RegistryPath = &SavedRegPath;
 
     UNICODE_STRING    paramPath;
+    WCHAR             paramPathBuffer[256];
+    ULONG             cacheIdx;
+    ULONG             fullHash;
 
     if(g_Dump) {
         goto failed;
     }
 
-    // <SavedRegPath>\<PathSuffix> -> <Name>
-//    KdPrint(( "AtapiCheckRegValue: %ws -> %ws\n", PathSuffix, Name));
-//    KdPrint(( "AtapiCheckRegValue: RegistryPath %ws\n", RegistryPath->Buffer));
+    if(!RegPathCacheInit) {
+        RtlZeroMemory(RegPathCacheHash, sizeof(RegPathCacheHash));
+        RtlZeroMemory(RegPathCacheMiss, sizeof(RegPathCacheMiss));
+        RegPathCacheInit = TRUE;
+    }
+
+    /* Skip if this path is cached as non-existent */
+    fullHash = RegPathFullHash(PathSuffix);
+    cacheIdx = fullHash % REG_PATH_CACHE_SIZE;
+    if(RegPathCacheMiss[cacheIdx] && RegPathCacheHash[cacheIdx] == fullHash) {
+        goto failed;
+    }
 
     paramPath.Length = 0;
     paramPath.MaximumLength = RegistryPath->Length +
         (wcslen(PathSuffix)+2)*sizeof(WCHAR);
-    paramPath.Buffer = (PWCHAR)ExAllocatePool(NonPagedPool, paramPath.MaximumLength);
-    if(!paramPath.Buffer) {
-        KdPrint(("AtapiCheckRegValue: couldn't allocate paramPath\n"));
+    if(paramPath.MaximumLength > sizeof(paramPathBuffer)) {
         return Default;
     }
+    paramPath.Buffer = paramPathBuffer;
 
     RtlZeroMemory(paramPath.Buffer, paramPath.MaximumLength);
     RtlAppendUnicodeToString(&paramPath, RegistryPath->Buffer);
@@ -11573,9 +11613,11 @@ AtapiRegCheckParameterValue(
                                     paramPath.Buffer, parameters, NULL, NULL);
     if(NT_SUCCESS(status)) {
         KdPrint(( "AtapiCheckRegValue: %ws -> %ws is %#x\n", PathSuffix, Name, doRun));
+    } else {
+        /* Cache this path as non-existent */
+        RegPathCacheHash[cacheIdx] = fullHash;
+        RegPathCacheMiss[cacheIdx] = TRUE;
     }
-
-    ExFreePool(paramPath.Buffer);
 
     if(!NT_SUCCESS(status)) {
 failed:

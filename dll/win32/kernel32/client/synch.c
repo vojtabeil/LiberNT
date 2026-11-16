@@ -8,15 +8,28 @@
 
 /* INCLUDES *****************************************************************/
 #include <k32.h>
+#define _WINMM_
+#include <mmsystem.h>
+#undef _WINMM_
 
 #define NDEBUG
 #include <debug.h>
+
+DEBUG_CHANNEL(kernel32sync);
 
 #undef InterlockedIncrement
 #undef InterlockedDecrement
 #undef InterlockedExchange
 #undef InterlockedExchangeAdd
 #undef InterlockedCompareExchange
+
+#ifndef EX_TIMER_HIGH_RESOLUTION
+#define EX_TIMER_HIGH_RESOLUTION 0x00000004
+#define EX_TIMER_NOTIFICATION (1UL << 31)
+#endif
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 
 /* FUNCTIONS *****************************************************************/
 
@@ -113,12 +126,6 @@ WaitForSingleObjectEx(IN HANDLE hHandle,
     /* Get real handle */
     hHandle = TranslateStdHandle(hHandle);
 
-    /* Check for console handle */
-    if ((IsConsoleHandle(hHandle)) && (VerifyConsoleIoHandle(hHandle)))
-    {
-        /* Get the real wait handle */
-        hHandle = GetConsoleInputWaitHandle();
-    }
 
     /* Convert the timeout */
     TimePtr = BaseFormatTimeOut(&Time, dwMilliseconds);
@@ -218,13 +225,6 @@ WaitForMultipleObjectsEx(IN DWORD nCount,
         /* Check what kind of handle this is */
         HandleBuffer[i] = TranslateStdHandle(HandleBuffer[i]);
 
-        /* Check for console handle */
-        if ((IsConsoleHandle(HandleBuffer[i])) &&
-            (VerifyConsoleIoHandle(HandleBuffer[i])))
-        {
-            /* Get the real wait handle */
-            HandleBuffer[i] = GetConsoleInputWaitHandle();
-        }
     }
 
     /* Convert the timeout */
@@ -289,13 +289,6 @@ SignalObjectAndWait(IN HANDLE hObjectToSignal,
     /* Get real handle */
     hObjectToWaitOn = TranslateStdHandle(hObjectToWaitOn);
 
-    /* Check for console handle */
-    if ((IsConsoleHandle(hObjectToWaitOn)) &&
-        (VerifyConsoleIoHandle(hObjectToWaitOn)))
-    {
-        /* Get the real wait handle */
-        hObjectToWaitOn = GetConsoleInputWaitHandle();
-    }
 
     /* Convert the timeout */
     TimePtr = BaseFormatTimeOut(&Time, dwMilliseconds);
@@ -336,6 +329,57 @@ CreateWaitableTimerW(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
                                lpTimerAttributes,
                                lpTimerName,
                                bManualReset ? NotificationTimer : SynchronizationTimer);
+}
+
+HANDLE
+WINAPI
+CreateWaitableTimerExW(IN LPSECURITY_ATTRIBUTES lpTimerAttributes OPTIONAL,
+                       IN LPCWSTR lpTimerName OPTIONAL,
+                       IN DWORD dwFlags,
+                       IN DWORD dwDesiredAccess)
+{
+    NTSTATUS Status;
+    HANDLE Handle;
+    UNICODE_STRING ObjectName;
+    OBJECT_ATTRIBUTES LocalAttributes;
+    POBJECT_ATTRIBUTES ObjectAttributes;
+    TIMER_TYPE TimerType;
+
+    if (dwFlags & ~(CREATE_WAITABLE_TIMER_MANUAL_RESET |
+                    CREATE_WAITABLE_TIMER_HIGH_RESOLUTION))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return NULL;
+    }
+
+    TimerType = (dwFlags & CREATE_WAITABLE_TIMER_MANUAL_RESET) ? NotificationTimer
+                                                               : SynchronizationTimer;
+
+    if (lpTimerName) RtlInitUnicodeString(&ObjectName, lpTimerName);
+    ObjectAttributes = BaseFormatObjectAttributes(&LocalAttributes, lpTimerAttributes, lpTimerName ? &ObjectName : NULL);
+
+    if (dwFlags & CREATE_WAITABLE_TIMER_HIGH_RESOLUTION)
+    {
+        Status = NtCreateTimer2(&Handle,
+                                NULL,
+                                ObjectAttributes,
+                                EX_TIMER_HIGH_RESOLUTION |
+                                    ((dwFlags & CREATE_WAITABLE_TIMER_MANUAL_RESET) ? EX_TIMER_NOTIFICATION : 0),
+                                dwDesiredAccess);
+    }
+    else
+    {
+        Status = NtCreateTimer(&Handle, dwDesiredAccess, ObjectAttributes, TimerType);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return NULL;
+    }
+
+    SetLastError((Status == STATUS_OBJECT_NAME_EXISTS) ? ERROR_ALREADY_EXISTS
+                                                       : ERROR_SUCCESS);
+    return Handle;
 }
 
 /*
@@ -795,12 +839,6 @@ RegisterWaitForSingleObject(OUT PHANDLE phNewWaitObject,
     /* Get real handle */
     hObject = TranslateStdHandle(hObject);
 
-    /* Check for console handle */
-    if ((IsConsoleHandle(hObject)) && (VerifyConsoleIoHandle(hObject)))
-    {
-        /* Get the real wait handle */
-        hObject = GetConsoleInputWaitHandle();
-    }
 
     /* Register the wait now */
     Status = RtlRegisterWait(phNewWaitObject,
@@ -837,12 +875,6 @@ RegisterWaitForSingleObjectEx(IN HANDLE hObject,
     /* Get real handle */
     hObject = TranslateStdHandle(hObject);
 
-    /* Check for console handle */
-    if ((IsConsoleHandle(hObject)) && (VerifyConsoleIoHandle(hObject)))
-    {
-        /* Get the real wait handle */
-        hObject = GetConsoleInputWaitHandle();
-    }
 
     /* Register the wait */
     Status = RtlRegisterWait(&hNewWaitObject,
@@ -922,6 +954,78 @@ UnregisterWaitEx(IN HANDLE WaitHandle,
 
     /* All good */
     return TRUE;
+}
+
+/* MMSYSTEM time functions */
+
+#define MMSYSTIME_MININTERVAL 1
+#define MMSYSTIME_MAXINTERVAL 65535
+
+/******************************************************************************
+ *		timeGetTime (KERNEL32.@)
+ */
+DWORD WINAPI timeGetTime(void)
+{
+    return GetTickCount();
+}
+
+/******************************************************************************
+ *		timeGetSystemTime (KERNEL32.@)
+ */
+MMRESULT WINAPI timeGetSystemTime(MMTIME *time, UINT size)
+{
+    if (size >= sizeof(*time))
+    {
+        time->wType = TIME_MS;
+        time->u.ms = timeGetTime();
+    }
+    return 0;
+}
+
+/******************************************************************************
+ *		timeGetDevCaps (KERNEL32.@)
+ */
+MMRESULT WINAPI timeGetDevCaps(TIMECAPS *caps, UINT size)
+{
+    TRACE("(%p, %u)\n", caps, size);
+
+    if (!caps) return TIMERR_NOCANDO;
+    if (size < sizeof(TIMECAPS)) return TIMERR_NOCANDO;
+    caps->wPeriodMin = MMSYSTIME_MININTERVAL;
+    caps->wPeriodMax = MMSYSTIME_MAXINTERVAL;
+    return 0;
+}
+
+/******************************************************************************
+ *		timeBeginPeriod (KERNEL32.@)
+ */
+MMRESULT WINAPI timeBeginPeriod(UINT period)
+{
+    ULONG CurrentResolution;
+
+    if (period < MMSYSTIME_MININTERVAL || period > MMSYSTIME_MAXINTERVAL)
+        return TIMERR_NOCANDO;
+
+    return NT_SUCCESS(NtSetTimerResolution(period * 10000,
+                                           TRUE,
+                                           &CurrentResolution)) ?
+           TIMERR_NOERROR : TIMERR_NOCANDO;
+}
+
+/******************************************************************************
+ *		timeEndPeriod (KERNEL32.@)
+ */
+MMRESULT WINAPI timeEndPeriod(UINT period)
+{
+    ULONG CurrentResolution;
+
+    if (period < MMSYSTIME_MININTERVAL || period > MMSYSTIME_MAXINTERVAL)
+        return TIMERR_NOCANDO;
+
+    return NT_SUCCESS(NtSetTimerResolution(period * 10000,
+                                           FALSE,
+                                           &CurrentResolution)) ?
+           TIMERR_NOERROR : TIMERR_NOCANDO;
 }
 
 /* EOF */

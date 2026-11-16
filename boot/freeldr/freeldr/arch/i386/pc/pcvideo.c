@@ -47,13 +47,11 @@ DBG_DEFAULT_CHANNEL(UI);
 #define    VIDEOMODE_132X50        0x8432
 #define    VIDEOMODE_132X60        0x843C
 
-/* For PcVideoSetVerticalResolution() (EGA/VGA only) */
 #define VERTRES_200_SCANLINES        0x00
 #define VERTRES_350_SCANLINES        0x01
 #define VERTRES_400_SCANLINES        0x02
-#define VERTRES_480_SCANLINES        0x03
 
-#include <pshpack2.h>
+#pragma pack(push, 2)
 typedef struct
 {
     USHORT ModeAttributes;             /* Mode attributes (see #00080) */
@@ -109,12 +107,11 @@ typedef struct
     UCHAR  Reserved2[190];             /* 190 BYTEs  reserved (0) */
 } SVGA_MODE_INFORMATION, *PSVGA_MODE_INFORMATION;
 C_ASSERT(sizeof(SVGA_MODE_INFORMATION) == 256);
-#include <poppack.h>
+#pragma pack(pop)
 
 UCHAR MachDefaultTextColor = COLOR_GRAY;
 
 static ULONG VideoCard = VIDEOCARD_CGA_OR_OTHER;        /* Type of video card installed on the system */
-static USHORT BiosVideoMode = VIDEOMODE_NORMAL_TEXT;    /* Current video mode as known by BIOS */
 static ULONG ScreenWidth = 80;                          /* Screen Width in characters */
 static ULONG ScreenHeight = 25;                         /* Screen Height in characters */
 static ULONG BytesPerScanLine = (80 * 2);               /* Number of bytes per scanline (delta) */
@@ -122,6 +119,10 @@ static VIDEODISPLAYMODE DisplayMode = VideoTextMode;    /* Current display mode 
 static BOOLEAN VesaVideoMode = FALSE;                   /* Are we using a VESA mode? */
 static SVGA_MODE_INFORMATION VesaVideoModeInformation;  /* Only valid when in VESA mode */
 static ULONG CurrentMemoryBank = 0;                     /* Currently selected VESA bank */
+static LOADER_PARAMETER_FRAMEBUFFER BootFrameBuffer = {0};
+static SVGA_MODE_INFORMATION BootFrameBufferModeInformation;
+static USHORT BootFrameBufferMode = 0;
+static BOOLEAN BootFrameBufferActive = FALSE;
 
 enum
 {
@@ -372,8 +373,12 @@ PcVideoGetBiosMode(
     Regs.b.ah = 0x0F;
     Int386(0x10, &Regs, &Regs);
 
-    if (Regs.b.ah == 0)
+    if (Regs.b.ah == 0 ||
+        Regs.b.al != ((*(PUCHAR)0x449) & 0x7F) ||
+        Regs.b.ah != *(PUSHORT)0x44A)
+    {
         return FALSE;
+    }
 
     *Mode = Regs.b.al;
     *WidthInChars = Regs.b.ah;
@@ -394,7 +399,6 @@ PcVideoGetDisplayMode(VOID)
         ScreenWidth = VesaVideoModeInformation.WidthInPixels;
         ScreenHeight = VesaVideoModeInformation.HeightInPixels;
         BytesPerScanLine = VesaVideoModeInformation.BytesPerScanLine;
-        BiosVideoMode = Mode;
         DisplayMode = (0x0108 <= Mode && Mode <= 0x010C) ? VideoTextMode : VideoGraphicsMode;
         VesaVideoMode = TRUE;
     }
@@ -409,7 +413,6 @@ PcVideoGetDisplayMode(VOID)
          */
         UCHAR BiosMode = (*(PUCHAR)0x449) & 0x7F; /* Current video mode */
         ASSERT(BiosMode == Mode);
-        BiosVideoMode = Mode;
         TRACE("BIOS mode detected\n");
 
         ScreenWidth = *(PUSHORT)0x44A; /* Number of screen columns */
@@ -424,7 +427,7 @@ PcVideoGetDisplayMode(VOID)
         /* Set the values for the default text mode.
          * If a graphics mode is set, these values will be changed. */
         TRACE("Fallback mode detected\n");
-        BiosVideoMode = VIDEOMODE_NORMAL_TEXT;
+        Mode = VIDEOMODE_NORMAL_TEXT;
         ScreenWidth = 80;
         ScreenHeight = 25;
         BytesPerScanLine = (ScreenWidth * 2);
@@ -433,7 +436,7 @@ PcVideoGetDisplayMode(VOID)
     }
 
     TRACE("This is a %s video mode\n", VesaVideoMode ? "VESA" : "BIOS");
-    TRACE("BiosVideoMode    = 0x%x\n", BiosVideoMode);
+    TRACE("BiosVideoMode    = 0x%x\n", Mode);
     TRACE("DisplayMode      = %sMode\n", DisplayMode == VideoTextMode ? "Text" : "Graphics");
     TRACE("ScreenWidth      = %lu\n", ScreenWidth);
     TRACE("ScreenHeight     = %lu\n", ScreenHeight);
@@ -868,7 +871,6 @@ PcVideoSetMode(USHORT NewMode)
     /* Set the values for the default text modes
      * If they are setting a graphics mode then
      * these values will be changed. */
-    BiosVideoMode = NewMode;
     ScreenWidth = 80;
     ScreenHeight = 25;
     BytesPerScanLine = (ScreenWidth * 2);
@@ -901,9 +903,10 @@ PcVideoSetMode(USHORT NewMode)
         WRITE_PORT_USHORT((USHORT*)0x03CE, 0x0F01); /* For some reason this is necessary? */
         ScreenWidth = 640;
         ScreenHeight = 480;
-        BytesPerScanLine = 80; // 8 pixels per byte (4 planes)
-        BiosVideoMode = NewMode;
+        BytesPerScanLine = 80;
         DisplayMode = VideoGraphicsMode;
+
+        return TRUE;
     }
     else if (NewMode == 0x13)
     {
@@ -911,9 +914,10 @@ PcVideoSetMode(USHORT NewMode)
         PcVideoSetBiosMode((UCHAR)NewMode);
         ScreenWidth = 320;
         ScreenHeight = 200;
-        BytesPerScanLine = 320; // 1 pixel per byte
-        BiosVideoMode = NewMode;
+        BytesPerScanLine = 320;
         DisplayMode = VideoGraphicsMode;
+
+        return TRUE;
     }
     else
     {
@@ -927,12 +931,13 @@ PcVideoSetMode(USHORT NewMode)
         ScreenWidth = VesaVideoModeInformation.WidthInPixels;
         ScreenHeight = VesaVideoModeInformation.HeightInPixels;
         BytesPerScanLine = VesaVideoModeInformation.BytesPerScanLine;
-        BiosVideoMode = NewMode;
         DisplayMode = (0x0108 <= NewMode && NewMode <= 0x010C) ? VideoTextMode : VideoGraphicsMode;
         VesaVideoMode = TRUE;
+
+        return TRUE;
     }
 
-    return TRUE;
+    return FALSE;
 }
 
 static VOID
@@ -1190,6 +1195,10 @@ PcVideoCopyOffScreenBufferToVRAM(PVOID Buffer)
     else if (VideoGraphicsMode == DisplayMode && VesaVideoMode)
     {
         BankSize = VesaVideoModeInformation.WindowGranularity << 10;
+
+        if (BootFrameBufferActive || BankSize == 0)
+            return;
+
         BanksToCopy = (USHORT)((VesaVideoModeInformation.HeightInPixels * VesaVideoModeInformation.BytesPerScanLine) / BankSize);
         BytesInLastBank = (VesaVideoModeInformation.HeightInPixels * VesaVideoModeInformation.BytesPerScanLine) % BankSize;
 
@@ -1287,9 +1296,136 @@ PcVideoSync(VOID)
 VOID
 PcVideoPrepareForReactOS(VOID)
 {
-    // PcVideoSetMode80x50_80x43();
-    PcVideoSetMode80x25();
+    /* Preserve the VBE linear framebuffer selected during hardware detect. */
+    if (BootFrameBufferMode != 0 && PcVideoSetBiosVesaMode(BootFrameBufferMode))
+    {
+        VesaVideoModeInformation = BootFrameBufferModeInformation;
+        ScreenWidth = BootFrameBuffer.HorizontalResolution;
+        ScreenHeight = BootFrameBuffer.VerticalResolution;
+        BytesPerScanLine = BootFrameBuffer.PixelsPerScanLine * sizeof(ULONG);
+        DisplayMode = VideoGraphicsMode;
+        VesaVideoMode = TRUE;
+        BootFrameBufferActive = TRUE;
+    }
+    else
+    {
+        if (BootFrameBufferMode != 0)
+            ERR("Failed to set VBE mode 0x%x for the boot framebuffer\n", BootFrameBufferMode);
+        PcVideoSetMode80x25();
+    }
     PcVideoHideShowTextCursor(FALSE);
+}
+
+static ULONG
+PcVideoMaskFromField(
+    _In_ UCHAR Size,
+    _In_ UCHAR Position)
+{
+    if (Size == 0 || Size > 31 || Position > 31 || Size + Position > 32)
+        return 0;
+
+    return ((1UL << Size) - 1) << Position;
+}
+
+BOOLEAN
+PcVideoInitializeBootFramebuffer(
+    _Out_ PLOADER_PARAMETER_FRAMEBUFFER FrameBuffer)
+{
+    SVGA_MODE_INFORMATION Candidate;
+    SVGA_MODE_INFORMATION Best = {0};
+    USHORT Mode, BestMode = 0;
+    ULONG BestPixels = 0, Pitch;
+    ULONGLONG Size;
+
+    RtlZeroMemory(FrameBuffer, sizeof(*FrameBuffer));
+
+    for (Mode = 0x100; Mode < 0x200; ++Mode)
+    {
+        ULONG Pixels;
+        UCHAR RedSize, RedPosition, GreenSize, GreenPosition;
+        UCHAR BlueSize, BluePosition;
+
+        if (!PcVideoVesaGetSVGAModeInformation(Mode, &Candidate))
+            continue;
+
+        RedSize = Candidate.LinearRedMaskSize ?
+                      Candidate.LinearRedMaskSize : Candidate.RedMaskSize;
+        RedPosition = Candidate.LinearRedMaskSize ?
+                          Candidate.LinearRedMaskPosition : Candidate.RedMaskPosition;
+        GreenSize = Candidate.LinearGreenMaskSize ?
+                        Candidate.LinearGreenMaskSize : Candidate.GreenMaskSize;
+        GreenPosition = Candidate.LinearGreenMaskSize ?
+                            Candidate.LinearGreenMaskPosition : Candidate.GreenMaskPosition;
+        BlueSize = Candidate.LinearBlueMaskSize ?
+                       Candidate.LinearBlueMaskSize : Candidate.BlueMaskSize;
+        BluePosition = Candidate.LinearBlueMaskSize ?
+                           Candidate.LinearBlueMaskPosition : Candidate.BlueMaskPosition;
+
+        if ((Candidate.ModeAttributes & 0x91) != 0x91 ||
+            Candidate.MemoryModel != 6 || Candidate.BitsPerPixel != 32 ||
+            Candidate.LinearVideoBufferAddress == 0 ||
+            Candidate.WidthInPixels == 0 || Candidate.HeightInPixels == 0 ||
+            Candidate.WidthInPixels > 1024 || Candidate.HeightInPixels > 768 ||
+            RedSize != 8 || RedPosition != 16 ||
+            GreenSize != 8 || GreenPosition != 8 ||
+            BlueSize != 8 || BluePosition != 0)
+        {
+            continue;
+        }
+
+        Pixels = (ULONG)Candidate.WidthInPixels * Candidate.HeightInPixels;
+        if (Pixels > BestPixels)
+        {
+            Best = Candidate;
+            BestMode = Mode;
+            BestPixels = Pixels;
+        }
+    }
+
+    if (BestMode == 0 || !PcVideoSetBiosVesaMode(BestMode | 0x4000))
+        return FALSE;
+
+    Pitch = Best.LinearBytesPerScanLine ?
+                Best.LinearBytesPerScanLine : Best.BytesPerScanLine;
+    Size = (ULONGLONG)Pitch * Best.HeightInPixels;
+    if (Pitch < (ULONG)Best.WidthInPixels * sizeof(ULONG) ||
+        Size == 0 || Size > MAXULONG)
+    {
+        PcVideoSetMode80x25();
+        return FALSE;
+    }
+
+    PcVideoSetMode80x25();
+    BootFrameBufferMode = BestMode | 0x4000;
+    BootFrameBufferModeInformation = Best;
+
+    BootFrameBuffer.FrameBufferBase.QuadPart = Best.LinearVideoBufferAddress;
+    BootFrameBuffer.FrameBufferSize = (ULONG)Size;
+    BootFrameBuffer.HorizontalResolution = Best.WidthInPixels;
+    BootFrameBuffer.VerticalResolution = Best.HeightInPixels;
+    BootFrameBuffer.PixelsPerScanLine = Pitch / sizeof(ULONG);
+    BootFrameBuffer.PixelFormat = Best.BitsPerPixel;
+    BootFrameBuffer.RedMask = PcVideoMaskFromField(
+        Best.LinearRedMaskSize ? Best.LinearRedMaskSize : Best.RedMaskSize,
+        Best.LinearRedMaskSize ? Best.LinearRedMaskPosition : Best.RedMaskPosition);
+    BootFrameBuffer.GreenMask = PcVideoMaskFromField(
+        Best.LinearGreenMaskSize ? Best.LinearGreenMaskSize : Best.GreenMaskSize,
+        Best.LinearGreenMaskSize ? Best.LinearGreenMaskPosition : Best.GreenMaskPosition);
+    BootFrameBuffer.BlueMask = PcVideoMaskFromField(
+        Best.LinearBlueMaskSize ? Best.LinearBlueMaskSize : Best.BlueMaskSize,
+        Best.LinearBlueMaskSize ? Best.LinearBlueMaskPosition : Best.BlueMaskPosition);
+    BootFrameBuffer.Reserved = PcVideoMaskFromField(
+        Best.LinearReservedMaskSize ? Best.LinearReservedMaskSize : Best.ReservedMaskSize,
+        Best.LinearReservedMaskSize ? Best.LinearReservedMaskPosition : Best.ReservedMaskPosition);
+    BootFrameBuffer.Dpi = LOADER_PARAMETER_FRAMEBUFFER_DPI_DEFAULT;
+
+    *FrameBuffer = BootFrameBuffer;
+    TRACE("Selected BIOS VBE framebuffer 0x%lx, %lux%lu pitch=%lu\n",
+          (ULONG_PTR)BootFrameBuffer.FrameBufferBase.QuadPart,
+          BootFrameBuffer.HorizontalResolution,
+          BootFrameBuffer.VerticalResolution,
+          Pitch);
+    return TRUE;
 }
 
 /* EOF */

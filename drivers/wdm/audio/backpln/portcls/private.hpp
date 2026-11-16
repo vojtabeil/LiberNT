@@ -16,8 +16,11 @@
 
 #include <ntddk.h>
 #include <portcls.h>
+#include <ks.h>
 #include <dmusicks.h>
 #include <kcom.h>
+#include <pseh/pseh2.h>
+#include <ntifs.h>
 
 #include "interfaces.hpp"
 
@@ -29,6 +32,9 @@
 
 #define PC_ASSERT_IRQL(x) PC_ASSERT(KeGetCurrentIrql() <= (x))
 #define PC_ASSERT_IRQL_EQUAL(x) PC_ASSERT(KeGetCurrentIrql()==(x))
+
+#define PCEVENT_DESCRIPTOR_IRP_STORAGE(Irp) \
+    (*(PSUBDEVICE_DESCRIPTOR *)&(Irp)->Tail.Overlay.DriverContext[1])
 
 PVOID
 __cdecl
@@ -332,10 +338,37 @@ PcHandleDisableEventWithTable(
     IN PIRP Irp,
     IN PSUBDEVICE_DESCRIPTOR Descriptor);
 
+VOID
+NTAPI
+PcGenerateEventList(
+    IN PSUBDEVICE_DESCRIPTOR Descriptor,
+    IN GUID *Set OPTIONAL,
+    IN ULONG EventId,
+    IN BOOL PinEvent,
+    IN ULONG PinId,
+    IN BOOL NodeEvent,
+    IN ULONG NodeId);
+
 IIrpTarget *
 NTAPI
 KsoGetIrpTargetFromIrp(
     PIRP Irp);
+
+#define DEFINE_KSPROPERTY_RTAUDIOSET(PinSet,\
+   GetAudioBuffer, GetHwLatency, GetRTAudioPosition,\
+   GetClockRegister, GetBufferWithNotification, RegisterNotificationEvent, UnregisterNotificationEvent)\
+DEFINE_KSPROPERTY_TABLE(PinSet) {\
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_BUFFER, (GetAudioBuffer), sizeof(KSRTAUDIO_BUFFER_PROPERTY), sizeof(KSRTAUDIO_BUFFER), NULL, NULL, 0, NULL, NULL, 0), \
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_HWLATENCY, (GetHwLatency), sizeof(KSPROPERTY), sizeof(KSRTAUDIO_HWLATENCY), NULL, NULL, NULL, 0, NULL, 0), \
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_POSITIONREGISTER, (GetRTAudioPosition), sizeof(KSRTAUDIO_HWREGISTER_PROPERTY), sizeof(KSRTAUDIO_HWREGISTER), NULL, NULL, NULL, 0, NULL, 0), \
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_CLOCKREGISTER, (GetClockRegister), sizeof(KSRTAUDIO_HWREGISTER_PROPERTY), sizeof(KSRTAUDIO_HWREGISTER), NULL, NULL, NULL, 0, NULL, 0), \
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_BUFFER_WITH_NOTIFICATION, (GetBufferWithNotification), sizeof(KSRTAUDIO_BUFFER_PROPERTY_WITH_NOTIFICATION), sizeof(KSRTAUDIO_BUFFER), NULL, NULL, NULL, 0, NULL, 0), \
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_REGISTER_NOTIFICATION_EVENT, (RegisterNotificationEvent), sizeof(KSRTAUDIO_NOTIFICATION_EVENT_PROPERTY), 0, (RegisterNotificationEvent), NULL, NULL, 0, NULL, 0), \
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_UNREGISTER_NOTIFICATION_EVENT, (UnregisterNotificationEvent), sizeof(KSRTAUDIO_NOTIFICATION_EVENT_PROPERTY), 0, (UnregisterNotificationEvent), NULL, NULL, 0, NULL, 0) \
+}
+
+#define ROUND_DOWN(n, align) (((ULONG)n) & ~((align)-1l))
+#define ROUND_UP(n, align) ROUND_DOWN(((ULONG)n) + (align)-1, (align))
 
 #define DEFINE_KSPROPERTY_CONNECTIONSET(PinSet,\
     PropStateHandler, PropDataFormatHandler, PropAllocatorFraming)\
@@ -412,8 +445,12 @@ typedef struct
     LIST_ENTRY TimerList;
     KSPIN_LOCK TimerListLock;
 
+    LIST_ENTRY PowerNotifyList;
+    KSPIN_LOCK PowerNotifyListLock;
+
     DEVICE_POWER_STATE DevicePowerState;
     SYSTEM_POWER_STATE  SystemPowerState;
+    DEVICE_POWER_STATE DeviceStateMap[PowerSystemMaximum];
 
 } PCLASS_DEVICE_EXTENSION, *PPCLASS_DEVICE_EXTENSION;
 
@@ -438,6 +475,23 @@ typedef struct
     IIrpTarget * Target;
     PKSOBJECT_CREATE_ITEM CreateItem;
 }DISPATCH_CONTEXT, *PDISPATCH_CONTEXT;
+
+typedef struct
+{
+    LIST_ENTRY Entry;
+    PPOWERNOTIFY PowerNotify;
+}ENTRY_POWER_NOTIFY, *PENTRY_POWER_NOTIFY;
+
+typedef struct
+{
+    PCPROPERTY_REQUEST Request;
+    LONG References;
+    NTSTATUS Status;
+}PROPERTY_REQUEST_CONTEXT, *PPROPERTY_REQUEST_CONTEXT;
+
+VOID
+PcCompletePropertyRequestContext(
+    IN PPROPERTY_REQUEST_CONTEXT Context);
 
 template<typename... Interfaces>
 class CUnknownImpl : public Interfaces...

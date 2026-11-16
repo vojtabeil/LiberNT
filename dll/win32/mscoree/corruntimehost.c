@@ -46,6 +46,17 @@ WINE_DEFAULT_DEBUG_CHANNEL( mscoree );
 #include "initguid.h"
 
 DEFINE_GUID(IID__AppDomain, 0x05f696dc,0x2b29,0x3663,0xad,0x8b,0xc4,0x38,0x9c,0xf2,0xa7,0x13);
+#ifdef __REACTOS__
+DEFINE_GUID(IID_IHostMemoryManager, 0x7bc698d1, 0xf9e3, 0x4460, 0x9c, 0xde, 0xd0, 0x42, 0x48, 0xe9, 0xfa, 0x25);
+DEFINE_GUID(IID_IHostTaskManager, 0x997ff24c, 0x43b7, 0x4352, 0x86, 0x67, 0x0d, 0xc0, 0x4f, 0xaf, 0xd3, 0x54);
+DEFINE_GUID(IID_IHostThreadpoolManager, 0x983d50e2, 0xcb15, 0x466b, 0x80, 0xfc, 0x84, 0x5d, 0xc6, 0xe8, 0xc5, 0xfd);
+DEFINE_GUID(IID_IHostIoCompletionManager, 0x8bde9d80, 0xec06, 0x41d6, 0x83, 0xe6, 0x22, 0x58, 0x0e, 0xff, 0xcc, 0x20);
+DEFINE_GUID(IID_IHostSyncManager, 0x234330c7, 0x5f10, 0x4f20, 0x96, 0x15, 0x51, 0x22, 0xda, 0xb7, 0xa0, 0xac);
+DEFINE_GUID(IID_IHostAssemblyManager, 0x613dabd7, 0x62b2, 0x493e, 0x9e, 0x65, 0xc1, 0xe3, 0x2a, 0x1e, 0x0c, 0x5e);
+DEFINE_GUID(IID_IHostGCManager, 0x5d4ec34e, 0xf248, 0x457b, 0xb6, 0x03, 0x25, 0x5f, 0xaa, 0xba, 0x0d, 0x21);
+DEFINE_GUID(IID_IHostSecurityManager, 0x75ad2468, 0xa349, 0x4d02, 0xa7, 0x64, 0x76, 0xa6, 0x8a, 0xee, 0x0c, 0x4f);
+DEFINE_GUID(IID_IHostPolicyManager, 0x7ae49844, 0xb1e3, 0x4683, 0xba, 0x7c, 0x1e, 0x82, 0x12, 0xea, 0x3b, 0x79);
+#endif
 
 struct DomainEntry
 {
@@ -66,6 +77,27 @@ static CRITICAL_SECTION_DEBUG fixup_list_cs_debug =
 static CRITICAL_SECTION fixup_list_cs = { &fixup_list_cs_debug, -1, 0, 0, 0, 0 };
 
 static struct list dll_fixups;
+
+#ifdef __REACTOS__
+struct clr_event_action
+{
+    struct list entry;
+    EClrEvent event;
+    IActionOnCLREvent *action;
+};
+
+static CRITICAL_SECTION clr_event_cs;
+static CRITICAL_SECTION_DEBUG clr_event_cs_debug =
+{
+    0, 0, &clr_event_cs,
+    { &clr_event_cs_debug.ProcessLocksList,
+      &clr_event_cs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": clr_event_cs") }
+};
+static CRITICAL_SECTION clr_event_cs = { &clr_event_cs_debug, -1, 0, 0, 0, 0 };
+
+static struct list clr_event_actions = LIST_INIT(clr_event_actions);
+#endif
 
 WCHAR **private_path = NULL;
 
@@ -115,24 +147,54 @@ struct clrclass_data
     DWORD res2[2];
 };
 
-static MonoDomain* domain_attach(MonoDomain *domain)
+static HRESULT RuntimeHost_GetIUnknownForObject(RuntimeHost *This, MonoObject *obj, IUnknown **ppUnk);
+
+#ifdef __REACTOS__
+static void RuntimeHost_InitializeDomainManager(RuntimeHost *This, MonoDomain *domain);
+
+static void RuntimeHost_SetAssemblyProbing(const WCHAR *config_path, const WCHAR *base_dir, SIZE_T base_dir_size)
 {
-    MonoDomain *prev_domain = mono_domain_get();
+    parsed_config_file parsed_config;
+    WCHAR *temp, *save, **priv_path;
+    int i, count = 0;
+    HRESULT hr;
 
-    if (prev_domain == domain)
-        /* Do not set or restore domain. */
-        return NULL;
+    hr = parse_config_file(config_path, &parsed_config);
+    if (SUCCEEDED(hr) && parsed_config.private_path && parsed_config.private_path[0])
+    {
+        for (i = 0; parsed_config.private_path[i] != 0; i++)
+            if (parsed_config.private_path[i] == ';') count++;
+        if (parsed_config.private_path[wcslen(parsed_config.private_path) - 1] != ';') count++;
 
-    mono_thread_attach(domain);
+        priv_path = calloc(count + 1, sizeof(WCHAR *));
+        if (priv_path)
+        {
+            temp = wcstok_s(parsed_config.private_path, L";", &save);
+            for (i = 0; i < count && temp; i++)
+            {
+                priv_path[i] = malloc((base_dir_size + wcslen(temp) + 1) * sizeof(WCHAR));
+                if (!priv_path[i])
+                    break;
+                memcpy(priv_path[i], base_dir, base_dir_size * sizeof(WCHAR));
+                wcscpy(priv_path[i] + base_dir_size, temp);
+                temp = wcstok_s(NULL, L";", &save);
+            }
 
-    return prev_domain;
+            if (InterlockedCompareExchangePointer((void **)&private_path, priv_path, NULL))
+            {
+                for (i = 0; priv_path[i]; i++)
+                    free(priv_path[i]);
+                free(priv_path);
+            }
+        }
+    }
+
+    if (SUCCEEDED(hr))
+        set_app_assembly_bindings(&parsed_config.assembly_bindings, base_dir, base_dir_size);
+
+    free_parsed_config_file(&parsed_config);
 }
-
-static void domain_restore(MonoDomain *prev_domain)
-{
-    if (prev_domain != NULL)
-        mono_domain_set(prev_domain, FALSE);
-}
+#endif
 
 static HRESULT RuntimeHost_GetDefaultDomain(RuntimeHost *This, const WCHAR *config_path, MonoDomain **result)
 {
@@ -141,6 +203,9 @@ static HRESULT RuntimeHost_GetDefaultDomain(RuntimeHost *This, const WCHAR *conf
     char *base_dirA, *config_pathA, *slash;
     HRESULT res=S_OK;
     static BOOL configured_domain;
+#ifdef __REACTOS__
+    BOOL configured_now = FALSE;
+#endif
 
     *result = get_root_domain();
 
@@ -178,20 +243,35 @@ static HRESULT RuntimeHost_GetDefaultDomain(RuntimeHost *This, const WCHAR *conf
 
     TRACE("setting base_dir: %s, config_path: %s\n", base_dirA, config_pathA);
     mono_domain_set_config(*result, base_dirA, config_pathA);
+#ifdef __REACTOS__
+    if (wcsrchr(base_dir, '\\'))
+        RuntimeHost_SetAssemblyProbing(config_path, base_dir, wcsrchr(base_dir, '\\') - base_dir + 1);
+#endif
 
     free(config_pathA);
     free(base_dirA);
+#ifdef __REACTOS__
+    configured_now = TRUE;
+#endif
 
 end:
 
     configured_domain = TRUE;
+#ifdef __REACTOS__
+    This->default_domain_started = TRUE;
+#endif
 
     LeaveCriticalSection(&This->lock);
+
+#ifdef __REACTOS__
+    if (configured_now)
+        RuntimeHost_InitializeDomainManager(This, *result);
+#endif
 
     return res;
 }
 
-static BOOL RuntimeHost_GetMethod(MonoDomain *domain, const char *assemblyname,
+static BOOL RuntimeHost_GetMethod(const char *assemblyname,
     const char *namespace, const char *typename, const char *methodname, int arg_count,
     MonoMethod **method)
 {
@@ -238,11 +318,11 @@ static BOOL RuntimeHost_GetMethod(MonoDomain *domain, const char *assemblyname,
     return TRUE;
 }
 
-static HRESULT RuntimeHost_Invoke(RuntimeHost *This, MonoDomain *domain,
+static HRESULT RuntimeHost_Invoke(RuntimeHost *This,
     const char *assemblyname, const char *namespace, const char *typename, const char *methodname,
     MonoObject *obj, void **args, int arg_count, MonoObject **result);
 
-static HRESULT RuntimeHost_DoInvoke(RuntimeHost *This, MonoDomain *domain,
+static HRESULT RuntimeHost_DoInvoke(RuntimeHost *This,
     const char *methodname, MonoMethod *method, MonoObject *obj, void **args, MonoObject **result)
 {
     MonoObject *exc;
@@ -257,7 +337,7 @@ static HRESULT RuntimeHost_DoInvoke(RuntimeHost *This, MonoDomain *domain,
         if (methodname != get_hresult)
         {
             /* Map the exception to an HRESULT. */
-            hr = RuntimeHost_Invoke(This, domain, NULL, "System", "Exception", get_hresult,
+            hr = RuntimeHost_Invoke(This, NULL, "System", "Exception", get_hresult,
                 exc, NULL, 0, &hr_object);
             if (SUCCEEDED(hr))
                 hr = *(HRESULT*)mono_object_unbox(hr_object);
@@ -273,42 +353,35 @@ static HRESULT RuntimeHost_DoInvoke(RuntimeHost *This, MonoDomain *domain,
     return S_OK;
 }
 
-static HRESULT RuntimeHost_Invoke(RuntimeHost *This, MonoDomain *domain,
+static HRESULT RuntimeHost_Invoke(RuntimeHost *This,
     const char *assemblyname, const char *namespace, const char *typename, const char *methodname,
     MonoObject *obj, void **args, int arg_count, MonoObject **result)
 {
     MonoMethod *method;
-    MonoDomain *prev_domain;
     HRESULT hr;
 
     *result = NULL;
 
-    prev_domain = domain_attach(domain);
-
-    if (!RuntimeHost_GetMethod(domain, assemblyname, namespace, typename, methodname,
+    if (!RuntimeHost_GetMethod(assemblyname, namespace, typename, methodname,
             arg_count, &method))
     {
-        domain_restore(prev_domain);
         return E_FAIL;
     }
 
-    hr = RuntimeHost_DoInvoke(This, domain, methodname, method, obj, args, result);
+    hr = RuntimeHost_DoInvoke(This, methodname, method, obj, args, result);
     if (FAILED(hr))
     {
         ERR("Method %s.%s:%s raised an exception, hr=%lx\n", namespace, typename, methodname, hr);
     }
 
-    domain_restore(prev_domain);
-
     return hr;
 }
 
-static HRESULT RuntimeHost_VirtualInvoke(RuntimeHost *This, MonoDomain *domain,
+static HRESULT RuntimeHost_VirtualInvoke(RuntimeHost *This,
     const char *assemblyname, const char *namespace, const char *typename, const char *methodname,
     MonoObject *obj, void **args, int arg_count, MonoObject **result)
 {
     MonoMethod *method;
-    MonoDomain *prev_domain;
     HRESULT hr;
 
     *result = NULL;
@@ -319,12 +392,9 @@ static HRESULT RuntimeHost_VirtualInvoke(RuntimeHost *This, MonoDomain *domain,
         return E_POINTER;
     }
 
-    prev_domain = domain_attach(domain);
-
-    if (!RuntimeHost_GetMethod(domain, assemblyname, namespace, typename, methodname,
+    if (!RuntimeHost_GetMethod(assemblyname, namespace, typename, methodname,
             arg_count, &method))
     {
-        domain_restore(prev_domain);
         return E_FAIL;
     }
 
@@ -332,22 +402,19 @@ static HRESULT RuntimeHost_VirtualInvoke(RuntimeHost *This, MonoDomain *domain,
     if (!method)
     {
         ERR("Object %p does not support method %s.%s:%s\n", obj, namespace, typename, methodname);
-        domain_restore(prev_domain);
         return E_FAIL;
     }
 
-    hr = RuntimeHost_DoInvoke(This, domain, methodname, method, obj, args, result);
+    hr = RuntimeHost_DoInvoke(This, methodname, method, obj, args, result);
     if (FAILED(hr))
     {
         ERR("Method %s.%s:%s raised an exception, hr=%lx\n", namespace, typename, methodname, hr);
     }
 
-    domain_restore(prev_domain);
-
     return hr;
 }
 
-static HRESULT RuntimeHost_GetObjectForIUnknown(RuntimeHost *This, MonoDomain *domain,
+static HRESULT RuntimeHost_GetObjectForIUnknown(RuntimeHost *This,
     IUnknown *unk, MonoObject **obj)
 {
     HRESULT hr;
@@ -355,7 +422,7 @@ static HRESULT RuntimeHost_GetObjectForIUnknown(RuntimeHost *This, MonoDomain *d
     MonoObject *result;
 
     args[0] = &unk;
-    hr = RuntimeHost_Invoke(This, domain, NULL, "System.Runtime.InteropServices", "Marshal", "GetObjectForIUnknown",
+    hr = RuntimeHost_Invoke(This, NULL, "System.Runtime.InteropServices", "Marshal", "GetObjectForIUnknown",
         NULL, args, 1, &result);
 
     if (SUCCEEDED(hr))
@@ -370,9 +437,10 @@ static HRESULT RuntimeHost_AddDomain(RuntimeHost *This, const WCHAR *name, IUnkn
 {
     HRESULT res;
     char *nameA;
-    MonoDomain *domain;
+    MonoDomain *domain, *prev_domain;
     void *args[3];
     MonoObject *new_domain, *id;
+    void *attach_cookie;
 
     res = RuntimeHost_GetDefaultDomain(This, NULL, &domain);
     if (FAILED(res))
@@ -386,19 +454,23 @@ static HRESULT RuntimeHost_AddDomain(RuntimeHost *This, const WCHAR *name, IUnkn
         return E_OUTOFMEMORY;
     }
 
+    prev_domain = mono_threads_attach_coop(domain, &attach_cookie);
+
     args[0] = mono_string_new(domain, nameA);
     free(nameA);
 
     if (!args[0])
     {
+        mono_threads_detach_coop(prev_domain, &attach_cookie);
         return E_OUTOFMEMORY;
     }
 
     if (evidence)
     {
-        res = RuntimeHost_GetObjectForIUnknown(This, domain, evidence, (MonoObject **)&args[1]);
+        res = RuntimeHost_GetObjectForIUnknown(This, evidence, (MonoObject **)&args[1]);
         if (FAILED(res))
         {
+            mono_threads_detach_coop(prev_domain, &attach_cookie);
             return res;
         }
     }
@@ -409,9 +481,10 @@ static HRESULT RuntimeHost_AddDomain(RuntimeHost *This, const WCHAR *name, IUnkn
 
     if (setup)
     {
-        res = RuntimeHost_GetObjectForIUnknown(This, domain, setup, (MonoObject **)&args[2]);
+        res = RuntimeHost_GetObjectForIUnknown(This, setup, (MonoObject **)&args[2]);
         if (FAILED(res))
         {
+            mono_threads_detach_coop(prev_domain, &attach_cookie);
             return res;
         }
     }
@@ -420,11 +493,12 @@ static HRESULT RuntimeHost_AddDomain(RuntimeHost *This, const WCHAR *name, IUnkn
         args[2] = NULL;
     }
 
-    res = RuntimeHost_Invoke(This, domain, NULL, "System", "AppDomain", "CreateDomain",
+    res = RuntimeHost_Invoke(This, NULL, "System", "AppDomain", "CreateDomain",
         NULL, args, 3, &new_domain);
 
     if (FAILED(res))
     {
+        mono_threads_detach_coop(prev_domain, &attach_cookie);
         return res;
     }
 
@@ -434,11 +508,12 @@ static HRESULT RuntimeHost_AddDomain(RuntimeHost *This, const WCHAR *name, IUnkn
      * Instead, do a vcall.
      */
 
-    res = RuntimeHost_VirtualInvoke(This, domain, NULL, "System", "AppDomain", "get_Id",
+    res = RuntimeHost_VirtualInvoke(This, NULL, "System", "AppDomain", "get_Id",
         new_domain, NULL, 0, &id);
 
     if (FAILED(res))
     {
+        mono_threads_detach_coop(prev_domain, &attach_cookie);
         return res;
     }
 
@@ -446,16 +521,22 @@ static HRESULT RuntimeHost_AddDomain(RuntimeHost *This, const WCHAR *name, IUnkn
 
     *result = mono_domain_get_by_id(*(int *)mono_object_unbox(id));
 
+    mono_threads_detach_coop(prev_domain, &attach_cookie);
+
     return S_OK;
 }
 
 static HRESULT RuntimeHost_GetIUnknownForDomain(RuntimeHost *This, MonoDomain *domain, IUnknown **punk)
 {
     HRESULT hr;
+    MonoDomain *prev_domain;
     MonoObject *appdomain_object;
     IUnknown *unk;
+    void *attach_cookie;
 
-    hr = RuntimeHost_Invoke(This, domain, NULL, "System", "AppDomain", "get_CurrentDomain",
+    prev_domain = mono_threads_attach_coop(domain, &attach_cookie);
+
+    hr = RuntimeHost_Invoke(This, NULL, "System", "AppDomain", "get_CurrentDomain",
         NULL, NULL, 0, &appdomain_object);
 
     if (SUCCEEDED(hr))
@@ -468,6 +549,8 @@ static HRESULT RuntimeHost_GetIUnknownForDomain(RuntimeHost *This, MonoDomain *d
         IUnknown_Release(unk);
     }
 
+    mono_threads_detach_coop(prev_domain, &attach_cookie);
+
     return hr;
 }
 
@@ -475,8 +558,9 @@ void RuntimeHost_ExitProcess(RuntimeHost *This, INT exitcode)
 {
     HRESULT hr;
     void *args[2];
-    MonoDomain *domain;
+    MonoDomain *domain, *prev_domain;
     MonoObject *dummy;
+    void *attach_cookie;
 
     hr = RuntimeHost_GetDefaultDomain(This, NULL, &domain);
     if (FAILED(hr))
@@ -485,12 +569,16 @@ void RuntimeHost_ExitProcess(RuntimeHost *This, INT exitcode)
         return;
     }
 
+    prev_domain = mono_threads_attach_coop(domain, &attach_cookie);
+
     args[0] = &exitcode;
     args[1] = NULL;
-    RuntimeHost_Invoke(This, domain, NULL, "System", "Environment", "Exit",
+    RuntimeHost_Invoke(This, NULL, "System", "Environment", "Exit",
         NULL, args, 1, &dummy);
 
     ERR("Process should have exited\n");
+
+    mono_threads_detach_coop(prev_domain, &attach_cookie);
 }
 
 static inline RuntimeHost *impl_from_ICLRRuntimeHost( ICLRRuntimeHost *iface )
@@ -710,19 +798,11 @@ static HRESULT WINAPI corruntimehost_CreateDomainSetup(
 {
     RuntimeHost *This = impl_from_ICorRuntimeHost( iface );
     HRESULT hr;
-    MonoDomain *domain;
-    MonoObject *obj;
     static const WCHAR classnameW[] = {'S','y','s','t','e','m','.','A','p','p','D','o','m','a','i','n','S','e','t','u','p',',','m','s','c','o','r','l','i','b',0};
 
     TRACE("(%p)\n", iface);
 
-    hr = RuntimeHost_GetDefaultDomain(This, NULL, &domain);
-
-    if (SUCCEEDED(hr))
-        hr = RuntimeHost_CreateManagedInstance(This, classnameW, domain, &obj);
-
-    if (SUCCEEDED(hr))
-        hr = RuntimeHost_GetIUnknownForObject(This, obj, appDomainSetup);
+    hr = RuntimeHost_CreateManagedInstance(This, classnameW, appDomainSetup);
 
     return hr;
 }
@@ -831,15 +911,83 @@ static HRESULT WINAPI CLRRuntimeHost_Stop(ICLRRuntimeHost* iface)
 static HRESULT WINAPI CLRRuntimeHost_SetHostControl(ICLRRuntimeHost* iface,
     IHostControl *pHostControl)
 {
+#ifdef __REACTOS__
+    static const struct
+    {
+        const GUID *iid;
+        const char *name;
+    } host_managers[] =
+    {
+        { &IID_IHostMemoryManager, "memory manager" },
+        { &IID_IHostTaskManager, "task manager" },
+        { &IID_IHostThreadpoolManager, "thread pool manager" },
+        { &IID_IHostIoCompletionManager, "I/O completion manager" },
+        { &IID_IHostSyncManager, "synchronization manager" },
+        { &IID_IHostAssemblyManager, "assembly manager" },
+        { &IID_IHostGCManager, "GC manager" },
+        { &IID_IHostSecurityManager, "security manager" },
+        { &IID_IHostPolicyManager, "policy manager" },
+    };
+    RuntimeHost *This = impl_from_ICLRRuntimeHost( iface );
+    IHostControl *old;
+    IUnknown *manager;
+    unsigned int i;
+    BOOL started;
+
+    TRACE("(%p,%p)\n", iface, pHostControl);
+
+    if (!pHostControl)
+        return E_INVALIDARG;
+
+    EnterCriticalSection(&This->lock);
+    started = This->default_domain_started;
+    LeaveCriticalSection(&This->lock);
+    if (started)
+        return E_ACCESSDENIED;
+
+    for (i = 0; i < ARRAY_SIZE(host_managers); i++)
+    {
+        manager = NULL;
+        if (SUCCEEDED(IHostControl_GetHostManager(pHostControl, host_managers[i].iid, (void **)&manager)) && manager)
+        {
+            FIXME("the host %s is not used\n", host_managers[i].name);
+            IUnknown_Release(manager);
+        }
+    }
+
+    IHostControl_AddRef(pHostControl);
+    EnterCriticalSection(&This->lock);
+    old = This->host_control;
+    This->host_control = pHostControl;
+    LeaveCriticalSection(&This->lock);
+    if (old)
+        IHostControl_Release(old);
+
+    return S_OK;
+#else
     FIXME("(%p,%p)\n", iface, pHostControl);
-    return E_NOTIMPL;
+    return S_OK;
+#endif
 }
 
 static HRESULT WINAPI CLRRuntimeHost_GetCLRControl(ICLRRuntimeHost* iface,
     ICLRControl **pCLRControl)
 {
+#ifdef __REACTOS__
+    RuntimeHost *This = impl_from_ICLRRuntimeHost( iface );
+
+    TRACE("(%p,%p)\n", iface, pCLRControl);
+
+    if (!pCLRControl)
+        return E_POINTER;
+
+    *pCLRControl = &This->ICLRControl_iface;
+    ICLRControl_AddRef(*pCLRControl);
+    return S_OK;
+#else
     FIXME("(%p,%p)\n", iface, pCLRControl);
     return E_NOTIMPL;
+#endif
 }
 
 static HRESULT WINAPI CLRRuntimeHost_UnloadAppDomain(ICLRRuntimeHost* iface,
@@ -880,6 +1028,7 @@ static HRESULT WINAPI CLRRuntimeHost_ExecuteInDefaultAppDomain(ICLRRuntimeHost* 
     MonoDomain *domain, *prev_domain;
     MonoObject *result;
     MonoString *str;
+    void *attach_cookie;
     char *filenameA = NULL, *classA = NULL, *methodA = NULL;
     char *argsA = NULL, *ns;
 
@@ -891,7 +1040,7 @@ static HRESULT WINAPI CLRRuntimeHost_ExecuteInDefaultAppDomain(ICLRRuntimeHost* 
     if (FAILED(hr))
         return hr;
 
-    prev_domain = domain_attach(domain);
+    prev_domain = mono_threads_attach_coop(domain, &attach_cookie);
 
     if (SUCCEEDED(hr))
     {
@@ -937,14 +1086,14 @@ static HRESULT WINAPI CLRRuntimeHost_ExecuteInDefaultAppDomain(ICLRRuntimeHost* 
 
     if (SUCCEEDED(hr))
     {
-        hr = RuntimeHost_Invoke(This, domain, filenameA, classA, ns+1, methodA,
+        hr = RuntimeHost_Invoke(This, filenameA, classA, ns+1, methodA,
             NULL, (void**)&str, 1, &result);
     }
 
     if (SUCCEEDED(hr))
         *pReturnValue = *(DWORD*)mono_object_unbox(result);
 
-    domain_restore(prev_domain);
+    mono_threads_detach_coop(prev_domain, &attach_cookie);
 
     free(filenameA);
     free(classA);
@@ -953,6 +1102,431 @@ static HRESULT WINAPI CLRRuntimeHost_ExecuteInDefaultAppDomain(ICLRRuntimeHost* 
 
     return hr;
 }
+
+#ifdef __REACTOS__
+static inline RuntimeHost *impl_from_ICLRControl( ICLRControl *iface )
+{
+    return CONTAINING_RECORD(iface, RuntimeHost, ICLRControl_iface);
+}
+
+static HRESULT WINAPI CLRControl_QueryInterface(ICLRControl *iface, REFIID riid, void **ppvObject)
+{
+    TRACE("%p %s %p\n", iface, debugstr_guid(riid), ppvObject);
+
+    if (!ppvObject)
+        return E_POINTER;
+
+    if (IsEqualGUID(riid, &IID_ICLRControl) || IsEqualGUID(riid, &IID_IUnknown))
+    {
+        *ppvObject = iface;
+        ICLRControl_AddRef(iface);
+        return S_OK;
+    }
+
+    *ppvObject = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI CLRControl_AddRef(ICLRControl *iface)
+{
+    RuntimeHost *This = impl_from_ICLRControl( iface );
+    return ICorRuntimeHost_AddRef(&This->ICorRuntimeHost_iface);
+}
+
+static ULONG WINAPI CLRControl_Release(ICLRControl *iface)
+{
+    RuntimeHost *This = impl_from_ICLRControl( iface );
+    return ICorRuntimeHost_Release(&This->ICorRuntimeHost_iface);
+}
+
+static HRESULT WINAPI CLROnEventManager_QueryInterface(ICLROnEventManager *iface, REFIID riid, void **ppvObject)
+{
+    TRACE("%p %s %p\n", iface, debugstr_guid(riid), ppvObject);
+
+    if (!ppvObject)
+        return E_POINTER;
+
+    if (IsEqualGUID(riid, &IID_ICLROnEventManager) || IsEqualGUID(riid, &IID_IUnknown))
+    {
+        *ppvObject = iface;
+        return S_OK;
+    }
+
+    *ppvObject = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI CLROnEventManager_AddRef(ICLROnEventManager *iface)
+{
+    return 2;
+}
+
+static ULONG WINAPI CLROnEventManager_Release(ICLROnEventManager *iface)
+{
+    return 1;
+}
+
+static HRESULT WINAPI CLROnEventManager_RegisterActionOnEvent(ICLROnEventManager *iface,
+    EClrEvent event, IActionOnCLREvent *action)
+{
+    struct clr_event_action *entry;
+
+    TRACE("(%p,%d,%p)\n", iface, event, action);
+
+    if ((unsigned int)event >= MaxClrEvent || !action)
+        return E_INVALIDARG;
+
+    entry = malloc(sizeof(*entry));
+    if (!entry)
+        return E_OUTOFMEMORY;
+
+    entry->event = event;
+    entry->action = action;
+    IActionOnCLREvent_AddRef(action);
+
+    EnterCriticalSection(&clr_event_cs);
+    list_add_tail(&clr_event_actions, &entry->entry);
+    LeaveCriticalSection(&clr_event_cs);
+
+    return S_OK;
+}
+
+static HRESULT WINAPI CLROnEventManager_UnregisterActionOnEvent(ICLROnEventManager *iface,
+    EClrEvent event, IActionOnCLREvent *action)
+{
+    struct clr_event_action *entry, *found = NULL;
+
+    TRACE("(%p,%d,%p)\n", iface, event, action);
+
+    EnterCriticalSection(&clr_event_cs);
+    LIST_FOR_EACH_ENTRY(entry, &clr_event_actions, struct clr_event_action, entry)
+    {
+        if (entry->event == event && entry->action == action)
+        {
+            found = entry;
+            list_remove(&entry->entry);
+            break;
+        }
+    }
+    LeaveCriticalSection(&clr_event_cs);
+
+    if (!found)
+        return HOST_E_INVALIDOPERATION;
+
+    IActionOnCLREvent_Release(found->action);
+    free(found);
+    return S_OK;
+}
+
+static const struct ICLROnEventManagerVtbl CLROnEventManagerVtbl =
+{
+    CLROnEventManager_QueryInterface,
+    CLROnEventManager_AddRef,
+    CLROnEventManager_Release,
+    CLROnEventManager_RegisterActionOnEvent,
+    CLROnEventManager_UnregisterActionOnEvent
+};
+
+static ICLROnEventManager clr_on_event_manager = { &CLROnEventManagerVtbl };
+
+void RuntimeHost_NotifyEvent(EClrEvent event, void *data)
+{
+    struct clr_event_action *entry;
+    IActionOnCLREvent **actions = NULL, **grown;
+    unsigned int count = 0, size = 0, i;
+
+    EnterCriticalSection(&clr_event_cs);
+    LIST_FOR_EACH_ENTRY(entry, &clr_event_actions, struct clr_event_action, entry)
+    {
+        if (entry->event != event)
+            continue;
+        if (count == size)
+        {
+            size = size ? size * 2 : 4;
+            grown = realloc(actions, size * sizeof(*actions));
+            if (!grown)
+                break;
+            actions = grown;
+        }
+        actions[count] = entry->action;
+        IActionOnCLREvent_AddRef(actions[count]);
+        count++;
+    }
+    LeaveCriticalSection(&clr_event_cs);
+
+    for (i = 0; i < count; i++)
+    {
+        IActionOnCLREvent_OnEvent(actions[i], event, data);
+        IActionOnCLREvent_Release(actions[i]);
+    }
+    free(actions);
+}
+
+static HRESULT WINAPI CLRControl_GetCLRManager(ICLRControl *iface, REFIID riid, void **ppObject)
+{
+    TRACE("(%p,%s,%p)\n", iface, debugstr_guid(riid), ppObject);
+
+    if (!ppObject)
+        return E_INVALIDARG;
+
+    if (IsEqualGUID(riid, &IID_ICLROnEventManager))
+    {
+        *ppObject = &clr_on_event_manager;
+        return S_OK;
+    }
+
+    if (IsEqualGUID(riid, &IID_ICLRDomainManager))
+    {
+        RuntimeHost *This = impl_from_ICLRControl( iface );
+
+        *ppObject = &This->ICLRDomainManager_iface;
+        ICLRDomainManager_AddRef(&This->ICLRDomainManager_iface);
+        return S_OK;
+    }
+
+    FIXME("(%p,%s,%p): no CLR manager\n", iface, debugstr_guid(riid), ppObject);
+    return E_NOINTERFACE;
+}
+
+static HRESULT RuntimeHost_SetDomainManagerType(RuntimeHost *This, LPCWSTR assembly_name,
+    LPCWSTR type_name, DWORD flags)
+{
+    WCHAR *assembly, *type;
+    HRESULT hr = S_OK;
+
+    if (!assembly_name || !type_name || (flags & ~eInitializeNewDomainFlags_NoSecurityChanges))
+        return E_INVALIDARG;
+
+    assembly = wcsdup(assembly_name);
+    type = wcsdup(type_name);
+    if (!assembly || !type)
+    {
+        free(assembly);
+        free(type);
+        return E_OUTOFMEMORY;
+    }
+
+    EnterCriticalSection(&This->lock);
+    if (This->default_domain_started || This->domain_manager_assembly)
+        hr = HOST_E_INVALIDOPERATION;
+    else
+    {
+        This->domain_manager_assembly = assembly;
+        This->domain_manager_type = type;
+    }
+    LeaveCriticalSection(&This->lock);
+
+    if (FAILED(hr))
+    {
+        free(assembly);
+        free(type);
+    }
+
+    return hr;
+}
+
+static HRESULT WINAPI CLRControl_SetAppDomainManagerType(ICLRControl *iface,
+    LPCWSTR appDomainManagerAssembly, LPCWSTR appDomainManagerType)
+{
+    RuntimeHost *This = impl_from_ICLRControl( iface );
+
+    TRACE("(%p,%s,%s)\n", iface, debugstr_w(appDomainManagerAssembly), debugstr_w(appDomainManagerType));
+
+    return RuntimeHost_SetDomainManagerType(This, appDomainManagerAssembly, appDomainManagerType,
+        eInitializeNewDomainFlags_None);
+}
+
+static inline RuntimeHost *impl_from_ICLRDomainManager( ICLRDomainManager *iface )
+{
+    return CONTAINING_RECORD(iface, RuntimeHost, ICLRDomainManager_iface);
+}
+
+static HRESULT WINAPI CLRDomainManager_QueryInterface(ICLRDomainManager *iface, REFIID riid, void **ppvObject)
+{
+    TRACE("%p %s %p\n", iface, debugstr_guid(riid), ppvObject);
+
+    if (!ppvObject)
+        return E_POINTER;
+
+    if (IsEqualGUID(riid, &IID_ICLRDomainManager) || IsEqualGUID(riid, &IID_IUnknown))
+    {
+        *ppvObject = iface;
+        ICLRDomainManager_AddRef(iface);
+        return S_OK;
+    }
+
+    *ppvObject = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI CLRDomainManager_AddRef(ICLRDomainManager *iface)
+{
+    RuntimeHost *This = impl_from_ICLRDomainManager( iface );
+    return ICorRuntimeHost_AddRef(&This->ICorRuntimeHost_iface);
+}
+
+static ULONG WINAPI CLRDomainManager_Release(ICLRDomainManager *iface)
+{
+    RuntimeHost *This = impl_from_ICLRDomainManager( iface );
+    return ICorRuntimeHost_Release(&This->ICorRuntimeHost_iface);
+}
+
+static HRESULT WINAPI CLRDomainManager_SetAppDomainManagerType(ICLRDomainManager *iface,
+    LPCWSTR wszAppDomainManagerAssembly, LPCWSTR wszAppDomainManagerType,
+    EInitializeNewDomainFlags dwInitializeDomainFlags)
+{
+    RuntimeHost *This = impl_from_ICLRDomainManager( iface );
+
+    TRACE("(%p,%s,%s,%x)\n", iface, debugstr_w(wszAppDomainManagerAssembly),
+        debugstr_w(wszAppDomainManagerType), dwInitializeDomainFlags);
+
+    return RuntimeHost_SetDomainManagerType(This, wszAppDomainManagerAssembly, wszAppDomainManagerType,
+        dwInitializeDomainFlags);
+}
+
+static HRESULT WINAPI CLRDomainManager_SetPropertiesForDefaultAppDomain(ICLRDomainManager *iface,
+    DWORD nProperties, LPCWSTR *pwszPropertyNames, LPCWSTR *pwszPropertyValues)
+{
+    RuntimeHost *This = impl_from_ICLRDomainManager( iface );
+    HRESULT hr = S_OK;
+    DWORD i;
+
+    TRACE("(%p,%lu,%p,%p)\n", iface, nProperties, pwszPropertyNames, pwszPropertyValues);
+
+    if (nProperties && (!pwszPropertyNames || !pwszPropertyValues))
+        return E_INVALIDARG;
+
+    EnterCriticalSection(&This->lock);
+    if (This->default_domain_started)
+        hr = HOST_E_INVALIDOPERATION;
+    for (i = 0; SUCCEEDED(hr) && i < nProperties; i++)
+    {
+        TRACE("%s=%s\n", debugstr_w(pwszPropertyNames[i]), debugstr_w(pwszPropertyValues[i]));
+        if (!pwszPropertyNames[i] || wcscmp(pwszPropertyNames[i], L"PARTIAL_TRUST_VISIBLE_ASSEMBLIES"))
+            hr = HRESULT_FROM_WIN32(ERROR_UNKNOWN_PROPERTY);
+    }
+    LeaveCriticalSection(&This->lock);
+
+    return hr;
+}
+
+static const struct ICLRDomainManagerVtbl CLRDomainManagerVtbl =
+{
+    CLRDomainManager_QueryInterface,
+    CLRDomainManager_AddRef,
+    CLRDomainManager_Release,
+    CLRDomainManager_SetAppDomainManagerType,
+    CLRDomainManager_SetPropertiesForDefaultAppDomain
+};
+
+static const struct ICLRControlVtbl CLRControlVtbl =
+{
+    CLRControl_QueryInterface,
+    CLRControl_AddRef,
+    CLRControl_Release,
+    CLRControl_GetCLRManager,
+    CLRControl_SetAppDomainManagerType
+};
+
+static void RuntimeHost_ApplyDomainConfiguration(RuntimeHost *This)
+{
+    WCHAR exe_config[MAX_PATH], *config;
+    parsed_config_file parsed_config;
+    MonoObject *result = NULL;
+    char *configA;
+    int len;
+
+    if (FAILED(RuntimeHost_Invoke(This, NULL, "System", "AppDomain", "GetConfigurationFileInternal", NULL, NULL, 0, &result)) || !result)
+        return;
+
+    configA = mono_string_to_utf8((MonoString *)result);
+    if (!configA)
+        return;
+    len = MultiByteToWideChar(CP_UTF8, 0, configA, -1, NULL, 0);
+    config = len ? malloc(len * sizeof(WCHAR)) : NULL;
+    if (config)
+        MultiByteToWideChar(CP_UTF8, 0, configA, -1, config, len);
+    mono_free(configA);
+    if (!config)
+        return;
+
+    GetModuleFileNameW(NULL, exe_config, MAX_PATH);
+    lstrcatW(exe_config, L".config");
+    if (config[0] && _wcsicmp(config, exe_config) && SUCCEEDED(parse_config_file(config, &parsed_config)))
+    {
+        TRACE("domain manager configuration %s\n", debugstr_w(config));
+        replace_app_assembly_bindings(&parsed_config.assembly_bindings);
+        free_parsed_config_file(&parsed_config);
+    }
+    free(config);
+}
+
+static void RuntimeHost_InitializeDomainManager(RuntimeHost *This, MonoDomain *domain)
+{
+    char *assemblyA = NULL, *typeA = NULL;
+    IHostControl *host_control;
+    MonoDomain *prev_domain;
+    MonoObject *manager;
+    void *attach_cookie;
+    void *args[2];
+    IUnknown *unk;
+    HRESULT hr;
+
+    EnterCriticalSection(&This->lock);
+    if (This->domain_manager_assembly && This->domain_manager_type)
+    {
+        assemblyA = WtoA(This->domain_manager_assembly);
+        typeA = WtoA(This->domain_manager_type);
+    }
+    LeaveCriticalSection(&This->lock);
+
+    if (!assemblyA || !typeA)
+    {
+        free(assemblyA);
+        free(typeA);
+        return;
+    }
+
+    prev_domain = mono_threads_attach_coop(domain, &attach_cookie);
+
+    args[0] = mono_string_new(domain, assemblyA);
+    args[1] = mono_string_new(domain, typeA);
+    hr = RuntimeHost_Invoke(This, NULL, "System", "AppDomain", "InitializeDomainManager",
+        NULL, args, 2, &manager);
+    if (FAILED(hr))
+        ERR("Could not create the application domain manager %s from %s, hr=%lx\n", typeA, assemblyA, hr);
+
+    if (SUCCEEDED(hr) && manager)
+    {
+        EnterCriticalSection(&This->lock);
+        host_control = This->host_control;
+        if (host_control)
+            IHostControl_AddRef(host_control);
+        LeaveCriticalSection(&This->lock);
+
+        if (host_control)
+        {
+            hr = RuntimeHost_GetIUnknownForObject(This, manager, &unk);
+            if (SUCCEEDED(hr))
+            {
+                hr = IHostControl_SetAppDomainManager(host_control, mono_domain_get_id(domain), unk);
+                if (FAILED(hr))
+                    WARN("The host refused the application domain manager, hr=%lx\n", hr);
+                IUnknown_Release(unk);
+            }
+            IHostControl_Release(host_control);
+        }
+    }
+
+    if (SUCCEEDED(hr))
+        RuntimeHost_ApplyDomainConfiguration(This);
+
+    mono_threads_detach_coop(prev_domain, &attach_cookie);
+
+    free(assemblyA);
+    free(typeA);
+}
+#endif
 
 static const struct ICLRRuntimeHostVtbl CLRHostVtbl =
 {
@@ -971,32 +1545,28 @@ static const struct ICLRRuntimeHostVtbl CLRHostVtbl =
 };
 
 /* Create an instance of a type given its name, by calling its constructor with
- * no arguments. Note that result MUST be in the stack, or the garbage
- * collector may free it prematurely. */
-HRESULT RuntimeHost_CreateManagedInstance(RuntimeHost *This, LPCWSTR name,
-    MonoDomain *domain, MonoObject **result)
+ * no arguments. */
+HRESULT RuntimeHost_CreateManagedInstance(RuntimeHost *This, LPCWSTR name, IUnknown **result)
 {
     HRESULT hr=S_OK;
     char *nameA=NULL;
     MonoType *type;
     MonoClass *klass;
     MonoObject *obj;
-    MonoDomain *prev_domain;
+    MonoDomain *domain, *prev_domain;
+    void *attach_cookie;
 
-    if (!domain)
-        hr = RuntimeHost_GetDefaultDomain(This, NULL, &domain);
-
+    hr = RuntimeHost_GetDefaultDomain(This, NULL, &domain);
     if (FAILED(hr))
-        return hr;
-
-    prev_domain = domain_attach(domain);
-
-    if (SUCCEEDED(hr))
     {
-        nameA = WtoA(name);
-        if (!nameA)
-            hr = E_OUTOFMEMORY;
+        return hr;
     }
+
+    nameA = WtoA(name);
+    if (!nameA)
+        hr = E_OUTOFMEMORY;
+
+    prev_domain = mono_threads_attach_coop(domain, &attach_cookie);
 
     if (SUCCEEDED(hr))
     {
@@ -1032,10 +1602,12 @@ HRESULT RuntimeHost_CreateManagedInstance(RuntimeHost *This, LPCWSTR name,
     {
         /* FIXME: Detect exceptions from the constructor? */
         mono_runtime_object_init(obj);
-        *result = obj;
     }
 
-    domain_restore(prev_domain);
+    if (SUCCEEDED(hr))
+        hr = RuntimeHost_GetIUnknownForObject(This, obj, result);
+
+    mono_threads_detach_coop(prev_domain, &attach_cookie);
 
     free(nameA);
 
@@ -1053,13 +1625,10 @@ HRESULT RuntimeHost_CreateManagedInstance(RuntimeHost *This, LPCWSTR name,
 HRESULT RuntimeHost_GetIUnknownForObject(RuntimeHost *This, MonoObject *obj,
     IUnknown **ppUnk)
 {
-    MonoDomain *domain;
     MonoObject *result;
     HRESULT hr;
 
-    domain = mono_object_get_domain(obj);
-
-    hr = RuntimeHost_Invoke(This, domain, NULL, "System.Runtime.InteropServices", "Marshal", "GetIUnknownForObject",
+    hr = RuntimeHost_Invoke(This, NULL, "System.Runtime.InteropServices", "Marshal", "GetIUnknownForObject",
         NULL, (void**)&obj, 1, &result);
 
     if (SUCCEEDED(hr))
@@ -1070,40 +1639,89 @@ HRESULT RuntimeHost_GetIUnknownForObject(RuntimeHost *This, MonoObject *obj,
     return hr;
 }
 
+#ifdef __REACTOS__
+static BOOL get_utf8_args(int *argc, char ***argv)
+#else
 static void get_utf8_args(int *argc, char ***argv)
+#endif
 {
     WCHAR **argvw;
+#ifdef __REACTOS__
+    int size, i, len;
+#else
     int size=0, i;
+#endif
     char *current_arg;
 
+#ifdef __REACTOS__
+    *argc = 0;
+    *argv = NULL;
+#endif
     argvw = CommandLineToArgvW(GetCommandLineW(), argc);
+#ifdef __REACTOS__
+    if (!argvw) return FALSE;
+    if (*argc < 0 || (SIZE_T)*argc >= MAXLONG / sizeof(char *))
+        goto failed;
+    size = ((SIZE_T)*argc + 1) * sizeof(char *);
+#endif
 
     for (i=0; i<*argc; i++)
     {
+#ifdef __REACTOS__
+        len = WideCharToMultiByte(CP_UTF8, 0, argvw[i], -1, NULL, 0, NULL, NULL);
+        if (!len || len > MAXLONG - size) goto failed;
+        size += len;
+#else
         size += sizeof(char*);
         size += WideCharToMultiByte(CP_UTF8, 0, argvw[i], -1, NULL, 0, NULL, NULL);
+#endif
     }
+#ifndef __REACTOS__
     size += sizeof(char*);
+#endif
 
     *argv = malloc(size);
+#ifdef __REACTOS__
+    if (!*argv) goto failed;
+#endif
     current_arg = (char*)(*argv + *argc + 1);
+#ifdef __REACTOS__
+    size -= ((SIZE_T)*argc + 1) * sizeof(char *);
+#endif
 
     for (i=0; i<*argc; i++)
     {
         (*argv)[i] = current_arg;
+#ifdef __REACTOS__
+        len = WideCharToMultiByte(CP_UTF8, 0, argvw[i], -1, current_arg, size, NULL, NULL);
+        if (!len) goto failed;
+        current_arg += len;
+        size -= len;
+#else
         current_arg += WideCharToMultiByte(CP_UTF8, 0, argvw[i], -1, current_arg, size, NULL, NULL);
+#endif
     }
 
     (*argv)[*argc] = NULL;
 
     LocalFree(argvw);
+#ifdef __REACTOS__
+    return TRUE;
+
+failed:
+    free(*argv);
+    *argv = NULL;
+    *argc = 0;
+    LocalFree(argvw);
+    return FALSE;
+#endif
 }
 
 #if __i386__
 
 # define CAN_FIXUP_VTABLE 1
 
-#include "pshpack1.h"
+#pragma pack(push,1)
 
 struct vtable_fixup_thunk
 {
@@ -1142,13 +1760,13 @@ static const struct vtable_fixup_thunk thunk_template = {
     NULL
 };
 
-#include "poppack.h"
+#pragma pack(pop)
 
 #elif __x86_64__ /* !__i386__ */
 
 # define CAN_FIXUP_VTABLE 1
 
-#include "pshpack1.h"
+#pragma pack(push,1)
 
 struct vtable_fixup_thunk
 {
@@ -1210,7 +1828,7 @@ static const struct vtable_fixup_thunk thunk_template = {
     {0x48,0x8B,0x00,0xFF,0xE0}
 };
 
-#include "poppack.h"
+#pragma pack(pop)
 
 #else /* !__i386__ && !__x86_64__ */
 
@@ -1233,6 +1851,9 @@ DWORD WINAPI GetTokenForVTableEntry(HINSTANCE hinst, BYTE **ppVTEntry)
     DWORD result = 0;
     DWORD rva;
     int i;
+#ifdef __REACTOS__
+    BOOL found = FALSE;
+#endif
 
     TRACE("%p,%p\n", hinst, ppVTEntry);
 
@@ -1247,9 +1868,17 @@ DWORD WINAPI GetTokenForVTableEntry(HINSTANCE hinst, BYTE **ppVTEntry)
             continue;
         i = (rva - fixup->fixup->rva) / sizeof(ULONG_PTR);
         result = ((ULONG_PTR*)fixup->tokens)[i];
+#ifdef __REACTOS__
+        found = TRUE;
+#endif
         break;
     }
     LeaveCriticalSection(&fixup_list_cs);
+
+#ifdef __REACTOS__
+    if (!found)
+        result = (DWORD)(ULONG_PTR)*ppVTEntry;
+#endif
 
     TRACE("<-- %lx\n", result);
     return result;
@@ -1266,6 +1895,7 @@ static void CDECL ReallyFixupVTable(struct dll_fixup *fixup)
     MonoAssembly *assembly=NULL;
     MonoImageOpenStatus status=0;
     MonoDomain *domain;
+    void *attach_cookie;
 
     if (fixup->done) return;
 
@@ -1293,7 +1923,7 @@ static void CDECL ReallyFixupVTable(struct dll_fixup *fixup)
     {
         MonoDomain *prev_domain;
 
-        prev_domain = domain_attach(domain);
+        prev_domain = mono_threads_attach_coop(domain, &attach_cookie);
 
         assembly = mono_assembly_open(filenameA, &status);
 
@@ -1322,7 +1952,7 @@ static void CDECL ReallyFixupVTable(struct dll_fixup *fixup)
             fixup->done = TRUE;
         }
 
-        domain_restore(prev_domain);
+        mono_threads_detach_coop(prev_domain, &attach_cookie);
     }
 
     if (info != NULL)
@@ -1350,6 +1980,10 @@ static void FixupVTableEntry(HMODULE hmodule, VTableFixup *vtable_fixup)
     struct dll_fixup *fixup;
 
     fixup = malloc(sizeof(*fixup));
+#ifdef __REACTOS__
+    if (!fixup)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     fixup->dll = hmodule;
     fixup->thunk_code = HeapAlloc(dll_fixup_heap, 0, sizeof(struct vtable_fixup_thunk) * vtable_fixup->count);
@@ -1369,6 +2003,10 @@ static void FixupVTableEntry(HMODULE hmodule, VTableFixup *vtable_fixup)
         struct vtable_fixup_thunk *thunks = fixup->thunk_code;
 
         tokens = fixup->tokens = malloc(sizeof(*tokens) * vtable_fixup->count);
+#ifdef __REACTOS__
+        if (!tokens)
+            RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
         memcpy(tokens, vtable, sizeof(*tokens) * vtable_fixup->count);
         for (i=0; i<vtable_fixup->count; i++)
         {
@@ -1427,10 +2065,11 @@ __int32 WINAPI _CorExeMain(void)
     int exit_code;
     int argc;
     char **argv;
-    MonoDomain *domain=NULL;
+    MonoDomain *domain=NULL, *prev_domain=NULL;
     MonoImage *image;
     MonoImageOpenStatus status;
     MonoAssembly *assembly=NULL;
+    void *attach_cookie;
     WCHAR filename[MAX_PATH], config_file[MAX_PATH], *temp, **priv_path;
     SIZE_T config_file_dir_size;
     char *filenameA;
@@ -1440,7 +2079,11 @@ __int32 WINAPI _CorExeMain(void)
     HRESULT hr;
     int i, number_of_private_paths = 0;
 
+#ifdef __REACTOS__
+    if (!get_utf8_args(&argc, &argv)) return -1;
+#else
     get_utf8_args(&argc, &argv);
+#endif
 
     GetModuleFileNameW(NULL, filename, MAX_PATH);
 
@@ -1461,30 +2104,24 @@ __int32 WINAPI _CorExeMain(void)
     hr = parse_config_file(config_file, &parsed_config);
     if (SUCCEEDED(hr) && parsed_config.private_path && parsed_config.private_path[0])
     {
-#ifndef __REACTOS__
         WCHAR *save;
-#endif
         for(i = 0; parsed_config.private_path[i] != 0; i++)
             if (parsed_config.private_path[i] == ';') number_of_private_paths++;
         if (parsed_config.private_path[wcslen(parsed_config.private_path) - 1] != ';') number_of_private_paths++;
         config_file_dir_size = (wcsrchr(config_file, '\\') - config_file) + 1;
         priv_path = malloc((number_of_private_paths + 1) * sizeof(WCHAR *));
-        /* wcstok ignores trailing semicolons */
 #ifdef __REACTOS__
-        temp = wcstok(parsed_config.private_path, scW);
-#else
-        temp = wcstok_s(parsed_config.private_path, scW, &save);
+        if (!priv_path)
+            RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
 #endif
+        /* wcstok ignores trailing semicolons */
+        temp = wcstok_s(parsed_config.private_path, scW, &save);
         for (i = 0; i < number_of_private_paths; i++)
         {
             priv_path[i] = malloc((config_file_dir_size + wcslen(temp) + 1) * sizeof(WCHAR));
             memcpy(priv_path[i], config_file, config_file_dir_size * sizeof(WCHAR));
             wcscpy(priv_path[i] + config_file_dir_size, temp);
-#ifdef __REACTOS__
-            temp = wcstok(NULL, scW);
-#else
             temp = wcstok_s(NULL, scW, &save);
-#endif
         }
         priv_path[number_of_private_paths] = NULL;
         if (InterlockedCompareExchangePointer((void **)&private_path, priv_path, NULL))
@@ -1500,10 +2137,14 @@ __int32 WINAPI _CorExeMain(void)
         hr = ICLRRuntimeInfo_GetRuntimeHost(info, &host);
 
         if (SUCCEEDED(hr))
+        {
             hr = RuntimeHost_GetDefaultDomain(host, config_file, &domain);
+        }
 
         if (SUCCEEDED(hr))
         {
+            prev_domain = mono_threads_attach_coop(domain, &attach_cookie);
+
             image = mono_image_open_from_module_handle(GetModuleHandleW(NULL),
                 filenameA, 1, &status);
 
@@ -1521,6 +2162,8 @@ __int32 WINAPI _CorExeMain(void)
                 ERR("couldn't load %s, status=%d\n", debugstr_w(filename), status);
                 exit_code = -1;
             }
+
+            mono_threads_detach_coop(prev_domain, &attach_cookie);
         }
         else
             exit_code = -1;
@@ -1603,6 +2246,14 @@ HRESULT RuntimeHost_Construct(CLRRuntimeInfo *runtime_version, RuntimeHost** res
 
     This->ICorRuntimeHost_iface.lpVtbl = &corruntimehost_vtbl;
     This->ICLRRuntimeHost_iface.lpVtbl = &CLRHostVtbl;
+#ifdef __REACTOS__
+    This->ICLRControl_iface.lpVtbl = &CLRControlVtbl;
+    This->ICLRDomainManager_iface.lpVtbl = &CLRDomainManagerVtbl;
+    This->host_control = NULL;
+    This->domain_manager_assembly = NULL;
+    This->domain_manager_type = NULL;
+    This->default_domain_started = FALSE;
+#endif
 
     This->ref = 1;
     This->version = runtime_version;
@@ -1729,6 +2380,30 @@ end:
 
 #define CHARS_IN_GUID 39
 
+#ifdef __REACTOS__
+HRESULT check_monodata_assembly(REFCLSID clsid)
+{
+    WCHAR path[CHARS_IN_GUID + 22], classname[350], filename[MAX_PATH];
+    HKEY key;
+
+    lstrcpyW(path, L"CLSID\\");
+    StringFromGUID2(clsid, path + lstrlenW(path), CHARS_IN_GUID);
+    lstrcatW(path, L"\\InprocServer32");
+
+    if (RegOpenKeyExW(HKEY_CLASSES_ROOT, path, 0, KEY_READ, &key) != ERROR_FILE_NOT_FOUND)
+    {
+        RegCloseKey(key);
+        return S_OK;
+    }
+
+    if (try_create_registration_free_com(clsid, classname, ARRAY_SIZE(classname), filename, ARRAY_SIZE(filename)) &&
+        GetFileAttributesW(filename) == INVALID_FILE_ATTRIBUTES)
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+
+    return S_OK;
+}
+
+#endif
 HRESULT create_monodata(REFCLSID clsid, LPVOID *ppObj)
 {
     static const WCHAR wszFileSlash[] = L"file:///";
@@ -1901,6 +2576,14 @@ HRESULT create_monodata(REFCLSID clsid, LPVOID *ppObj)
 
     *ppObj = NULL;
 
+#ifdef __REACTOS__
+    if (GetFileAttributesW(filename) == INVALID_FILE_ATTRIBUTES)
+    {
+        hr = HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+        goto cleanup;
+    }
+#endif
+
 
     hr = get_runtime_info(filename, NULL, NULL, NULL, 0, 0, FALSE, &info);
     if (SUCCEEDED(hr))
@@ -1918,12 +2601,13 @@ HRESULT create_monodata(REFCLSID clsid, LPVOID *ppObj)
             MonoDomain *prev_domain;
             MonoImageOpenStatus status;
             IUnknown *unk = NULL;
+            void *attach_cookie;
             char *filenameA, *ns;
             char *classA;
 
             hr = CLASS_E_CLASSNOTAVAILABLE;
 
-            prev_domain = domain_attach(domain);
+            prev_domain = mono_threads_attach_coop(domain, &attach_cookie);
 
             filenameA = WtoA(filename);
             assembly = mono_assembly_open(filenameA, &status);
@@ -1931,7 +2615,7 @@ HRESULT create_monodata(REFCLSID clsid, LPVOID *ppObj)
             if (!assembly)
             {
                 ERR("Cannot open assembly %s, status=%i\n", debugstr_w(filename), status);
-                domain_restore(prev_domain);
+                mono_threads_detach_coop(prev_domain, &attach_cookie);
                 goto cleanup;
             }
 
@@ -1939,7 +2623,7 @@ HRESULT create_monodata(REFCLSID clsid, LPVOID *ppObj)
             if (!image)
             {
                 ERR("Couldn't get assembly image\n");
-                domain_restore(prev_domain);
+                mono_threads_detach_coop(prev_domain, &attach_cookie);
                 goto cleanup;
             }
 
@@ -1952,7 +2636,7 @@ HRESULT create_monodata(REFCLSID clsid, LPVOID *ppObj)
             if (!klass)
             {
                 ERR("Couldn't get class from image\n");
-                domain_restore(prev_domain);
+                mono_threads_detach_coop(prev_domain, &attach_cookie);
                 goto cleanup;
             }
 
@@ -1972,7 +2656,7 @@ HRESULT create_monodata(REFCLSID clsid, LPVOID *ppObj)
             else
                 hr = CLASS_E_CLASSNOTAVAILABLE;
 
-            domain_restore(prev_domain);
+            mono_threads_detach_coop(prev_domain, &attach_cookie);
         }
         else
             hr = CLASS_E_CLASSNOTAVAILABLE;

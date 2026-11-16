@@ -116,7 +116,7 @@ CServiceGroup::RequestService()
     else
     {
         // check current irql
-        if (KeGetCurrentIrql() > DISPATCH_LEVEL)
+        if (KeGetCurrentIrql() >= DISPATCH_LEVEL)
         {
             //insert dpc to queue
             KeInsertQueueDpc(&m_Dpc, NULL, NULL);
@@ -235,6 +235,9 @@ IServiceGroupDpc(
     CServiceGroup * This = (CServiceGroup*)DeferredContext;
 
     // acquire service group list lock
+
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+
     KeAcquireSpinLockAtDpcLevel(&This->m_Lock);
 
     // grab first entry

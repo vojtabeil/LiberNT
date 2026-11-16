@@ -9,7 +9,7 @@
 #ifndef __WINE_FLOAT_H
 #define __WINE_FLOAT_H
 
-#include <corecrt.h>
+#include "corecrt.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -153,6 +153,7 @@ _ACRTIMP double __cdecl _nextafter(double, double);
 _ACRTIMP int    __cdecl _finite(double);
 _ACRTIMP int    __cdecl _isnan(double);
 _ACRTIMP int    __cdecl _fpclass(double);
+_ACRTIMP int *  __cdecl __fpecode(void);
 
 #ifdef __x86_64__
 _ACRTIMP float __cdecl _scalbf(float, __msvcrt_long);

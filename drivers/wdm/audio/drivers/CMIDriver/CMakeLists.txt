@@ -5,7 +5,7 @@ add_subdirectory(cpl)
 
 # For (NT6+) WaveRT support.
 # See WAVERT define in debug.hpp.
-# remove_definitions(-D_WIN32_WINNT=0x502)
+# remove_definitions(-D_WIN32_WINNT=0x600)
 # add_definitions(-D_WIN32_WINNT=0x600)
 
 list(APPEND SOURCE
@@ -28,10 +28,6 @@ add_importlibs(cmipci portcls hal ntoskrnl)
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
     target_compile_options(cmipci PRIVATE -Wno-write-strings -Wno-switch)
-endif()
-
-if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    target_compile_options(cmipci PRIVATE -Wno-enum-constexpr-conversion)
 endif()
 
 add_pch(cmipci precomp.h "${PCH_SKIP_SOURCE}")

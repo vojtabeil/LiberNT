@@ -80,6 +80,7 @@ BEGIN
     IDS_DECOMPRESSERROR "Неизвестный метод компрессии %d. Продолжить?"
     IDS_UNKNOWNERROR "Неизвестная ошибка 0x%08x."
     IDS_CANTDELETEFILE "Failed to delete the file(s)."
+    IDS_DRAGEXTRACT "&Extract..."
 
     IDS_WIZ_TITLE "Мастер извлечения архивов"
     IDS_WIZ_DEST_TITLE "Укажите путь"
@@ -95,5 +96,7 @@ BEGIN
 
     IDS_MENUITEM "&Извлечь всё..."
     IDS_HELPTEXT "Извлекает содержимое архива"
+    IDS_MENUITEM_HERE "Извлечь &сюда"
+    IDS_HELPTEXT_HERE "Извлекает содержимое в эту папку"
     IDS_FRIENDLYNAME "Сжатая zip папка"
 END

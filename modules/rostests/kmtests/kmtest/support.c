@@ -11,11 +11,19 @@
 
 #include "kmtest.h"
 #include <kmt_public.h>
+#include <ndk/exfuncs.h>
+#include <ndk/kefuncs.h>
 
 #include <assert.h>
 #include <debug.h>
 
 extern HANDLE KmtestHandle;
+
+typedef struct _KMT_USER_CALLBACK_CONTEXT
+{
+    volatile LONG StopRequested;
+    HANDLE ReadyEvent;
+} KMT_USER_CALLBACK_CONTEXT, *PKMT_USER_CALLBACK_CONTEXT;
 
 /**
  * @name KmtUserCallbackThread
@@ -29,14 +37,13 @@ WINAPI
 KmtUserCallbackThread(
     PVOID Parameter)
 {
+    PKMT_USER_CALLBACK_CONTEXT Context = Parameter;
     DWORD Error = ERROR_SUCCESS;
     /* TODO: RequestPacket? */
     KMT_CALLBACK_REQUEST_PACKET RequestPacket;
     KMT_RESPONSE Response;
     DWORD BytesReturned;
     HANDLE LocalKmtHandle;
-
-    UNREFERENCED_PARAMETER(Parameter);
 
     /* concurrent IoCtls on the same (non-overlapped) handle aren't possible,
      * so open a separate one.
@@ -45,11 +52,21 @@ KmtUserCallbackThread(
     if (LocalKmtHandle == INVALID_HANDLE_VALUE)
         error_goto(Error, cleanup);
 
-    while (1)
+    SetEvent(Context->ReadyEvent);
+
+    while (!InterlockedCompareExchange(&Context->StopRequested, 0, 0))
     {
         if (!DeviceIoControl(LocalKmtHandle, IOCTL_KMTEST_USERMODE_AWAIT_REQ, NULL, 0, &RequestPacket, sizeof(RequestPacket), &BytesReturned, NULL))
             error_goto(Error, cleanup);
-        ASSERT(BytesReturned == sizeof(RequestPacket));
+        if (BytesReturned != sizeof(RequestPacket))
+        {
+            /* STATUS_TIMEOUT is a successful poll with no callback packet. */
+            if (BytesReturned == 0)
+                continue;
+
+            Error = ERROR_INVALID_DATA;
+            goto cleanup;
+        }
 
         switch (RequestPacket.OperationClass)
         {
@@ -66,6 +83,46 @@ KmtUserCallbackThread(
 
                 break;
             }
+            case QueryEventPairBehavior:
+            {
+                HANDLE EventPairHandle = UlongToHandle(0x55555555);
+
+                Response.EventPair.CreateStatus = NtCreateEventPair(&EventPairHandle, EVENT_PAIR_ALL_ACCESS, NULL);
+                Response.EventPair.CreateHandle = EventPairHandle;
+                EventPairHandle = UlongToHandle(0x55555555);
+                Response.EventPair.OpenStatus = NtOpenEventPair(&EventPairHandle, EVENT_PAIR_ALL_ACCESS, NULL);
+                Response.EventPair.OpenHandle = EventPairHandle;
+                Response.EventPair.SetHighStatus = NtSetHighEventPair(EventPairHandle);
+                Response.EventPair.SetHighWaitLowStatus = NtSetHighWaitLowEventPair(EventPairHandle);
+                Response.EventPair.SetLowStatus = NtSetLowEventPair(EventPairHandle);
+                Response.EventPair.SetLowWaitHighStatus = NtSetLowWaitHighEventPair(EventPairHandle);
+                Response.EventPair.WaitHighStatus = NtWaitHighEventPair(EventPairHandle);
+                Response.EventPair.WaitLowStatus = NtWaitLowEventPair(EventPairHandle);
+                if (!DeviceIoControl(LocalKmtHandle, IOCTL_KMTEST_USERMODE_SEND_RESPONSE, &RequestPacket.RequestId, sizeof(RequestPacket.RequestId), &Response, sizeof(Response), &BytesReturned, NULL)) error_goto(Error, cleanup);
+                ASSERT(BytesReturned == 0);
+                break;
+            }
+            case CreateProfile:
+            {
+                KMT_PROFILE_PARAMETERS *Parameters = RequestPacket.Parameters;
+
+                Response.Profile.Handle = NULL;
+                Response.Profile.Status = NtCreateProfile(&Response.Profile.Handle,
+                                                         NtCurrentProcess(),
+                                                         Parameters->RangeBase,
+                                                         Parameters->RangeSize,
+                                                         Parameters->BucketSize,
+                                                         Parameters->Buffer,
+                                                         Parameters->BufferSize,
+                                                         Parameters->Source,
+                                                         Parameters->Affinity);
+                if (!DeviceIoControl(LocalKmtHandle, IOCTL_KMTEST_USERMODE_SEND_RESPONSE,
+                                     &RequestPacket.RequestId, sizeof(RequestPacket.RequestId),
+                                     &Response, sizeof(Response), &BytesReturned, NULL))
+                    error_goto(Error, cleanup);
+                ASSERT(BytesReturned == 0);
+                break;
+            }
             default:
                 DPRINT1("Unrecognized user-mode callback request\n");
                 break;
@@ -76,7 +133,7 @@ cleanup:
     if (LocalKmtHandle != INVALID_HANDLE_VALUE)
         CloseHandle(LocalKmtHandle);
 
-    DPRINT("Callback handler dying! Error code %lu", Error);
+    DPRINT("Callback handler dying! Error code %lu\n", Error);
     return Error;
 }
 
@@ -95,17 +152,32 @@ DWORD
 KmtRunKernelTest(
     IN PCSTR TestName)
 {
+    KMT_USER_CALLBACK_CONTEXT CallbackContext = { 0 };
     HANDLE CallbackThread;
     DWORD Error = ERROR_SUCCESS;
     DWORD BytesRead;
 
-    CallbackThread = CreateThread(NULL, 0, KmtUserCallbackThread, NULL, 0, NULL);
+    CallbackContext.ReadyEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    CallbackThread = CreateThread(NULL, 0, KmtUserCallbackThread, &CallbackContext, 0, NULL);
+    if (CallbackThread != NULL && CallbackContext.ReadyEvent != NULL)
+    {
+        HANDLE Handles[2] = { CallbackContext.ReadyEvent, CallbackThread };
+        WaitForMultipleObjects(2, Handles, FALSE, INFINITE);
+    }
 
     if (!DeviceIoControl(KmtestHandle, IOCTL_KMTEST_RUN_TEST, (PVOID)TestName, (DWORD)strlen(TestName), NULL, 0, &BytesRead, NULL))
         error(Error);
 
+    InterlockedExchange(&CallbackContext.StopRequested, 1);
     if (CallbackThread != NULL)
-         CloseHandle(CallbackThread);
+    {
+        if (!DeviceIoControl(KmtestHandle, IOCTL_KMTEST_USERMODE_CANCEL_WAIT, NULL, 0, NULL, 0, &BytesRead, NULL)) error(Error);
+        WaitForSingleObject(CallbackThread, INFINITE);
+        if (!DeviceIoControl(KmtestHandle, IOCTL_KMTEST_USERMODE_RESET_WAIT, NULL, 0, NULL, 0, &BytesRead, NULL)) error(Error);
+        CloseHandle(CallbackThread);
+    }
+    if (CallbackContext.ReadyEvent != NULL)
+        CloseHandle(CallbackContext.ReadyEvent);
 
     return Error;
 }

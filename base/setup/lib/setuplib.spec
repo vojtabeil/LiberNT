@@ -27,8 +27,12 @@
 
 ;; partlist
 @ stdcall CreatePartitionList()
+@ stdcall IsUefiFirmware()
 @ stdcall CreatePartition(ptr ptr int64 ptr)
+@ stdcall CreateGptSystemPartitions(ptr ptr ptr ptr)
+@ stdcall GptDiskNeedsSystemPartitions(ptr)
 @ stdcall DeletePartition(ptr ptr ptr)
+@ stdcall EraseDisk(ptr ptr ptr)
 @ stdcall DestroyPartitionList(ptr)
 @ stdcall GetNextPartition(ptr ptr)
 @ stdcall GetPrevPartition(ptr ptr)
@@ -41,10 +45,6 @@
 
 ;; partinfo
 @ stdcall LookupPartitionTypeString(long ptr)
-
-;; osdetect
-@ stdcall CreateNTOSInstallationsList(ptr)
-@ stdcall FindSubStrI(wstr wstr)
 
 ;; settings
 @ cdecl CreateComputerTypeList(ptr)
@@ -65,8 +65,9 @@
 @ stdcall InitDestinationPaths(ptr wstr ptr)
 @ stdcall InitializeSetup(ptr ptr ptr ptr)
 @ stdcall InitSystemPartition(ptr ptr ptr ptr ptr)
-@ stdcall InstallSetupInfFile(ptr)
 @ stdcall UpdateRegistry(ptr long ptr long wstr ptr ptr)
+@ stdcall MountTargetRegistry(ptr)
+@ stdcall UnmountTargetRegistry()
 
 ;; fsutil
 @ stdcall FsVolCommitOpsQueue(ptr ptr ptr ptr ptr)
@@ -74,8 +75,9 @@
 
 ;; install
 @ stdcall PrepareFileCopy(ptr ptr)
+@ stdcall PrepareUpgradeFileCopy(ptr ptr)
 @ stdcall DoFileCopy(ptr ptr ptr)
 
 ;; bootsup
 @ stdcall InstallBootManagerAndBootEntries(long ptr ptr ptr ptr)
-@ stdcall InstallBootcodeToRemovable(long ptr ptr ptr)
+@ stdcall RemoveHostSetupBoot(ptr)

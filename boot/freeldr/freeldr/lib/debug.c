@@ -20,15 +20,24 @@
 #include <freeldr.h>
 #include <debug.h>
 
-#if DBG
+#if defined(UEFIBOOT) && (defined(_M_ARM64) || defined(_M_RISCV64))
+#if defined(_M_ARM64)
+#include <reactos/arm64/early_uart.h>
+#endif
+BOOLEAN UefiSerialInitialize(VOID);
+VOID UefiSerialPutChar(_In_ UCHAR Character);
+#endif
+#if defined(UEFIBOOT)
+VOID UefiLogPutChar(_In_ UCHAR Character);
+#endif
 
-// #define DEBUG_ALL
+//#define DEBUG_ALL
 // #define DEBUG_WARN
 // #define DEBUG_ERR
 // #define DEBUG_INIFILE
 // #define DEBUG_REACTOS
-// #define DEBUG_CUSTOM
-#define DEBUG_NONE
+#define DEBUG_CUSTOM      /* DPRINT_DISK + DPRINT_FILESYSTEM at full trace */
+// #define DEBUG_NONE
 
 #define DBG_DEFAULT_LEVELS (ERR_LEVEL|FIXME_LEVEL)
 
@@ -45,10 +54,35 @@ ULONG DebugPort = RS232;
 /* Serial debug connection */
 #include <cportlib/uartinfo.h>
 ULONG ComPortBaudRate = DEFAULT_DEBUG_BAUD_RATE;
-// The COM port initializer chooses the first available port starting from COM4 down to COM1.
+// The COM port initializer chooses the first available port starting from COM1 up to COM4.
 PUCHAR ComPortAddress = NULL;
 
 BOOLEAN DebugStartOfLine = TRUE;
+static BOOLEAN DebugEnabled = DBG;
+static BOOLEAN DebugPortReady = FALSE;
+static BOOLEAN DebugForceScreen = FALSE;
+static BOOLEAN DebugScreenDisabled = FALSE;
+static CHAR DebugLastError[256];
+static CHAR DebugErrorLines[8][192];
+static ULONG DebugErrorLineCount;
+
+#if defined(UEFIBOOT) && (defined(_M_ARM64) || defined(_M_RISCV64))
+static VOID
+DebugUefiSerialPutChar(
+    _In_ UCHAR Character)
+{
+#if defined(_M_ARM64)
+    if (EarlyUartReady())
+    {
+        EarlyUartPutc(Character);
+        if (EarlyUartReady())
+            return;
+    }
+#endif
+
+    UefiSerialPutChar(Character);
+}
+#endif
 
 VOID
 DebugInit(
@@ -79,17 +113,25 @@ DebugInit(
     DbgChannels[DPRINT_REACTOS] = MAX_LEVEL;
     DbgChannels[DPRINT_REGISTRY] = MAX_LEVEL;
 #elif defined (DEBUG_CUSTOM)
-    DbgChannels[DPRINT_WARNING] = MAX_LEVEL;
-    DbgChannels[DPRINT_WINDOWS] = MAX_LEVEL;
+    /* Enable full trace for the ramdisk / WIM extraction path during
+     * boot.wim bring-up. Keeps the serial log focused on WimLoader*,
+     * Fat32*, RamDisk* without drowning the console in unrelated
+     * loader output. */
+    DbgChannels[DPRINT_DISK]       = MAX_LEVEL;
+    DbgChannels[DPRINT_FILESYSTEM] = MAX_LEVEL;
+    DbgChannels[DPRINT_WARNING]    = MAX_LEVEL;
 #endif
 
     CommandLine = NULL;
+    if (DebugString && *DebugString)
+        DebugEnabled = TRUE;
+
     if (!DebugString || !*DebugString)
     {
         /* No command-line is provided: during pre-initialization,
          * initialize the debug port with default settings;
          * otherwise just return during main initialization */
-        if (!Initialized)
+        if (!Initialized || (DebugEnabled && !DebugPortReady))
             goto Done;
         return;
     }
@@ -171,32 +213,72 @@ DebugInit(
 
 Done:
     Initialized = TRUE;
+    if (!DebugEnabled)
+        return;
 
+    DebugPortReady = TRUE;
+
+#if defined(UEFIBOOT) && (defined(_M_ARM64) || defined(_M_RISCV64))
+    UefiSerialInitialize();
+#if defined(_M_ARM64)
+    EarlyUartInitialize(0);
+#endif
+    DebugPort |= RS232;
+#elif defined(OFWBOOT)
+    /* The Open Firmware console is the serial port on PReP. */
+    DebugPort |= RS232;
+#else
     /* Try to initialize the port; if it fails, remove the corresponding flag */
     if (DebugPort & RS232)
     {
         if (!Rs232PortInitialize(ComPortAddress, ComPortBaudRate))
             DebugPort &= ~RS232;
     }
+#endif
+}
+
+VOID
+DebugEnable(VOID)
+{
+    if (DebugEnabled && DebugPortReady)
+        return;
+
+    DebugEnabled = TRUE;
+    DebugInit(NULL);
 }
 
 VOID DebugPrintChar(UCHAR Character)
 {
+    if (!DebugEnabled)
+        return;
+
     if (Character == '\n')
         DebugStartOfLine = TRUE;
 
+#if defined(UEFIBOOT)
+    UefiLogPutChar(Character);
+#endif
     if (DebugPort & RS232)
     {
+#if defined(UEFIBOOT) && (defined(_M_ARM64) || defined(_M_RISCV64))
+        if (Character == '\n')
+            DebugUefiSerialPutChar('\r');
+
+        DebugUefiSerialPutChar(Character);
+#elif defined(OFWBOOT)
+        MachConsPutChar(Character);
+#else
         if (Character == '\n')
             Rs232PortPutByte('\r');
 
         Rs232PortPutByte(Character);
+#endif
     }
     if (DebugPort & BOCHS)
     {
         WRITE_PORT_UCHAR((PUCHAR)BOCHS_OUTPUT_PORT, Character);
     }
-    if (DebugPort & SCREEN)
+    if ((DebugPort & SCREEN) || DebugForceScreen)
     {
         MachConsPutChar(Character);
     }
@@ -209,6 +291,9 @@ DbgPrint(const char *Format, ...)
     int Length;
     char* ptr;
     CHAR Buffer[512];
+
+    if (!DebugEnabled)
+        return 0;
 
     va_start(ap, Format);
     Length = _vsnprintf(Buffer, sizeof(Buffer), Format, ap);
@@ -238,11 +323,16 @@ DbgPrint2(ULONG Mask, ULONG Level, const char *File, ULONG Line, char *Format, .
     char Buffer[2096];
     char *ptr = Buffer;
 
+    if (!DebugEnabled)
+        return;
+
     /* Mask out unwanted debug messages */
     if (!(DbgChannels[Mask] & Level) && !(Level & DBG_DEFAULT_LEVELS))
     {
         return;
     }
+
+    DebugForceScreen = (Level == ERR_LEVEL) && !DebugScreenDisabled && MachVtbl.ConsPutChar;
 
     /* Print the header if we have started a new line */
     if (DebugStartOfLine)
@@ -276,6 +366,57 @@ DbgPrint2(ULONG Mask, ULONG Level, const char *File, ULONG Line, char *Format, .
     {
         DebugPrintChar(*ptr++);
     }
+
+    DebugForceScreen = FALSE;
+
+    if (Level == ERR_LEVEL)
+    {
+        SIZE_T Length;
+
+        RtlStringCbCopyA(DebugLastError, sizeof(DebugLastError), Buffer);
+        Length = strlen(DebugLastError);
+        while (Length && (DebugLastError[Length - 1] == '\n' || DebugLastError[Length - 1] == '\r'))
+            DebugLastError[--Length] = ANSI_NULL;
+
+        {
+            PCSTR Name = strrchr(File, '\\');
+            if (!Name)
+                Name = strrchr(File, '/');
+            RtlStringCbPrintfA(DebugErrorLines[DebugErrorLineCount % RTL_NUMBER_OF(DebugErrorLines)],
+                               sizeof(DebugErrorLines[0]),
+                               "%s:%lu %s",
+                               Name ? Name + 1 : File,
+                               Line,
+                               DebugLastError);
+            ++DebugErrorLineCount;
+        }
+    }
+}
+
+ULONG
+DebugGetErrorLines(
+    _Out_writes_(MaxLines) PCSTR* Lines,
+    _In_ ULONG MaxLines)
+{
+    ULONG Count = min(min(DebugErrorLineCount, (ULONG)RTL_NUMBER_OF(DebugErrorLines)), MaxLines);
+    ULONG First = DebugErrorLineCount - Count;
+    ULONG Index;
+
+    for (Index = 0; Index < Count; ++Index)
+        Lines[Index] = DebugErrorLines[(First + Index) % RTL_NUMBER_OF(DebugErrorLines)];
+    return Count;
+}
+
+PCSTR
+DebugGetLastError(VOID)
+{
+    return DebugLastError;
+}
+
+VOID
+DebugClearLastError(VOID)
+{
+    DebugLastError[0] = ANSI_NULL;
 }
 
 VOID
@@ -315,6 +456,7 @@ VOID
 DebugDisableScreenPort(VOID)
 {
     DebugPort &= ~SCREEN;
+    DebugScreenDisabled = TRUE;
 }
 
 static BOOLEAN
@@ -404,50 +546,6 @@ DbgParseDebugChannels(PCHAR Value)
         str = separator + 1;
     } while (separator != NULL);
 }
-
-#else
-
-#undef DebugInit
-VOID
-DebugInit(
-    _In_ PCSTR DebugString)
-{
-    UNREFERENCED_PARAMETER(DebugString);
-}
-
-ULONG
-DbgPrint(PCCH Format, ...)
-{
-    UNREFERENCED_PARAMETER(Format);
-    return 0;
-}
-
-VOID
-DbgPrint2(ULONG Mask, ULONG Level, const char *File, ULONG Line, char *Format, ...)
-{
-    UNREFERENCED_PARAMETER(Mask);
-    UNREFERENCED_PARAMETER(Level);
-    UNREFERENCED_PARAMETER(File);
-    UNREFERENCED_PARAMETER(Line);
-    UNREFERENCED_PARAMETER(Format);
-}
-
-VOID
-DebugDumpBuffer(ULONG Mask, PVOID Buffer, ULONG Length)
-{
-    UNREFERENCED_PARAMETER(Mask);
-    UNREFERENCED_PARAMETER(Buffer);
-    UNREFERENCED_PARAMETER(Length);
-}
-
-#undef DbgParseDebugChannels
-VOID
-DbgParseDebugChannels(PCHAR Value)
-{
-    UNREFERENCED_PARAMETER(Value);
-}
-
-#endif // DBG
 
 ULONG
 MsgBoxPrint(const char *Format, ...)

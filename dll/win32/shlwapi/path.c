@@ -23,7 +23,9 @@
 #include <string.h>
 #include <stdlib.h>
 
+#ifdef __REACTOS__
 #include "wine/unicode.h"
+#endif
 #include "windef.h"
 #include "winbase.h"
 #include "wingdi.h"
@@ -182,36 +184,46 @@ BOOL WINAPI PathFileExistsDefExtW(LPWSTR lpszPath,DWORD dwWhich)
   if (!lpszPath || PathIsUNCServerW(lpszPath) || PathIsUNCServerShareW(lpszPath))
     return FALSE;
 
+#ifdef __REACTOS__
+  if (dwWhich)
+  {
+    size_t iChoose;
+    int iLen;
+
+    if (*PathFindExtensionW(lpszPath) && (dwWhich & WHICH_OPTIONAL))
+      return PathFileExistsW(lpszPath);
+
+    iLen = lstrlenW(lpszPath);
+    if (iLen > (MAX_PATH - 5))
+      return FALSE;
+    for (iChoose = 0; pszExts[iChoose][0]; iChoose++)
+    {
+      if (!(dwWhich & (1 << iChoose)))
+        continue;
+      lstrcpyW(lpszPath + iLen, pszExts[iChoose]);
+      if (PathFileExistsW(lpszPath))
+        return TRUE;
+    }
+    lpszPath[iLen] = UNICODE_NULL;
+    if (iLen && (lpszPath[iLen - 1] == L'.' || lpszPath[iLen - 1] == L' '))
+      return FALSE;
+  }
+  return PathFileExistsW(lpszPath);
+#else
   if (dwWhich)
   {
     LPCWSTR szExt = PathFindExtensionW(lpszPath);
-#ifndef __REACTOS__
     if (!*szExt || dwWhich & 0x40)
-#else
-    if (!*szExt || dwWhich & WHICH_OPTIONAL)
-#endif
     {
       size_t iChoose = 0;
       int iLen = lstrlenW(lpszPath);
       if (iLen > (MAX_PATH - 5))
         return FALSE;
-#ifndef __REACTOS__
       while ( (dwWhich & 0x1) && pszExts[iChoose][0] )
-#else
-      while (pszExts[iChoose][0])
-#endif
       {
-#ifdef __REACTOS__
-        if (dwWhich & 0x1)
-        {
-        if (GetFileAttributes(lpszPath) != FILE_ATTRIBUTE_DIRECTORY)
-#endif
         lstrcpyW(lpszPath + iLen, pszExts[iChoose]);
         if (PathFileExistsW(lpszPath))
           return TRUE;
-#ifdef __REACTOS__
-        }
-#endif
         iChoose++;
         dwWhich >>= 1;
       }
@@ -220,6 +232,7 @@ BOOL WINAPI PathFileExistsDefExtW(LPWSTR lpszPath,DWORD dwWhich)
     }
   }
   return PathFileExistsW(lpszPath);
+#endif
 }
 
 /*************************************************************************
@@ -269,8 +282,6 @@ BOOL WINAPI PathFileExistsDefExtA(LPSTR lpszPath,DWORD dwWhich)
  */
 static BOOL SHLWAPI_PathFindInOtherDirs(LPWSTR lpszFile, DWORD dwWhich)
 {
-  static const WCHAR szSystem[] = { 'S','y','s','t','e','m','\0'};
-  static const WCHAR szPath[] = { 'P','A','T','H','\0'};
   DWORD dwLenPATH;
   LPCWSTR lpszCurr;
   WCHAR *lpszPATH;
@@ -288,7 +299,7 @@ static BOOL SHLWAPI_PathFindInOtherDirs(LPWSTR lpszFile, DWORD dwWhich)
     return TRUE;
   }
   GetWindowsDirectoryW(buff, MAX_PATH);
-  if (!PathAppendW(buff, szSystem ) || !PathAppendW(buff, lpszFile))
+  if (!PathAppendW(buff, L"System" ) || !PathAppendW(buff, lpszFile))
     return FALSE;
   if (PathFileExistsDefExtW(buff, dwWhich))
   {
@@ -304,12 +315,12 @@ static BOOL SHLWAPI_PathFindInOtherDirs(LPWSTR lpszFile, DWORD dwWhich)
     return TRUE;
   }
   /* Try dirs listed in %PATH% */
-  dwLenPATH = GetEnvironmentVariableW(szPath, buff, MAX_PATH);
+  dwLenPATH = GetEnvironmentVariableW(L"PATH", buff, MAX_PATH);
 
   if (!dwLenPATH || !(lpszPATH = malloc((dwLenPATH + 1) * sizeof (WCHAR))))
     return FALSE;
 
-  GetEnvironmentVariableW(szPath, lpszPATH, dwLenPATH + 1);
+  GetEnvironmentVariableW(L"PATH", lpszPATH, dwLenPATH + 1);
   lpszCurr = lpszPATH;
   while (lpszCurr)
   {
@@ -801,7 +812,6 @@ BOOL WINAPI PathIsContentTypeA(LPCSTR path, LPCSTR content_type)
  */
 BOOL WINAPI PathIsContentTypeW(LPCWSTR lpszPath, LPCWSTR lpszContentType)
 {
-  static const WCHAR szContentType[] = { 'C','o','n','t','e','n','t',' ','T','y','p','e','\0' };
   LPCWSTR szExt;
   DWORD dwDummy;
   WCHAR szBuff[MAX_PATH];
@@ -809,7 +819,7 @@ BOOL WINAPI PathIsContentTypeW(LPCWSTR lpszPath, LPCWSTR lpszContentType)
   TRACE("(%s,%s)\n", debugstr_w(lpszPath), debugstr_w(lpszContentType));
 
   if (lpszPath && (szExt = PathFindExtensionW(lpszPath)) && *szExt &&
-      !SHGetValueW(HKEY_CLASSES_ROOT, szExt, szContentType,
+      !SHGetValueW(HKEY_CLASSES_ROOT, szExt, L"Content Type",
                    REG_NONE, szBuff, &dwDummy) &&
       !wcsicmp(lpszContentType, szBuff))
   {
@@ -1107,9 +1117,15 @@ static BOOL SHLWAPI_UseSystemForSystemFolders(void)
     bCheckedReg = TRUE;
 
     /* Key tells Win what file attributes to use on system folders */
+#ifdef __REACTOS__
+    if (!SHGetValueA(HKEY_LOCAL_MACHINE,
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer",
+        "UseSystemForSystemFolders", 0, 0, 0))
+#else
     if (SHGetValueA(HKEY_LOCAL_MACHINE,
         "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer",
         "UseSystemForSystemFolders", 0, 0, 0))
+#endif
       bUseSystemForSystemFolders = TRUE;
   }
   return bUseSystemForSystemFolders;
@@ -1595,8 +1611,8 @@ HRESULT WINAPI SHGetWebFolderFilePathA(LPCSTR lpszFile, LPSTR lpszPath, DWORD dw
  */
 HRESULT WINAPI SHGetWebFolderFilePathW(LPCWSTR lpszFile, LPWSTR lpszPath, DWORD dwPathLen)
 {
-  static const WCHAR szWeb[] = {'\\','W','e','b','\\','\0'};
-  static const WCHAR szWebMui[] = {'m','u','i','\\','%','0','4','x','\\','\0'};
+  static const WCHAR szWeb[] = L"\\Web\\";
+  static const WCHAR szWebMui[] = L"mui\\%04x\\";
   DWORD dwLen, dwFileLen;
   LANGID lidSystem, lidUser;
 

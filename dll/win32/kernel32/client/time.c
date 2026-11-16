@@ -12,6 +12,7 @@
 /* INCLUDES *******************************************************************/
 
 #include <k32.h>
+#include <reactos/precisetime.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -106,17 +107,15 @@ WINAPI
 CompareFileTime(IN CONST FILETIME *lpFileTime1,
                 IN CONST FILETIME *lpFileTime2)
 {
-    LARGE_INTEGER Time1, Time2, Diff;
+    ULARGE_INTEGER Time1, Time2;
 
     Time1.LowPart = lpFileTime1->dwLowDateTime;
     Time2.LowPart = lpFileTime2->dwLowDateTime;
     Time1.HighPart = lpFileTime1->dwHighDateTime;
     Time2.HighPart = lpFileTime2->dwHighDateTime;
 
-    Diff.QuadPart = Time1.QuadPart - Time2.QuadPart;
-
-    if (Diff.HighPart < 0) return -1;
-    if (Diff.QuadPart == 0) return 0;
+    if (Time1.QuadPart < Time2.QuadPart) return -1;
+    if (Time1.QuadPart == Time2.QuadPart) return 0;
     return 1;
 }
 
@@ -136,13 +135,18 @@ GetSystemTimeAsFileTime(OUT PFILETIME lpFileTime)
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 VOID
 WINAPI
 GetSystemTimePreciseAsFileTime(OUT PFILETIME lpFileTime)
 {
-    STUB;
+    LARGE_INTEGER SystemTime;
+
+    SystemTime.QuadPart = RtlGetSystemTimePrecise();
+
+    lpFileTime->dwLowDateTime = SystemTime.LowPart;
+    lpFileTime->dwHighDateTime = SystemTime.HighPart;
 }
 
 /*
@@ -522,7 +526,7 @@ GetSystemTimes(OUT LPFILETIME lpIdleTime OPTIONAL,
         {
             for (i = 0; i < BaseStaticServerData->SysInfo.NumberOfProcessors; i++)
             {
-                TotalIdleTime.QuadPart += ProcPerfInfo[i].IdleTime.QuadPart;
+                TotalIdleTime.QuadPart += ProcPerfInfo[(unsigned char)i].IdleTime.QuadPart;
             }
 
             lpIdleTime->dwLowDateTime = TotalIdleTime.LowPart;
@@ -533,7 +537,7 @@ GetSystemTimes(OUT LPFILETIME lpIdleTime OPTIONAL,
         {
             for (i = 0; i < BaseStaticServerData->SysInfo.NumberOfProcessors; i++)
             {
-                TotalKernTime.QuadPart += ProcPerfInfo[i].KernelTime.QuadPart;
+                TotalKernTime.QuadPart += ProcPerfInfo[(unsigned char)i].KernelTime.QuadPart;
             }
 
             lpKernelTime->dwLowDateTime = TotalKernTime.LowPart;
@@ -544,7 +548,7 @@ GetSystemTimes(OUT LPFILETIME lpIdleTime OPTIONAL,
         {
             for (i = 0; i < BaseStaticServerData->SysInfo.NumberOfProcessors; i++)
             {
-                TotalUserTime.QuadPart += ProcPerfInfo[i].UserTime.QuadPart;
+                TotalUserTime.QuadPart += ProcPerfInfo[(unsigned char)i].UserTime.QuadPart;
             }
 
             lpUserTime->dwLowDateTime = TotalUserTime.LowPart;
@@ -575,6 +579,77 @@ SetClientTimeZoneInformation(IN CONST TIME_ZONE_INFORMATION *lpTimeZoneInformati
 {
     STUB;
     return 0;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+QueryUnbiasedInterruptTime(OUT PULONGLONG UnbiasedTime)
+{
+    LARGE_INTEGER InterruptTime;
+
+    if (UnbiasedTime == NULL)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    InterruptTime = KiReadSystemTime(&SharedUserData->InterruptTime);
+    *UnbiasedTime = (ULONGLONG)InterruptTime.QuadPart - SharedUserData->InterruptTimeBias;
+    return TRUE;
+}
+
+static
+ULONGLONG
+BasepQueryInterruptTimePrecise(BOOLEAN Unbiased)
+{
+    LARGE_INTEGER Counter;
+    ULONGLONG Time, Baseline, Increment, Bias;
+    ULONG Sequence;
+    UCHAR Shift;
+
+    for (;;)
+    {
+        Sequence = ReadULongAcquire((volatile ULONG *)&SharedUserData->TimeUpdateLock);
+        if (Sequence & 1)
+        {
+            YieldProcessor();
+            continue;
+        }
+        Time = KiReadSystemTime(&SharedUserData->InterruptTime).QuadPart;
+        Baseline = ReadULong64NoFence(&SharedUserData->BaselineInterruptTimeQpc);
+        Increment = ReadULong64NoFence(&SharedUserData->QpcInterruptTimeIncrement);
+        Shift = ReadUCharNoFence(&SharedUserData->QpcInterruptTimeIncrementShift);
+        Bias = Unbiased ? ReadULong64NoFence(&SharedUserData->InterruptTimeBias) : 0;
+        RtlQueryPerformanceCounter(&Counter);
+        MemoryBarrier();
+        if (Sequence == ReadULongAcquire((volatile ULONG *)&SharedUserData->TimeUpdateLock)) break;
+    }
+    return Time +
+        RtlpScaleTimeDelta(Counter.QuadPart - Baseline, Increment, Shift, NULL) - Bias;
+}
+
+VOID
+WINAPI
+QueryInterruptTime(_Out_ PULONGLONG lpInterruptTime)
+{
+    *lpInterruptTime = KiReadSystemTime(&SharedUserData->InterruptTime).QuadPart;
+}
+
+VOID
+WINAPI
+QueryInterruptTimePrecise(_Out_ PULONGLONG lpInterruptTimePrecise)
+{
+    *lpInterruptTimePrecise = BasepQueryInterruptTimePrecise(FALSE);
+}
+
+VOID
+WINAPI
+QueryUnbiasedInterruptTimePrecise(_Out_ PULONGLONG lpUnbiasedInterruptTimePrecise)
+{
+    *lpUnbiasedInterruptTimePrecise = BasepQueryInterruptTimePrecise(TRUE);
 }
 
 /* EOF */

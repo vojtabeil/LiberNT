@@ -12,8 +12,7 @@ if(DBG)
 endif()
 
 # Silence GCC/Clang warnings
-if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR
-   CMAKE_C_COMPILER_ID STREQUAL "Clang")
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     add_compile_options(
         -Wno-builtin-declaration-mismatch
         -Wno-unused-function
@@ -52,10 +51,13 @@ list(APPEND VCSTARTUP_SOURCES
     isa_available.cpp
     mainCRTStartup.cpp
     tlssup.c
+    WinMainCRTStartup.cpp
     wmainCRTStartup.cpp
+    wWinMainCRTStartup.cpp
 )
 
 # Startup library (linked into executables, linking to ucrtbase)
 add_library(vcstartup ${VCSTARTUP_SOURCES})
+add_dependencies(vcstartup psdk)
 target_link_libraries(vcstartup ${PSEH_LIB} libkernel32)
 target_include_directories(vcstartup PRIVATE  $<TARGET_PROPERTY:vcruntime,INTERFACE_INCLUDE_DIRECTORIES>)

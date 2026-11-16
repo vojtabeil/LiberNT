@@ -21,12 +21,21 @@ storahci.sys = 1
 DefaultDestDir = 12 ; DIRID_DRIVERS
 
 [Manufacturer]
-%ROS%=STORAHCI,NTx86
+%ROS%=STORAHCI,NTx86,NTamd64,NTarm64
 
 [STORAHCI]
 
 [STORAHCI.NTx86]
 %SATA_AHCI.DeviceDesc%=storahci_Inst, PCI\CC_010601; Standard SATA AHCI Controller
+%SATA_AHCI.DeviceDesc%=storahci_Inst, ACPI\CLS_0001&SUBCLS_0006&PI_01; AHCI controller enumerated by ACPI
+
+[STORAHCI.NTamd64]
+%SATA_AHCI.DeviceDesc%=storahci_Inst, PCI\CC_010601; Standard SATA AHCI Controller
+%SATA_AHCI.DeviceDesc%=storahci_Inst, ACPI\CLS_0001&SUBCLS_0006&PI_01; AHCI controller enumerated by ACPI
+
+[STORAHCI.NTarm64]
+%SATA_AHCI.DeviceDesc%=storahci_Inst, PCI\CC_010601; Standard SATA AHCI Controller
+%SATA_AHCI.DeviceDesc%=storahci_Inst, ACPI\CLS_0001&SUBCLS_0006&PI_01; AHCI controller enumerated by ACPI
 
 [ControlFlags]
 ExcludeFromSelect = *
@@ -37,6 +46,19 @@ CopyFiles = storahci_CopyFiles
 [storahci_Inst.HW]
 ; Enables Storport IPM for this adapter
 HKR, "StorPort", "EnableIdlePowerManagement", %REG_DWORD%, 0x01
+
+; Ask for a message signaled interrupt. AHCI controllers on modern chipsets
+; are meant to be driven with MSI (this is what Windows' storahci and Linux's
+; ahci both do); the INTx line is a legacy fallback and is frequently
+; mis-routed by firmware, which leaves the adapter with an interrupt that
+; never fires and every command hanging.
+; pci.sys reads this policy from the device's hardware key.
+; The controller implements a single MSI message (MSI Count=1/1), so the
+; message number limit is 1. It has no MSI-X capability.
+HKR, "Interrupt Management",, 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties",, 0x00000010
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", "MSISupported", %REG_DWORD%, 0x00000001
+HKR, "Interrupt Management\MessageSignaledInterruptProperties", "MessageNumberLimit", %REG_DWORD%, 0x00000001
 
 [storahci_Inst.Services]
 AddService = storahci, %SPSVCINST_ASSOCSERVICE%, storahci_Service_Inst, Miniport_EventLog_Inst
@@ -69,6 +91,13 @@ ROS                     = "ReactOS"
 DeviceDesc              = "AHCI SATA Driver"
 SATA_AHCI.DeviceDesc    = "Standard SATA AHCI Controller"
 
+SPSVCINST_ASSOCSERVICE = 0x00000002
+SERVICE_KERNEL_DRIVER  = 1
+SERVICE_BOOT_START     = 0
+SERVICE_ERROR_CRITICAL = 3
+REG_EXPAND_SZ          = 0x00020000
+REG_DWORD              = 0x00010001
+
 [Strings.0404]
 ROS                     = "ReactOS"
 DeviceDesc              = "AHCI SATA 驅動程式"
@@ -93,10 +122,3 @@ SATA_AHCI.DeviceDesc    = "标准 SATA AHCI 控制器"
 ROS                     = "ReactOS"
 DeviceDesc              = "AHCI SATA 驅動程式"
 SATA_AHCI.DeviceDesc    = "標準 SATA AHCI 控制器"
-
-SPSVCINST_ASSOCSERVICE = 0x00000002
-SERVICE_KERNEL_DRIVER  = 1
-SERVICE_BOOT_START     = 0
-SERVICE_ERROR_CRITICAL = 3
-REG_EXPAND_SZ          = 0x00020000
-REG_DWORD              = 0x00010001

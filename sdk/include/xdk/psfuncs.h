@@ -54,6 +54,24 @@ NtQueryInformationProcess(
     _Out_opt_ PULONG ReturnLength);
 $endif (_NTDDK_)
 $if (_NTIFS_)
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+NTKERNELAPI
+BOOLEAN
+NTAPI
+PsIsDiskCountersEnabled(VOID);
+
+NTKERNELAPI
+VOID
+NTAPI
+PsUpdateDiskCounters(
+  _Inout_ PEPROCESS Process,
+  _In_ ULONG64 BytesRead,
+  _In_ ULONG64 BytesWritten,
+  _In_ ULONG ReadOperationCount,
+  _In_ ULONG WriteOperationCount,
+  _In_ ULONG FlushOperationCount);
+#endif
+
 
 _Must_inspect_result_
 _IRQL_requires_max_(APC_LEVEL)
@@ -282,6 +300,22 @@ LONGLONG
 NTAPI
 PsGetProcessCreateTimeQuadPart(
   _In_ PEPROCESS Process);
+
+_IRQL_requires_max_(APC_LEVEL)
+NTKERNELAPI
+NTSTATUS
+NTAPI
+PsGetProcessExitStatus(
+  _In_ PEPROCESS Process);
+
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS2)
+_IRQL_requires_max_(DISPATCH_LEVEL)
+NTKERNELAPI
+ULONGLONG
+NTAPI
+PsGetProcessStartKey(
+  _In_ PEPROCESS Process);
+#endif /* (NTDDI_VERSION >= NTDDI_WIN10_RS2) */
 $endif (_NTDDK_)
 $if (_NTIFS_)
 
@@ -359,4 +393,15 @@ PsSetCreateProcessNotifyRoutineEx(
   IN PCREATE_PROCESS_NOTIFY_ROUTINE_EX NotifyRoutine,
   IN BOOLEAN Remove);
 #endif /* (NTDDI_VERSION >= NTDDI_VISTASP1) */
+
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS2)
+_IRQL_requires_max_(PASSIVE_LEVEL)
+NTKERNELAPI
+NTSTATUS
+NTAPI
+PsSetCreateProcessNotifyRoutineEx2(
+  IN PSCREATEPROCESSNOTIFYTYPE NotifyType,
+  IN PVOID NotifyInformation,
+  IN BOOLEAN Remove);
+#endif /* (NTDDI_VERSION >= NTDDI_WIN10_RS2) */
 $endif (_NTDDK_)

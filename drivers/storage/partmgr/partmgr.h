@@ -12,6 +12,8 @@
 #include <mountdev.h>
 #include <ntddvol.h>
 #include <ntdddisk.h>
+#include <diskguid.h>
+#include <ntintsafe.h>
 #include <ndk/psfuncs.h>
 #include <ndk/section_attribs.h>
 #include <ioevent.h>
@@ -34,31 +36,15 @@ typedef struct _DISK_GEOMETRY_EX_INTERNAL
 // Unique ID data for basic (disk partition-based) volumes.
 // It is stored in the MOUNTDEV_UNIQUE_ID::UniqueId member
 // as an array of bytes.
-#include <pshpack1.h>
-typedef union _BASIC_VOLUME_UNIQUE_ID
-{
-    struct
-    {
-        ULONG Signature;
-        ULONGLONG StartingOffset;
-    } Mbr;
-    struct
-    {
-        ULONGLONG Signature; // UCHAR[8] // "DMIO:ID:"
-        GUID PartitionGuid;
-    } Gpt;
-} BASIC_VOLUME_UNIQUE_ID, *PBASIC_VOLUME_UNIQUE_ID;
-#include <poppack.h>
-C_ASSERT(RTL_FIELD_SIZE(BASIC_VOLUME_UNIQUE_ID, Mbr) == 0x0C);
-C_ASSERT(RTL_FIELD_SIZE(BASIC_VOLUME_UNIQUE_ID, Gpt) == 0x18);
-
-#define DMIO_ID_SIGNATURE   (*(ULONGLONG*)"DMIO:ID:")
+#include <drivers/basicvol.h>
 
 typedef struct _FDO_EXTENSION
 {
     BOOLEAN IsFDO;
     PDEVICE_OBJECT DeviceObject;
     PDEVICE_OBJECT LowerDevice;
+    IO_REMOVE_LOCK RemoveLock;
+    volatile LONG Removed;
     PDEVICE_OBJECT PhysicalDiskDO;
     KEVENT SyncEvent;
 
@@ -68,6 +54,7 @@ typedef struct _FDO_EXTENSION
     SINGLE_LIST_ENTRY PartitionList;
     UINT32 EnumeratedPartitionsTotal;
     BOOLEAN IsSuperFloppy;
+    volatile LONG VerifyGeneration;
 
     struct {
         UINT64 DiskSize;
@@ -84,18 +71,44 @@ typedef struct _FDO_EXTENSION
         };
     } DiskData;
     UNICODE_STRING DiskInterfaceName;
+
+    // IOCTL_DISK_PERFORMANCE counters; everything except the lookaside
+    // list is guarded by Lock. The device-wide RemoveLock also protects
+    // requests when these optional counters are disabled.
+    struct {
+        KSPIN_LOCK Lock;
+        NPAGED_LOOKASIDE_LIST ContextLookaside;
+        LONG ReferenceCount;
+        LONG OutstandingRequests;
+        ULONGLONG IdleStartTime;
+        LONGLONG IdleTime;
+        LONGLONG BytesRead;
+        LONGLONG BytesWritten;
+        LONGLONG ReadTime;
+        LONGLONG WriteTime;
+        ULONG ReadCount;
+        ULONG WriteCount;
+    } Perf;
 } FDO_EXTENSION, *PFDO_EXTENSION;
+
+typedef struct _PARTMGR_PERFORMANCE_CONTEXT
+{
+    ULONGLONG StartTime;
+} PARTMGR_PERFORMANCE_CONTEXT, *PPARTMGR_PERFORMANCE_CONTEXT;
 
 typedef struct _PARTITION_EXTENSION
 {
     BOOLEAN IsFDO;
     PDEVICE_OBJECT DeviceObject;
     PDEVICE_OBJECT LowerDevice;
+    IO_REMOVE_LOCK RemoveLock;
+    volatile LONG Removed;
     PDEVICE_OBJECT Part0Device;
 
     UINT64 StartingOffset;
     UINT64 PartitionLength;
     SINGLE_LIST_ENTRY ListEntry;
+    volatile LONG VerifyGeneration;
 
     UINT32 VolumeNumber; // Volume number in the "\Device\HarddiskVolumeN" device name
     UINT32 DetectedNumber;
@@ -123,7 +136,29 @@ typedef struct _PARTITION_EXTENSION
     UNICODE_STRING PartitionInterfaceName;
     UNICODE_STRING VolumeInterfaceName;
     UNICODE_STRING DeviceName;
+    PIRP UniqueIdChangeIrp;
+    KSPIN_LOCK HoldLock;
+    PIRP HoldIrp;
+    LIST_ENTRY HeldWrites;
+    KTIMER HoldTimer;
+    KDPC HoldDpc;
+    WORK_QUEUE_ITEM HoldWorkItem;
 } PARTITION_EXTENSION, *PPARTITION_EXTENSION;
+
+#define PARTMGR_HOLD_TIMEOUT_SECONDS 20
+
+C_ASSERT(FIELD_OFFSET(FDO_EXTENSION, RemoveLock) == FIELD_OFFSET(PARTITION_EXTENSION, RemoveLock));
+C_ASSERT(FIELD_OFFSET(FDO_EXTENSION, Removed) == FIELD_OFFSET(PARTITION_EXTENSION, Removed));
+
+FORCEINLINE
+NTSTATUS
+PartMgrFailIrp(_In_ PIRP Irp, _In_ NTSTATUS Status)
+{
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
+}
 
 CODE_SEG("PAGE")
 NTSTATUS
@@ -133,6 +168,11 @@ PartitionCreateDevice(
     _In_ UINT32 OnDiskNumber,
     _In_ PARTITION_STYLE PartitionStyle,
     _Out_ PDEVICE_OBJECT *PDO);
+
+CODE_SEG("PAGE")
+VOID
+PartitionDeleteSymlink(
+    _In_ PPARTITION_EXTENSION PartExt);
 
 CODE_SEG("PAGE")
 NTSTATUS
@@ -146,10 +186,33 @@ PartitionHandlePnp(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp);
 
+VOID
+PartitionInitializeHold(
+    _In_ PPARTITION_EXTENSION PartExt);
+
+BOOLEAN
+PartitionQueueHeldWrite(
+    _In_ PPARTITION_EXTENSION PartExt,
+    _In_ PIRP Irp);
+
+NTSTATUS
+NTAPI
+PartMgrReadWrite(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp);
+
 NTSTATUS
 PartitionHandleDeviceControl(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp);
+
+VOID
+PartitionNotifyUniqueIdChange(
+    _In_ PPARTITION_EXTENSION PartExt);
+
+VOID
+PartitionCancelUniqueIdChangeNotify(
+    _In_ PPARTITION_EXTENSION PartExt);
 
 NTSTATUS
 NTAPI

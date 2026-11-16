@@ -3,6 +3,7 @@
  * LICENSE:         GPL-2.0-or-later (https://spdx.org/licenses/GPL-2.0-or-later)
  * PURPOSE:         Tests for the NtSetInformationToken API
  * COPYRIGHT:       Copyright 2022 George Bișoc <george.bisoc@reactos.org>
+ *                  Copyright 2026 Ahmed ARIF <arif.ing@outlook.com>
  */
 
 #include "precomp.h"
@@ -15,7 +16,7 @@ OpenCurrentToken(VOID)
     HANDLE Token;
 
     Success = OpenProcessToken(GetCurrentProcess(),
-                               TOKEN_READ | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID,
+                               TOKEN_READ | TOKEN_DUPLICATE | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID,
                                &Token);
     if (!Success)
     {
@@ -197,17 +198,172 @@ SetTokenSessionIdTests(
     _In_ HANDLE Token)
 {
     NTSTATUS Status;
-    ULONG SessionId = 1;
+    ULONG SessionId, OriginalSessionId, QueriedSessionId, Length;
+    HANDLE Caller = NULL, Target = NULL, Previous = NULL;
+    TOKEN_PRIVILEGES Privileges;
+    BOOL Success, Impersonating = FALSE;
+    DWORD Error;
 
-    /*
-     * We're not allowed to set a session ID
-     * because we don't have the TCB privilege.
-     */
-    Status = NtSetInformationToken(Token,
-                                   TokenSessionId,
-                                   &SessionId,
-                                   sizeof(ULONG));
+    Status = NtQueryInformationToken(Token, TokenSessionId, &OriginalSessionId,
+                                     sizeof(OriginalSessionId), &Length);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (!NT_SUCCESS(Status)) return;
+    SessionId = OriginalSessionId ^ 1;
+    Success = OpenThreadToken(GetCurrentThread(), TOKEN_IMPERSONATE, TRUE, &Previous);
+    Error = GetLastError();
+    if (!Success && Error != ERROR_NO_TOKEN)
+    {
+        ok(FALSE, "OpenThreadToken failed: %lu\n", Error);
+        return;
+    }
+    Success = DuplicateTokenEx(Token, TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES | TOKEN_IMPERSONATE,
+                              NULL, SecurityImpersonation, TokenImpersonation, &Caller);
+    ok(Success, "Caller token duplication failed: %lu\n", GetLastError());
+    if (!Success) goto Done;
+    Success = DuplicateTokenEx(Token, TOKEN_QUERY | TOKEN_ADJUST_DEFAULT | TOKEN_ADJUST_SESSIONID,
+                              NULL, SecurityImpersonation, TokenPrimary, &Target);
+    ok(Success, "Target token duplication failed: %lu\n", GetLastError());
+    if (!Success) goto Done;
+    Success = AdjustTokenPrivileges(Caller, TRUE, NULL, 0, NULL, NULL);
+    ok(Success, "Disabling private caller privileges failed: %lu\n", GetLastError());
+    if (!Success) goto Done;
+    Success = SetThreadToken(NULL, Caller);
+    ok(Success, "Setting caller token failed: %lu\n", GetLastError());
+    if (!Success) goto Done;
+    Impersonating = TRUE;
+    Status = NtSetInformationToken(Target, TokenSessionId, &SessionId, sizeof(SessionId));
     ok_ntstatus(Status, STATUS_PRIVILEGE_NOT_HELD);
+    Status = NtQueryInformationToken(Target, TokenSessionId, &QueriedSessionId,
+                                     sizeof(QueriedSessionId), &Length);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+        ok(QueriedSessionId == OriginalSessionId, "Denied update changed session %lu to %lu\n",
+           OriginalSessionId, QueriedSessionId);
+
+    Privileges.PrivilegeCount = 1;
+    Privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+    Success = LookupPrivilegeValue(NULL, SE_TCB_NAME, &Privileges.Privileges[0].Luid);
+    ok(Success, "SeTcbPrivilege lookup failed: %lu\n", GetLastError());
+    if (!Success) goto Done;
+    Success = AdjustTokenPrivileges(Caller, FALSE, &Privileges, 0, NULL, NULL);
+    Error = GetLastError();
+    ok(Success, "Enabling private caller TCB privilege failed: %lu\n", Error);
+    if (!Success) goto Done;
+    if (Error == ERROR_NOT_ALL_ASSIGNED)
+    {
+        skip("The caller has no SeTcbPrivilege for the privileged session cases\n");
+        goto Done;
+    }
+    ok(Error == ERROR_SUCCESS, "Enabling SeTcbPrivilege returned %lu\n", Error);
+    if (Error != ERROR_SUCCESS) goto Done;
+    Status = NtSetInformationToken(Token, TokenSessionId, &SessionId, sizeof(SessionId));
+    ok_ntstatus(Status, STATUS_TOKEN_ALREADY_IN_USE);
+    Status = NtQueryInformationToken(Token, TokenSessionId, &QueriedSessionId,
+                                     sizeof(QueriedSessionId), &Length);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+        ok(QueriedSessionId == OriginalSessionId, "Assigned token session changed to %lu\n", QueriedSessionId);
+    Status = NtSetInformationToken(Target, TokenSessionId, &SessionId, sizeof(SessionId));
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    Status = NtQueryInformationToken(Target, TokenSessionId, &QueriedSessionId,
+                                     sizeof(QueriedSessionId), &Length);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+        ok(QueriedSessionId == SessionId, "Private token session %lu expected %lu\n", QueriedSessionId, SessionId);
+
+Done:
+    if (Impersonating)
+    {
+        Success = SetThreadToken(NULL, Previous);
+        ok(Success, "Restoring caller token failed: %lu\n", GetLastError());
+    }
+    if (Target) CloseHandle(Target);
+    if (Caller) CloseHandle(Caller);
+    if (Previous) CloseHandle(Previous);
+}
+
+static
+VOID
+SetTokenBadPointerTests(
+    _In_ HANDLE Token)
+{
+    TOKEN_MANDATORY_LABEL Label;
+    TOKEN_OWNER Owner;
+    NTSTATUS Status;
+
+    Owner.Owner = (PSID)(ULONG_PTR)0x10;
+    Status = NtSetInformationToken(Token, TokenOwner, &Owner, sizeof(Owner));
+    ok_ntstatus(Status, STATUS_ACCESS_VIOLATION);
+
+    Label.Label.Sid = (PSID)(ULONG_PTR)0x10;
+    Label.Label.Attributes = SE_GROUP_INTEGRITY;
+    Status = NtSetInformationToken(Token, TokenIntegrityLevel, &Label, sizeof(Label));
+    ok_ntstatus(Status, STATUS_ACCESS_VIOLATION);
+}
+
+static
+VOID
+SetTokenNullSidTests(
+    _In_ HANDLE Token)
+{
+    TOKEN_PRIMARY_GROUP Group;
+    TOKEN_MANDATORY_LABEL Label;
+    TOKEN_OWNER Owner;
+    NTSTATUS Status;
+
+    Owner.Owner = NULL;
+    Status = NtSetInformationToken(Token, TokenOwner, &Owner, sizeof(Owner));
+    ok_ntstatus(Status, STATUS_ACCESS_VIOLATION);
+
+    Group.PrimaryGroup = NULL;
+    Status = NtSetInformationToken(Token, TokenPrimaryGroup, &Group, sizeof(Group));
+    ok_ntstatus(Status, STATUS_ACCESS_VIOLATION);
+
+    Label.Label.Sid = NULL;
+    Label.Label.Attributes = SE_GROUP_INTEGRITY;
+    Status = NtSetInformationToken(Token, TokenIntegrityLevel, &Label, sizeof(Label));
+    ok_ntstatus(Status, STATUS_ACCESS_VIOLATION);
+}
+
+static
+VOID
+SetTokenEmptyLabelTests(
+    _In_ HANDLE Token)
+{
+    static SID_IDENTIFIER_AUTHORITY MandatoryAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+    UCHAR Buffer[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
+    PTOKEN_MANDATORY_LABEL Queried = (PTOKEN_MANDATORY_LABEL)Buffer;
+    ULONG EmptySid[FIELD_OFFSET(SID, SubAuthority) / sizeof(ULONG)];
+    TOKEN_MANDATORY_LABEL Label;
+    HANDLE Copy;
+    ULONG Length;
+    NTSTATUS Status;
+
+    if (!DuplicateTokenEx(Token, TOKEN_QUERY | TOKEN_ADJUST_DEFAULT, NULL, SecurityImpersonation, TokenPrimary, &Copy))
+    {
+        ok(0, "DuplicateTokenEx failed with %lu\n", GetLastError());
+        return;
+    }
+
+    RtlInitializeSid((PSID)EmptySid, &MandatoryAuthority, 0);
+    Label.Label.Sid = (PSID)EmptySid;
+    Label.Label.Attributes = SE_GROUP_INTEGRITY;
+    Status = NtSetInformationToken(Copy, TokenIntegrityLevel, &Label, sizeof(Label));
+    ok_ntstatus(Status, STATUS_SUCCESS);
+
+    Status = NtQueryInformationToken(Copy, TokenIntegrityLevel, Buffer, sizeof(Buffer), &Length);
+    ok_ntstatus(Status, STATUS_SUCCESS);
+    if (NT_SUCCESS(Status))
+    {
+        ok(RtlEqualMemory(RtlIdentifierAuthoritySid(Queried->Label.Sid), &MandatoryAuthority, sizeof(MandatoryAuthority)),
+           "the label left the mandatory label authority\n");
+        ok(*RtlSubAuthorityCountSid(Queried->Label.Sid) == 1, "label has %u sub-authorities\n",
+           *RtlSubAuthorityCountSid(Queried->Label.Sid));
+        if (*RtlSubAuthorityCountSid(Queried->Label.Sid) == 1)
+            ok_eq_ulong(*RtlSubAuthoritySid(Queried->Label.Sid, 0), (ULONG)SECURITY_MANDATORY_UNTRUSTED_RID);
+    }
+
+    CloseHandle(Copy);
 }
 
 START_TEST(NtSetInformationToken)
@@ -242,6 +398,9 @@ START_TEST(NtSetInformationToken)
     /* Now perform tests for each class */
     SetTokenDefaultDaclTests(Token);
     SetTokenSessionIdTests(Token);
+    SetTokenBadPointerTests(Token);
+    SetTokenNullSidTests(Token);
+    SetTokenEmptyLabelTests(Token);
 
     CloseHandle(Token);
 }

@@ -5,15 +5,20 @@
  * PROGRAMMER:      Thomas Faber <thomas.faber@reactos.org>
  */
 
+#ifdef _M_IX86
 struct _SINGLE_LIST_ENTRY;
 union _SLIST_HEADER;
 struct _SINGLE_LIST_ENTRY *__fastcall ExInterlockedPushEntrySList(union _SLIST_HEADER *, struct _SINGLE_LIST_ENTRY *, unsigned long *);
 struct _SINGLE_LIST_ENTRY *__fastcall ExInterlockedPopEntrySList(union _SLIST_HEADER *, unsigned long *);
+#endif
 
 #include <kmt_test.h>
 
-/* TODO: SLIST_HEADER is a lot different for x64 */
-#ifndef _M_AMD64
+/* TODO: SLIST_HEADER is a lot different for 64-bit architectures */
+#ifndef _WIN64
+/* i386 NT 5.x collapses HIGH_LEVEL and POWER_LEVEL, reporting
+ * POWER_LEVEL (30) after KeRaiseIrql(HIGH_LEVEL=31). All other
+ * platforms / versions report HIGH_LEVEL correctly. */
 #define CheckSListHeader(ListHead, ExpectedPointer, ExpectedDepth) do   \
 {                                                                       \
     ok_eq_pointer((ListHead)->Next.Next, ExpectedPointer);              \
@@ -21,7 +26,13 @@ struct _SINGLE_LIST_ENTRY *__fastcall ExInterlockedPopEntrySList(union _SLIST_HE
     ok_eq_uint((ListHead)->Depth, ExpectedDepth);                       \
     ok_eq_uint((ListHead)->Sequence, ExpectedSequence);                 \
     ok_eq_uint(ExQueryDepthSList(ListHead), ExpectedDepth);             \
-    ok_irql(HIGH_LEVEL);                                                \
+    {                                                                   \
+        KIRQL _ir = KeGetCurrentIrql();                                 \
+        KIRQL _expect = HIGH_LEVEL;                                     \
+        if (KmtIsNt5I386())                                           \
+            _expect = POWER_LEVEL;                                      \
+        ok_eq_uint(_ir, _expect);                                       \
+    }                                                                   \
     ok_bool_true(KmtAreInterruptsEnabled(), "Interrupts enabled:");     \
 } while (0)
 
@@ -35,15 +46,19 @@ struct _SINGLE_LIST_ENTRY *__fastcall ExInterlockedPopEntrySList(union _SLIST_HE
 #define TestXListFunctional TestSListFunctional
 #include "ExXList.h"
 
+#ifdef _M_IX86
+/* These legacy fastcall exports exist only on x86. Other targets use
+ * the ExpInterlocked entry points selected by the DDK above. */
 #undef ExInterlockedPushEntrySList
 #undef ExInterlockedPopEntrySList
 #define TestXListFunctional TestSListFunctionalExports
 #include "ExXList.h"
 #endif
+#endif
 
 START_TEST(ExSequencedList)
 {
-#ifndef _M_AMD64
+#ifndef _WIN64
     PSLIST_HEADER ListHead;
     KSPIN_LOCK SpinLock;
     USHORT ExpectedSequence = 0;
@@ -58,9 +73,14 @@ START_TEST(ExSequencedList)
     pSpinLock = NULL;
 #endif
 
-    /* make sure stuff is as un-aligned as possible ;) */
+    /* Keep the header naturally aligned on strict-alignment machines.
+     * x86 additionally exercises its legacy unaligned implementation. */
     Buffer = ExAllocatePoolWithTag(NonPagedPool, sizeof *ListHead + EntriesSize + 1, 'TLqS');
+#ifdef _M_IX86
     ListHead = (PVOID)&Buffer[1];
+#else
+    ListHead = (PVOID)Buffer;
+#endif
     Entries = (PVOID)&ListHead[1];
     KeRaiseIrql(HIGH_LEVEL, &Irql);
 
@@ -74,7 +94,11 @@ START_TEST(ExSequencedList)
     RtlFillMemory(ListHead, sizeof *ListHead, 0x55);
     ExInitializeSListHead(ListHead);
     CheckSListHeader(ListHead, NULL, 0);
+#ifdef _M_IX86
     TestSListFunctionalExports(ListHead, Entries, pSpinLock);
+#else
+    TestSListFunctional(ListHead, Entries, pSpinLock);
+#endif
 
     KeLowerIrql(Irql);
     ExFreePoolWithTag(Buffer, 'TLqS');

@@ -5,7 +5,12 @@ list(REMOVE_ITEM INCLUDE_DIRS "${REACTOS_SOURCE_DIR}/sdk/include/crt")
 set_property(DIRECTORY . PROPERTY INCLUDE_DIRECTORIES ${INCLUDE_DIRS})
 include_directories(${REACTOS_SOURCE_DIR}/sdk/include/ucrt)
 
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    add_compile_options(-fno-builtin)
+endif()
+
 list(APPEND SOURCE
+    C99Math.c
     ../crt/_finite.c
     ../crt/_isnan.c
     ../crt/_wsystem.c
@@ -42,7 +47,7 @@ set_module_type(ucrtbase_apitest win32cui)
 target_compile_definitions(ucrtbase_apitest PRIVATE USE_WINE_TODOS TEST_UCRTBASE TEST_DLL_NAME="ucrtbase.dll")
 
 target_link_libraries(ucrtbase_apitest ${PSEH_LIB} chkstk)
-if(NOT MSVC)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     # Add this manually here, so it can link to ucrtbase.dll and vcstartup
     target_link_libraries(ucrtbase_apitest -lgcc)
 endif()

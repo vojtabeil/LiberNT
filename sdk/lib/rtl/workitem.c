@@ -165,10 +165,8 @@ RtlpStartWorkerThread(PTHREAD_START_ROUTINE StartRoutine)
 {
     NTSTATUS Status;
     HANDLE ThreadHandle;
-    LARGE_INTEGER Timeout;
     volatile LONG WorkerInitialized = 0;
-
-    Timeout.QuadPart = -10000LL; /* Wait for 100ms */
+    LONG NotInitialized = 0;
 
     /* Start the thread */
     Status = RtlpStartThreadFunc(StartRoutine, (PVOID)&WorkerInitialized, &ThreadHandle);
@@ -176,11 +174,12 @@ RtlpStartWorkerThread(PTHREAD_START_ROUTINE StartRoutine)
     {
         NtResumeThread(ThreadHandle, NULL);
 
-        /* Poll until the thread got a chance to initialize */
         while (WorkerInitialized == 0)
         {
-            NtDelayExecution(FALSE,
-                             &Timeout);
+            RtlWaitOnAddress((PVOID)&WorkerInitialized,
+                             &NotInitialized,
+                             sizeof(WorkerInitialized),
+                             NULL);
         }
 
         NtClose(ThreadHandle);
@@ -223,7 +222,7 @@ RtlpExecuteWorkItem(IN OUT PVOID NormalContext,
         DPRINT("RtlpExecuteWorkItem: Function: 0x%p Context: 0x%p ImpersonationToken: 0x%p\n", WorkItem.Function, WorkItem.Context, WorkItem.TokenHandle);
 
         /* Execute the function */
-        WorkItem.Function(WorkItem.Context);
+        RtlpCallWorkItemCallback(WorkItem.Function, WorkItem.Context);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -340,7 +339,7 @@ RtlpExecuteIoWorkItem(IN OUT PVOID NormalContext,
         DPRINT("RtlpExecuteIoWorkItem: Function: 0x%p Context: 0x%p ImpersonationToken: 0x%p\n", WorkItem.Function, WorkItem.Context, WorkItem.TokenHandle);
 
         /* Execute the function */
-        WorkItem.Function(WorkItem.Context);
+        RtlpCallWorkItemCallback(WorkItem.Function, WorkItem.Context);
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -589,6 +588,7 @@ InitFailed:
         /* Signal initialization completion */
         InterlockedExchange((PLONG)Parameter,
                             1);
+        RtlWakeAddressAll(Parameter);
 
         RtlpExitThreadFunc(Status);
         return 0;
@@ -603,6 +603,7 @@ InitFailed:
     /* Signal initialization completion */
     InterlockedExchange((PLONG)Parameter,
                          1);
+    RtlWakeAddressAll(Parameter);
 
     for (;;)
     {
@@ -690,6 +691,7 @@ RtlpWorkerThreadProc(IN PVOID Parameter)
         /* Signal initialization completion */
         InterlockedExchange((PLONG)Parameter,
                              1);
+        RtlWakeAddressAll(Parameter);
 
         /* Oops, too many worker threads... */
         RtlpExitThreadFunc(Status);
@@ -699,6 +701,7 @@ RtlpWorkerThreadProc(IN PVOID Parameter)
     /* Signal initialization completion */
     InterlockedExchange((PLONG)Parameter,
                          1);
+    RtlWakeAddressAll(Parameter);
 
     for (;;)
     {
@@ -718,7 +721,7 @@ RtlpWorkerThreadProc(IN PVOID Parameter)
             _SEH2_TRY
             {
                 /* Call the APC routine */
-                ApcRoutine(NULL,
+                ApcRoutine((PVOID)(ULONG_PTR)RtlNtStatusToDosError(IoStatusBlock.Status),
                            (PVOID)IoStatusBlock.Information,
                            SystemArgument2);
             }
@@ -934,6 +937,17 @@ RtlSetIoCompletionCallback(IN HANDLE FileHandle,
                                   &FileCompletionInfo,
                                   sizeof(FileCompletionInfo),
                                   FileCompletionInformation);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    Status = RtlEnterCriticalSection(&ThreadPoolLock);
+    if (NT_SUCCESS(Status))
+    {
+        if (*((volatile LONG*)&ThreadPoolWorkerThreads) == 0)
+            Status = RtlpStartWorkerThread(RtlpWorkerThreadProc);
+
+        RtlLeaveCriticalSection(&ThreadPoolLock);
+    }
 
     return Status;
 }

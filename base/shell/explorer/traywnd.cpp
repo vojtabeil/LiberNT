@@ -4,9 +4,11 @@
  * PURPOSE:     Tray window implementation
  * COPYRIGHT:   Copyright 2006-2007 Thomas Weidenmueller <w3seek@reactos.org>
  *              Copyright 2018-2025 Katayama Hirofumi MZ <katayama.hirofumi.mz@gmail.com>
+ *              Copyright 2026 Ahmed ARIF <arif.ing@outlook.com>
  */
 
 #include "precomp.h"
+#include <math.h>
 #include <commoncontrols.h>
 #include <cfgmgr32.h>
 #include <regstr.h>
@@ -14,7 +16,8 @@
 
 HRESULT TrayWindowCtxMenuCreator(ITrayWindow * TrayWnd, IN HWND hWndOwner, IContextMenu ** ppCtxMenu);
 
-#define WM_APP_TRAYDESTROY  (WM_APP + 0x100)
+#define WM_APP_TRAYDESTROY    (WM_APP + 0x100)
+#define WM_APP_THEME_RELAYOUT (WM_APP + 0x101)
 
 #define TIMER_ID_AUTOHIDE 1
 #define TIMER_ID_MOUSETRACK 2
@@ -25,6 +28,12 @@ HRESULT TrayWindowCtxMenuCreator(ITrayWindow * TrayWnd, IN HWND hWndOwner, ICont
 
 #define AUTOHIDE_SPEED_SHOW 10
 #define AUTOHIDE_SPEED_HIDE 1
+
+#define TIMER_ID_STARTLOGO 1
+#define STARTLOGO_INTERVAL 15
+#define STARTLOGO_PRESS_MS 50
+#define STARTLOGO_RELEASE_MS 250
+#define STARTLOGO_PRESSED_SCALE (5.0 / 6.0)
 
 #define AUTOHIDE_HIDDEN 0
 #define AUTOHIDE_SHOWING 1
@@ -43,6 +52,11 @@ HRESULT TrayWindowCtxMenuCreator(ITrayWindow * TrayWnd, IN HWND hWndOwner, ICont
 #define IDHK_SYS_PROPERTIES 0x1fd
 #define IDHK_DESKTOP 0x1fe
 #define IDHK_PAGER 0x1ff
+#define IDHK_ACTIVATE_TASK 0x209
+#define IDHK_QUICK_SETTINGS 0x20a
+#define IDHK_SETTINGS 0x20b
+#define IDHK_ACCESSIBILITY 0x20c
+#define IDHK_SCREENSHOT 0x20d
 
 enum { NONE, TILED, CASCADED } g_Arrangement = NONE;
 
@@ -184,17 +198,52 @@ class CStartButton
     SIZE       m_Size;
     HFONT      m_Font;
 
+    BOOL m_bOrbIcon;
+    BOOL m_bMaterial;
+    BOOL m_bModernTaskbar;
+    BOOL m_bInitialized;
+    COLORREF m_crMaterial;
+
+    HBITMAP m_OrbSource[3];
+    double m_OrbNormalize[3];
+    INT m_OrbSize;
+    BOOL m_bPressed;
+    double m_LogoScale;
+    double m_AnimFrom;
+    double m_AnimTo;
+    ULONGLONG m_AnimStart;
+    UINT m_AnimDuration;
+
 public:
     CStartButton()
         : m_ImageList(NULL),
-          m_Font(NULL)
+          m_Font(NULL),
+          m_bOrbIcon(FALSE),
+          m_bMaterial(FALSE),
+          m_bModernTaskbar(FALSE),
+          m_bInitialized(FALSE),
+          m_crMaterial(0),
+          m_OrbSize(0),
+          m_bPressed(FALSE),
+          m_LogoScale(1.0),
+          m_AnimFrom(1.0),
+          m_AnimTo(1.0),
+          m_AnimStart(0),
+          m_AnimDuration(0)
     {
         m_Size.cx = 0;
         m_Size.cy = 0;
+        for (UINT i = 0; i < _countof(m_OrbSource); ++i)
+        {
+            m_OrbSource[i] = NULL;
+            m_OrbNormalize[i] = 1.0;
+        }
     }
 
     virtual ~CStartButton()
     {
+        ClearOrbSources();
+
         if (m_ImageList != NULL)
             ImageList_Destroy(m_ImageList);
 
@@ -202,9 +251,57 @@ public:
             DeleteObject(m_Font);
     }
 
+    VOID ClearOrbSources()
+    {
+        for (UINT i = 0; i < _countof(m_OrbSource); ++i)
+        {
+            if (m_OrbSource[i])
+                DeleteObject(m_OrbSource[i]);
+            m_OrbSource[i] = NULL;
+            m_OrbNormalize[i] = 1.0;
+        }
+        m_OrbSize = 0;
+    }
+
+    VOID CreateOrbSources(INT Size)
+    {
+        static const UINT Resources[] = { IDI_STARTORB, IDI_STARTORB_HOVER, IDI_STARTORB_PRESSED };
+        INT Extent[_countof(Resources)];
+
+        ClearOrbSources();
+        for (UINT i = 0; i < _countof(Resources); ++i)
+        {
+            m_OrbSource[i] = CreateStartOrbBitmap(Size * 4, Resources[i]);
+            Extent[i] = GetStartOrbExtent(m_OrbSource[i]);
+        }
+        if (!Extent[0])
+        {
+            ClearOrbSources();
+            return;
+        }
+        for (UINT i = 1; i < _countof(Resources); ++i)
+        {
+            if (Extent[i])
+            {
+                m_OrbNormalize[i] = (double)Extent[0] / Extent[i];
+            }
+            else if (m_OrbSource[i])
+            {
+                DeleteObject(m_OrbSource[i]);
+                m_OrbSource[i] = NULL;
+            }
+        }
+        m_OrbSize = Size;
+    }
+
     SIZE GetSize()
     {
         return m_Size;
+    }
+
+    BOOL IsModernTaskbar()
+    {
+        return m_bModernTaskbar;
     }
 
     VOID UpdateSize()
@@ -218,6 +315,9 @@ public:
         }
 
         Size.cy = max(Size.cy, GetSystemMetrics(SM_CYCAPTION));
+
+        if (m_bModernTaskbar)
+            Size.cy = max(ShellScaleForDpi(40), 2 * GetSystemMetrics(SM_CYCAPTION));
 
         /* Save the size of the start button */
         m_Size = Size;
@@ -239,6 +339,77 @@ public:
         SetFont(m_Font, FALSE);
     }
 
+    VOID ClearImageList()
+    {
+        BUTTON_IMAGELIST bil = { 0 };
+
+        SendMessageW(BCM_SETIMAGELIST, 0, (LPARAM)&bil);
+        if (m_ImageList)
+        {
+            ImageList_Destroy(m_ImageList);
+            m_ImageList = NULL;
+        }
+        m_bOrbIcon = FALSE;
+        ClearOrbSources();
+    }
+
+    VOID UpdateThemeAppearance()
+    {
+        COLORREF crMaterial = 0;
+        BOOL bModernTaskbar = ShellGetTaskbarMaterial(&crMaterial);
+        BOOL bRebuildImages = (bModernTaskbar != m_bModernTaskbar || !m_ImageList);
+        WCHAR szStartCaption[32];
+
+        m_bModernTaskbar = bModernTaskbar;
+        m_crMaterial = crMaterial;
+
+        if (bRebuildImages)
+        {
+            ClearImageList();
+            m_ImageList = CreateStartOrbImageList(ShellScaleForDpi(m_bModernTaskbar ? 42 : 20));
+            if (m_ImageList)
+            {
+                const INT Margin = ShellScaleForDpi(1);
+                BUTTON_IMAGELIST bil = {m_ImageList,
+                                        {Margin, Margin, Margin, Margin},
+                                        BUTTON_IMAGELIST_ALIGN_CENTER};
+                SendMessageW(BCM_SETIMAGELIST, 0, (LPARAM)&bil);
+                m_bOrbIcon = TRUE;
+                if (m_bModernTaskbar)
+                    CreateOrbSources(ShellScaleForDpi(42));
+            }
+            else if (!m_bModernTaskbar)
+            {
+                m_ImageList = ImageList_LoadImageW(hExplorerInstance,
+                                                   MAKEINTRESOURCEW(IDB_START),
+                                                   0, 0, 0,
+                                                   IMAGE_BITMAP,
+                                                   LR_LOADTRANSPARENT | LR_CREATEDIBSECTION);
+                if (m_ImageList)
+                {
+                    const INT Margin = ShellScaleForDpi(1);
+                    BUTTON_IMAGELIST bil = {m_ImageList,
+                                            {Margin, Margin, Margin, Margin},
+                                            BUTTON_IMAGELIST_ALIGN_LEFT};
+                    SendMessageW(BCM_SETIMAGELIST, 0, (LPARAM)&bil);
+                }
+            }
+        }
+
+        if (!LoadStringW(hExplorerInstance, IDS_START, szStartCaption,
+                         _countof(szStartCaption)))
+        {
+            wcscpy(szStartCaption, L"Start");
+        }
+        if (m_bModernTaskbar || m_bOrbIcon)
+            szStartCaption[0] = UNICODE_NULL;
+        SetWindowTextW(szStartCaption);
+
+        m_bMaterial = m_bModernTaskbar && m_bOrbIcon;
+        UpdateSize();
+        InvalidateRect(NULL, TRUE);
+    }
+
     VOID Initialize()
     {
         // HACK & FIXME: CORE-18016
@@ -247,16 +418,8 @@ public:
         SubclassWindow(hWnd);
 
         SetWindowTheme(m_hWnd, L"Start", NULL);
-
-        m_ImageList = ImageList_LoadImageW(hExplorerInstance,
-                                           MAKEINTRESOURCEW(IDB_START),
-                                           0, 0, 0,
-                                           IMAGE_BITMAP,
-                                           LR_LOADTRANSPARENT | LR_CREATEDIBSECTION);
-
-        BUTTON_IMAGELIST bil = {m_ImageList, {1,1,1,1}, BUTTON_IMAGELIST_ALIGN_LEFT};
-        SendMessageW(BCM_SETIMAGELIST, 0, (LPARAM) &bil);
-        UpdateSize();
+        m_bInitialized = TRUE;
+        UpdateThemeAppearance();
     }
 
     HWND Create(HWND hwndParent)
@@ -295,12 +458,366 @@ public:
         if (uMsg == WM_KEYUP && wParam != VK_SPACE)
             return 0;
 
-        GetParent().PostMessage(TWM_OPENSTARTMENU);
+        if (!m_bMaterial)
+        {
+            GetParent().PostMessage(TWM_OPENSTARTMENU);
+            return 0;
+        }
+
+        SetCapture();
+        m_bPressed = TRUE;
+        AnimateLogo(STARTLOGO_PRESSED_SCALE, STARTLOGO_PRESS_MS);
         return 0;
+    }
+
+    LRESULT OnLButtonDblClk(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        if (!m_bMaterial)
+        {
+            bHandled = FALSE;
+            return 0;
+        }
+        return OnLButtonDown(uMsg, wParam, lParam, bHandled);
+    }
+
+    LRESULT OnLButtonUp(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        RECT rc;
+
+        if (!m_bPressed)
+        {
+            bHandled = FALSE;
+            return 0;
+        }
+
+        GetClientRect(&rc);
+        EndPress();
+        ReleaseCapture();
+        if (PtInRect(&rc, pt))
+            GetParent().PostMessage(TWM_OPENSTARTMENU);
+        return 0;
+    }
+
+    LRESULT OnMouseMove(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        if (!m_bPressed)
+        {
+            bHandled = FALSE;
+            return 0;
+        }
+        return DefWindowProc(uMsg, wParam & ~MK_LBUTTON, lParam);
+    }
+
+    LRESULT OnCaptureChanged(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        EndPress();
+        bHandled = FALSE;
+        return 0;
+    }
+
+    VOID EndPress()
+    {
+        if (!m_bPressed)
+            return;
+        m_bPressed = FALSE;
+        AnimateLogo(1.0, STARTLOGO_RELEASE_MS);
+    }
+
+    VOID AnimateLogo(double Target, UINT Duration)
+    {
+        m_AnimFrom = m_LogoScale;
+        m_AnimTo = Target;
+        m_AnimStart = GetTickCount64();
+        m_AnimDuration = Duration;
+        SetTimer(TIMER_ID_STARTLOGO, STARTLOGO_INTERVAL, NULL);
+        InvalidateRect(NULL, FALSE);
+    }
+
+    LRESULT OnTimer(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        if (wParam != TIMER_ID_STARTLOGO)
+        {
+            bHandled = FALSE;
+            return 0;
+        }
+
+        ULONGLONG Elapsed = GetTickCount64() - m_AnimStart;
+        if (Elapsed >= m_AnimDuration)
+        {
+            m_LogoScale = m_AnimTo;
+            KillTimer(TIMER_ID_STARTLOGO);
+        }
+        else
+        {
+            double s = pow((double)Elapsed / m_AnimDuration, 1.0 / 3.0);
+            m_LogoScale = m_AnimFrom + (m_AnimTo - m_AnimFrom) * s * s * (3.0 - 2.0 * s);
+        }
+        InvalidateRect(NULL, FALSE);
+        return 0;
+    }
+
+    static double PlateCoverage(INT x, INT y, INT w, INT h, INT r)
+    {
+        if (x < 0 || y < 0 || x >= w || y >= h)
+            return 0.0;
+
+        double px = x + 0.5, py = y + 0.5;
+        double dx = (px < r) ? r - px : (px > w - r) ? px - (w - r) : 0.0;
+        double dy = (py < r) ? r - py : (py > h - r) ? py - (h - r) : 0.0;
+        if (dx <= 0.0 || dy <= 0.0)
+            return 1.0;
+
+        double c = r + 0.5 - sqrt(dx * dx + dy * dy);
+        return (c < 0.0) ? 0.0 : (c > 1.0) ? 1.0 : c;
+    }
+
+    VOID DrawPlate(HDC hdc, const RECT *prc, INT Fill, INT EdgeTop, INT EdgeSide, INT EdgeBottom)
+    {
+        INT w = prc->right - prc->left, h = prc->bottom - prc->top;
+        INT r = ShellScaleForDpi(4);
+        BITMAPINFO bmi = {};
+        DWORD *pBits = NULL;
+
+        if (w <= 2 || h <= 2)
+            return;
+
+        bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+        HBITMAP hbm = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, (void **)&pBits, NULL, 0);
+        HDC hdcMem = CreateCompatibleDC(hdc);
+        if (hbm && hdcMem && pBits)
+        {
+            HGDIOBJ hbmOld = SelectObject(hdcMem, hbm);
+
+            if (BitBlt(hdcMem, 0, 0, w, h, hdc, prc->left, prc->top, SRCCOPY))
+            {
+                GdiFlush();
+                for (INT y = 0; y < h; ++y)
+                {
+                    double py = y + 0.5;
+                    double dy = (py < r) ? r - py : (py > h - r) ? py - (h - r) : 0.0;
+                    INT EdgeY = (y < h / 2) ? EdgeTop : EdgeBottom;
+
+                    for (INT x = 0; x < w; ++x)
+                    {
+                        double Outer = PlateCoverage(x, y, w, h, r);
+                        if (Outer <= 0.0)
+                            continue;
+
+                        double px = x + 0.5;
+                        double dx = (px < r) ? r - px : (px > w - r) ? px - (w - r) : 0.0;
+                        double Edge = (dx + dy > 0.0) ? (EdgeSide * dx + EdgeY * dy) / (dx + dy) : EdgeSide;
+                        double Inner = PlateCoverage(x - 1, y - 1, w - 2, h - 2, r - 1);
+                        INT Lift = (INT)floor(Fill * Inner + Edge * (Outer - Inner) + 0.5);
+                        DWORD Pixel = pBits[y * w + x];
+                        INT cr = max(0, min(255, (INT)((Pixel >> 16) & 0xFF) + Lift));
+                        INT cg = max(0, min(255, (INT)((Pixel >> 8) & 0xFF) + Lift));
+                        INT cb = max(0, min(255, (INT)(Pixel & 0xFF) + Lift));
+
+                        pBits[y * w + x] = (Pixel & 0xFF000000) | ((DWORD)cr << 16) | ((DWORD)cg << 8) | (DWORD)cb;
+                    }
+                }
+                BitBlt(hdc, prc->left, prc->top, w, h, hdcMem, 0, 0, SRCCOPY);
+            }
+            SelectObject(hdcMem, hbmOld);
+        }
+        if (hdcMem)
+            DeleteDC(hdcMem);
+        if (hbm)
+            DeleteObject(hbm);
+    }
+
+    VOID DrawFlagPane(HDC hdc, int x0, int x1, double t0, double t1, int yTop, int h, int skew, int w)
+    {
+        POINT pts[4];
+        pts[0].x = x0; pts[0].y = yTop + (int)(skew * (1.0 - t0));
+        pts[1].x = x1; pts[1].y = yTop + (int)(skew * (1.0 - t1));
+        pts[2].x = x1; pts[2].y = yTop + h - (int)(skew * (1.0 - t1));
+        pts[3].x = x0; pts[3].y = yTop + h - (int)(skew * (1.0 - t0));
+        Polygon(hdc, pts, 4);
+    }
+
+    VOID DrawWin8Flag(HDC hdc)
+    {
+        RECT rc;
+        GetClientRect(&rc);
+
+        int w = ShellScaleForDpi(22);
+        int h = ShellScaleForDpi(17);
+        int skew = ShellScaleForDpi(2);
+        int gap = ShellScaleForDpi(2);
+        int xBase = ((rc.right - w) / 2);
+        int yBase = ((rc.bottom - h) / 2);
+
+        HBRUSH hbr = CreateSolidBrush(RGB(255, 255, 255));
+        HGDIOBJ hbrOld = SelectObject(hdc, hbr);
+        HGDIOBJ hpenOld = SelectObject(hdc, GetStockObject(NULL_PEN));
+
+        int xm = w * 42 / 100;
+        double tm0 = (double)xm / w;
+        double tm1 = (double)(xm + gap) / w;
+
+        int hPane = (h - gap) / 2;
+
+        SetViewportOrgEx(hdc, xBase, yBase, NULL);
+        DrawFlagPane(hdc, 0, xm, 0.0, tm0, 0, hPane, skew, w);
+        DrawFlagPane(hdc, xm + gap, w, tm1, 1.0, 0, hPane, skew, w);
+        DrawFlagPane(hdc, 0, xm, 0.0, tm0, hPane + gap, hPane, skew, w);
+        DrawFlagPane(hdc, xm + gap, w, tm1, 1.0, hPane + gap, hPane, skew, w);
+        SetViewportOrgEx(hdc, 0, 0, NULL);
+
+        SelectObject(hdc, hpenOld);
+        SelectObject(hdc, hbrOld);
+        DeleteObject(hbr);
+    }
+
+    VOID DrawLogo(HDC hdc, const RECT *prc, UINT iArt)
+    {
+        if (m_OrbSize > 0)
+        {
+            if (!m_OrbSource[iArt])
+                iArt = 0;
+            if (DrawStartOrbBitmap(hdc, m_OrbSource[iArt],
+                                   (prc->right - m_OrbSize) / 2, (prc->bottom - m_OrbSize) / 2,
+                                   m_OrbSize, m_LogoScale * m_OrbNormalize[iArt]))
+            {
+                return;
+            }
+        }
+
+        int cx = 0, cy = 0;
+        int iImage = (iArt == 2) ? PBS_PRESSED - 1 : (iArt == 1) ? PBS_HOT - 1 : PBS_NORMAL - 1;
+        ImageList_GetIconSize(m_ImageList, &cx, &cy);
+        if (ImageList_GetImageCount(m_ImageList) == 1)
+            iImage = 0;
+        ImageList_Draw(m_ImageList, iImage, hdc,
+                       (prc->right - cx) / 2, (prc->bottom - cy) / 2,
+                       ILD_TRANSPARENT);
+    }
+
+    VOID DrawMaterial(HDC hdc, const RECT *prc)
+    {
+        LRESULT state = SendMessageW(BM_GETSTATE, 0, 0);
+        BOOL bEnabled = IsWindowEnabled();
+        BOOL bOpen = bEnabled && (state & BST_PUSHED);
+        BOOL bHot = bEnabled && (state & BST_HOT);
+        BOOL bLight = ShellColorIsLight(m_crMaterial);
+        INT HoverFill = bLight ? 9 : 13;
+        INT PressedFill = bLight ? 5 : 7;
+        UINT iArt = 0;
+        RECT rcBack = *prc;
+
+        DrawThemeParentBackground(m_hWnd, hdc, &rcBack);
+        if (m_bPressed || bOpen || bHot)
+        {
+            INT Size = ShellScaleForDpi(40);
+            INT Fill = HoverFill;
+            RECT rcPlate;
+
+            rcPlate.left = (prc->right - Size) / 2;
+            rcPlate.top = (prc->bottom - Size) / 2;
+            rcPlate.right = rcPlate.left + Size;
+            rcPlate.bottom = rcPlate.top + Size;
+            if (m_bPressed)
+            {
+                Fill = PressedFill;
+            }
+            else if (m_LogoScale < 1.0)
+            {
+                double t = (m_LogoScale - STARTLOGO_PRESSED_SCALE) / (1.0 - STARTLOGO_PRESSED_SCALE);
+                Fill = PressedFill + (INT)floor((HoverFill - PressedFill) * max(0.0, t) + 0.5);
+            }
+            if (bLight)
+                DrawPlate(hdc, &rcPlate, Fill, -7, -7, -21);
+            else
+                DrawPlate(hdc, &rcPlate, Fill, 23, Fill, Fill);
+        }
+
+        if (m_bPressed || bOpen || m_LogoScale < 1.0)
+            iArt = 2;
+        else if (bHot)
+            iArt = 1;
+        DrawLogo(hdc, prc, iArt);
+    }
+
+    LRESULT OnEraseBkgnd(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        if (!m_bMaterial)
+        {
+            bHandled = FALSE;
+            return 0;
+        }
+        return 1;
+    }
+
+    LRESULT OnThemeChanged(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        LRESULT Result = DefWindowProc(uMsg, wParam, lParam);
+
+        if (m_bInitialized)
+            UpdateThemeAppearance();
+        return Result;
+    }
+
+    LRESULT OnPaint(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        if (m_bMaterial)
+        {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(&ps);
+            if (hdc)
+            {
+                RECT rc;
+                GetClientRect(&rc);
+                HDC hdcMem = CreateCompatibleDC(hdc);
+                HBITMAP hbm = hdcMem ? CreateCompatibleBitmap(hdc, rc.right, rc.bottom) : NULL;
+                if (hbm)
+                {
+                    HGDIOBJ hbmOld = SelectObject(hdcMem, hbm);
+                    DrawMaterial(hdcMem, &rc);
+                    BitBlt(hdc, 0, 0, rc.right, rc.bottom, hdcMem, 0, 0, SRCCOPY);
+                    SelectObject(hdcMem, hbmOld);
+                    DeleteObject(hbm);
+                }
+                else
+                {
+                    DrawMaterial(hdc, &rc);
+                }
+                if (hdcMem)
+                    DeleteDC(hdcMem);
+                EndPaint(&ps);
+            }
+            return 0;
+        }
+
+        LRESULT lr = DefWindowProc(uMsg, wParam, lParam);
+        if (m_bModernTaskbar && !m_bOrbIcon)
+        {
+            HDC hdc = GetDC();
+            if (hdc)
+            {
+                DrawWin8Flag(hdc);
+                ReleaseDC(hdc);
+            }
+        }
+        return lr;
     }
 
     BEGIN_MSG_MAP(CStartButton)
         MESSAGE_HANDLER(WM_LBUTTONDOWN, OnLButtonDown)
+        MESSAGE_HANDLER(WM_LBUTTONDBLCLK, OnLButtonDblClk)
+        MESSAGE_HANDLER(WM_LBUTTONUP, OnLButtonUp)
+        MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
+        MESSAGE_HANDLER(WM_CAPTURECHANGED, OnCaptureChanged)
+        MESSAGE_HANDLER(WM_TIMER, OnTimer)
+        MESSAGE_HANDLER(WM_ERASEBKGND, OnEraseBkgnd)
+        MESSAGE_HANDLER(WM_THEMECHANGED, OnThemeChanged)
+        MESSAGE_HANDLER(WM_PAINT, OnPaint)
     END_MSG_MAP()
 };
 
@@ -351,8 +868,6 @@ class CTrayWindow :
 
     HDPA m_ShellServices;
 
-    UINT m_WinMMDevChgMsg;
-
 public:
     CComPtr<ITrayBandSite> m_TrayBandSite;
 
@@ -364,7 +879,7 @@ public:
             /* UI Status */
             DWORD InSizeMove : 1;
             DWORD IsDragging : 1;
-            DWORD NewPosSize : 1;
+            DWORD ThemeLayoutPending : 1;
         };
     };
 
@@ -387,7 +902,6 @@ public:
         m_RunFileDlgOwner(NULL),
         m_AutoHideState(NULL),
         m_ShellServices(NULL),
-        m_WinMMDevChgMsg(NULL),
         Flags(0)
     {
         ZeroMemory(&m_TrayRects, sizeof(m_TrayRects));
@@ -464,7 +978,8 @@ public:
 
     void RefreshStartMenuSettings()
     {
-        IUnknown_Exec(m_StartMenuPopup, CLSID_MenuBand, 0x10000000, 0, NULL, NULL);
+        if (m_StartMenuPopup)
+            IUnknown_Exec(m_StartMenuPopup, CLSID_MenuBand, 0x10000000, 0, NULL, NULL);
     }
 
     LRESULT DoExitWindows()
@@ -593,7 +1108,7 @@ public:
         return This->TrayPropertiesThread();
     }
 
-    HWND STDMETHODCALLTYPE DisplayProperties()
+    HWND STDMETHODCALLTYPE DisplayProperties() override
     {
         HWND hTrayProp;
 
@@ -654,12 +1169,12 @@ public:
         }
     }
 
-    BOOL STDMETHODCALLTYPE ExecContextMenuCmd(IN UINT uiCmd)
+    BOOL STDMETHODCALLTYPE ExecContextMenuCmd(IN UINT uiCmd) override
     {
         switch (uiCmd)
         {
         case ID_SHELL_CMD_PROPERTIES:
-            DisplayProperties();
+            ShellExecuteW(m_hWnd, NULL, L"ms-settings:taskbar", NULL, NULL, SW_NORMAL);
             break;
 
         case ID_SHELL_CMD_OPEN_ALL_USERS:
@@ -726,7 +1241,7 @@ public:
             break;
 
         case ID_SHELL_CMD_ADJUST_DAT:
-            ShellExecuteW(m_hWnd, NULL, L"timedate.cpl", NULL, NULL, SW_NORMAL);
+            ShellExecuteW(m_hWnd, NULL, L"ms-settings:dateandtime", NULL, NULL, SW_NORMAL);
             break;
 
         case ID_SHELL_CMD_RESTORE_ALL:
@@ -743,7 +1258,10 @@ public:
 
     VOID HideStartMenu()
     {
-        m_StartMenuPopup->OnSelect(MPOS_CANCELLEVEL);
+        if (m_StartMenuPopup)
+            m_StartMenuPopup->OnSelect(MPOS_CANCELLEVEL);
+        else
+            StartMenu2_Hide();
     }
 
     VOID ShowFolder(INT csidl, BOOL bExplore)
@@ -781,8 +1299,31 @@ public:
             SHFindComputer(NULL, NULL);
             break;
         case IDHK_SYS_PROPERTIES:
-            ShellExecuteW(m_hWnd, NULL, L"sysdm.cpl", NULL, NULL, SW_NORMAL);
+            ShellExecuteW(m_hWnd, NULL, L"ms-settings:about", NULL, NULL, SW_NORMAL);
             break;
+        case IDHK_SETTINGS:
+        {
+            HWND hwndButton = m_TrayNotify ? FindWindowExW(m_TrayNotify, NULL, L"TrayQuickSettingsButton", NULL) : NULL;
+            RECT rc;
+
+            if (!IsThemeActive() && hwndButton && ::GetWindowRect(hwndButton, &rc))
+                TrayQuickSettings_Toggle(hwndButton, &rc);
+            else
+                ShellExecuteW(m_hWnd, NULL, L"ms-settings:", NULL, NULL, SW_NORMAL);
+            break;
+        }
+        case IDHK_ACCESSIBILITY:
+            ShellExecuteW(m_hWnd, NULL, L"ms-settings:easeofaccess", NULL, NULL, SW_NORMAL);
+            break;
+        case IDHK_QUICK_SETTINGS:
+        {
+            HWND hwndButton = m_TrayNotify ? FindWindowExW(m_TrayNotify, NULL, L"TrayQuickSettingsButton", NULL) : NULL;
+            RECT rc;
+
+            if (hwndButton && ::GetWindowRect(hwndButton, &rc))
+                TrayQuickSettings_Toggle(hwndButton, &rc);
+            break;
+        }
         case IDHK_NEXT_TASK:
             break;
         case IDHK_PREV_TASK:
@@ -797,6 +1338,9 @@ public:
             ToggleDesktop();
             break;
         case IDHK_PAGER:
+            break;
+        case IDHK_SCREENSHOT:
+            TrayScreenshot_Capture();
             break;
         }
 
@@ -843,13 +1387,13 @@ public:
                 ToggleDesktop();
                 break;
             case TRAYCMD_DATE_AND_TIME:
-                ShellExecuteW(m_hWnd, NULL, L"timedate.cpl", NULL, NULL, SW_NORMAL);
+                ShellExecuteW(m_hWnd, NULL, L"ms-settings:dateandtime", NULL, NULL, SW_NORMAL);
                 break;
             case TRAYCMD_EJECT:
                 SHCreateThread(EjectThreadProc, NULL, CTF_INSIST, NULL);
                 break;
             case TRAYCMD_TASKBAR_PROPERTIES:
-                DisplayProperties();
+                ShellExecuteW(m_hWnd, NULL, L"ms-settings:taskbar", NULL, NULL, SW_NORMAL);
                 break;
             case TRAYCMD_MINIMIZE_ALL:
                 MinimizeAll();
@@ -877,7 +1421,7 @@ public:
                 break;
             case TRAYCMD_CONTROL_PANEL:
                 if (!SHRestricted(REST_NOSETFOLDERS))
-                    ShowFolder(CSIDL_CONTROLS, FALSE);
+                    ShellExecuteW(NULL, NULL, L"control.exe", NULL, NULL, SW_SHOWNORMAL);
                 break;
             case TRAYCMD_SHUTDOWN_DIALOG:
                 DoExitWindows();
@@ -1076,7 +1620,8 @@ public:
         if (m_Theme)
             return;
 
-        m_StartButton.UpdateFont();
+        if (m_StartButton.m_hWnd)
+            m_StartButton.UpdateFont();
 
         NONCLIENTMETRICS ncm = {sizeof(ncm)};
         if (!SystemParametersInfoW(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, FALSE))
@@ -1096,9 +1641,12 @@ public:
             return;
         }
 
-        SendMessage(m_Rebar, WM_SETFONT, (WPARAM) m_Font, TRUE);
-        SendMessage(m_TaskSwitch, WM_SETFONT, (WPARAM) m_Font, TRUE);
-        SendMessage(m_TrayNotify, WM_SETFONT, (WPARAM) m_Font, TRUE);
+        if (m_Rebar)
+            SendMessage(m_Rebar, WM_SETFONT, (WPARAM) m_Font, TRUE);
+        if (m_TaskSwitch)
+            SendMessage(m_TaskSwitch, WM_SETFONT, (WPARAM) m_Font, TRUE);
+        if (m_TrayNotify)
+            SendMessage(m_TrayNotify, WM_SETFONT, (WPARAM) m_Font, TRUE);
     }
 
     HMONITOR GetScreenRectFromRect(
@@ -1587,10 +2135,7 @@ ChangePos:
         if (m_PreviousMonitor != m_Monitor)
         {
             GetScreenRect(m_PreviousMonitor, &rcWorkArea);
-            SystemParametersInfoW(SPI_SETWORKAREA,
-                                  1,
-                                  &rcWorkArea,
-                                  SPIF_SENDCHANGE);
+            SetMonitorWorkArea(m_PreviousMonitor, &rcWorkArea);
         }
 
         rcTray = m_TrayRects[m_Position];
@@ -1623,11 +2168,20 @@ ChangePos:
          * Resize the current monitor work area. Win32k will also send
          * a WM_SIZE message to automatically resize the desktop.
          */
+        SetMonitorWorkArea(m_Monitor, &rcWorkArea);
+#endif
+    }
+
+    VOID SetMonitorWorkArea(HMONITOR hMonitor, LPCRECT prcWorkArea)
+    {
+        MONITORINFO mi = { sizeof(mi) };
+        if (hMonitor && GetMonitorInfoW(hMonitor, &mi) && EqualRect(&mi.rcWork, prcWorkArea))
+            return;
+
         SystemParametersInfoW(SPI_SETWORKAREA,
                               1,
-                              &rcWorkArea,
+                              (PVOID)prcWorkArea,
                               SPIF_SENDCHANGE);
-#endif
     }
 
     VOID CheckTrayWndPosition()
@@ -1650,6 +2204,52 @@ ChangePos:
         ResizeWorkArea();
         ApplyClipping(TRUE);
         RedrawWindow(NULL, NULL, RDW_ERASE | RDW_FRAME | RDW_INTERNALPAINT | RDW_INVALIDATE | RDW_ALLCHILDREN);
+    }
+
+    INT GetDefaultTrayHeight()
+    {
+        SIZE StartSize = m_StartButton.GetSize();
+
+        if (!m_Theme)
+        {
+            return StartSize.cy + 2 * (GetSystemMetrics(SM_CYEDGE) +
+                                       GetSystemMetrics(SM_CYDLGFRAME));
+        }
+
+        INT Height = StartSize.cy - GetSystemMetrics(SM_CYEDGE);
+        if (!g_TaskbarSettings.bLock)
+            Height += GetSystemMetrics(SM_CYSIZEFRAME);
+        return Height;
+    }
+
+    LRESULT OnThemeRelayout(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        RECT rcScreen;
+
+        if (!ThemeLayoutPending)
+            return 0;
+        ThemeLayoutPending = FALSE;
+
+        if (!m_Rebar || !m_TaskSwitch || !IsPosHorizontal())
+            return 0;
+
+        /* Reset to the same one-row height used by the original startup
+           path. The task band can grow it only when the active theme has
+           explicitly requested the modern row height. */
+        m_TraySize.cy = GetDefaultTrayHeight();
+
+        rcScreen = m_TrayRects[m_Position];
+        GetScreenRect(m_Monitor, &rcScreen);
+        for (DWORD Position = ABE_LEFT; Position <= ABE_BOTTOM; ++Position)
+        {
+            GetTrayRectFromScreenRect(Position, &rcScreen, &m_TraySize,
+                                      &m_TrayRects[Position]);
+        }
+
+        CheckTrayWndPosition();
+        g_TaskbarSettings.sr.Size.cy = m_TraySize.cy;
+        g_TaskbarSettings.Save();
+        return 0;
     }
 
     VOID RegLoadSettings()
@@ -1678,14 +2278,12 @@ ChangePos:
             if(!m_Theme)
             {
                 g_TaskbarSettings.sr.Size.cx = StartBtnSize.cx + (2 * (EdgeSize.cx + DlgFrameSize.cx));
-                g_TaskbarSettings.sr.Size.cy = StartBtnSize.cy + (2 * (EdgeSize.cy + DlgFrameSize.cy));
+                g_TaskbarSettings.sr.Size.cy = GetDefaultTrayHeight();
             }
             else
             {
                 g_TaskbarSettings.sr.Size.cx = StartBtnSize.cx - EdgeSize.cx;
-                g_TaskbarSettings.sr.Size.cy = StartBtnSize.cy - EdgeSize.cy;
-                if(!g_TaskbarSettings.bLock)
-                    g_TaskbarSettings.sr.Size.cy += GetSystemMetrics(SM_CYSIZEFRAME);
+                g_TaskbarSettings.sr.Size.cy = GetDefaultTrayHeight();
             }
         }
         /* Determine a minimum tray window rectangle. The "client" height is
@@ -1775,6 +2373,12 @@ ChangePos:
 
             /* Themed button covers Edge area as well */
             StartSize.cy = HIWORD(size) + (m_Theme ? GetSystemMetrics(SM_CYEDGE) : 0);
+        }
+
+        if (m_StartButton.IsModernTaskbar() && Horizontal)
+        {
+            StartSize.cy = rcClient.bottom;
+            StartSize.cx = MulDiv(StartSize.cy, 6, 5);
         }
 
         if (m_StartButton.m_hWnd != NULL)
@@ -1918,6 +2522,17 @@ ChangePos:
 
     void PopupStartMenu()
     {
+        if (m_StartMenuPopup == NULL)
+        {
+            RECT rcBtn;
+            if (m_StartButton.GetWindowRect(&rcBtn) &&
+                StartMenu2_Popup(&rcBtn, m_Position) == S_OK)
+            {
+                m_StartButton.SendMessageW(BM_SETSTATE, TRUE, 0);
+            }
+            return;
+        }
+
         if (m_StartMenuPopup != NULL)
         {
             POINTL pt;
@@ -2128,8 +2743,28 @@ ChangePos:
 
         if (m_Theme)
         {
+            COLORREF crMaterial;
+
             GetClientRect(&rect);
-            DrawThemeBackground(m_Theme, hdc, iSBkgndPart[m_Position], 0, &rect, 0);
+            if (ShellGetTaskbarMaterial(&crMaterial) && ShellColorIsLight(crMaterial))
+            {
+                HBRUSH hbr = CreateSolidBrush(crMaterial);
+
+                FillRect(hdc, &rect, hbr);
+                DeleteObject(hbr);
+                if (m_Position == ABE_BOTTOM || m_Position == ABE_TOP)
+                {
+                    RECT rcEdge = { rect.left, rect.top, rect.right, rect.top + 1 };
+
+                    hbr = CreateSolidBrush(RGB(190, 190, 190));
+                    FillRect(hdc, &rcEdge, hbr);
+                    DeleteObject(hbr);
+                }
+            }
+            else
+            {
+                DrawThemeBackground(m_Theme, hdc, iSBkgndPart[m_Position], 0, &rect, 0);
+            }
         }
 
         return 0;
@@ -2179,7 +2814,7 @@ ChangePos:
     /*
      * ITrayWindow
      */
-    HRESULT STDMETHODCALLTYPE Open()
+    HRESULT STDMETHODCALLTYPE Open() override
     {
         RECT rcWnd;
 
@@ -2190,13 +2825,14 @@ ChangePos:
             return S_OK;
         }
 
-        DWORD dwExStyle = WS_EX_TOOLWINDOW | WS_EX_WINDOWEDGE;
+        DWORD dwExStyle = WS_EX_TOOLWINDOW;
         if (g_TaskbarSettings.sr.AlwaysOnTop)
             dwExStyle |= WS_EX_TOPMOST;
 
         DWORD dwStyle = WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
-        if(!m_Theme)
+        if (!IsThemeActive())
         {
+            dwExStyle |= WS_EX_WINDOWEDGE;
             dwStyle |= WS_THICKFRAME | WS_BORDER;
         }
 
@@ -2216,7 +2852,7 @@ ChangePos:
         return S_OK;
     }
 
-    HRESULT STDMETHODCALLTYPE Close()
+    HRESULT STDMETHODCALLTYPE Close() override
     {
         if (m_hWnd != NULL)
         {
@@ -2229,23 +2865,23 @@ ChangePos:
         return S_OK;
     }
 
-    HWND STDMETHODCALLTYPE GetHWND()
+    HWND STDMETHODCALLTYPE GetHWND() override
     {
         return m_hWnd;
     }
 
-    BOOL STDMETHODCALLTYPE IsSpecialHWND(IN HWND hWnd)
+    BOOL STDMETHODCALLTYPE IsSpecialHWND(IN HWND hWnd) override
     {
         return (m_hWnd == hWnd ||
                 (m_DesktopWnd != NULL && m_hWnd == m_DesktopWnd));
     }
 
-    BOOL STDMETHODCALLTYPE IsHorizontal()
+    BOOL STDMETHODCALLTYPE IsHorizontal() override
     {
         return IsPosHorizontal();
     }
 
-    BOOL STDMETHODCALLTYPE Lock(IN BOOL bLock)
+    BOOL STDMETHODCALLTYPE Lock(IN BOOL bLock) override
     {
         BOOL bPrevLock = g_TaskbarSettings.bLock;
 
@@ -2298,7 +2934,7 @@ ChangePos:
     /* The task window is visible and non-WS_EX_TOOLWINDOW and
        { has WS_EX_APPWINDOW style or has no owner } and is none of explorer's
        special windows (such as the desktop or the tray window) */
-    BOOL STDMETHODCALLTYPE IsTaskWnd(HWND hWnd)
+    BOOL STDMETHODCALLTYPE IsTaskWnd(HWND hWnd) override
     {
         if (::IsWindow(hWnd) && ::IsWindowVisible(hWnd) && !IsSpecialHWND(hWnd))
         {
@@ -2319,7 +2955,7 @@ ChangePos:
                                                UINT indexMenu,
                                                UINT idCmdFirst,
                                                UINT idCmdLast,
-                                               UINT uFlags)
+                                               UINT uFlags) override
     {
         if (!m_ContextMenu)
         {
@@ -2331,7 +2967,7 @@ ChangePos:
         return m_ContextMenu->QueryContextMenu(hPopup, indexMenu, idCmdFirst, idCmdLast, uFlags);
     }
 
-    HRESULT STDMETHODCALLTYPE InvokeCommand(LPCMINVOKECOMMANDINFO lpici)
+    HRESULT STDMETHODCALLTYPE InvokeCommand(LPCMINVOKECOMMANDINFO lpici) override
     {
         if (!m_ContextMenu)
             return E_INVALIDARG;
@@ -2343,7 +2979,7 @@ ChangePos:
                                                UINT uType,
                                                UINT *pwReserved,
                                                LPSTR pszName,
-                                               UINT cchMax)
+                                               UINT cchMax) override
     {
         if (!m_ContextMenu)
             return E_INVALIDARG;
@@ -2369,10 +3005,16 @@ ChangePos:
         /* Load the saved tray window settings */
         RegLoadSettings();
 
+#if 0
         /* Create and initialize the start menu */
         HBITMAP hbmBanner = LoadBitmapW(hExplorerInstance, MAKEINTRESOURCEW(IDB_STARTMENU));
         m_StartMenuPopup = CreateStartMenu(this, &m_StartMenuBand, hbmBanner,
                                            g_TaskbarSettings.sr.SmSmallIcons);
+#else
+        StartMenu2_Create(this, m_hWnd);
+#endif
+        TrayVolume_StartWatch();
+        TrayBrightness_StartWatch();
 
         /* Create the task band */
         hRet = CTaskBand_CreateInstance(this, m_StartButton.m_hWnd, IID_PPV_ARG(IDeskBand, &m_TaskBand));
@@ -2437,6 +3079,15 @@ ChangePos:
             MAKELONG(IDHK_SYS_PROPERTIES, MAKEWORD(VK_PAUSE, MOD_WIN)),
             MAKELONG(IDHK_DESKTOP,        MAKEWORD('D', MOD_WIN)),
             MAKELONG(IDHK_PAGER,          MAKEWORD('B', MOD_WIN)),
+            MAKELONG(IDHK_QUICK_SETTINGS, MAKEWORD('A', MOD_WIN)),
+            MAKELONG(IDHK_SETTINGS,       MAKEWORD('I', MOD_WIN)),
+            MAKELONG(IDHK_ACCESSIBILITY,  MAKEWORD('U', MOD_WIN)),
+            MAKELONG(IDHK_SCREENSHOT,     MAKEWORD(VK_SNAPSHOT, MOD_WIN)),
+        };
+        static const UINT taskmods[] =
+        {
+            MOD_WIN, MOD_WIN | MOD_SHIFT, MOD_WIN | MOD_CONTROL, MOD_WIN | MOD_ALT,
+            MOD_WIN | MOD_CONTROL | MOD_SHIFT,
         };
         if (!SHRestricted(REST_NOWINKEYS))
         {
@@ -2445,15 +3096,20 @@ ChangePos:
                 UINT mod = HIBYTE(HIWORD(winkeys[i])), key = LOBYTE(HIWORD(winkeys[i]));
                 RegisterHotKey(m_hWnd, LOWORD(winkeys[i]), mod, key);
             }
+            for (UINT i = 0; i < _countof(taskmods); ++i)
+            {
+                for (UINT key = '0'; key <= '9'; ++key)
+                    RegisterHotKey(m_hWnd, IDHK_ACTIVATE_TASK, taskmods[i], key);
+            }
         }
-
-        m_WinMMDevChgMsg = RegisterWindowMessageW(L"winmm_devicechange");
 
         return TRUE;
     }
 
     LRESULT OnDestroy(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
     {
+        TrayFlyouts_Destroy();
+        StartMenu2_Destroy();
         return 0;
     }
 
@@ -2470,22 +3126,52 @@ ChangePos:
             CloseThemeData(m_Theme);
 
         m_Theme = OpenThemeData(m_hWnd, L"TaskBar");
+        if (m_StartButton.m_hWnd)
+            m_StartButton.SendMessage(WM_THEMECHANGED, 0, 0);
+        /*
+         * Theme changes are broadcast from another process.  A posted tray
+         * relayout can therefore run before that broadcaster reaches our
+         * child windows.  Refresh every child that participates in layout
+         * synchronously so that the rebar sees the new borders, row metrics,
+         * and notification-area margins when it is asked to resize.
+         */
+        if (m_Rebar)
+            ::SendMessageW(m_Rebar, WM_THEMECHANGED, wParam, lParam);
+        if (m_TaskSwitch)
+            ::SendMessageW(m_TaskSwitch, WM_THEMECHANGED, wParam, lParam);
+        if (m_TrayNotify)
+            ::SendMessageW(m_TrayNotify, WM_THEMECHANGED, wParam, lParam);
+        if (!m_Theme)
+            UpdateFonts();
 
         if (m_Theme)
         {
+            SetWindowExStyle(m_hWnd, WS_EX_WINDOWEDGE, 0);
             SetWindowStyle(m_hWnd, WS_THICKFRAME | WS_BORDER, 0);
         }
         else
         {
+            SetWindowExStyle(m_hWnd, WS_EX_WINDOWEDGE, WS_EX_WINDOWEDGE);
             SetWindowStyle(m_hWnd, WS_THICKFRAME | WS_BORDER, WS_THICKFRAME | WS_BORDER);
         }
         SetWindowPos(NULL, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER);
+        RedrawWindow(NULL, NULL, RDW_ERASE | RDW_FRAME | RDW_INVALIDATE);
+
+        /* Reflow after the frame and the task-band metrics have been updated. */
+        ThemeLayoutPending = (m_Rebar && m_TaskSwitch && IsPosHorizontal());
+        if (ThemeLayoutPending)
+            PostMessage(WM_APP_THEME_RELAYOUT, 0, 0);
+        else
+            PostMessage(WM_SIZE, SIZE_RESTORED, 0);
 
         return TRUE;
     }
 
     LRESULT OnSettingChanged(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
     {
+        if (lParam && lstrcmpiW((LPCWSTR)lParam, L"ImmersiveColorSet") == 0)
+            OnThemeChanged(WM_THEMECHANGED, 0, 0, bHandled);
+
         if (wParam == SPI_SETNONCLIENTMETRICS)
         {
             SendMessage(m_TrayNotify, uMsg, wParam, lParam);
@@ -2495,9 +3181,16 @@ ChangePos:
             CheckTrayWndPosition();
         }
 
-        // Note: We rely on CDesktopBrowser to get this message and call SHSettingsChanged
-        if (m_DesktopWnd)
-            ::SendMessageW(m_DesktopWnd, uMsg, wParam, lParam);
+        if (lParam && lstrcmpiW((LPCWSTR)lParam, L"TraySettings") == 0)
+        {
+            TaskbarSettings newSettings = g_TaskbarSettings;
+            if (newSettings.Load())
+            {
+                SendMessageW(TWM_SETTINGSCHANGED, 0, (LPARAM)&newSettings);
+                g_TaskbarSettings = newSettings;
+                g_TaskbarSettings.Save();
+            }
+        }
 
         if (m_StartMenuPopup && lstrcmpiW((LPCWSTR)lParam, L"TraySettings") == 0)
         {
@@ -2559,6 +3252,7 @@ ChangePos:
                 return OnAppBarMessage(pCopyData);
             case TABDMC_NOTIFY:
             case TABDMC_LOADINPROC:
+            case TABDMC_NOTIFY_GETRECT:
                 return ::SendMessageW(m_TrayNotify, uMsg, wParam, lParam);
         }
         return FALSE;
@@ -2597,6 +3291,13 @@ ChangePos:
     LRESULT OnSysColorChange(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
     {
         return SendMessageW(m_Rebar, uMsg, wParam, lParam);
+    }
+
+    LRESULT OnTimeChange(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        if (m_TrayNotify)
+            ::SendMessageW(m_TrayNotify, uMsg, wParam, lParam);
+        return 0;
     }
 
     LRESULT OnNcHitTest(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
@@ -3052,6 +3753,15 @@ HandleTrayContextMenu:
 
     LRESULT OnOpenStartMenu(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
     {
+        if (m_StartMenuPopup == NULL)
+        {
+            if (StartMenu2_IsVisible())
+                HideStartMenu();
+            else
+                PopupStartMenu();
+            return TRUE;
+        }
+
         HWND hwndStartMenu;
         HRESULT hr = IUnknown_GetWindow(m_StartMenuPopup, &hwndStartMenu);
         if (FAILED_UNEXPECTEDLY(hr))
@@ -3062,6 +3772,68 @@ HandleTrayContextMenu:
         else
             PopupStartMenu();
 
+        return TRUE;
+    }
+
+    LRESULT OnShowVolumeFlyout(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        RECT rcAnchor;
+        if (!m_TrayNotify)
+            return FALSE;
+        ::GetWindowRect(m_TrayNotify, &rcAnchor);
+        if (wParam == 1)
+            TrayMixer_Open(&rcAnchor);
+        else
+        {
+            WORD state = HIWORD(lParam);
+            if (state & 0x8000)
+                TrayVolume_SetCachedState((int)LOWORD(lParam), (state & 1) != 0);
+            TrayVolume_Toggle(m_hWnd, &rcAnchor);
+        }
+        return TRUE;
+    }
+
+    LRESULT OnShowNetworkFlyout(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        RECT rcAnchor;
+        if (!m_TrayNotify)
+            return FALSE;
+        ::GetWindowRect(m_TrayNotify, &rcAnchor);
+        TrayNetwork_Toggle(m_hWnd, &rcAnchor);
+        return TRUE;
+    }
+
+    LRESULT OnShowBluetoothFlyout(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        RECT rcAnchor;
+        if (!m_TrayNotify)
+            return FALSE;
+        ::GetWindowRect(m_TrayNotify, &rcAnchor);
+        TrayBluetooth_Toggle(m_hWnd, &rcAnchor);
+        return TRUE;
+    }
+
+    LRESULT OnShowPowerFlyout(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        RECT rcAnchor;
+        if (!m_TrayNotify)
+            return FALSE;
+        ::GetWindowRect(m_TrayNotify, &rcAnchor);
+        TrayPower_Toggle(m_hWnd, &rcAnchor);
+        return TRUE;
+    }
+
+    LRESULT OnShowCalendarFlyout(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
+    {
+        RECT rcAnchor;
+        HWND hwndClock;
+        if (!m_TrayNotify)
+            return FALSE;
+        hwndClock = FindWindowExW(m_TrayNotify, NULL, L"TrayClockWClass", NULL);
+        if (!hwndClock)
+            return FALSE;
+        ::GetWindowRect(hwndClock, &rcAnchor);
+        TrayCalendar_Toggle(hwndClock, &rcAnchor);
         return TRUE;
     }
 
@@ -3107,6 +3879,17 @@ HandleTrayContextMenu:
 
     LRESULT OnHotkey(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
     {
+        if (wParam == IDHK_ACTIVATE_TASK)
+        {
+            UINT key = HIWORD(lParam);
+            UINT index = (key == '0') ? 9 : key - '1';
+            if (key < '0' || key > '9' || !m_TaskSwitch)
+                return 0;
+            HideStartMenu();
+            ::SendMessageW(m_TaskSwitch, TSWM_ACTIVATETASKINDEX,
+                           MAKEWPARAM(index, LOWORD(lParam) & ~MOD_WIN), 0);
+            return 0;
+        }
         return HandleHotKey(wParam);
     }
 
@@ -3449,6 +4232,7 @@ HandleTrayContextMenu:
         MESSAGE_HANDLER(WM_NCACTIVATE, OnNcActivate)
         MESSAGE_HANDLER(WM_CTLCOLORBTN, OnCtlColorBtn)
         MESSAGE_HANDLER(WM_SYSCOLORCHANGE, OnSysColorChange)
+        MESSAGE_HANDLER(WM_TIMECHANGE, OnTimeChange)
         MESSAGE_HANDLER(WM_MOVING, OnMoving)
         MESSAGE_HANDLER(WM_SIZING, OnSizing)
         MESSAGE_HANDLER(WM_WINDOWPOSCHANGING, OnWindowPosChanging)
@@ -3463,6 +4247,7 @@ HandleTrayContextMenu:
         MESSAGE_HANDLER(WM_MOUSEMOVE, OnMouseMove)
         MESSAGE_HANDLER(WM_NCMOUSEMOVE, OnMouseMove)
         MESSAGE_HANDLER(WM_APP_TRAYDESTROY, OnAppTrayDestroy)
+        MESSAGE_HANDLER(WM_APP_THEME_RELAYOUT, OnThemeRelayout)
         MESSAGE_HANDLER(WM_CLOSE, OnDoExitWindows)
         MESSAGE_HANDLER(WM_HOTKEY, OnHotkey)
         MESSAGE_HANDLER(WM_NCCALCSIZE, OnNcCalcSize)
@@ -3470,9 +4255,13 @@ HandleTrayContextMenu:
         MESSAGE_HANDLER(WM_ACTIVATE, OnActivate)
         MESSAGE_HANDLER(WM_SETFOCUS, OnSetFocus)
         MESSAGE_HANDLER(WM_GETMINMAXINFO, OnGetMinMaxInfo)
-        MESSAGE_HANDLER(m_WinMMDevChgMsg, OnWinMMDeviceChange)
         MESSAGE_HANDLER(TWM_SETTINGSCHANGED, OnTaskbarSettingsChanged)
         MESSAGE_HANDLER(TWM_OPENSTARTMENU, OnOpenStartMenu)
+        MESSAGE_HANDLER(TWM_SHOWVOLUMEFLYOUT, OnShowVolumeFlyout)
+        MESSAGE_HANDLER(TWM_SHOWNETWORKFLYOUT, OnShowNetworkFlyout)
+        MESSAGE_HANDLER(TWM_SHOWBLUETOOTHFLYOUT, OnShowBluetoothFlyout)
+        MESSAGE_HANDLER(TWM_SHOWCALENDARFLYOUT, OnShowCalendarFlyout)
+        MESSAGE_HANDLER(TWM_SHOWPOWERFLYOUT, OnShowPowerFlyout)
         MESSAGE_HANDLER(TWM_DOEXITWINDOWS, OnDoExitWindows)
         MESSAGE_HANDLER(TWM_GETTASKSWITCH, OnGetTaskSwitch)
         MESSAGE_HANDLER(TWM_SETZORDER, OnSetZOrder)
@@ -3480,13 +4269,6 @@ HandleTrayContextMenu:
     END_MSG_MAP()
 
     /*****************************************************************************/
-
-    LRESULT OnWinMMDeviceChange(UINT uMsg, WPARAM wParam, LPARAM lParam, BOOL& bHandled)
-    {
-        /* CTaskSwitchWnd does not receive this message directly */
-        ::SendMessageW(m_TaskSwitch, uMsg, wParam, lParam);
-        return TRUE;
-    }
 
     VOID TrayProcessMessages()
     {

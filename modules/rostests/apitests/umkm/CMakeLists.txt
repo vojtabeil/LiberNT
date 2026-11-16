@@ -1,9 +1,14 @@
 
 set(CMAKE_CXX_STANDARD 17)
 
-include_directories(${REACTOS_SOURCE_DIR}/ntoskrnl/include)
+if(NOT ARCH STREQUAL "i386" AND NOT ARCH STREQUAL "amd64")
+    return()
+endif()
+
+include_directories(${REACTOS_SOURCE_DIR}/ntos/include ${REACTOS_SOURCE_DIR}/subsystems/win/win32k)
 
 list(APPEND SOURCE
+    GuiServiceFailure.c
     SystemCall.c
     XStateConfig.cpp
     XStateSave.c
@@ -29,7 +34,7 @@ add_executable(umkm_apitest
     ${umkm_apitest_asm}
     ${PCH_SKIP_SOURCE})
 
-if(NOT MSVC)
+if(NOT MSVC AND (ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64"))
     target_compile_options(umkm_apitest PRIVATE -mxsave)
 endif()
 
@@ -40,4 +45,3 @@ add_pch(umkm_apitest precomp.h "${PCH_SKIP_SOURCE}")
 add_dependencies(umkm_apitest psdk load_notifications)
 
 add_rostests_file(TARGET umkm_apitest)
-

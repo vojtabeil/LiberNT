@@ -17,7 +17,50 @@ VOID
 NTAPI
 ApicInitializeLocalApic(ULONG Cpu);
 
+extern PPROCESSOR_IDENTITY HalpProcessorIdentity;
+extern HALP_APIC_INFO_TABLE HalpApicInfoTable;
+
 /* FUNCTIONS ****************************************************************/
+
+static
+VOID
+HalpEnsureBootProcessorFirst(VOID)
+{
+    PROCESSOR_IDENTITY Identity;
+    ULONG BootApicId;
+    ULONG i;
+
+    BootApicId = ApicGetId();
+    for (i = 0; i < HalpApicInfoTable.ProcessorCount; i++)
+    {
+        if (HalpProcessorIdentity[i].LapicId == BootApicId)
+        {
+            if (i != 0)
+            {
+                Identity = HalpProcessorIdentity[0];
+                HalpProcessorIdentity[0] = HalpProcessorIdentity[i];
+                HalpProcessorIdentity[i] = Identity;
+            }
+
+            HalpProcessorIdentity[0].BSPCheck = TRUE;
+            return;
+        }
+    }
+
+    i = min(HalpApicInfoTable.ProcessorCount, MAXIMUM_PROCESSORS - 1);
+    while (i != 0)
+    {
+        HalpProcessorIdentity[i] = HalpProcessorIdentity[i - 1];
+        i--;
+    }
+
+    RtlZeroMemory(&HalpProcessorIdentity[0], sizeof(HalpProcessorIdentity[0]));
+    HalpProcessorIdentity[0].ProcessorId = BootApicId;
+    HalpProcessorIdentity[0].LapicId = (UCHAR)BootApicId;
+    HalpProcessorIdentity[0].BSPCheck = TRUE;
+    if (HalpApicInfoTable.ProcessorCount < MAXIMUM_PROCESSORS)
+        HalpApicInfoTable.ProcessorCount++;
+}
 
 VOID
 NTAPI
@@ -27,13 +70,21 @@ HalpInitProcessor(
 {
     if (ProcessorNumber == 0)
     {
+        /* Quiesce firmware's virtual-wire source before changing the LAPIC's
+         * LINT0 routing. Masking it only in HalpInitializePICs is too late:
+         * a pending legacy IRQ can already have asserted CPU INTR. */
+        __outbyte(PIC1_DATA_PORT, 0xFF);
+        __outbyte(PIC2_DATA_PORT, 0xFF);
         HalpParseApicTables(LoaderBlock);
     }
 
-    HalpSetupProcessorsTable(ProcessorNumber);
-
     /* Initialize the local APIC for this cpu */
     ApicInitializeLocalApic(ProcessorNumber);
+
+    if (ProcessorNumber == 0)
+        HalpEnsureBootProcessorFirst();
+
+    HalpSetupProcessorsTable(ProcessorNumber);
 
     /* Initialize profiling data (but don't start it) */
     HalInitializeProfiling();
@@ -45,11 +96,14 @@ HalpInitProcessor(
 VOID
 HalpInitPhase0(IN PLOADER_PARAMETER_BLOCK LoaderBlock)
 {
-    DPRINT1("Using HAL: APIC %s %s\n",
+    DPRINT1("Using HAL: APIC %s %s, local APIC through %s\n",
             (HalpBuildType & PRCB_BUILD_UNIPROCESSOR) ? "UP" : "SMP",
-            (HalpBuildType & PRCB_BUILD_DEBUG) ? "DBG" : "REL");
+            (HalpBuildType & PRCB_BUILD_DEBUG) ? "DBG" : "REL",
+            HalpX2ApicMode ? "registers (x2APIC)" : "the memory window");
 
     HalpPrintApicTables();
+
+    HalpSecondaryInitialize();
 
     /* Enable clock interrupt handler */
     HalpEnableInterruptHandler(IDT_INTERNAL,

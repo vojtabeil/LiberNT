@@ -147,6 +147,33 @@ CleanAndQuit:
     return Ret;
 }
 
+static
+BOOL
+IsUncRootPath(IN PUNICODE_STRING NtPathName)
+{
+    UNICODE_STRING UncPrefix = RTL_CONSTANT_STRING(L"\\??\\UNC\\");
+    PCWSTR Name, End, Component;
+    ULONG Components = 0;
+
+    if (!RtlPrefixUnicodeString(&UncPrefix, NtPathName, TRUE))
+        return FALSE;
+
+    Name = NtPathName->Buffer + UncPrefix.Length / sizeof(WCHAR);
+    End = NtPathName->Buffer + NtPathName->Length / sizeof(WCHAR);
+    while (Name < End)
+    {
+        Component = Name;
+        while (Name < End && *Name != L'\\')
+            Name++;
+        if (Name == Component || Name == End)
+            return FALSE;
+        Components++;
+        Name++;
+    }
+
+    return Components == 2;
+}
+
 /*
  * @implemented
  */
@@ -162,6 +189,9 @@ IsThisARootDirectory(IN HANDLE VolumeHandle,
         WCHAR Buffer[MAX_PATH];
     } FileNameInfo;
 
+    if (NtPathName != NULL && IsUncRootPath(NtPathName))
+        return TRUE;
+
     /* If we have a handle, query the name */
     if (VolumeHandle)
     {
@@ -175,6 +205,11 @@ IsThisARootDirectory(IN HANDLE VolumeHandle,
         if (FileNameInfo.FileName[FileNameInfo.FileNameLength / sizeof(WCHAR) - 1] != L'\\')
         {
             return FALSE;
+        }
+
+        if (FileNameInfo.FileNameLength == sizeof(WCHAR))
+        {
+            return TRUE;
         }
     }
 

@@ -23,9 +23,16 @@
 #ifndef _NTDDNDIS_
 #define _NTDDNDIS_
 
+#include <ifdef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* NDIS 6.30+ Hyper-V switch identifiers. These are scalar ABI types shared
+ * by ntddndis.h consumers and the kernel-mode NET_PNP notification surface. */
+typedef ULONG NDIS_NIC_SWITCH_ID, *PNDIS_NIC_SWITCH_ID;
+typedef ULONG NDIS_NIC_SWITCH_VPORT_ID, *PNDIS_NIC_SWITCH_VPORT_ID;
 
 typedef enum _NDIS_WAN_QUALITY {
 	NdisWanRaw,
@@ -96,6 +103,8 @@ typedef struct _NDIS_OBJECT_HEADER
     UCHAR Revision;
     USHORT Size;
 } NDIS_OBJECT_HEADER, *PNDIS_OBJECT_HEADER;
+
+#define NDIS_OBJECT_TYPE_DEFAULT                        0x80
 
 #define NDIS_802_11_LENGTH_SSID  32
 #define NDIS_802_11_LENGTH_RATES 8
@@ -182,6 +191,12 @@ typedef struct _NDIS_PNP_CAPABILITIES {
   ULONG  Flags;
   NDIS_PM_WAKE_UP_CAPABILITIES  WakeUpCapabilities;
 } NDIS_PNP_CAPABILITIES, *PNDIS_PNP_CAPABILITIES;
+
+/* NDIS 6.20 power-management capabilities (REVISION_1 form). Target of
+ * NDIS_MINIPORT_ADAPTER_GENERAL_ATTRIBUTES::PowerManagementCapabilitiesEx. */
+#define NDIS_PM_CAPABILITIES_REVISION_1  1
+
+
 
 /* Type (OID_GEN_VLAN_ID) */
 typedef ULONG NDIS_VLAN_ID;
@@ -410,6 +425,7 @@ typedef ULONG NDIS_OID, *PNDIS_OID;
 #define OID_TCP_OFFLOAD_HARDWARE_CAPABILITIES              0xFC01020D /* Query only */
 #define OID_TCP_CONNECTION_OFFLOAD_CURRENT_CONFIG          0xFC01020E /* Query only */
 #define OID_TCP_CONNECTION_OFFLOAD_HARDWARE_CAPABILITIES   0xFC01020F /* Query only */
+#define OID_TCP_RSC_STATISTICS                             0x0002021D
 #define OID_OFFLOAD_ENCAPSULATION                          0x0101010A
 
 /* Obsolete FFP defines */
@@ -502,10 +518,21 @@ typedef struct _NDIS_GUID {
   union {
     NDIS_OID Oid;
     NDIS_STATUS Status;
-  } u;
+  };
   ULONG Size;
   ULONG Flags;
 } NDIS_GUID, *PNDIS_GUID;
+
+#define fNDIS_GUID_TO_OID                   0x00000001
+#define fNDIS_GUID_TO_STATUS                0x00000002
+#define fNDIS_GUID_ANSI_STRING              0x00000004
+#define fNDIS_GUID_UNICODE_STRING           0x00000008
+#define fNDIS_GUID_ARRAY                    0x00000010
+#define fNDIS_GUID_ALLOW_READ               0x00000020
+#define fNDIS_GUID_ALLOW_WRITE              0x00000040
+#define fNDIS_GUID_METHOD                   0x00000080
+#define fNDIS_GUID_NDIS_RESERVED            0x00000100
+#define fNDIS_GUID_SUPPORT_COMMON_HEADER    0x00000200
 
 typedef struct _NDIS_PM_PACKET_PATTERN {
   ULONG Priority;
@@ -541,8 +568,3152 @@ typedef struct _NDIS_CO_LINK_SPEED {
   ULONG Inbound;
 } NDIS_CO_LINK_SPEED, *PNDIS_CO_LINK_SPEED;
 
+#define NDIS_PACKET_TYPE_DIRECTED               0x00000001
+#define NDIS_PACKET_TYPE_MULTICAST              0x00000002
+#define NDIS_PACKET_TYPE_ALL_MULTICAST          0x00000004
+#define NDIS_PACKET_TYPE_BROADCAST              0x00000008
+#define NDIS_PACKET_TYPE_SOURCE_ROUTING         0x00000010
+#define NDIS_PACKET_TYPE_PROMISCUOUS            0x00000020
+#define NDIS_PACKET_TYPE_SMT                    0x00000040
+#define NDIS_PACKET_TYPE_ALL_LOCAL              0x00000080
+#define NDIS_PACKET_TYPE_GROUP                  0x00001000
+#define NDIS_PACKET_TYPE_ALL_FUNCTIONAL         0x00002000
+#define NDIS_PACKET_TYPE_FUNCTIONAL             0x00004000
+#define NDIS_PACKET_TYPE_MAC_FRAME              0x00008000
+#define NDIS_PACKET_TYPE_NO_LOCAL               0x00010000
+
+#if !defined(NDIS_SUPPORT_NDIS6) || NDIS_SUPPORT_NDIS6
+
+#if ((NDIS_SUPPORT_NDIS61))
+
+#define NDIS_OBJECT_TYPE_MINIPORT_ADAPTER_HARDWARE_ASSIST_ATTRIBUTES    0xAF
+
+#endif
+#if ((NDIS_SUPPORT_NDIS620))
+
+#define NDIS_OBJECT_TYPE_RSS_PROCESSOR_INFO                             0xB1
+
+#endif
+#if ((NDIS_SUPPORT_NDIS630))
+
+#define NDIS_OBJECT_TYPE_QOS_CAPABILITIES                               0xB5
+
+#define NDIS_OBJECT_TYPE_QOS_PARAMETERS                                 0xB6
+
+#define NDIS_OBJECT_TYPE_QOS_CLASSIFICATION_ELEMENT                     0xB7
+
+#define NDIS_OBJECT_TYPE_SWITCH_OPTIONAL_HANDLERS                       0xB8
+
+#endif
+
+#define NDIS_OBJECT_REVISION_1 1
+
+#if (((NTDDI_VERSION >= NTDDI_VISTA) || NDIS_SUPPORT_NDIS6))
+
+typedef enum _NDIS_INTERRUPT_MODERATION
+{
+    NdisInterruptModerationUnknown,
+    NdisInterruptModerationNotSupported,
+    NdisInterruptModerationEnabled,
+    NdisInterruptModerationDisabled
+} NDIS_INTERRUPT_MODERATION, *PNDIS_INTERRUPT_MODERATION;
+
+#define NDIS_INTERRUPT_MODERATION_CHANGE_NEEDS_RESET            0x00000001
+
+#define NDIS_INTERRUPT_MODERATION_CHANGE_NEEDS_REINITIALIZE     0x00000002
+
+#define NDIS_INTERRUPT_MODERATION_PARAMETERS_REVISION_1    1
+
+typedef struct _NDIS_INTERRUPT_MODERATION_PARAMETERS
+{
+    NDIS_OBJECT_HEADER Header;
+    ULONG Flags;
+    NDIS_INTERRUPT_MODERATION InterruptModeration;
+}NDIS_INTERRUPT_MODERATION_PARAMETERS, *PNDIS_INTERRUPT_MODERATION_PARAMETERS;
+
+#define NDIS_SIZEOF_INTERRUPT_MODERATION_PARAMETERS_REVISION_1    \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_INTERRUPT_MODERATION_PARAMETERS, InterruptModeration)
+
+#define OID_GEN_RECEIVE_SCALE_CAPABILITIES      0x00010203
+
+#define OID_GEN_RECEIVE_SCALE_PARAMETERS        0x00010204
+
+#define OID_GEN_MAX_LINK_SPEED                  0x00010206
+
+#endif
+#if (((NTDDI_VERSION >= NTDDI_WIN10_RS3) || NDIS_SUPPORT_NDIS680))
+
+#define OID_GEN_RECEIVE_SCALE_PARAMETERS_V2     0x00010214
+
+#endif
+#if (((NTDDI_VERSION >= NTDDI_VISTA) || NDIS_SUPPORT_NDIS6))
+
+#define OID_GEN_MEDIA_CONNECT_STATUS_EX         0x0001028A
+
+#define OID_GEN_LINK_SPEED_EX                   0x0001028B
+
+#define OID_GEN_MEDIA_DUPLEX_STATE              0x0001028C
+
+#define OID_GEN_BYTES_RCV                       0x00020219
+
+#define OID_GEN_BYTES_XMIT                      0x0002021A
+
+#define OID_GEN_RCV_DISCARDS                    0x0002021B
+
+#define OID_GEN_XMIT_DISCARDS                   0x0002021C
+
+#define OID_802_3_ADD_MULTICAST_ADDRESS         0x01010208
+
+#define OID_802_3_DELETE_MULTICAST_ADDRESS      0x01010209
+
+#endif
+
+#define NDIS_ETH_TYPE_802_1X            0x888e
+
+#define NDIS_ETH_TYPE_802_1Q            0x8100
+
+#if (((NTDDI_VERSION >= NTDDI_WIN7) || NDIS_SUPPORT_NDIS620))
+
+#define OID_PM_PARAMETERS                       0xFD010109
+
+#define OID_PM_ADD_WOL_PATTERN                  0xFD01010A
+
+#define OID_PM_REMOVE_WOL_PATTERN               0xFD01010B
+
+#define OID_PM_ADD_PROTOCOL_OFFLOAD             0xFD01010D
+
+#define OID_PM_REMOVE_PROTOCOL_OFFLOAD          0xFD01010F
+
+#define OID_RECEIVE_FILTER_ALLOCATE_QUEUE               0x00010223
+
+#define OID_RECEIVE_FILTER_FREE_QUEUE                   0x00010224
+
+#define OID_RECEIVE_FILTER_QUEUE_PARAMETERS             0x00010226
+
+#define OID_RECEIVE_FILTER_SET_FILTER                   0x00010227
+
+#define OID_RECEIVE_FILTER_CLEAR_FILTER                 0x00010228
+
+#define OID_RECEIVE_FILTER_QUEUE_ALLOCATION_COMPLETE    0x0001022B
+
+#endif
+#if (((NTDDI_VERSION >= NTDDI_WIN8) || NDIS_SUPPORT_NDIS630))
+
+typedef USHORT NDIS_SRIOV_FUNCTION_ID, *PNDIS_SRIOV_FUNCTION_ID;
+
+#define OID_NIC_SWITCH_ALLOCATE_VF                    0x00010245
+
+#define OID_SWITCH_PROPERTY_ADD                       0x00010263
+
+#define OID_SWITCH_PROPERTY_UPDATE                    0x00010264
+
+#define OID_SWITCH_PROPERTY_DELETE                    0x00010265
+
+#define OID_SWITCH_PROPERTY_ENUM                      0x00010266
+
+#define OID_SWITCH_FEATURE_STATUS_QUERY               0x00010267
+
+#define OID_SWITCH_NIC_REQUEST                        0x00010270
+
+#define OID_SWITCH_PORT_PROPERTY_ADD                  0x00010271
+
+#define OID_SWITCH_PORT_PROPERTY_UPDATE               0x00010272
+
+#define OID_SWITCH_PORT_PROPERTY_DELETE               0x00010273
+
+#define OID_SWITCH_PORT_PROPERTY_ENUM                 0x00010274
+
+#define OID_SWITCH_PARAMETERS                         0x00010275
+
+#define OID_SWITCH_PORT_ARRAY                         0x00010276
+
+#define OID_SWITCH_NIC_ARRAY                          0x00010277
+
+#define OID_SWITCH_PORT_CREATE                        0x00010278
+
+#define OID_SWITCH_PORT_DELETE                        0x00010279
+
+#define OID_SWITCH_NIC_CREATE                         0x0001027A
+
+#define OID_SWITCH_NIC_CONNECT                        0x0001027B
+
+#define OID_SWITCH_NIC_DISCONNECT                     0x0001027C
+
+#define OID_SWITCH_NIC_DELETE                         0x0001027D
+
+#define OID_SWITCH_PORT_FEATURE_STATUS_QUERY          0x0001027E
+
+#define OID_SWITCH_PORT_TEARDOWN                      0x0001027F
+
+#define OID_SWITCH_NIC_SAVE                           0x00010290
+
+#define OID_SWITCH_NIC_SAVE_COMPLETE                  0x00010291
+
+#define OID_SWITCH_NIC_RESTORE                        0x00010292
+
+#define OID_SWITCH_NIC_RESTORE_COMPLETE               0x00010293
+
+#define OID_SWITCH_NIC_UPDATED                        0x00010294
+
+#define OID_SWITCH_PORT_UPDATED                       0x00010295
+
+#endif
+#if ((NTDDI_VERSION >= NTDDI_WIN10_RS3) || (NDIS_SUPPORT_NDIS680))
+
+#define OID_GEN_RSS_SET_INDIRECTION_TABLE_ENTRIES     0x000102C0
+
+#endif
+typedef ULONG NDIS_PORT_NUMBER, *PNDIS_PORT_NUMBER;
+
+typedef enum _NDIS_SUPPORTED_PAUSE_FUNCTIONS {
+  NdisPauseFunctionsUnsupported,
+  NdisPauseFunctionsSendOnly,
+  NdisPauseFunctionsReceiveOnly,
+  NdisPauseFunctionsSendAndReceive,
+  NdisPauseFunctionsUnknown
+} NDIS_SUPPORTED_PAUSE_FUNCTIONS, *PNDIS_SUPPORTED_PAUSE_FUNCTIONS;
+
+
+#if (((NTDDI_VERSION >= NTDDI_VISTA) || NDIS_SUPPORT_NDIS6))
+
+typedef struct _NDIS_LINK_SPEED
+{
+    ULONG64     XmitLinkSpeed;
+    ULONG64     RcvLinkSpeed;
+} NDIS_LINK_SPEED, *PNDIS_LINK_SPEED;
+
+typedef IF_COUNTED_STRING NDIS_IF_COUNTED_STRING, *PNDIS_IF_COUNTED_STRING;
+
+#define NDIS_MAX_PHYS_ADDRESS_LENGTH IF_MAX_PHYS_ADDRESS_LENGTH
+typedef IF_PHYSICAL_ADDRESS NDIS_IF_PHYSICAL_ADDRESS, *PNDIS_IF_PHYSICAL_ADDRESS;
+
+#define NDIS_OFFLOAD_PARAMETERS_NO_CHANGE                  0
+
+#define NDIS_OFFLOAD_PARAMETERS_TX_RX_DISABLED             1
+
+#define NDIS_OFFLOAD_PARAMETERS_TX_ENABLED_RX_DISABLED     2
+
+#define NDIS_OFFLOAD_PARAMETERS_RX_ENABLED_TX_DISABLED     3
+
+#define NDIS_OFFLOAD_PARAMETERS_TX_RX_ENABLED              4
+
+#define NDIS_OFFLOAD_PARAMETERS_REVISION_1            1
+
+typedef struct _NDIS_OFFLOAD_PARAMETERS
+{
+    NDIS_OBJECT_HEADER      Header;
+    UCHAR                   IPv4Checksum;
+    UCHAR                   TCPIPv4Checksum;
+    UCHAR                   UDPIPv4Checksum;
+    UCHAR                   TCPIPv6Checksum;
+    UCHAR                   UDPIPv6Checksum;
+    UCHAR                   LsoV1;
+    UCHAR                   IPsecV1;
+    UCHAR                   LsoV2IPv4;
+    UCHAR                   LsoV2IPv6;
+    UCHAR                   TcpConnectionIPv4;
+    UCHAR                   TcpConnectionIPv6;
+    ULONG                   Flags;
+#if (NDIS_SUPPORT_NDIS61)
+    UCHAR                   IPsecV2;
+    UCHAR                   IPsecV2IPv4;
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+    struct
+    {
+        UCHAR               RscIPv4;
+        UCHAR               RscIPv6;
+    };
+    struct
+    {
+        UCHAR               EncapsulatedPacketTaskOffload;
+        UCHAR               EncapsulationTypes;
+    };
+#endif
+#if (NDIS_SUPPORT_NDIS650)
+    union _ENCAPSULATION_PROTOCOL_PARAMETERS {
+        struct _VXLAN_PARAMETERS {
+            USHORT VxlanUDPPortNumber;
+        } VxlanParameters;
+        ULONG Value;
+    } EncapsulationProtocolParameters;
+#endif
+#if (NDIS_SUPPORT_NDIS683)
+    struct
+    {
+        UCHAR               IPv4;
+        UCHAR               IPv6;
+    } UdpSegmentation;
+#endif
+#if (NDIS_SUPPORT_NDIS689)
+    struct
+    {
+        UCHAR               Enabled;
+    } UdpRsc;
+#endif
+} NDIS_OFFLOAD_PARAMETERS, *PNDIS_OFFLOAD_PARAMETERS;
+
+#define NDIS_OFFLOAD_NOT_SUPPORTED              0
+#define NDIS_OFFLOAD_SUPPORTED                  1
+
+#define NDIS_OFFLOAD_SET_NO_CHANGE              0
+#define NDIS_OFFLOAD_SET_ON                     1
+#define NDIS_OFFLOAD_SET_OFF                    2
+
+#define NDIS_ENCAPSULATION_NOT_SUPPORTED        0x00000000
+#define NDIS_ENCAPSULATION_NULL                 0x00000001
+#define NDIS_ENCAPSULATION_IEEE_802_3           0x00000002
+#define NDIS_ENCAPSULATION_IEEE_802_3_P_AND_Q   0x00000004
+#define NDIS_ENCAPSULATION_IEEE_802_3_P_AND_Q_IN_OOB 0x00000008
+#define NDIS_ENCAPSULATION_IEEE_LLC_SNAP_ROUTED 0x00000010
+
+#define NDIS_OFFLOAD_REVISION_1    1
+
+#if ((NDIS_SUPPORT_NDIS630))
+
+#define NDIS_OFFLOAD_REVISION_3    3
+
+#endif
+
+#define NDIS_SIZEOF_NDIS_OFFLOAD_REVISION_1   RTL_SIZEOF_THROUGH_FIELD(NDIS_OFFLOAD, Flags)
+
+#if ((NDIS_SUPPORT_NDIS620))
+
+typedef enum _NDIS_PM_WOL_PACKET
+{
+    NdisPMWoLPacketUnspecified,
+    NdisPMWoLPacketBitmapPattern,
+    NdisPMWoLPacketMagicPacket,
+    NdisPMWoLPacketIPv4TcpSyn,
+    NdisPMWoLPacketIPv6TcpSyn,
+    NdisPMWoLPacketEapolRequestIdMessage,
+    NdisPMWoLPacketMaximum
+}NDIS_PM_WOL_PACKET, *PNDIS_PM_WOL_PACKET;
+
+#define NDIS_PM_MAX_STRING_SIZE 64
+
+typedef struct _NDIS_PM_COUNTED_STRING
+{
+    USHORT      Length;
+    WCHAR       String[NDIS_PM_MAX_STRING_SIZE + 1];
+} NDIS_PM_COUNTED_STRING, *PNDIS_PM_COUNTED_STRING;
+
+#if ((NDIS_SUPPORT_NDIS630))
+
+#define NDIS_PM_CAPABILITIES_REVISION_2              2
+
+#endif
+
+typedef struct _NDIS_PM_CAPABILITIES
+{
+    NDIS_OBJECT_HEADER      Header;
+    ULONG                   Flags;
+    ULONG                   SupportedWoLPacketPatterns;
+    ULONG                   NumTotalWoLPatterns;
+    ULONG                   MaxWoLPatternSize;
+    ULONG                   MaxWoLPatternOffset;
+    ULONG                   MaxWoLPacketSaveBuffer;
+    ULONG                   SupportedProtocolOffloads;
+    ULONG                   NumArpOffloadIPv4Addresses;
+    ULONG                   NumNSOffloadIPv6Addresses;
+    NDIS_DEVICE_POWER_STATE MinMagicPacketWakeUp;
+    NDIS_DEVICE_POWER_STATE MinPatternWakeUp;
+    NDIS_DEVICE_POWER_STATE MinLinkChangeWakeUp;
+#if (NDIS_SUPPORT_NDIS630)
+    ULONG                   SupportedWakeUpEvents;
+    ULONG                   MediaSpecificWakeUpEvents;
+#endif
+}NDIS_PM_CAPABILITIES, *PNDIS_PM_CAPABILITIES;
+
+#define NDIS_SIZEOF_NDIS_PM_CAPABILITIES_REVISION_1     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_PM_CAPABILITIES, MinLinkChangeWakeUp)
+
+#if ((NDIS_SUPPORT_NDIS630))
+
+#define NDIS_SIZEOF_NDIS_PM_CAPABILITIES_REVISION_2     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_PM_CAPABILITIES, MediaSpecificWakeUpEvents)
+
+#endif
+
+typedef struct _NDIS_PM_WOL_PATTERN
+{
+    NDIS_OBJECT_HEADER          Header;
+    ULONG                       Flags;
+    ULONG                       Priority;
+    NDIS_PM_WOL_PACKET          WoLPacketType;
+    NDIS_PM_COUNTED_STRING      FriendlyName;
+    ULONG                       PatternId;
+    ULONG                       NextWoLPatternOffset;
+    union _WOL_PATTERN
+    {
+        struct _IPV4_TCP_SYN_WOL_PACKET_PARAMETERS
+        {
+            ULONG   Flags;
+            UCHAR   IPv4SourceAddress[4];
+            UCHAR   IPv4DestAddress[4];
+            USHORT  TCPSourcePortNumber;
+            USHORT  TCPDestPortNumber;
+        }IPv4TcpSynParameters;
+        struct _IPV6_TCP_SYN_WOL_PACKET_PARAMETERS
+        {
+            ULONG   Flags;
+            UCHAR   IPv6SourceAddress[16];
+            UCHAR   IPv6DestAddress[16];
+            USHORT  TCPSourcePortNumber;
+            USHORT  TCPDestPortNumber;
+        }IPv6TcpSynParameters;
+        struct _EAPOL_REQUEST_ID_MESSAGE_WOL_PACKET_PARAMETERS
+        {
+            ULONG   Flags;
+        } EapolRequestIdMessageParameters;
+        struct _WOL_BITMAP_PATTERN
+        {
+            ULONG   Flags;
+            ULONG   MaskOffset;
+            ULONG   MaskSize;
+            ULONG   PatternOffset;
+            ULONG   PatternSize;
+        }WoLBitMapPattern;
+    }WoLPattern;
+}NDIS_PM_WOL_PATTERN, *PNDIS_PM_WOL_PATTERN;
+
+#define NDIS_RECEIVE_FILTER_MAC_HEADER_SUPPORTED            0x00000001
+
+#define NDIS_RECEIVE_FILTER_MAC_HEADER_DEST_ADDR_SUPPORTED      0x00000001
+
+#define NDIS_RECEIVE_FILTER_MAC_HEADER_VLAN_ID_SUPPORTED        0x00000008
+
+#define NDIS_RECEIVE_FILTER_TEST_HEADER_FIELD_EQUAL_SUPPORTED               0x00000001
+
+#define NDIS_RECEIVE_FILTER_VM_QUEUE_SUPPORTED                      0x00000002
+
+#define NDIS_RECEIVE_FILTER_LOOKAHEAD_SPLIT_SUPPORTED               0x00000004
+
+#if ((NDIS_SUPPORT_NDIS630))
+
+#define NDIS_RECEIVE_FILTER_DYNAMIC_PROCESSOR_AFFINITY_CHANGE_SUPPORTED 0x00000008
+
+#endif
+
+#define NDIS_RECEIVE_FILTER_VMQ_FILTERS_ENABLED                     0x00000001
+
+#define NDIS_RECEIVE_FILTER_VM_QUEUES_ENABLED                       0x00000001
+
+typedef struct _NDIS_RECEIVE_FILTER_CAPABILITIES
+{
+    _In_  NDIS_OBJECT_HEADER          Header;
+    _In_  ULONG                       Flags;
+    _In_  ULONG                       EnabledFilterTypes;
+    _In_  ULONG                       EnabledQueueTypes;
+    _In_  ULONG                       NumQueues;
+    _In_  ULONG                       SupportedQueueProperties;
+    _In_  ULONG                       SupportedFilterTests;
+    _In_  ULONG                       SupportedHeaders;
+    _In_  ULONG                       SupportedMacHeaderFields;
+    _In_  ULONG                       MaxMacHeaderFilters;
+    _In_  ULONG                       MaxQueueGroups;
+    _In_  ULONG                       MaxQueuesPerQueueGroup;
+    _In_  ULONG                       MinLookaheadSplitSize;
+    _In_  ULONG                       MaxLookaheadSplitSize;
+#if (NDIS_SUPPORT_NDIS630)
+    _In_  ULONG                       SupportedARPHeaderFields;
+    _In_  ULONG                       SupportedIPv4HeaderFields;
+    _In_  ULONG                       SupportedIPv6HeaderFields;
+    _In_  ULONG                       SupportedUdpHeaderFields;
+    _In_  ULONG                       MaxFieldTestsPerPacketCoalescingFilter;
+    _In_  ULONG                       MaxPacketCoalescingFilters;
+    _In_  ULONG                       NdisReserved;
+#endif
+} NDIS_RECEIVE_FILTER_CAPABILITIES, *PNDIS_RECEIVE_FILTER_CAPABILITIES;
+
+#define NDIS_SIZEOF_RECEIVE_FILTER_CAPABILITIES_REVISION_1     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_FILTER_CAPABILITIES, MaxLookaheadSplitSize)
+
+typedef struct _NDIS_NIC_SWITCH_CAPABILITIES
+{
+    _In_  NDIS_OBJECT_HEADER          Header;
+    _In_  ULONG                       Flags;
+    _In_  ULONG                       NdisReserved1;
+    _In_  ULONG                       NumTotalMacAddresses;
+    _In_  ULONG                       NumMacAddressesPerPort;
+    _In_  ULONG                       NumVlansPerPort;
+    _In_  ULONG                       NdisReserved2;
+    _In_  ULONG                       NdisReserved3;
+#if (NDIS_SUPPORT_NDIS630)
+    _In_  ULONG                       NicSwitchCapabilities;
+    _In_  ULONG                       MaxNumSwitches;
+    _In_  ULONG                       MaxNumVPorts;
+    _In_  ULONG                       NdisReserved4;
+    _In_  ULONG                       MaxNumVFs;
+    _In_  ULONG                       MaxNumQueuePairs;
+    _In_  ULONG                       NdisReserved5;
+    _In_  ULONG                       NdisReserved6;
+    _In_  ULONG                       NdisReserved7;
+    _In_  ULONG                       MaxNumQueuePairsPerNonDefaultVPort;
+    _In_  ULONG                       NdisReserved8;
+    _In_  ULONG                       NdisReserved9;
+    _In_  ULONG                       NdisReserved10;
+    _In_  ULONG                       NdisReserved11;
+    _In_  ULONG                       NdisReserved12;
+    _In_  ULONG                       MaxNumMacAddresses;
+    _In_  ULONG                       NdisReserved13;
+    _In_  ULONG                       NdisReserved14;
+    _In_  ULONG                       NdisReserved15;
+    _In_  ULONG                       NdisReserved16;
+    _In_  ULONG                       NdisReserved17;
+#endif
+#if (NDIS_SUPPORT_NDIS660)
+    _In_  ULONG                       MaxNumRssCapableNonDefaultPFVPorts;
+    _In_  ULONG                       NumberOfIndirectionTableEntriesForDefaultVPort;
+    _In_  ULONG                       NumberOfIndirectionTableEntriesPerNonDefaultPFVPort;
+    _In_  ULONG                       MaxNumQueuePairsForDefaultVPort;
+#endif
+}NDIS_NIC_SWITCH_CAPABILITIES, *PNDIS_NIC_SWITCH_CAPABILITIES;
+
+#define NDIS_SIZEOF_NIC_SWITCH_CAPABILITIES_REVISION_1     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_NIC_SWITCH_CAPABILITIES, NdisReserved3)
+
+typedef ULONG NDIS_RECEIVE_QUEUE_ID, *PNDIS_RECEIVE_QUEUE_ID;
+
+typedef ULONG NDIS_RECEIVE_QUEUE_GROUP_ID, *PNDIS_RECEIVE_QUEUE_GROUP_ID;
+
+#define NDIS_DEFAULT_RECEIVE_QUEUE_ID               0
+
+typedef ULONG NDIS_RECEIVE_FILTER_ID, *PNDIS_RECEIVE_FILTER_ID;
+
+typedef enum _NDIS_RECEIVE_FILTER_TYPE
+{
+    NdisReceiveFilterTypeUndefined,
+    NdisReceiveFilterTypeVMQueue,
+    NdisReceiveFilterTypePacketCoalescing,
+    NdisReceiveFilterTypeMaximum
+}NDIS_RECEIVE_FILTER_TYPE, *PNDIS_RECEIVE_FILTER_TYPE;
+
+typedef enum _NDIS_FRAME_HEADER
+{
+    NdisFrameHeaderUndefined,
+    NdisFrameHeaderMac,
+    NdisFrameHeaderArp,
+    NdisFrameHeaderIPv4,
+    NdisFrameHeaderIPv6,
+    NdisFrameHeaderUdp,
+    NdisFrameHeaderMaximum
+}NDIS_FRAME_HEADER, *PNDIS_FRAME_HEADER;
+
+typedef enum _NDIS_MAC_HEADER_FIELD
+{
+    NdisMacHeaderFieldUndefined,
+    NdisMacHeaderFieldDestinationAddress,
+    NdisMacHeaderFieldSourceAddress,
+    NdisMacHeaderFieldProtocol,
+    NdisMacHeaderFieldVlanId,
+    NdisMacHeaderFieldPriority,
+    NdisMacHeaderFieldPacketType,
+    NdisMacHeaderFieldMaximum
+}NDIS_MAC_HEADER_FIELD, *PNDIS_MAC_HEADER_FIELD;
+
+typedef enum _NDIS_ARP_HEADER_FIELD
+{
+    NdisARPHeaderFieldUndefined,
+    NdisARPHeaderFieldOperation,
+    NdisARPHeaderFieldSPA,
+    NdisARPHeaderFieldTPA,
+    NdisARPHeaderFieldMaximum
+} NDIS_ARP_HEADER_FIELD, *PNDIS_ARP_HEADER_FIELD;
+
+typedef enum _NDIS_IPV4_HEADER_FIELD
+{
+    NdisIPv4HeaderFieldUndefined,
+    NdisIPv4HeaderFieldProtocol,
+    NdisIPv4HeaderFieldMaximum
+}NDIS_IPV4_HEADER_FIELD, *PNDIS_IPV4_HEADER_FIELD;
+
+typedef enum _NDIS_IPV6_HEADER_FIELD
+{
+    NdisIPv6HeaderFieldUndefined,
+    NdisIPv6HeaderFieldProtocol,
+    NdisIPv6HeaderFieldMaximum
+}NDIS_IPV6_HEADER_FIELD, *PNDIS_IPV6_HEADER_FIELD;
+
+typedef enum _NDIS_UDP_HEADER_FIELD
+{
+    NdisUdpHeaderFieldUndefined,
+    NdisUdpHeaderFieldDestinationPort,
+    NdisUdpHeaderFieldMaximum
+}NDIS_UDP_HEADER_FIELD, *PNDIS_UDP_HEADER_FIELD;
+
+typedef enum _NDIS_RECEIVE_FILTER_TEST
+{
+    NdisReceiveFilterTestUndefined,
+    NdisReceiveFilterTestEqual,
+    NdisReceiveFilterTestMaskEqual,
+    NdisReceiveFilterTestNotEqual,
+    NdisReceiveFilterTestMaximum
+}NDIS_RECEIVE_FILTER_TEST, *PNDIS_RECEIVE_FILTER_TEST;
+
+#define NDIS_RECEIVE_FILTER_FIELD_MAC_HEADER_VLAN_UNTAGGED_OR_ZERO  0x00000001
+
+typedef struct _NDIS_RECEIVE_FILTER_FIELD_PARAMETERS
+{
+    _In_ NDIS_OBJECT_HEADER       Header;
+    _In_ ULONG                    Flags;
+    _In_ NDIS_FRAME_HEADER        FrameHeader;
+    _In_ NDIS_RECEIVE_FILTER_TEST ReceiveFilterTest;
+    _In_ union _HEADER_FIELD
+    {
+        NDIS_MAC_HEADER_FIELD       MacHeaderField;
+        NDIS_ARP_HEADER_FIELD       ArpHeaderField;
+        NDIS_IPV4_HEADER_FIELD      IPv4HeaderField;
+        NDIS_IPV6_HEADER_FIELD      IPv6HeaderField;
+        NDIS_UDP_HEADER_FIELD       UdpHeaderField;
+    }HeaderField;
+    _In_ union _FIELD_VALUE
+    {
+        UCHAR               FieldByteValue;
+        USHORT              FieldShortValue;
+        ULONG               FieldLongValue;
+        ULONG64             FieldLong64Value;
+        UCHAR               FieldByteArrayValue[16];
+    }FieldValue;
+    _In_ union _RESULT_VALUE
+    {
+        UCHAR               ResultByteValue;
+        USHORT              ResultShortValue;
+        ULONG               ResultLongValue;
+        ULONG64             ResultLong64Value;
+        UCHAR               ResultByteArrayValue[16];
+    }ResultValue;
+}NDIS_RECEIVE_FILTER_FIELD_PARAMETERS, *PNDIS_RECEIVE_FILTER_FIELD_PARAMETERS;
+
+#define NDIS_RECEIVE_FILTER_PARAMETERS_REVISION_1       1
+
+typedef
+  _When_(FieldParametersArrayNumElements == 0, _Struct_size_bytes_(sizeof(NDIS_RECEIVE_FILTER_PARAMETERS)))
+  _When_(FieldParametersArrayNumElements > 0, _Struct_size_bytes_(FieldParametersArrayOffset +FieldParametersArrayNumElements*FieldParametersArrayElementSize))
+    struct _NDIS_RECEIVE_FILTER_PARAMETERS
+{
+    _In_    NDIS_OBJECT_HEADER                     Header;
+    _In_    ULONG                                  Flags;
+    _In_    NDIS_RECEIVE_FILTER_TYPE               FilterType;
+    _In_    NDIS_RECEIVE_QUEUE_ID                  QueueId;
+    _Inout_ NDIS_RECEIVE_FILTER_ID                 FilterId;
+    _In_    ULONG                                  FieldParametersArrayOffset;
+    _In_    ULONG                                  FieldParametersArrayNumElements;
+    _In_    ULONG                                  FieldParametersArrayElementSize;
+    _In_    ULONG                                  RequestedFilterIdBitCount;
+#if (NDIS_SUPPORT_NDIS630)
+    _In_    ULONG                                  MaxCoalescingDelay;
+    _In_    NDIS_NIC_SWITCH_VPORT_ID               VPortId;
+#endif
+}NDIS_RECEIVE_FILTER_PARAMETERS, *PNDIS_RECEIVE_FILTER_PARAMETERS;
+
+#define NDIS_SIZEOF_RECEIVE_FILTER_PARAMETERS_REVISION_1     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_FILTER_PARAMETERS, RequestedFilterIdBitCount)
+
+#define NDIS_RECEIVE_FILTER_CLEAR_PARAMETERS_REVISION_1       1
+
+typedef struct _NDIS_RECEIVE_FILTER_CLEAR_PARAMETERS
+{
+    _In_ NDIS_OBJECT_HEADER                           Header;
+    _In_ ULONG                                        Flags;
+    _In_    NDIS_RECEIVE_QUEUE_ID                     QueueId;
+    _In_ NDIS_RECEIVE_FILTER_ID                       FilterId;
+}NDIS_RECEIVE_FILTER_CLEAR_PARAMETERS, *PNDIS_RECEIVE_FILTER_CLEAR_PARAMETERS;
+
+#define NDIS_SIZEOF_RECEIVE_FILTER_CLEAR_PARAMETERS_REVISION_1     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_FILTER_CLEAR_PARAMETERS, FilterId)
+
+typedef enum _NDIS_RECEIVE_QUEUE_TYPE
+{
+    NdisReceiveQueueTypeUnspecified,
+    NdisReceiveQueueTypeVMQueue,
+    NdisReceiveQueueTypeMaximum
+}NDIS_RECEIVE_QUEUE_TYPE, *PNDIS_RECEIVE_QUEUE_TYPE;
+
+#define NDIS_RECEIVE_QUEUE_PARAMETERS_LOOKAHEAD_SPLIT_REQUIRED                  0x00000002
+
+#define NDIS_RECEIVE_QUEUE_PARAMETERS_FLAGS_CHANGED                             0x00010000
+
+#define NDIS_RECEIVE_QUEUE_PARAMETERS_PROCESSOR_AFFINITY_CHANGED                0x00020000
+
+#define NDIS_RECEIVE_QUEUE_PARAMETERS_SUGGESTED_RECV_BUFFER_NUMBERS_CHANGED     0x00040000
+
+#define NDIS_RECEIVE_QUEUE_PARAMETERS_CHANGE_MASK                               0xFFFF0000
+
+typedef NDIS_IF_COUNTED_STRING NDIS_QUEUE_NAME, *PNDIS_QUEUE_NAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_VM_NAME, *PNDIS_VM_NAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_VM_FRIENDLYNAME, *PNDIS_VM_FRIENDLYNAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_NAME, *PNDIS_SWITCH_NAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_FRIENDLYNAME, *PNDIS_SWITCH_FRIENDLYNAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_PORT_NAME, *PNDIS_SWITCH_PORT_NAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_PORT_FRIENDLYNAME, *PNDIS_SWITCH_PORT_FRIENDLYNAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_NIC_NAME, *PNDIS_SWITCH_NIC_NAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_NIC_FRIENDLYNAME, *PNDIS_SWITCH_NIC_FRIENDLYNAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_EXTENSION_FRIENDLYNAME, *PNDIS_SWITCH_EXTENSION_FRIENDLYNAME;
+
+#if ((NDIS_SUPPORT_NDIS650))
+
+typedef ULONG NDIS_QOS_SQ_ID, *PNDIS_QOS_SQ_ID;
+
+#endif
+
+#define NDIS_RECEIVE_QUEUE_PARAMETERS_REVISION_1       1
+
+typedef struct _NDIS_RECEIVE_QUEUE_PARAMETERS
+{
+    _In_    NDIS_OBJECT_HEADER               Header;
+    _Inout_ ULONG                            Flags;
+    _In_    NDIS_RECEIVE_QUEUE_TYPE          QueueType;
+    _Inout_ NDIS_RECEIVE_QUEUE_ID            QueueId;
+    _Inout_ NDIS_RECEIVE_QUEUE_GROUP_ID      QueueGroupId;
+    _In_    GROUP_AFFINITY                   ProcessorAffinity;
+    _In_    ULONG                            NumSuggestedReceiveBuffers;
+   _Out_    ULONG                            MSIXTableEntry;
+    _In_    ULONG                            LookaheadSize;
+    _In_    NDIS_VM_NAME                     VmName;
+    _In_    NDIS_QUEUE_NAME                  QueueName;
+#if (NDIS_SUPPORT_NDIS630)
+    _In_    ULONG                            PortId;
+    _Out_   ULONG                            InterruptCoalescingDomainId;
+#endif
+#if (NDIS_SUPPORT_NDIS650)
+    _In_    NDIS_QOS_SQ_ID                   QosSqId;
+#endif
+}NDIS_RECEIVE_QUEUE_PARAMETERS, *PNDIS_RECEIVE_QUEUE_PARAMETERS;
+
+#define NDIS_SIZEOF_RECEIVE_QUEUE_PARAMETERS_REVISION_1     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_QUEUE_PARAMETERS, QueueName)
+
+#define NDIS_RECEIVE_QUEUE_FREE_PARAMETERS_REVISION_1       1
+
+typedef struct _NDIS_RECEIVE_QUEUE_FREE_PARAMETERS
+{
+    _In_ NDIS_OBJECT_HEADER                   Header;
+    _In_ ULONG                                Flags;
+    _In_ NDIS_RECEIVE_QUEUE_ID                QueueId;
+}NDIS_RECEIVE_QUEUE_FREE_PARAMETERS, *PNDIS_RECEIVE_QUEUE_FREE_PARAMETERS;
+
+#define NDIS_SIZEOF_RECEIVE_QUEUE_FREE_PARAMETERS_REVISION_1     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_QUEUE_FREE_PARAMETERS, QueueId)
+
+typedef enum _NDIS_RECEIVE_QUEUE_OPERATIONAL_STATE
+{
+    NdisReceiveQueueOperationalStateUndefined,
+    NdisReceiveQueueOperationalStateRunning,
+    NdisReceiveQueueOperationalStatePaused,
+    NdisReceiveQueueOperationalStateDmaStopped,
+    NdisReceiveQueueOperationalStateMaximum
+}NDIS_RECEIVE_QUEUE_OPERATIONAL_STATE, *PNDIS_RECEIVE_QUEUE_OPERATIONAL_STATE;
+
+typedef struct _NDIS_RECEIVE_FILTER_INFO
+{
+    NDIS_OBJECT_HEADER                       Header;
+    ULONG                                    Flags;
+    NDIS_RECEIVE_FILTER_TYPE                 FilterType;
+    NDIS_RECEIVE_FILTER_ID                   FilterId;
+}NDIS_RECEIVE_FILTER_INFO, *PNDIS_RECEIVE_FILTER_INFO;
+
+typedef struct _NDIS_RECEIVE_QUEUE_ALLOCATION_COMPLETE_PARAMETERS
+{
+    _In_  NDIS_OBJECT_HEADER      Header;
+    _In_  ULONG                   Flags;
+    _In_  NDIS_RECEIVE_QUEUE_ID   QueueId;
+    _Out_ NDIS_STATUS             CompletionStatus;
+}NDIS_RECEIVE_QUEUE_ALLOCATION_COMPLETE_PARAMETERS, *PNDIS_RECEIVE_QUEUE_ALLOCATION_COMPLETE_PARAMETERS;
+
+#define NDIS_RECEIVE_QUEUE_ALLOCATION_COMPLETE_ARRAY_REVISION_1         1
+
+typedef
+        _When_(NumElements >= 1,
+            _Struct_size_bytes_(FirstElementOffset + NumElements*ElementSize))
+        _When_(NumElements == 0,
+            _Struct_size_bytes_(sizeof(NDIS_RECEIVE_QUEUE_ALLOCATION_COMPLETE_ARRAY)))
+    struct _NDIS_RECEIVE_QUEUE_ALLOCATION_COMPLETE_ARRAY
+{
+    NDIS_OBJECT_HEADER                          Header;
+    ULONG                                       Flags;
+    ULONG                                       FirstElementOffset;
+    ULONG                                       NumElements;
+    ULONG                                       ElementSize;
+}NDIS_RECEIVE_QUEUE_ALLOCATION_COMPLETE_ARRAY, *PNDIS_RECEIVE_QUEUE_ALLOCATION_COMPLETE_ARRAY;
+
+#define NDIS_SIZEOF_RECEIVE_QUEUE_ALLOCATION_COMPLETE_ARRAY_REVISION_1 \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_QUEUE_ALLOCATION_COMPLETE_ARRAY, ElementSize)
+
+#endif
+#if (((NTDDI_VERSION >= NTDDI_VISTA) || NDIS_SUPPORT_NDIS6))
+
+#define NDIS_RSS_CAPS_HASH_TYPE_TCP_IPV4                    0x00000100
+#define NDIS_RSS_CAPS_HASH_TYPE_TCP_IPV6                    0x00000200
+#define NDIS_RSS_CAPS_HASH_TYPE_TCP_IPV6_EX                 0x00000400
+#if (NDIS_SUPPORT_NDIS680)
+#define NDIS_RSS_CAPS_HASH_TYPE_UDP_IPV4                    0x00000800
+#define NDIS_RSS_CAPS_HASH_TYPE_UDP_IPV6                    0x00001000
+#define NDIS_RSS_CAPS_HASH_TYPE_UDP_IPV6_EX                 0x00002000
+#endif
+
+#define NDIS_RSS_CAPS_MESSAGE_SIGNALED_INTERRUPTS           0x01000000
+#define NDIS_RSS_CAPS_CLASSIFICATION_AT_ISR                 0x02000000
+#define NDIS_RSS_CAPS_CLASSIFICATION_AT_DPC                 0x04000000
+#if NDIS_SUPPORT_NDIS620
+#define NDIS_RSS_CAPS_USING_MSI_X                           0x08000000
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_RSS_CAPS_RSS_AVAILABLE_ON_PORTS                0x10000000
+#define NDIS_RSS_CAPS_SUPPORTS_MSI_X                        0x20000000
+#endif
+#if (NDIS_SUPPORT_NDIS680)
+#define NDIS_RSS_CAPS_SUPPORTS_INDEPENDENT_ENTRY_MOVE       0x40000000
+#endif
+
+typedef ULONG NDIS_RSS_CAPS_FLAGS;
+
+typedef struct _NDIS_RECEIVE_SCALE_CAPABILITIES
+{
+    NDIS_OBJECT_HEADER    Header;
+    NDIS_RSS_CAPS_FLAGS   CapabilitiesFlags;
+    ULONG                 NumberOfInterruptMessages;
+    ULONG                 NumberOfReceiveQueues;
+    #if (NDIS_SUPPORT_NDIS630)
+    USHORT                NumberOfIndirectionTableEntries;
+    #endif
+} NDIS_RECEIVE_SCALE_CAPABILITIES, *PNDIS_RECEIVE_SCALE_CAPABILITIES;
+
+#define NdisHashFunctionToeplitz                0x00000001
+#define NdisHashFunctionReserved1               0x00000002
+#define NdisHashFunctionReserved2               0x00000004
+#define NdisHashFunctionReserved3               0x00000008
+
+#define NDIS_HASH_FUNCTION_MASK                 0x000000FF
+
+#define NDIS_HASH_TYPE_MASK                     0x00FFFF00
+
+#define NDIS_HASH_IPV4                          0x00000100
+#define NDIS_HASH_TCP_IPV4                      0x00000200
+#define NDIS_HASH_IPV6                          0x00000400
+#define NDIS_HASH_IPV6_EX                       0x00000800
+#define NDIS_HASH_TCP_IPV6                      0x00001000
+#define NDIS_HASH_TCP_IPV6_EX                   0x00002000
+#if (NDIS_SUPPORT_NDIS680)
+#define NDIS_HASH_UDP_IPV4                      0x00004000
+#define NDIS_HASH_UDP_IPV6                      0x00008000
+#define NDIS_HASH_UDP_IPV6_EX                   0x00010000
+#endif
+
+typedef ULONG NDIS_HASH_FLAGS;
+
+#define NDIS_RSS_HASH_FUNC_FROM_HASH_INFO(_HashInfo) ((_HashInfo) & (NDIS_HASH_FUNCTION_MASK))
+#define NDIS_RSS_HASH_TYPE_FROM_HASH_INFO(_HashInfo) ((_HashInfo) & (NDIS_HASH_TYPE_MASK))
+#define NDIS_RSS_HASH_INFO_FROM_TYPE_AND_FUNC(_HashType, _HashFunction) ((_HashType) | (_HashFunction))
+
+#define NDIS_RSS_PARAM_FLAG_BASE_CPU_UNCHANGED              0x0001
+
+#define NDIS_RSS_PARAM_FLAG_HASH_INFO_UNCHANGED             0x0002
+
+#define NDIS_RSS_PARAM_FLAG_ITABLE_UNCHANGED                0x0004
+
+#define NDIS_RSS_PARAM_FLAG_HASH_KEY_UNCHANGED              0x0008
+
+#define NDIS_RSS_PARAM_FLAG_DISABLE_RSS                     0x0010
+
+#define NDIS_RECEIVE_SCALE_PARAMETERS_REVISION_1     1
+
+typedef struct _NDIS_RECEIVE_SCALE_PARAMETERS
+{
+    NDIS_OBJECT_HEADER      Header;
+    USHORT                  Flags;
+    USHORT                  BaseCpuNumber;
+    ULONG                   HashInformation;
+    USHORT                  IndirectionTableSize;
+    ULONG                   IndirectionTableOffset;
+    USHORT                  HashSecretKeySize;
+    ULONG                   HashSecretKeyOffset;
+#if NDIS_SUPPORT_NDIS620
+    ULONG                   ProcessorMasksOffset;
+    ULONG                   NumberOfProcessorMasks;
+    ULONG                   ProcessorMasksEntrySize;
+#endif
+#if NDIS_SUPPORT_NDIS660
+    PROCESSOR_NUMBER        DefaultProcessorNumber;
+#endif
+} NDIS_RECEIVE_SCALE_PARAMETERS, *PNDIS_RECEIVE_SCALE_PARAMETERS;
+
+#define NDIS_SIZEOF_RECEIVE_SCALE_PARAMETERS_REVISION_1    \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_SCALE_PARAMETERS, HashSecretKeyOffset)
+
+#define NDIS_RSS_INDIRECTION_TABLE_MAX_SIZE_REVISION_1      128
+#define NDIS_RSS_HASH_SECRET_KEY_MAX_SIZE_REVISION_1        40
+
+#if (NDIS_SUPPORT_NDIS620)
+
+#define NDIS_SIZEOF_RECEIVE_SCALE_PARAMETERS_REVISION_2    \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_SCALE_PARAMETERS, ProcessorMasksEntrySize)
+
+#define NDIS_RSS_INDIRECTION_TABLE_MAX_SIZE_REVISION_2      (128*sizeof(PROCESSOR_NUMBER))
+#define NDIS_RSS_HASH_SECRET_KEY_MAX_SIZE_REVISION_2        40
+
+#endif
+#if (NDIS_SUPPORT_NDIS660)
+
+#define NDIS_SIZEOF_RECEIVE_SCALE_PARAMETERS_REVISION_3    \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_SCALE_PARAMETERS, DefaultProcessorNumber)
+
+#define NDIS_RSS_INDIRECTION_TABLE_MAX_SIZE_REVISION_3      (128*sizeof(PROCESSOR_NUMBER))
+#define NDIS_RSS_HASH_SECRET_KEY_MAX_SIZE_REVISION_3        40
+
+#endif
+#if (NDIS_SUPPORT_NDIS680)
+
+#define NDIS_RECEIVE_SCALE_PARAM_ENABLE_RSS                 0x00000001
+
+#define NDIS_RECEIVE_SCALE_PARAM_HASH_INFO_CHANGED          0x00000002
+
+#define NDIS_RECEIVE_SCALE_PARAM_HASH_KEY_CHANGED           0x00000004
+
+#define NDIS_RECEIVE_SCALE_PARAM_NUMBER_OF_QUEUES_CHANGED   0x00000008
+
+#define NDIS_RECEIVE_SCALE_PARAM_NUMBER_OF_ENTRIES_CHANGED  0x00000010
+
+typedef struct _NDIS_RECEIVE_SCALE_PARAMETERS_V2
+{
+    NDIS_OBJECT_HEADER      Header;
+    ULONG                   Flags;
+    ULONG                   HashInformation;
+    ULONG                   HashSecretKeySize;
+    ULONG                   HashSecretKeyOffset;
+    ULONG                   NumberOfQueues;
+    ULONG                   NumberOfIndirectionTableEntries;
+} NDIS_RECEIVE_SCALE_PARAMETERS_V2, *PNDIS_RECEIVE_SCALE_PARAMETERS_V2;
+
+#define NDIS_SIZEOF_RECEIVE_SCALE_PARAMETERS_V2_REVISION_1 \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_SCALE_PARAMETERS_V2, \
+                                 NumberOfIndirectionTableEntries)
+
+#define NDIS_RSS_SET_INDIRECTION_ENTRY_FLAG_PRIMARY_PROCESSOR   0x00000001
+
+#define NDIS_RSS_SET_INDIRECTION_ENTRY_FLAG_DEFAULT_PROCESSOR   0x00000002
+
+typedef struct _NDIS_RSS_SET_INDIRECTION_ENTRY
+{
+    NDIS_NIC_SWITCH_ID          SwitchId;
+    NDIS_NIC_SWITCH_VPORT_ID    VPortId;
+    ULONG                       Flags;
+    USHORT                      IndirectionTableIndex;
+    PROCESSOR_NUMBER            TargetProcessorNumber;
+    NDIS_STATUS                 EntryStatus;
+} NDIS_RSS_SET_INDIRECTION_ENTRY, *PNDIS_RSS_SET_INDIRECTION_ENTRY;
+
+typedef struct _NDIS_RSS_SET_INDIRECTION_ENTRIES
+{
+    NDIS_OBJECT_HEADER      Header;
+    ULONG                   Flags;
+    ULONG                   RssEntrySize;
+    ULONG                   RssEntryTableOffset;
+    ULONG                   NumberOfRssEntries;
+} NDIS_RSS_SET_INDIRECTION_ENTRIES, *PNDIS_RSS_SET_INDIRECTION_ENTRIES;
+
+#define NDIS_SIZEOF_RSS_SET_INDIRECTION_ENTRIES_REVISION_1 \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_RSS_SET_INDIRECTION_ENTRIES, \
+                                 NumberOfRssEntries)
+
+#endif
+#if (NDIS_SUPPORT_NDIS620)
+
+typedef struct _NDIS_RSS_PROCESSOR
+{
+    PROCESSOR_NUMBER ProcNum;
+    USHORT           PreferenceIndex;
+    USHORT           Reserved;
+} NDIS_RSS_PROCESSOR, *PNDIS_RSS_PROCESSOR;
+
+#define NDIS_SIZEOF_RSS_PROCESSOR_REVISION_1    \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_RSS_PROCESSOR, PreferenceIndex)
+
+#define NDIS_RSS_PROCESSOR_INFO_REVISION_1      1
+
+#if ((NDIS_SUPPORT_NDIS630))
+
+#define NDIS_RSS_PROCESSOR_INFO_REVISION_2      2
+
+typedef enum _NDIS_RSS_PROFILE
+{
+    NdisRssProfileClosest = 1,
+    NdisRssProfileClosestStatic,
+    NdisRssProfileNuma,
+    NdisRssProfileNumaStatic,
+    NdisRssProfileConservative,
+#if (NDIS_SUPPORT_NDIS688)
+    NdisRssProfileBalanced,
+#endif
+    NdisRssProfileMaximum,
+} NDIS_RSS_PROFILE, *PNDIS_RSS_PROFILE;
+
+#endif
+
+typedef struct _NDIS_RSS_PROCESSOR_INFO
+{
+    NDIS_OBJECT_HEADER      Header;
+    ULONG                   Flags;
+    PROCESSOR_NUMBER        RssBaseProcessor;
+    ULONG                   MaxNumRssProcessors;
+    USHORT                  PreferredNumaNode;
+    ULONG                   RssProcessorArrayOffset;
+    ULONG                   RssProcessorCount;
+    ULONG                   RssProcessorEntrySize;
+#if (NDIS_SUPPORT_NDIS630)
+    PROCESSOR_NUMBER        RssMaxProcessor;
+    NDIS_RSS_PROFILE        RssProfile;
+#endif
+} NDIS_RSS_PROCESSOR_INFO, *PNDIS_RSS_PROCESSOR_INFO;
+
+#define NDIS_SIZEOF_RSS_PROCESSOR_INFO_REVISION_1    \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_RSS_PROCESSOR_INFO, RssProcessorEntrySize)
+
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_SIZEOF_RSS_PROCESSOR_INFO_REVISION_2    \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_RSS_PROCESSOR_INFO, RssProfile)
+#endif
+
+#endif
+#if ((NDIS_SUPPORT_NDIS630))
+
+#define OID_QOS_PARAMETERS                      0xFC050003
+
+#define NDIS_QOS_MAXIMUM_PRIORITIES         8
+
+#define NDIS_QOS_MAXIMUM_TRAFFIC_CLASSES    8
+
+#define NDIS_QOS_CAPABILITIES_STRICT_TSA_SUPPORTED      0x00000001
+
+#define NDIS_QOS_CAPABILITIES_REVISION_1    1
+
+typedef _Struct_size_bytes_(Header.Size) struct _NDIS_QOS_CAPABILITIES
+{
+    _In_ NDIS_OBJECT_HEADER Header;
+    _In_ ULONG              Flags;
+    _In_ ULONG              MaxNumTrafficClasses;
+    _In_ _Field_range_(<=, MaxNumTrafficClasses)
+         ULONG              MaxNumEtsCapableTrafficClasses;
+    _In_ _Field_range_(<=, MaxNumTrafficClasses)
+         ULONG              MaxNumPfcEnabledTrafficClasses;
+} NDIS_QOS_CAPABILITIES, *PNDIS_QOS_CAPABILITIES;
+
+#define NDIS_SIZEOF_QOS_CAPABILITIES_REVISION_1 \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_QOS_CAPABILITIES, MaxNumPfcEnabledTrafficClasses)
+
+#define NDIS_QOS_CLASSIFICATION_ENFORCED_BY_MINIPORT    0x01000000
+
+#define NDIS_QOS_CONDITION_DEFAULT          0x1
+
+#define NDIS_QOS_CONDITION_TCP_PORT         0x2
+
+#define NDIS_QOS_CONDITION_ETHERTYPE        0x5
+
+#define NDIS_QOS_CONDITION_MAXIMUM          0x7
+
+#define NDIS_QOS_ACTION_PRIORITY            0x0
+
+#define NDIS_QOS_ACTION_MAXIMUM             0x1
+
+#define NDIS_QOS_CLASSIFICATION_ELEMENT_REVISION_1   1
+
+typedef _Struct_size_bytes_(Header.Size) struct _NDIS_QOS_CLASSIFICATION_ELEMENT
+{
+    _In_    NDIS_OBJECT_HEADER  Header;
+    _Inout_ ULONG               Flags;
+    _In_ _Field_range_(<, NDIS_QOS_CONDITION_MAXIMUM)
+            USHORT              ConditionSelector;
+    _In_    USHORT              ConditionField;
+    _In_ _Field_range_(<, NDIS_QOS_ACTION_MAXIMUM)
+            USHORT              ActionSelector;
+    _In_    USHORT              ActionField;
+} NDIS_QOS_CLASSIFICATION_ELEMENT, *PNDIS_QOS_CLASSIFICATION_ELEMENT;
+
+#define NDIS_SIZEOF_QOS_CLASSIFICATION_ELEMENT_REVISION_1 \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_QOS_CLASSIFICATION_ELEMENT, ActionField)
+
+#define NDIS_QOS_PARAMETERS_ETS_CONFIGURED              0x00000002
+
+#define NDIS_QOS_PARAMETERS_PFC_CONFIGURED              0x00000200
+
+#define NDIS_QOS_PARAMETERS_CLASSIFICATION_CONFIGURED   0x00020000
+
+#define NDIS_QOS_TSA_ETS                    0x2
+
+#define NDIS_QOS_PARAMETERS_REVISION_1   1
+
+typedef _Struct_size_bytes_(Header.Size) struct _NDIS_QOS_PARAMETERS
+{
+    _In_ NDIS_OBJECT_HEADER Header;
+    _In_ ULONG              Flags;
+    _In_ _Field_range_(0, NDIS_QOS_MAXIMUM_TRAFFIC_CLASSES)
+         ULONG              NumTrafficClasses;
+    _In_ UCHAR              PriorityAssignmentTable[NDIS_QOS_MAXIMUM_PRIORITIES];
+    _In_ UCHAR              TcBandwidthAssignmentTable[NDIS_QOS_MAXIMUM_TRAFFIC_CLASSES];
+    _In_ UCHAR              TsaAssignmentTable[NDIS_QOS_MAXIMUM_TRAFFIC_CLASSES];
+    _In_ _Field_range_(0, (1ul << NDIS_QOS_MAXIMUM_PRIORITIES) - 1)
+         ULONG              PfcEnable;
+    _In_ ULONG              NumClassificationElements;
+    _In_ ULONG              ClassificationElementSize;
+    _In_ ULONG              FirstClassificationElementOffset;
+} NDIS_QOS_PARAMETERS, *PNDIS_QOS_PARAMETERS;
+
+#define NDIS_SIZEOF_QOS_PARAMETERS_REVISION_1 \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_QOS_PARAMETERS, FirstClassificationElementOffset)
+
+typedef NDIS_IF_COUNTED_STRING NDIS_NIC_SWITCH_FRIENDLYNAME, *PNDIS_NIC_SWITCH_FRIENDLYNAME;
+
+#define NDIS_INVALID_VPORT_ID               (ULONG) -1
+
+#define NDIS_DEFAULT_SWITCH_ID              0
+
+#define NDIS_INVALID_SWITCH_ID              (ULONG) -1
+
+typedef enum _NDIS_NIC_SWITCH_TYPE
+{
+    NdisNicSwitchTypeUnspecified,
+    NdisNicSwitchTypeExternal,
+    NdisNicSwitchTypeMax
+} NDIS_NIC_SWITCH_TYPE, *PNDIS_NIC_SWITCH_TYPE;
+
+typedef struct _NDIS_NIC_SWITCH_INFO
+{
+    _In_        NDIS_OBJECT_HEADER              Header;
+    _In_        ULONG                           Flags;
+    _In_        NDIS_NIC_SWITCH_TYPE            SwitchType;
+    _In_        NDIS_NIC_SWITCH_ID              SwitchId;
+    _In_        NDIS_NIC_SWITCH_FRIENDLYNAME    SwitchFriendlyName;
+    _In_        ULONG                           NumVFs;
+    _In_        ULONG                           NumAllocatedVFs;
+    _In_        ULONG                           NumVPorts;
+    _In_        ULONG                           NumActiveVPorts;
+    _In_        ULONG                           NumQueuePairsForDefaultVPort;
+    _In_        ULONG                           NumQueuePairsForNonDefaultVPorts;
+    _In_        ULONG                           NumActiveDefaultVPortMacAddresses;
+    _In_        ULONG                           NumActiveNonDefaultVPortMacAddresses;
+    _In_        ULONG                           NumActiveDefaultVPortVlanIds;
+    _In_        ULONG                           NumActiveNonDefaultVPortVlanIds;
+}NDIS_NIC_SWITCH_INFO, *PNDIS_NIC_SWITCH_INFO;
+
+#if ((NDIS_SUPPORT_NDIS650))
+#if !defined(_NDIS_SWITCH_PORT_ID)
+
+#define _NDIS_SWITCH_PORT_ID NDIS_SWITCH_PORT_ID
+
+typedef UINT32 NDIS_SWITCH_PORT_ID, *PNDIS_SWITCH_PORT_ID;
+
+typedef USHORT NDIS_SWITCH_NIC_INDEX, *PNDIS_SWITCH_NIC_INDEX;
+
+#endif
+#endif
+#if !defined(_NDIS_SWITCH_PORT_ID)
+
+#define _NDIS_SWITCH_PORT_ID NDIS_SWITCH_PORT_ID
+
+typedef UINT32 NDIS_SWITCH_PORT_ID, *PNDIS_SWITCH_PORT_ID;
+
+typedef USHORT NDIS_SWITCH_NIC_INDEX, *PNDIS_SWITCH_NIC_INDEX;
+
+#endif
+
+typedef GUID NDIS_SWITCH_OBJECT_INSTANCE_ID, *PNDIS_SWITCH_OBJECT_INSTANCE_ID;
+
+typedef GUID NDIS_SWITCH_OBJECT_ID, *PNDIS_SWITCH_OBJECT_ID;
+
+typedef USHORT NDIS_SWITCH_OBJECT_VERSION, *PNDIS_SWITCH_OBJECT_VERSION;
+
+typedef USHORT NDIS_SWITCH_OBJECT_SERIALIZATION_VERSION, *PNDIS_SWITCH_OBJECT_SERIALIZATION_VERSION;
+
+#define NDIS_SWITCH_OBJECT_SERIALIZATION_VERSION_1       1
+
+typedef enum _NDIS_SWITCH_PORT_PROPERTY_TYPE
+{
+    NdisSwitchPortPropertyTypeUndefined,
+    NdisSwitchPortPropertyTypeCustom,
+    NdisSwitchPortPropertyTypeSecurity,
+    NdisSwitchPortPropertyTypeVlan,
+    NdisSwitchPortPropertyTypeProfile,
+    NdisSwitchPortPropertyTypeIsolation,
+    NdisSwitchPortPropertyTypeRoutingDomain,
+    NdisSwitchPortPropertyTypeMaximum
+} NDIS_SWITCH_PORT_PROPERTY_TYPE, *PNDIS_SWITCH_PORT_PROPERTY_TYPE;
+
+typedef enum _NDIS_SWITCH_PORT_VLAN_MODE
+{
+    NdisSwitchPortVlanModeUnknown      = 0,
+    NdisSwitchPortVlanModeAccess       = 1,
+    NdisSwitchPortVlanModeTrunk        = 2,
+    NdisSwitchPortVlanModePrivate      = 3,
+    NdisSwitchPortVlanModeMax          = 4
+} NDIS_SWITCH_PORT_VLAN_MODE, *PNDIS_SWITCH_PORT_VLAN_MODE;
+
+typedef enum _NDIS_SWITCH_PORT_PVLAN_MODE
+{
+    NdisSwitchPortPvlanModeUndefined = 0,
+    NdisSwitchPortPvlanModeIsolated,
+    NdisSwitchPortPvlanModeCommunity,
+    NdisSwitchPortPvlanModePromiscuous
+} NDIS_SWITCH_PORT_PVLAN_MODE, *PNDIS_SWITCH_PORT_PVLAN_MODE;
+
+#define NDIS_SWITCH_PORT_PROPERTY_VLAN_REVISION_1       1
+
+typedef struct _NDIS_SWITCH_PORT_PROPERTY_VLAN
+{
+    NDIS_OBJECT_HEADER          Header;
+    ULONG                       Flags;
+    NDIS_SWITCH_PORT_VLAN_MODE  OperationMode;
+    union
+    {
+        struct
+        {
+            UINT16              AccessVlanId;
+            UINT16              NativeVlanId;
+            UINT64              PruneVlanIdArray[64];
+            UINT64              TrunkVlanIdArray[64];
+        } VlanProperties;
+        struct
+        {
+            NDIS_SWITCH_PORT_PVLAN_MODE
+                                PvlanMode;
+            UINT16              PrimaryVlanId;
+            union
+            {
+                UINT16          SecondaryVlanId;
+                UINT64          SecondaryVlanIdArray[64];
+            };
+        } PvlanProperties;
+    };
+} NDIS_SWITCH_PORT_PROPERTY_VLAN, *PNDIS_SWITCH_PORT_PROPERTY_VLAN;
+
+#define NDIS_SWITCH_PORT_PROPERTY_PARAMETERS_REVISION_1     1
+
+typedef struct _NDIS_SWITCH_PORT_PROPERTY_PARAMETERS
+{
+    NDIS_OBJECT_HEADER                      Header;
+    ULONG                                   Flags;
+    NDIS_SWITCH_PORT_ID                     PortId;
+    NDIS_SWITCH_PORT_PROPERTY_TYPE          PropertyType;
+    NDIS_SWITCH_OBJECT_ID                   PropertyId;
+    NDIS_SWITCH_OBJECT_VERSION              PropertyVersion;
+    NDIS_SWITCH_OBJECT_SERIALIZATION_VERSION SerializationVersion;
+    NDIS_SWITCH_OBJECT_INSTANCE_ID          PropertyInstanceId;
+    ULONG                                   PropertyBufferLength;
+    ULONG                                   PropertyBufferOffset;
+    ULONG                                   Reserved;
+} NDIS_SWITCH_PORT_PROPERTY_PARAMETERS, *PNDIS_SWITCH_PORT_PROPERTY_PARAMETERS;
+
+#define NDIS_SIZEOF_NDIS_SWITCH_PORT_PROPERTY_PARAMETERS_REVISION_1    \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_SWITCH_PORT_PROPERTY_PARAMETERS, Reserved)
+
+#define NDIS_SWITCH_PORT_PROPERTY_DELETE_PARAMETERS_REVISION_1  1
+
+typedef struct _NDIS_SWITCH_PORT_PROPERTY_DELETE_PARAMETERS
+{
+    NDIS_OBJECT_HEADER                      Header;
+    ULONG                                   Flags;
+    NDIS_SWITCH_PORT_ID                     PortId;
+    NDIS_SWITCH_PORT_PROPERTY_TYPE          PropertyType;
+    NDIS_SWITCH_OBJECT_ID                   PropertyId;
+    NDIS_SWITCH_OBJECT_INSTANCE_ID          PropertyInstanceId;
+} NDIS_SWITCH_PORT_PROPERTY_DELETE_PARAMETERS, *PNDIS_SWITCH_PORT_PROPERTY_DELETE_PARAMETERS;
+
+#define NDIS_SIZEOF_NDIS_SWITCH_PORT_PROPERTY_DELETE_PARAMETERS_REVISION_1  \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_SWITCH_PORT_PROPERTY_DELETE_PARAMETERS, PropertyInstanceId)
+
+#define NDIS_SWITCH_PORT_PROPERTY_ENUM_PARAMETERS_REVISION_1    1
+
+typedef struct _NDIS_SWITCH_PORT_PROPERTY_ENUM_PARAMETERS
+{
+    NDIS_OBJECT_HEADER                      Header;
+    ULONG                                   Flags;
+    NDIS_SWITCH_PORT_ID                     PortId;
+    NDIS_SWITCH_PORT_PROPERTY_TYPE          PropertyType;
+    NDIS_SWITCH_OBJECT_ID                   PropertyId;
+    NDIS_SWITCH_OBJECT_SERIALIZATION_VERSION SerializationVersion;
+    ULONG                                   FirstPropertyOffset;
+    ULONG                                   NumProperties;
+    USHORT                                  Reserved;
+} NDIS_SWITCH_PORT_PROPERTY_ENUM_PARAMETERS, *PNDIS_SWITCH_PORT_PROPERTY_ENUM_PARAMETERS;
+
+#define NDIS_SWITCH_PORT_PROPERTY_ENUM_PARAMETERS_GET_FIRST_INFO(_PortEnumParams_)\
+            ((PNDIS_SWITCH_PORT_PROPERTY_ENUM_INFO)((PUCHAR)(_PortEnumParams_) + \
+                (_PortEnumParams_)->FirstPropertyOffset))
+
+typedef struct _NDIS_SWITCH_PORT_PROPERTY_ENUM_INFO
+{
+    NDIS_OBJECT_HEADER                      Header;
+    ULONG                                   Flags;
+    NDIS_SWITCH_OBJECT_VERSION              PropertyVersion;
+    NDIS_SWITCH_OBJECT_INSTANCE_ID          PropertyInstanceId;
+    ULONG                                   QwordAlignedPropertyBufferLength;
+    ULONG                                   PropertyBufferLength;
+    ULONG                                   PropertyBufferOffset;
+} NDIS_SWITCH_PORT_PROPERTY_ENUM_INFO, *PNDIS_SWITCH_PORT_PROPERTY_ENUM_INFO;
+
+#define NDIS_SWITCH_PORT_PROPERTY_ENUM_INFO_GET_PROPERTY(_PortEnumInfo_)\
+            ((PVOID)((PUCHAR)(_PortEnumInfo_) + (_PortEnumInfo_)->PropertyBufferOffset))
+
+typedef enum _NDIS_SWITCH_PORT_FEATURE_STATUS_TYPE
+{
+    NdisSwitchPortFeatureStatusTypeUndefined,
+    NdisSwitchPortFeatureStatusTypeCustom,
+    NdisSwitchPortFeatureStatusTypeMaximum
+} NDIS_SWITCH_PORT_FEATURE_STATUS_TYPE, *PNDIS_SWITCH_PORT_FEATURE_STATUS_TYPE;
+
+typedef struct _NDIS_SWITCH_PORT_FEATURE_STATUS_PARAMETERS
+{
+    NDIS_OBJECT_HEADER                            Header;
+    ULONG                                         Flags;
+    NDIS_SWITCH_PORT_ID                           PortId;
+    NDIS_SWITCH_PORT_FEATURE_STATUS_TYPE          FeatureStatusType;
+    NDIS_SWITCH_OBJECT_ID                         FeatureStatusId;
+    NDIS_SWITCH_OBJECT_VERSION                    FeatureStatusVersion;
+    NDIS_SWITCH_OBJECT_SERIALIZATION_VERSION      SerializationVersion;
+    NDIS_SWITCH_OBJECT_INSTANCE_ID                FeatureStatusInstanceId;
+    ULONG                                         FeatureStatusBufferLength;
+    ULONG                                         FeatureStatusBufferOffset;
+    ULONG                                         Reserved;
+} NDIS_SWITCH_PORT_FEATURE_STATUS_PARAMETERS, *PNDIS_SWITCH_PORT_FEATURE_STATUS_PARAMETERS;
+
+typedef enum _NDIS_SWITCH_PROPERTY_TYPE
+{
+    NdisSwitchPropertyTypeUndefined,
+    NdisSwitchPropertyTypeCustom,
+    NdisSwitchPropertyTypeMaximum
+} NDIS_SWITCH_PROPERTY_TYPE, *PNDIS_SWITCH_PROPERTY_TYPE;
+
+typedef struct _NDIS_SWITCH_PROPERTY_CUSTOM
+{
+    NDIS_OBJECT_HEADER      Header;
+    ULONG                   Flags;
+    ULONG                   PropertyBufferLength;
+    ULONG                   PropertyBufferOffset;
+} NDIS_SWITCH_PROPERTY_CUSTOM, *PNDIS_SWITCH_PROPERTY_CUSTOM;
+
+#define NDIS_SWITCH_PROPERTY_CUSTOM_GET_BUFFER(_SwitchPropertyCustom_)\
+            ((PVOID)((PUCHAR)(_SwitchPropertyCustom_) + (_SwitchPropertyCustom_)->PropertyBufferOffset))
+
+#define NDIS_SWITCH_PROPERTY_PARAMETERS_REVISION_1  1
+
+typedef struct _NDIS_SWITCH_PROPERTY_PARAMETERS
+{
+    NDIS_OBJECT_HEADER                         Header;
+    ULONG                                      Flags;
+    NDIS_SWITCH_PROPERTY_TYPE                  PropertyType;
+    NDIS_SWITCH_OBJECT_ID                      PropertyId;
+    NDIS_SWITCH_OBJECT_VERSION                 PropertyVersion;
+    NDIS_SWITCH_OBJECT_SERIALIZATION_VERSION   SerializationVersion;
+    NDIS_SWITCH_OBJECT_INSTANCE_ID             PropertyInstanceId;
+    ULONG                                      PropertyBufferLength;
+    ULONG                                      PropertyBufferOffset;
+} NDIS_SWITCH_PROPERTY_PARAMETERS, *PNDIS_SWITCH_PROPERTY_PARAMETERS;
+
+#define NDIS_SIZEOF_NDIS_SWITCH_PROPERTY_PARAMETERS_REVISION_1   \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_SWITCH_PROPERTY_PARAMETERS, PropertyBufferOffset)
+
+#define NDIS_SWITCH_PROPERTY_PARAMETERS_GET_PROPERTY(_SwitchParameters_)\
+            ((PVOID)((PUCHAR)(_SwitchParameters_) + (_SwitchParameters_)->PropertyBufferOffset))
+
+#define NDIS_SWITCH_PROPERTY_DELETE_PARAMETERS_REVISION_1  1
+
+typedef struct _NDIS_SWITCH_PROPERTY_DELETE_PARAMETERS
+{
+    NDIS_OBJECT_HEADER                 Header;
+    ULONG                              Flags;
+    NDIS_SWITCH_PROPERTY_TYPE          PropertyType;
+    NDIS_SWITCH_OBJECT_ID              PropertyId;
+    NDIS_SWITCH_OBJECT_INSTANCE_ID     PropertyInstanceId;
+} NDIS_SWITCH_PROPERTY_DELETE_PARAMETERS, *PNDIS_SWITCH_PROPERTY_DELETE_PARAMETERS;
+
+#define NDIS_SIZEOF_NDIS_SWITCH_PROPERTY_DELETE_PARAMETERS_REVISION_1   \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_SWITCH_PROPERTY_DELETE_PARAMETERS, PropertyInstanceId)
+
+typedef struct _NDIS_SWITCH_PROPERTY_ENUM_INFO
+{
+    NDIS_OBJECT_HEADER               Header;
+    ULONG                            Flags;
+    NDIS_SWITCH_OBJECT_INSTANCE_ID   PropertyInstanceId;
+    NDIS_SWITCH_OBJECT_VERSION       PropertyVersion;
+    ULONG                            QwordAlignedPropertyBufferLength;
+    ULONG                            PropertyBufferLength;
+    ULONG                            PropertyBufferOffset;
+} NDIS_SWITCH_PROPERTY_ENUM_INFO, *PNDIS_SWITCH_PROPERTY_ENUM_INFO;
+
+#define NDIS_SWITCH_PROPERTY_ENUM_INFO_GET_NEXT(_SwitchEnumInfo_)\
+            ((PNDIS_SWITCH_PROPERTY_ENUM_INFO)\
+                ((ULONG_PTR)(_SwitchEnumInfo_) +\
+                (_SwitchEnumInfo_)->QwordAlignedPropertyBufferLength +\
+                 sizeof(NDIS_SWITCH_PROPERTY_ENUM_INFO)))
+
+#define NDIS_SWITCH_PROPERTY_ENUM_INFO_GET_PROPERTY(_SwitchEnumInfo_)\
+            ((PVOID)((PUCHAR)(_SwitchEnumInfo_) + (_SwitchEnumInfo_)->PropertyBufferOffset))
+
+#define NDIS_SWITCH_PROPERTY_ENUM_PARAMETERS_REVISION_1  1
+
+typedef struct _NDIS_SWITCH_PROPERTY_ENUM_PARAMETERS
+{
+    NDIS_OBJECT_HEADER                         Header;
+    ULONG                                      Flags;
+    NDIS_SWITCH_PROPERTY_TYPE                  PropertyType;
+    NDIS_SWITCH_OBJECT_ID                      PropertyId;
+    NDIS_SWITCH_OBJECT_SERIALIZATION_VERSION   SerializationVersion;
+    ULONG                                      FirstPropertyOffset;
+    ULONG                                      NumProperties;
+} NDIS_SWITCH_PROPERTY_ENUM_PARAMETERS, *PNDIS_SWITCH_PROPERTY_ENUM_PARAMETERS;
+
+#define NDIS_SWITCH_PROPERTY_ENUM_PARAMETERS_GET_FIRST_INFO(_SwitchEnumParams_)\
+            ((PNDIS_SWITCH_PROPERTY_ENUM_INFO)((PUCHAR)(_SwitchEnumParams_) + \
+                (_SwitchEnumParams_)->FirstPropertyOffset))
+
+#define NDIS_SWITCH_FEATURE_STATUS_PARAMETERS_REVISION_1         1
+
+typedef enum _NDIS_SWITCH_FEATURE_STATUS_TYPE
+{
+    NdisSwitchFeatureStatusTypeUndefined,
+    NdisSwitchFeatureStatusTypeCustom,
+    NdisSwitchFeatureStatusTypeMaximum
+} NDIS_SWITCH_FEATURE_STATUS_TYPE, *PNDIS_SWITCH_FEATURE_STATUS_TYPE;
+
+typedef struct _NDIS_SWITCH_FEATURE_STATUS_PARAMETERS
+{
+    NDIS_OBJECT_HEADER                               Header;
+    ULONG                                            Flags;
+    NDIS_SWITCH_FEATURE_STATUS_TYPE                  FeatureStatusType;
+    NDIS_SWITCH_OBJECT_ID                            FeatureStatusId;
+    NDIS_SWITCH_OBJECT_INSTANCE_ID                   FeatureStatusInstanceId;
+    NDIS_SWITCH_OBJECT_VERSION                       FeatureStatusVersion;
+    NDIS_SWITCH_OBJECT_SERIALIZATION_VERSION         SerializationVersion;
+    ULONG                                            FeatureStatusBufferOffset;
+    ULONG                                            FeatureStatusBufferLength;
+} NDIS_SWITCH_FEATURE_STATUS_PARAMETERS, *PNDIS_SWITCH_FEATURE_STATUS_PARAMETERS;
+
+#define NDIS_SIZEOF_NDIS_SWITCH_FEATURE_STATUS_PARAMETERS_REVISION_1       \
+            RTL_SIZEOF_THROUGH_FIELD(NDIS_SWITCH_FEATURE_STATUS_PARAMETERS, FeatureStatusBufferLength)
+
+#define NDIS_SWITCH_FEATURE_STATUS_CUSTOM_REVISION_1       1
+
+typedef struct _NDIS_SWITCH_FEATURE_STATUS_CUSTOM
+{
+    NDIS_OBJECT_HEADER      Header;
+    ULONG                   Flags;
+    ULONG                   FeatureStatusCustomBufferLength;
+    ULONG                   FeatureStatusCustomBufferOffset;
+} NDIS_SWITCH_FEATURE_STATUS_CUSTOM, *PNDIS_SWITCH_FEATURE_STATUS_CUSTOM;
+
+#define NDIS_SIZEOF_NDIS_SWITCH_FEATURE_STATUS_CUSTOM_REVISION_1       \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_SWITCH_FEATURE_STATUS_CUSTOM, FeatureStatusCustomBufferOffset)
+
+#define NDIS_SWITCH_PARAMETERS_REVISION_1      1
+
+typedef struct _NDIS_SWITCH_PARAMETERS
+{
+  NDIS_OBJECT_HEADER        Header;
+  ULONG                     Flags;
+  NDIS_SWITCH_NAME          SwitchName;
+  NDIS_SWITCH_FRIENDLYNAME  SwitchFriendlyName;
+  UINT32                    NumSwitchPorts;
+  BOOLEAN                   IsActive;
+} NDIS_SWITCH_PARAMETERS, *PNDIS_SWITCH_PARAMETERS;
+
+typedef enum _NDIS_SWITCH_PORT_TYPE
+{
+    NdisSwitchPortTypeGeneric    = 0,
+    NdisSwitchPortTypeExternal   = 1,
+    NdisSwitchPortTypeSynthetic  = 2,
+    NdisSwitchPortTypeEmulated   = 3,
+    NdisSwitchPortTypeInternal   = 4
+} NDIS_SWITCH_PORT_TYPE;
+
+typedef enum _NDIS_SWITCH_PORT_STATE
+{
+    NdisSwitchPortStateUnknown      = 0,
+    NdisSwitchPortStateCreated      = 1,
+    NdisSwitchPortStateTeardown     = 2,
+    NdisSwitchPortStateDeleted      = 3
+} NDIS_SWITCH_PORT_STATE;
+
+typedef struct _NDIS_SWITCH_PORT_PARAMETERS
+{
+  NDIS_OBJECT_HEADER                Header;
+  ULONG                             Flags;
+  NDIS_SWITCH_PORT_ID               PortId;
+  NDIS_SWITCH_PORT_NAME             PortName;
+  NDIS_SWITCH_PORT_FRIENDLYNAME     PortFriendlyName;
+  NDIS_SWITCH_PORT_TYPE             PortType;
+  BOOLEAN                           IsValidationPort;
+  NDIS_SWITCH_PORT_STATE            PortState;
+} NDIS_SWITCH_PORT_PARAMETERS, *PNDIS_SWITCH_PORT_PARAMETERS;
+
+#define NDIS_SWITCH_PORT_PARAMETERS_REVISION_1      1
+
+#define NDIS_SIZEOF_NDIS_SWITCH_PORT_PARAMETERS_REVISION_1 \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_SWITCH_PORT_PARAMETERS, PortState)
+
+typedef struct _NDIS_SWITCH_PORT_ARRAY
+{
+  NDIS_OBJECT_HEADER        Header;
+  ULONG                     Flags;
+  USHORT                    FirstElementOffset;
+  ULONG                     NumElements;
+  ULONG                     ElementSize;
+} NDIS_SWITCH_PORT_ARRAY, *PNDIS_SWITCH_PORT_ARRAY;
+
+#define NDIS_SWITCH_PORT_ARRAY_REVISION_1      1
+
+typedef enum _NDIS_SWITCH_NIC_TYPE
+{
+    NdisSwitchNicTypeExternal      = 0,
+    NdisSwitchNicTypeSynthetic     = 1,
+    NdisSwitchNicTypeEmulated      = 2,
+    NdisSwitchNicTypeInternal      = 3
+} NDIS_SWITCH_NIC_TYPE;
+
+typedef enum _NDIS_SWITCH_NIC_STATE
+{
+    NdisSwitchNicStateUnknown       = 0,
+    NdisSwitchNicStateCreated       = 1,
+    NdisSwitchNicStateConnected     = 2,
+    NdisSwitchNicStateDisconnected  = 3,
+    NdisSwitchNicStateDeleted       = 4
+} NDIS_SWITCH_NIC_STATE;
+
+typedef struct _NDIS_SWITCH_NIC_PARAMETERS
+{
+    NDIS_OBJECT_HEADER              Header;
+    ULONG                           Flags;
+    NDIS_SWITCH_NIC_NAME            NicName;
+    NDIS_SWITCH_NIC_FRIENDLYNAME    NicFriendlyName;
+    NDIS_SWITCH_PORT_ID             PortId;
+    NDIS_SWITCH_NIC_INDEX           NicIndex;
+    NDIS_SWITCH_NIC_TYPE            NicType;
+    NDIS_SWITCH_NIC_STATE           NicState;
+    NDIS_VM_NAME                    VmName;
+    NDIS_VM_FRIENDLYNAME            VmFriendlyName;
+    GUID                            NetCfgInstanceId;
+    ULONG                           MTU;
+    USHORT                          NumaNodeId;
+    UCHAR                           PermanentMacAddress[NDIS_MAX_PHYS_ADDRESS_LENGTH];
+    UCHAR                           VMMacAddress[NDIS_MAX_PHYS_ADDRESS_LENGTH];
+    UCHAR                           CurrentMacAddress[NDIS_MAX_PHYS_ADDRESS_LENGTH];
+    BOOLEAN                         VFAssigned;
+#if defined(NDIS_SUPPORT_NDIS640)
+    ULONG64                         NdisReserved[2];
+#endif
+} NDIS_SWITCH_NIC_PARAMETERS, *PNDIS_SWITCH_NIC_PARAMETERS;
+
+#define NDIS_SWITCH_NIC_PARAMETERS_REVISION_1      1
+
+#define NDIS_SIZEOF_NDIS_SWITCH_NIC_PARAMETERS_REVISION_1 \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_SWITCH_NIC_PARAMETERS, VFAssigned)
+
+typedef struct _NDIS_SWITCH_NIC_ARRAY
+{
+  NDIS_OBJECT_HEADER        Header;
+  ULONG                     Flags;
+  USHORT                    FirstElementOffset;
+  ULONG                     NumElements;
+  ULONG                     ElementSize;
+} NDIS_SWITCH_NIC_ARRAY, *PNDIS_SWITCH_NIC_ARRAY;
+
+#define NDIS_SWITCH_NIC_AT_ARRAY_INDEX(_NicArray_, _Index_)\
+    ((PNDIS_SWITCH_NIC_PARAMETERS)((PUCHAR)(_NicArray_) + \
+                        (_NicArray_)->FirstElementOffset + \
+                        ((_NicArray_)->ElementSize * (_Index_))))
+
+typedef struct _NDIS_OID_REQUEST NDIS_OID_REQUEST, *PNDIS_OID_REQUEST;
+
+typedef struct _NDIS_SWITCH_NIC_OID_REQUEST
+{
+    NDIS_OBJECT_HEADER          Header;
+    ULONG                       Flags;
+    NDIS_SWITCH_PORT_ID         SourcePortId;
+    NDIS_SWITCH_NIC_INDEX       SourceNicIndex;
+    NDIS_SWITCH_PORT_ID         DestinationPortId;
+    NDIS_SWITCH_NIC_INDEX       DestinationNicIndex;
+    PNDIS_OID_REQUEST           OidRequest;
+} NDIS_SWITCH_NIC_OID_REQUEST, *PNDIS_SWITCH_NIC_OID_REQUEST;
+
+#define NDIS_SWITCH_NIC_OID_REQUEST_REVISION_1     1
+
+#define NDIS_SIZEOF_NDIS_SWITCH_NIC_OID_REQUEST_REVISION_1 \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_SWITCH_NIC_OID_REQUEST, OidRequest)
+
+typedef struct _NDIS_SWITCH_NIC_SAVE_STATE
+{
+  NDIS_OBJECT_HEADER                    Header;
+  ULONG                                 Flags;
+  NDIS_SWITCH_PORT_ID                   PortId;
+  NDIS_SWITCH_NIC_INDEX                 NicIndex;
+  GUID                                  ExtensionId;
+  NDIS_SWITCH_EXTENSION_FRIENDLYNAME    ExtensionFriendlyName;
+  GUID                                  FeatureClassId;
+  USHORT                                SaveDataSize;
+  USHORT                                SaveDataOffset;
+#if (NDIS_SUPPORT_NDIS650)
+  ULONG                                 SaveDataSizeOverflow;
+#endif
+} NDIS_SWITCH_NIC_SAVE_STATE, *PNDIS_SWITCH_NIC_SAVE_STATE;
+
+#define NDIS_SWITCH_NIC_SAVE_STATE_REVISION_1      1
+
+#define NDIS_SIZEOF_NDIS_SWITCH_NIC_SAVE_STATE_REVISION_1 \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_SWITCH_NIC_SAVE_STATE,  SaveDataOffset)
+
+#endif
+#endif
+
+#if (NDIS_SUPPORT_NDIS689)
+#define NDIS_OFFLOAD_PARAMETERS_UDP_RSC_NO_CHANGE       0
+#define NDIS_OFFLOAD_PARAMETERS_UDP_RSC_DISABLED        1
+#define NDIS_OFFLOAD_PARAMETERS_UDP_RSC_ENABLED         2
+
+typedef struct _NDIS_UDP_RSC_OFFLOAD
+{
+    BOOLEAN Enabled;
+} NDIS_UDP_RSC_OFFLOAD;
+#endif
+
+typedef NET_IF_MEDIA_CONNECT_STATE NDIS_MEDIA_CONNECT_STATE, *PNDIS_MEDIA_CONNECT_STATE;
+
+typedef NET_IF_MEDIA_DUPLEX_STATE NDIS_MEDIA_DUPLEX_STATE, *PNDIS_MEDIA_DUPLEX_STATE;
+
+#define NDIS_LINK_STATE_PAUSE_FUNCTIONS_AUTO_NEGOTIATED         0x00000008
+#define NDIS_LINK_PARAMETERS_REVISION_1      1
+typedef struct _NDIS_LINK_PARAMETERS
+{
+    NDIS_OBJECT_HEADER              Header;
+    NDIS_MEDIA_DUPLEX_STATE         MediaDuplexState;
+    ULONG64                         XmitLinkSpeed;
+    ULONG64                         RcvLinkSpeed;
+    NDIS_SUPPORTED_PAUSE_FUNCTIONS  PauseFunctions;
+    ULONG                           AutoNegotiationFlags;
+} NDIS_LINK_PARAMETERS, *PNDIS_LINK_PARAMETERS;
+
+#define NDIS_SIZEOF_LINK_PARAMETERS_REVISION_1    \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_LINK_PARAMETERS, AutoNegotiationFlags)
+#define NDIS_OPER_STATE_REVISION_1      1
+typedef struct _NDIS_OPER_STATE
+{
+    NDIS_OBJECT_HEADER              Header;
+    NET_IF_OPER_STATUS              OperationalStatus;
+    ULONG                           OperationalStatusFlags;
+} NDIS_OPER_STATE, *PNDIS_OPER_STATE;
+
+#define NDIS_SIZEOF_OPER_STATE_REVISION_1    \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_OPER_STATE, OperationalStatusFlags)
+typedef struct _NDIS_IP_OPER_STATUS
+{
+    ULONG AddressFamily;
+    NET_IF_OPER_STATUS OperationalStatus;
+    ULONG OperationalStatusFlags;
+} NDIS_IP_OPER_STATUS, *PNDIS_IP_OPER_STATUS;
+
+#define MAXIMUM_IP_OPER_STATUS_ADDRESS_FAMILIES_SUPPORTED 32
+#define NDIS_IP_OPER_STATUS_INFO_REVISION_1 1
+typedef struct _NDIS_IP_OPER_STATUS_INFO
+{
+    NDIS_OBJECT_HEADER Header;
+    ULONG Flags;
+    ULONG NumberofAddressFamiliesReturned;
+    NDIS_IP_OPER_STATUS IpOperationalStatus[MAXIMUM_IP_OPER_STATUS_ADDRESS_FAMILIES_SUPPORTED];
+} NDIS_IP_OPER_STATUS_INFO, *PNDIS_IP_OPER_STATUS_INFO;
+
+#define NDIS_SIZEOF_IP_OPER_STATUS_INFO_REVISION_1    \
+        FIELD_OFFSET(NDIS_IP_OPER_STATUS_INFO, IpOperationalStatus) + \
+        MAXIMUM_IP_OPER_STATUS_ADDRESS_FAMILIES_SUPPORTED * sizeof(NDIS_IP_OPER_STATUS)
+#define NDIS_IP_OPER_STATE_REVISION_1    1
+typedef struct _NDIS_IP_OPER_STATE
+{
+    NDIS_OBJECT_HEADER Header;
+    ULONG Flags;
+    NDIS_IP_OPER_STATUS IpOperationalStatus;
+} NDIS_IP_OPER_STATE, *PNDIS_IP_OPER_STATE;
+
+#define NDIS_SIZEOF_IP_OPER_STATE_REVISION_1    \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_IP_OPER_STATE, IpOperationalStatus)
+#define NDIS_OFFLOAD_PARAMETERS_LSOV1_DISABLED             1
+#define NDIS_OFFLOAD_PARAMETERS_LSOV1_ENABLED              2
+#define NDIS_OFFLOAD_PARAMETERS_IPSECV1_DISABLED             1
+#define NDIS_OFFLOAD_PARAMETERS_IPSECV1_AH_ENABLED           2
+#define NDIS_OFFLOAD_PARAMETERS_IPSECV1_ESP_ENABLED          3
+#define NDIS_OFFLOAD_PARAMETERS_IPSECV1_AH_AND_ESP_ENABLED   4
+#define NDIS_OFFLOAD_PARAMETERS_LSOV2_DISABLED             1
+#define NDIS_OFFLOAD_PARAMETERS_LSOV2_ENABLED              2
+#if (NDIS_SUPPORT_NDIS61)
+#define NDIS_OFFLOAD_PARAMETERS_IPSECV2_DISABLED             1
+#define NDIS_OFFLOAD_PARAMETERS_IPSECV2_AH_ENABLED           2
+#define NDIS_OFFLOAD_PARAMETERS_IPSECV2_ESP_ENABLED          3
+#define NDIS_OFFLOAD_PARAMETERS_IPSECV2_AH_AND_ESP_ENABLED   4
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_OFFLOAD_PARAMETERS_RSC_DISABLED             1
+#define NDIS_OFFLOAD_PARAMETERS_RSC_ENABLED              2
+#define NDIS_ENCAPSULATION_TYPE_GRE_MAC          0x00000001
+#if (NDIS_SUPPORT_NDIS650)
+#define NDIS_ENCAPSULATION_TYPE_VXLAN            0x00000002
+#endif
+#endif
+#define NDIS_OFFLOAD_PARAMETERS_CONNECTION_OFFLOAD_DISABLED     1
+#define NDIS_OFFLOAD_PARAMETERS_CONNECTION_OFFLOAD_ENABLED      2
+#if (NDIS_SUPPORT_NDIS683)
+#define NDIS_OFFLOAD_PARAMETERS_USO_DISABLED            1
+#define NDIS_OFFLOAD_PARAMETERS_USO_ENABLED             2
+#endif
+#if (NDIS_SUPPORT_NDIS61)
+#define NDIS_OFFLOAD_PARAMETERS_REVISION_2            2
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_OFFLOAD_PARAMETERS_REVISION_3            3
+#endif
+#if (NDIS_SUPPORT_NDIS650)
+#define NDIS_OFFLOAD_PARAMETERS_REVISION_4            4
+#endif
+#if (NDIS_SUPPORT_NDIS683)
+#define NDIS_OFFLOAD_PARAMETERS_REVISION_5            5
+#endif
+#if (NDIS_SUPPORT_NDIS689)
+#define NDIS_OFFLOAD_PARAMETERS_REVISION_6            6
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_OFFLOAD_PARAMETERS_SKIP_REGISTRY_UPDATE    0x00000001
+#endif
+#define NDIS_SIZEOF_OFFLOAD_PARAMETERS_REVISION_1 RTL_SIZEOF_THROUGH_FIELD(NDIS_OFFLOAD_PARAMETERS, Flags)
+#if (NDIS_SUPPORT_NDIS61)
+#define NDIS_SIZEOF_OFFLOAD_PARAMETERS_REVISION_2 RTL_SIZEOF_THROUGH_FIELD(NDIS_OFFLOAD_PARAMETERS, IPsecV2IPv4)
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_SIZEOF_OFFLOAD_PARAMETERS_REVISION_3 RTL_SIZEOF_THROUGH_FIELD(NDIS_OFFLOAD_PARAMETERS, EncapsulationTypes)
+#endif
+#if (NDIS_SUPPORT_NDIS650)
+#define NDIS_SIZEOF_OFFLOAD_PARAMETERS_REVISION_4 RTL_SIZEOF_THROUGH_FIELD(NDIS_OFFLOAD_PARAMETERS, EncapsulationProtocolParameters)
+#endif
+#if (NDIS_SUPPORT_NDIS683)
+#define NDIS_SIZEOF_OFFLOAD_PARAMETERS_REVISION_5 RTL_SIZEOF_THROUGH_FIELD(NDIS_OFFLOAD_PARAMETERS, UdpSegmentation)
+#endif
+#if (NDIS_SUPPORT_NDIS689)
+#define NDIS_SIZEOF_OFFLOAD_PARAMETERS_REVISION_6 RTL_SIZEOF_THROUGH_FIELD(NDIS_OFFLOAD_PARAMETERS, UdpRsc)
+#endif
+typedef struct _NDIS_TCP_LARGE_SEND_OFFLOAD_V1
+{
+
+    struct
+    {
+        ULONG     Encapsulation;
+        ULONG     MaxOffLoadSize;
+        ULONG     MinSegmentCount;
+        ULONG     TcpOptions:2;
+        ULONG     IpOptions:2;
+    } IPv4;
+
+} NDIS_TCP_LARGE_SEND_OFFLOAD_V1, *PNDIS_TCP_LARGE_SEND_OFFLOAD_V1;
+
+typedef struct _NDIS_TCP_IP_CHECKSUM_OFFLOAD
+{
+
+    struct
+    {
+        ULONG       Encapsulation;
+        ULONG       IpOptionsSupported:2;
+        ULONG       TcpOptionsSupported:2;
+        ULONG       TcpChecksum:2;
+        ULONG       UdpChecksum:2;
+        ULONG       IpChecksum:2;
+    } IPv4Transmit;
+
+    struct
+    {
+        ULONG       Encapsulation;
+        ULONG       IpOptionsSupported:2;
+        ULONG       TcpOptionsSupported:2;
+        ULONG       TcpChecksum:2;
+        ULONG       UdpChecksum:2;
+        ULONG       IpChecksum:2;
+    } IPv4Receive;
+
+
+    struct
+    {
+        ULONG       Encapsulation;
+        ULONG       IpExtensionHeadersSupported:2;
+        ULONG       TcpOptionsSupported:2;
+        ULONG       TcpChecksum:2;
+        ULONG       UdpChecksum:2;
+
+    } IPv6Transmit;
+
+    struct
+    {
+        ULONG       Encapsulation;
+        ULONG       IpExtensionHeadersSupported:2;
+        ULONG       TcpOptionsSupported:2;
+        ULONG       TcpChecksum:2;
+        ULONG       UdpChecksum:2;
+
+    } IPv6Receive;
+
+} NDIS_TCP_IP_CHECKSUM_OFFLOAD, *PNDIS_TCP_IP_CHECKSUM_OFFLOAD;
+
+typedef struct _NDIS_IPSEC_OFFLOAD_V1
+{
+    struct
+    {
+        ULONG   Encapsulation;
+        ULONG   AhEspCombined;
+        ULONG   TransportTunnelCombined;
+        ULONG   IPv4Options;
+        ULONG   Flags;
+    } Supported;
+
+    struct
+    {
+        ULONG   Md5:2;
+        ULONG   Sha_1:2;
+        ULONG   Transport:2;
+        ULONG   Tunnel:2;
+        ULONG   Send:2;
+        ULONG   Receive:2;
+    } IPv4AH;
+
+    struct
+    {
+        ULONG   Des:2;
+        ULONG   Reserved:2;
+        ULONG   TripleDes:2;
+        ULONG   NullEsp:2;
+        ULONG   Transport:2;
+        ULONG   Tunnel:2;
+        ULONG   Send:2;
+        ULONG   Receive:2;
+    } IPv4ESP;
+
+} NDIS_IPSEC_OFFLOAD_V1, *PNDIS_IPSEC_OFFLOAD_V1;
+
+typedef struct _NDIS_TCP_LARGE_SEND_OFFLOAD_V2
+{
+    struct
+    {
+         ULONG     Encapsulation;
+         ULONG     MaxOffLoadSize;
+         ULONG     MinSegmentCount;
+    }IPv4;
+
+    struct
+    {
+         ULONG     Encapsulation;
+         ULONG     MaxOffLoadSize;
+         ULONG     MinSegmentCount;
+         ULONG     IpExtensionHeadersSupported:2;
+         ULONG     TcpOptionsSupported:2;
+    }IPv6;
+
+} NDIS_TCP_LARGE_SEND_OFFLOAD_V2, *PNDIS_TCP_LARGE_SEND_OFFLOAD_V2;
+
+#if (NDIS_SUPPORT_NDIS61)
+#define IPSEC_OFFLOAD_V2_AUTHENTICATION_MD5                      0x00000001
+#define IPSEC_OFFLOAD_V2_AUTHENTICATION_SHA_1                    0x00000002
+#define IPSEC_OFFLOAD_V2_AUTHENTICATION_SHA_256                  0x00000004
+#define IPSEC_OFFLOAD_V2_AUTHENTICATION_AES_GCM_128              0x00000008
+#define IPSEC_OFFLOAD_V2_AUTHENTICATION_AES_GCM_192              0x00000010
+#define IPSEC_OFFLOAD_V2_AUTHENTICATION_AES_GCM_256              0x00000020
+#define IPSEC_OFFLOAD_V2_ENCRYPTION_NONE                          0x00000001
+#define IPSEC_OFFLOAD_V2_ENCRYPTION_DES_CBC                       0x00000002
+#define IPSEC_OFFLOAD_V2_ENCRYPTION_3_DES_CBC                     0x00000004
+#define IPSEC_OFFLOAD_V2_ENCRYPTION_AES_GCM_128                   0x00000008
+#define IPSEC_OFFLOAD_V2_ENCRYPTION_AES_GCM_192                   0x00000010
+#define IPSEC_OFFLOAD_V2_ENCRYPTION_AES_GCM_256                   0x00000020
+#define IPSEC_OFFLOAD_V2_ENCRYPTION_AES_CBC_128                   0x00000040
+#define IPSEC_OFFLOAD_V2_ENCRYPTION_AES_CBC_192                   0x00000080
+#define IPSEC_OFFLOAD_V2_ENCRYPTION_AES_CBC_256                   0x00000100
+typedef struct _NDIS_IPSEC_OFFLOAD_V2
+{
+    ULONG       Encapsulation;      
+    BOOLEAN     IPv6Supported;      
+    BOOLEAN     IPv4Options;                           
+    BOOLEAN     IPv6NonIPsecExtensionHeaders;          
+    BOOLEAN     Ah;
+    BOOLEAN     Esp;
+    BOOLEAN     AhEspCombined;
+    BOOLEAN     Transport;
+    BOOLEAN     Tunnel;
+    BOOLEAN     TransportTunnelCombined;
+    BOOLEAN     LsoSupported;
+    BOOLEAN     ExtendedSequenceNumbers;
+    ULONG       UdpEsp;
+    ULONG       AuthenticationAlgorithms;     
+    ULONG       EncryptionAlgorithms;         
+    ULONG       SaOffloadCapacity;            
+} NDIS_IPSEC_OFFLOAD_V2, *PNDIS_IPSEC_OFFLOAD_V2;
+
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+typedef struct _NDIS_TCP_RECV_SEG_COALESCE_OFFLOAD
+{
+    struct
+    {
+        BOOLEAN Enabled;
+    } IPv4;
+    struct
+    {
+        BOOLEAN Enabled;
+    } IPv6;
+} NDIS_TCP_RECV_SEG_COALESCE_OFFLOAD, *PNDIS_TCP_RECV_SEG_COALESCE_OFFLOAD;
+
+#define NDIS_TCP_RECV_SEG_COALESC_OFFLOAD_REVISION_1            1
+#define NDIS_SIZEOF_TCP_RECV_SEG_COALESC_OFFLOAD_REVISION_1     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_TCP_RECV_SEG_COALESCE_OFFLOAD, IPv6.Enabled)
+#define NDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD_NOT_SUPPORTED    0x00000000
+#define NDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD_INNER_IPV4       0x00000001
+#define NDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD_OUTER_IPV4       0x00000002
+#define NDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD_INNER_IPV6       0x00000004
+#define NDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD_OUTER_IPV6       0x00000008
+typedef struct _NDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD {
+    ULONG TransmitChecksumOffloadSupported:4;
+    ULONG ReceiveChecksumOffloadSupported:4;
+    ULONG LsoV2Supported:4;
+    ULONG RssSupported:4;
+    ULONG VmqSupported:4;
+#if (NDIS_SUPPORT_NDIS685)
+    ULONG UsoSupported:4;
+    ULONG Reserved:8;
+#endif 
+    ULONG MaxHeaderSizeSupported;
+} NDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD, *PNDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD;
+
+#define NDIS_SIZEOF_ENCAPSULATED_PACKET_TASK_OFFLOAD_REVISION_1     \
+        RTL_SIZEOF_THROUGH_FIELD(                                   \
+            NDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD, MaxHeaderSizeSupported)
+#endif
+#if (NDIS_SUPPORT_NDIS650)
+typedef struct _NDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD_V2 {
+    ULONG TransmitChecksumOffloadSupported:4;
+    ULONG ReceiveChecksumOffloadSupported:4;
+    ULONG LsoV2Supported:4;
+    ULONG RssSupported:4;
+    ULONG VmqSupported:4;
+#if (NDIS_SUPPORT_NDIS685)
+    ULONG UsoSupported:4;
+    ULONG Reserved:8;
+#else
+    ULONG Reserved:12;
+#endif 
+    ULONG MaxHeaderSizeSupported;
+
+    union _ENCAPSULATION_PROTOCOL_INFO {
+        struct _VXLAN_INFO {
+           USHORT VxlanUDPPortNumber;
+           USHORT VxlanUDPPortNumberConfigurable  :1;
+        } VxlanInfo;
+
+        ULONG Value;
+
+    } EncapsulationProtocolInfo;
+
+    ULONG Reserved1;
+    ULONG Reserved2;
+} NDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD_V2, *PNDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD_V2;
+
+#endif
+#if (NDIS_SUPPORT_NDIS670)
+typedef enum _NDIS_RFC6877_464XLAT_OFFLOAD_OPTIONS
+{
+    NDIS_RFC6877_464XLAT_OFFLOAD_NOT_SUPPORTED = 0,    
+    NDIS_RFC6877_464XLAT_OFFLOAD_DISABLED,             
+    NDIS_RFC6877_464XLAT_OFFLOAD_ENABLED,              
+    NDIS_RFC6877_464XLAT_OFFLOAD_ON_DEMAND,            
+} NDIS_RFC6877_464XLAT_OFFLOAD_OPTIONS;
+
+typedef struct _NDIS_RFC6877_464XLAT_OFFLOAD
+{
+    NDIS_RFC6877_464XLAT_OFFLOAD_OPTIONS   XlatOffload;
+    ULONG Flags;                                       
+} NDIS_RFC6877_464XLAT_OFFLOAD, *PNDIS_RFC6877_464XLAT_OFFLOAD;
+
+#endif
+#if (NDIS_SUPPORT_NDIS683)
+typedef struct _NDIS_UDP_SEGMENTATION_OFFLOAD
+{
+    struct
+    {
+        ULONG     Encapsulation;
+        ULONG     MaxOffLoadSize;
+        ULONG     MinSegmentCount : 6;
+#if (NDIS_SUPPORT_NDIS684)
+        ULONG     SubMssFinalSegmentSupported : 1;
+        ULONG     Reserved : 25;
+#else
+        ULONG     Reserved : 26;
+#endif 
+    } IPv4;
+
+    struct
+    {
+        ULONG     Encapsulation;
+        ULONG     MaxOffLoadSize;
+        ULONG     MinSegmentCount : 6;
+#if (NDIS_SUPPORT_NDIS684)
+        ULONG     SubMssFinalSegmentSupported : 1;
+        ULONG     Reserved1 : 25;
+#else
+        ULONG     Reserved1 : 26;
+#endif 
+        ULONG     IpExtensionHeadersSupported : 2;
+        ULONG     Reserved2 : 30;
+    } IPv6;
+} NDIS_UDP_SEGMENTATION_OFFLOAD, *PNDIS_UDP_SEGMENTATION_OFFLOAD;
+
+#endif
+#define NDIS_OFFLOAD_FLAGS_GROUP_CHECKSUM_CAPABILITIES  0x00000001
+#if (NDIS_SUPPORT_NDIS630)
+#define IPSEC_OFFLOAD_V2_AND_TCP_CHECKSUM_COEXISTENCE  0x00000002
+#define IPSEC_OFFLOAD_V2_AND_UDP_CHECKSUM_COEXISTENCE  0x00000004
+#endif
+#if (NDIS_SUPPORT_NDIS650)
+#define NDIS_OFFLOAD_REVISION_4    4
+#endif
+#if (NDIS_SUPPORT_NDIS670)
+#define NDIS_OFFLOAD_REVISION_5    5
+#endif
+#if (NDIS_SUPPORT_NDIS683)
+#define NDIS_OFFLOAD_REVISION_6    6
+#endif
+#if (NDIS_SUPPORT_NDIS685)
+#define NDIS_OFFLOAD_REVISION_7    7
+#endif
+#if (NDIS_SUPPORT_NDIS689)
+#define NDIS_OFFLOAD_REVISION_8    8
+#endif
+typedef struct _NDIS_OFFLOAD
+{
+    NDIS_OBJECT_HEADER                       Header;
+
+    
+    
+    
+    NDIS_TCP_IP_CHECKSUM_OFFLOAD             Checksum;
+
+    
+    
+    
+    NDIS_TCP_LARGE_SEND_OFFLOAD_V1           LsoV1;
+
+    
+    
+    
+    NDIS_IPSEC_OFFLOAD_V1                    IPsecV1;
+
+    
+    
+    
+    NDIS_TCP_LARGE_SEND_OFFLOAD_V2           LsoV2;
+
+    ULONG                                    Flags;
+
+#if (NDIS_SUPPORT_NDIS61)
+    
+    
+    
+    NDIS_IPSEC_OFFLOAD_V2                    IPsecV2;
+#endif 
+
+#if (NDIS_SUPPORT_NDIS630)
+    
+    
+    
+    NDIS_TCP_RECV_SEG_COALESCE_OFFLOAD       Rsc;
+
+    
+    
+    
+    NDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD    EncapsulatedPacketTaskOffloadGre;
+#endif 
+
+#if (NDIS_SUPPORT_NDIS650)
+    
+    
+    
+    NDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD_V2 EncapsulatedPacketTaskOffloadVxlan;
+
+    
+    
+    
+    UCHAR                                    EncapsulationTypes;
+#endif 
+
+#if (NDIS_SUPPORT_NDIS670)
+    
+    
+    
+    NDIS_RFC6877_464XLAT_OFFLOAD             Rfc6877Xlat;
+
+#endif 
+
+#if (NDIS_SUPPORT_NDIS683)
+    
+    
+    
+    NDIS_UDP_SEGMENTATION_OFFLOAD            UdpSegmentation;
+#endif 
+
+#if (NDIS_SUPPORT_NDIS689)
+    
+    
+    
+    NDIS_UDP_RSC_OFFLOAD                     UdpRsc;
+#endif 
+
+} NDIS_OFFLOAD, *PNDIS_OFFLOAD;
+
+#if (NDIS_SUPPORT_NDIS61)
+#define NDIS_SIZEOF_NDIS_OFFLOAD_REVISION_2   RTL_SIZEOF_THROUGH_FIELD(NDIS_OFFLOAD, IPsecV2)
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_SIZEOF_NDIS_OFFLOAD_REVISION_3   RTL_SIZEOF_THROUGH_FIELD(NDIS_OFFLOAD, EncapsulatedPacketTaskOffloadGre)
+#endif
+#if (NDIS_SUPPORT_NDIS650)
+#define NDIS_SIZEOF_NDIS_OFFLOAD_REVISION_4   RTL_SIZEOF_THROUGH_FIELD(NDIS_OFFLOAD, EncapsulationTypes)
+#endif
+#if (NDIS_SUPPORT_NDIS670)
+#define NDIS_SIZEOF_NDIS_OFFLOAD_REVISION_5   RTL_SIZEOF_THROUGH_FIELD(NDIS_OFFLOAD, Rfc6877Xlat)
+#endif
+#if (NDIS_SUPPORT_NDIS683)
+#define NDIS_SIZEOF_NDIS_OFFLOAD_REVISION_6   RTL_SIZEOF_THROUGH_FIELD(NDIS_OFFLOAD, UdpSegmentation)
+#endif
+#if (NDIS_SUPPORT_NDIS685)
+#define NDIS_SIZEOF_NDIS_OFFLOAD_REVISION_7   RTL_SIZEOF_THROUGH_FIELD(NDIS_OFFLOAD, UdpSegmentation)
+#endif
+#if (NDIS_SUPPORT_NDIS689)
+#define NDIS_SIZEOF_NDIS_OFFLOAD_REVISION_8   RTL_SIZEOF_THROUGH_FIELD(NDIS_OFFLOAD, UdpRsc)
+#endif
+typedef struct _NDIS_WMI_TCP_LARGE_SEND_OFFLOAD_V1
+{
+    struct
+    {
+        ULONG     Encapsulation;
+        ULONG     MaxOffLoadSize;
+        ULONG     MinSegmentCount;
+        ULONG     TcpOptions;
+        ULONG     IpOptions;
+    } IPv4;
+
+} NDIS_WMI_TCP_LARGE_SEND_OFFLOAD_V1, *PNDIS_WMI_TCP_LARGE_SEND_OFFLOAD_V1;
+
+typedef struct _NDIS_WMI_TCP_IP_CHECKSUM_OFFLOAD
+{
+
+    struct
+    {
+        ULONG       Encapsulation;
+        ULONG       IpOptionsSupported;
+        ULONG       TcpOptionsSupported;
+        ULONG       TcpChecksum;
+        ULONG       UdpChecksum;
+        ULONG       IpChecksum;
+    } IPv4Transmit;
+
+    struct
+    {
+        ULONG       Encapsulation;
+        ULONG       IpOptionsSupported;
+        ULONG       TcpOptionsSupported;
+        ULONG       TcpChecksum;
+        ULONG       UdpChecksum;
+        ULONG       IpChecksum;
+    } IPv4Receive;
+
+
+    struct
+    {
+        ULONG       Encapsulation;
+        ULONG       IpExtensionHeadersSupported;
+        ULONG       TcpOptionsSupported;
+        ULONG       TcpChecksum;
+        ULONG       UdpChecksum;
+
+    } IPv6Transmit;
+
+    struct
+    {
+        ULONG       Encapsulation;
+        ULONG       IpExtensionHeadersSupported;
+        ULONG       TcpOptionsSupported;
+        ULONG       TcpChecksum;
+        ULONG       UdpChecksum;
+
+    } IPv6Receive;
+
+} NDIS_WMI_TCP_IP_CHECKSUM_OFFLOAD, *PNDIS_WMI_TCP_IP_CHECKSUM_OFFLOAD;
+
+typedef struct _NDIS_WMI_IPSEC_OFFLOAD_V1
+{
+    struct
+    {
+        ULONG   Encapsulation;
+        ULONG   AhEspCombined;
+        ULONG   TransportTunnelCombined;
+        ULONG   IPv4Options;
+        ULONG   Flags;
+    } Supported;
+
+    struct
+    {
+        ULONG   Md5;
+        ULONG   Sha_1;
+        ULONG   Transport;
+        ULONG   Tunnel;
+        ULONG   Send;
+        ULONG   Receive;
+    } IPv4AH;
+
+    struct
+    {
+        ULONG   Des;
+        ULONG   Reserved;
+        ULONG   TripleDes;
+        ULONG   NullEsp;
+        ULONG   Transport;
+        ULONG   Tunnel;
+        ULONG   Send;
+        ULONG   Receive;
+    } IPv4ESP;
+
+} NDIS_WMI_IPSEC_OFFLOAD_V1, *PNDIS_WMI_IPSEC_OFFLOAD_V1;
+
+typedef struct _NDIS_WMI_TCP_LARGE_SEND_OFFLOAD_V2
+{
+    struct
+    {
+         ULONG     Encapsulation;
+         ULONG     MaxOffLoadSize;
+         ULONG     MinSegmentCount;
+    }IPv4;
+
+    struct
+    {
+         ULONG     Encapsulation;
+         ULONG     MaxOffLoadSize;
+         ULONG     MinSegmentCount;
+         ULONG     IpExtensionHeadersSupported;
+         ULONG     TcpOptionsSupported;
+    }IPv6;
+
+} NDIS_WMI_TCP_LARGE_SEND_OFFLOAD_V2, *PNDIS_WMI_TCP_LARGE_SEND_OFFLOAD_V2;
+
+typedef struct _NDIS_WMI_OFFLOAD
+{
+    
+    
+    
+    
+    
+    NDIS_OBJECT_HEADER                  Header;
+
+    
+    
+    
+    NDIS_WMI_TCP_IP_CHECKSUM_OFFLOAD    Checksum;
+
+    
+    
+    
+    NDIS_WMI_TCP_LARGE_SEND_OFFLOAD_V1   LsoV1;
+
+    
+    
+    
+    NDIS_WMI_IPSEC_OFFLOAD_V1           IPsecV1;
+    
+    
+    
+    NDIS_WMI_TCP_LARGE_SEND_OFFLOAD_V2  LsoV2;
+
+    ULONG                               Flags;
+
+#if (NDIS_SUPPORT_NDIS61)
+    
+    
+    
+    NDIS_IPSEC_OFFLOAD_V2               IPsecV2;
+#endif 
+
+
+#if (NDIS_SUPPORT_NDIS630)
+    
+    
+    
+    NDIS_TCP_RECV_SEG_COALESCE_OFFLOAD  Rsc;
+
+    
+    
+    
+    NDIS_ENCAPSULATED_PACKET_TASK_OFFLOAD EncapsulatedPacketTaskOffloadGre;
+#endif 
+
+#if (NDIS_SUPPORT_NDIS683)
+    
+    
+    
+    NDIS_UDP_SEGMENTATION_OFFLOAD            UdpSegmentation;
+#endif 
+
+#if (NDIS_SUPPORT_NDIS689)
+    
+    
+    
+    NDIS_UDP_RSC_OFFLOAD              UdpRsc;
+#endif 
+
+} NDIS_WMI_OFFLOAD, *PNDIS_WMI_OFFLOAD;
+
+#define NDIS_SIZEOF_NDIS_WMI_OFFLOAD_REVISION_1   RTL_SIZEOF_THROUGH_FIELD(NDIS_WMI_OFFLOAD, Flags)
+#if (NDIS_SUPPORT_NDIS61)
+#define NDIS_SIZEOF_NDIS_WMI_OFFLOAD_REVISION_2   RTL_SIZEOF_THROUGH_FIELD(NDIS_WMI_OFFLOAD, IPsecV2)
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_SIZEOF_NDIS_WMI_OFFLOAD_REVISION_3   RTL_SIZEOF_THROUGH_FIELD(NDIS_WMI_OFFLOAD, EncapsulatedPacketTaskOffloadGre)
+#endif
+#if (NDIS_SUPPORT_NDIS683)
+#define NDIS_SIZEOF_NDIS_WMI_OFFLOAD_REVISION_4   RTL_SIZEOF_THROUGH_FIELD(NDIS_WMI_OFFLOAD, UdpSegmentation)
+#endif
+#if (NDIS_SUPPORT_NDIS689)
+#define NDIS_SIZEOF_NDIS_WMI_OFFLOAD_REVISION_5   RTL_SIZEOF_THROUGH_FIELD(NDIS_WMI_OFFLOAD, UdpRsc)
+#endif
+#define NDIS_TCP_CONNECTION_OFFLOAD_REVISION_1              1
+#if (NDIS_SUPPORT_NDIS61)
+#define NDIS_TCP_CONNECTION_OFFLOAD_REVISION_2              2
+#endif
+typedef struct _NDIS_TCP_CONNECTION_OFFLOAD
+{
+    
+    
+    
+    
+    
+    NDIS_OBJECT_HEADER Header;
+    ULONG Encapsulation;
+    ULONG SupportIPv4:2;
+    ULONG SupportIPv6:2;
+    ULONG SupportIPv6ExtensionHeaders:2;
+    ULONG SupportSack:2;
+#if (NDIS_SUPPORT_NDIS61)
+    ULONG CongestionAlgorithm:4;
+#endif 
+    ULONG TcpConnectionOffloadCapacity;
+    ULONG Flags;
+} NDIS_TCP_CONNECTION_OFFLOAD, *PNDIS_TCP_CONNECTION_OFFLOAD;
+
+#define NDIS_SIZEOF_TCP_CONNECTION_OFFLOAD_REVISION_1 RTL_SIZEOF_THROUGH_FIELD(NDIS_TCP_CONNECTION_OFFLOAD, Flags)
+#if (NDIS_SUPPORT_NDIS61)
+#define NDIS_SIZEOF_TCP_CONNECTION_OFFLOAD_REVISION_2 RTL_SIZEOF_THROUGH_FIELD(NDIS_TCP_CONNECTION_OFFLOAD, Flags)
+#endif
+typedef struct _NDIS_WMI_TCP_CONNECTION_OFFLOAD
+{
+    
+    
+    
+    
+    
+    NDIS_OBJECT_HEADER Header;
+    ULONG Encapsulation;
+    ULONG SupportIPv4;
+    ULONG SupportIPv6;
+    ULONG SupportIPv6ExtensionHeaders;
+    ULONG SupportSack;
+    ULONG TcpConnectionOffloadCapacity;
+    ULONG Flags;
+} NDIS_WMI_TCP_CONNECTION_OFFLOAD, *PNDIS_WMI_TCP_CONNECTION_OFFLOAD;
+
+#define NDIS_SIZEOF_WMI_TCP_CONNECTION_OFFLOAD_REVISION_1 RTL_SIZEOF_THROUGH_FIELD(NDIS_WMI_TCP_CONNECTION_OFFLOAD, Flags)
+#ifdef NDIS_INCLUDE_LEGACY_NAMES
+typedef NDIS_PORT_CONTROL_STATE  NDIS_PORT_CONTROLL_STATE;
+
+typedef PNDIS_PORT_CONTROL_STATE PNDIS_PORT_CONTROLL_STATE;
+
+#endif
+typedef enum _NDIS_NETWORK_CHANGE_TYPE
+{
+    NdisPossibleNetworkChange = 1,
+    NdisDefinitelyNetworkChange,
+    NdisNetworkChangeFromMediaConnect,
+    NdisNetworkChangeMax
+} NDIS_NETWORK_CHANGE_TYPE, *PNDIS_NETWORK_CHANGE_TYPE;
+
+#define  NDIS_WMI_DEFAULT_METHOD_ID             1
+#define  NDIS_WMI_OBJECT_TYPE_SET               0x01
+#define  NDIS_WMI_OBJECT_TYPE_METHOD            0x02
+#define  NDIS_WMI_OBJECT_TYPE_EVENT             0x03
+#define  NDIS_WMI_OBJECT_TYPE_ENUM_ADAPTER      0x04
+#define  NDIS_WMI_OBJECT_TYPE_OUTPUT_INFO       0x05
+#define NDIS_WMI_METHOD_HEADER_REVISION_1       1
+typedef struct _NDIS_WMI_METHOD_HEADER
+{
+    NDIS_OBJECT_HEADER   Header;
+    NDIS_PORT_NUMBER     PortNumber;
+    NET_LUID             NetLuid;
+    ULONG64              RequestId;
+    ULONG                Timeout;
+    UCHAR                Padding[4];
+} NDIS_WMI_METHOD_HEADER, *PNDIS_WMI_METHOD_HEADER;
+
+#define NDIS_SIZEOF_WMI_METHOD_HEADER_REVISION_1     \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_WMI_METHOD_HEADER, Padding)
+#define NDIS_WMI_SET_HEADER_REVISION_1         1
+typedef struct _NDIS_WMI_SET_HEADER
+{
+    NDIS_OBJECT_HEADER   Header;
+    NDIS_PORT_NUMBER     PortNumber;
+    NET_LUID             NetLuid;
+    ULONG64              RequestId;
+    ULONG                Timeout;
+    UCHAR                Padding[4];
+} NDIS_WMI_SET_HEADER, *PNDIS_WMI_SET_HEADER;
+
+#define NDIS_SIZEOF_WMI_SET_HEADER_REVISION_1     \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_WMI_SET_HEADER, Padding)
+#define NDIS_WMI_EVENT_HEADER_REVISION_1      1
+typedef struct _NDIS_WMI_EVENT_HEADER
+{
+    NDIS_OBJECT_HEADER   Header;
+    NET_IFINDEX          IfIndex;
+    NET_LUID             NetLuid;
+    ULONG64              RequestId;
+    NDIS_PORT_NUMBER     PortNumber;
+    ULONG                DeviceNameLength;
+    ULONG                DeviceNameOffset;
+    UCHAR                Padding[4];
+} NDIS_WMI_EVENT_HEADER, *PNDIS_WMI_EVENT_HEADER;
+
+#define NDIS_SIZEOF_WMI_EVENT_HEADER_REVISION_1     \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_WMI_EVENT_HEADER, Padding)
+#define NDIS_WMI_ENUM_ADAPTER_REVISION_1       1
+typedef struct _NDIS_WMI_ENUM_ADAPTER
+{
+    NDIS_OBJECT_HEADER   Header;
+    NET_IFINDEX          IfIndex;
+    NET_LUID             NetLuid;
+    USHORT               DeviceNameLength;
+    CHAR                 DeviceName[1];
+}NDIS_WMI_ENUM_ADAPTER, *PNDIS_WMI_ENUM_ADAPTER;
+
+#define NDIS_SIZEOF_WMI_ENUM_ADAPTER_REVISION_1     \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_WMI_ENUM_ADAPTER, DeviceName)
+#define NDIS_DEVICE_TYPE_ENDPOINT           0x00000001
+#if (NDIS_SUPPORT_NDIS61)
+#define NDIS_HD_SPLIT_PARAMETERS_REVISION_1      1
+typedef struct _NDIS_HD_SPLIT_PARAMETERS
+{
+    
+    
+    
+    
+    
+    NDIS_OBJECT_HEADER      Header;
+    ULONG                   HDSplitCombineFlags;
+}NDIS_HD_SPLIT_PARAMETERS, *PNDIS_HD_SPLIT_PARAMETERS;
+
+#define NDIS_SIZEOF_HD_SPLIT_PARAMETERS_REVISION_1     \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_HD_SPLIT_PARAMETERS, HDSplitCombineFlags)
+#define NDIS_HD_SPLIT_COMBINE_ALL_HEADERS          0x00000001
+#define NDIS_HD_SPLIT_CURRENT_CONFIG_REVISION_1      1
+typedef struct _NDIS_HD_SPLIT_CURRENT_CONFIG
+{
+    
+    
+    
+    
+    
+    NDIS_OBJECT_HEADER          Header;
+    ULONG                       HardwareCapabilities;
+    ULONG                       CurrentCapabilities;
+    ULONG                       HDSplitFlags;
+    ULONG                       HDSplitCombineFlags;
+    ULONG                       BackfillSize;
+    ULONG                       MaxHeaderSize;
+} NDIS_HD_SPLIT_CURRENT_CONFIG, *PNDIS_HD_SPLIT_CURRENT_CONFIG;
+
+#define NDIS_SIZEOF_HD_SPLIT_CURRENT_CONFIG_REVISION_1     \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_HD_SPLIT_CURRENT_CONFIG, MaxHeaderSize)
+#define NDIS_HD_SPLIT_CAPS_SUPPORTS_HEADER_DATA_SPLIT         0x00000001
+#define NDIS_HD_SPLIT_CAPS_SUPPORTS_IPV4_OPTIONS              0x00000002
+#define NDIS_HD_SPLIT_CAPS_SUPPORTS_IPV6_EXTENSION_HEADERS    0x00000004
+#define NDIS_HD_SPLIT_CAPS_SUPPORTS_TCP_OPTIONS               0x00000008
+#define NDIS_HD_SPLIT_ENABLE_HEADER_DATA_SPLIT     0x00000001
+#endif
+#define NDIS_WMI_OUTPUT_INFO_REVISION_1    1;
+typedef struct NDIS_WMI_OUTPUT_INFO
+{
+    NDIS_OBJECT_HEADER   Header;
+    ULONG                Flags;
+    UCHAR                SupportedRevision;
+    ULONG                DataOffset;
+
+} NDIS_WMI_OUTPUT_INFO, *PNDIS_WMI_OUTPUT_INFO;
+
+#define NDIS_SIZEOF_WMI_OUTPUT_INFO_REVISION_1     \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_WMI_OUTPUT_INFO, DataOffset)
+#if (NDIS_SUPPORT_NDIS620)
+#define NDIS_PM_WOL_BITMAP_PATTERN_SUPPORTED                    0x00000001
+#define NDIS_PM_WOL_MAGIC_PACKET_SUPPORTED                      0x00000002
+#define NDIS_PM_WOL_IPV4_TCP_SYN_SUPPORTED                      0x00000004
+#define NDIS_PM_WOL_IPV6_TCP_SYN_SUPPORTED                      0x00000008
+#define NDIS_PM_WOL_IPV4_DEST_ADDR_WILDCARD_SUPPORTED           0x00000200
+#define NDIS_PM_WOL_IPV6_DEST_ADDR_WILDCARD_SUPPORTED           0x00000800
+#define NDIS_PM_WOL_EAPOL_REQUEST_ID_MESSAGE_SUPPORTED          0x00010000
+#define NDIS_PM_PROTOCOL_OFFLOAD_ARP_SUPPORTED                  0x00000001
+#define NDIS_PM_PROTOCOL_OFFLOAD_NS_SUPPORTED                   0x00000002
+#define NDIS_PM_PROTOCOL_OFFLOAD_80211_RSN_REKEY_SUPPORTED      0x00000080
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_PM_WAKE_ON_MEDIA_CONNECT_SUPPORTED                   0x00000001
+#define NDIS_PM_WAKE_ON_MEDIA_DISCONNECT_SUPPORTED                0x00000002
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_WLAN_WAKE_ON_NLO_DISCOVERY_SUPPORTED                 0x00000001
+#define NDIS_WLAN_WAKE_ON_AP_ASSOCIATION_LOST_SUPPORTED           0x00000002
+#define NDIS_WLAN_WAKE_ON_GTK_HANDSHAKE_ERROR_SUPPORTED           0x00000004
+#define NDIS_WLAN_WAKE_ON_4WAY_HANDSHAKE_REQUEST_SUPPORTED        0x00000008
+#endif
+#if (NDIS_SUPPORT_NDIS688)
+#define NDIS_WLAN_WAKE_ON_INCOMING_ACTION_FRAME_SUPPORTED         0x00000010
+#endif
+#if (NDIS_SUPPORT_NDIS689)
+#define NDIS_WLAN_WAKE_ON_CLIENT_DRIVER_DIAGNOSTIC_SUPPORTED     0x00000020
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_WWAN_WAKE_ON_REGISTER_STATE_SUPPORTED                0x00000001
+#define NDIS_WWAN_WAKE_ON_SMS_RECEIVE_SUPPORTED                   0x00000002
+#define NDIS_WWAN_WAKE_ON_USSD_RECEIVE_SUPPORTED                  0x00000004
+#define NDIS_WWAN_WAKE_ON_PACKET_STATE_SUPPORTED                  0x00000008
+#define NDIS_WWAN_WAKE_ON_UICC_CHANGE_SUPPORTED                   0x00000010
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_PM_WAKE_PACKET_INDICATION_SUPPORTED                0x00000001
+#define NDIS_PM_SELECTIVE_SUSPEND_SUPPORTED                     0x00000002
+#endif
+#define NDIS_PM_WOL_BITMAP_PATTERN_ENABLED                      0x00000001
+#define NDIS_PM_WOL_MAGIC_PACKET_ENABLED                        0x00000002
+#define NDIS_PM_WOL_IPV4_TCP_SYN_ENABLED                        0x00000004
+#define NDIS_PM_WOL_IPV6_TCP_SYN_ENABLED                        0x00000008
+#define NDIS_PM_WOL_IPV4_DEST_ADDR_WILDCARD_ENABLED             0x00000200
+#define NDIS_PM_WOL_IPV6_DEST_ADDR_WILDCARD_ENABLED             0x00000800
+#define NDIS_PM_WOL_EAPOL_REQUEST_ID_MESSAGE_ENABLED            0x00010000
+#define NDIS_PM_PROTOCOL_OFFLOAD_ARP_ENABLED                    0x00000001
+#define NDIS_PM_PROTOCOL_OFFLOAD_NS_ENABLED                     0x00000002
+#define NDIS_PM_PROTOCOL_OFFLOAD_80211_RSN_REKEY_ENABLED        0x00000080
+#define NDIS_PM_WAKE_ON_LINK_CHANGE_ENABLED                     0x00000001
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_PM_WAKE_ON_MEDIA_DISCONNECT_ENABLED                0x00000002
+#define NDIS_PM_SELECTIVE_SUSPEND_ENABLED                       0x00000010
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_WLAN_WAKE_ON_NLO_DISCOVERY_ENABLED                 0x00000001
+#define NDIS_WLAN_WAKE_ON_AP_ASSOCIATION_LOST_ENABLED           0x00000002
+#define NDIS_WLAN_WAKE_ON_GTK_HANDSHAKE_ERROR_ENABLED           0x00000004
+#define NDIS_WLAN_WAKE_ON_4WAY_HANDSHAKE_REQUEST_ENABLED        0x00000008
+#endif
+#if (NDIS_SUPPORT_NDIS688)
+#define NDIS_WLAN_WAKE_ON_INCOMING_ACTION_FRAME_ENABLED         0x00000010
+#endif
+#if (NDIS_SUPPORT_NDIS689)
+#define NDIS_WLAN_WAKE_ON_CLIENT_DRIVER_DIAGNOSTIC_ENABLED     0x00000020
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_WWAN_WAKE_ON_REGISTER_STATE_ENABLED                0x00000001
+#define NDIS_WWAN_WAKE_ON_SMS_RECEIVE_ENABLED                   0x00000002
+#define NDIS_WWAN_WAKE_ON_USSD_RECEIVE_ENABLED                  0x00000004
+#endif
+#if (NDIS_SUPPORT_NDIS650)
+#define NDIS_WWAN_WAKE_ON_PACKET_STATE_ENABLED                  0x00000008
+#define NDIS_WWAN_WAKE_ON_UICC_CHANGE_ENABLED                   0x00000010
+#endif
+#define NDIS_PM_WOL_PRIORITY_LOWEST                             0xFFFFFFFF
+#define NDIS_PM_WOL_PRIORITY_NORMAL                             0x10000000
+#define NDIS_PM_WOL_PRIORITY_HIGHEST                            0x00000001
+#define NDIS_PM_PROTOCOL_OFFLOAD_PRIORITY_LOWEST                0xFFFFFFFF
+#define NDIS_PM_PROTOCOL_OFFLOAD_PRIORITY_NORMAL                0x10000000
+#define NDIS_PM_PROTOCOL_OFFLOAD_PRIORITY_HIGHEST               0x00000001
+typedef enum _NDIS_PM_PROTOCOL_OFFLOAD_TYPE
+{
+    NdisPMProtocolOffloadIdUnspecified,
+    NdisPMProtocolOffloadIdIPv4ARP,
+    NdisPMProtocolOffloadIdIPv6NS,
+    NdisPMProtocolOffload80211RSNRekey,
+#if (NDIS_SUPPORT_NDIS684)
+    NdisPMProtocolOffload80211RSNRekeyV2,
+#endif 
+    NdisPMProtocolOffloadIdMaximum
+}NDIS_PM_PROTOCOL_OFFLOAD_TYPE, *PNDIS_PM_PROTOCOL_OFFLOAD_TYPE;
+
+#define NDIS_PM_PARAMETERS_REVISION_1              1
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_PM_PARAMETERS_REVISION_2              2
+#endif
+typedef struct _NDIS_PM_PARAMETERS
+{
+    
+    
+    
+    
+    
+    NDIS_OBJECT_HEADER      Header;
+
+    ULONG                   EnabledWoLPacketPatterns; 
+    ULONG                   EnabledProtocolOffloads;  
+    ULONG                   WakeUpFlags;              
+
+#if (NDIS_SUPPORT_NDIS630)
+    ULONG                   MediaSpecificWakeUpEvents; 
+#endif 
+
+} NDIS_PM_PARAMETERS, *PNDIS_PM_PARAMETERS;
+
+#define NDIS_SIZEOF_NDIS_PM_PARAMETERS_REVISION_1     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_PM_PARAMETERS, WakeUpFlags)
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_SIZEOF_NDIS_PM_PARAMETERS_REVISION_2     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_PM_PARAMETERS, MediaSpecificWakeUpEvents)
+#endif
+#define EAPOL_REQUEST_ID_WOL_FLAG_MUST_ENCRYPT        0x00000001
+#define NDIS_PM_MAX_PATTERN_ID  0x0000FFFF
+#define NDIS_PM_PRIVATE_PATTERN_ID  0x00000001
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_PM_WOL_PATTERN_REVISION_2              2
+#endif
+#define NDIS_SIZEOF_NDIS_PM_WOL_PATTERN_REVISION_1     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_PM_WOL_PATTERN, WoLPattern)
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_SIZEOF_NDIS_PM_WOL_PATTERN_REVISION_2     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_PM_WOL_PATTERN, WoLPattern)
+#endif
+#define DOT11_RSN_KCK_LENGTH                  16
+#define DOT11_RSN_KEK_LENGTH                  16
+#if (NDIS_SUPPORT_NDIS684)
+#define DOT11_RSN_MAX_CIPHER_KEY_LENGTH       32
+#endif
+#define NDIS_PM_PROTOCOL_OFFLOAD_REVISION_1             1
+#if (NDIS_SUPPORT_NDIS684)
+#define NDIS_PM_PROTOCOL_OFFLOAD_REVISION_2             2
+#endif
+typedef struct _NDIS_PM_PROTOCOL_OFFLOAD
+{
+    
+    
+    
+    
+    
+    NDIS_OBJECT_HEADER            Header;
+    ULONG                         Flags;
+    ULONG                         Priority;
+    NDIS_PM_PROTOCOL_OFFLOAD_TYPE ProtocolOffloadType;
+    NDIS_PM_COUNTED_STRING        FriendlyName;
+    ULONG                         ProtocolOffloadId; 
+    ULONG                         NextProtocolOffloadOffset;
+
+    union _PROTOCOL_OFFLOAD_PARAMETERS
+    {
+        
+        
+        
+        struct _IPV4_ARP_PARAMETERS
+        {
+            ULONG   Flags;
+            UCHAR   RemoteIPv4Address[4];   
+            UCHAR   HostIPv4Address[4];     
+            UCHAR   MacAddress[6];          
+        }IPv4ARPParameters;
+
+        
+        
+        
+        
+        
+        
+        struct  _IPV6_NS_PARAMETERS
+        {
+            ULONG   Flags;
+            UCHAR   RemoteIPv6Address[16];              
+            UCHAR   SolicitedNodeIPv6Address[16];       
+            UCHAR   MacAddress[6];                      
+            UCHAR   TargetIPv6Addresses[2][16];         
+        }IPv6NSParameters;
+
+        
+        
+        
+        struct _DOT11_RSN_REKEY_PARAMETERS
+        {
+            ULONG   Flags;
+            UCHAR   KCK[DOT11_RSN_KCK_LENGTH];
+            UCHAR   KEK[DOT11_RSN_KEK_LENGTH];
+            ULONGLONG KeyReplayCounter;
+        }Dot11RSNRekeyParameters;
+
+#if (NDIS_SUPPORT_NDIS684)
+        
+        
+        
+        struct _DOT11_RSN_REKEY_PARAMETERS_V2
+        {
+            ULONG       Flags;
+            ULONGLONG   KeyReplayCounter;
+
+            
+            ULONG       AuthAlgo;
+            ULONG       KCKLength;
+            ULONG       KEKLength;
+            UCHAR       KCK [DOT11_RSN_MAX_CIPHER_KEY_LENGTH];
+            UCHAR       KEK [DOT11_RSN_MAX_CIPHER_KEY_LENGTH];
+        }Dot11RSNRekeyParametersV2;
+#endif 
+
+    }ProtocolOffloadParameters;
+
+}NDIS_PM_PROTOCOL_OFFLOAD, *PNDIS_PM_PROTOCOL_OFFLOAD;
+
+#define NDIS_SIZEOF_NDIS_PM_PROTOCOL_OFFLOAD_REVISION_1     \
+    0xF0
+#if (NDIS_SUPPORT_NDIS684)
+#define NDIS_SIZEOF_NDIS_PM_PROTOCOL_OFFLOAD_REVISION_2     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_PM_PROTOCOL_OFFLOAD, ProtocolOffloadParameters)
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+typedef enum _NDIS_PM_WAKE_REASON_TYPE
+{
+    NdisWakeReasonUnspecified               = 0x0000,
+    NdisWakeReasonPacket                    = 0x0001,
+    NdisWakeReasonMediaDisconnect           = 0x0002,
+    NdisWakeReasonMediaConnect              = 0x0003,
+
+    
+    NdisWakeReasonWlanNLODiscovery          = 0x1000,
+    NdisWakeReasonWlanAPAssociationLost     = 0x1001,
+    NdisWakeReasonWlanGTKHandshakeError     = 0x1002,
+    NdisWakeReasonWlan4WayHandshakeRequest  = 0x1003,
+#if (NDIS_SUPPORT_NDIS688)
+    NdisWakeReasonWlanIncomingActionFrame   = 0x1004,
+#endif 
+#if (NDIS_SUPPORT_NDIS689)
+    NdisWakeReasonWlanClientDriverDiagnostic = 0x1005,
+#endif 
+    
+    NdisWakeReasonWwanRegisterState         = 0x2000,
+    NdisWakeReasonWwanSMSReceive            = 0x2001,
+    NdisWakeReasonWwanUSSDReceive           = 0x2002,
+    
+#if (NDIS_SUPPORT_NDIS684)
+    NdisWakeReasonWwanPacketState           = 0x2004,
+    NdisWakeReasonWwanUiccChange            = 0x2005,
+#endif
+} NDIS_PM_WAKE_REASON_TYPE, *PNDIS_PM_WAKE_REASON_TYPE;
+
+#define NDIS_PM_WAKE_REASON_REVISION_1     1
+typedef struct _NDIS_PM_WAKE_REASON
+{
+    
+    
+    
+    
+    
+    NDIS_OBJECT_HEADER          Header;
+
+    ULONG                       Flags;                  
+    NDIS_PM_WAKE_REASON_TYPE    WakeReason;
+    ULONG                       InfoBufferOffset;
+    ULONG                       InfoBufferSize;
+} NDIS_PM_WAKE_REASON, *PNDIS_PM_WAKE_REASON;
+
+#define NDIS_SIZEOF_PM_WAKE_REASON_REVISION_1 \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_PM_WAKE_REASON, InfoBufferSize)
+#define NDIS_PM_WAKE_PACKET_REVISION_1     1
+typedef struct _NDIS_PM_WAKE_PACKET
+{
+    
+    
+    
+    
+    
+    NDIS_OBJECT_HEADER      Header;
+
+    ULONG                   Flags;                  
+    ULONG                   PatternId;              
+    NDIS_PM_COUNTED_STRING  PatternFriendlyName;    
+    ULONG                   OriginalPacketSize;
+    ULONG                   SavedPacketSize;
+    ULONG                   SavedPacketOffset;
+} NDIS_PM_WAKE_PACKET, *PNDIS_PM_WAKE_PACKET;
+
+#define NDIS_SIZEOF_PM_WAKE_PACKET_REVISION_1 \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_PM_WAKE_PACKET, SavedPacketOffset)
+#endif
+typedef enum _NDIS_PM_ADMIN_CONFIG_STATE
+{
+    NdisPMAdminConfigUnspecified = 0,
+    NdisPMAdminConfigDisabled = 1,
+    NdisPMAdminConfigEnabled = 2
+} NDIS_PM_ADMIN_CONFIG_STATE, *PNDIS_PM_ADMIN_CONFIG_STATE;
+
+#define NDIS_WMI_PM_ADMIN_CONFIG_REVISION_1     1
+typedef struct _NDIS_WMI_PM_ADMIN_CONFIG
+{
+    
+    
+    
+    
+    
+    NDIS_OBJECT_HEADER Header;
+
+    NDIS_PM_ADMIN_CONFIG_STATE   WakeOnPattern;
+    NDIS_PM_ADMIN_CONFIG_STATE   WakeOnMagicPacket;
+    NDIS_PM_ADMIN_CONFIG_STATE   DeviceSleepOnDisconnect;
+    NDIS_PM_ADMIN_CONFIG_STATE   PMARPOffload;
+    NDIS_PM_ADMIN_CONFIG_STATE   PMNSOffload;
+    NDIS_PM_ADMIN_CONFIG_STATE   PMWiFiRekeyOffload;
+
+} NDIS_WMI_PM_ADMIN_CONFIG, *PNDIS_WMI_PM_ADMIN_CONFIG;
+
+#define NDIS_SIZEOF_WMI_PM_ADMIN_CONFIG_REVISION_1 \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_WMI_PM_ADMIN_CONFIG, PMWiFiRekeyOffload)
+typedef enum _NDIS_PM_CAPABILITY_STATE
+{
+    NdisPMAdminConfigUnsupported = 0,
+    NdisPMAdminConfigInactive = 1,
+    NdisPMAdminConfigActive = 2
+} NDIS_PM_CAPABILITY_STATE, *PNDIS_PM_CAPABILITY_STATE;
+
+#define NDIS_WMI_PM_ACTIVE_CAPABILITIES_REVISION_1     1
+typedef struct _NDIS_WMI_PM_ACTIVE_CAPABILITIES
+{
+    
+    
+    
+    
+    
+    NDIS_OBJECT_HEADER Header;
+
+    NDIS_PM_CAPABILITY_STATE   WakeOnPattern;
+    NDIS_PM_CAPABILITY_STATE   WakeOnMagicPacket;
+    NDIS_PM_CAPABILITY_STATE   DeviceSleepOnDisconnect;
+    NDIS_PM_CAPABILITY_STATE   PMARPOffload;
+    NDIS_PM_CAPABILITY_STATE   PMNSOffload;
+    NDIS_PM_CAPABILITY_STATE   PMWiFiRekeyOffload;
+
+} NDIS_WMI_PM_ACTIVE_CAPABILITIES, *PNDIS_WMI_PM_ACTIVE_CAPABILITIES;
+
+#define NDIS_SIZEOF_WMI_PM_ACTIVE_CAPABILITIES_REVISION_1 \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_WMI_PM_ACTIVE_CAPABILITIES, PMWiFiRekeyOffload)
+#define NDIS_RECEIVE_FILTER_IPV4_HEADER_SUPPORTED           0x00000002
+#define NDIS_RECEIVE_FILTER_IPV6_HEADER_SUPPORTED           0x00000004
+#define NDIS_RECEIVE_FILTER_ARP_HEADER_SUPPORTED            0x00000008
+#define NDIS_RECEIVE_FILTER_UDP_HEADER_SUPPORTED            0x00000010
+#define NDIS_RECEIVE_FILTER_MAC_HEADER_SOURCE_ADDR_SUPPORTED    0x00000002
+#define NDIS_RECEIVE_FILTER_MAC_HEADER_PROTOCOL_SUPPORTED       0x00000004
+#define NDIS_RECEIVE_FILTER_MAC_HEADER_PRIORITY_SUPPORTED       0x00000010
+#define NDIS_RECEIVE_FILTER_MAC_HEADER_PACKET_TYPE_SUPPORTED    0x00000020
+#define NDIS_RECEIVE_FILTER_ARP_HEADER_OPERATION_SUPPORTED      0x00000001
+#define NDIS_RECEIVE_FILTER_ARP_HEADER_SPA_SUPPORTED            0x00000002
+#define NDIS_RECEIVE_FILTER_ARP_HEADER_TPA_SUPPORTED            0x00000004
+#define NDIS_RECEIVE_FILTER_IPV4_HEADER_PROTOCOL_SUPPORTED      0x00000001
+#define NDIS_RECEIVE_FILTER_IPV6_HEADER_PROTOCOL_SUPPORTED      0x00000001
+#define NDIS_RECEIVE_FILTER_UDP_HEADER_DEST_PORT_SUPPORTED      0x00000001
+#define NDIS_RECEIVE_FILTER_TEST_HEADER_FIELD_MASK_EQUAL_SUPPORTED          0x00000002
+#define NDIS_RECEIVE_FILTER_TEST_HEADER_FIELD_NOT_EQUAL_SUPPORTED           0x00000004
+#define NDIS_RECEIVE_FILTER_MSI_X_SUPPORTED                         0x00000001
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_RECEIVE_FILTER_INTERRUPT_VECTOR_COALESCING_SUPPORTED       0x00000010
+#define NDIS_RECEIVE_FILTER_IMPLAT_MIN_OF_QUEUES_MODE                   0x00000040
+#define NDIS_RECEIVE_FILTER_IMPLAT_SUM_OF_QUEUES_MODE                   0x00000080
+#define NDIS_RECEIVE_FILTER_PACKET_COALESCING_SUPPORTED_ON_DEFAULT_QUEUE 0x00000100
+#define NDIS_RECEIVE_FILTER_ANY_VLAN_SUPPORTED                          0x00000020
+#endif
+#if (NDIS_SUPPORT_NDIS680)
+#define NDIS_RECEIVE_FILTER_DYNAMIC_PROCESSOR_AFFINITY_CHANGE_FOR_DEFAULT_QUEUE_SUPPORTED 0x00000040
+#endif
+#define NDIS_RECEIVE_FILTER_PACKET_COALESCING_FILTERS_ENABLED       0x00000002
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_RECEIVE_FILTER_CAPABILITIES_REVISION_2     2
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_SIZEOF_RECEIVE_FILTER_CAPABILITIES_REVISION_2     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_FILTER_CAPABILITIES, NdisReserved)
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_NIC_SWITCH_CAPS_VLAN_SUPPORTED                                                       0x00000001
+#define NDIS_NIC_SWITCH_CAPS_PER_VPORT_INTERRUPT_MODERATION_SUPPORTED                             0x00000002
+#define NDIS_NIC_SWITCH_CAPS_ASYMMETRIC_QUEUE_PAIRS_FOR_NONDEFAULT_VPORT_SUPPORTED                0x00000004
+#define NDIS_NIC_SWITCH_CAPS_VF_RSS_SUPPORTED                                                     0x00000008
+#define NDIS_NIC_SWITCH_CAPS_SINGLE_VPORT_POOL                                                    0x00000010
+#if (NDIS_SUPPORT_NDIS650)
+#define NDIS_NIC_SWITCH_CAPS_RSS_PARAMETERS_PER_PF_VPORT_SUPPORTED                                0x00000020
+#endif
+#if (NDIS_SUPPORT_NDIS660)
+#define NDIS_NIC_SWITCH_CAPS_NIC_SWITCH_WITHOUT_IOV_SUPPORTED                                     0x00000040
+#define NDIS_NIC_SWITCH_CAPS_RSS_ON_PF_VPORTS_SUPPORTED                                           0x00000080
+#define NDIS_NIC_SWITCH_CAPS_RSS_PER_PF_VPORT_INDIRECTION_TABLE_SUPPORTED                         0x00000100
+#define NDIS_NIC_SWITCH_CAPS_RSS_PER_PF_VPORT_HASH_FUNCTION_SUPPORTED                             0x00000200
+#define NDIS_NIC_SWITCH_CAPS_RSS_PER_PF_VPORT_HASH_TYPE_SUPPORTED                                 0x00000400
+#define NDIS_NIC_SWITCH_CAPS_RSS_PER_PF_VPORT_HASH_KEY_SUPPORTED                                  0x00000800
+#define NDIS_NIC_SWITCH_CAPS_RSS_PER_PF_VPORT_INDIRECTION_TABLE_SIZE_RESTRICTED                   0x00001000
+#define NDIS_NIC_SWITCH_CAPS_RSS_PER_PF_VPORT_MASK                             \
+            (NDIS_NIC_SWITCH_CAPS_RSS_PER_PF_VPORT_HASH_KEY_SUPPORTED |        \
+             NDIS_NIC_SWITCH_CAPS_RSS_PER_PF_VPORT_HASH_FUNCTION_SUPPORTED |   \
+             NDIS_NIC_SWITCH_CAPS_RSS_PER_PF_VPORT_HASH_TYPE_SUPPORTED |       \
+             NDIS_NIC_SWITCH_CAPS_RSS_PER_PF_VPORT_INDIRECTION_TABLE_SUPPORTED)
+#endif
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_NIC_SWITCH_CAPABILITIES_REVISION_2        2
+#endif
+#if (NDIS_SUPPORT_NDIS660)
+#define NDIS_NIC_SWITCH_CAPABILITIES_REVISION_3        3
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_SIZEOF_NIC_SWITCH_CAPABILITIES_REVISION_2     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_NIC_SWITCH_CAPABILITIES, NdisReserved17)
+#endif
+#if (NDIS_SUPPORT_NDIS660)
+#define NDIS_SIZEOF_NIC_SWITCH_CAPABILITIES_REVISION_3     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_NIC_SWITCH_CAPABILITIES, \
+                             MaxNumQueuePairsForDefaultVPort)
+#endif
+#define NDIS_RECEIVE_FILTER_GLOBAL_PARAMETERS_REVISION_1       1
+typedef struct _NDIS_RECEIVE_FILTER_GLOBAL_PARAMETERS
+{
+    _In_  NDIS_OBJECT_HEADER          Header;
+    _In_  ULONG                       Flags;
+    _In_  ULONG                       EnabledFilterTypes;
+    _In_  ULONG                       EnabledQueueTypes;
+} NDIS_RECEIVE_FILTER_GLOBAL_PARAMETERS, *PNDIS_RECEIVE_FILTER_GLOBAL_PARAMETERS;
+
+#define NDIS_SIZEOF_RECEIVE_FILTER_GLOBAL_PARAMETERS_REVISION_1     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_FILTER_GLOBAL_PARAMETERS, EnabledQueueTypes)
+typedef ULONG NDIS_RECEIVE_QUEUE_ID, *PNDIS_RECEIVE_QUEUE_ID;
+
+typedef ULONG NDIS_RECEIVE_QUEUE_GROUP_ID, *PNDIS_RECEIVE_QUEUE_GROUP_ID;
+
+#define NDIS_DEFAULT_RECEIVE_QUEUE_GROUP_ID         0
+#define NDIS_DEFAULT_RECEIVE_FILTER_ID              0
+typedef ULONG NDIS_RECEIVE_FILTER_ID, *PNDIS_RECEIVE_FILTER_ID;
+
+typedef enum _NDIS_MAC_PACKET_TYPE
+{
+    NdisMacPacketTypeUndefined = 0,
+    NdisMacPacketTypeUnicast = 1,
+    NdisMacPacketTypeMulticast = 2,
+    NdisMacPacketTypeBroadcast = 3,
+    NdisMacPacketTypeMaximum
+} NDIS_MAC_PACKET_TYPE, *PNDIS_MAC_PACKET_TYPE;
+
+#define NDIS_RECEIVE_FILTER_RESERVED                                0x000000FE
+#define NDIS_RECEIVE_FILTER_FIELD_PARAMETERS_REVISION_1       1
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_RECEIVE_FILTER_FIELD_PARAMETERS_REVISION_2       2
+#endif
+#define NDIS_SIZEOF_RECEIVE_FILTER_FIELD_PARAMETERS_REVISION_1     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_FILTER_FIELD_PARAMETERS, ResultValue)
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_SIZEOF_RECEIVE_FILTER_FIELD_PARAMETERS_REVISION_2     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_FILTER_FIELD_PARAMETERS, ResultValue)
+#endif
+#define NDIS_RECEIVE_FILTER_FLAGS_RESERVED                          0x00000001
+#define NDIS_RECEIVE_FILTER_PACKET_ENCAPSULATION_GRE                0x00000002
+#if (NDIS_SUPPORT_NDIS650)
+#define NDIS_RECEIVE_FILTER_PACKET_ENCAPSULATION                    0x00000002
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_RECEIVE_FILTER_PARAMETERS_REVISION_2       2
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_SIZEOF_RECEIVE_FILTER_PARAMETERS_REVISION_2     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_FILTER_PARAMETERS, VPortId)
+#endif
+#define NDIS_RECEIVE_QUEUE_PARAMETERS_PER_QUEUE_RECEIVE_INDICATION              0x00000001
+#define NDIS_RECEIVE_QUEUE_PARAMETERS_NAME_CHANGED                              0x00080000
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_RECEIVE_QUEUE_PARAMETERS_INTERRUPT_COALESCING_DOMAIN_ID_CHANGED    0x00100000
+#endif
+#if (NDIS_SUPPORT_NDIS650)
+#define NDIS_RECEIVE_QUEUE_PARAMETERS_QOS_SQ_ID_CHANGED                         0x00200000
+#endif
+typedef NDIS_IF_COUNTED_STRING NDIS_QUEUE_NAME, *PNDIS_QUEUE_NAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_VM_NAME, *PNDIS_VM_NAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_VM_FRIENDLYNAME, *PNDIS_VM_FRIENDLYNAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_PORT_PROPERTY_PROFILE_NAME, *PNDIS_SWITCH_PORT_PROPERTY_PROFILE_NAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_PORT_PROPERTY_PROFILE_CDN_LABEL, *PNDIS_SWITCH_PORT_PROPERTY_PROFILE_CDN_LABEL;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_NAME, *PNDIS_SWITCH_NAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_FRIENDLYNAME, *PNDIS_SWITCH_FRIENDLYNAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_PORT_NAME, *PNDIS_SWITCH_PORT_NAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_PORT_FRIENDLYNAME, *PNDIS_SWITCH_PORT_FRIENDLYNAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_NIC_NAME, *PNDIS_SWITCH_NIC_NAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_NIC_FRIENDLYNAME, *PNDIS_SWITCH_NIC_FRIENDLYNAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_SWITCH_EXTENSION_FRIENDLYNAME, *PNDIS_SWITCH_EXTENSION_FRIENDLYNAME;
+
+typedef NDIS_IF_COUNTED_STRING NDIS_VENDOR_NAME, *PNDIS_VENDOR_NAME;
+
+#if (NDIS_SUPPORT_NDIS650)
+typedef ULONG NDIS_QOS_SQ_ID, *PNDIS_QOS_SQ_ID;
+
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_RECEIVE_QUEUE_PARAMETERS_REVISION_2       2
+#endif
+#if (NDIS_SUPPORT_NDIS650)
+#define NDIS_RECEIVE_QUEUE_PARAMETERS_REVISION_3       3
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_SIZEOF_RECEIVE_QUEUE_PARAMETERS_REVISION_2     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_QUEUE_PARAMETERS, InterruptCoalescingDomainId)
+#endif
+#if (NDIS_SUPPORT_NDIS650)
+#define NDIS_SIZEOF_RECEIVE_QUEUE_PARAMETERS_REVISION_3     \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_QUEUE_PARAMETERS, QosSqId)
+#endif
+#define NDIS_RECEIVE_QUEUE_INFO_REVISION_1              1
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_RECEIVE_QUEUE_INFO_REVISION_2              2
+#endif
+typedef struct _NDIS_RECEIVE_QUEUE_INFO
+{
+    NDIS_OBJECT_HEADER                  Header;
+    ULONG                               Flags;
+    NDIS_RECEIVE_QUEUE_TYPE             QueueType;
+    NDIS_RECEIVE_QUEUE_ID               QueueId;
+    NDIS_RECEIVE_QUEUE_GROUP_ID         QueueGroupId;
+    NDIS_RECEIVE_QUEUE_OPERATIONAL_STATE QueueState;
+    GROUP_AFFINITY                      ProcessorAffinity;
+    ULONG                               NumSuggestedReceiveBuffers;
+    ULONG                               MSIXTableEntry;
+    ULONG                               LookaheadSize;
+    NDIS_VM_NAME                        VmName;
+    NDIS_QUEUE_NAME                     QueueName;
+#if (NDIS_SUPPORT_NDIS630)
+    ULONG                               NumFilters;
+    ULONG                               InterruptCoalescingDomainId;
+#endif 
+}NDIS_RECEIVE_QUEUE_INFO, *PNDIS_RECEIVE_QUEUE_INFO;
+
+#define NDIS_SIZEOF_RECEIVE_QUEUE_INFO_REVISION_1      \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_QUEUE_INFO, QueueName)
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_SIZEOF_RECEIVE_QUEUE_INFO_REVISION_2     \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_QUEUE_INFO, InterruptCoalescingDomainId)
+#endif
+#define NDIS_RECEIVE_QUEUE_INFO_ARRAY_REVISION_1             1
+typedef struct _NDIS_RECEIVE_QUEUE_INFO_ARRAY
+{
+    NDIS_OBJECT_HEADER                          Header;
+    ULONG                                       FirstElementOffset;
+    ULONG                                       NumElements;
+    ULONG                                       ElementSize;
+}NDIS_RECEIVE_QUEUE_INFO_ARRAY, *PNDIS_RECEIVE_QUEUE_INFO_ARRAY;
+
+#define NDIS_SIZEOF_RECEIVE_QUEUE_INFO_ARRAY_REVISION_1      \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_QUEUE_INFO_ARRAY, ElementSize)
+#define NDIS_SIZEOF_RECEIVE_FILTER_INFO_REVISION_1      \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_FILTER_INFO, FilterId)
+#define NDIS_RECEIVE_FILTER_INFO_ARRAY_REVISION_1             1
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_RECEIVE_FILTER_INFO_ARRAY_REVISION_2             2
+#endif
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_RECEIVE_FILTER_INFO_ARRAY_VPORT_ID_SPECIFIED       0x00000001
+#endif
+typedef struct _NDIS_RECEIVE_FILTER_INFO_ARRAY
+{
+    NDIS_OBJECT_HEADER                          Header;
+    NDIS_RECEIVE_QUEUE_ID                       QueueId;
+    ULONG                                       FirstElementOffset;
+    ULONG                                       NumElements;
+    ULONG                                       ElementSize;
+#if (NDIS_SUPPORT_NDIS630)
+    ULONG                                       Flags;
+    NDIS_NIC_SWITCH_VPORT_ID                    VPortId;
+#endif 
+}NDIS_RECEIVE_FILTER_INFO_ARRAY, *PNDIS_RECEIVE_FILTER_INFO_ARRAY;
+
+#define NDIS_SIZEOF_RECEIVE_FILTER_INFO_ARRAY_REVISION_1      \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_FILTER_INFO_ARRAY, ElementSize)
+#if (NDIS_SUPPORT_NDIS630)
+#define NDIS_SIZEOF_RECEIVE_FILTER_INFO_ARRAY_REVISION_2      \
+        RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_FILTER_INFO_ARRAY, VPortId)
+#endif
+#define NDIS_RECEIVE_QUEUE_ALLOCATION_COMPLETE_PARAMETERS_REVISION_1    1
+#define NDIS_SIZEOF_RECEIVE_QUEUE_ALLOCATION_COMPLETE_PARAMETERS_REVISION_1 \
+    RTL_SIZEOF_THROUGH_FIELD(NDIS_RECEIVE_QUEUE_ALLOCATION_COMPLETE_PARAMETERS, CompletionStatus)
+#endif
+
+#endif
+#if ((NDIS_SUPPORT_NDIS650))
+
+typedef struct _NDIS_GFT_OFFLOAD_CAPABILITIES
+{
+    NDIS_OBJECT_HEADER                  Header;
+    ULONG                               Flags;
+    ULONG                               CounterCapabilities;
+    ULONG                               SupportedTableTypes;
+    ULONG                               SupportedEncapsulationTypes;
+    ULONG                               SupportedIngressExactMatchTableActions;
+    ULONG                               SupportedEgressExactMatchTableActions;
+    ULONG                               SoftwareSupportedIngressExactMatchTableActions;
+    ULONG                               SoftwareSupportedEgressExactMatchTableActions;
+    ULONG                               SupportedIngressWildcardMatchTableActions;
+    ULONG                               SupportedEgressWildcardMatchTableActions;
+    ULONG                               SoftwareSupportedIngressWildcardMatchTableActions;
+    ULONG                               SoftwareSupportedEgressWildcardMatchTableActions;
+    ULONG                               NumPacketCounterObjects;
+    ULONG                               NumByteCounterObjects;
+    ULONG                               NumPacketByteCounterObjects;
+    ULONG                               NumPacketByteCounterAndStateObjects;
+    ULONG                               NumCounterObjectsPerIngressExactMatchFlowEntry;
+    ULONG                               NumCounterObjectsPerEgressExactMatchFlowEntry;
+    ULONG                               NumCounterObjectsPerIngressWildcardMatchFlowEntry;
+    ULONG                               NumCounterObjectsPerEgressWildcardMatchFlowEntry;
+} NDIS_GFT_OFFLOAD_CAPABILITIES, *PNDIS_GFT_OFFLOAD_CAPABILITIES;
+
+typedef ULONG NDIS_QOS_SQ_ID, *PNDIS_QOS_SQ_ID;
+
+#endif
+
+#define NDIS_OFFLOAD_PARAMETERS_DEFINED 1
+#define NDIS_RECEIVE_SCALE_PARAMETERS_DEFINED 1
+#define NDIS_INTERRUPT_MODERATION_PARAMETERS_DEFINED 1
+#define NDIS_LINK_SPEED_DEFINED 1
+
+#endif
+
+#define NDIS_ETH_TYPE_IPV4              0x0800
+
+#define NDIS_ETH_TYPE_ARP               0x0806
+
+#define NDIS_ETH_TYPE_IPV6              0x86dd
+
+#define NDIS_ETH_TYPE_SLOW_PROTOCOL     0x8809
+
 #ifdef __cplusplus
 }
+#endif
+
+#if ((NTDDI_VERSION >= NTDDI_VISTA) || NDIS_SUPPORT_NDIS6)
+#ifndef __WINDOT11_H__
+#include <windot11.h>
+#endif
 #endif
 
 #endif /* _NTDDNDIS_ */

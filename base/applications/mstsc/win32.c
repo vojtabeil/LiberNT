@@ -773,7 +773,7 @@ mi_create_window(void)
   /* name of window class */
   str_to_uni(classname, "rdesktop");
   wc.lpszClassName = classname;
-  str_to_uni(caption, "ReactOS Remote Desktop");
+  str_to_uni(caption, "LiberNT Remote Desktop");
   wc.hIcon = LoadIcon(g_Instance,
                       MAKEINTRESOURCE(IDI_MSTSC));
   /* Register the window class. */
@@ -1197,9 +1197,9 @@ mi_fill_rect(int x, int y, int cx, int cy, int colour)
   RECT rect;
   HDC maindc;
   HRGN rgn;
-  int red;
-  int green;
-  int blue;
+  int red = 0;
+  int green = 0;
+  int blue = 0;
 
   if (g_server_depth == 8)
   {
@@ -1242,9 +1242,9 @@ mi_line(int x1, int y1, int x2, int y2, int colour)
   HDC maindc;
   HGDIOBJ save;
   HRGN rgn;
-  int red;
-  int green;
-  int blue;
+  int red = 0;
+  int green = 0;
+  int blue = 0;
 
   if (g_server_depth == 8)
   {
@@ -1380,4 +1380,3 @@ void
 mi_set_null_cursor(void)
 {
 }
-

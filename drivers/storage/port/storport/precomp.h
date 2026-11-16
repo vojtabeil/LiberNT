@@ -8,19 +8,22 @@
 #ifndef _STORPORT_PCH_
 #define _STORPORT_PCH_
 
+/* Declare StorPort and its internal kernel dependencies before the DDK headers. */
+#define _STORPORT_
+
 #include <wdm.h>
 #include <ntddk.h>
 #include <stdio.h>
 #include <memory.h>
 
-/* Declare STORPORT_API functions as exports rather than imports */
-#define _STORPORT_
 #include <storport.h>
 
 #include <ntddscsi.h>
 #include <ntdddisk.h>
 #include <mountdev.h>
 #include <wdmguid.h>
+#include <reactos/drivers/dumpstor.h>
+#include <reactos/drivers/dumpscsi.h>
 
 /* Memory Tags */
 #define TAG_GLOBAL_DATA     'DGtS'
@@ -31,6 +34,14 @@
 #define TAG_ADDRESS_MAPPING 'MAtS'
 #define TAG_INQUIRY_DATA    'QItS'
 #define TAG_SENSE_DATA      'NStS'
+#define TAG_SRB_CONTEXT     'CStS'
+#define TAG_SRB_EXTENSION   'EStS'
+#define TAG_SGL             'GStS'
+#define TAG_DEVICE_RELATION 'RDtS'
+#define TAG_PNP_ID          'IPtS'
+#define TAG_DUMP_CONTEXT    'CptS'
+#define TAG_DMA_BUFFER      'DBtS'
+#define TAG_RESET_REQUEST   'RRtS'
 
 typedef enum
 {
@@ -65,6 +76,7 @@ typedef struct _DRIVER_OBJECT_EXTENSION
     ULONG AdapterCount;
 
     LIST_ENTRY InitDataListHead;
+    ULONG BusType;
 } DRIVER_OBJECT_EXTENSION, *PDRIVER_OBJECT_EXTENSION;
 
 typedef struct _MINIPORT_DEVICE_EXTENSION
@@ -79,6 +91,8 @@ typedef struct _MINIPORT
     PHW_INITIALIZATION_DATA InitData;
     PORT_CONFIGURATION_INFORMATION PortConfig;
     PMINIPORT_DEVICE_EXTENSION MiniportExtension;
+    ULONG SupportedControlTypes;
+    ULONG SupportedUnitControlTypes;
 } MINIPORT, *PMINIPORT;
 
 typedef struct _UNIT_DATA
@@ -86,6 +100,20 @@ typedef struct _UNIT_DATA
     LIST_ENTRY ListEntry;
     INQUIRYDATA InquiryData;
 } UNIT_DATA, *PUNIT_DATA;
+
+typedef struct _PORT_HMB_BLOCK
+{
+    PVOID VirtualAddress;
+    PHYSICAL_ADDRESS Physical;
+    SIZE_T Bytes;
+} PORT_HMB_BLOCK, *PPORT_HMB_BLOCK;
+
+typedef struct _PORT_USAGE_COUNTS
+{
+    volatile LONG PagingFiles;
+    volatile LONG HibernationFiles;
+    volatile LONG DumpFiles;
+} PORT_USAGE_COUNTS, *PPORT_USAGE_COUNTS;
 
 typedef struct _FDO_DEVICE_EXTENSION
 {
@@ -98,6 +126,16 @@ typedef struct _FDO_DEVICE_EXTENSION
     DEVICE_STATE PnpState;
     LIST_ENTRY AdapterListEntry;
     MINIPORT Miniport;
+    PDMA_ADAPTER DmaAdapter;
+    PDMA_ADAPTER CommonBufferAdapter;
+    BOOLEAN DataDma64;
+    KSPIN_LOCK DmaBufferLock;
+    LIST_ENTRY DmaBuffers;
+    SLIST_HEADER FreeSrbExtensions;
+    PVOID SrbExtensionPool;
+    ULONG PortNumber;
+    ULONG RaidPortNumber;
+    BOOLEAN ScsiPortLinked;
     ULONG BusNumber;
     ULONG SlotNumber;
     PCM_RESOURCE_LIST AllocatedResources;
@@ -110,12 +148,124 @@ typedef struct _FDO_DEVICE_EXTENSION
     ULONG UncachedExtensionSize;
     PHW_PASSIVE_INITIALIZE_ROUTINE HwPassiveInitRoutine;
     PKINTERRUPT Interrupt;
+    BOOLEAN InterruptConnectedEx;
     ULONG InterruptIrql;
+    /* Non-NULL when the adapter is connected message-based; each entry owns
+     * the KINTERRUPT whose lock serializes that message. */
+    PIO_INTERRUPT_MESSAGE_INFO MessageInfo;
+    ULONG PerfFlags;
+    ULONG PerfConcurrentChannels;
+    BOOLEAN PerfConfigured;
+
+    /* CPU-only per-request state. Device-visible extensions use DMA buffers. */
+    NPAGED_LOOKASIDE_LIST SrbContextLookaside;
+    NPAGED_LOOKASIDE_LIST MiniportSrbLookaside;
+    NPAGED_LOOKASIDE_LIST SglLookaside;
+    ULONG SglLookasideSize;
+    BOOLEAN RequestPoolsReady;
+
+    /* Host memory buffer blocks lent to the adapter (StorPortAllocateHostMemoryBuffer). */
+#define PORT_HMB_MAX_BLOCKS 8
+    PORT_HMB_BLOCK HmbBlocks[PORT_HMB_MAX_BLOCKS];
+    ULONG HmbBlockCount;
+
+    /*
+     * Legacy miniports get one port-owned timer through
+     * StorPortNotification(RequestTimerCall).
+     */
+    KTIMER MiniportTimer;
+    KDPC MiniportTimerDpc;
+    KDPC MiniportTimerRequestDpc;
+    KSPIN_LOCK MiniportTimerLock;
+    PHW_TIMER MiniportTimerRoutine;
+    PHW_TIMER MiniportTimerRequestedRoutine;
+    ULONG MiniportTimerRequestedValue;
+    BOOLEAN MiniportTimerArmed;
+    BOOLEAN MiniportTimerRequestPending;
+    BOOLEAN MiniportTimerRequestDpcActive;
+
+    /* Shared backing lock for StorPortAcquireSpinLockEx miniport locks */
+    KSPIN_LOCK MiniportExLock;
+    KSPIN_LOCK MessageInterruptLock;
+    KSPIN_LOCK NoInterruptLock;
+    KSPIN_LOCK MiniportTimerListLock;
+    LIST_ENTRY MiniportTimerList;
+    volatile ULONG StartIoOwner;
+
+    KSPIN_LOCK CompletionLock;
+    LIST_ENTRY CompletionListHead;
+    KDPC CompletionDpc;
 
     KSPIN_LOCK PdoListLock;
     LIST_ENTRY PdoListHead;
     ULONG PdoCount;
+    BOOLEAN BusScanned;
+    volatile BOOLEAN BusRescanPending;
+    volatile BOOLEAN DumpMode;
+    BOOLEAN InFindAdapter;
+    ULONG AdapterBusType;
+
+    KSPIN_LOCK RequestHoldLock;
+    LIST_ENTRY HeldRequests;
+    BOOLEAN HoldRequests;
+    volatile LONG OutstandingRequests;
+    ULONG RequestLimit;
+    KDPC RequestRestartDpc;
+    KDPC BusChangeDpc;
+    KEVENT RequestsDrained;
+    DEVICE_POWER_STATE DevicePowerState;
+    SYSTEM_POWER_STATE SystemPowerState;
+    PORT_USAGE_COUNTS Usage;
+
+    KSPIN_LOCK ActiveLock;
+    LIST_ENTRY ActiveRequests;
+    KTIMER TimeoutTimer;
+    KDPC TimeoutDpc;
+    BOOLEAN TimeoutArmed;
+    volatile BOOLEAN ResetActive;
+    BOOLEAN BusResetActive;
+    LONG BusyCompletions;
+    PIO_WORKITEM ResetWorkItem;
+    KEVENT ResetIdle;
+    UCHAR ResetPathId;
+    UCHAR ResetTargetId;
+    UCHAR ResetLun;
+    ULONG ResetTimeOutValue;
+    BOOLEAN TimeoutsStopped;
+    KEVENT TimeoutsStopEvent;
+    volatile LONG RecoveringRequests;
+    KEVENT Recovered;
+    EX_SPIN_LOCK ChannelLock;
+    KDPC CompleteRequestsDpc;
+    volatile LONG64 StartSequence;
+    KTIMER BusyRetryTimer;
+    KDPC BusyRetryDpc;
+    SLIST_HEADER CompleteRequestsFree;
+    SLIST_HEADER CompleteRequestsPending;
+    PVOID CompleteRequestsPool;
 } FDO_DEVICE_EXTENSION, *PFDO_DEVICE_EXTENSION;
+
+FORCEINLINE
+BOOLEAN
+PortStartIoSerialized(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension)
+{
+    return !DeviceExtension->Miniport.PortConfig.VirtualDevice && (DeviceExtension->PerfConcurrentChannels <= 1);
+}
+
+NTSTATUS PortInitializeDma(_In_ PFDO_DEVICE_EXTENSION FdoExtension,
+                          _In_ PPORT_CONFIGURATION_INFORMATION Config);
+PVOID PortAllocateDmaBuffer(_In_ PFDO_DEVICE_EXTENSION FdoExtension,
+                           _In_ ULONG Length,
+                           _In_ BOOLEAN CacheEnabled,
+                           _Out_ PPHYSICAL_ADDRESS LogicalAddress);
+VOID PortFreeDmaBuffer(_In_ PFDO_DEVICE_EXTENSION FdoExtension,
+                      _In_ PVOID Buffer);
+VOID PortReleaseDma(_In_ PFDO_DEVICE_EXTENSION FdoExtension);
+BOOLEAN PortGetDmaAddress(_In_ PFDO_DEVICE_EXTENSION FdoExtension,
+                          _In_ PVOID Buffer,
+                          _Out_ PPHYSICAL_ADDRESS LogicalAddress,
+                          _Out_ PULONG Length);
 
 
 typedef struct _PDO_DEVICE_EXTENSION
@@ -130,11 +280,131 @@ typedef struct _PDO_DEVICE_EXTENSION
     ULONG Bus;
     ULONG Target;
     ULONG Lun;
+    ULONG QueueDepth;
+    BOOLEAN DeviceClaimed;
     PINQUIRYDATA InquiryBuffer;
-
+    CHAR SerialNumber[252]; /* Cached SCSI VPD page 0x80, NUL terminated. */
+    CHAR ModelNumber[STOR_MODEL_NUMBER_LENGTH + 1];
+    CHAR FirmwareRevision[STOR_FIRMWARE_REVISION_LENGTH + 1];
+    struct _PORT_DUMP_CONTEXT *DumpContext;
+    PORT_USAGE_COUNTS Usage;
+    LONG OutstandingRequests;
+    LONG UntaggedRequests;
+    LONG BusyCompletions;
+    ULONGLONG BusyUntil;
 
 } PDO_DEVICE_EXTENSION, *PPDO_DEVICE_EXTENSION;
 
+
+/*
+ * Per-request state owned by the port driver for the lifetime of one SRB.
+ * It is anchored in the IRP so the completion path (which only receives the
+ * SRB) can find and release it again.
+ */
+typedef struct _STOR_SRB_CONTEXT
+{
+    PVOID SrbExtensionAllocation;
+    PSTORAGE_REQUEST_BLOCK MiniportSrb;
+    PSCSI_REQUEST_BLOCK LegacySrb;
+    PSTOR_SCATTER_GATHER_LIST Sgl;
+    PSCATTER_GATHER_LIST DmaList;
+    BOOLEAN WriteToDevice;
+    ULONG SglAllocationSize;
+    ULONG SrbExtensionSize;
+    struct _FDO_DEVICE_EXTENSION* FdoExtension;
+    PMDL BouncePages;
+    PMDL BounceMdl;
+    PVOID BounceVa;
+    PVOID OriginalDataBuffer;
+    PVOID OriginalSystemVa;
+    ULONG BounceLength;
+    LIST_ENTRY ActiveEntry;
+    ULONGLONG Deadline;
+    LONG64 StartSequence;
+    BOOLEAN WasRecovering;
+    volatile LONG State;
+} STOR_SRB_CONTEXT, *PSTOR_SRB_CONTEXT;
+
+#define PORT_SRB_PREPARED   0
+#define PORT_SRB_BUILDING   1
+#define PORT_SRB_ACTIVE     2
+#define PORT_SRB_RECOVERING 3
+#define PORT_SRB_COMPLETED  4
+
+#define PortGetSrbContext(Irp)  ((PSTOR_SRB_CONTEXT)((Irp)->Tail.Overlay.DriverContext[0]))
+#define PORT_DUMP_IRP_MARKER     ((PVOID)(ULONG_PTR)'pruD')
+#define PORT_UNTAGGED_MARKER     ((PVOID)(ULONG_PTR)'gtnU')
+#define PortRequestCountedUntagged(Irp)  ((Irp)->Tail.Overlay.DriverContext[2] == PORT_UNTAGGED_MARKER)
+
+FORCEINLINE BOOLEAN PortIsExtendedSrb(_In_opt_ PVOID Srb)
+{
+    return Srb != NULL && ((PSTORAGE_REQUEST_BLOCK_HEADER)Srb)->Function == SRB_FUNCTION_STORAGE_REQUEST_BLOCK;
+}
+
+FORCEINLINE PIRP PortGetOriginalRequestFromSrb(_In_ PVOID Srb)
+{
+    return (PIRP)(PortIsExtendedSrb(Srb) ? ((PSTORAGE_REQUEST_BLOCK)Srb)->OriginalRequest : ((PSCSI_REQUEST_BLOCK)Srb)->OriginalRequest);
+}
+
+/*
+ * STOR_SCATTER_GATHER_LIST ends in a flexible array, so it cannot be embedded
+ * by value. This mirrors it with room for the single element a dump write
+ * needs; the miniport reads it back through the real type, so the layout must
+ * stay identical.
+ */
+typedef struct _PORT_DUMP_SGL
+{
+    ULONG NumberOfElements;
+    ULONG_PTR Reserved;
+    STOR_SCATTER_GATHER_ELEMENT List[1];
+} PORT_DUMP_SGL, *PPORT_DUMP_SGL;
+
+C_ASSERT(FIELD_OFFSET(PORT_DUMP_SGL, NumberOfElements) == FIELD_OFFSET(STOR_SCATTER_GATHER_LIST, NumberOfElements));
+C_ASSERT(FIELD_OFFSET(PORT_DUMP_SGL, Reserved) == FIELD_OFFSET(STOR_SCATTER_GATHER_LIST, Reserved));
+C_ASSERT(FIELD_OFFSET(PORT_DUMP_SGL, List) == FIELD_OFFSET(STOR_SCATTER_GATHER_LIST, List));
+
+typedef struct _PORT_DUMP_CONTEXT
+{
+    PPDO_DEVICE_EXTENSION PdoExtension;
+    PIRP Irp;
+    SCSI_REQUEST_BLOCK Srb;
+    STOR_SRB_CONTEXT SrbContext;
+    PORT_DUMP_SGL Sgl;
+    PVOID SrbExtension;
+    PVOID DataBuffer;
+    PHYSICAL_ADDRESS DataAddress;
+    volatile LONG Completed;
+    NTSTATUS Status;
+    ULONG BytesPerSector;
+    SENSE_DATA SenseData;
+} PORT_DUMP_CONTEXT, *PPORT_DUMP_CONTEXT;
+
+#define PORT_DUMP_UNIT_ATTENTION_RETRIES 4
+
+/* pdo.c */
+
+VOID PortFreeSrbContext(_In_ PIRP Irp);
+
+NTSTATUS PortFdoInitializeRequestPools(_In_ PFDO_DEVICE_EXTENSION FdoExtension);
+
+KDEFERRED_ROUTINE PortFdoRestartRequestsDpc;
+KDEFERRED_ROUTINE PortFdoBusChangeDpc;
+
+NTSTATUS PortSrbStatusToNtStatus(_In_ UCHAR SrbStatus);
+
+VOID PortFreeDumpContext(_In_opt_ PPORT_DUMP_CONTEXT DumpContext);
+
+NTSTATUS PortGetDumpInterface(_In_ PPDO_DEVICE_EXTENSION PdoExtension, _Out_ PROS_STORAGE_DUMP_INTERFACE Interface);
+
+/* devmap.c */
+
+VOID PortCreateScsiPortLinks(_Inout_ PFDO_DEVICE_EXTENSION DeviceExtension);
+
+VOID PortDeleteScsiPortLinks(_Inout_ PFDO_DEVICE_EXTENSION DeviceExtension);
+
+VOID PortRegisterAdapterMap(_In_ PFDO_DEVICE_EXTENSION DeviceExtension);
+
+VOID PortRegisterLunMap(_In_ PPDO_DEVICE_EXTENSION PdoExtension);
 
 /* fdo.c */
 
@@ -150,6 +420,95 @@ PortFdoPnp(
     _In_ PDEVICE_OBJECT DeviceObject,
     _In_ PIRP Irp);
 
+NTSTATUS
+NTAPI
+PortFdoPower(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp);
+
+BOOLEAN
+PortFdoStartRequest(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension,
+    _In_ PIRP Irp,
+    _In_ BOOLEAN PortRequest);
+
+VOID
+PortFdoEndRequest(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension,
+    _In_ PIRP Irp);
+
+BOOLEAN
+PortFdoSetBusy(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension,
+    _In_ BOOLEAN Unit,
+    _In_ UCHAR PathId,
+    _In_ UCHAR TargetId,
+    _In_ UCHAR Lun,
+    _In_ ULONG RequestsToComplete);
+
+VOID
+PortFdoTrackRequest(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension,
+    _Inout_ PSTOR_SRB_CONTEXT SrbContext);
+
+VOID
+PortFdoUntrackRequest(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension,
+    _Inout_ PSTOR_SRB_CONTEXT SrbContext);
+
+VOID
+PortFdoStopTimeouts(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension);
+
+VOID
+PortFdoStartTimeouts(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension);
+
+BOOLEAN
+PortFdoClaimRequest(
+    _Inout_ PSTOR_SRB_CONTEXT SrbContext,
+    _In_ BOOLEAN Started);
+
+VOID
+PortFdoStartRequestIo(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension,
+    _In_ PVOID Srb);
+
+VOID
+PortFdoRequestRecovered(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension);
+
+VOID
+PortFdoCompleteRequests(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension,
+    _In_ UCHAR PathId,
+    _In_ UCHAR TargetId,
+    _In_ UCHAR Lun,
+    _In_ UCHAR SrbStatus,
+    _In_ LONG64 LastStarted);
+
+VOID
+PortFdoRetryBusyRequest(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension,
+    _In_ PIRP Irp);
+
+KDEFERRED_ROUTINE PortFdoCompleteRequestsDpc;
+KDEFERRED_ROUTINE PortFdoBusyRetryDpc;
+
+#define PORT_COMPLETE_REQUESTS_DEFERRED 8
+
+typedef struct _PORT_COMPLETE_REQUESTS
+{
+    SLIST_ENTRY Entry;
+    LONG64 LastStarted;
+    UCHAR PathId;
+    UCHAR TargetId;
+    UCHAR Lun;
+    UCHAR SrbStatus;
+} PORT_COMPLETE_REQUESTS, *PPORT_COMPLETE_REQUESTS;
+
+KDEFERRED_ROUTINE PortFdoTimeoutDpc;
+
 
 /* miniport.c */
 
@@ -164,12 +523,67 @@ MiniportFindAdapter(
     _In_ PMINIPORT Miniport);
 
 NTSTATUS
+MiniportAdapterControlPreFind(
+    _In_ PMINIPORT Miniport,
+    _Inout_ PIO_RESOURCE_REQUIREMENTS_LIST RequirementsList);
+
+NTSTATUS
 MiniportHwInitialize(
     _In_ PMINIPORT Miniport);
+
+ULONG
+PortAcquireSpinLock(
+    PFDO_DEVICE_EXTENSION DeviceExtension,
+    STOR_SPINLOCK SpinLock,
+    PVOID LockContext,
+    PSTOR_LOCK_HANDLE LockHandle);
+
+VOID
+PortReleaseSpinLock(
+    PFDO_DEVICE_EXTENSION DeviceExtension,
+    PSTOR_LOCK_HANDLE LockHandle);
+
+VOID
+PortFreeMiniportTimers(
+    _In_ PFDO_DEVICE_EXTENSION DeviceExtension);
+
+VOID
+MiniportQuerySupportedControlTypes(
+    _In_ PMINIPORT Miniport);
+
+SCSI_ADAPTER_CONTROL_STATUS
+MiniportAdapterControl(
+    _In_ PMINIPORT Miniport,
+    _In_ SCSI_ADAPTER_CONTROL_TYPE ControlType,
+    _In_opt_ PVOID Parameters);
+
+STORAGE_BUS_TYPE
+PortStorageBusType(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension);
+
+VOID
+MiniportQuerySupportedUnitControlTypes(
+    _In_ PMINIPORT Miniport);
+
+SCSI_UNIT_CONTROL_STATUS
+MiniportUnitControl(
+    _In_ PMINIPORT Miniport,
+    _In_ SCSI_UNIT_CONTROL_TYPE ControlType,
+    _In_opt_ PVOID Parameters);
+
+BOOLEAN
+MiniportHwMSInterrupt(
+    _In_ PMINIPORT Miniport,
+    _In_ ULONG MessageId);
 
 BOOLEAN
 MiniportHwInterrupt(
     _In_ PMINIPORT Miniport);
+
+BOOLEAN
+MiniportBuildIo(
+    _In_ PMINIPORT Miniport,
+    _In_ PSCSI_REQUEST_BLOCK Srb);
 
 BOOLEAN
 MiniportStartIo(
@@ -201,6 +615,21 @@ QueryBusInterface(
     USHORT Version,
     PBUS_INTERFACE_STANDARD Interface,
     PVOID InterfaceSpecificData);
+
+VOID
+PortAdjustUsageCount(
+    _Inout_ PPORT_USAGE_COUNTS Usage,
+    _In_ PIO_STACK_LOCATION Stack);
+
+BOOLEAN
+PortIsInUsagePath(
+    _In_ PPORT_USAGE_COUNTS Usage);
+
+NTSTATUS
+PortSendDeviceUsageNotification(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ DEVICE_USAGE_NOTIFICATION_TYPE Type,
+    _In_ BOOLEAN InPath);
 
 BOOLEAN
 TranslateResourceListAddress(
@@ -244,6 +673,13 @@ PortDeletePdo(
     _In_ PPDO_DEVICE_EXTENSION PdoExtension);
 
 NTSTATUS
+PortSubmitSrb(
+    _In_ PFDO_DEVICE_EXTENSION FdoExtension,
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _In_ PIRP Irp,
+    _In_ PSCSI_REQUEST_BLOCK Srb);
+
+NTSTATUS
 NTAPI
 PortPdoScsi(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -262,6 +698,10 @@ PHW_INITIALIZATION_DATA
 PortGetDriverInitData(
     PDRIVER_OBJECT_EXTENSION DriverExtension,
     INTERFACE_TYPE InterfaceType);
+
+PHW_INITIALIZATION_DATA
+PortGetVirtualDriverInitData(
+    PDRIVER_OBJECT_EXTENSION DriverExtension);
 
 NTSTATUS
 NTAPI

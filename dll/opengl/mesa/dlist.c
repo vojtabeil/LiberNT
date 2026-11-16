@@ -255,6 +255,7 @@ typedef enum {
         OPCODE_COPY_TEX_IMAGE3D,
         OPCODE_COPY_TEX_SUB_IMAGE1D,
         OPCODE_COPY_TEX_SUB_IMAGE2D,
+        OPCODE_COPY_TEX_SUB_IMAGE3D,
 	OPCODE_CULL_FACE,
 	OPCODE_DEPTH_FUNC,
 	OPCODE_DEPTH_MASK,
@@ -327,8 +328,10 @@ typedef enum {
         OPCODE_TEXPARAMETER,
 	OPCODE_TEX_IMAGE1D,
 	OPCODE_TEX_IMAGE2D,
+	OPCODE_TEX_IMAGE3D,
 	OPCODE_TEX_SUB_IMAGE1D,
 	OPCODE_TEX_SUB_IMAGE2D,
+	OPCODE_TEX_SUB_IMAGE3D,
         OPCODE_TRANSLATE,
         OPCODE_VERTEX2,
         OPCODE_VERTEX3,
@@ -416,6 +419,10 @@ static Node *alloc_instruction( GLcontext *ctx, OpCode opcode, GLint argcount )
 static Node *make_empty_list( void )
 {
    Node *n = (Node *) malloc( sizeof(Node) );
+#ifdef __REACTOS__
+   if (!n)
+       abort();
+#endif
    n[0].opcode = OPCODE_END_OF_LIST;
    return n;
 }
@@ -474,11 +481,16 @@ void gl_destroy_list( GLcontext *ctx, GLuint list )
             gl_free_image( (struct gl_image *) n[9].data );
             n += InstSize[n[0].opcode];
 	    break;
+	 case OPCODE_TEX_IMAGE3D:
+            gl_free_image( (struct gl_image *) n[10].data );
+            n += InstSize[n[0].opcode];
+	    break;
          case OPCODE_TEX_SUB_IMAGE1D:
             {
                struct gl_image *image;
                image = (struct gl_image *) n[7].data;
                gl_free_image( image );
+               n += InstSize[n[0].opcode];
             }
             break;
          case OPCODE_TEX_SUB_IMAGE2D:
@@ -486,6 +498,15 @@ void gl_destroy_list( GLcontext *ctx, GLuint list )
                struct gl_image *image;
                image = (struct gl_image *) n[9].data;
                gl_free_image( image );
+               n += InstSize[n[0].opcode];
+            }
+            break;
+         case OPCODE_TEX_SUB_IMAGE3D:
+            {
+               struct gl_image *image;
+               image = (struct gl_image *) n[11].data;
+               gl_free_image( image );
+               n += InstSize[n[0].opcode];
             }
             break;
 	 case OPCODE_CONTINUE:
@@ -602,6 +623,7 @@ void gl_init_lists( void )
       InstSize[OPCODE_COPY_TEX_IMAGE2D] = 9;
       InstSize[OPCODE_COPY_TEX_SUB_IMAGE1D] = 7;
       InstSize[OPCODE_COPY_TEX_SUB_IMAGE2D] = 9;
+      InstSize[OPCODE_COPY_TEX_SUB_IMAGE3D] = 10;
       InstSize[OPCODE_CULL_FACE] = 2;
       InstSize[OPCODE_DEPTH_FUNC] = 2;
       InstSize[OPCODE_DEPTH_MASK] = 2;
@@ -674,8 +696,10 @@ void gl_init_lists( void )
       InstSize[OPCODE_TEXPARAMETER] = 7;
       InstSize[OPCODE_TEX_IMAGE1D] = 9;
       InstSize[OPCODE_TEX_IMAGE2D] = 10;
+      InstSize[OPCODE_TEX_IMAGE3D] = 11;
       InstSize[OPCODE_TEX_SUB_IMAGE1D] = 8;
       InstSize[OPCODE_TEX_SUB_IMAGE2D] = 10;
+      InstSize[OPCODE_TEX_SUB_IMAGE3D] = 12;
       InstSize[OPCODE_TRANSLATE] = 4;
       InstSize[OPCODE_VERTEX2] = 3;
       InstSize[OPCODE_VERTEX3] = 4;
@@ -1172,6 +1196,33 @@ void gl_save_CopyTexSubImage2D( GLcontext *ctx,
                                x, y, width, height );
    }
 }
+
+
+void gl_save_CopyTexSubImage3D( GLcontext *ctx,
+                                GLenum target, GLint level,
+                                GLint xoffset, GLint yoffset, GLint zoffset,
+                                GLint x, GLint y,
+                                GLsizei width, GLsizei height )
+{
+   Node *n = alloc_instruction( ctx, OPCODE_COPY_TEX_SUB_IMAGE3D, 9 );
+   if (n) {
+      n[1].e = target;
+      n[2].i = level;
+      n[3].i = xoffset;
+      n[4].i = yoffset;
+      n[5].i = zoffset;
+      n[6].i = x;
+      n[7].i = y;
+      n[8].i = width;
+      n[9].i = height;
+   }
+   if (ctx->ExecuteFlag) {
+      (*ctx->Exec.CopyTexSubImage3D)( ctx, target, level,
+                                      xoffset, yoffset, zoffset,
+                                      x, y, width, height );
+   }
+}
+
 
 void gl_save_CullFace( GLcontext *ctx, GLenum mode )
 {
@@ -2244,6 +2295,35 @@ void gl_save_TexImage2D( GLcontext *ctx, GLenum target,
 }
 
 
+void gl_save_TexImage3D( GLcontext *ctx, GLenum target,
+                         GLint level, GLint components,
+			 GLsizei width, GLsizei height, GLsizei depth,
+                         GLint border, GLenum format, GLenum type,
+			 struct gl_image *teximage )
+{
+   Node *n = alloc_instruction( ctx, OPCODE_TEX_IMAGE3D, 10 );
+   if (n) {
+      n[1].e = target;
+      n[2].i = level;
+      n[3].i = components;
+      n[4].i = (GLint) width;
+      n[5].i = (GLint) height;
+      n[6].i = (GLint) depth;
+      n[7].i = border;
+      n[8].e = format;
+      n[9].e = type;
+      n[10].data = teximage;
+      if (teximage)
+         teximage->RefCount = 1;
+   }
+   if (ctx->ExecuteFlag) {
+      (*ctx->Exec.TexImage3D)( ctx, target, level, components,
+                               width, height, depth, border,
+                               format, type, teximage );
+   }
+}
+
+
 void gl_save_TexSubImage1D( GLcontext *ctx,
                             GLenum target, GLint level, GLint xoffset,
                             GLsizei width, GLenum format, GLenum type,
@@ -2292,6 +2372,38 @@ void gl_save_TexSubImage2D( GLcontext *ctx,
    if (ctx->ExecuteFlag) {
       (*ctx->Exec.TexSubImage2D)( ctx, target, level, xoffset, yoffset,
                            width, height, format, type, image );
+   }
+}
+
+
+void gl_save_TexSubImage3D( GLcontext *ctx,
+                            GLenum target, GLint level,
+                            GLint xoffset, GLint yoffset, GLint zoffset,
+                            GLsizei width, GLsizei height, GLsizei depth,
+                            GLenum format, GLenum type,
+                            struct gl_image *image )
+{
+   Node *n = alloc_instruction( ctx, OPCODE_TEX_SUB_IMAGE3D, 11 );
+   if (n) {
+      n[1].e = target;
+      n[2].i = level;
+      n[3].i = xoffset;
+      n[4].i = yoffset;
+      n[5].i = zoffset;
+      n[6].i = (GLint) width;
+      n[7].i = (GLint) height;
+      n[8].i = (GLint) depth;
+      n[9].e = format;
+      n[10].e = type;
+      n[11].data = image;
+      if (image)
+         image->RefCount = 1;
+   }
+   if (ctx->ExecuteFlag) {
+      (*ctx->Exec.TexSubImage3D)( ctx, target, level,
+                                  xoffset, yoffset, zoffset,
+                                  width, height, depth,
+                                  format, type, image );
    }
 }
 
@@ -2558,6 +2670,11 @@ static void execute_list( GLcontext *ctx, GLuint list )
          case OPCODE_COPY_TEX_SUB_IMAGE2D:
 	    gl_CopyTexSubImage2D( ctx, n[1].e, n[2].i, n[3].i, n[4].i,
                                   n[5].i, n[6].i, n[7].i, n[8].i );
+            break;
+         case OPCODE_COPY_TEX_SUB_IMAGE3D:
+	    gl_CopyTexSubImage3D( ctx, n[1].e, n[2].i, n[3].i, n[4].i,
+                                  n[5].i, n[6].i, n[7].i,
+                                  n[8].i, n[9].i );
             break;
 	 case OPCODE_CULL_FACE:
 	    gl_CullFace( ctx, n[1].e );
@@ -2854,6 +2971,19 @@ static void execute_list( GLcontext *ctx, GLuint list )
                            n[8].e, /* type */
                            (struct gl_image *) n[9].data );
 	    break;
+         case OPCODE_TEX_IMAGE3D:
+	    gl_TexImage3D( ctx,
+                          n[1].e, /* target */
+                          n[2].i, /* level */
+                          n[3].i, /* components */
+                          n[4].i, /* width */
+                          n[5].i, /* height */
+                          n[6].i, /* depth */
+                          n[7].e, /* border */
+                          n[8].e, /* format */
+                          n[9].e, /* type */
+                          (struct gl_image *) n[10].data );
+	    break;
          case OPCODE_TEX_SUB_IMAGE1D:
             gl_TexSubImage1D( ctx, n[1].e, n[2].i, n[3].i, n[4].i, n[5].e,
                               n[6].e, (struct gl_image *) n[7].data );
@@ -2862,6 +2992,13 @@ static void execute_list( GLcontext *ctx, GLuint list )
             gl_TexSubImage2D( ctx, n[1].e, n[2].i, n[3].i, n[4].i, n[5].e,
                               n[6].i, n[7].e, n[8].e,
                               (struct gl_image *) n[9].data );
+            break;
+         case OPCODE_TEX_SUB_IMAGE3D:
+            gl_TexSubImage3D( ctx, n[1].e, n[2].i,
+                              n[3].i, n[4].i, n[5].i,
+                              n[6].i, n[7].i, n[8].i,
+                              n[9].e, n[10].e,
+                              (struct gl_image *) n[11].data );
             break;
          case OPCODE_TRANSLATE:
             gl_Translatef( ctx, n[1].f, n[2].f, n[3].f );
@@ -2912,6 +3049,97 @@ GLboolean gl_IsList( GLcontext *ctx, GLuint list )
    }
    else {
       return GL_FALSE;
+   }
+}
+
+
+/*
+ * Walk the compact, immutable representation used by a finished display
+ * list.  This intentionally recognizes only the state and vertex operations
+ * needed by simple fixed-function geometry.  Encountering anything else is
+ * a clean failure, allowing a hardware driver to execute the original list.
+ */
+GLboolean gl_visit_display_list(
+   GLcontext *ctx, GLuint list,
+   const struct gl_display_list_visitor *visitor, void *user )
+{
+   Node *n;
+
+   if (!ctx || !visitor || !gl_IsList(ctx, list))
+      return GL_FALSE;
+
+   n = (Node *) HashLookup(ctx->Shared->DisplayList, list);
+   for (;;) {
+      OpCode opcode = n[0].opcode;
+      GLboolean accepted;
+
+      if ((GLuint) opcode > OPCODE_END_OF_LIST)
+         return GL_FALSE;
+
+      switch (opcode) {
+         case OPCODE_BEGIN:
+            if (!visitor->Begin)
+               return GL_FALSE;
+            accepted = visitor->Begin(user, n[1].e);
+            break;
+         case OPCODE_END:
+            if (!visitor->End)
+               return GL_FALSE;
+            accepted = visitor->End(user);
+            break;
+         case OPCODE_MATERIAL:
+            {
+               GLfloat params[4];
+               if (!visitor->Material)
+                  return GL_FALSE;
+               params[0] = n[3].f;
+               params[1] = n[4].f;
+               params[2] = n[5].f;
+               params[3] = n[6].f;
+               accepted = visitor->Material(user, n[1].e, n[2].e,
+                                             params);
+            }
+            break;
+         case OPCODE_NORMAL:
+            {
+               GLfloat normal[3];
+               if (!visitor->Normal)
+                  return GL_FALSE;
+               normal[0] = n[1].f;
+               normal[1] = n[2].f;
+               normal[2] = n[3].f;
+               accepted = visitor->Normal(user, normal);
+            }
+            break;
+         case OPCODE_SHADE_MODEL:
+            if (!visitor->ShadeModel)
+               return GL_FALSE;
+            accepted = visitor->ShadeModel(user, n[1].e);
+            break;
+         case OPCODE_VERTEX3:
+            {
+               GLfloat vertex[4];
+               if (!visitor->Vertex)
+                  return GL_FALSE;
+               vertex[0] = n[1].f;
+               vertex[1] = n[2].f;
+               vertex[2] = n[3].f;
+               vertex[3] = 1.0F;
+               accepted = visitor->Vertex(user, vertex);
+            }
+            break;
+         case OPCODE_CONTINUE:
+            n = (Node *) n[1].next;
+            continue;
+         case OPCODE_END_OF_LIST:
+            return GL_TRUE;
+         default:
+            return GL_FALSE;
+      }
+
+      if (!accepted)
+         return GL_FALSE;
+      n += InstSize[opcode];
    }
 }
 

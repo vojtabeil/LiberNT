@@ -38,7 +38,7 @@ public:
                 return S_OK;
         }
 
-        DbgPrint("MessageSFVCB unimplemented %d %08x %08x\n", uMsg, wParam, lParam);
+        TRACE("MessageSFVCB %u %Ix %Ix not handled\n", uMsg, wParam, lParam);
         return E_NOTIMPL;
     }
 
@@ -163,7 +163,7 @@ public:
     STDMETHOD(EnumObjects)(
         HWND hwndOwner,
         SHCONTF grfFlags,
-        IEnumIDList **ppenumIDList) PURE;
+        IEnumIDList **ppenumIDList) override PURE;
 
     STDMETHODIMP BindToObject(
         LPCITEMIDLIST pidl,
@@ -602,21 +602,21 @@ public:
 
     STDMETHOD(GetDefaultColumnState)(
         UINT iColumn,
-        SHCOLSTATEF *pcsFlags) PURE;
+        SHCOLSTATEF *pcsFlags) override PURE;
 
     STDMETHOD(GetDetailsEx)(
         LPCITEMIDLIST pidl,
         const SHCOLUMNID *pscid,
-        VARIANT *pv) PURE;
+        VARIANT *pv) override PURE;
 
     STDMETHOD(GetDetailsOf)(
         LPCITEMIDLIST pidl,
         UINT iColumn,
-        SHELLDETAILS *psd) PURE;
+        SHELLDETAILS *psd) override PURE;
 
     STDMETHOD(MapColumnToSCID)(
         UINT iColumn,
-        SHCOLUMNID *pscid) PURE;
+        SHCOLUMNID *pscid) override PURE;
 
     // IPersist
     STDMETHODIMP GetClassID(CLSID *lpClassId) override

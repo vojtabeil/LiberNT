@@ -6,15 +6,47 @@
  * PROGRAMMERS:     David Quintana
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <ctype.h>
-#include "fatfs/ff.h"
-#include "fatfs/diskio.h"
+#include <errno.h>
+#include <limits.h>
+#include <sys/stat.h>
+#if _WIN32
+#include <sys/timeb.h>
+#include <io.h>
+#else
+#include <sys/time.h>
+#define DIR HOST_DIR
+#include <dirent.h>
+#undef DIR
+#endif
+#include <ff.h>
+#include <diskio.h>
+#include "fatten_diskio.h"
 
 static FATFS g_Filesystem;
 static int isMounted = 0;
 static unsigned char buff[32768];
+
+#if _WIN32 && !defined(S_ISDIR)
+#define S_ISDIR(mode) (((mode) & _S_IFMT) == _S_IFDIR)
+#endif
+
+#define FAT12_16_BPB_LENGTH 59
+#define FAT32_BPB_LENGTH    87
+#define FAT32_EXTRA_SECTOR  14
+#define FAT_OEM_NAME_OFFSET 3
+#define FAT_OEM_NAME_LENGTH 8
+#define FAT12_16_VOL_ID_OFFSET 39
+#define FAT32_BACKUP_BOOT_SECTOR_OFFSET 50
+#define FAT32_VOL_ID_OFFSET 67
+#define FAT12_16_VOL_LABEL_OFFSET 43
+#define FAT32_VOL_LABEL_OFFSET 71
+#define LIST_LINE_SIZE      16384
+
+static const BYTE g_MkfsFatOemName[FAT_OEM_NAME_LENGTH] = { 'm', 'k', 'f', 's', '.', 'f', 'a', 't' };
 
 // tool needed by fatfs
 DWORD get_fattime(void)
@@ -22,12 +54,43 @@ DWORD get_fattime(void)
     /* 31-25: Year(0-127 org.1980), 24-21: Month(1-12), 20-16: Day(1-31) */
     /* 15-11: Hour(0-23), 10-5: Minute(0-59), 4-0: Second(0-29 *2) */
 
+    const char* source_date_epoch;
     time_t rawtime;
     struct tm * timeinfo;
+    struct tm tm_value;
+
+    source_date_epoch = getenv("SOURCE_DATE_EPOCH");
+    if (source_date_epoch && *source_date_epoch)
+    {
+        char* end;
+        unsigned long long seconds;
+
+        errno = 0;
+        seconds = strtoull(source_date_epoch, &end, 10);
+        if (errno == 0 && end != source_date_epoch && *end == '\0')
+        {
+            rawtime = (time_t)seconds;
+#if _WIN32
+            timeinfo = localtime(&rawtime);
+            if (timeinfo)
+                tm_value = *timeinfo;
+#else
+            if (localtime_r(&rawtime, &tm_value))
+                timeinfo = &tm_value;
+            else
+                timeinfo = NULL;
+#endif
+            if (timeinfo)
+                goto pack_time;
+        }
+    }
 
     time(&rawtime);
     timeinfo = localtime(&rawtime);
+    if (!timeinfo)
+        return 0;
 
+pack_time:
     {
     union FatTime {
         struct {
@@ -63,13 +126,17 @@ void print_help(const char* name)
 #else
     printf("Commands:\n");
 #endif
-    // printf("    -format <sectors> [<filesystem>] [<custom header label>]\n"
-    printf("    -format <sectors> [<custom header label>]\n"
-           "            Formats the disk image.\n");
+    printf("    -format <sectors> [fat|fat32|exfat] [<volume label>]\n"
+           "            Formats the disk image (defaults to FAT).\n");
+    printf("    -format-vhd <sectors> [fat|fat32|exfat] [<volume label>]\n"
+           "            Creates a fixed VHD with an MBR partition and formats it.\n");
     printf("    -boot <sector file>\n"
            "            Writes a new boot sector.\n");
     printf("    -add <src path> <dst path>\n"
            "            Copies an external file or directory into the image.\n");
+    printf("    -addfiles <list file>\n"
+           "            Copies files from a newline-delimited dst=src list into the image.\n"
+           "            Bare entries create directories inside the image.\n");
     printf("    -extract <src path> <dst path>\n"
            "            Copies a file or directory from the image into an external file\n"
            "            or directory.\n");
@@ -77,10 +144,10 @@ void print_help(const char* name)
            "            Moves/renames a file or directory.\n");
     printf("    -copy <src path> <new path>\n"
            "            Copies a file or directory.\n");
-    printf("    -mkdir <src path> <new path>\n"
+    printf("    -mkdir <path>\n"
            "            Creates a directory.\n");
-    printf("    -rmdir <src path> <new path>\n"
-           "            Creates a directory.\n");
+    printf("    -delete <path>\n"
+           "            Deletes a file or empty directory.\n");
     printf("    -list [<pattern>]\n"
            "            Lists files a directory (defaults to root).\n");
 }
@@ -114,12 +181,711 @@ int need_mount(void)
     if (isMounted)
         return FR_OK;
 
-    r = f_mount(&g_Filesystem, "0:", 0);
+    r = f_mount(&g_Filesystem, "0:", 1);
+    if (r == FR_NO_FILESYSTEM)
+        r = f_mount(&g_Filesystem, "0:", 0);
     if (r)
         return r;
 
     isMounted = 1;
     return FR_OK;
+}
+
+static void invalidate_mount(void)
+{
+    f_mount(NULL, "0:", 0);
+    memset(&g_Filesystem, 0, sizeof(g_Filesystem));
+    isMounted = 0;
+}
+
+static char* duplicate_string(const char* src)
+{
+    size_t length;
+    char* copy;
+
+    if (!src)
+        return NULL;
+
+    length = strlen(src) + 1;
+    copy = malloc(length);
+    if (!copy)
+        return NULL;
+
+    memcpy(copy, src, length);
+    return copy;
+}
+
+static WORD read_le16(const BYTE* data, size_t offset)
+{
+    return (WORD)(data[offset] | ((WORD)data[offset + 1] << 8));
+}
+
+static void write_le32(BYTE* data, size_t offset, DWORD value)
+{
+    data[offset + 0] = (BYTE)(value & 0xFF);
+    data[offset + 1] = (BYTE)((value >> 8) & 0xFF);
+    data[offset + 2] = (BYTE)((value >> 16) & 0xFF);
+    data[offset + 3] = (BYTE)((value >> 24) & 0xFF);
+}
+
+static DWORD generate_volume_id(void)
+{
+    const char* source_date_epoch;
+
+    source_date_epoch = getenv("SOURCE_DATE_EPOCH");
+    if (source_date_epoch && *source_date_epoch)
+    {
+        char* end;
+        unsigned long long seconds;
+
+        errno = 0;
+        seconds = strtoull(source_date_epoch, &end, 10);
+        if (errno == 0 && end != source_date_epoch && *end == '\0')
+            return (DWORD)seconds;
+    }
+
+#if _WIN32
+    struct _timeb now;
+    _ftime(&now);
+    return ((DWORD)now.time << 20) | (DWORD)(now.millitm * 1000);
+#else
+    struct timeval now;
+
+    if (gettimeofday(&now, NULL) == 0 && now.tv_sec >= 0)
+        return ((DWORD)now.tv_sec << 20) | (DWORD)now.tv_usec;
+
+    return (DWORD)time(NULL) << 20;
+#endif
+}
+
+static int sync_fat32_backup_boot_sector(const BYTE* vbr, const BYTE* extra_sector)
+{
+    WORD backup_sector;
+
+    backup_sector = read_le16(vbr, FAT32_BACKUP_BOOT_SECTOR_OFFSET);
+    if (backup_sector == 0 || backup_sector == 0xFFFF)
+        return 0;
+
+    if (disk_write(0, (BYTE*)vbr, g_Filesystem.volbase + backup_sector, 1))
+        return 1;
+
+    if (extra_sector && disk_write(0, (BYTE*)extra_sector, g_Filesystem.volbase + backup_sector + FAT32_EXTRA_SECTOR, 1))
+        return 1;
+
+    return 0;
+}
+
+static int patch_volume_metadata(void)
+{
+    DWORD volume_id;
+    size_t volume_id_offset;
+
+    if (disk_read(0, buff, g_Filesystem.volbase, 1))
+        return 1;
+
+    memcpy(buff + FAT_OEM_NAME_OFFSET, g_MkfsFatOemName, FAT_OEM_NAME_LENGTH);
+
+    volume_id = generate_volume_id();
+    volume_id_offset = (g_Filesystem.fs_type == FS_FAT32) ? FAT32_VOL_ID_OFFSET : FAT12_16_VOL_ID_OFFSET;
+    write_le32(buff, volume_id_offset, volume_id);
+
+    if (disk_write(0, buff, g_Filesystem.volbase, 1))
+        return 1;
+
+    if (g_Filesystem.fs_type == FS_FAT32 && sync_fat32_backup_boot_sector(buff, NULL))
+        return 1;
+
+    return 0;
+}
+
+static void normalize_separators(char* path)
+{
+    while (*path)
+    {
+        if (*path == '\\')
+            *path = '/';
+        path++;
+    }
+}
+
+static char* trim_whitespace(char* text)
+{
+    char* end;
+
+    while (*text && isspace((unsigned char)*text))
+        text++;
+
+    end = text + strlen(text);
+    while ((end > text) && isspace((unsigned char)end[-1]))
+        *--end = '\0';
+
+    return text;
+}
+
+static int host_path_is_directory(const char* path)
+{
+    struct stat st;
+    return (stat(path, &st) == 0) && S_ISDIR(st.st_mode);
+}
+
+static FRESULT create_image_dir_if_missing(const char* path)
+{
+    FILINFO info = { 0 };
+    FRESULT result;
+
+    if (!path || !*path || (strcmp(path, "/") == 0))
+        return FR_OK;
+
+    result = f_stat(path, &info);
+    if (result == FR_OK)
+        return (info.fattrib & AM_DIR) ? FR_OK : FR_EXIST;
+    if ((result != FR_NO_FILE) && (result != FR_NO_PATH))
+        return result;
+
+    result = f_mkdir(path);
+    return (result == FR_EXIST) ? FR_OK : result;
+}
+
+static FRESULT ensure_image_dir(const char* path)
+{
+    char* mutable_path;
+    char* cursor;
+    FRESULT result = FR_OK;
+
+    if (!path || !*path || (strcmp(path, "/") == 0))
+        return FR_OK;
+
+    mutable_path = duplicate_string(path);
+    if (!mutable_path)
+        return FR_NOT_ENOUGH_CORE;
+
+    normalize_separators(mutable_path);
+
+    cursor = mutable_path;
+    if (*cursor == '/')
+        cursor++;
+
+    while ((cursor = strchr(cursor, '/')) != NULL)
+    {
+        *cursor = '\0';
+        result = create_image_dir_if_missing(mutable_path);
+        if (result != FR_OK)
+            goto cleanup;
+        *cursor++ = '/';
+    }
+
+    result = create_image_dir_if_missing(mutable_path);
+
+cleanup:
+    free(mutable_path);
+    return result;
+}
+
+static FRESULT ensure_image_parent_dirs(const char* path)
+{
+    char* mutable_path;
+    char* slash;
+    FRESULT result;
+
+    mutable_path = duplicate_string(path);
+    if (!mutable_path)
+        return FR_NOT_ENOUGH_CORE;
+
+    normalize_separators(mutable_path);
+    slash = strrchr(mutable_path, '/');
+    if (!slash)
+    {
+        result = FR_OK;
+    }
+    else if (slash == mutable_path)
+    {
+        result = FR_OK;
+    }
+    else
+    {
+        *slash = '\0';
+        result = ensure_image_dir(mutable_path);
+    }
+
+    free(mutable_path);
+    return result;
+}
+
+typedef struct _LIST_FILE_ENTRY
+{
+    char* image_path;
+    char* host_path;
+} LIST_FILE_ENTRY;
+
+typedef struct _STRING_LIST
+{
+    char** items;
+    size_t count;
+    size_t capacity;
+} STRING_LIST;
+
+typedef struct _FILE_LIST
+{
+    LIST_FILE_ENTRY* items;
+    size_t count;
+    size_t capacity;
+} FILE_LIST;
+
+static void free_string_list(STRING_LIST* list)
+{
+    size_t index;
+
+    for (index = 0; index < list->count; index++)
+        free(list->items[index]);
+    free(list->items);
+    list->items = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
+
+static void free_file_list(FILE_LIST* list)
+{
+    size_t index;
+
+    for (index = 0; index < list->count; index++)
+    {
+        free(list->items[index].image_path);
+        free(list->items[index].host_path);
+    }
+    free(list->items);
+    list->items = NULL;
+    list->count = 0;
+    list->capacity = 0;
+}
+
+static int append_string(STRING_LIST* list, const char* text)
+{
+    char** resized;
+    char* copy;
+
+    copy = duplicate_string(text);
+    if (!copy)
+        return 1;
+
+    normalize_separators(copy);
+
+    if (list->count == list->capacity)
+    {
+        size_t new_capacity = list->capacity ? (list->capacity * 2) : 16;
+        resized = realloc(list->items, new_capacity * sizeof(list->items[0]));
+        if (!resized)
+        {
+            free(copy);
+            return 1;
+        }
+
+        list->items = resized;
+        list->capacity = new_capacity;
+    }
+
+    list->items[list->count++] = copy;
+    return 0;
+}
+
+static int append_file_entry(FILE_LIST* list, const char* image_path, const char* host_path)
+{
+    LIST_FILE_ENTRY* resized;
+    char* image_copy;
+    char* host_copy;
+
+    image_copy = duplicate_string(image_path);
+    host_copy = duplicate_string(host_path);
+    if (!image_copy || !host_copy)
+    {
+        free(image_copy);
+        free(host_copy);
+        return 1;
+    }
+
+    normalize_separators(image_copy);
+
+    if (list->count == list->capacity)
+    {
+        size_t new_capacity = list->capacity ? (list->capacity * 2) : 16;
+        resized = realloc(list->items, new_capacity * sizeof(list->items[0]));
+        if (!resized)
+        {
+            free(image_copy);
+            free(host_copy);
+            return 1;
+        }
+
+        list->items = resized;
+        list->capacity = new_capacity;
+    }
+
+    list->items[list->count].image_path = image_copy;
+    list->items[list->count].host_path = host_copy;
+    list->count++;
+    return 0;
+}
+
+static int append_parent_directories(STRING_LIST* list, const char* path)
+{
+    char* mutable_path;
+    char* cursor;
+    int ret = 0;
+
+    mutable_path = duplicate_string(path);
+    if (!mutable_path)
+        return 1;
+
+    normalize_separators(mutable_path);
+
+    cursor = mutable_path;
+    if (*cursor == '/')
+        cursor++;
+
+    while ((cursor = strchr(cursor, '/')) != NULL)
+    {
+        *cursor = '\0';
+        ret = append_string(list, mutable_path);
+        *cursor++ = '/';
+        if (ret)
+            break;
+    }
+
+    free(mutable_path);
+    return ret;
+}
+
+static int compare_string_ptrs(const void* left, const void* right)
+{
+    const char* const* lhs = left;
+    const char* const* rhs = right;
+    return strcmp(*lhs, *rhs);
+}
+
+static int compare_file_entries(const void* left, const void* right)
+{
+    const LIST_FILE_ENTRY* lhs = left;
+    const LIST_FILE_ENTRY* rhs = right;
+    return strcmp(lhs->image_path, rhs->image_path);
+}
+
+static int copy_host_file_to_image(const char* host_path, const char* image_path)
+{
+    FILE* source;
+    FIL destination = { 0 };
+    UINT read_length = 0;
+    UINT write_length = 0;
+    FRESULT result;
+    int ret = 0;
+
+    source = fopen(host_path, "rb");
+    if (!source)
+    {
+        fprintf(stderr, "Error: Unable to open external file '%s' for reading.\n", host_path);
+        return 1;
+    }
+
+    result = ensure_image_parent_dirs(image_path);
+    if (result != FR_OK)
+    {
+        fprintf(stderr, "Error: Unable to create parent directories for '%s' (%d).\n", image_path, result);
+        fclose(source);
+        return 1;
+    }
+
+    result = f_open(&destination, image_path, FA_WRITE | FA_CREATE_ALWAYS);
+    if (result != FR_OK)
+    {
+        fprintf(stderr, "Error: Unable to open file '%s' for writing (%d).\n", image_path, result);
+        fclose(source);
+        return 1;
+    }
+
+    while ((read_length = fread(buff, 1, sizeof(buff), source)) > 0)
+    {
+        result = f_write(&destination, buff, read_length, &write_length);
+        if (result || (write_length < read_length))
+        {
+            fprintf(stderr, "Error: Unable to write '%u' bytes to disk (%d).\n", write_length, result);
+            ret = 1;
+            goto cleanup;
+        }
+    }
+
+    if (ferror(source))
+    {
+        fprintf(stderr, "Error: Unable to read external file '%s'.\n", host_path);
+        ret = 1;
+    }
+
+cleanup:
+    f_close(&destination);
+    fclose(source);
+    return ret;
+}
+
+static char* join_host_path(const char* left, const char* right)
+{
+    size_t left_length = strlen(left);
+    size_t right_length = strlen(right);
+    int need_separator = (left_length > 0) && (left[left_length - 1] != '/') && (left[left_length - 1] != '\\');
+    char* path = malloc(left_length + right_length + (need_separator ? 2 : 1));
+
+    if (!path)
+        return NULL;
+
+    memcpy(path, left, left_length);
+    if (need_separator)
+        path[left_length++] = '/';
+    memcpy(path + left_length, right, right_length + 1);
+    return path;
+}
+
+static char* join_image_path(const char* left, const char* right)
+{
+    size_t left_length = strlen(left);
+    size_t right_length = strlen(right);
+    int need_separator = (left_length > 0) && (left[left_length - 1] != '/');
+    char* path = malloc(left_length + right_length + (need_separator ? 2 : 1));
+
+    if (!path)
+        return NULL;
+
+    memcpy(path, left, left_length);
+    if (need_separator)
+        path[left_length++] = '/';
+    memcpy(path + left_length, right, right_length + 1);
+    return path;
+}
+
+static int add_host_path_to_image(const char* host_path, const char* image_path)
+{
+    FRESULT result;
+
+    if (host_path_is_directory(host_path))
+    {
+#if _WIN32
+        struct _finddata_t find_data;
+        intptr_t handle;
+        char* pattern;
+        int ret = 0;
+
+        result = ensure_image_dir(image_path);
+        if (result != FR_OK)
+        {
+            fprintf(stderr, "Error: Unable to create directory '%s' (%d).\n", image_path, result);
+            return 1;
+        }
+
+        pattern = join_host_path(host_path, "*");
+        if (!pattern)
+        {
+            fprintf(stderr, "Error: Out of memory while walking '%s'.\n", host_path);
+            return 1;
+        }
+
+        handle = _findfirst(pattern, &find_data);
+        free(pattern);
+        if (handle == -1)
+        {
+            if (errno == ENOENT)
+                return 0;
+
+            fprintf(stderr, "Error: Unable to enumerate directory '%s' (%d).\n", host_path, errno);
+            return 1;
+        }
+
+        do
+        {
+            char* child_host_path;
+            char* child_image_path;
+
+            if ((strcmp(find_data.name, ".") == 0) || (strcmp(find_data.name, "..") == 0))
+                continue;
+
+            child_host_path = join_host_path(host_path, find_data.name);
+            child_image_path = join_image_path(image_path, find_data.name);
+            if (!child_host_path || !child_image_path)
+            {
+                fprintf(stderr, "Error: Out of memory while walking '%s'.\n", host_path);
+                free(child_host_path);
+                free(child_image_path);
+                ret = 1;
+                break;
+            }
+
+            ret = add_host_path_to_image(child_host_path, child_image_path);
+            free(child_host_path);
+            free(child_image_path);
+            if (ret)
+                break;
+        } while (_findnext(handle, &find_data) == 0);
+
+        _findclose(handle);
+        return ret;
+#else
+        HOST_DIR* dir;
+        struct dirent* entry;
+        int ret = 0;
+
+        result = ensure_image_dir(image_path);
+        if (result != FR_OK)
+        {
+            fprintf(stderr, "Error: Unable to create directory '%s' (%d).\n", image_path, result);
+            return 1;
+        }
+
+        dir = opendir(host_path);
+        if (!dir)
+        {
+            fprintf(stderr, "Error: Unable to enumerate directory '%s' (%d).\n", host_path, errno);
+            return 1;
+        }
+
+        while ((entry = readdir(dir)) != NULL)
+        {
+            char* child_host_path;
+            char* child_image_path;
+
+            if ((strcmp(entry->d_name, ".") == 0) || (strcmp(entry->d_name, "..") == 0))
+                continue;
+
+            child_host_path = join_host_path(host_path, entry->d_name);
+            child_image_path = join_image_path(image_path, entry->d_name);
+            if (!child_host_path || !child_image_path)
+            {
+                fprintf(stderr, "Error: Out of memory while walking '%s'.\n", host_path);
+                free(child_host_path);
+                free(child_image_path);
+                ret = 1;
+                break;
+            }
+
+            ret = add_host_path_to_image(child_host_path, child_image_path);
+            free(child_host_path);
+            free(child_image_path);
+            if (ret)
+                break;
+        }
+
+        closedir(dir);
+        return ret;
+#endif
+    }
+
+    return copy_host_file_to_image(host_path, image_path);
+}
+
+static int add_files_from_list(const char* list_path)
+{
+    FILE* list_file;
+    char line[LIST_LINE_SIZE];
+    unsigned int line_number = 0;
+    STRING_LIST directories = { 0 };
+    FILE_LIST files = { 0 };
+    size_t index;
+    int ret = 1;
+
+    list_file = fopen(list_path, "rb");
+    if (!list_file)
+    {
+        fprintf(stderr, "Error: Unable to open list file '%s' for reading.\n", list_path);
+        return 1;
+    }
+
+    while (fgets(line, sizeof(line), list_file) != NULL)
+    {
+        char* entry;
+        char* separator;
+        size_t line_length = strlen(line);
+        int line_complete = ((line_length > 0) && (line[line_length - 1] == '\n')) || feof(list_file);
+
+        line_number++;
+        if (!line_complete)
+        {
+            fprintf(stderr, "Error: List entry %u in '%s' exceeds %u bytes.\n", line_number, list_path, LIST_LINE_SIZE - 1);
+            goto cleanup;
+        }
+
+        entry = trim_whitespace(line);
+
+        if ((*entry == '\0') || (*entry == '#'))
+            continue;
+
+        separator = strchr(entry, '=');
+        if (separator)
+        {
+            char* image_path;
+            char* host_path;
+
+            *separator = '\0';
+            image_path = trim_whitespace(entry);
+            host_path = trim_whitespace(separator + 1);
+
+            if ((*image_path == '\0') || (*host_path == '\0'))
+            {
+                fprintf(stderr, "Error: Invalid list entry %u in '%s'.\n", line_number, list_path);
+                goto cleanup;
+            }
+
+            if (append_file_entry(&files, image_path, host_path) ||
+                append_parent_directories(&directories, image_path) ||
+                (host_path_is_directory(host_path) && append_string(&directories, image_path)))
+            {
+                fprintf(stderr, "Error: Out of memory while processing list entry %u in '%s'.\n", line_number, list_path);
+                goto cleanup;
+            }
+        }
+        else
+        {
+            if (append_string(&directories, entry))
+            {
+                fprintf(stderr, "Error: Out of memory while processing list entry %u in '%s'.\n", line_number, list_path);
+                goto cleanup;
+            }
+        }
+    }
+
+    if (ferror(list_file))
+    {
+        fprintf(stderr, "Error: Unable to read list file '%s'.\n", list_path);
+        goto cleanup;
+    }
+
+    qsort(directories.items, directories.count, sizeof(directories.items[0]), compare_string_ptrs);
+    for (index = 0; index < directories.count; index++)
+    {
+        FRESULT result;
+
+        if (index > 0 && strcmp(directories.items[index - 1], directories.items[index]) == 0)
+            continue;
+
+        result = ensure_image_dir(directories.items[index]);
+        if (result != FR_OK)
+        {
+            fprintf(stderr, "Error: Unable to create directory '%s' from list '%s' (%d).\n",
+                    directories.items[index], list_path, result);
+            goto cleanup;
+        }
+    }
+
+    qsort(files.items, files.count, sizeof(files.items[0]), compare_file_entries);
+    for (index = 0; index < files.count; index++)
+    {
+        if (add_host_path_to_image(files.items[index].host_path, files.items[index].image_path))
+        {
+            fprintf(stderr, "Error: Failed to import '%s' into '%s' from list '%s'.\n",
+                    files.items[index].host_path, files.items[index].image_path, list_path);
+            goto cleanup;
+        }
+    }
+
+    ret = 0;
+
+cleanup:
+    fclose(list_file);
+    free_string_list(&directories);
+    free_file_list(&files);
+    return ret;
 }
 
 #define NEED_MOUNT() \
@@ -178,49 +944,149 @@ int main(int oargc, char* oargv[])
         while ((argv[i] != NULL) && !is_command(argv[i++]))
             nargs++;
 
-        if (strcmp(parg, "format") == 0)
+        if (strcmp(parg, "format") == 0 || strcmp(parg, "format-vhd") == 0)
         {
-            // NOTE: The fs driver detects which FAT format fits best based on size
-            int sectors;
+            MKFS_PARM Format = { 0 };
+            unsigned long long ParsedSectors;
+            LBA_t Sectors;
+            const char* VolumeLabel = NULL;
+            char* End;
+            int IsExFat = 0;
+            int IsVhd = strcmp(parg, "format-vhd") == 0;
+            BYTE SuperFloppyFlag = IsVhd ? 0 : FM_SFD;
 
-            NEED_PARAMS(1, 2);
+            NEED_PARAMS(1, 3);
 
             // Arg 1: number of sectors
-            sectors = atoi(argv[0]);
+            errno = 0;
+            ParsedSectors = strtoull(argv[0], &End, 10);
+            Sectors = (LBA_t)ParsedSectors;
 
-            if (sectors <= 0)
+            if (errno != 0 || End == argv[0] || *End != '\0' || ParsedSectors == 0 ||
+                (unsigned long long)Sectors != ParsedSectors)
             {
-                fprintf(stderr, "Error: Sectors must be > 0\n");
+                fprintf(stderr, "Error: Invalid sector count '%s'.\n", argv[0]);
                 ret = 1;
                 goto exit;
             }
 
-            if (disk_ioctl(0, SET_SECTOR_COUNT, &sectors))
+            Format.fmt = FM_FAT | FM_FAT32 | SuperFloppyFlag;
+            Format.n_fat = 2;
+            Format.au_size = (Sectors < 4096 ? 1 : 8) * 512;
+
+            if (nargs > 1)
             {
-                fprintf(stderr, "Error: Failed to set sector count to %d.\n", sectors);
+                if (strcmp(argv[1], "fat") == 0)
+                {
+                    VolumeLabel = nargs > 2 ? argv[2] : NULL;
+                }
+                else if (strcmp(argv[1], "fat32") == 0)
+                {
+                    Format.fmt = FM_FAT32 | SuperFloppyFlag;
+                    Format.au_size = 0;
+                    VolumeLabel = nargs > 2 ? argv[2] : NULL;
+                }
+                else if (strcmp(argv[1], "exfat") == 0)
+                {
+                    Format.fmt = FM_EXFAT | SuperFloppyFlag;
+                    Format.n_fat = 1;
+                    Format.au_size = 0;
+                    VolumeLabel = nargs > 2 ? argv[2] : NULL;
+                    IsExFat = 1;
+                }
+                else if (nargs == 2)
+                {
+                    /* Preserve the historical -format <sectors> <label> form. */
+                    VolumeLabel = argv[1];
+                }
+                else
+                {
+                    fprintf(stderr, "Error: Unknown filesystem '%s'.\n", argv[1]);
+                    ret = 1;
+                    goto exit;
+                }
+            }
+
+            if ((IsVhd ? disk_prepare_vhd(0, Sectors) : disk_set_sector_count(0, Sectors, !IsExFat)) != RES_OK)
+            {
+                fprintf(stderr, "Error: Failed to set sector count to %llu.\n", ParsedSectors);
                 ret = 1;
                 goto exit;
             }
 
             NEED_MOUNT();
 
-            ret = f_mkfs("0:", 1, sectors < 4096 ? 1 : 8);
+            ret = f_mkfs("0:", &Format, buff, sizeof(buff));
             if (ret)
             {
                 fprintf(stderr, "Error: Formatting drive: %d.\n", ret);
                 goto exit;
             }
 
-            // Arg 2: custom header label (optional)
-            if (nargs > 1)
+            invalidate_mount();
+            ret = need_mount();
+            if (ret)
+            {
+                fprintf(stderr, "Error: Could not remount disk after formatting (%d).\n", ret);
+                goto exit;
+            }
+
+            if (g_Filesystem.fs_type != FS_EXFAT && patch_volume_metadata())
+            {
+                fprintf(stderr, "Error: Unable to patch FAT volume metadata.\n");
+                ret = 1;
+                goto exit;
+            }
+
+            if (IsVhd)
+            {
+                BYTE PartitionType;
+
+                if (g_Filesystem.fs_type == FS_EXFAT)
+                    PartitionType = 0x07;
+                else if (g_Filesystem.fs_type == FS_FAT32)
+                    PartitionType = 0x0C;
+                else if (g_Filesystem.fs_type == FS_FAT16)
+                    PartitionType = 0x0E;
+                else
+                    PartitionType = 0x01;
+
+                if (disk_set_partition_type(0, PartitionType) != RES_OK)
+                {
+                    fprintf(stderr, "Error: Unable to update the VHD partition type.\n");
+                    ret = 1;
+                    goto exit;
+                }
+            }
+
+            if (VolumeLabel)
             {
 #define FAT_VOL_LABEL_LEN   11
-                char vol_label[2 + FAT_VOL_LABEL_LEN + 1]; // Null-terminated buffer
+                char vol_label[2 + (FAT_VOL_LABEL_LEN * 4) + 1]; // UTF-8 plus drive prefix
                 char* label = vol_label + 2; // The first two characters are reserved for the drive number "0:"
                 char ch;
 
                 int i, invalid = 0;
-                int len = strlen(argv[1]);
+                int len = strlen(VolumeLabel);
+
+                if (g_Filesystem.fs_type == FS_EXFAT)
+                {
+                    if ((size_t)len > sizeof(vol_label) - 3)
+                    {
+                        fprintf(stderr, "Error: exFAT volume label is too long.\n");
+                        ret = 1;
+                        goto exit;
+                    }
+
+                    memcpy(vol_label, "0:", 2);
+                    memcpy(label, VolumeLabel, len + 1);
+                    ret = f_setlabel(vol_label);
+                    if (ret)
+                        fprintf(stderr, "Error: Unable to set the exFAT volume label (%d).\n", ret);
+                    if (ret)
+                        goto exit;
+                    goto label_complete;
+                }
 
                 if (len <= FAT_VOL_LABEL_LEN)
                 {
@@ -228,7 +1094,7 @@ int main(int oargc, char* oargv[])
                     // and copy it in uppercase.
                     for (i = 0; i < len; i++)
                     {
-                        ch = toupper(argv[1][i]);
+                        ch = toupper(VolumeLabel[i]);
                         if ((ch < 0x20) || !isprint(ch))
                         {
                             invalid = 1;
@@ -259,7 +1125,7 @@ int main(int oargc, char* oargv[])
                     goto exit;
                 }
 
-                if (disk_read(0, buff, 0, 1))
+                if (disk_read(0, buff, g_Filesystem.volbase, 1))
                 {
                     fprintf(stderr, "Error: Unable to read existing boot sector from image.");
                     ret = 1;
@@ -272,12 +1138,19 @@ int main(int oargc, char* oargv[])
                 }
                 else
                 {
-                    memcpy(buff + 43, label, FAT_VOL_LABEL_LEN);
+                    memcpy(buff + FAT12_16_VOL_LABEL_OFFSET, label, FAT_VOL_LABEL_LEN);
                 }
 
-                if (disk_write(0, buff, 0, 1))
+                if (disk_write(0, buff, g_Filesystem.volbase, 1))
                 {
                     fprintf(stderr, "Error: Unable to write new boot sector to image.");
+                    ret = 1;
+                    goto exit;
+                }
+
+                if (g_Filesystem.fs_type == FS_FAT32 && sync_fat32_backup_boot_sector(buff, NULL))
+                {
+                    fprintf(stderr, "Error: Unable to update FAT32 backup boot sector label.");
                     ret = 1;
                     goto exit;
                 }
@@ -291,12 +1164,16 @@ int main(int oargc, char* oargv[])
                     ret = 1;
                     goto exit;
                 }
+
+label_complete:
+                ;
             }
         }
         else if (strcmp(parg, "boot") == 0)
         {
             FILE* fe;
             BYTE* temp = buff + 1024;
+            size_t boot_sector_size;
 
             NEED_PARAMS(1, 1);
 
@@ -310,7 +1187,8 @@ int main(int oargc, char* oargv[])
                 goto exit;
             }
 
-            if (!fread(buff, 512, 1, fe))
+            boot_sector_size = fread(buff, 1, sizeof(buff) / 2, fe);
+            if (boot_sector_size < 512)
             {
                 fprintf(stderr, "Error: Unable to read boot sector from file '%s'.", argv[0]);
                 fclose(fe);
@@ -322,7 +1200,14 @@ int main(int oargc, char* oargv[])
 
             NEED_MOUNT();
 
-            if (disk_read(0, temp, 0, 1))
+            if (g_Filesystem.fs_type == FS_EXFAT)
+            {
+                fprintf(stderr, "Error: Replacing an exFAT boot region is not supported yet.\n");
+                ret = 1;
+                goto exit;
+            }
+
+            if (disk_read(0, temp, g_Filesystem.volbase, 1))
             {
                 fprintf(stderr, "Error: Unable to read existing boot sector from image.");
                 ret = 1;
@@ -331,74 +1216,71 @@ int main(int oargc, char* oargv[])
 
             if (g_Filesystem.fs_type == FS_FAT32)
             {
-                printf("TODO: Writing boot sectors for FAT32 images not yet supported.");
-                ret = 1;
-                goto exit;
+                if (boot_sector_size < 1024)
+                {
+                    fprintf(stderr, "Error: FAT32 boot sector '%s' must contain both reserved sectors.\n", argv[0]);
+                    ret = 1;
+                    goto exit;
+                }
+
+                memcpy(buff + 3, temp + 3, FAT32_BPB_LENGTH);
             }
             else
             {
-#define FAT16_HEADER_START 3
-#define FAT16_HEADER_END 62
-
-                memcpy(buff + FAT16_HEADER_START, temp + FAT16_HEADER_START, FAT16_HEADER_END - FAT16_HEADER_START);
+                memcpy(buff + 3, temp + 3, FAT12_16_BPB_LENGTH);
             }
 
-            if (disk_write(0, buff, 0, 1))
+            if (disk_write(0, buff, g_Filesystem.volbase, 1))
             {
                 fprintf(stderr, "Error: Unable to write new boot sector to image.");
                 ret = 1;
                 goto exit;
             }
+
+            if (g_Filesystem.fs_type == FS_FAT32)
+            {
+                if (disk_write(0, buff + 512, g_Filesystem.volbase + FAT32_EXTRA_SECTOR, 1))
+                {
+                    fprintf(stderr, "Error: Unable to write FAT32 extra boot sector to image.");
+                    ret = 1;
+                    goto exit;
+                }
+
+                if (sync_fat32_backup_boot_sector(buff, buff + 512))
+                {
+                    fprintf(stderr, "Error: Unable to update FAT32 backup boot sectors.");
+                    ret = 1;
+                    goto exit;
+                }
+            }
         }
         else if (strcmp(parg, "add") == 0)
         {
-            FILE* fe;
-            FIL   fv = { 0 };
-            UINT rdlen = 0;
-            UINT wrlen = 0;
-
             NEED_PARAMS(2, 2);
 
             NEED_MOUNT();
 
             // Arg 1: external file to add
             // Arg 2: virtual filename
-
-            fe = fopen(argv[0], "rb");
-            if (!fe)
-            {
-                fprintf(stderr, "Error: Unable to open external file '%s' for reading.", argv[0]);
-                ret = 1;
+            ret = add_host_path_to_image(argv[0], argv[1]);
+            if (ret)
                 goto exit;
-            }
+        }
+        else if (strcmp(parg, "addfiles") == 0)
+        {
+            NEED_PARAMS(1, 1);
 
-            if (f_open(&fv, argv[1], FA_WRITE | FA_CREATE_ALWAYS))
-            {
-                fprintf(stderr, "Error: Unable to open file '%s' for writing.", argv[1]);
-                fclose(fe);
-                ret = 1;
+            NEED_MOUNT();
+
+            ret = add_files_from_list(argv[0]);
+            if (ret)
                 goto exit;
-            }
-
-            while ((rdlen = fread(buff, 1, sizeof(buff), fe)) > 0)
-            {
-                if (f_write(&fv, buff, rdlen, &wrlen) || wrlen < rdlen)
-                {
-                    fprintf(stderr, "Error: Unable to write '%d' bytes to disk.", wrlen);
-                    ret = 1;
-                    goto exit;
-                }
-            }
-
-            fclose(fe);
-            f_close(&fv);
         }
         else if (strcmp(parg, "extract") == 0)
         {
             FIL   fe = { 0 };
             FILE* fv;
             UINT rdlen = 0;
-            UINT wrlen = 0;
 
             NEED_PARAMS(2, 2);
 
@@ -524,7 +1406,6 @@ int main(int oargc, char* oargv[])
             char* root = "/";
             DIR dir = { 0 };
             FILINFO info = { 0 };
-            char lfname[257];
 
             NEED_PARAMS(0, 1);
 
@@ -535,6 +1416,8 @@ int main(int oargc, char* oargv[])
                 root = argv[0];
             }
 
+            NEED_MOUNT();
+
             if (f_opendir(&dir, root))
             {
                 fprintf(stderr, "Error: Unable to opening directory '%s' for listing.\n", root);
@@ -544,15 +1427,14 @@ int main(int oargc, char* oargv[])
 
             printf("Listing directory contents of: %s\n", root);
 
-            info.lfname = lfname;
-            info.lfsize = sizeof(lfname)-1;
             while ((!f_readdir(&dir, &info)) && (strlen(info.fname) > 0))
             {
-                if (strlen(info.lfname) > 0)
-                    printf(" - %s (%s)\n", info.lfname, info.fname);
+                if (strlen(info.altname) > 0 && strcmp(info.altname, info.fname) != 0)
+                    printf(" - %s (%s)\n", info.fname, info.altname);
                 else
                     printf(" - %s\n", info.fname);
             }
+            f_closedir(&dir);
         }
         else
         {
@@ -567,7 +1449,11 @@ int main(int oargc, char* oargv[])
 
 exit:
 
-    disk_cleanup(0);
+    if (disk_cleanup(0) != RES_OK && ret == 0)
+    {
+        fprintf(stderr, "Error: Unable to finalize the disk image.\n");
+        ret = 1;
+    }
 
     return ret;
 }

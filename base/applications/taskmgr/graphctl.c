@@ -111,6 +111,9 @@ fail:
 void
 GraphCtrl_Dispose(PTM_GRAPH_CONTROL inst)
 {
+    if (inst->CpuBuffer)
+        HeapFree(GetProcessHeap(), 0, inst->CpuBuffer);
+
     if (inst->PointBuffer)
         HeapFree(GetProcessHeap(), 0, inst->PointBuffer);
 
@@ -203,6 +206,292 @@ GraphCtrl_AddPoint(PTM_GRAPH_CONTROL inst, BYTE val0, BYTE val1)
     LineTo(inst->hdcGraph, inst->BitmapWidth - 1, CurrY);
 }
 
+BOOL
+GraphCtrl_EnablePerCpu(PTM_GRAPH_CONTROL inst, UINT32 nCpus)
+{
+    if (nCpus < 2)
+        return FALSE;
+
+    if (inst->CpuBuffer && inst->CpuSeries == nCpus)
+        return TRUE;
+
+    if (inst->CpuBuffer)
+        HeapFree(GetProcessHeap(), 0, inst->CpuBuffer);
+
+    /* The total usage of every processor, then its kernel usage */
+    inst->CpuBuffer = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                inst->NumberOfPoints * nCpus * 2);
+    if (!inst->CpuBuffer)
+    {
+        inst->CpuSeries = 0;
+        inst->CpuKernelBuffer = NULL;
+        return FALSE;
+    }
+
+    inst->CpuSeries = nCpus;
+    inst->CpuKernelBuffer = inst->CpuBuffer + inst->NumberOfPoints * nCpus;
+    inst->CpuRegionWidth = 0;
+    return TRUE;
+}
+
+#define PERCPU_GAP 5
+
+static void
+GraphCtrl_PerCpuGrid(PTM_GRAPH_CONTROL inst, UINT32 *pCols, UINT32 *pRows)
+{
+    UINT32 Rows = (inst->CpuSeries + 7) / 8;
+
+    if (Rows < 1)
+        Rows = 1;
+    *pRows = Rows;
+    *pCols = (inst->CpuSeries + Rows - 1) / Rows;
+}
+
+static void
+GraphCtrl_PerCpuPane(PTM_GRAPH_CONTROL inst, UINT32 Cpu, RECT *prc)
+{
+    INT    RegionLeft = inst->BitmapWidth - inst->CpuRegionWidth;
+    UINT32 Cols, Rows, Col, Row;
+    INT    UsableW, UsableH;
+
+    GraphCtrl_PerCpuGrid(inst, &Cols, &Rows);
+    Col = Cpu % Cols;
+    Row = Cpu / Cols;
+
+    UsableW = (INT)inst->CpuRegionWidth - (INT)(Cols - 1) * PERCPU_GAP;
+    UsableH = (INT)inst->BitmapHeight - (INT)(Rows - 1) * PERCPU_GAP;
+    if (UsableW < (INT)Cols * 8)
+        UsableW = (INT)Cols * 8;
+    if (UsableH < (INT)Rows * 8)
+        UsableH = (INT)Rows * 8;
+
+    prc->left   = RegionLeft + UsableW * (INT)Col / (INT)Cols + (INT)Col * PERCPU_GAP;
+    prc->right  = RegionLeft + UsableW * (INT)(Col + 1) / (INT)Cols + (INT)Col * PERCPU_GAP;
+    prc->top    = UsableH * (INT)Row / (INT)Rows + (INT)Row * PERCPU_GAP;
+    prc->bottom = UsableH * (INT)(Row + 1) / (INT)Rows + (INT)Row * PERCPU_GAP;
+}
+
+static void
+GraphCtrl_PerCpuDrawPaneStatic(PTM_GRAPH_CONTROL inst, const RECT *pc)
+{
+    HDC hdcg = inst->hdcGraph;
+    INT ColL = pc->left, ColR = pc->right;
+    INT Top = pc->top, Bot = pc->bottom;
+    INT p;
+    RECT rc;
+
+    rc.left = ColL; rc.top = Top;
+    rc.right = ColR; rc.bottom = Bot;
+    FillRect(hdcg, &rc, inst->hBrushBack);
+
+    SelectObject(hdcg, inst->hPenGrid);
+    for (p = Top + inst->GridCellHeight - 1; p < Bot - 1; p += inst->GridCellHeight)
+    {
+        MoveToEx(hdcg, ColL + 1, p, NULL);
+        LineTo(hdcg, ColR - 1, p);
+    }
+
+    for (p = ColR - 2 - inst->CurrShift; p > ColL; p -= inst->GridCellWidth)
+    {
+        MoveToEx(hdcg, p, Top + 1, NULL);
+        LineTo(hdcg, p, Bot - 1);
+    }
+
+    DrawEdge(hdcg, &rc, BDR_SUNKENOUTER, BF_RECT);
+}
+
+/* Draws the whole history of one series (total or kernel usage) into a pane */
+static void
+GraphCtrl_PerCpuDrawSeries(PTM_GRAPH_CONTROL inst, const RECT *pc, PBYTE t)
+{
+    HDC  hdcg = inst->hdcGraph;
+    INT  ColL = pc->left, ColR = pc->right, Bot = pc->bottom;
+    INT  CellH = pc->bottom - pc->top, x, y;
+    UINT j, i;
+
+    x = ColR - 2;
+    j = inst->CurrIndex;
+    y = Bot - 2 - (*(t + j) * (CellH - 3)) / 100;
+    MoveToEx(hdcg, x, y, NULL);
+    for (i = 0; i < inst->NumberOfPoints && x > ColL + 1; i++)
+    {
+        j = (j ? j : inst->NumberOfPoints) - 1;
+        y = Bot - 2 - (*(t + j) * (CellH - 3)) / 100;
+        x -= PLOT_SHIFT;
+        if (x < ColL + 1)
+            x = ColL + 1;
+        LineTo(hdcg, x, y);
+    }
+}
+
+static void
+GraphCtrl_RedrawPerCpu(PTM_GRAPH_CONTROL inst)
+{
+    HDC    hdcg = inst->hdcGraph;
+    RECT   rc;
+    UINT32 Cpu;
+
+    GetClientRect(inst->hWnd, &rc);
+    if (rc.right > 0)
+        inst->CpuRegionWidth = rc.right;
+    if (inst->CpuRegionWidth == 0)
+        return;
+
+    rc.left = 0; rc.top = 0;
+    rc.right = inst->BitmapWidth; rc.bottom = inst->BitmapHeight;
+    FillRect(hdcg, &rc, GetSysColorBrush(COLOR_3DFACE));
+
+    for (Cpu = 0; Cpu < inst->CpuSeries; Cpu++)
+    {
+        RECT pc;
+
+        GraphCtrl_PerCpuPane(inst, Cpu, &pc);
+        GraphCtrl_PerCpuDrawPaneStatic(inst, &pc);
+
+        if (inst->DrawSecondaryPlot)
+        {
+            SelectObject(hdcg, inst->hPen1);
+            GraphCtrl_PerCpuDrawSeries(inst, &pc, inst->CpuKernelBuffer + Cpu * inst->NumberOfPoints);
+        }
+        SelectObject(hdcg, inst->hPen0);
+        GraphCtrl_PerCpuDrawSeries(inst, &pc, inst->CpuBuffer + Cpu * inst->NumberOfPoints);
+    }
+}
+
+/*
+ * Adds one sample of the CPU usage: the total and kernel usage of the whole
+ * system and of every processor. Both histories are always kept, so switching
+ * between one graph for all CPUs and one graph per CPU shows the full history;
+ * only the selected view is drawn.
+ */
+void
+GraphCtrl_AddPointsPerCpu(PTM_GRAPH_CONTROL inst, BYTE Total, BYTE Kernel,
+                          const BYTE *vals, const BYTE *kvals, UINT32 nCpus)
+{
+    HDC    hdcg;
+    RECT   rc;
+    UINT32 Cpu, Next;
+    INT    v;
+
+    if (!GraphCtrl_EnablePerCpu(inst, nCpus))
+    {
+        GraphCtrl_AddPoint(inst, Total, Kernel);
+        return;
+    }
+
+    Next = (inst->CurrIndex < inst->NumberOfPoints - 1) ? inst->CurrIndex + 1 : 0;
+    for (Cpu = 0; Cpu < nCpus; Cpu++)
+    {
+        *(inst->CpuBuffer + Cpu * inst->NumberOfPoints + Next) = vals[Cpu];
+        *(inst->CpuKernelBuffer + Cpu * inst->NumberOfPoints + Next) = kvals[Cpu];
+    }
+
+    if (!inst->PerCpuMode)
+    {
+        /* Moves CurrIndex to Next as well and draws the single graph */
+        GraphCtrl_AddPoint(inst, Total, Kernel);
+        return;
+    }
+
+    inst->CurrIndex = Next;
+    *(inst->PointBuffer + Next) = Total;
+    *(inst->PointBuffer + Next + inst->NumberOfPoints) = Kernel;
+
+    v = inst->CurrShift + PLOT_SHIFT;
+    if (v >= inst->GridCellWidth)
+        v -= inst->GridCellWidth;
+    inst->CurrShift = v;
+
+    GetClientRect(inst->hWnd, &rc);
+    if (inst->CpuRegionWidth == 0 ||
+        ((rc.right > 0) && (rc.right != (INT)inst->CpuRegionWidth)))
+    {
+        GraphCtrl_RedrawPerCpu(inst);
+        return;
+    }
+
+    hdcg = inst->hdcGraph;
+
+    for (Cpu = 0; Cpu < nCpus; Cpu++)
+    {
+        RECT  pc;
+        INT   ColL, ColR, Top, Bot, CellH, InL, InR, PrevY, CurrY, p;
+        RECT  rcDirt;
+        UINT  PrevIdx;
+        PBYTE t = inst->CpuBuffer + Cpu * inst->NumberOfPoints;
+        PBYTE k = inst->CpuKernelBuffer + Cpu * inst->NumberOfPoints;
+
+        GraphCtrl_PerCpuPane(inst, Cpu, &pc);
+        ColL = pc.left; ColR = pc.right; Top = pc.top; Bot = pc.bottom;
+        CellH = Bot - Top;
+        InL = ColL + 1;
+        InR = ColR - 1;
+        if (InR - InL <= PLOT_SHIFT)
+            continue;
+
+        BitBlt(hdcg, InL, Top + 1, InR - InL - PLOT_SHIFT, CellH - 2,
+               hdcg, InL + PLOT_SHIFT, Top + 1, SRCCOPY);
+
+        rcDirt.left = InR - PLOT_SHIFT;
+        rcDirt.top = Top + 1;
+        rcDirt.right = InR;
+        rcDirt.bottom = Bot - 1;
+        FillRect(hdcg, &rcDirt, inst->hBrushBack);
+
+        SelectObject(hdcg, inst->hPenGrid);
+        for (p = Top + inst->GridCellHeight - 1; p < Bot - 1; p += inst->GridCellHeight)
+        {
+            MoveToEx(hdcg, InR - PLOT_SHIFT, p, NULL);
+            LineTo(hdcg, InR, p);
+        }
+        if (inst->CurrShift < PLOT_SHIFT)
+        {
+            p = InR - inst->CurrShift - 1;
+            if (p >= InL)
+            {
+                MoveToEx(hdcg, p, Top + 1, NULL);
+                LineTo(hdcg, p, Bot - 1);
+            }
+        }
+
+        PrevIdx = Next ? (Next - 1) : (inst->NumberOfPoints - 1);
+
+        if (inst->DrawSecondaryPlot)
+        {
+            PrevY = Bot - 2 - (*(k + PrevIdx) * (CellH - 3)) / 100;
+            CurrY = Bot - 2 - (kvals[Cpu] * (CellH - 3)) / 100;
+            SelectObject(hdcg, inst->hPen1);
+            MoveToEx(hdcg, InR - PLOT_SHIFT - 1, PrevY, NULL);
+            LineTo(hdcg, InR - 1, CurrY);
+        }
+
+        PrevY = Bot - 2 - (*(t + PrevIdx) * (CellH - 3)) / 100;
+        CurrY = Bot - 2 - (vals[Cpu] * (CellH - 3)) / 100;
+        SelectObject(hdcg, inst->hPen0);
+        MoveToEx(hdcg, InR - PLOT_SHIFT - 1, PrevY, NULL);
+        LineTo(hdcg, InR - 1, CurrY);
+    }
+}
+
+/* Redraws the graph in the selected view, after the view or an option changed */
+void
+GraphCtrl_Redraw(PTM_GRAPH_CONTROL inst)
+{
+    if (inst->PerCpuMode && inst->CpuBuffer && inst->CpuSeries)
+        GraphCtrl_RedrawPerCpu(inst);
+    else
+        GraphCtrl_RedrawBitmap(inst, inst->BitmapHeight);
+}
+
+void
+GraphCtrl_SetPerCpuMode(PTM_GRAPH_CONTROL inst, BOOL PerCpu)
+{
+    inst->PerCpuMode = PerCpu;
+    inst->CpuRegionWidth = 0;
+    if (inst->hdcGraph)
+        GraphCtrl_Redraw(inst);
+}
+
 inline void
 GraphCtrl_RedrawBitmap(PTM_GRAPH_CONTROL inst, INT h)
 {
@@ -286,7 +575,7 @@ GraphCtrl_RedrawOnHeightChange(PTM_GRAPH_CONTROL inst, INT nh)
     DeleteObject(hbmOld);
     ReleaseDC(inst->hParentWnd, hdc);
 
-    GraphCtrl_RedrawBitmap(inst, nh);
+    GraphCtrl_Redraw(inst);
 }
 
 extern TM_GRAPH_CONTROL PerformancePageCpuUsageHistoryGraph;

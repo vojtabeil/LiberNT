@@ -46,9 +46,6 @@ static void TEST_setjmp_normal(void)
         case 2:
             ok_int(value, 1);
             stage = 3;
-#ifdef __clang__ /* avoiding clang build hung up */
-            skip("avoiding clang build crash\n");
-#else /* ndef __clang__ */
             _SEH2_TRY
             {
                 longjmp(g_jmp_buf, 333);
@@ -61,9 +58,15 @@ static void TEST_setjmp_normal(void)
             _SEH2_END;
             assert(FALSE);
             break;
-#endif /* ndef __clang__ */
         case 3:
             ok_int(value, 333);
+#if defined(_M_PPC)
+            /* NT PowerPC's ordinary setjmp has Type == 0: longjmp restores
+             * the saved registers without unwinding SEH.  _setjmpex is the
+             * separate ABI entry that runs termination handlers. */
+            ok_int(finally_called, FALSE);
+            ok_int(abnormal, FALSE);
+#else
 #ifdef _M_AMD64 // This is broken on Windows 2003 x64
             if (NtCurrentPeb()->OSMajorVersion >= 6)
 #endif
@@ -71,10 +74,8 @@ static void TEST_setjmp_normal(void)
                 ok_int(finally_called, TRUE);
                 ok_int(abnormal, TRUE);
             }
+#endif
             stage = 4;
-#ifdef __clang__ /* avoiding clang build hung up */
-            skip("avoiding clang build crash\n");
-#else /* ndef __clang__ */
             _SEH2_TRY
             {
                 longjmp(g_jmp_buf, 444);
@@ -86,7 +87,6 @@ static void TEST_setjmp_normal(void)
             _SEH2_END;
             assert(FALSE);
             break;
-#endif /* ndef __clang__ */
         case 4:
             ok_int(value, 444);
             ok_int(exception, 0);
@@ -198,6 +198,8 @@ static void TEST_setjmp_zero_longjmp_check(void)
         CHECK_POINT(15);
     }
 }
+
+#if defined(_M_IX86) || defined(_M_AMD64)
 
 void call_setjmp(_JUMP_BUFFER *Buf);
 ULONG_PTR get_sp(void);
@@ -330,6 +332,8 @@ static void TEST_buffer_contents(void)
     ok_eq_hex(buf.UnwindFunc, 0xCCCCCCCC);
 #endif
 }
+
+#endif /* defined(_M_IX86) || defined(_M_AMD64) */
 
 #ifdef _M_IX86
 
@@ -564,7 +568,11 @@ START_TEST(setjmp)
     TEST_setjmp_return_check();
     TEST_setjmp_longjmp_integration();
     TEST_setjmp_zero_longjmp_check();
+#if defined(_M_IX86) || defined(_M_AMD64)
     TEST_buffer_contents();
+#else
+    skip("setjmp buffer layout checks are only implemented for x86/x64.\n");
+#endif
 #ifdef _M_IX86
     Test_setjmp1_longjmp_inside_SEH();
     Test_setjmp1_external_inside_SEH();

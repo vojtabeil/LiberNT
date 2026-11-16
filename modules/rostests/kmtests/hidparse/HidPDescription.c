@@ -128,12 +128,132 @@ static UCHAR PowerProEliteDescriptor[] = {
 };
 C_ASSERT(sizeof(PowerProEliteDescriptor) == 148);
 
+static UCHAR LargeReportCountDescriptor[] = {
+    0x05, 0x01,                   /* Usage Page (Generic Desktop), */
+    0x09, 0x06,                   /* Usage (Keyboard), */
+    0xa1, 0x01,                   /* Collection (Application), */
+    0x75, 0x01,                   /*   Report Size (1), */
+    0x97, 0xec, 0x04, 0x00, 0x00, /*   Report Count (1260), */
+    0x81, 0x02,                   /*   Input (Data, Variable, Absolute), */
+    0xc0                          /* End Collection */
+};
+C_ASSERT(sizeof(LargeReportCountDescriptor) == 16);
+
+static UCHAR OverflowReportCountDescriptor[] = {
+    0x05, 0x01,                   /* Usage Page (Generic Desktop), */
+    0x09, 0x06,                   /* Usage (Keyboard), */
+    0xa1, 0x01,                   /* Collection (Application), */
+    0x75, 0x01,                   /*   Report Size (1), */
+    0x97, 0xff, 0xff, 0xff, 0xff, /*   Report Count (UINT32_MAX), */
+    0x81, 0x02,                   /*   Input (Data, Variable, Absolute), */
+    0xc0                          /* End Collection */
+};
+C_ASSERT(sizeof(OverflowReportCountDescriptor) == 16);
+
+static UCHAR SignedAxisDescriptor[] = {
+    0x05, 0x01,       /* Usage Page (Generic Desktop), */
+    0x09, 0x05,       /* Usage (Game Pad), */
+    0xa1, 0x01,       /* Collection (Application), */
+    0x85, 0x02,       /*   Report ID (2), */
+    0x09, 0x30,       /*   Usage (X), */
+    0x16, 0x00, 0x80, /*   Logical Minimum (-32768), */
+    0x26, 0xff, 0x7f, /*   Logical Maximum (32767), */
+    0x36, 0x00, 0x80, /*   Physical Minimum (-32768), */
+    0x46, 0xff, 0x7f, /*   Physical Maximum (32767), */
+    0x75, 0x10,       /*   Report Size (16), */
+    0x95, 0x01,       /*   Report Count (1), */
+    0x81, 0x02,       /*   Input (Data, Variable, Absolute), */
+    0xc0              /* End Collection */
+};
+C_ASSERT(sizeof(SignedAxisDescriptor) == 29);
+
+#define LAYOUT_HEADER 0x05, 0x01, 0x09, 0x06, 0xa1, 0x01
+#define LAYOUT_USAGES 0x05, 0x07, 0x19, 0x00, 0x29, 0x01
+
+static const struct
+{
+    const char *Name;
+    UCHAR Descriptor[40];
+    UCHAR Length;
+    NTSTATUS Status;
+    USHORT Input, Output, Feature;
+    USHORT InputButtons, InputValues, OutputButtons, OutputValues, FeatureButtons, FeatureValues;
+} ReportLayouts[] =
+{
+    { "data without usage", { LAYOUT_HEADER, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0xc0 }, 13, STATUS_COULD_NOT_INTERPRET },
+    { "constant without usage", { LAYOUT_HEADER, 0x75, 0x01, 0x95, 0x08, 0x81, 0x01, 0xc0 }, 13, STATUS_SUCCESS, 2 },
+    { "output without usage", { LAYOUT_HEADER, 0x75, 0x08, 0x95, 0x01, 0x91, 0x02, 0xc0 }, 13, STATUS_COULD_NOT_INTERPRET },
+    { "feature without usage", { LAYOUT_HEADER, 0x75, 0x08, 0x95, 0x01, 0xb1, 0x02, 0xc0 }, 13, STATUS_COULD_NOT_INTERPRET },
+    { "8 bits", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, 0xc0 }, 19, STATUS_SUCCESS, 2, 0, 0, 1 },
+    { "255 bits", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x95, 0xff, 0x81, 0x02, 0xc0 }, 19, STATUS_COULD_NOT_INTERPRET },
+    { "256 bits", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x96, 0x00, 0x01, 0x81, 0x02, 0xc0 }, 20, STATUS_SUCCESS, 33, 0, 0, 1 },
+    { "1023 bits", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x96, 0xff, 0x03, 0x81, 0x02, 0xc0 }, 20, STATUS_COULD_NOT_INTERPRET },
+    { "1024 bits", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x96, 0x00, 0x04, 0x81, 0x02, 0xc0 }, 20, STATUS_SUCCESS, 129, 0, 0, 1 },
+    { "4096 bits", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x96, 0x00, 0x10, 0x81, 0x02, 0xc0 }, 20, STATUS_SUCCESS, 513, 0, 0, 1 },
+    { "65535 bits", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x96, 0xff, 0xff, 0x81, 0x02, 0xc0 }, 20, STATUS_COULD_NOT_INTERPRET },
+    { "255 bytes", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x08, 0x95, 0xff, 0x81, 0x02, 0xc0 }, 19, STATUS_SUCCESS, 256, 0, 0, 0, 1 },
+    { "two 4 bit items", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x95, 0x04, 0x81, 0x02, LAYOUT_USAGES, 0x95, 0x04, 0x81, 0x02, 0xc0 }, 29, STATUS_SUCCESS, 2, 0, 0, 2 },
+    { "4 bits", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x95, 0x04, 0x81, 0x02, 0xc0 }, 19, STATUS_COULD_NOT_INTERPRET },
+    { "4 bits and constant padding", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x95, 0x04, 0x81, 0x02, 0x95, 0x04, 0x81, 0x01, 0xc0 }, 23, STATUS_SUCCESS, 2, 0, 0, 1 },
+    { "7 input bits", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x95, 0x07, 0x81, 0x02, LAYOUT_USAGES, 0x95, 0x08, 0x91, 0x02, 0xc0 }, 29, STATUS_COULD_NOT_INTERPRET },
+    { "7 output bits", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x95, 0x08, 0x81, 0x02, LAYOUT_USAGES, 0x95, 0x07, 0x91, 0x02, 0xc0 }, 29, STATUS_COULD_NOT_INTERPRET },
+    { "4 bits in two reports", { LAYOUT_HEADER, 0x85, 0x01, LAYOUT_USAGES, 0x75, 0x01, 0x95, 0x04, 0x81, 0x02, 0x85, 0x02, LAYOUT_USAGES, 0x95, 0x04, 0x81, 0x02, 0xc0 }, 33, STATUS_COULD_NOT_INTERPRET },
+    { "2 byte report count", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x96, 0x08, 0x00, 0x81, 0x02, 0xc0 }, 20, STATUS_SUCCESS, 2, 0, 0, 1 },
+    { "4 byte report count", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x97, 0x08, 0x00, 0x00, 0x00, 0x81, 0x02, 0xc0 }, 22, STATUS_SUCCESS },
+    { "4 byte report count after 1 byte", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x95, 0x08, 0x97, 0xec, 0x04, 0x00, 0x00, 0x81, 0x02, 0xc0 }, 24, STATUS_SUCCESS, 2, 0, 0, 1 },
+    { "4 byte report size", { LAYOUT_HEADER, LAYOUT_USAGES, 0x77, 0x01, 0x00, 0x00, 0x00, 0x95, 0x08, 0x81, 0x02, 0xc0 }, 22, STATUS_SUCCESS, 0, 0, 0, 0, 1 },
+    { "array", { LAYOUT_HEADER, LAYOUT_USAGES, 0x75, 0x01, 0x95, 0x08, 0x81, 0x00, 0xc0 }, 19, STATUS_SUCCESS, 2, 0, 0, 1 },
+};
+
+static
+VOID
+TestReportLayouts(VOID)
+{
+    HIDP_DEVICE_DESC DeviceDescription;
+    HIDP_CAPS Caps;
+    NTSTATUS Status;
+    ULONG i;
+
+    for (i = 0; i < RTL_NUMBER_OF(ReportLayouts); i++)
+    {
+        RtlZeroMemory(&DeviceDescription, sizeof(DeviceDescription));
+        Status = HidP_GetCollectionDescription((PHIDP_REPORT_DESCRIPTOR)ReportLayouts[i].Descriptor, ReportLayouts[i].Length, NonPagedPool, &DeviceDescription);
+        ok(Status == ReportLayouts[i].Status, "%s: Status = 0x%lx, expected 0x%lx\n", ReportLayouts[i].Name, Status, ReportLayouts[i].Status);
+        if (!NT_SUCCESS(Status))
+            continue;
+        if (DeviceDescription.CollectionDescLength >= 1)
+        {
+            ok(DeviceDescription.CollectionDesc[0].InputLength == ReportLayouts[i].Input, "%s: InputLength = %u\n", ReportLayouts[i].Name, DeviceDescription.CollectionDesc[0].InputLength);
+            ok(DeviceDescription.CollectionDesc[0].OutputLength == ReportLayouts[i].Output, "%s: OutputLength = %u\n", ReportLayouts[i].Name, DeviceDescription.CollectionDesc[0].OutputLength);
+            ok(DeviceDescription.CollectionDesc[0].FeatureLength == ReportLayouts[i].Feature, "%s: FeatureLength = %u\n", ReportLayouts[i].Name, DeviceDescription.CollectionDesc[0].FeatureLength);
+            Status = HidP_GetCaps(DeviceDescription.CollectionDesc[0].PreparsedData, &Caps);
+            ok(Status == HIDP_STATUS_SUCCESS, "%s: HidP_GetCaps = 0x%lx\n", ReportLayouts[i].Name, Status);
+            if (Status == HIDP_STATUS_SUCCESS)
+            {
+                ok(Caps.NumberInputButtonCaps == ReportLayouts[i].InputButtons, "%s: NumberInputButtonCaps = %u\n", ReportLayouts[i].Name, Caps.NumberInputButtonCaps);
+                ok(Caps.NumberInputValueCaps == ReportLayouts[i].InputValues, "%s: NumberInputValueCaps = %u\n", ReportLayouts[i].Name, Caps.NumberInputValueCaps);
+                ok(Caps.NumberOutputButtonCaps == ReportLayouts[i].OutputButtons, "%s: NumberOutputButtonCaps = %u\n", ReportLayouts[i].Name, Caps.NumberOutputButtonCaps);
+                ok(Caps.NumberOutputValueCaps == ReportLayouts[i].OutputValues, "%s: NumberOutputValueCaps = %u\n", ReportLayouts[i].Name, Caps.NumberOutputValueCaps);
+                ok(Caps.NumberFeatureButtonCaps == ReportLayouts[i].FeatureButtons, "%s: NumberFeatureButtonCaps = %u\n", ReportLayouts[i].Name, Caps.NumberFeatureButtonCaps);
+                ok(Caps.NumberFeatureValueCaps == ReportLayouts[i].FeatureValues, "%s: NumberFeatureValueCaps = %u\n", ReportLayouts[i].Name, Caps.NumberFeatureValueCaps);
+            }
+        }
+        else
+        {
+            ok(0, "%s: no collection\n", ReportLayouts[i].Name);
+        }
+        HidP_FreeCollectionDescription(&DeviceDescription);
+    }
+}
+
 static
 VOID
 TestGetCollectionDescription(VOID)
 {
     NTSTATUS Status;
     HIDP_DEVICE_DESC DeviceDescription;
+    HIDP_VALUE_CAPS ValueCaps;
+    USHORT Count;
 
     /* Empty report descriptor */
     RtlFillMemory(&DeviceDescription, sizeof(DeviceDescription), 0x55);
@@ -147,6 +267,34 @@ TestGetCollectionDescription(VOID)
     ok_eq_pointer(DeviceDescription.ReportIDs, NULL);
     ok_eq_ulong(DeviceDescription.ReportIDsLength, 0);
     if (NT_SUCCESS(Status)) HidP_FreeCollectionDescription(&DeviceDescription);
+
+    /* Signed bounds must be extended to LONG before being exposed in value caps. */
+    Status = HidP_GetCollectionDescription(SignedAxisDescriptor,
+                                           sizeof(SignedAxisDescriptor),
+                                           NonPagedPool,
+                                           &DeviceDescription);
+    ok_eq_hex(Status, STATUS_SUCCESS);
+    ok_eq_ulong(DeviceDescription.CollectionDescLength, 1);
+    if (!skip(NT_SUCCESS(Status) && DeviceDescription.CollectionDescLength >= 1,
+              "Signed-axis descriptor parsing failure\n"))
+    {
+        Count = 1;
+        RtlZeroMemory(&ValueCaps, sizeof(ValueCaps));
+        Status = HidP_GetValueCaps(HidP_Input,
+                                   &ValueCaps,
+                                   &Count,
+                                   DeviceDescription.CollectionDesc[0].PreparsedData);
+        ok_eq_hex(Status, HIDP_STATUS_SUCCESS);
+        ok_eq_uint(Count, 1);
+        if (Status == HIDP_STATUS_SUCCESS && Count == 1)
+        {
+            ok_eq_long(ValueCaps.LogicalMin, -32768);
+            ok_eq_long(ValueCaps.LogicalMax, 32767);
+            ok_eq_long(ValueCaps.PhysicalMin, -32768);
+            ok_eq_long(ValueCaps.PhysicalMax, 32767);
+        }
+        HidP_FreeCollectionDescription(&DeviceDescription);
+    }
 
     /* Sample keyboard report descriptor from the HID spec */
     Status = HidP_GetCollectionDescription(ExampleKeyboardDescriptor,
@@ -233,6 +381,28 @@ TestGetCollectionDescription(VOID)
         }
         HidP_FreeCollectionDescription(&DeviceDescription);
     }
+
+    /* A data item without a usage */
+    RtlFillMemory(&DeviceDescription, sizeof(DeviceDescription), 0x55);
+    Status = HidP_GetCollectionDescription(LargeReportCountDescriptor, sizeof(LargeReportCountDescriptor), NonPagedPool, &DeviceDescription);
+    ok_eq_hex(Status, STATUS_COULD_NOT_INTERPRET);
+    ok_eq_pointer(DeviceDescription.CollectionDesc, NULL);
+    ok_eq_ulong(DeviceDescription.CollectionDescLength, 0);
+    ok_eq_pointer(DeviceDescription.ReportIDs, NULL);
+    ok_eq_ulong(DeviceDescription.ReportIDsLength, 0);
+    if (NT_SUCCESS(Status)) HidP_FreeCollectionDescription(&DeviceDescription);
+
+    /* Reject a report count whose private report-item array would overflow */
+    RtlFillMemory(&DeviceDescription, sizeof(DeviceDescription), 0x55);
+    Status = HidP_GetCollectionDescription(OverflowReportCountDescriptor, sizeof(OverflowReportCountDescriptor), NonPagedPool, &DeviceDescription);
+    ok_eq_hex(Status, STATUS_COULD_NOT_INTERPRET);
+    ok_eq_pointer(DeviceDescription.CollectionDesc, NULL);
+    ok_eq_ulong(DeviceDescription.CollectionDescLength, 0);
+    ok_eq_pointer(DeviceDescription.ReportIDs, NULL);
+    ok_eq_ulong(DeviceDescription.ReportIDsLength, 0);
+    if (NT_SUCCESS(Status)) HidP_FreeCollectionDescription(&DeviceDescription);
+
+    TestReportLayouts();
 }
 
 NTSTATUS

@@ -7,8 +7,6 @@
 
 #include "msctfime.h"
 
-WINE_DEFAULT_DEBUG_CHANNEL(msctfime);
-
 /***********************************************************************/
 
 UINT WM_MSIME_SERVICE = 0;
@@ -874,13 +872,14 @@ HRESULT UIComposition::OnImeSetContextAfter(CicIMCLock& imcLock)
 #define UI_GWLP_SIZE (UI_GWLP_UI + sizeof(UI*))
 
 /// @implemented
-UI::UI(HWND hWnd) : m_hWnd(hWnd)
+UI::UI(HWND hWnd) : m_hWnd(hWnd), m_pComp(NULL), m_pCompWnd(NULL)
 {
 }
 
 /// @implemented
 UI::~UI()
 {
+    delete m_pCompWnd;
     delete m_pComp;
 }
 
@@ -889,6 +888,10 @@ HRESULT UI::_Create()
 {
     m_pComp = new(cicNoThrow) UIComposition(m_hWnd);
     if (!m_pComp)
+        return E_OUTOFMEMORY;
+
+    m_pCompWnd = new(cicNoThrow) CCompositionWindow(m_hWnd);
+    if (!m_pCompWnd)
         return E_OUTOFMEMORY;
 
     ::SetWindowLongPtrW(m_hWnd, UI_GWLP_UI, (LONG_PTR)this);
@@ -993,7 +996,7 @@ HRESULT CALLBACK CIMEUIWindowHandler::ImeUIOnLayoutChange(LPARAM lParam)
         return S_OK;
 
     CicInputContext *pCicIC = imeContext.get().m_pCicIC;
-    if (pCicIC)
+    if (pCicIC && pCicIC->m_pContextOwnerServices)
     {
         auto pContextOwnerServices = pCicIC->m_pContextOwnerServices;
         pContextOwnerServices->AddRef();
@@ -1039,7 +1042,7 @@ CIMEUIWindowHandler::ImeUIMsImeModeBiasHandler(HWND hWnd, WPARAM wParam, LPARAM 
         return FALSE;
 
     CicInputContext *pCicIC = imeContext.get().m_pCicIC;
-    if (!pCicIC)
+    if (!pCicIC || !pCicIC->m_pContextOwnerServices)
         return FALSE;
 
     if (wParam == 1)
@@ -1234,11 +1237,7 @@ CIMEUIWindowHandler::ImeUIWndProcWorker(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
 {
     TLS *pTLS = TLS::GetTLS();
     if (pTLS && (pTLS->m_dwSystemInfoFlags & IME_SYSINFO_WINLOGON))
-    {
-        if (uMsg == WM_CREATE)
-            return -1;
         return ::DefWindowProcW(hWnd, uMsg, wParam, lParam);
-    }
 
     switch (uMsg)
     {
@@ -1278,6 +1277,9 @@ CIMEUIWindowHandler::ImeUIWndProcWorker(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
                         pUI->m_pComp->OnImeCompositionUpdate(imcLock);
                         ::SetTimer(hWnd, 0, 10, NULL);
                         pUI->m_pComp->m_bInComposition = TRUE;
+                        imcLock.unlock();
+                        if (pUI->m_pCompWnd)
+                            pUI->m_pCompWnd->Update(hIMC);
                     }
                     break;
                 }
@@ -1285,10 +1287,19 @@ CIMEUIWindowHandler::ImeUIWndProcWorker(HWND hWnd, UINT uMsg, WPARAM wParam, LPA
                 {
                     ::KillTimer(hWnd, 0);
                     pUI->m_pComp->OnImeEndComposition();
+                    if (pUI->m_pCompWnd)
+                        pUI->m_pCompWnd->Hide();
                     break;
                 }
                 case WM_IME_SETCONTEXT:
                 {
+                    if (pUI->m_pCompWnd)
+                    {
+                        if (wParam)
+                            pUI->m_pCompWnd->SetAllowed(!!(lParam & ISC_SHOWUICOMPOSITIONWINDOW));
+                        else
+                            pUI->m_pCompWnd->Hide();
+                    }
                     pUI->OnImeSetContext(imcLock, wParam, lParam);
                     ::KillTimer(hWnd, 1);
                     ::SetTimer(hWnd, 1, 300, NULL);
@@ -1395,6 +1406,11 @@ BOOL RegisterImeClass(VOID)
 /// @implemented
 VOID UnregisterImeClass(VOID)
 {
+#ifdef __REACTOS__
+    /* The class icons are shared system objects. */
+    UnregisterClassW(L"MSCTFIME UI", g_hInst);
+    UnregisterClassW(L"MSCTFIME Composition", g_hInst);
+#else
     WNDCLASSEXW wcx;
 
     GetClassInfoExW(g_hInst, L"MSCTFIME UI", &wcx);
@@ -1406,4 +1422,6 @@ VOID UnregisterImeClass(VOID)
     UnregisterClassW(L"MSCTFIME Composition", g_hInst);
     DestroyIcon(wcx.hIcon);
     DestroyIcon(wcx.hIconSm);
+#endif
+    CCompositionWindow::UnregisterWndClass();
 }

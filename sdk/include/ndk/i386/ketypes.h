@@ -19,6 +19,21 @@ Author:
 #ifndef _I386_KETYPES_H
 #define _I386_KETYPES_H
 
+#define PROCESSOR_POWER_STATE_LEGACY_AREA_SIZE 0x160
+#include <potypes.h>
+#ifndef NTOS_MODE_USER
+C_ASSERT(FIELD_OFFSET(PROCESSOR_POWER_STATE, ArchitecturalEfficiencyClass) == 0x160);
+C_ASSERT(FIELD_OFFSET(PROCESSOR_POWER_STATE, PerformanceSchedulingClass) == 0x161);
+C_ASSERT(FIELD_OFFSET(PROCESSOR_POWER_STATE, EfficiencySchedulingClass) == 0x162);
+C_ASSERT(FIELD_OFFSET(PROCESSOR_POWER_STATE, Reserved) == 0x163);
+C_ASSERT(FIELD_OFFSET(PROCESSOR_POWER_STATE, Parked) == 0x164);
+/* FIXME: Win10 i386 has LongPriorQosPeriod at +0x165 and no SoftParked */
+#endif
+
+/* Loader/kernel contract, independent of the NTDDI-selected KPRCB layout.
+ * Vista+ PCRs exceed one page. Shared user data must not alias this storage. */
+#define KIPCR_BOOT_SIZE 0x2000
+
 //
 // Dependencies
 //
@@ -204,6 +219,17 @@ typedef enum
 #define IPI_FREEZE              4
 #define IPI_PACKET_READY        8
 #define IPI_SYNCH_REQUEST       16
+
+//
+// Flags for KPRCB::IpiFrozen
+//
+#define IPI_FROZEN_STATE_RUNNING 0
+#define IPI_FROZEN_STATE_FROZEN 2
+#define IPI_FROZEN_STATE_THAW 3
+#define IPI_FROZEN_STATE_OWNER 4
+#define IPI_FROZEN_STATE_TARGET_FREEZE 5
+#define IPI_FROZEN_STATE_SAVING 6
+#define IPI_FROZEN_FLAG_ACTIVE 0x20
 
 //
 // PRCB Flags
@@ -782,14 +808,8 @@ typedef struct _KPRCB
     ULONG CoreProcessorSet;
 #endif
 #ifdef __REACTOS__
-#if (NTDDI_VERSION < NTDDI_LONGHORN)
-    ULONGLONG StartCycles;
-    ULONGLONG CycleTime;
-#endif
-#if  (NTDDI_VERSION < NTDDI_WIN10)
-    // On Win 10+ the FeatureBits field is extended to 64 bits
+    /* ReactOS stores the upper half separately on i386. */
     ULONG FeatureBitsHigh;
-#endif
 #endif
 } KPRCB, *PKPRCB;
 

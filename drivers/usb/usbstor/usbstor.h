@@ -2,11 +2,14 @@
 #define _USBSTOR_H_
 
 #include <wdm.h>
+#include <ntddk.h>
 #include <ntstrsafe.h>
 #include <usbdi.h>
 #include <usbbusif.h>
 #include <usbdlib.h>
 #include <classpnp.h>
+#include <reactos/drivers/dumpstor.h>
+#include <reactos/drivers/dumpscsi.h>
 
 #define USB_STOR_TAG 'sbsu'
 
@@ -60,12 +63,13 @@
 
 #define USB_MAXCHILDREN 16
 #define MAX_LUN 0xF
-#define USBSTOR_DEFAULT_MAX_TRANSFER_LENGTH 0x10000
+#define USBSTOR_USB2_MAX_TRANSFER_LENGTH (64 * 1024)
+#define USBSTOR_USB3_MAX_TRANSFER_LENGTH (512 * 1024)
 
 #define CBW_SIGNATURE 0x43425355
 #define CSW_SIGNATURE 0x53425355
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 typedef struct
 {
@@ -79,6 +83,7 @@ typedef struct
 } CBW, *PCBW;
 
 C_ASSERT(sizeof(CBW) == 31);
+C_ASSERT(sizeof(CBW) <= SYSTEM_CACHE_ALIGNMENT_SIZE);
 
 #define CSW_STATUS_COMMAND_PASSED 0x00
 #define CSW_STATUS_COMMAND_FAILED 0x01
@@ -92,18 +97,19 @@ typedef struct
     UCHAR Status;                                                    // CSW status
 } CSW, *PCSW;
 
-#include <poppack.h>
+C_ASSERT(sizeof(CSW) <= SYSTEM_CACHE_ALIGNMENT_SIZE);
+
+#pragma pack(pop)
 
 typedef struct
 {
     PIRP Irp;
     ULONG ErrorIndex;
     ULONG StallRetryCount;                                            // the number of retries after receiving USBD_STATUS_STALL_PID status
-    union
-    {
-        CBW cbw;
-        CSW csw;
-    };
+    PCBW Cbw;
+    PCSW Csw;
+    PVOID CbwAllocation;
+    PVOID CswAllocation;
     URB Urb;
     SCSI_REQUEST_BLOCK SenseSrb;
 } IRP_CONTEXT, *PIRP_CONTEXT;
@@ -116,6 +122,7 @@ typedef struct __COMMON_DEVICE_EXTENSION__
 
 #define USBSTOR_FDO_FLAGS_DEVICE_RESETTING   0x00000001 // hard reset is in progress
 #define USBSTOR_FDO_FLAGS_IRP_LIST_FREEZE    0x00000002 // the irp list is freezed
+#define USBSTOR_FDO_FLAGS_RESET_REQUIRED     0x00000004 // a failed reset must be retried before I/O
 
 typedef struct
 {
@@ -139,14 +146,23 @@ typedef struct
     ULONG IrpPendingCount;                                                               // count of irp pending
     PSCSI_REQUEST_BLOCK ActiveSrb;                                                       // stores the current active SRB
     KEVENT NoPendingRequests;                                                            // set if no pending or in progress requests
-    PSCSI_REQUEST_BLOCK LastTimerActiveSrb;                                              // last timer tick active srb
-    ULONG SrbErrorHandlingActive;                                                        // error handling of srb is activated
-    ULONG TimerWorkQueueEnabled;                                                         // timer work queue enabled
     ULONG InstanceCount;                                                                 // pdo instance count
     KSPIN_LOCK CommonLock;
     PIO_WORKITEM ResetDeviceWorkItem;
     ULONG Flags;
+    volatile LONG BotResetPending;
     IRP_CONTEXT CurrentIrpContext;
+    KSPIN_LOCK RequestTimerLock;
+    KTIMER RequestTimer;
+    KDPC RequestTimerDpc;
+    PIRP RequestTimerIrp;
+    PIRP DeferredCompletionIrp;
+    ULONG RequestTimeoutValue;
+    BOOLEAN RequestTimerDpcRunning;
+    BOOLEAN RequestTimedOut;
+    BOOLEAN DeferredCompletionReset;
+    USBD_HANDLE UsbdHandle;
+    ULONG MaxTransferLength;
 }FDO_DEVICE_EXTENSION, *PFDO_DEVICE_EXTENSION;
 
 typedef struct
@@ -158,17 +174,25 @@ typedef struct
     PDEVICE_OBJECT LowerDeviceObject;                                                    // points to FDO
     PDEVICE_OBJECT *PDODeviceObject;                                                     // entry in pdo list
     PDEVICE_OBJECT Self;                                                                 // self
+    struct _USBSTOR_DUMP_CONTEXT *DumpContext;
+    IO_REMOVE_LOCK RemoveLock;
+    BOOLEAN Removed;
     // the whole structure is not stored
     UCHAR InquiryData[INQUIRYDATABUFFERSIZE];                                            // USB SCSI inquiry data
 }PDO_DEVICE_EXTENSION, *PPDO_DEVICE_EXTENSION;
 
-typedef struct _ERRORHANDLER_WORKITEM_DATA
+#define USBSTOR_DUMP_CONTEXT_TAG 'pDsB'
+
+typedef struct _USBSTOR_DUMP_CONTEXT
 {
-    PDEVICE_OBJECT DeviceObject;
-    PIRP_CONTEXT Context;
-    WORK_QUEUE_ITEM WorkQueueItem;
-    PIRP Irp;
-} ERRORHANDLER_WORKITEM_DATA, *PERRORHANDLER_WORKITEM_DATA;
+    PFDO_DEVICE_EXTENSION FdoExtension;
+    PPDO_DEVICE_EXTENSION PdoExtension;
+    ROS_USB_DUMP_INTERFACE UsbInterface;
+    CBW Cbw;
+    CSW Csw;
+    ULONG BytesPerSector;
+    ULONG Tag;
+} USBSTOR_DUMP_CONTEXT, *PUSBSTOR_DUMP_CONTEXT;
 
 // we need this to be compatible with ReactOS' classpnp (which is compiled with NTDDI_WIN8)
 typedef struct _STORAGE_ADAPTER_DESCRIPTOR_WIN8 {
@@ -212,6 +236,11 @@ USBSTOR_CreatePDO(
     IN PDEVICE_OBJECT DeviceObject,
     IN UCHAR LUN);
 
+VOID
+USBSTOR_PdoStopRequests(
+    IN PPDO_DEVICE_EXTENSION PDODeviceExtension,
+    IN PIRP Irp);
+
 //---------------------------------------------------------------------
 //
 // misc.c routines
@@ -236,6 +265,8 @@ NTSTATUS
 USBSTOR_SyncUrbRequest(
     IN PDEVICE_OBJECT DeviceObject,
     OUT PURB UrbRequest);
+
+NTSTATUS USBSTOR_SyncInternalRequest(IN PDEVICE_OBJECT DeviceObject, IN ULONG IoControlCode, IN PVOID Argument);
 
 NTSTATUS
 USBSTOR_GetMaxLUN(
@@ -318,12 +349,6 @@ USBSTOR_QueueAddIrp(
     IN PIRP Irp);
 
 VOID
-NTAPI
-USBSTOR_CancelIo(
-    IN  PDEVICE_OBJECT DeviceObject,
-    IN  PIRP Irp);
-
-VOID
 USBSTOR_QueueInitialize(
     PFDO_DEVICE_EXTENSION FDODeviceExtension);
 
@@ -332,9 +357,15 @@ USBSTOR_QueueNextRequest(
     IN PDEVICE_OBJECT DeviceObject);
 
 VOID
+USBSTOR_QueueEndReset(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN NTSTATUS Status);
+
+VOID
 USBSTOR_QueueTerminateRequest(
     IN PDEVICE_OBJECT DeviceObject,
-    IN PIRP Irp);
+    IN PIRP Irp,
+    IN BOOLEAN ResetDevice);
 
 //---------------------------------------------------------------------
 //
@@ -352,10 +383,25 @@ USBSTOR_ResetPipeWithHandle(
     IN USBD_PIPE_HANDLE PipeHandle);
 
 VOID
-NTAPI
-USBSTOR_TimerRoutine(
-    PDEVICE_OBJECT DeviceObject,
-     PVOID Context);
+USBSTOR_InitializeRequestTimer(
+    IN PFDO_DEVICE_EXTENSION FDODeviceExtension);
+
+VOID
+USBSTOR_StartRequestTimer(
+    IN PFDO_DEVICE_EXTENSION FDODeviceExtension,
+    IN PIRP Irp,
+    IN ULONG TimeOutValue);
+
+BOOLEAN
+USBSTOR_IsRequestTimedOut(
+    IN PFDO_DEVICE_EXTENSION FDODeviceExtension,
+    IN PIRP Irp);
+
+BOOLEAN
+USBSTOR_FinishRequest(
+    IN PFDO_DEVICE_EXTENSION FDODeviceExtension,
+    IN PIRP Irp,
+    IN BOOLEAN ResetDevice);
 
 VOID
 NTAPI

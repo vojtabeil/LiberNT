@@ -1,7 +1,4 @@
 
-remove_definitions(-D_WIN32_WINNT=0x502 -DWINVER=0x502)
-add_definitions(-D_WIN32_WINNT=0x600 -DWINVER=0x600)
-
 remove_definitions(-D_CRT_NON_CONFORMING_SWPRINTFS)
 
 add_definitions(
@@ -60,8 +57,8 @@ endif()
 
 set_module_type(crypt32 win32dll)
 target_link_libraries(crypt32 wine ${PSEH_LIB} oldnames)
-add_delay_importlibs(crypt32 cryptnet)
-add_importlibs(crypt32 bcrypt user32 advapi32 advapi32_vista msvcrt kernel32_vista kernel32 ntdll)
+add_delay_importlibs(crypt32 cryptnet rpcrt4)
+add_importlibs(crypt32 bcrypt ncrypt user32 advapi32 advapi32_vista msvcrt kernel32_vista kernel32 ntdll)
 add_pch(crypt32 precomp.h "${PCH_SKIP_SOURCE}")
 add_cd_file(TARGET crypt32 DESTINATION reactos/system32 FOR all)
 set_wine_module_FIXME(crypt32) # CORE-5743: No ARRAY_SIZE macro

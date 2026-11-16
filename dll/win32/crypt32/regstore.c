@@ -43,9 +43,124 @@ typedef struct _WINE_REGSTOREINFO
     struct list      certsToDelete;
     struct list      crlsToDelete;
     struct list      ctlsToDelete;
+    HANDLE           key_modified_event;
+#ifdef __REACTOS__
+    struct list      notify_events;
+#endif
 } WINE_REGSTOREINFO;
 
-static void CRYPT_HashToStr(const BYTE *hash, LPWSTR asciiHash)
+#ifdef __REACTOS__
+typedef struct _WINE_REGSTORE_NOTIFY
+{
+    struct list entry;
+    HANDLE      caller_event;
+    HANDLE      event;
+    BOOL        duplicated;
+    HANDLE      key_event;
+    HANDLE      wait;
+    HKEY        key;
+} WINE_REGSTORE_NOTIFY;
+
+static void CALLBACK CRYPT_RegNotifyCallback(PVOID context, BOOLEAN timed_out)
+{
+    WINE_REGSTORE_NOTIFY *notify = context;
+
+    SetEvent(notify->event);
+}
+
+static void CRYPT_RegFreeNotify(WINE_REGSTORE_NOTIFY *notify)
+{
+    list_remove(&notify->entry);
+    if (notify->wait)
+        UnregisterWaitEx(notify->wait, INVALID_HANDLE_VALUE);
+    if (notify->key)
+        RegCloseKey(notify->key);
+    if (notify->key_event)
+        CloseHandle(notify->key_event);
+    if (notify->duplicated)
+        CloseHandle(notify->event);
+    CryptMemFree(notify);
+}
+
+static WINE_REGSTORE_NOTIFY *CRYPT_RegFindNotify(WINE_REGSTOREINFO *store, HANDLE event)
+{
+    WINE_REGSTORE_NOTIFY *notify;
+
+    LIST_FOR_EACH_ENTRY(notify, &store->notify_events, WINE_REGSTORE_NOTIFY, entry)
+    {
+        if (notify->caller_event == event)
+            return notify;
+    }
+    return NULL;
+}
+
+static BOOL CRYPT_RegArmNotify(WINE_REGSTORE_NOTIFY *notify)
+{
+    LSTATUS status = RegNotifyChangeKeyValue(notify->key, TRUE,
+     REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET, notify->key_event, TRUE);
+
+    if (status)
+    {
+        SetLastError(status);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static BOOL CRYPT_RegAddNotify(WINE_REGSTOREINFO *store, HANDLE event, DWORD dwFlags)
+{
+    WINE_REGSTORE_NOTIFY *notify;
+    LSTATUS status;
+    DWORD error;
+
+    if (!(notify = CryptMemAlloc(sizeof(*notify))))
+    {
+        SetLastError(ERROR_OUTOFMEMORY);
+        return FALSE;
+    }
+    notify->caller_event = event;
+    notify->event = event;
+    notify->duplicated = FALSE;
+    notify->key_event = NULL;
+    notify->wait = NULL;
+    notify->key = NULL;
+    list_add_tail(&store->notify_events, &notify->entry);
+    if ((status = RegOpenKeyExW(store->key, NULL, 0, KEY_NOTIFY, &notify->key)))
+    {
+        notify->key = NULL;
+        SetLastError(status);
+        goto fail;
+    }
+    if (!(dwFlags & CERT_STORE_CTRL_INHIBIT_DUPLICATE_HANDLE_FLAG))
+    {
+        if (!DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &notify->event,
+         0, FALSE, DUPLICATE_SAME_ACCESS))
+        {
+            notify->event = event;
+            goto fail;
+        }
+        notify->duplicated = TRUE;
+    }
+    if (!(notify->key_event = CreateEventW(NULL, FALSE, FALSE, NULL)))
+        goto fail;
+    if (!RegisterWaitForSingleObject(&notify->wait, notify->key_event, CRYPT_RegNotifyCallback,
+     notify, INFINITE, WT_EXECUTEDEFAULT))
+    {
+        notify->wait = NULL;
+        goto fail;
+    }
+    if (CRYPT_RegArmNotify(notify))
+        return TRUE;
+
+fail:
+    error = GetLastError();
+    CRYPT_RegFreeNotify(notify);
+    SetLastError(error);
+    return FALSE;
+}
+#endif
+
+void CRYPT_HashToStr(const BYTE *hash, LPWSTR asciiHash)
 {
     DWORD i;
 
@@ -197,7 +312,36 @@ static BOOL CRYPT_WriteSerializedToReg(HKEY key, DWORD flags, const BYTE *hash, 
     return ret;
 }
 
-BOOL CRYPT_SerializeContextsToReg(HKEY key, DWORD flags,
+BOOL CRYPT_SerializeContextToReg(HKEY key, DWORD flags, const WINE_CONTEXT_INTERFACE *context_iface,
+ const void *context)
+{
+    BYTE hash[20];
+    DWORD hash_size = sizeof(hash);
+    DWORD size = 0;
+    BYTE *buf;
+    BOOL ret;
+
+    if (!context_iface->getProp(context, CERT_HASH_PROP_ID, hash,  &hash_size))
+        return FALSE;
+
+    context_iface->serialize(context, 0, NULL, &size);
+    if (!size)
+        return FALSE;
+
+    if (!(buf = CryptMemAlloc(size)))
+        return FALSE;
+
+    if (!(context_iface->serialize(context, 0, buf, &size)))
+    {
+        CryptMemFree(buf);
+        return FALSE;
+    }
+    ret = CRYPT_WriteSerializedToReg(key, flags, hash, buf, size);
+    CryptMemFree(buf);
+    return ret;
+}
+
+static BOOL CRYPT_SerializeContextsToReg(HKEY key, DWORD flags,
  const WINE_CONTEXT_INTERFACE *contextInterface, HCERTSTORE memStore)
 {
     const void *context = NULL;
@@ -205,36 +349,20 @@ BOOL CRYPT_SerializeContextsToReg(HKEY key, DWORD flags,
 
     do {
         context = contextInterface->enumContextsInStore(memStore, context);
-        if (context)
-        {
-            BYTE hash[20];
-            DWORD hashSize = sizeof(hash);
-
-            ret = contextInterface->getProp(context, CERT_HASH_PROP_ID, hash,
-             &hashSize);
-            if (ret)
-            {
-                DWORD size = 0;
-                LPBYTE buf = NULL;
-
-                ret = contextInterface->serialize(context, 0, NULL, &size);
-                if (size)
-                    buf = CryptMemAlloc(size);
-                if (buf)
-                {
-                    ret = contextInterface->serialize(context, 0, buf, &size);
-                    if (ret)
-                        ret = CRYPT_WriteSerializedToReg(key, flags, hash, buf, size);
-                }
-                CryptMemFree(buf);
-            }
-        }
-        else
-            ret = TRUE;
+        ret = !context || CRYPT_SerializeContextToReg(key, flags, contextInterface, context);
     } while (ret && context != NULL);
     if (context)
         Context_Release(context_from_ptr(context));
     return ret;
+}
+
+void CRYPT_RegDeleteFromReg(HKEY key, const BYTE *sha1_hash)
+{
+    WCHAR hash[20 * 2 + 1];
+
+    CRYPT_HashToStr(sha1_hash, hash);
+    TRACE("Removing %s\n", debugstr_w(hash));
+    RegDeleteKeyW(key, hash);
 }
 
 static BOOL CRYPT_RegWriteToReg(WINE_REGSTOREINFO *store)
@@ -258,22 +386,12 @@ static BOOL CRYPT_RegWriteToReg(WINE_REGSTOREINFO *store)
             if (listToDelete[i])
             {
                 WINE_HASH_TO_DELETE *toDelete, *next;
-                WCHAR asciiHash[20 * 2 + 1];
 
                 EnterCriticalSection(&store->cs);
                 LIST_FOR_EACH_ENTRY_SAFE(toDelete, next, listToDelete[i],
                  WINE_HASH_TO_DELETE, entry)
                 {
-                    LONG rc;
-
-                    CRYPT_HashToStr(toDelete->hash, asciiHash);
-                    TRACE("Removing %s\n", debugstr_w(asciiHash));
-                    rc = RegDeleteKeyW(key, asciiHash);
-                    if (rc != ERROR_SUCCESS && rc != ERROR_FILE_NOT_FOUND)
-                    {
-                        SetLastError(rc);
-                        ret = FALSE;
-                    }
+                    CRYPT_RegDeleteFromReg(key, toDelete->hash);
                     list_remove(&toDelete->entry);
                     CryptMemFree(toDelete);
                 }
@@ -316,11 +434,16 @@ static void WINAPI CRYPT_RegCloseStore(HCERTSTORE hCertStore, DWORD dwFlags)
     WINE_REGSTOREINFO *store = hCertStore;
 
     TRACE("(%p, %08lx)\n", store, dwFlags);
-    if (dwFlags)
+    if (dwFlags & ~CERT_CLOSE_STORE_FORCE_FLAG)
         FIXME("Unimplemented flags: %08lx\n", dwFlags);
 
-    CRYPT_RegFlushStore(store, FALSE);
+    CRYPT_RegFlushStore(store, dwFlags & CERT_CLOSE_STORE_FORCE_FLAG);
+#ifdef __REACTOS__
+    while (!list_empty(&store->notify_events))
+        CRYPT_RegFreeNotify(LIST_ENTRY(list_head(&store->notify_events), WINE_REGSTORE_NOTIFY, entry));
+#endif
     RegCloseKey(store->key);
+    CloseHandle(store->key_modified_event);
     store->cs.DebugInfo->Spare[0] = 0;
     DeleteCriticalSection(&store->cs);
     CryptMemFree(store);
@@ -458,13 +581,39 @@ static BOOL WINAPI CRYPT_RegControl(HCERTSTORE hCertStore, DWORD dwFlags,
     {
     case CERT_STORE_CTRL_RESYNC:
     {
-        HCERTSTORE memStore = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0,
-         CERT_STORE_CREATE_NEW_FLAG, NULL);
+        HCERTSTORE memStore;
+        DWORD ret;
 
+        EnterCriticalSection(&store->cs);
         CRYPT_RegFlushStore(store, FALSE);
-        CRYPT_RegReadFromReg(store->key, memStore, CERT_STORE_ADD_REPLACE_EXISTING);
-        I_CertUpdateStore(store->memStore, memStore, 0, 0);
-        CertCloseStore(memStore, 0);
+        if ((ret = WaitForSingleObject(store->key_modified_event, 0)) != WAIT_TIMEOUT)
+        {
+            memStore = CertOpenStore(CERT_STORE_PROV_MEMORY, 0, 0, CERT_STORE_CREATE_NEW_FLAG, NULL);
+            if (RegNotifyChangeKeyValue(store->key, TRUE, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET,
+                store->key_modified_event, TRUE))
+            {
+                ERR("RegNotifyChangeKeyValue failed.\n");
+#ifdef __REACTOS__
+                SetEvent(store->key_modified_event);
+#endif
+            }
+            CRYPT_RegReadFromReg(store->key, memStore, CERT_STORE_ADD_REPLACE_EXISTING);
+            I_CertUpdateStore(store->memStore, memStore, 0, 0);
+            CertCloseStore(memStore, 0);
+        }
+#ifdef __REACTOS__
+        if (pvCtrlPara)
+        {
+            HANDLE event = *(const HANDLE *)pvCtrlPara;
+            WINE_REGSTORE_NOTIFY *notify = CRYPT_RegFindNotify(store, event);
+
+            if (notify)
+                ret = CRYPT_RegArmNotify(notify);
+            else
+                ret = CRYPT_RegAddNotify(store, event, dwFlags);
+        }
+#endif
+        LeaveCriticalSection(&store->cs);
         break;
     }
     case CERT_STORE_CTRL_COMMIT:
@@ -475,8 +624,35 @@ static BOOL WINAPI CRYPT_RegControl(HCERTSTORE hCertStore, DWORD dwFlags,
         FIXME("CERT_STORE_CTRL_AUTO_RESYNC: stub\n");
         break;
     case CERT_STORE_CTRL_NOTIFY_CHANGE:
+#ifdef __REACTOS__
+        if (pvCtrlPara)
+        {
+            EnterCriticalSection(&store->cs);
+            ret = CRYPT_RegAddNotify(store, *(const HANDLE *)pvCtrlPara, dwFlags);
+            LeaveCriticalSection(&store->cs);
+        }
+#else
         FIXME("CERT_STORE_CTRL_NOTIFY_CHANGE: stub\n");
+#endif
         break;
+#ifdef __REACTOS__
+    case CERT_STORE_CTRL_CANCEL_NOTIFY:
+    {
+        WINE_REGSTORE_NOTIFY *notify;
+
+        if (!pvCtrlPara)
+        {
+            SetLastError(E_INVALIDARG);
+            ret = FALSE;
+            break;
+        }
+        EnterCriticalSection(&store->cs);
+        if ((notify = CRYPT_RegFindNotify(store, *(const HANDLE *)pvCtrlPara)))
+            CRYPT_RegFreeNotify(notify);
+        LeaveCriticalSection(&store->cs);
+        break;
+    }
+#endif
     default:
         FIXME("%lu: stub\n", dwCtrlType);
         ret = FALSE;
@@ -524,10 +700,32 @@ WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
     {
         HKEY key;
 
+#ifdef __REACTOS__
+        BOOL opened;
+
+        if ((ULONG_PTR)pvPara >= (ULONG_PTR)HKEY_CLASSES_ROOT &&
+            (ULONG_PTR)pvPara <= (ULONG_PTR)HKEY_DYN_DATA)
+        {
+            LONG rc = RegOpenKeyExW((HKEY)pvPara, NULL, 0,
+             dwFlags & CERT_STORE_READONLY_FLAG ? KEY_READ : KEY_ALL_ACCESS, &key);
+
+            opened = rc == ERROR_SUCCESS;
+            if (!opened) SetLastError(rc);
+        }
+        else
+        {
+            opened = DuplicateHandle(GetCurrentProcess(), (HANDLE)pvPara,
+             GetCurrentProcess(), (LPHANDLE)&key,
+             dwFlags & CERT_STORE_READONLY_FLAG ? KEY_READ : KEY_ALL_ACCESS,
+             TRUE, 0);
+        }
+        if (opened)
+#else
         if (DuplicateHandle(GetCurrentProcess(), (HANDLE)pvPara,
          GetCurrentProcess(), (LPHANDLE)&key,
          dwFlags & CERT_STORE_READONLY_FLAG ? KEY_READ : KEY_ALL_ACCESS,
          TRUE, 0))
+#endif
         {
             WINECRYPT_CERTSTORE *memStore;
 
@@ -550,6 +748,18 @@ WINECRYPT_CERTSTORE *CRYPT_RegOpenStore(HCRYPTPROV hCryptProv, DWORD dwFlags,
                     list_init(&regInfo->certsToDelete);
                     list_init(&regInfo->crlsToDelete);
                     list_init(&regInfo->ctlsToDelete);
+#ifdef __REACTOS__
+                    list_init(&regInfo->notify_events);
+#endif
+                    regInfo->key_modified_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+                    if (RegNotifyChangeKeyValue(regInfo->key, TRUE, REG_NOTIFY_CHANGE_NAME | REG_NOTIFY_CHANGE_LAST_SET,
+                        regInfo->key_modified_event, TRUE))
+                    {
+                        ERR("RegNotifyChangeKeyValue failed.\n");
+#ifdef __REACTOS__
+                        SetEvent(regInfo->key_modified_event);
+#endif
+                    }
                     CRYPT_RegReadFromReg(regInfo->key, regInfo->memStore, CERT_STORE_ADD_ALWAYS);
                     regInfo->dirty = FALSE;
                     provInfo.cbSize = sizeof(provInfo);

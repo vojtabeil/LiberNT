@@ -17,6 +17,8 @@ extern "C" {
 #define DNS_QUERY_TREAT_AS_FQDN             0x1000
 #define DNS_QUERY_WIRE_ONLY                 0x100
 #define DNS_QUERY_RETURN_MESSAGE            0x200
+#define DNS_QUERY_MULTICAST_ONLY            0x400
+#define DNS_QUERY_NO_MULTICAST              0x800
 #define DNS_QUERY_DONT_RESET_TTL_VALUES     0x100000
 #define DNS_QUERY_RESERVED                  0xff000000
 
@@ -105,6 +107,10 @@ typedef _Return_type_success_(return == 0) DWORD DNS_STATUS;
 #define DNS_ATMA_MAX_ADDR_LENGTH 20
 
 #define DNS_ADDR_MAX_SOCKADDR_LENGTH 32
+#ifdef __REACTOS__
+#define DNS_MAX_NAME_LENGTH 255
+#define DNS_MAX_NAME_BUFFER_LENGTH 256
+#endif
 
 typedef enum _DNS_CHARSET {
   DnsCharSetUnknown,
@@ -131,7 +137,12 @@ typedef enum {
   DnsConfigHostName_UTF8,
   DnsConfigFullHostName_W,
   DnsConfigFullHostName_A,
-  DnsConfigFullHostName_UTF8
+  DnsConfigFullHostName_UTF8,
+#ifdef __REACTOS__
+  DnsConfigDnsServersUnspec = 4144,
+  DnsConfigDnsServersIpv4,
+  DnsConfigDnsServersIpv6
+#endif
 } DNS_CONFIG_TYPE;
 
 typedef enum {

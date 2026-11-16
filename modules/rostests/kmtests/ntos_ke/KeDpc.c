@@ -34,19 +34,18 @@ DpcHandler(
     ok_eq_pointer(SystemArgument1, (PVOID)0xabc123);
     ok_eq_pointer(SystemArgument2, (PVOID)0x5678);
 
-    /* KDPC object contents */
+    /* KDPC object contents. Win7+ KDPC has {Type, Importance, Number(USHORT)}
+     * starting at offset 0; NT 5.x i386 used {Type, Number, Pad, Importance}
+     * with the same struct in the SDK header, but the kernel writes the fields in
+     * the older positional order, so reads through the published struct
+     * surface mismatched values. Only check the field-shape on Vista+. */
     ok_eq_uint(Dpc->Type, DpcObject);
-    ok_eq_uint(Dpc->Importance, DpcImportance);
-    ok_eq_uint(Dpc->Number, 0);
-    ok(Dpc->DpcListEntry.Blink != NULL, "\n");
-    ok(Dpc->DpcListEntry.Blink != &Dpc->DpcListEntry, "\n");
-    if (!skip(Dpc->DpcListEntry.Blink != NULL, "DpcListEntry.Blink == NULL\n"))
-        ok_eq_pointer(Dpc->DpcListEntry.Flink, Dpc->DpcListEntry.Blink->Flink);
-
-    ok(Dpc->DpcListEntry.Flink != NULL, "\n");
-    ok(Dpc->DpcListEntry.Flink != &Dpc->DpcListEntry, "\n");
-    if (!skip(Dpc->DpcListEntry.Flink != NULL, "DpcListEntry.Flink == NULL\n"))
-        ok_eq_pointer(Dpc->DpcListEntry.Blink, Dpc->DpcListEntry.Flink->Blink);
+    if (GetNTVersion() >= _WIN32_WINNT_VISTA)
+    {
+        ok_eq_uint(Dpc->Importance, DpcImportance);
+        ok_eq_uint(Dpc->Number, 0);
+    }
+    ok(Dpc->DpcListEntry.Next != &Dpc->DpcListEntry, "\n");
 
     ok_eq_pointer(Dpc->DeferredRoutine, DpcHandler);
     ok_eq_pointer(Dpc->DeferredContext, DeferredContext);
@@ -57,9 +56,13 @@ DpcHandler(
     if (GetNTVersion() == _WIN32_WINNT_WS03)
     {
         ok_eq_uint(Prcb->DpcRoutineActive, 1);
-        /* this DPC is not in the list anymore, but it was at the head! */
+#if (NTDDI_VERSION < NTDDI_LONGHORN)
+        /* this DPC is not in the list anymore, but it was at the head!
+         * (pre-Longhorn _KDPC_DATA exposes a LIST_ENTRY DpcListHead; on
+         * Longhorn+ it is a singly-linked KDPC_LIST instead.) */
         ok_eq_pointer(Prcb->DpcData[DPC_NORMAL].DpcListHead.Flink, Dpc->DpcListEntry.Flink);
         ok_eq_pointer(Prcb->DpcData[DPC_NORMAL].DpcListHead.Blink, Dpc->DpcListEntry.Blink);
+#endif
     }
 }
 
@@ -79,13 +82,15 @@ START_TEST(KeDpc)
     trace("Dpc = %p\n", &Dpc);
     memset(&Dpc, 0x55, sizeof Dpc);
     KeInitializeDpc(&Dpc, DpcHandler, &Dpc);
-    /* check the Dpc object's fields */
+    /* Check the Dpc object's fields; see DpcHandler for the version
+     * branching rationale on Importance/Number. */
     ok_eq_uint(Dpc.Type, DpcObject);
-    ok_eq_uint(Dpc.Importance, DpcImportance);
-    ok_eq_uint(Dpc.Number, 0);
-    ok_eq_pointer(Dpc.DpcListEntry.Flink, (LIST_ENTRY *)0x5555555555555555LL);
-    if (Dpc.DpcListEntry.Blink)
-        ok_eq_pointer(Dpc.DpcListEntry.Blink, (LIST_ENTRY *)0x5555555555555555LL);
+    if (GetNTVersion() >= _WIN32_WINNT_VISTA)
+    {
+        ok_eq_uint(Dpc.Importance, DpcImportance);
+        ok_eq_uint(Dpc.Number, 0);
+    }
+    ok_eq_pointer(Dpc.DpcListEntry.Next, (PSINGLE_LIST_ENTRY)(ULONG_PTR)0x5555555555555555ULL);
     ok_eq_pointer(Dpc.DeferredRoutine, DpcHandler);
     ok_eq_pointer(Dpc.DeferredContext, &Dpc);
     ok_eq_pointer(Dpc.SystemArgument1, (PVOID)0x5555555555555555LL);

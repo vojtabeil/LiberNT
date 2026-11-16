@@ -267,12 +267,6 @@ ScConnectControlPipe(HANDLE *hPipe)
     _swprintf(NtControlPipeName, L"\\\\.\\pipe\\net\\NtControlPipe%u", dwServiceCurrent);
     TRACE("PipeName: %S\n", NtControlPipeName);
 
-    if (!WaitNamedPipeW(NtControlPipeName, 30000))
-    {
-        ERR("WaitNamedPipe(%S) failed (Error %lu)\n", NtControlPipeName, GetLastError());
-        return ERROR_FAILED_SERVICE_CONTROLLER_CONNECT;
-    }
-
     *hPipe = CreateFileW(NtControlPipeName,
                          GENERIC_READ | GENERIC_WRITE,
                          FILE_SHARE_READ | FILE_SHARE_WRITE,
@@ -334,6 +328,7 @@ ScBuildUnicodeArgsVector(PSCM_CONTROL_PACKET ControlPacket,
 {
     PWSTR *lpVector;
     PWSTR pszServiceName;
+    PWSTR pszStrings;
     DWORD cbServiceName;
     DWORD cbArguments;
     DWORD cbTotal;
@@ -349,43 +344,34 @@ ScBuildUnicodeArgsVector(PSCM_CONTROL_PACKET ControlPacket,
     pszServiceName = (PWSTR)((ULONG_PTR)ControlPacket + ControlPacket->dwServiceNameOffset);
     cbServiceName  = lstrlenW(pszServiceName) * sizeof(WCHAR) + sizeof(UNICODE_NULL);
 
-    /*
-     * The total size of the argument vector is equal to the entry for
-     * the service name, plus the size of the original argument vector.
-     */
-    cbTotal = sizeof(PWSTR) + cbServiceName;
     if (ControlPacket->dwArgumentsCount > 0)
-        cbArguments = ControlPacket->dwSize - ControlPacket->dwArgumentsOffset;
+        cbArguments = ControlPacket->dwSize - ControlPacket->dwArgumentsOffset -
+                      ControlPacket->dwArgumentsCount * sizeof(DWORD);
     else
         cbArguments = 0;
-    cbTotal += cbArguments;
+    cbTotal = (ControlPacket->dwArgumentsCount + 1) * sizeof(PWSTR) + cbArguments + cbServiceName;
 
-    /* Allocate the new argument vector */
     lpVector = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, cbTotal);
     if (lpVector == NULL)
         return ERROR_NOT_ENOUGH_MEMORY;
 
-    /*
-     * The first argument is reserved for the service name, which
-     * will be appended to the end of the argument string list.
-     */
+    pszStrings = (PWSTR)&lpVector[ControlPacket->dwArgumentsCount + 1];
 
-    /* Copy the remaining arguments */
     if (ControlPacket->dwArgumentsCount > 0)
     {
-        memcpy(&lpVector[1],
-               (PWSTR)((ULONG_PTR)ControlPacket + ControlPacket->dwArgumentsOffset),
-               cbArguments);
+        PDWORD pOffsets = (PDWORD)((ULONG_PTR)ControlPacket + ControlPacket->dwArgumentsOffset);
+
+        memcpy(pszStrings, &pOffsets[ControlPacket->dwArgumentsCount], cbArguments);
 
         for (i = 0; i < ControlPacket->dwArgumentsCount; i++)
         {
-            lpVector[i + 1] = (PWSTR)((ULONG_PTR)&lpVector[1] + (ULONG_PTR)lpVector[i + 1]);
+            lpVector[i + 1] = (PWSTR)((ULONG_PTR)pszStrings + pOffsets[i] -
+                                      ControlPacket->dwArgumentsCount * sizeof(DWORD));
             TRACE("Unicode lpVector[%lu] = '%ls'\n", i + 1, lpVector[i + 1]);
         }
     }
 
-    /* Now copy the service name */
-    lpVector[0] = (PWSTR)((ULONG_PTR)&lpVector[1] + cbArguments);
+    lpVector[0] = (PWSTR)((ULONG_PTR)pszStrings + cbArguments);
     memcpy(lpVector[0], pszServiceName, cbServiceName);
     TRACE("Unicode lpVector[%lu] = '%ls'\n", 0, lpVector[0]);
 
@@ -468,7 +454,7 @@ ScStartService(PACTIVE_SERVICE lpService,
     TRACE("Service: %S\n", (PWSTR)((ULONG_PTR)ControlPacket + ControlPacket->dwServiceNameOffset));
 
     /* Set the service status handle */
-    lpService->hServiceStatus = ControlPacket->hServiceStatus;
+    lpService->hServiceStatus = (SERVICE_STATUS_HANDLE)(ULONG_PTR)ControlPacket->hServiceStatus;
     /* Set the service tag */
     lpService->dwServiceTag = ControlPacket->dwServiceTag;
 
@@ -591,10 +577,15 @@ ScControlService(PACTIVE_SERVICE lpService,
     }
     else if (lpService->HandlerFunctionEx)
     {
-        if (dwControl == SERVICE_CONTROL_DEVICEEVENT)
+        if ((dwControl == SERVICE_CONTROL_DEVICEEVENT ||
+             dwControl == SERVICE_CONTROL_HARDWAREPROFILECHANGE ||
+             dwControl == SERVICE_CONTROL_POWEREVENT ||
+             dwControl == SERVICE_CONTROL_SESSIONCHANGE) &&
+            ControlPacket->dwServiceNameOffset >= sizeof(SCM_CONTROL_PACKET) + sizeof(DWORD))
         {
             dwEventType = *(LPDWORD)((ULONG_PTR)ControlPacket + sizeof(SCM_CONTROL_PACKET));
-            pEventData = (PVOID)((ULONG_PTR)ControlPacket + sizeof(SCM_CONTROL_PACKET) + sizeof(DWORD));
+            if (ControlPacket->dwServiceNameOffset > sizeof(SCM_CONTROL_PACKET) + sizeof(DWORD))
+                pEventData = (PVOID)((ULONG_PTR)ControlPacket + sizeof(SCM_CONTROL_PACKET) + sizeof(DWORD));
         }
 
         _SEH2_TRY
@@ -921,7 +912,7 @@ I_ScSetServiceBitsA(SERVICE_STATUS_HANDLE hServiceStatus,
                     BOOL bUpdateImmediately,
                     LPSTR lpString)
 {
-    BOOL bResult;
+    BOOL bResult = FALSE;
 
     TRACE("I_ScSetServiceBitsA(%lu %lx %u %u %s)\n",
           hServiceStatus, dwServiceBits, bSetBitsOn, bUpdateImmediately,
@@ -929,7 +920,7 @@ I_ScSetServiceBitsA(SERVICE_STATUS_HANDLE hServiceStatus,
 
     RpcTryExcept
     {
-        bResult = RI_ScSetServiceBitsA((RPC_SERVICE_STATUS_HANDLE)hServiceStatus,
+        bResult = RI_ScSetServiceBitsA((RPC_SERVICE_STATUS_HANDLE)(ULONG_PTR)hServiceStatus,
                                        dwServiceBits,
                                        bSetBitsOn,
                                        bUpdateImmediately,
@@ -960,7 +951,7 @@ I_ScSetServiceBitsW(SERVICE_STATUS_HANDLE hServiceStatus,
                     BOOL bUpdateImmediately,
                     LPWSTR lpString)
 {
-    BOOL bResult;
+    BOOL bResult = FALSE;
 
     TRACE("I_ScSetServiceBitsW(%lu %lx %u %u %s)\n",
           hServiceStatus, dwServiceBits, bSetBitsOn, bUpdateImmediately,
@@ -968,7 +959,7 @@ I_ScSetServiceBitsW(SERVICE_STATUS_HANDLE hServiceStatus,
 
     RpcTryExcept
     {
-        bResult = RI_ScSetServiceBitsW((RPC_SERVICE_STATUS_HANDLE)hServiceStatus,
+        bResult = RI_ScSetServiceBitsW((RPC_SERVICE_STATUS_HANDLE)(ULONG_PTR)hServiceStatus,
                                        dwServiceBits,
                                        bSetBitsOn,
                                        bUpdateImmediately,
@@ -1016,14 +1007,14 @@ BOOL WINAPI
 SetServiceStatus(SERVICE_STATUS_HANDLE hServiceStatus,
                  LPSERVICE_STATUS lpServiceStatus)
 {
-    DWORD dwError;
+    DWORD dwError = 0;
 
     TRACE("SetServiceStatus(%lu %p)\n",
           hServiceStatus, lpServiceStatus);
 
     RpcTryExcept
     {
-        dwError = RSetServiceStatus((RPC_SERVICE_STATUS_HANDLE)hServiceStatus,
+        dwError = RSetServiceStatus((RPC_SERVICE_STATUS_HANDLE)(ULONG_PTR)hServiceStatus,
                                     lpServiceStatus);
     }
     RpcExcept(EXCEPTION_EXECUTE_HANDLER)
@@ -1067,6 +1058,13 @@ StartServiceCtrlDispatcherA(const SERVICE_TABLE_ENTRYA *lpServiceStartTable)
     while (lpServiceStartTable[i].lpServiceProc != NULL)
     {
         i++;
+    }
+
+    /* A table without a service would leave the dispatcher looking up entry 0 of nothing */
+    if (i == 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
     }
 
     dwActiveServiceCount = i;
@@ -1166,6 +1164,13 @@ StartServiceCtrlDispatcherW(const SERVICE_TABLE_ENTRYW *lpServiceStartTable)
     while (lpServiceStartTable[i].lpServiceProc != NULL)
     {
         i++;
+    }
+
+    /* A table without a service would leave the dispatcher looking up entry 0 of nothing */
+    if (i == 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
     }
 
     dwActiveServiceCount = i;

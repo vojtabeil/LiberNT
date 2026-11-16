@@ -14,6 +14,7 @@
 #define COBJMACROS
 
 #include <io.h>
+#include <lmcons.h>
 #include <wincon.h>
 #include <winnls.h>
 #include <winsvc.h>
@@ -23,6 +24,11 @@
 #include <shobjidl.h>
 #include <rpcproxy.h>
 #include <ndk/cmfuncs.h>
+#include <ndk/exfuncs.h>
+#include <ntsecapi.h>
+#include <strsafe.h>
+#define WIDL_using_Windows_System_Profile
+#include <windows.system.profile.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -33,20 +39,10 @@
 DWORD WINAPI
 SetupStartService(LPCWSTR lpServiceName, BOOL bWait);
 
+
 /* GLOBALS ******************************************************************/
 
 HINF hSysSetupInf = INVALID_HANDLE_VALUE;
-ADMIN_INFO AdminInfo;
-
-typedef struct _DLG_DATA
-{
-    HBITMAP hLogoBitmap;
-    HBITMAP hBarBitmap;
-    HWND hWndBarCtrl;
-    DWORD BarCounter;
-    DWORD BarWidth;
-    DWORD BarHeight;
-} DLG_DATA, *PDLG_DATA;
 
 /* FUNCTIONS ****************************************************************/
 
@@ -65,7 +61,7 @@ FatalError(char *pszFmt,...)
     strcat(szBuffer, "\nRebooting now!");
     MessageBoxA(NULL,
                 szBuffer,
-                "ReactOS Setup",
+                "LiberNT Setup",
                 MB_OK);
 }
 
@@ -123,7 +119,8 @@ CreateShortcut(
     LPCWSTR pszDescription,
     INT iIconNr,
     LPCWSTR pszWorkingDir,
-    LPCWSTR pszArgs)
+    LPCWSTR pszArgs,
+    LPCWSTR pszIconPath)
 {
     DWORD dwLen;
     LPWSTR Ptr;
@@ -175,7 +172,7 @@ CreateShortcut(
                                      pszArgs,
                                      pszWorkingDir,
                                      /* Special value to indicate no icon */
-                                     (iIconNr != -1 ? pszCommand : NULL),
+                                     (iIconNr != -1 ? pszIconPath : NULL),
                                      iIconNr,
                                      pszDescription));
 }
@@ -193,10 +190,12 @@ CreateShortcutsFromSection(
     DWORD dwFieldCount;
     INT iIconNr;
     WCHAR szCommand[MAX_PATH];
+    WCHAR szTarget[MAX_PATH];
     WCHAR szName[MAX_PATH];
     WCHAR szDescription[MAX_PATH];
     WCHAR szDirectory[MAX_PATH];
     WCHAR szArgs[MAX_PATH];
+    WCHAR szIcon[MAX_PATH];
 
     if (!SetupFindFirstLine(hinf, pszSection, NULL, &Context))
         return FALSE;
@@ -214,6 +213,12 @@ CreateShortcutsFromSection(
         if (!SetupGetStringFieldW(&Context, 1, szCommand, ARRAYSIZE(szCommand), NULL))
             continue;
 
+        if (ExpandEnvironmentStringsW(szCommand, szTarget, ARRAYSIZE(szTarget)) == 0 ||
+            GetFileAttributesW(szTarget) == INVALID_FILE_ATTRIBUTES)
+        {
+            continue;
+        }
+
         if (!SetupGetStringFieldW(&Context, 2, szName, ARRAYSIZE(szName), NULL))
             continue;
 
@@ -229,9 +234,19 @@ CreateShortcutsFromSection(
         if (dwFieldCount < 6 || !SetupGetStringFieldW(&Context, 6, szArgs, ARRAYSIZE(szArgs), NULL))
             szArgs[0] = L'\0';
 
+        if (dwFieldCount < 7 || !SetupGetStringFieldW(&Context, 7, szIcon, ARRAYSIZE(szIcon), NULL))
+        {
+            wcscpy(szIcon, szCommand);
+        }
+        else if (ExpandEnvironmentStringsW(szIcon, szTarget, ARRAYSIZE(szTarget)) == 0 ||
+                 GetFileAttributesW(szTarget) == INVALID_FILE_ATTRIBUTES)
+        {
+            continue;
+        }
+
         wcscat(szName, L".lnk");
 
-        CreateShortcut(pszFolder, szName, szCommand, szDescription, iIconNr, szDirectory, szArgs);
+        CreateShortcut(pszFolder, szName, szCommand, szDescription, iIconNr, szDirectory, szArgs, szIcon);
 
         SendMessage(pItemsData->hwndDlg, PM_STEP_END, 0, (LPARAM)pNotify);
 
@@ -368,7 +383,7 @@ done:
     SendMessage(pItemsData->hwndDlg, PM_ITEM_END, 1, LastError);
 }
 
-static VOID
+VOID
 CreateTempDir(
     IN LPCWSTR VarName)
 {
@@ -421,7 +436,7 @@ cleanup:
     RegCloseKey(hKey);
 }
 
-static BOOL
+BOOL
 InstallSysSetupInfDevices(VOID)
 {
     INFCONTEXT InfContext;
@@ -457,8 +472,9 @@ InstallSysSetupInfDevices(VOID)
     return TRUE;
 }
 
-static BOOL
-InstallSysSetupInfComponents(VOID)
+BOOL
+InstallSysSetupInfComponents(
+    _In_ UINT Flags)
 {
     INFCONTEXT InfContext;
     WCHAR szNameBuffer[256];
@@ -512,7 +528,7 @@ InstallSysSetupInfComponents(VOID)
             if (!SetupInstallFromInfSectionW(NULL,
                                              hComponentInf,
                                              szSectionBuffer,
-                                             SPINST_ALL,
+                                             Flags,
                                              NULL,
                                              NULL,
                                              SP_COPY_NEWER,
@@ -535,6 +551,59 @@ InstallSysSetupInfComponents(VOID)
 }
 
 
+
+static HANDLE hWow64Registration = NULL;
+static DWORD Wow64RegistrationTimeout;
+
+VOID
+StartWow64Registration(VOID)
+{
+    WCHAR Wow64Dir[MAX_PATH], WindowsDir[MAX_PATH], Rundll32[MAX_PATH], CommandLine[3 * MAX_PATH];
+    PROCESS_INFORMATION ProcessInformation;
+    STARTUPINFOW StartupInfo;
+    LONG Count;
+
+    if (hWow64Registration)
+        return;
+    if (!GetSystemWow64DirectoryW(Wow64Dir, ARRAYSIZE(Wow64Dir)) ||
+        !GetWindowsDirectoryW(WindowsDir, ARRAYSIZE(WindowsDir)))
+    {
+        return;
+    }
+    if (FAILED(StringCchPrintfW(Rundll32, ARRAYSIZE(Rundll32), L"%s\\rundll32.exe", Wow64Dir)) ||
+        GetFileAttributesW(Rundll32) == INVALID_FILE_ATTRIBUTES ||
+        FAILED(StringCchPrintfW(CommandLine, ARRAYSIZE(CommandLine),
+                                L"\"%s\" setupapi.dll,InstallHinfSection Wow64Registration 128 %s\\inf\\syssetup.inf",
+                                Rundll32, WindowsDir)))
+    {
+        return;
+    }
+
+    ZeroMemory(&StartupInfo, sizeof(StartupInfo));
+    StartupInfo.cb = sizeof(StartupInfo);
+    if (!CreateProcessW(Rundll32, CommandLine, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL,
+                        &StartupInfo, &ProcessInformation))
+    {
+        DPRINT1("Could not start the 32-bit registration (Error %lu)\n", GetLastError());
+        return;
+    }
+    CloseHandle(ProcessInformation.hThread);
+    hWow64Registration = ProcessInformation.hProcess;
+
+    Count = SetupGetLineCountW(hSysSetupInf, L"Wow64RegisterDlls");
+    Wow64RegistrationTimeout = 60000 * max(Count, 0);
+}
+
+VOID
+WaitWow64Registration(VOID)
+{
+    if (!hWow64Registration)
+        return;
+    if (WaitForSingleObject(hWow64Registration, Wow64RegistrationTimeout) != WAIT_OBJECT_0)
+        DPRINT1("The 32-bit registration did not finish\n");
+    CloseHandle(hWow64Registration);
+    hWow64Registration = NULL;
+}
 
 BOOL
 RegisterTypeLibraries(
@@ -594,7 +663,7 @@ RegisterTypeLibraries(
             continue;
         }
 
-        __wine_register_resources(hmod);
+        __wine_register_resources_module(hmod);
 
         if (pItemsData && pNotify)
         {
@@ -605,6 +674,14 @@ RegisterTypeLibraries(
     } while (SetupFindNextLine(&InfContext, &InfContext));
 
     return TRUE;
+}
+
+static SERVICE_NOTIFYW PnpServiceNotify;
+
+static VOID CALLBACK
+PnpServiceStatusChanged(PVOID pParameter)
+{
+    UNREFERENCED_PARAMETER(pParameter);
 }
 
 static BOOL
@@ -652,6 +729,13 @@ EnableUserModePnpManager(VOID)
         goto cleanup;
     }
 
+    PnpServiceNotify.dwVersion = SERVICE_NOTIFY_STATUS_CHANGE;
+    PnpServiceNotify.pfnNotifyCallback = PnpServiceStatusChanged;
+    NotifyServiceStatusChangeW(hService,
+                               SERVICE_NOTIFY_STOPPED | SERVICE_NOTIFY_STOP_PENDING | SERVICE_NOTIFY_RUNNING |
+                               SERVICE_NOTIFY_CONTINUE_PENDING | SERVICE_NOTIFY_PAUSE_PENDING | SERVICE_NOTIFY_PAUSED,
+                               &PnpServiceNotify);
+
     while (TRUE)
     {
         bRet = QueryServiceStatusEx(hService,
@@ -671,7 +755,7 @@ EnableUserModePnpManager(VOID)
         WaitTime = ServiceStatus.dwWaitHint / 10;
         if (WaitTime < 1000) WaitTime = 1000;
         else if (WaitTime > 10000) WaitTime = 10000;
-        Sleep(WaitTime);
+        SleepEx(WaitTime, TRUE);
     };
 
     if (ServiceStatus.dwCurrentState != SERVICE_RUNNING)
@@ -692,217 +776,111 @@ cleanup:
 }
 
 static VOID
-AdjustStatusMessageWindow(HWND hwndDlg, PDLG_DATA pDlgData)
+DisplayDeviceBootStatus(
+    _In_ ULONG Completed,
+    _In_ ULONG Total)
 {
-    INT xOld, yOld, cxOld, cyOld;
-    INT xNew, yNew, cxNew, cyNew;
-    INT cxLabel, cyLabel, dyLabel;
-    RECT rc, rcBar, rcLabel, rcWnd;
-    BITMAP bmLogo, bmBar;
-    DWORD style, exstyle;
-    HWND hwndLogo = GetDlgItem(hwndDlg, IDC_ROSLOGO);
-    HWND hwndBar = GetDlgItem(hwndDlg, IDC_BAR);
-    HWND hwndLabel = GetDlgItem(hwndDlg, IDC_STATUSLABEL);
+    WCHAR Phase[256];
+    WCHAR Text[272];
+    UNICODE_STRING String;
 
-    /* This adjustment is for CJK only */
-    switch (PRIMARYLANGID(GetUserDefaultLangID()))
-    {
-        case LANG_CHINESE:
-        case LANG_JAPANESE:
-        case LANG_KOREAN:
-            break;
-
-        default:
-            return;
-    }
-
-    if (!GetObjectW(pDlgData->hLogoBitmap, sizeof(BITMAP), &bmLogo) ||
-        !GetObjectW(pDlgData->hBarBitmap, sizeof(BITMAP), &bmBar))
-    {
-        return;
-    }
-
-    GetWindowRect(hwndBar, &rcBar);
-    MapWindowPoints(NULL, hwndDlg, (LPPOINT)&rcBar, 2);
-    dyLabel = bmLogo.bmHeight - rcBar.top;
-
-    GetWindowRect(hwndLabel, &rcLabel);
-    MapWindowPoints(NULL, hwndDlg, (LPPOINT)&rcLabel, 2);
-    cxLabel = rcLabel.right - rcLabel.left;
-    cyLabel = rcLabel.bottom - rcLabel.top;
-
-    MoveWindow(hwndLogo, 0, 0, bmLogo.bmWidth, bmLogo.bmHeight, TRUE);
-    MoveWindow(hwndBar, 0, bmLogo.bmHeight, bmLogo.bmWidth, bmBar.bmHeight, TRUE);
-    MoveWindow(hwndLabel, rcLabel.left, rcLabel.top + dyLabel, cxLabel, cyLabel, TRUE);
-
-    GetWindowRect(hwndDlg, &rcWnd);
-    xOld = rcWnd.left;
-    yOld = rcWnd.top;
-    cxOld = rcWnd.right - rcWnd.left;
-    cyOld = rcWnd.bottom - rcWnd.top;
-
-    GetClientRect(hwndDlg, &rc);
-    SetRect(&rc, 0, 0, bmLogo.bmWidth, rc.bottom - rc.top); /* new client size */
-
-    style = (DWORD)GetWindowLongPtrW(hwndDlg, GWL_STYLE);
-    exstyle = (DWORD)GetWindowLongPtrW(hwndDlg, GWL_EXSTYLE);
-    AdjustWindowRectEx(&rc, style, FALSE, exstyle);
-
-    cxNew = rc.right - rc.left;
-    cyNew = (rc.bottom - rc.top) + dyLabel;
-    xNew = xOld - (cxNew - cxOld) / 2;
-    yNew = yOld - (cyNew - cyOld) / 2;
-    MoveWindow(hwndDlg, xNew, yNew, cxNew, cyNew, TRUE);
+    if (!LoadStringW(hDllInstance, IDS_STATUS_INSTALL_DEV, Phase, ARRAYSIZE(Phase)))
+        Phase[0] = UNICODE_NULL;
+    StringCchPrintfW(Text, ARRAYSIZE(Text), L"%s %lu%%\r\n", Phase,
+                     Total == 0 ? 0 : Completed >= Total ? 100 : Completed * 100 / Total);
+    RtlInitUnicodeString(&String, Text);
+    NtDisplayString(&String);
 }
 
-static INT_PTR CALLBACK
-StatusMessageWindowProc(
-    IN HWND hwndDlg,
-    IN UINT uMsg,
-    IN WPARAM wParam,
-    IN LPARAM lParam)
+static BOOL
+QueryDeviceInstallProgress(
+    _Out_ PULONG InstalledDevices,
+    _Out_ PULONG TotalDevices)
 {
-    PDLG_DATA pDlgData;
-    UNREFERENCED_PARAMETER(wParam);
+    HDEVINFO DeviceInfoSet;
+    SP_DEVINFO_DATA DeviceInfoData;
+    WCHAR ClassName[MAX_PATH];
+    WCHAR DeviceInstanceId[MAX_DEVICE_ID_LEN];
+    DWORD RequiredSize;
+    DWORD Error;
+    DWORD Index;
 
-    pDlgData = (PDLG_DATA)GetWindowLongPtrW(hwndDlg, DWLP_USER);
+    *InstalledDevices = 0;
+    *TotalDevices = 0;
+    DeviceInfoSet = SetupDiGetClassDevsW(NULL,
+                                         NULL,
+                                         NULL,
+                                         DIGCF_ALLCLASSES);
+    if (DeviceInfoSet == INVALID_HANDLE_VALUE)
+        return FALSE;
 
-    /* pDlgData is required for each case except WM_INITDIALOG */
-    if (uMsg != WM_INITDIALOG && pDlgData == NULL) return FALSE;
-
-    switch (uMsg)
+    DeviceInfoData.cbSize = sizeof(DeviceInfoData);
+    for (Index = 0;
+         SetupDiEnumDeviceInfo(DeviceInfoSet, Index, &DeviceInfoData);
+         ++Index)
     {
-        case WM_INITDIALOG:
+        if (SetupDiGetDeviceInstanceIdW(DeviceInfoSet,
+                                        &DeviceInfoData,
+                                        DeviceInstanceId,
+                                        ARRAYSIZE(DeviceInstanceId),
+                                        NULL) &&
+            !lstrcmpiW(DeviceInstanceId, L"HTREE\\ROOT\\0"))
         {
-            BITMAP bm;
-            WCHAR szMsg[256];
-
-            /* Allocate pDlgData */
-            pDlgData = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*pDlgData));
-            if (pDlgData)
-            {
-                /* Set pDlgData to DWLP_USER, so we can get it for new messages */
-                SetWindowLongPtrW(hwndDlg, DWLP_USER, (LONG_PTR)pDlgData);
-
-                /* Load bitmaps */
-                pDlgData->hLogoBitmap = LoadImageW(hDllInstance,
-                                                    MAKEINTRESOURCEW(IDB_REACTOS), IMAGE_BITMAP,
-                                                    0, 0, LR_DEFAULTCOLOR);
-
-                pDlgData->hBarBitmap = LoadImageW(hDllInstance, MAKEINTRESOURCEW(IDB_LINE),
-                                                IMAGE_BITMAP, 0, 0, LR_DEFAULTCOLOR);
-                GetObject(pDlgData->hBarBitmap, sizeof(bm), &bm);
-                pDlgData->BarWidth = bm.bmWidth;
-                pDlgData->BarHeight = bm.bmHeight;
-
-                if (pDlgData->hLogoBitmap && pDlgData->hBarBitmap)
-                {
-                    if (SetTimer(hwndDlg, IDT_BAR, 20, NULL) == 0)
-                    {
-                        DPRINT1("SetTimer(IDT_BAR) failed: %lu\n", GetLastError());
-                    }
-
-                    /* Get the animation bar control */
-                    pDlgData->hWndBarCtrl = GetDlgItem(hwndDlg, IDC_BAR);
-                }
-            }
-
-            /* Get and set status text */
-            if (!LoadStringW(hDllInstance, IDS_STATUS_INSTALL_DEV, szMsg, ARRAYSIZE(szMsg)))
-                return FALSE;
-            SetDlgItemTextW(hwndDlg, IDC_STATUSLABEL, szMsg);
-
-            AdjustStatusMessageWindow(hwndDlg, pDlgData);
-            return TRUE;
+            continue;
         }
 
-        case WM_TIMER:
+        ++*TotalDevices;
+        if (SetupDiGetDeviceRegistryPropertyW(DeviceInfoSet,
+                                              &DeviceInfoData,
+                                              SPDRP_CLASS,
+                                              NULL,
+                                              (PBYTE)ClassName,
+                                              sizeof(ClassName),
+                                              &RequiredSize))
         {
-            if (pDlgData->hBarBitmap)
-            {
-                /*
-                 * Default rotation bar image width is 413 (same as logo)
-                 * We can divide 413 by 7 without remainder
-                 */
-                pDlgData->BarCounter = (pDlgData->BarCounter + 7) % pDlgData->BarWidth;
-                InvalidateRect(pDlgData->hWndBarCtrl, NULL, FALSE);
-                UpdateWindow(pDlgData->hWndBarCtrl);
-            }
-            return TRUE;
-        }
-
-        case WM_DRAWITEM:
-        {
-            LPDRAWITEMSTRUCT lpDis = (LPDRAWITEMSTRUCT)lParam;
-
-            if (lpDis->CtlID != IDC_BAR)
-            {
-                return FALSE;
-            }
-
-            if (pDlgData->hBarBitmap)
-            {
-                HDC hdcMem;
-                HGDIOBJ hOld;
-                DWORD off = pDlgData->BarCounter;
-                DWORD iw = pDlgData->BarWidth;
-                DWORD ih = pDlgData->BarHeight;
-
-                hdcMem = CreateCompatibleDC(lpDis->hDC);
-                hOld = SelectObject(hdcMem, pDlgData->hBarBitmap);
-                BitBlt(lpDis->hDC, off, 0, iw - off, ih, hdcMem, 0, 0, SRCCOPY);
-                BitBlt(lpDis->hDC, 0, 0, off, ih, hdcMem, iw - off, 0, SRCCOPY);
-                SelectObject(hdcMem, hOld);
-                DeleteDC(hdcMem);
-                return TRUE;
-            }
-            return FALSE;
-        }
-
-        case WM_DESTROY:
-        {
-            if (pDlgData->hBarBitmap)
-            {
-                KillTimer(hwndDlg, IDT_BAR);
-            }
-
-            DeleteObject(pDlgData->hLogoBitmap);
-            DeleteObject(pDlgData->hBarBitmap);
-            HeapFree(GetProcessHeap(), 0, pDlgData);
-            return TRUE;
+            ++*InstalledDevices;
         }
     }
-    return FALSE;
+
+    Error = GetLastError();
+    SetupDiDestroyDeviceInfoList(DeviceInfoSet);
+    return Error == ERROR_NO_MORE_ITEMS;
 }
 
-static DWORD WINAPI
-ShowStatusMessageThread(
-    IN LPVOID lpParameter)
+static DWORD
+WaitForDeviceInstall(
+    _In_ BOOL ShowStatus,
+    _Out_ PULONG InstalledDevices,
+    _Out_ PULONG TotalDevices)
 {
-    HWND hWnd;
-    MSG Msg;
-    UNREFERENCED_PARAMETER(lpParameter);
+    ULONG LastInstalled = (ULONG)-1;
+    ULONG LastTotal = (ULONG)-1;
+    DWORD WaitResult;
 
-    hWnd = CreateDialogParam(hDllInstance,
-                             MAKEINTRESOURCE(IDD_STATUSWINDOW_DLG),
-                             GetDesktopWindow(),
-                             StatusMessageWindowProc,
-                             (LPARAM)NULL);
-    if (!hWnd)
-        return 0;
-
-    ShowWindow(hWnd, SW_SHOW);
-
-    /* Message loop for the Status window */
-    while (GetMessage(&Msg, NULL, 0, 0))
+    *InstalledDevices = 0;
+    *TotalDevices = 0;
+    do
     {
-        TranslateMessage(&Msg);
-        DispatchMessage(&Msg);
+        if (QueryDeviceInstallProgress(InstalledDevices, TotalDevices) &&
+            (*InstalledDevices != LastInstalled || *TotalDevices != LastTotal))
+        {
+            if (ShowStatus)
+                DisplayDeviceBootStatus(*InstalledDevices, *TotalDevices);
+            LastInstalled = *InstalledDevices;
+            LastTotal = *TotalDevices;
+        }
+
+        WaitResult = CMP_WaitNoPendingInstallEvents(150);
+    } while (WaitResult == WAIT_TIMEOUT);
+
+    if (WaitResult == WAIT_OBJECT_0 &&
+        QueryDeviceInstallProgress(InstalledDevices, TotalDevices))
+    {
+        if (ShowStatus)
+            DisplayDeviceBootStatus(*InstalledDevices, *TotalDevices);
     }
 
-    EndDialog(hWnd, 0);
-
-    return 0;
+    return WaitResult;
 }
 
 static LONG
@@ -987,58 +965,15 @@ cleanup:
 }
 
 static VOID
-ProcessDetachedProgram(
-    _In_ PCWSTR pszInf)
-{
-    WCHAR szInfApp[MAX_PATH], szInfArg[MAX_PATH * 3];
-    WCHAR szCmd[_countof(szInfApp) + _countof(szInfArg)];
-    UINT cch;
-
-    if (!GetPrivateProfileStringW(L"GuiUnattended", L"DetachedProgram", L"", szInfApp, _countof(szInfApp), pszInf) || !*szInfApp)
-        return;
-    cch = ExpandEnvironmentStrings(szInfApp, szCmd, _countof(szCmd) - 1);
-    if (GetPrivateProfileStringW(L"GuiUnattended", L"Arguments", L"", szInfArg, _countof(szInfArg), pszInf) && cch)
-    {
-        szCmd[cch - 1] = L' ';
-        szCmd[cch] = UNICODE_NULL;
-        ExpandEnvironmentStrings(szInfArg, szCmd + cch, _countof(szCmd) - cch);
-    }
-    RunCommandAndWait(szCmd);
-}
-
-extern VOID
-EnableVisualTheme(
-    _In_opt_ HWND hwndParent,
-    _In_opt_ PCWSTR ThemeFile);
-
-/**
- * @brief
- * Pre-process unattended file to apply early settings.
- *
- * @param[in]   IsInstall
- * TRUE if this is ReactOS installation, invoked from InstallReactOS(),
- * FALSE if this is run as part of LiveCD, invoked form InstallLiveCD().
- **/
-static VOID
-PreprocessUnattend(
-    _In_ BOOL IsInstall)
+PreprocessUnattend(VOID)
 {
     WCHAR szPath[MAX_PATH];
     WCHAR szValue[MAX_PATH];
     BOOL bDefaultThemesOff;
 
-    if (IsInstall)
-    {
-        /* See also wizard.c!ProcessSetupInf()
-         * Retrieve the path of the setup INF */
-        GetSetupInfPath(szPath, _countof(szPath));
-    }
-    else
-    {
-        /* See also userinit/livecd.c!RunLiveCD() */
-        GetWindowsDirectoryW(szPath, _countof(szPath));
-        wcscat(szPath, L"\\unattend.inf");
-    }
+    /* See also userinit/livecd.c!RunLiveCD() */
+    GetWindowsDirectoryW(szPath, _countof(szPath));
+    wcscat(szPath, L"\\unattend.inf");
 
     /*
      * Apply initial default theming
@@ -1051,24 +986,27 @@ PreprocessUnattend(
 
     if (!bDefaultThemesOff)
     {
-        /* Retrieve the complete path to a .theme (or for ReactOS, a .msstyles) file */
-        if (!GetPrivateProfileStringW(L"Shell", L"CustomDefaultThemeFile", NULL, szValue, _countof(szValue), szPath) || !*szValue)
-            bDefaultThemesOff = TRUE; // None specified, fall back to the classic theme.
+        /* Retrieve an optional .theme (or .msstyles) override, defaulting to Aero */
+        if (!GetPrivateProfileStringW(L"Shell", L"CustomDefaultThemeFile",
+                                      L"%WINDIR%\\Resources\\Themes\\Aero\\aero.msstyles",
+                                      szValue, _countof(szValue), szPath) || !*szValue)
+            bDefaultThemesOff = TRUE; // Invalid override: fall back to the classic theme.
     }
 
     /* Enable the chosen theme, or use the classic theme */
     EnableVisualTheme(NULL, bDefaultThemesOff ? NULL : szValue);
-
-    if (IsInstall)
-        ProcessDetachedProgram(szPath);
 }
 
 static BOOL
 CommonInstall(VOID)
 {
-    HANDLE hThread = NULL;
-    DWORD dwThreadId = 0;
+    ULONG InstalledDevices = 0;
+    ULONG TotalDevices = 0;
+    BOOL ShowStatus = !IsConsoleBoot();
     BOOL bResult = FALSE;
+
+    if (ShowStatus)
+        DisplayDeviceBootStatus(0, 0);
 
     hSysSetupInf = SetupOpenInfFileW(L"syssetup.inf",
                                      NULL,
@@ -1077,7 +1015,7 @@ CommonInstall(VOID)
     if (hSysSetupInf == INVALID_HANDLE_VALUE)
     {
         FatalError("SetupOpenInfFileW() failed to open 'syssetup.inf' (Error: %lu)\n", GetLastError());
-        return FALSE;
+        goto Exit;
     }
 
     if (!InstallSysSetupInfDevices())
@@ -1086,20 +1024,10 @@ CommonInstall(VOID)
         goto Exit;
     }
 
-    if (!InstallSysSetupInfComponents())
+    if (!InstallSysSetupInfComponents(SPINST_ALL & ~SPINST_REGSVR))
     {
         FatalError("InstallSysSetupInfComponents() failed!\n");
         goto Exit;
-    }
-
-    if (!IsConsoleBoot())
-    {
-        hThread = CreateThread(NULL,
-                               0,
-                               ShowStatusMessageThread,
-                               NULL,
-                               0,
-                               &dwThreadId);
     }
 
     if (!EnableUserModePnpManager())
@@ -1108,7 +1036,9 @@ CommonInstall(VOID)
         goto Exit;
     }
 
-    if (CMP_WaitNoPendingInstallEvents(INFINITE) != WAIT_OBJECT_0)
+    if (WaitForDeviceInstall(ShowStatus,
+                             &InstalledDevices,
+                             &TotalDevices) != WAIT_OBJECT_0)
     {
         FatalError("CMP_WaitNoPendingInstallEvents() failed!\n");
         goto Exit;
@@ -1119,17 +1049,333 @@ CommonInstall(VOID)
 Exit:
     if (bResult == FALSE)
     {
-        SetupCloseInfFile(hSysSetupInf);
-    }
+        if (hSysSetupInf != INVALID_HANDLE_VALUE)
+            SetupCloseInfFile(hSysSetupInf);
 
-    if (hThread != NULL)
-    {
-        PostThreadMessage(dwThreadId, WM_QUIT, 0, 0);
-        WaitForSingleObject(hThread, INFINITE);
-        CloseHandle(hThread);
     }
 
     return bResult;
+}
+
+static VOID
+StartServiceAccountServices(VOID)
+{
+    LPENUM_SERVICE_STATUS_PROCESSW pServices = NULL;
+    LPQUERY_SERVICE_CONFIGW pConfig = NULL;
+    SC_HANDLE hManager, hService;
+    DWORD dwBytesNeeded = 0, dwCount = 0, dwResume = 0, dwConfigSize = 0, i;
+    BOOL bConfig;
+
+    hManager = OpenSCManagerW(NULL, NULL, SC_MANAGER_ENUMERATE_SERVICE);
+    if (hManager == NULL)
+        return;
+
+    EnumServicesStatusExW(hManager, SC_ENUM_PROCESS_INFO, SERVICE_WIN32, SERVICE_INACTIVE,
+                          NULL, 0, &dwBytesNeeded, &dwCount, &dwResume, NULL);
+    if (GetLastError() != ERROR_MORE_DATA)
+        goto done;
+
+    pServices = HeapAlloc(GetProcessHeap(), 0, dwBytesNeeded);
+    if (pServices == NULL)
+        goto done;
+
+    dwResume = 0;
+    if (!EnumServicesStatusExW(hManager, SC_ENUM_PROCESS_INFO, SERVICE_WIN32, SERVICE_INACTIVE,
+                               (LPBYTE)pServices, dwBytesNeeded, &dwBytesNeeded, &dwCount, &dwResume, NULL))
+    {
+        goto done;
+    }
+
+    for (i = 0; i < dwCount; i++)
+    {
+        hService = OpenServiceW(hManager, pServices[i].lpServiceName, SERVICE_QUERY_CONFIG | SERVICE_START);
+        if (hService == NULL)
+            continue;
+
+        bConfig = QueryServiceConfigW(hService, pConfig, dwConfigSize, &dwBytesNeeded);
+        if (!bConfig && GetLastError() == ERROR_INSUFFICIENT_BUFFER)
+        {
+            if (pConfig != NULL)
+                HeapFree(GetProcessHeap(), 0, pConfig);
+            dwConfigSize = dwBytesNeeded;
+            pConfig = HeapAlloc(GetProcessHeap(), 0, dwConfigSize);
+            if (pConfig == NULL)
+                dwConfigSize = 0;
+            else
+                bConfig = QueryServiceConfigW(hService, pConfig, dwConfigSize, &dwBytesNeeded);
+        }
+
+        if (bConfig &&
+            pConfig->dwStartType == SERVICE_AUTO_START &&
+            pConfig->lpServiceStartName != NULL &&
+            (_wcsicmp(pConfig->lpServiceStartName, L"NT AUTHORITY\\LocalService") == 0 ||
+             _wcsicmp(pConfig->lpServiceStartName, L"NT AUTHORITY\\NetworkService") == 0))
+        {
+            StartServiceW(hService, 0, NULL);
+        }
+
+        CloseServiceHandle(hService);
+    }
+
+done:
+    if (pConfig != NULL)
+        HeapFree(GetProcessHeap(), 0, pConfig);
+    if (pServices != NULL)
+        HeapFree(GetProcessHeap(), 0, pServices);
+    CloseServiceHandle(hManager);
+}
+
+static
+BOOL
+GetPreinstallUserName(
+    _Out_writes_(cchUserName) PWSTR UserName,
+    _In_ DWORD cchUserName)
+{
+    HKEY hKey;
+    DWORD cbData = (cchUserName - 1) * sizeof(WCHAR);
+    DWORD dwType;
+    LONG Error;
+
+    ZeroMemory(UserName, cchUserName * sizeof(WCHAR));
+    Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                          L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon",
+                          0,
+                          KEY_QUERY_VALUE,
+                          &hKey);
+    if (Error != ERROR_SUCCESS)
+        return FALSE;
+
+    Error = RegQueryValueExW(hKey, L"DefaultUserName", NULL, &dwType, (PBYTE)UserName, &cbData);
+    RegCloseKey(hKey);
+    if (Error != ERROR_SUCCESS || dwType != REG_SZ)
+    {
+        UserName[0] = UNICODE_NULL;
+        return FALSE;
+    }
+
+    return UserName[0] != UNICODE_NULL;
+}
+
+VOID
+CreateMachineGuid(VOID)
+{
+    RPC_WSTR UuidString;
+    UUID Uuid;
+    HKEY hKey;
+    LONG Error;
+
+    Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+                            L"SOFTWARE\\Microsoft\\Cryptography",
+                            0,
+                            NULL,
+                            0,
+                            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY,
+                            NULL,
+                            &hKey,
+                            NULL);
+    if (Error != ERROR_SUCCESS)
+    {
+        DPRINT1("Cannot open the Cryptography key (error %ld)\n", Error);
+        return;
+    }
+
+    Error = RegQueryValueExW(hKey, L"MachineGuid", NULL, NULL, NULL, NULL);
+    if (Error == ERROR_FILE_NOT_FOUND &&
+        UuidCreate(&Uuid) == RPC_S_OK &&
+        UuidToStringW(&Uuid, &UuidString) == RPC_S_OK)
+    {
+        Error = RegSetValueExW(hKey,
+                               L"MachineGuid",
+                               0,
+                               REG_SZ,
+                               (PBYTE)UuidString,
+                               (DWORD)((wcslen((PCWSTR)UuidString) + 1) * sizeof(WCHAR)));
+        RpcStringFreeW(&UuidString);
+    }
+    if (Error != ERROR_SUCCESS)
+        DPRINT1("Cannot create the machine GUID (error %ld)\n", Error);
+
+    RegCloseKey(hKey);
+}
+
+#define SYSTEM_ID_SEED_BYTES 32
+#define SYSTEM_ID_SEED_VARIABLE L"SystemIdentificationSeed"
+#define SYSTEM_ID_SEED_VENDOR L"{8af810c6-b3f8-47db-b467-966847f996dc}"
+
+static
+DWORD
+ReadFirmwareSystemIdSeed(
+    _Out_writes_bytes_(SYSTEM_ID_SEED_BYTES) PBYTE Seed,
+    _In_ BOOL AllowCreate)
+{
+    DWORD Length;
+
+    Length = GetFirmwareEnvironmentVariableExW(SYSTEM_ID_SEED_VARIABLE,
+                                               SYSTEM_ID_SEED_VENDOR,
+                                               Seed,
+                                               SYSTEM_ID_SEED_BYTES,
+                                               NULL);
+    if (Length == SYSTEM_ID_SEED_BYTES)
+        return ERROR_SUCCESS;
+    if (Length != 0)
+        return ERROR_INVALID_DATA;
+    if (GetLastError() != ERROR_ENVVAR_NOT_FOUND || !AllowCreate)
+        return GetLastError();
+
+    if (!RtlGenRandom(Seed, SYSTEM_ID_SEED_BYTES) ||
+        !SetFirmwareEnvironmentVariableExW(SYSTEM_ID_SEED_VARIABLE,
+                                           SYSTEM_ID_SEED_VENDOR,
+                                           Seed,
+                                           SYSTEM_ID_SEED_BYTES,
+                                           VARIABLE_ATTRIBUTE_NON_VOLATILE |
+                                           VARIABLE_ATTRIBUTE_BOOTSERVICE_ACCESS |
+                                           VARIABLE_ATTRIBUTE_RUNTIME_ACCESS))
+    {
+        return GetLastError();
+    }
+
+    return ERROR_SUCCESS;
+}
+
+VOID
+CreateSystemIdSeed(
+    _In_ BOOL AllowFirmwareWrite)
+{
+    BYTE Seed[SYSTEM_ID_SEED_BYTES];
+    DWORD Source = SystemIdentificationSource_Registry;
+    HKEY hKey;
+    LONG Error;
+
+    Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+                            L"SOFTWARE\\LiberNT\\SystemIdentification",
+                            0,
+                            NULL,
+                            0,
+                            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_WOW64_64KEY,
+                            NULL,
+                            &hKey,
+                            NULL);
+    if (Error != ERROR_SUCCESS)
+    {
+        DPRINT1("Cannot open the system identification key (error %ld)\n", Error);
+        return;
+    }
+
+    if (RegQueryValueExW(hKey, L"Seed", NULL, NULL, NULL, NULL) != ERROR_FILE_NOT_FOUND)
+    {
+        RegCloseKey(hKey);
+        return;
+    }
+
+    /* TODO: Take the TPM source (endorsement key) first when a TPM is present; UEFI is used instead. */
+    if (pSetupEnablePrivilege(SE_SYSTEM_ENVIRONMENT_NAME, TRUE))
+    {
+        Error = ReadFirmwareSystemIdSeed(Seed, AllowFirmwareWrite);
+        if (Error == ERROR_SUCCESS)
+            Source = SystemIdentificationSource_Uefi;
+        else
+            DPRINT1("No firmware system identification seed (error %ld)\n", Error);
+        pSetupEnablePrivilege(SE_SYSTEM_ENVIRONMENT_NAME, FALSE);
+    }
+
+    if (Source == SystemIdentificationSource_Registry && !RtlGenRandom(Seed, sizeof(Seed)))
+    {
+        DPRINT1("Cannot generate the system identification seed\n");
+        RegCloseKey(hKey);
+        return;
+    }
+
+    Error = RegSetValueExW(hKey, L"Source", 0, REG_DWORD, (PBYTE)&Source, sizeof(Source));
+    if (Error == ERROR_SUCCESS)
+        Error = RegSetValueExW(hKey, L"Seed", 0, REG_BINARY, Seed, sizeof(Seed));
+    if (Error != ERROR_SUCCESS)
+        DPRINT1("Cannot store the system identification seed (error %ld)\n", Error);
+
+    SecureZeroMemory(Seed, sizeof(Seed));
+    RegCloseKey(hKey);
+}
+
+static
+VOID
+ScheduleFirstBootSetup(VOID)
+{
+    WCHAR Path[MAX_PATH];
+    HKEY hKey;
+    LONG Error;
+    UINT Length;
+
+    Length = GetSystemDirectoryW(Path, ARRAYSIZE(Path));
+    if (Length == 0 || Length + wcslen(L"\\oobe\\oobe.exe") >= ARRAYSIZE(Path))
+        return;
+    wcscat(Path, L"\\oobe\\oobe.exe");
+    if (GetFileAttributesW(Path) == INVALID_FILE_ATTRIBUTES)
+        return;
+
+    Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+                            L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+                            0,
+                            NULL,
+                            0,
+                            KEY_SET_VALUE,
+                            NULL,
+                            &hKey,
+                            NULL);
+    if (Error != ERROR_SUCCESS)
+    {
+        DPRINT1("Could not schedule the first-boot setup (error %ld)\n", Error);
+        return;
+    }
+
+    RegSetValueExW(hKey, L"OOBE", 0, REG_SZ, (PBYTE)Path, (DWORD)((wcslen(Path) + 1) * sizeof(WCHAR)));
+    RegCloseKey(hKey);
+}
+
+static
+LONG
+EndSystemSetup(VOID)
+{
+    HKEY hKey;
+    DWORD dwValue = 0;
+    LONG Error;
+
+    Error = RegFlushKey(HKEY_LOCAL_MACHINE);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\Setup", 0, KEY_SET_VALUE, &hKey);
+    if (Error != ERROR_SUCCESS)
+        return Error;
+
+    Error = RegSetValueExW(hKey, L"SystemSetupInProgress", 0, REG_DWORD, (PBYTE)&dwValue, sizeof(dwValue));
+    if (Error == ERROR_SUCCESS)
+        Error = RegSetValueExW(hKey, L"SetupType", 0, REG_DWORD, (PBYTE)&dwValue, sizeof(dwValue));
+    if (Error == ERROR_SUCCESS)
+        Error = RegFlushKey(hKey);
+    RegCloseKey(hKey);
+
+    return Error;
+}
+
+static
+VOID
+LoadSystemProfile(VOID)
+{
+    PROFILEINFOW ProfileInfo;
+    HANDLE hToken;
+
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_IMPERSONATE | TOKEN_DUPLICATE, &hToken))
+        return;
+
+    ZeroMemory(&ProfileInfo, sizeof(ProfileInfo));
+    ProfileInfo.dwSize = sizeof(ProfileInfo);
+    ProfileInfo.dwFlags = PI_NOUI;
+    ProfileInfo.lpUserName = L"SYSTEM";
+    if (LoadUserProfileW(hToken, &ProfileInfo))
+        RegCloseKey(ProfileInfo.hProfile);
+    else
+        DPRINT1("LoadUserProfileW() for the system account failed (Error %lu)\n", GetLastError());
+
+    CloseHandle(hToken);
 }
 
 static
@@ -1138,14 +1384,48 @@ InstallLiveCD(VOID)
 {
     STARTUPINFOW StartupInfo;
     PROCESS_INFORMATION ProcessInformation;
+    LPVOID lpEnvironment;
+    HANDLE hToken = NULL;
     BOOL bRes;
+    WCHAR UserName[UNLEN + 1];
+    WCHAR ComputerName[MAX_COMPUTERNAME_LENGTH + 1];
+    DWORD cchComputerName = ARRAYSIZE(ComputerName);
+    ITEMSDATA ItemsData = { NULL };
+    REGISTRATIONNOTIFY Notify;
+    BOOL bPreinstall;
+    NTSTATUS Status;
 
-    PreprocessUnattend(FALSE);
+    PreprocessUnattend();
+    InitializeProgramFilesDir();
     if (!CommonInstall())
         goto error;
+    CreateMachineGuid();
+
+    bPreinstall = GetPreinstallUserName(UserName, ARRAYSIZE(UserName));
+    CreateSystemIdSeed(bPreinstall);
+    if (bPreinstall)
+    {
+        if (!InitializeProfiles())
+            goto error;
+        InitializeDefaultUserLocale();
+        if (SaveDefaultUserHive() != ERROR_SUCCESS || !CopySystemProfile(0))
+            goto error;
+        LoadSystemProfile();
+        if (!GetComputerNameW(ComputerName, &cchComputerName))
+            goto error;
+        Status = SetAccountsDomainSid(NULL, ComputerName);
+        if (!NT_SUCCESS(Status))
+            goto error;
+        ZeroMemory(&Notify, sizeof(Notify));
+        InstallSecurity(&ItemsData, &Notify);
+    }
+    else
+    {
+        InstallLiveCDPrivileges();
+    }
 
     /* Install the TCP/IP protocol driver */
-    bRes = InstallNetworkComponent(L"MS_TCPIP");
+    bRes = InstallNetworkComponent(L"MS_TCPIP", FALSE);
     if (!bRes && GetLastError() != ERROR_FILE_NOT_FOUND)
     {
         DPRINT("InstallNetworkComponent() failed with error 0x%lx\n", GetLastError());
@@ -1162,14 +1442,12 @@ InstallLiveCD(VOID)
     _SEH2_TRY
     {
         if (!SetupInstallFromInfSectionW(NULL,
-                                         hSysSetupInf, L"RegistrationPhase2",
+                                         hSysSetupInf, L"RegistrationLiveCD",
                                          SPINST_ALL,
                                          0, NULL, 0, NULL, NULL, NULL, NULL))
         {
             DPRINT1("SetupInstallFromInfSectionW failed!\n");
         }
-
-        RegisterTypeLibraries(NULL, NULL, hSysSetupInf, L"TypeLibraries");
     }
     _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
     {
@@ -1179,7 +1457,28 @@ InstallLiveCD(VOID)
 
     SetupCloseInfFile(hSysSetupInf);
 
-    /* Run the shell */
+    StartServiceAccountServices();
+
+    if (bPreinstall)
+    {
+        Status = CreateTargetAccount(UserName, L"");
+        if (!NT_SUCCESS(Status) && Status != STATUS_USER_EXISTS)
+            goto error;
+        ScheduleFirstBootSetup();
+        if (EndSystemSetup() != ERROR_SUCCESS)
+            goto error;
+        return 0;
+    }
+
+    /* Run the shell with a fresh system environment, as winlogon does for
+     * a shell without a user token: ours was inherited from SMSS before it
+     * wrote the per-boot variables such as PROCESSOR_IDENTIFIER. */
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &hToken) ||
+        !CreateEnvironmentBlock(&lpEnvironment, hToken, TRUE))
+        lpEnvironment = NULL;
+    if (hToken)
+        CloseHandle(hToken);
+
     ZeroMemory(&StartupInfo, sizeof(StartupInfo));
     StartupInfo.cb = sizeof(StartupInfo);
     bRes = CreateProcessW(L"userinit.exe",
@@ -1187,11 +1486,13 @@ InstallLiveCD(VOID)
                           NULL,
                           NULL,
                           FALSE,
-                          0,
-                          NULL,
+                          CREATE_UNICODE_ENVIRONMENT,
+                          lpEnvironment,
                           NULL,
                           &StartupInfo,
                           &ProcessInformation);
+    if (lpEnvironment)
+        DestroyEnvironmentBlock(lpEnvironment);
     if (!bRes)
         goto error;
 
@@ -1201,12 +1502,11 @@ InstallLiveCD(VOID)
     return 0;
 
 error:
-    MessageBoxW(NULL,
-                L"Failed to load LiveCD! You can shutdown your computer, or press ENTER to reboot.",
-                L"ReactOS LiveCD",
-                MB_OK);
-    // HACK: This shouldn't be done here, but by the caller of InstallWindowsNt()
-    /* Enable the shutdown privilege and reboot the machine */
+    MessageBoxW(
+        NULL,
+        L"Failed to load LiveCD! You can shutdown your computer, or press ENTER to reboot.",
+        L"LiberNT LiveCD",
+        MB_OK);
     if (!pSetupEnablePrivilege(SE_SHUTDOWN_NAME, TRUE))
         DPRINT1("pSetupEnablePrivilege(SE_SHUTDOWN_NAME) failed (Error %lu)\n", GetLastError());
     ExitWindowsEx(EWX_REBOOT, 0);
@@ -1214,85 +1514,7 @@ error:
 }
 
 
-static BOOL
-SetSetupType(DWORD dwSetupType)
-{
-    DWORD dwError;
-    HKEY hKey;
 
-    dwError = RegOpenKeyExW(
-        HKEY_LOCAL_MACHINE,
-        L"SYSTEM\\Setup",
-        0,
-        KEY_SET_VALUE,
-        &hKey);
-    if (dwError != ERROR_SUCCESS)
-        return FALSE;
-
-    dwError = RegSetValueExW(
-        hKey,
-        L"SetupType",
-        0,
-        REG_DWORD,
-        (LPBYTE)&dwSetupType,
-        sizeof(DWORD));
-    RegCloseKey(hKey);
-    if (dwError != ERROR_SUCCESS)
-        return FALSE;
-
-    return TRUE;
-}
-
-static DWORD CALLBACK
-HotkeyThread(LPVOID Parameter)
-{
-    ATOM hotkey;
-    MSG msg;
-
-    DPRINT("HotkeyThread start\n");
-
-    hotkey = GlobalAddAtomW(L"Setup Shift+F10 Hotkey");
-    if (!RegisterHotKey(NULL, hotkey, MOD_SHIFT, VK_F10))
-        DPRINT1("RegisterHotKey failed with %lu\n", GetLastError());
-
-    while (GetMessageW(&msg, NULL, 0, 0))
-    {
-        if (msg.hwnd == NULL && msg.message == WM_HOTKEY && msg.wParam == hotkey)
-        {
-            WCHAR CmdLine[] = L"cmd.exe"; // CreateProcess can modify this buffer.
-            STARTUPINFOW si = { sizeof(si) };
-            PROCESS_INFORMATION pi;
-
-            if (CreateProcessW(NULL,
-                               CmdLine,
-                               NULL,
-                               NULL,
-                               FALSE,
-                               CREATE_NEW_CONSOLE,
-                               NULL,
-                               NULL,
-                               &si,
-                               &pi))
-            {
-                CloseHandle(pi.hProcess);
-                CloseHandle(pi.hThread);
-            }
-            else
-            {
-                DPRINT1("Failed to launch command prompt: %lu\n", GetLastError());
-            }
-        }
-    }
-
-    UnregisterHotKey(NULL, hotkey);
-    GlobalDeleteAtom(hotkey);
-
-    DPRINT("HotkeyThread terminate\n");
-    return 0;
-}
-
-
-static
 BOOL
 InitializeProgramFilesDir(VOID)
 {
@@ -1302,6 +1524,10 @@ InitializeProgramFilesDir(VOID)
     WCHAR szProgramFilesDirPath[MAX_PATH];
     WCHAR szCommonFilesDirPath[MAX_PATH];
     WCHAR szBuffer[MAX_PATH];
+#ifdef _WIN64
+    WCHAR szNativeProgramFilesDirPath[MAX_PATH];
+    WCHAR szNativeCommonFilesDirPath[MAX_PATH];
+#endif
 
     /* Load 'Program Files' location */
     if (!LoadStringW(hDllInstance,
@@ -1385,7 +1611,8 @@ InitializeProgramFilesDir(VOID)
     // FIXME: Security!
     if (!CreateDirectoryW(szProgramFilesDirPath, NULL))
     {
-        if (GetLastError() != ERROR_ALREADY_EXISTS)
+        if (GetLastError() != ERROR_ALREADY_EXISTS &&
+            GetFileAttributesW(szProgramFilesDirPath) == INVALID_FILE_ATTRIBUTES)
         {
             DPRINT1("Error: %lu\n", GetLastError());
             return FALSE;
@@ -1403,11 +1630,155 @@ InitializeProgramFilesDir(VOID)
         }
     }
 
+#ifdef _WIN64
+    Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                          L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion",
+                          0,
+                          KEY_SET_VALUE,
+                          &hKey);
+    if (Error == ERROR_SUCCESS)
+    {
+        dwLength = (wcslen(szProgramFilesDirPath) + 1) * sizeof(WCHAR);
+        Error = RegSetValueExW(hKey,
+                               L"ProgramW6432Dir",
+                               0,
+                               REG_SZ,
+                               (LPBYTE)szProgramFilesDirPath,
+                               dwLength);
+        if (Error != ERROR_SUCCESS)
+        {
+            DPRINT1("Warning: %lu\n", Error);
+        }
+
+        dwLength = (wcslen(szCommonFilesDirPath) + 1) * sizeof(WCHAR);
+        Error = RegSetValueExW(hKey,
+                               L"CommonW6432Dir",
+                               0,
+                               REG_SZ,
+                               (LPBYTE)szCommonFilesDirPath,
+                               dwLength);
+        if (Error != ERROR_SUCCESS)
+        {
+            DPRINT1("Warning: %lu\n", Error);
+        }
+
+        RegCloseKey(hKey);
+    }
+    else
+    {
+        DPRINT1("Warning: %lu\n", Error);
+    }
+
+    if (!LoadStringW(hDllInstance,
+                     IDS_COMMONFILES,
+                     szBuffer,
+                     ARRAYSIZE(szBuffer)))
+    {
+        DPRINT1("Warning: %lu\n", GetLastError());
+        return TRUE;
+    }
+
+    wcscpy(szNativeProgramFilesDirPath, szProgramFilesDirPath);
+    wcscpy(szNativeCommonFilesDirPath, szCommonFilesDirPath);
+    wcscat(szProgramFilesDirPath, L" (x86)");
+    wcscpy(szCommonFilesDirPath, szProgramFilesDirPath);
+    wcscat(szCommonFilesDirPath, L"\\");
+    wcscat(szCommonFilesDirPath, szBuffer);
+
+    Error = RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+                            L"SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion",
+                            0,
+                            NULL,
+                            0,
+                            KEY_SET_VALUE,
+                            NULL,
+                            &hKey,
+                            NULL);
+    if (Error == ERROR_SUCCESS)
+    {
+        const struct
+        {
+            PCWSTR Name;
+            PCWSTR Value;
+        } Values[] =
+        {
+            { L"ProgramFilesDir", szProgramFilesDirPath },
+            { L"CommonFilesDir", szCommonFilesDirPath },
+            { L"ProgramFilesDir (x86)", szProgramFilesDirPath },
+            { L"CommonFilesDir (x86)", szCommonFilesDirPath },
+            { L"ProgramW6432Dir", szNativeProgramFilesDirPath },
+            { L"CommonW6432Dir", szNativeCommonFilesDirPath },
+        };
+        ULONG Index;
+
+        for (Index = 0; Index < ARRAYSIZE(Values); Index++)
+        {
+            dwLength = (wcslen(Values[Index].Value) + 1) * sizeof(WCHAR);
+            Error = RegSetValueExW(hKey, Values[Index].Name, 0, REG_SZ, (LPBYTE)Values[Index].Value, dwLength);
+            if (Error != ERROR_SUCCESS)
+                DPRINT1("Warning: %lu\n", Error);
+        }
+        RegCloseKey(hKey);
+    }
+    else
+    {
+        DPRINT1("Warning: %lu\n", Error);
+    }
+
+    Error = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                          L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion",
+                          0,
+                          KEY_SET_VALUE,
+                          &hKey);
+    if (Error != ERROR_SUCCESS)
+    {
+        DPRINT1("Warning: %lu\n", Error);
+        return TRUE;
+    }
+
+    dwLength = (wcslen(szProgramFilesDirPath) + 1) * sizeof(WCHAR);
+    Error = RegSetValueExW(hKey,
+                           L"ProgramFilesDir (x86)",
+                           0,
+                           REG_SZ,
+                           (LPBYTE)szProgramFilesDirPath,
+                           dwLength);
+    if (Error != ERROR_SUCCESS)
+    {
+        DPRINT1("Warning: %lu\n", Error);
+    }
+
+    dwLength = (wcslen(szCommonFilesDirPath) + 1) * sizeof(WCHAR);
+    Error = RegSetValueExW(hKey,
+                           L"CommonFilesDir (x86)",
+                           0,
+                           REG_SZ,
+                           (LPBYTE)szCommonFilesDirPath,
+                           dwLength);
+    if (Error != ERROR_SUCCESS)
+    {
+        DPRINT1("Warning: %lu\n", Error);
+    }
+
+    RegCloseKey(hKey);
+
+    if (!CreateDirectoryW(szProgramFilesDirPath, NULL) &&
+        GetLastError() != ERROR_ALREADY_EXISTS)
+    {
+        DPRINT1("Warning: %lu\n", GetLastError());
+    }
+
+    if (!CreateDirectoryW(szCommonFilesDirPath, NULL) &&
+        GetLastError() != ERROR_ALREADY_EXISTS)
+    {
+        DPRINT1("Warning: %lu\n", GetLastError());
+    }
+#endif
+
     return TRUE;
 }
 
 
-static
 VOID
 InitializeDefaultUserLocale(VOID)
 {
@@ -1515,7 +1886,6 @@ done:
 }
 
 
-static
 DWORD
 SaveDefaultUserHive(VOID)
 {
@@ -1589,134 +1959,10 @@ SaveDefaultUserHive(VOID)
 }
 
 
-static
-DWORD
-InstallReactOS(VOID)
-{
-    BOOL ret;
-    DWORD dwHotkeyThreadId = 0;
-    WCHAR szBuffer[MAX_PATH];
-
-    InitializeSetupActionLog(FALSE);
-    LogItem(NULL, L"Installing ReactOS");
-
-    CreateTempDir(L"TEMP");
-    CreateTempDir(L"TMP");
-
-    if (!InitializeProgramFilesDir())
-    {
-        FatalError("InitializeProgramFilesDir() failed");
-        goto Quit;
-    }
-
-    if (!InitializeProfiles())
-    {
-        FatalError("InitializeProfiles() failed");
-        goto Quit;
-    }
-
-    InitializeDefaultUserLocale();
-
-    if (GetWindowsDirectoryW(szBuffer, ARRAYSIZE(szBuffer)))
-    {
-        HKEY hKey;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                          L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
-                          0,
-                          KEY_WRITE,
-                          &hKey) == ERROR_SUCCESS)
-        {
-            RegSetValueExW(hKey,
-                           L"PathName",
-                           0,
-                           REG_SZ,
-                           (LPBYTE)szBuffer,
-                           (wcslen(szBuffer) + 1) * sizeof(WCHAR));
-
-            RegSetValueExW(hKey,
-                           L"SystemRoot",
-                           0,
-                           REG_SZ,
-                           (LPBYTE)szBuffer,
-                           (wcslen(szBuffer) + 1) * sizeof(WCHAR));
-
-            RegCloseKey(hKey);
-        }
-
-        PathAddBackslash(szBuffer);
-        wcscat(szBuffer, L"system");
-        CreateDirectory(szBuffer, NULL);
-    }
-
-    if (SaveDefaultUserHive() != ERROR_SUCCESS)
-    {
-        FatalError("SaveDefaultUserHive() failed");
-        goto Quit;
-    }
-
-    if (!CopySystemProfile(0))
-    {
-        FatalError("CopySystemProfile() failed");
-        goto Quit;
-    }
-
-    /* Start the hotkey thread */
-    CloseHandle(CreateThread(NULL, 0, HotkeyThread, NULL, 0, &dwHotkeyThreadId));
-
-    PreprocessUnattend(TRUE);
-    if (!CommonInstall())
-        goto Quit;
-
-    /* Install the TCP/IP protocol driver */
-    ret = InstallNetworkComponent(L"MS_TCPIP");
-    if (!ret && GetLastError() != ERROR_FILE_NOT_FOUND)
-    {
-        DPRINT("InstallNetworkComponent() failed with error 0x%lx\n", GetLastError());
-    }
-    else
-    {
-        /* Start the TCP/IP protocol driver */
-        SetupStartService(L"Tcpip", FALSE);
-        SetupStartService(L"Dhcp", FALSE);
-        SetupStartService(L"Dnscache", FALSE);
-    }
-
-    InstallWizard();
-
-    SetAutoAdminLogon();
-
-    SetupCloseInfFile(hSysSetupInf);
-    SetSetupType(0);
-
-    /* Stop the hotkey thread */
-    if (dwHotkeyThreadId)
-        PostThreadMessage(dwHotkeyThreadId, WM_QUIT, 0, 0);
-
-    LogItem(NULL, L"Installing ReactOS done");
-    TerminateSetupActionLog();
-
-    if (AdminInfo.Name != NULL)
-        RtlFreeHeap(RtlGetProcessHeap(), 0, AdminInfo.Name);
-
-    if (AdminInfo.Domain != NULL)
-        RtlFreeHeap(RtlGetProcessHeap(), 0, AdminInfo.Domain);
-
-    if (AdminInfo.Password != NULL)
-        RtlFreeHeap(RtlGetProcessHeap(), 0, AdminInfo.Password);
-
-Quit:
-    // HACK: This shouldn't be done here, but by the caller of InstallWindowsNt()
-    /* Enable the shutdown privilege and reboot the machine */
-    if (!pSetupEnablePrivilege(SE_SHUTDOWN_NAME, TRUE))
-        DPRINT1("pSetupEnablePrivilege(SE_SHUTDOWN_NAME) failed (Error %lu)\n", GetLastError());
-    ExitWindowsEx(EWX_REBOOT, 0);
-    return 0;
-}
-
 
 /*
  * Standard Windows-compatible export, which dispatches
- * to either 'InstallReactOS' or 'InstallLiveCD'.
+ * to either 'InstallTargetSystem' or 'InstallLiveCD'.
  */
 INT
 WINAPI
@@ -1734,8 +1980,8 @@ InstallWindowsNt(INT argc, WCHAR** argv)
 
             // NOTE: On Windows, "mini" means "minimal UI", and can be used
             // in addition to "newsetup"; these options are not exclusive.
-            if (_wcsicmp(p, L"newsetup") == 0)
-                return (INT)InstallReactOS();
+            if (_wcsicmp(p, L"target") == 0)
+                return (INT)InstallTargetSystem();
             else if (_wcsicmp(p, L"mini") == 0)
                 return (INT)InstallLiveCD();
 

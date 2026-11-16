@@ -9,6 +9,7 @@
 /* INCLUDES *****************************************************************/
 
 #include <rtl.h>
+#include <reactos/unaligned.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -35,8 +36,24 @@ PUSHORT NlsOemLeadByteInfo = NULL; /* exported */
 USHORT NlsOemDefaultChar = '\0';
 USHORT NlsUnicodeDefaultChar = 0;
 
+#define RTLP_CP_UTF8 65001
+
 
 /* FUNCTIONS *****************************************************************/
+
+static
+VOID
+RtlpCopyNlsHeaderBytes(
+    _Out_writes_bytes_(Length) PUCHAR Destination,
+    _In_reads_bytes_(Length) const UCHAR *Source,
+    _In_ SIZE_T Length)
+{
+    while (Length != 0)
+    {
+        *Destination++ = *Source++;
+        Length--;
+    }
+}
 
 /*
  * @unimplemented
@@ -75,8 +92,28 @@ RtlCustomCPToUnicodeN(IN PCPTABLEINFO CustomCP,
     else
     {
         /* multi-byte code page */
-        /* FIXME */
-        ASSERT(FALSE);
+        UCHAR Char;
+        USHORT LeadByteInfo;
+
+        for (i = 0; i < UnicodeSize / sizeof(WCHAR) && CustomSize; i++)
+        {
+            Char = *(PUCHAR)CustomString++;
+            CustomSize--;
+
+            LeadByteInfo = CustomCP->DBCSOffsets[Char];
+            if (LeadByteInfo && CustomSize)
+            {
+                *UnicodeString++ = CustomCP->DBCSOffsets[LeadByteInfo + *(PUCHAR)CustomString++];
+                CustomSize--;
+            }
+            else
+            {
+                *UnicodeString++ = CustomCP->MultiByteTable[Char];
+            }
+        }
+
+        if (ResultSize)
+            *ResultSize = i * sizeof(WCHAR);
     }
 
     return STATUS_SUCCESS;
@@ -155,32 +192,46 @@ VOID NTAPI
 RtlInitCodePageTable(IN PUSHORT TableBase,
                      OUT PCPTABLEINFO CodePageTable)
 {
-    PNLS_FILE_HEADER NlsFileHeader;
+    const UCHAR *TableBytes;
+    USHORT HeaderSize;
 
     PAGED_CODE_RTL();
 
     DPRINT("RtlInitCodePageTable() called\n");
 
-    NlsFileHeader = (PNLS_FILE_HEADER)TableBase;
+    TableBytes = (const UCHAR *)TableBase;
+    if (ReadUnalignedU16((const USHORT *)(TableBytes + FIELD_OFFSET(NLS_FILE_HEADER, CodePage))) == RTLP_CP_UTF8)
+    {
+        RtlZeroMemory(CodePageTable, sizeof(*CodePageTable));
+        CodePageTable->CodePage = RTLP_CP_UTF8;
+        CodePageTable->MaximumCharacterSize = 4;
+        CodePageTable->DefaultChar = '?';
+        CodePageTable->UniDefaultChar = 0xFFFD;
+        CodePageTable->TransDefaultChar = '?';
+        CodePageTable->TransUniDefaultChar = '?';
+        return;
+    }
+
+    HeaderSize = ReadUnalignedU16((const USHORT *)(TableBytes + FIELD_OFFSET(NLS_FILE_HEADER, HeaderSize)));
 
     /* Copy header fields first */
-    CodePageTable->CodePage = NlsFileHeader->CodePage;
-    CodePageTable->MaximumCharacterSize = NlsFileHeader->MaximumCharacterSize;
-    CodePageTable->DefaultChar = NlsFileHeader->DefaultChar;
-    CodePageTable->UniDefaultChar = NlsFileHeader->UniDefaultChar;
-    CodePageTable->TransDefaultChar = NlsFileHeader->TransDefaultChar;
-    CodePageTable->TransUniDefaultChar = NlsFileHeader->TransUniDefaultChar;
+    CodePageTable->CodePage = ReadUnalignedU16((const USHORT *)(TableBytes + FIELD_OFFSET(NLS_FILE_HEADER, CodePage)));
+    CodePageTable->MaximumCharacterSize = ReadUnalignedU16((const USHORT *)(TableBytes + FIELD_OFFSET(NLS_FILE_HEADER, MaximumCharacterSize)));
+    CodePageTable->DefaultChar = ReadUnalignedU16((const USHORT *)(TableBytes + FIELD_OFFSET(NLS_FILE_HEADER, DefaultChar)));
+    CodePageTable->UniDefaultChar = ReadUnalignedU16((const USHORT *)(TableBytes + FIELD_OFFSET(NLS_FILE_HEADER, UniDefaultChar)));
+    CodePageTable->TransDefaultChar = ReadUnalignedU16((const USHORT *)(TableBytes + FIELD_OFFSET(NLS_FILE_HEADER, TransDefaultChar)));
+    CodePageTable->TransUniDefaultChar = ReadUnalignedU16((const USHORT *)(TableBytes + FIELD_OFFSET(NLS_FILE_HEADER, TransUniDefaultChar)));
 
-    RtlCopyMemory(&CodePageTable->LeadByte,
-                  &NlsFileHeader->LeadByte,
-                  MAXIMUM_LEADBYTES);
+    RtlpCopyNlsHeaderBytes(CodePageTable->LeadByte,
+                           TableBytes + FIELD_OFFSET(NLS_FILE_HEADER, LeadByte),
+                           MAXIMUM_LEADBYTES);
 
     /* Offset to wide char table is after the header */
     CodePageTable->WideCharTable =
-        TableBase + NlsFileHeader->HeaderSize + 1 + TableBase[NlsFileHeader->HeaderSize];
+        TableBase + HeaderSize + 1 + TableBase[HeaderSize];
 
     /* Then multibyte table (256 wchars) follows */
-    CodePageTable->MultiByteTable = TableBase + NlsFileHeader->HeaderSize + 1;
+    CodePageTable->MultiByteTable = TableBase + HeaderSize + 1;
 
     /* Check the presence of glyph table (256 wchars) */
     if (!CodePageTable->MultiByteTable[256])
@@ -512,8 +563,25 @@ RtlUnicodeToCustomCPN(IN PCPTABLEINFO CustomCP,
     else
     {
         /* multi-byte code page */
-        /* FIXME */
-        ASSERT(FALSE);
+        PUSHORT WideCharTable = (PUSHORT)CustomCP->WideCharTable;
+        USHORT MbChar;
+
+        for (i = CustomSize, Size = UnicodeSize / sizeof(WCHAR); i && Size; i--, Size--)
+        {
+            MbChar = WideCharTable[*UnicodeString++];
+
+            if (HIBYTE(MbChar))
+            {
+                if (i == 1) break;
+                i--;
+                *CustomString++ = HIBYTE(MbChar);
+            }
+
+            *CustomString++ = LOBYTE(MbChar);
+        }
+
+        if (ResultSize)
+            *ResultSize = CustomSize - i;
     }
 
     return STATUS_SUCCESS;
@@ -764,8 +832,32 @@ RtlUpcaseUnicodeToCustomCPN(IN PCPTABLEINFO CustomCP,
     else
     {
         /* multi-byte code page */
-        /* FIXME */
-        ASSERT(FALSE);
+        PUSHORT WideCharTable = (PUSHORT)CustomCP->WideCharTable;
+        USHORT MbChar;
+
+        for (i = CustomSize, Size = UnicodeSize / sizeof(WCHAR); i && Size; i--, Size--)
+        {
+            MbChar = WideCharTable[*UnicodeString++];
+
+            if (HIBYTE(MbChar))
+                UpcaseChar = CustomCP->DBCSOffsets[CustomCP->DBCSOffsets[HIBYTE(MbChar)] + LOBYTE(MbChar)];
+            else
+                UpcaseChar = CustomCP->MultiByteTable[LOBYTE(MbChar)];
+
+            MbChar = WideCharTable[RtlpUpcaseUnicodeChar(UpcaseChar)];
+
+            if (HIBYTE(MbChar))
+            {
+                if (i == 1) break;
+                i--;
+                *CustomString++ = HIBYTE(MbChar);
+            }
+
+            *CustomString++ = LOBYTE(MbChar);
+        }
+
+        if (ResultSize)
+            *ResultSize = CustomSize - i;
     }
 
     return STATUS_SUCCESS;
@@ -809,8 +901,31 @@ RtlUpcaseUnicodeToMultiByteN(OUT PCHAR MbString,
     else
     {
         /* multi-byte code page */
-        /* FIXME */
-        ASSERT(FALSE);
+        USHORT MbChar;
+
+        for (i = MbSize, Size = UnicodeSize / sizeof(WCHAR); i && Size; i--, Size--)
+        {
+            MbChar = NlsUnicodeToMbAnsiTable[*UnicodeString++];
+
+            if (HIBYTE(MbChar))
+                UpcaseChar = NlsLeadByteInfo[NlsLeadByteInfo[HIBYTE(MbChar)] + LOBYTE(MbChar)];
+            else
+                UpcaseChar = NlsAnsiToUnicodeTable[LOBYTE(MbChar)];
+
+            MbChar = NlsUnicodeToMbAnsiTable[RtlpUpcaseUnicodeChar(UpcaseChar)];
+
+            if (HIBYTE(MbChar))
+            {
+                if (i == 1) break;
+                i--;
+                *MbString++ = HIBYTE(MbChar);
+            }
+
+            *MbString++ = LOBYTE(MbChar);
+        }
+
+        if (ResultSize)
+            *ResultSize = MbSize - i;
     }
 
     return STATUS_SUCCESS;
@@ -847,6 +962,11 @@ RtlUpcaseUnicodeToOemN(OUT PCHAR OemString,
         {
             UpcaseChar = RtlpUpcaseUnicodeChar(*UnicodeString);
             *OemString = NlsUnicodeToOemTable[UpcaseChar];
+            if (NlsOemToUnicodeTable[(UCHAR)*OemString] != UpcaseChar)
+            {
+                UpcaseChar = RtlpUpcaseUnicodeChar(NlsOemToUnicodeTable[(UCHAR)*OemString]);
+                *OemString = NlsUnicodeToOemTable[UpcaseChar];
+            }
             OemString++;
             UnicodeString++;
         }

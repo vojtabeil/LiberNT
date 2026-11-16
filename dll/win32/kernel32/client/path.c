@@ -19,6 +19,9 @@ UNICODE_STRING NoDefaultCurrentDirectoryInExePath = RTL_CONSTANT_STRING(L"NoDefa
 
 UNICODE_STRING BaseWindowsSystemDirectory, BaseWindowsDirectory;
 UNICODE_STRING BaseDefaultPathAppend, BaseDefaultPath, BaseDllDirectory;
+DWORD BaseDefaultDllDirectoriesFlags;
+
+static const WCHAR BaseWow64DirectorySuffix[] = L"\\SysWOW64";
 
 PVOID gpTermsrvGetWindowsDirectoryA;
 PVOID gpTermsrvGetWindowsDirectoryW;
@@ -78,7 +81,17 @@ BASE_SEARCH_PATH_TYPE BaseProcessOrder[BaseSearchPathMax] =
     BaseSearchPathInvalid
 };
 
+BASE_SEARCH_PATH_TYPE BaseProcessOrderSafe[BaseSearchPathMax] =
+{
+    BaseSearchPathApp,
+    BaseSearchPathDefault,
+    BaseSearchPathCurrent,
+    BaseSearchPathEnv,
+    BaseSearchPathInvalid
+};
+
 BASE_CURRENT_DIR_PLACEMENT BasepDllCurrentDirPlacement = BaseCurrentDirPlacementInvalid;
+static LONG BasepSearchPathMode;
 
 extern UNICODE_STRING BasePathVariableName;
 
@@ -228,6 +241,10 @@ BasepComputeProcessPath(IN PBASE_SEARCH_PATH_TYPE PathOrder,
             PathLengthInBytes += BaseDefaultPath.Length;
             break;
 
+        case BaseSearchPathSystem:
+            PathLengthInBytes += BaseWindowsSystemDirectory.Length + sizeof(L';');
+            break;
+
         /* Compute the size of the current app directory */
         case BaseSearchPathApp:
             /* Find out where the app name ends, to get only the directory */
@@ -336,6 +353,13 @@ BasepComputeProcessPath(IN PBASE_SEARCH_PATH_TYPE PathOrder,
             PathCurrent += (BaseDefaultPath.Length / sizeof(WCHAR));
             break;
 
+        case BaseSearchPathSystem:
+            ASSERT((((PathCurrent - PathBuffer + 1) * sizeof(WCHAR)) + BaseWindowsSystemDirectory.Length) <= PathLengthInBytes);
+            RtlCopyMemory(PathCurrent, BaseWindowsSystemDirectory.Buffer, BaseWindowsSystemDirectory.Length);
+            PathCurrent += BaseWindowsSystemDirectory.Length / sizeof(WCHAR);
+            *PathCurrent++ = L';';
+            break;
+
         /* Add the path in the PATH environment variable */
         case BaseSearchPathEnv:
             if (EnvPath.Length)
@@ -394,10 +418,12 @@ LPWSTR
 WINAPI
 BaseComputeProcessSearchPath(VOID)
 {
+    PBASE_SEARCH_PATH_TYPE PathOrder;
+
     DPRINT("Computing Process Search path\n");
 
-    /* Compute the path using default process order */
-    return BasepComputeProcessPath(BaseProcessOrder, NULL, NULL);
+    PathOrder = BasepSearchPathMode ? BaseProcessOrderSafe : BaseProcessOrder;
+    return BasepComputeProcessPath(PathOrder, NULL, NULL);
 }
 
 LPWSTR
@@ -413,6 +439,74 @@ BaseComputeProcessExePath(IN LPWSTR FullPath)
 
     /* And now compute the path */
     return BasepComputeProcessPath(PathOrder, NULL, NULL);
+}
+
+static
+LPWSTR
+BasepApplyPreferSystem32(
+    _In_opt_ LPWSTR DllPath)
+{
+    struct
+    {
+        ULONG Policy;
+        ULONG Flags;
+    } Mitigation = {10, 0};
+    WCHAR System32[MAX_PATH];
+    SIZE_T SystemLength, PathLength;
+    LPWSTR NewPath;
+    NTSTATUS Status;
+
+    if (!DllPath) return NULL;
+    Status = NtQueryInformationProcess(NtCurrentProcess(), ProcessMitigationPolicy, &Mitigation, sizeof(Mitigation), NULL);
+    if (!NT_SUCCESS(Status) || !(Mitigation.Flags & 4)) return DllPath;
+
+    SystemLength = GetSystemDirectoryW(System32, RTL_NUMBER_OF(System32));
+    if (!SystemLength || SystemLength >= RTL_NUMBER_OF(System32)) return DllPath;
+    PathLength = wcslen(DllPath);
+    NewPath = RtlAllocateHeap(RtlGetProcessHeap(), 0, (SystemLength + 1 + PathLength + 1) * sizeof(WCHAR));
+    if (!NewPath) return DllPath;
+    RtlCopyMemory(NewPath, System32, SystemLength * sizeof(WCHAR));
+    NewPath[SystemLength] = L';';
+    RtlCopyMemory(NewPath + SystemLength + 1, DllPath, (PathLength + 1) * sizeof(WCHAR));
+    RtlFreeHeap(RtlGetProcessHeap(), 0, DllPath);
+    return NewPath;
+}
+
+VOID
+BasepInheritDllDirectory(VOID)
+{
+    PUNICODE_STRING DllPath = &NtCurrentPeb()->ProcessParameters->DllPath;
+    UNICODE_STRING Directory, Remaining, Default;
+    PWCHAR Start, End, Limit;
+
+    if (DllPath->Buffer == NULL)
+        return;
+    Limit = DllPath->Buffer + DllPath->Length / sizeof(WCHAR);
+    for (Start = DllPath->Buffer; Start < Limit && *Start != L';'; Start++);
+    if (Start == Limit)
+        return;
+    Start++;
+    for (End = Start; End < Limit && *End != L';'; End++);
+    Directory.Buffer = Start;
+    Directory.Length = Directory.MaximumLength = (USHORT)((End - Start) * sizeof(WCHAR));
+    if (Directory.Length < 3 * sizeof(WCHAR) ||
+        (Start[1] != L':' && (Start[0] != L'\\' || Start[1] != L'\\')) ||
+        RtlEqualUnicodeString(&Directory, &BaseWindowsSystemDirectory, TRUE))
+    {
+        return;
+    }
+    if (End == Limit)
+        return;
+    Default = BaseDefaultPath;
+    Default.Length -= sizeof(WCHAR);
+    Remaining.Buffer = End + 1;
+    Remaining.Length = Remaining.MaximumLength = (USHORT)((Limit - Remaining.Buffer) * sizeof(WCHAR));
+    if (!RtlPrefixUnicodeString(&Default, &Remaining, TRUE) ||
+        (Remaining.Length > Default.Length && Remaining.Buffer[Default.Length / sizeof(WCHAR)] != L';'))
+    {
+        return;
+    }
+    RtlDuplicateUnicodeString(RTL_DUPLICATE_UNICODE_STRING_NULL_TERMINATE, &Directory, &BaseDllDirectory);
 }
 
 LPWSTR
@@ -443,7 +537,7 @@ BaseComputeProcessDllPath(IN LPWSTR FullPath,
         RtlLeaveCriticalSection(&BaseDllDirectoryLock);
 
         /* Return dll path */
-        return DllPath;
+        return BasepApplyPreferSystem32(DllPath);
     }
 
     /* Release DLL directory lock */
@@ -511,6 +605,100 @@ BaseComputeProcessDllPath(IN LPWSTR FullPath,
                                       Environment);
 
     /* Return dll path */
+    return BasepApplyPreferSystem32(DllPath);
+}
+
+static PWSTR
+BasepAppendDllSearchDirectory(
+    _Out_ PWSTR Destination,
+    _In_reads_(Length) PCWSTR Directory,
+    _In_ SIZE_T Length)
+{
+    if (Length)
+    {
+        RtlCopyMemory(Destination, Directory, Length * sizeof(WCHAR));
+        Destination += Length;
+        *Destination++ = L';';
+    }
+    return Destination;
+}
+
+LPWSTR
+WINAPI
+BaseComputeSecureDllPath(
+    IN LPCWSTR FullPath,
+    IN DWORD Flags)
+{
+    PBASE_DLL_DIRECTORY_ENTRY Entry;
+    PLIST_ENTRY ListEntry;
+    PCWSTR ModuleEnd = NULL, ImagePath = NULL, ImageEnd = NULL, Directory;
+    SIZE_T Length = 1;
+    LPWSTR DllPath, Current;
+
+    RtlEnterCriticalSection(&BaseDllDirectoryLock);
+
+    if (Flags & LOAD_LIBRARY_SEARCH_DEFAULT_DIRS)
+    {
+        Flags |= LOAD_LIBRARY_SEARCH_APPLICATION_DIR |
+                 LOAD_LIBRARY_SEARCH_USER_DIRS |
+                 LOAD_LIBRARY_SEARCH_SYSTEM32;
+    }
+
+    if (Flags & LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR)
+    {
+        ModuleEnd = BasepEndOfDirName((PWSTR)FullPath);
+        if (ModuleEnd) Length += ModuleEnd - FullPath + 1;
+    }
+
+    if (Flags & LOAD_LIBRARY_SEARCH_APPLICATION_DIR)
+    {
+        ImagePath = NtCurrentPeb()->ProcessParameters->ImagePathName.Buffer;
+        ImageEnd = BasepEndOfDirName((PWSTR)ImagePath);
+        if (ImageEnd) Length += ImageEnd - ImagePath + 1;
+    }
+
+    if (Flags & LOAD_LIBRARY_SEARCH_USER_DIRS)
+    {
+        for (ListEntry = BaseDllDirectoryList.Flink; ListEntry != &BaseDllDirectoryList; ListEntry = ListEntry->Flink)
+        {
+            Entry = CONTAINING_RECORD(ListEntry, BASE_DLL_DIRECTORY_ENTRY, ListEntry);
+            Directory = Entry->NtPath;
+            if (!wcsncmp(Directory, L"\\??\\", 4)) Directory += 4;
+            Length += wcslen(Directory) + 1;
+        }
+        if (BaseDllDirectory.Length) Length += BaseDllDirectory.Length / sizeof(WCHAR) + 1;
+    }
+
+    if (Flags & LOAD_LIBRARY_SEARCH_SYSTEM32) Length += BaseWindowsSystemDirectory.Length / sizeof(WCHAR) + 1;
+
+    DllPath = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length * sizeof(WCHAR));
+    if (!DllPath)
+    {
+        RtlLeaveCriticalSection(&BaseDllDirectoryLock);
+        return NULL;
+    }
+
+    Current = DllPath;
+    if (ModuleEnd) Current = BasepAppendDllSearchDirectory(Current, FullPath, ModuleEnd - FullPath);
+    if (ImageEnd) Current = BasepAppendDllSearchDirectory(Current, ImagePath, ImageEnd - ImagePath);
+
+    if (Flags & LOAD_LIBRARY_SEARCH_USER_DIRS)
+    {
+        for (ListEntry = BaseDllDirectoryList.Flink; ListEntry != &BaseDllDirectoryList; ListEntry = ListEntry->Flink)
+        {
+            Entry = CONTAINING_RECORD(ListEntry, BASE_DLL_DIRECTORY_ENTRY, ListEntry);
+            Directory = Entry->NtPath;
+            if (!wcsncmp(Directory, L"\\??\\", 4)) Directory += 4;
+            Current = BasepAppendDllSearchDirectory(Current, Directory, wcslen(Directory));
+        }
+        Current = BasepAppendDllSearchDirectory(Current, BaseDllDirectory.Buffer, BaseDllDirectory.Length / sizeof(WCHAR));
+    }
+
+    if (Flags & LOAD_LIBRARY_SEARCH_SYSTEM32) Current = BasepAppendDllSearchDirectory(Current, BaseWindowsSystemDirectory.Buffer, BaseWindowsSystemDirectory.Length / sizeof(WCHAR));
+
+    if (Current != DllPath) --Current;
+    *Current = UNICODE_NULL;
+    RtlLeaveCriticalSection(&BaseDllDirectoryLock);
     return DllPath;
 }
 
@@ -620,7 +808,7 @@ IsShortName_U(IN PWCHAR Name,
         }
 
         /* Check for illegal characters */
-        if ((c > 0x7F) || (IllegalMask[c / 32] & (1 << (c % 32))))
+        if ((c > 0x7F) || (IllegalMask[c / 32] & (1U << (c % 32))))
         {
             return FALSE;
         }
@@ -1056,6 +1244,7 @@ GetFullPathNameA(IN LPCSTR lpFileName,
     {
         /* Reset the path size since the buffer is not large enough */
         PathSize = 0;
+        SetLastError(ERROR_FILENAME_EXCED_RANGE);
     }
 
     /* Either no path, or local buffer was too small, enter failure code */
@@ -1288,6 +1477,52 @@ Quickie:
     if (ExtensionString.Buffer) RtlFreeUnicodeString(&ExtensionString);
     if (PathString.Buffer) RtlFreeUnicodeString(&PathString);
     return PathSize;
+}
+
+/*
+ * @implemented
+ */
+BOOL
+WINAPI
+SetSearchPathMode(IN DWORD Flags)
+{
+    LONG Mode, PreviousMode;
+
+    switch (Flags)
+    {
+        case BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE:
+            Mode = 1;
+            break;
+
+        case BASE_SEARCH_PATH_DISABLE_SAFE_SEARCHMODE:
+            Mode = 0;
+            break;
+
+        case BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE | BASE_SEARCH_PATH_PERMANENT:
+            InterlockedExchange(&BasepSearchPathMode, 2);
+            return TRUE;
+
+        default:
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+    }
+
+    for (;;)
+    {
+        PreviousMode = BasepSearchPathMode;
+        if (PreviousMode == 2)
+        {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return FALSE;
+        }
+
+        if (InterlockedCompareExchange(&BasepSearchPathMode,
+                                       Mode,
+                                       PreviousMode) == PreviousMode)
+        {
+            return TRUE;
+        }
+    }
 }
 
 /*
@@ -1994,33 +2229,14 @@ GetTempPathA(IN DWORD nBufferLength,
  *
  * ripped from wine
  */
+static
 DWORD
-WINAPI
-GetTempPathW(IN DWORD count,
-             OUT LPWSTR path)
+BasepFormatTempPath(IN PCWSTR tmp_path,
+                    IN DWORD count,
+                    OUT LPWSTR path)
 {
-    static const WCHAR tmp[]  = { 'T', 'M', 'P', 0 };
-    static const WCHAR temp[] = { 'T', 'E', 'M', 'P', 0 };
-    static const WCHAR userprofile[] = { 'U','S','E','R','P','R','O','F','I','L','E',0 };
-    WCHAR tmp_path[MAX_PATH];
     WCHAR full_tmp_path[MAX_PATH];
     UINT ret;
-
-    DPRINT("%u,%p\n", count, path);
-
-    if (!(ret = GetEnvironmentVariableW( tmp, tmp_path, MAX_PATH )) &&
-        !(ret = GetEnvironmentVariableW( temp, tmp_path, MAX_PATH )) &&
-        !(ret = GetEnvironmentVariableW( userprofile, tmp_path, MAX_PATH )) &&
-        !(ret = GetWindowsDirectoryW( tmp_path, MAX_PATH )))
-    {
-        return 0;
-    }
-
-    if (ret > MAX_PATH)
-    {
-        SetLastError(ERROR_FILENAME_EXCED_RANGE);
-        return 0;
-    }
 
     ret = GetFullPathNameW(tmp_path, MAX_PATH, full_tmp_path, NULL);
     if (!ret) return 0;
@@ -2055,6 +2271,111 @@ GetTempPathW(IN DWORD count,
 
     DPRINT("GetTempPathW returning %u, %S\n", ret, path);
     return ret;
+}
+
+DWORD
+WINAPI
+GetTempPathW(IN DWORD count,
+             OUT LPWSTR path)
+{
+    static const WCHAR tmp[]  = { 'T', 'M', 'P', 0 };
+    static const WCHAR temp[] = { 'T', 'E', 'M', 'P', 0 };
+    static const WCHAR userprofile[] = { 'U','S','E','R','P','R','O','F','I','L','E',0 };
+    WCHAR tmp_path[MAX_PATH];
+    UINT ret;
+
+    DPRINT("%u,%p\n", count, path);
+
+    if (!(ret = GetEnvironmentVariableW( tmp, tmp_path, MAX_PATH )) &&
+        !(ret = GetEnvironmentVariableW( temp, tmp_path, MAX_PATH )) &&
+        !(ret = GetEnvironmentVariableW( userprofile, tmp_path, MAX_PATH )) &&
+        !(ret = GetWindowsDirectoryW( tmp_path, MAX_PATH )))
+    {
+        return 0;
+    }
+
+    if (ret > MAX_PATH)
+    {
+        SetLastError(ERROR_FILENAME_EXCED_RANGE);
+        return 0;
+    }
+
+    return BasepFormatTempPath(tmp_path, count, path);
+}
+
+static
+BOOLEAN
+BasepIsLocalSystemProcess(VOID)
+{
+    static SID LocalSystemSid = { SID_REVISION, 1, { SECURITY_NT_AUTHORITY }, { SECURITY_LOCAL_SYSTEM_RID } };
+    UCHAR Buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    PTOKEN_USER User = (PTOKEN_USER)Buffer;
+    HANDLE TokenHandle;
+    ULONG ReturnLength;
+    NTSTATUS Status;
+
+    Status = NtOpenProcessToken(NtCurrentProcess(), TOKEN_QUERY, &TokenHandle);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    Status = NtQueryInformationToken(TokenHandle, TokenUser, User, sizeof(Buffer), &ReturnLength);
+    NtClose(TokenHandle);
+    if (!NT_SUCCESS(Status))
+        return FALSE;
+
+    return RtlEqualSid(User->User.Sid, &LocalSystemSid);
+}
+
+DWORD
+WINAPI
+GetTempPath2W(IN DWORD BufferLength,
+              OUT LPWSTR Buffer)
+{
+    static const WCHAR SystemTemp[] = L"\\SystemTemp";
+    WCHAR TempPath[MAX_PATH];
+    UINT Length;
+
+    SetLastError(ERROR_SUCCESS);
+
+    if (!BasepIsLocalSystemProcess())
+        return GetTempPathW(BufferLength, Buffer);
+
+    Length = GetSystemWindowsDirectoryW(TempPath, MAX_PATH);
+    if (!Length)
+        return 0;
+
+    if (Length + RTL_NUMBER_OF(SystemTemp) > MAX_PATH)
+    {
+        SetLastError(ERROR_FILENAME_EXCED_RANGE);
+        return 0;
+    }
+
+    if (TempPath[Length - 1] == L'\\')
+        Length--;
+    RtlCopyMemory(&TempPath[Length], SystemTemp, sizeof(SystemTemp));
+
+    return BasepFormatTempPath(TempPath, BufferLength, Buffer);
+}
+
+DWORD
+WINAPI
+GetTempPath2A(IN DWORD BufferLength,
+              OUT LPSTR Buffer)
+{
+    WCHAR BufferW[MAX_PATH];
+    DWORD ret;
+
+    ret = GetTempPath2W(MAX_PATH, BufferW);
+
+    if (!ret) return 0;
+
+    if (ret > MAX_PATH)
+    {
+        SetLastError(ERROR_FILENAME_EXCED_RANGE);
+        return 0;
+    }
+
+    return FilenameW2A_FitOrFail(Buffer, BufferLength, BufferW, ret+1);
 }
 
 /*
@@ -2333,37 +2654,79 @@ GetSystemWindowsDirectoryW(OUT LPWSTR lpBuffer,
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 UINT
 WINAPI
 GetSystemWow64DirectoryW(OUT LPWSTR lpBuffer,
                          IN UINT uSize)
 {
-#ifdef _WIN64
-    UNIMPLEMENTED;
-    return 0;
-#else
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return 0;
+#ifndef _WIN64
+    BOOL Wow64Process;
+
+    if (!IsWow64Process(GetCurrentProcess(), &Wow64Process) || !Wow64Process)
+    {
+        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+        return 0;
+    }
 #endif
+
+    if (uSize >= BaseWindowsDirectory.Length / sizeof(WCHAR) + RTL_NUMBER_OF(BaseWow64DirectorySuffix))
+    {
+        RtlCopyMemory(lpBuffer, BaseWindowsDirectory.Buffer, BaseWindowsDirectory.Length);
+        RtlCopyMemory((PBYTE)lpBuffer + BaseWindowsDirectory.Length, BaseWow64DirectorySuffix, sizeof(BaseWow64DirectorySuffix));
+        return BaseWindowsDirectory.Length / sizeof(WCHAR) + RTL_NUMBER_OF(BaseWow64DirectorySuffix) - 1;
+    }
+
+    return BaseWindowsDirectory.Length / sizeof(WCHAR) + RTL_NUMBER_OF(BaseWow64DirectorySuffix);
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 UINT
 WINAPI
 GetSystemWow64DirectoryA(OUT LPSTR lpBuffer,
                          IN UINT uSize)
 {
-#ifdef _WIN64
-    UNIMPLEMENTED;
-    return 0;
-#else
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return 0;
+    WCHAR Wow64DirectoryBuffer[MAX_PATH];
+    UNICODE_STRING Wow64Directory;
+    ANSI_STRING AnsiString;
+    ULONG AnsiLength;
+    NTSTATUS Status;
+
+#ifndef _WIN64
+    BOOL Wow64Process;
+
+    if (!IsWow64Process(GetCurrentProcess(), &Wow64Process) || !Wow64Process)
+    {
+        SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+        return 0;
+    }
 #endif
+
+    Wow64Directory.Length = BaseWindowsDirectory.Length + sizeof(BaseWow64DirectorySuffix) - sizeof(WCHAR);
+    Wow64Directory.MaximumLength = Wow64Directory.Length + sizeof(WCHAR);
+    if (Wow64Directory.MaximumLength > sizeof(Wow64DirectoryBuffer))
+    {
+        BaseSetLastNTError(STATUS_NAME_TOO_LONG);
+        return 0;
+    }
+
+    Wow64Directory.Buffer = Wow64DirectoryBuffer;
+    RtlCopyMemory(Wow64Directory.Buffer, BaseWindowsDirectory.Buffer, BaseWindowsDirectory.Length);
+    RtlCopyMemory((PBYTE)Wow64Directory.Buffer + BaseWindowsDirectory.Length, BaseWow64DirectorySuffix, sizeof(BaseWow64DirectorySuffix));
+
+    Status = RtlUnicodeToMultiByteSize(&AnsiLength, Wow64Directory.Buffer, Wow64Directory.MaximumLength);
+    if (!NT_SUCCESS(Status)) return 0;
+
+    if (uSize < AnsiLength) return AnsiLength;
+
+    RtlInitEmptyAnsiString(&AnsiString, lpBuffer, uSize);
+    Status = BasepUnicodeStringTo8BitString(&AnsiString, &Wow64Directory, FALSE);
+    if (!NT_SUCCESS(Status)) return 0;
+
+    return AnsiString.Length;
 }
 
 /* EOF */

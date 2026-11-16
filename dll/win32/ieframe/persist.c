@@ -38,26 +38,32 @@ static HRESULT WINAPI PersistStorage_QueryInterface(IPersistStorage *iface,
         REFIID riid, LPVOID *ppobj)
 {
     WebBrowser *This = impl_from_IPersistStorage(iface);
-    return IWebBrowser2_QueryInterface(&This->IWebBrowser2_iface, riid, ppobj);
+    return IUnknown_QueryInterface(This->hlink_frame.outer, riid, ppobj);
 }
 
 static ULONG WINAPI PersistStorage_AddRef(IPersistStorage *iface)
 {
     WebBrowser *This = impl_from_IPersistStorage(iface);
-    return IWebBrowser2_AddRef(&This->IWebBrowser2_iface);
+    return IUnknown_AddRef(This->hlink_frame.outer);
 }
 
 static ULONG WINAPI PersistStorage_Release(IPersistStorage *iface)
 {
     WebBrowser *This = impl_from_IPersistStorage(iface);
-    return IWebBrowser2_Release(&This->IWebBrowser2_iface);
+    return IUnknown_Release(This->hlink_frame.outer);
 }
 
 static HRESULT WINAPI PersistStorage_GetClassID(IPersistStorage *iface, CLSID *pClassID)
 {
     WebBrowser *This = impl_from_IPersistStorage(iface);
-    FIXME("(%p)->(%p)\n", This, pClassID);
-    return E_NOTIMPL;
+
+    TRACE("(%p)->(%p)\n", This, pClassID);
+
+    if (!pClassID)
+        return E_INVALIDARG;
+
+    *pClassID = This->version == 1 ? CLSID_WebBrowser_V1: CLSID_WebBrowser;
+    return S_OK;
 }
 
 static HRESULT WINAPI PersistStorage_IsDirty(IPersistStorage *iface)
@@ -122,19 +128,19 @@ static HRESULT WINAPI PersistMemory_QueryInterface(IPersistMemory *iface,
         REFIID riid, LPVOID *ppobj)
 {
     WebBrowser *This = impl_from_IPersistMemory(iface);
-    return IWebBrowser2_QueryInterface(&This->IWebBrowser2_iface, riid, ppobj);
+    return IUnknown_QueryInterface(This->hlink_frame.outer, riid, ppobj);
 }
 
 static ULONG WINAPI PersistMemory_AddRef(IPersistMemory *iface)
 {
     WebBrowser *This = impl_from_IPersistMemory(iface);
-    return IWebBrowser2_AddRef(&This->IWebBrowser2_iface);
+    return IUnknown_AddRef(This->hlink_frame.outer);
 }
 
 static ULONG WINAPI PersistMemory_Release(IPersistMemory *iface)
 {
     WebBrowser *This = impl_from_IPersistMemory(iface);
-    return IWebBrowser2_Release(&This->IWebBrowser2_iface);
+    return IUnknown_Release(This->hlink_frame.outer);
 }
 
 static HRESULT WINAPI PersistMemory_GetClassID(IPersistMemory *iface, CLSID *pClassID)
@@ -161,7 +167,7 @@ static HRESULT WINAPI PersistMemory_InitNew(IPersistMemory *iface)
 static HRESULT WINAPI PersistMemory_Load(IPersistMemory *iface, LPVOID pMem, ULONG cbSize)
 {
     WebBrowser *This = impl_from_IPersistMemory(iface);
-    FIXME("(%p)->(%p %x)\n", This, pMem, cbSize);
+    FIXME("(%p)->(%p %lx)\n", This, pMem, cbSize);
     return S_OK;
 }
 
@@ -169,7 +175,7 @@ static HRESULT WINAPI PersistMemory_Save(IPersistMemory *iface, LPVOID pMem,
         BOOL fClearDirty, ULONG cbSize)
 {
     WebBrowser *This = impl_from_IPersistMemory(iface);
-    FIXME("(%p)->(%p %x %x)\n", This, pMem, fClearDirty, cbSize);
+    FIXME("(%p)->(%p %x %lx)\n", This, pMem, fClearDirty, cbSize);
     return E_NOTIMPL;
 }
 
@@ -206,19 +212,19 @@ static HRESULT WINAPI PersistStreamInit_QueryInterface(IPersistStreamInit *iface
         REFIID riid, LPVOID *ppobj)
 {
     WebBrowser *This = impl_from_IPersistStreamInit(iface);
-    return IWebBrowser2_QueryInterface(&This->IWebBrowser2_iface, riid, ppobj);
+    return IUnknown_QueryInterface(This->hlink_frame.outer, riid, ppobj);
 }
 
 static ULONG WINAPI PersistStreamInit_AddRef(IPersistStreamInit *iface)
 {
     WebBrowser *This = impl_from_IPersistStreamInit(iface);
-    return IWebBrowser2_AddRef(&This->IWebBrowser2_iface);
+    return IUnknown_AddRef(This->hlink_frame.outer);
 }
 
 static ULONG WINAPI PersistStreamInit_Release(IPersistStreamInit *iface)
 {
     WebBrowser *This = impl_from_IPersistStreamInit(iface);
-    return IWebBrowser2_Release(&This->IWebBrowser2_iface);
+    return IUnknown_Release(This->hlink_frame.outer);
 }
 
 static HRESULT WINAPI PersistStreamInit_GetClassID(IPersistStreamInit *iface, CLSID *pClassID)
@@ -230,36 +236,68 @@ static HRESULT WINAPI PersistStreamInit_GetClassID(IPersistStreamInit *iface, CL
 static HRESULT WINAPI PersistStreamInit_IsDirty(IPersistStreamInit *iface)
 {
     WebBrowser *This = impl_from_IPersistStreamInit(iface);
+#ifdef __REACTOS__
+    TRACE("(%p)\n", This);
+    return S_FALSE;
+#else
     return IPersistStorage_IsDirty(&This->IPersistStorage_iface);
+#endif
 }
 
 static HRESULT WINAPI PersistStreamInit_Load(IPersistStreamInit *iface, LPSTREAM pStg)
 {
     WebBrowser *This = impl_from_IPersistStreamInit(iface);
+#ifdef __REACTOS__
+    TRACE("(%p)->(%p)\n", This, pStg);
+    if(!pStg)
+        return E_POINTER;
+    return WebBrowser_Ext_LoadStream(This, pStg);
+#else
     FIXME("(%p)->(%p)\n", This, pStg);
     return S_OK;
+#endif
 }
 
 static HRESULT WINAPI PersistStreamInit_Save(IPersistStreamInit *iface, LPSTREAM pStg,
         BOOL fSameAsLoad)
 {
     WebBrowser *This = impl_from_IPersistStreamInit(iface);
+#ifdef __REACTOS__
+    TRACE("(%p)->(%p %x)\n", This, pStg, fSameAsLoad);
+    if(!pStg)
+        return E_POINTER;
+    return WebBrowser_Ext_SaveStream(This, pStg);
+#else
     FIXME("(%p)->(%p %x)\n", This, pStg, fSameAsLoad);
     return E_NOTIMPL;
+#endif
 }
 
 static HRESULT WINAPI PersistStreamInit_GetSizeMax(IPersistStreamInit *iface,
         ULARGE_INTEGER *pcbSize)
 {
     WebBrowser *This = impl_from_IPersistStreamInit(iface);
+#ifdef __REACTOS__
+    TRACE("(%p)->(%p)\n", This, pcbSize);
+    if(!pcbSize)
+        return E_POINTER;
+    pcbSize->QuadPart = 0x2020;
+    return S_OK;
+#else
     FIXME("(%p)->(%p)\n", This, pcbSize);
     return E_NOTIMPL;
+#endif
 }
 
 static HRESULT WINAPI PersistStreamInit_InitNew(IPersistStreamInit *iface)
 {
     WebBrowser *This = impl_from_IPersistStreamInit(iface);
+#ifdef __REACTOS__
+    TRACE("(%p)\n", This);
+    WebBrowser_Ext_InitNew(This);
+#else
     FIXME("(%p)\n", This);
+#endif
     return S_OK;
 }
 

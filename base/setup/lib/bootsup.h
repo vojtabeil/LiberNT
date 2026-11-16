@@ -7,6 +7,9 @@
 
 #pragma once
 
+#define BOOT_OPTION_AFTER_WINDOWS   0x100
+#define BOOT_OPTION_KEEP_ORDER      0x200
+
 NTSTATUS
 NTAPI
 InstallBootManagerAndBootEntries(
@@ -18,10 +21,8 @@ InstallBootManagerAndBootEntries(
 
 NTSTATUS
 NTAPI
-InstallBootcodeToRemovable(
-    _In_ ARCHITECTURE_TYPE ArchType,
-    _In_ PCUNICODE_STRING RemovableRootPath,
-    _In_ PCUNICODE_STRING SourceRootPath,
-    _In_ PCUNICODE_STRING DestinationArcPath);
+RemoveHostSetupBoot(
+    _In_ PCUNICODE_STRING SystemRootPath);
+
 
 /* EOF */

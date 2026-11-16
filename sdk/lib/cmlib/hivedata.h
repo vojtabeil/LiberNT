@@ -55,6 +55,9 @@
 //
 #define HV_LOG_DIRTY_BLOCK 0xFF
 #define HV_LOG_DIRTY_SIGNATURE 0x54524944 // "DIRT"
+#define HV_LOG_INCREMENTAL_TYPE 6
+#define HV_LOG_ENTRY_SIGNATURE 0x454C7648
+#define HV_LOG_ENTRY_FLAGS 0x1
 
 //
 // Hive structure identifiers
@@ -128,7 +131,7 @@ typedef enum
     Volatile = 1
 } HSTORAGE_TYPE;
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 
 /**
  * @name HBASE_BLOCK
@@ -177,17 +180,32 @@ typedef struct _HBASE_BLOCK
        of the full name of the hive file */
     WCHAR FileName[HIVE_FILENAME_MAXLEN + 1];
 
-    ULONG Reserved1[99];
+    GUID RmId;
+    GUID LogId;
+    ULONG Flags;
+    GUID TmId;
+    ULONG GuidSignature;
+    ULONGLONG LastReorganizeTime;
+    ULONG Reserved1[83];
 
     /* Checksum of first 0x200 bytes */
     ULONG CheckSum;
 
-    ULONG Reserved2[0x37E];
+    ULONG Reserved2[882];
+    GUID ThawTmId;
+    GUID ThawRmId;
+    GUID ThawLogId;
     ULONG BootType;
     ULONG BootRecover;
 } HBASE_BLOCK, *PHBASE_BLOCK;
 
 C_ASSERT(sizeof(HBASE_BLOCK) == HBLOCK_SIZE);
+C_ASSERT(FIELD_OFFSET(HBASE_BLOCK, RmId) == 112);
+C_ASSERT(FIELD_OFFSET(HBASE_BLOCK, Flags) == 144);
+C_ASSERT(FIELD_OFFSET(HBASE_BLOCK, LastReorganizeTime) == 168);
+C_ASSERT(FIELD_OFFSET(HBASE_BLOCK, CheckSum) == 508);
+C_ASSERT(FIELD_OFFSET(HBASE_BLOCK, ThawTmId) == 4040);
+C_ASSERT(FIELD_OFFSET(HBASE_BLOCK, BootType) == 4088);
 
 typedef struct _HBIN
 {
@@ -215,7 +233,29 @@ typedef struct _HCELL
     LONG Size;
 } HCELL, *PHCELL;
 
-#include <poppack.h>
+#pragma pack(pop)
+
+typedef struct _HV_LOG_ENTRY
+{
+    ULONG Signature;
+    ULONG Size;
+    ULONG Flags;
+    ULONG Sequence;
+    ULONG Length;
+    ULONG DirtyPageCount;
+    ULONGLONG Hash1;
+    ULONGLONG Hash2;
+} HV_LOG_ENTRY, *PHV_LOG_ENTRY;
+
+typedef struct _HV_LOG_DIRTY_PAGE
+{
+    ULONG Offset;
+    ULONG Size;
+} HV_LOG_DIRTY_PAGE, *PHV_LOG_DIRTY_PAGE;
+
+C_ASSERT(sizeof(HV_LOG_ENTRY) == 40);
+C_ASSERT(FIELD_OFFSET(HV_LOG_ENTRY, Hash2) == 32);
+C_ASSERT(sizeof(HV_LOG_DIRTY_PAGE) == 8);
 
 struct _HHIVE;
 
@@ -278,11 +318,13 @@ typedef BOOLEAN
     ULONG Length
 );
 
+#define MAP_ENTRY_NEW_ALLOC 0x1
+#define MAP_ENTRY_DUMMY 0x8
+
 typedef struct _HMAP_ENTRY
 {
-    ULONG_PTR BlockAddress;
-    ULONG_PTR BinAddress;
-    struct _CM_VIEW_OF_FILE *CmView;
+    ULONG_PTR BlockOffset;
+    ULONG_PTR PermanentBinAddress;
     ULONG MemAlloc;
 } HMAP_ENTRY, *PHMAP_ENTRY;
 
@@ -293,69 +335,149 @@ typedef struct _HMAP_TABLE
 
 typedef struct _HMAP_DIRECTORY
 {
-    PHMAP_TABLE Directory[2048];
+    PHMAP_TABLE Directory[1024];
 } HMAP_DIRECTORY, *PHMAP_DIRECTORY;
+
+#if defined(_M_ARM64)
+C_ASSERT(sizeof(HMAP_ENTRY) == 24);
+C_ASSERT(FIELD_OFFSET(HMAP_ENTRY, BlockOffset) == 0);
+C_ASSERT(FIELD_OFFSET(HMAP_ENTRY, PermanentBinAddress) == 8);
+C_ASSERT(FIELD_OFFSET(HMAP_ENTRY, MemAlloc) == 16);
+C_ASSERT(sizeof(HMAP_TABLE) == 12288);
+C_ASSERT(sizeof(HMAP_DIRECTORY) == 8192);
+#endif
+
+typedef struct _FREE_DISPLAY
+{
+    ULONG RealVectorSize;
+    ULONG Hint;
+    RTL_BITMAP Display;
+} FREE_DISPLAY, *PFREE_DISPLAY;
 
 typedef struct _DUAL
 {
     ULONG Length;
     PHMAP_DIRECTORY Map;
-    PHMAP_ENTRY BlockList; // PHMAP_TABLE SmallDir;
+    PHMAP_TABLE SmallDir;
     ULONG Guard;
-    HCELL_INDEX FreeDisplay[24]; // FREE_DISPLAY FreeDisplay[24];
-    ULONG FreeSummary;
+    FREE_DISPLAY FreeDisplay[24];
     LIST_ENTRY FreeBins;
+    ULONG FreeSummary;
 } DUAL, *PDUAL;
+
+#if defined(_M_ARM64)
+C_ASSERT(sizeof(FREE_DISPLAY) == 24);
+C_ASSERT(FIELD_OFFSET(FREE_DISPLAY, RealVectorSize) == 0);
+C_ASSERT(FIELD_OFFSET(FREE_DISPLAY, Hint) == 4);
+C_ASSERT(FIELD_OFFSET(FREE_DISPLAY, Display) == 8);
+C_ASSERT(sizeof(DUAL) == 632);
+C_ASSERT(FIELD_OFFSET(DUAL, Length) == 0);
+C_ASSERT(FIELD_OFFSET(DUAL, Map) == 8);
+C_ASSERT(FIELD_OFFSET(DUAL, SmallDir) == 16);
+C_ASSERT(FIELD_OFFSET(DUAL, Guard) == 24);
+C_ASSERT(FIELD_OFFSET(DUAL, FreeDisplay) == 32);
+C_ASSERT(FIELD_OFFSET(DUAL, FreeBins) == 608);
+C_ASSERT(FIELD_OFFSET(DUAL, FreeSummary) == 624);
+#endif
+
+typedef struct _CMSI_RW_LOCK
+{
+    PVOID Reserved;
+} CMSI_RW_LOCK, *PCMSI_RW_LOCK;
+
+typedef struct _HVP_VIEW_MAP
+{
+    PVOID SectionReference;
+    LONGLONG StorageEndFileOffset;
+    LONGLONG SectionEndFileOffset;
+    struct _CMSI_PROCESS_TUPLE *ProcessTuple;
+    ULONG Flags;
+    RTL_RB_TREE ViewTree;
+} HVP_VIEW_MAP, *PHVP_VIEW_MAP;
 
 typedef struct _HHIVE
 {
-    /* Hive identifier (0xBEE0BEE0) */
     ULONG Signature;
-
-    /* Callbacks */
     PGET_CELL_ROUTINE GetCellRoutine;
     PRELEASE_CELL_ROUTINE ReleaseCellRoutine;
     PALLOCATE_ROUTINE Allocate;
     PFREE_ROUTINE Free;
-    PFILE_SET_SIZE_ROUTINE FileSetSize;
     PFILE_WRITE_ROUTINE FileWrite;
     PFILE_READ_ROUTINE FileRead;
-    PFILE_FLUSH_ROUTINE FileFlush;
-
-#if (NTDDI_VERSION >= NTDDI_WIN7)
-    PVOID HiveLoadFailure; // PHIVE_LOAD_FAILURE
-#endif
+    PVOID HiveLoadFailure;
     PHBASE_BLOCK BaseBlock;
+    CMSI_RW_LOCK FlusherLock;
+    CMSI_RW_LOCK WriterLock;
     RTL_BITMAP DirtyVector;
     ULONG DirtyCount;
     ULONG DirtyAlloc;
+    RTL_BITMAP UnreconciledVector;
+    ULONG UnreconciledCount;
     ULONG BaseBlockAlloc;
     ULONG Cluster;
-    BOOLEAN Flat;
-    BOOLEAN ReadOnly;
-#if (NTDDI_VERSION < NTDDI_VISTA) // NTDDI_LONGHORN
-    BOOLEAN Log;
-    BOOLEAN Alternate;
-#endif
-    BOOLEAN DirtyFlag;
-#if (NTDDI_VERSION >= NTDDI_VISTA) // NTDDI_LONGHORN
+    UCHAR Flat : 1;
+    UCHAR ReadOnly : 1;
+    UCHAR Reserved : 6;
+    UCHAR DirtyFlag;
     ULONG HvBinHeadersUse;
     ULONG HvFreeCellsUse;
     ULONG HvUsedCellsUse;
     ULONG CmUsedCellsUse;
-#endif
     ULONG HiveFlags;
-#if (NTDDI_VERSION < NTDDI_VISTA) // NTDDI_LONGHORN
-    ULONG LogSize;
-#else
+    ULONG FlusherFlags;
     ULONG CurrentLog;
-    ULONG LogSize[2];
-#endif
+    ULONG CurrentLogSequence;
+    ULONG CurrentLogMinimumSequence;
+    ULONG CurrentLogOffset;
+    ULONG MinimumLogSequence;
+    ULONG LogFileSizeCap;
+    UCHAR LogDataPresent[2];
+    BOOLEAN PrimaryFileValid;
+    BOOLEAN BaseBlockDirty;
+    LARGE_INTEGER LastLogSwapTime;
+    union
+    {
+        struct
+        {
+            USHORT FirstLogFile : 3;
+            USHORT SecondLogFile : 3;
+            USHORT HeaderRecovered : 1;
+            USHORT LegacyRecoveryIndicated : 1;
+            USHORT RecoveryInformationReserved : 8;
+        };
+        USHORT RecoveryInformation;
+    };
+    UCHAR LogEntriesRecovered[2];
     ULONG RefreshCount;
     ULONG StorageTypeCount;
     ULONG Version;
+    HVP_VIEW_MAP ViewMap;
     DUAL Storage[HTYPE_COUNT];
 } HHIVE, *PHHIVE;
+
+#if defined(_M_ARM64)
+C_ASSERT(sizeof(CMSI_RW_LOCK) == 8);
+C_ASSERT(FIELD_OFFSET(CMSI_RW_LOCK, Reserved) == 0);
+C_ASSERT(sizeof(RTL_RB_TREE) == 16);
+C_ASSERT(FIELD_OFFSET(RTL_RB_TREE, Root) == 0);
+C_ASSERT(FIELD_OFFSET(RTL_RB_TREE, Min) == 8);
+C_ASSERT(sizeof(HVP_VIEW_MAP) == 56);
+C_ASSERT(FIELD_OFFSET(HVP_VIEW_MAP, SectionReference) == 0);
+C_ASSERT(FIELD_OFFSET(HVP_VIEW_MAP, StorageEndFileOffset) == 8);
+C_ASSERT(FIELD_OFFSET(HVP_VIEW_MAP, SectionEndFileOffset) == 16);
+C_ASSERT(FIELD_OFFSET(HVP_VIEW_MAP, ProcessTuple) == 24);
+C_ASSERT(FIELD_OFFSET(HVP_VIEW_MAP, Flags) == 32);
+C_ASSERT(FIELD_OFFSET(HVP_VIEW_MAP, ViewTree) == 40);
+C_ASSERT(sizeof(HHIVE) == 1544);
+C_ASSERT(FIELD_OFFSET(HHIVE, BaseBlock) == 64);
+C_ASSERT(FIELD_OFFSET(HHIVE, FlusherLock) == 72);
+C_ASSERT(FIELD_OFFSET(HHIVE, WriterLock) == 80);
+C_ASSERT(FIELD_OFFSET(HHIVE, DirtyVector) == 88);
+C_ASSERT(FIELD_OFFSET(HHIVE, UnreconciledVector) == 112);
+C_ASSERT(FIELD_OFFSET(HHIVE, HiveFlags) == 160);
+C_ASSERT(FIELD_OFFSET(HHIVE, ViewMap) == 224);
+C_ASSERT(FIELD_OFFSET(HHIVE, Storage) == 280);
+#endif
 
 #define IsFreeCell(Cell)    ((Cell)->Size >= 0)
 #define IsUsedCell(Cell)    ((Cell)->Size <  0)

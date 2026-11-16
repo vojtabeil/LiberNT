@@ -3,6 +3,7 @@
  * LICENSE:     LGPL-2.1+ (https://spdx.org/licenses/LGPL-2.1+)
  * PURPOSE:     FolderItem(s) implementation
  * COPYRIGHT:   Copyright 2015-2018 Mark Jansen (mark.jansen@reactos.org)
+ *              Copyright 2026 Ahmed ARIF (arif.ing@outlook.com)
  */
 
 #include "precomp.h"
@@ -78,6 +79,7 @@ static inline HRESULT GetUIObjectOfFolderItems(FolderItems *pFI, REFIID riid, vo
 }
 
 CFolderItem::CFolderItem()
+    : m_SafetyOptions(0)
 {
 }
 
@@ -89,6 +91,76 @@ HRESULT CFolderItem::Initialize(Folder* folder, LPCITEMIDLIST idlist)
 {
     m_Folder = folder;
     return SHILClone(idlist, &m_idlist);
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItem::GetClassID(CLSID *pClassID)
+{
+    if (!pClassID)
+        return E_POINTER;
+    *pClassID = CLSID_FolderItem;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItem::Initialize(PCIDLIST_ABSOLUTE pidl)
+{
+    if (!pidl)
+        return E_INVALIDARG;
+
+    CComPtr<IDispatch> pApplication;
+    HRESULT hr = CShellDispatch_Constructor(IID_PPV_ARG(IDispatch, &pApplication));
+    if (FAILED_UNEXPECTEDLY(hr))
+        return hr;
+
+    CComHeapPtr<ITEMIDLIST> pidlParent(ILClone(pidl));
+    if (!pidlParent)
+        return E_OUTOFMEMORY;
+    ILRemoveLastID(pidlParent);
+
+    CComPtr<Folder> pFolder;
+    hr = CFolder::CreateInstance(pidlParent, pApplication, IID_PPV_ARG(Folder, &pFolder));
+    if (FAILED_UNEXPECTEDLY(hr))
+        return hr;
+
+    m_idlist.Free();
+    m_Folder = pFolder;
+    return SHILClone(pidl, &m_idlist);
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItem::GetCurFolder(PIDLIST_ABSOLUTE *ppidl)
+{
+    if (!ppidl)
+        return E_POINTER;
+    *ppidl = NULL;
+    if (!m_idlist)
+        return S_FALSE;
+    return SHILClone(m_idlist, ppidl);
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItem::GetInterfaceSafetyOptions(REFIID riid, DWORD *pdwSupportedOptions, DWORD *pdwEnabledOptions)
+{
+    if (!pdwSupportedOptions || !pdwEnabledOptions)
+        return E_POINTER;
+
+    CComPtr<IUnknown> pUnk;
+    if (FAILED(QueryInterface(riid, (void **)&pUnk)))
+        return E_NOINTERFACE;
+
+    *pdwSupportedOptions = INTERFACESAFE_FOR_UNTRUSTED_CALLER | INTERFACESAFE_FOR_UNTRUSTED_DATA;
+    *pdwEnabledOptions = m_SafetyOptions;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItem::SetInterfaceSafetyOptions(REFIID riid, DWORD dwOptionSetMask, DWORD dwEnabledOptions)
+{
+    CComPtr<IUnknown> pUnk;
+    if (FAILED(QueryInterface(riid, (void **)&pUnk)))
+        return E_NOINTERFACE;
+
+    if (dwOptionSetMask & ~(INTERFACESAFE_FOR_UNTRUSTED_CALLER | INTERFACESAFE_FOR_UNTRUSTED_DATA))
+        return E_FAIL;
+
+    m_SafetyOptions = (m_SafetyOptions & ~dwOptionSetMask) | (dwEnabledOptions & dwOptionSetMask);
+    return S_OK;
 }
 
 inline HRESULT CFolderItem::GetParentShellFolderAndItem(REFIID riid, void**ppv, PCUITEMID_CHILD &pidlLast)
@@ -210,10 +282,190 @@ HRESULT STDMETHODCALLTYPE CFolderItem::get_Path(BSTR *pbs)
     return StrRetToBSTR(&strret, NULL, pbs);
 }
 
+class CShellLinkObject :
+    public CComObjectRootEx<CComMultiThreadModelNoCS>,
+    public IDispatchImpl<IShellLinkDual2, &IID_IShellLinkDual2>
+{
+private:
+    CComPtr<IShellLinkW> m_pShellLink;
+    WCHAR m_szFile[MAX_PATH];
+
+    static HRESULT ToBSTR(PCWSTR psz, BSTR *pbs)
+    {
+        if (!pbs)
+            return E_POINTER;
+        *pbs = SysAllocString(psz);
+        return *pbs ? S_OK : E_OUTOFMEMORY;
+    }
+
+public:
+    CShellLinkObject()
+    {
+        m_szFile[0] = UNICODE_NULL;
+    }
+
+    HRESULT Initialize(LPCITEMIDLIST pidl)
+    {
+        if (!SHGetPathFromIDListW(pidl, m_szFile))
+            return E_FAIL;
+        HRESULT hr = CoCreateInstance(CLSID_ShellLink, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARG(IShellLinkW, &m_pShellLink));
+        if (FAILED_UNEXPECTEDLY(hr))
+            return hr;
+        CComPtr<IPersistFile> pPersistFile;
+        hr = m_pShellLink->QueryInterface(IID_PPV_ARG(IPersistFile, &pPersistFile));
+        if (FAILED_UNEXPECTEDLY(hr))
+            return hr;
+        return pPersistFile->Load(m_szFile, STGM_READ);
+    }
+
+    STDMETHOD(get_Path)(BSTR *pbs) override
+    {
+        WCHAR szPath[MAX_PATH];
+        HRESULT hr = m_pShellLink->GetPath(szPath, _countof(szPath), NULL, 0);
+        if (FAILED(hr))
+            return hr;
+        return ToBSTR(hr == S_OK ? szPath : L"", pbs);
+    }
+
+    STDMETHOD(put_Path)(BSTR bs) override
+    {
+        return m_pShellLink->SetPath(bs);
+    }
+
+    STDMETHOD(get_Description)(BSTR *pbs) override
+    {
+        WCHAR szText[INFOTIPSIZE];
+        HRESULT hr = m_pShellLink->GetDescription(szText, _countof(szText));
+        return FAILED(hr) ? hr : ToBSTR(szText, pbs);
+    }
+
+    STDMETHOD(put_Description)(BSTR bs) override
+    {
+        return m_pShellLink->SetDescription(bs);
+    }
+
+    STDMETHOD(get_WorkingDirectory)(BSTR *pbs) override
+    {
+        WCHAR szPath[MAX_PATH];
+        HRESULT hr = m_pShellLink->GetWorkingDirectory(szPath, _countof(szPath));
+        return FAILED(hr) ? hr : ToBSTR(szPath, pbs);
+    }
+
+    STDMETHOD(put_WorkingDirectory)(BSTR bs) override
+    {
+        return m_pShellLink->SetWorkingDirectory(bs);
+    }
+
+    STDMETHOD(get_Arguments)(BSTR *pbs) override
+    {
+        WCHAR szArgs[INFOTIPSIZE];
+        HRESULT hr = m_pShellLink->GetArguments(szArgs, _countof(szArgs));
+        return FAILED(hr) ? hr : ToBSTR(szArgs, pbs);
+    }
+
+    STDMETHOD(put_Arguments)(BSTR bs) override
+    {
+        return m_pShellLink->SetArguments(bs);
+    }
+
+    STDMETHOD(get_Hotkey)(int *piHK) override
+    {
+        WORD wHotkey = 0;
+        if (!piHK)
+            return E_POINTER;
+        HRESULT hr = m_pShellLink->GetHotkey(&wHotkey);
+        *piHK = wHotkey;
+        return hr;
+    }
+
+    STDMETHOD(put_Hotkey)(int iHK) override
+    {
+        return m_pShellLink->SetHotkey((WORD)iHK);
+    }
+
+    STDMETHOD(get_ShowCommand)(int *piShowCommand) override
+    {
+        if (!piShowCommand)
+            return E_POINTER;
+        return m_pShellLink->GetShowCmd(piShowCommand);
+    }
+
+    STDMETHOD(put_ShowCommand)(int iShowCommand) override
+    {
+        return m_pShellLink->SetShowCmd(iShowCommand);
+    }
+
+    STDMETHOD(Resolve)(int fFlags) override
+    {
+        return m_pShellLink->Resolve(NULL, fFlags);
+    }
+
+    STDMETHOD(GetIconLocation)(BSTR *pbs, int *piIcon) override
+    {
+        WCHAR szPath[MAX_PATH];
+        int iIcon = 0;
+        if (!piIcon)
+            return E_POINTER;
+        HRESULT hr = m_pShellLink->GetIconLocation(szPath, _countof(szPath), &iIcon);
+        if (FAILED(hr))
+            return hr;
+        *piIcon = iIcon;
+        return ToBSTR(szPath, pbs);
+    }
+
+    STDMETHOD(SetIconLocation)(BSTR bs, int iIcon) override
+    {
+        return m_pShellLink->SetIconLocation(bs, iIcon);
+    }
+
+    STDMETHOD(Save)(VARIANT vWhere) override
+    {
+        CComPtr<IPersistFile> pPersistFile;
+        HRESULT hr = m_pShellLink->QueryInterface(IID_PPV_ARG(IPersistFile, &pPersistFile));
+        if (FAILED_UNEXPECTEDLY(hr))
+            return hr;
+        PCWSTR pszFile = (V_VT(&vWhere) == VT_BSTR && !StrIsNullOrEmpty(V_BSTR(&vWhere))) ? V_BSTR(&vWhere) : m_szFile;
+        return pPersistFile->Save(pszFile, TRUE);
+    }
+
+    STDMETHOD(get_Target)(FolderItem **ppfi) override
+    {
+        CComHeapPtr<ITEMIDLIST> pidl;
+        if (!ppfi)
+            return E_POINTER;
+        *ppfi = NULL;
+        HRESULT hr = m_pShellLink->GetIDList(&pidl);
+        if (hr != S_OK)
+            return FAILED(hr) ? hr : E_FAIL;
+        CComPtr<IPersistFolder> pPersistFolder;
+        hr = ShellObjectCreator<CFolderItem>(IID_PPV_ARG(IPersistFolder, &pPersistFolder));
+        if (FAILED_UNEXPECTEDLY(hr))
+            return hr;
+        hr = pPersistFolder->Initialize(pidl);
+        if (FAILED_UNEXPECTEDLY(hr))
+            return hr;
+        return pPersistFolder->QueryInterface(IID_PPV_ARG(FolderItem, ppfi));
+    }
+
+BEGIN_COM_MAP(CShellLinkObject)
+    COM_INTERFACE_ENTRY_IID(IID_IShellLinkDual2, IShellLinkDual2)
+    COM_INTERFACE_ENTRY_IID(IID_IShellLinkDual, IShellLinkDual)
+    COM_INTERFACE_ENTRY_IID(IID_IDispatch, IDispatch)
+END_COM_MAP()
+};
+
 HRESULT STDMETHODCALLTYPE CFolderItem::get_GetLink(IDispatch **ppid)
 {
     TRACE("(%p, %p)\n", this, ppid);
-    return E_NOTIMPL;
+
+    if (!ppid)
+        return E_POINTER;
+    *ppid = NULL;
+
+    if (!SHGetAttributes(NULL, GetAbsoluteIDList(), SFGAO_LINK))
+        return E_NOTIMPL;
+
+    return ShellObjectCreatorInit<CShellLinkObject>(GetAbsoluteIDList(), IID_PPV_ARG(IDispatch, ppid));
 }
 
 HRESULT STDMETHODCALLTYPE CFolderItem::get_GetFolder(IDispatch **ppid)
@@ -535,6 +787,10 @@ HRESULT STDMETHODCALLTYPE CFolderItems::Item(VARIANT var, FolderItem **ppid)
     CComVariant index;
     HRESULT hr;
 
+    if (!ppid)
+        return E_POINTER;
+    *ppid = NULL;
+
     hr = VariantCopyInd(&index, &var);
     if (FAILED(hr))
         return hr;
@@ -547,6 +803,8 @@ HRESULT STDMETHODCALLTYPE CFolderItems::Item(VARIANT var, FolderItem **ppid)
         if (FAILED(EnumObjects()))
             return E_FAIL;
 
+        if (V_I4(&index) < 0)
+            return S_FALSE;
         ULONG count = V_UI4(&index);
 
         hr = m_EnumIDList->Reset();
@@ -563,7 +821,7 @@ HRESULT STDMETHODCALLTYPE CFolderItems::Item(VARIANT var, FolderItem **ppid)
         if (FAILED_UNEXPECTEDLY(hr))
             return hr;
         if (hr != S_OK)
-            return E_INVALIDARG;
+            return S_FALSE;
 
         CComHeapPtr<ITEMIDLIST> pidlFull;
         if (FAILED_UNEXPECTEDLY(hr = SHILCombine(m_idlist, pidlChild, &pidlFull)))
@@ -582,6 +840,11 @@ HRESULT STDMETHODCALLTYPE CFolderItems::Item(VARIANT var, FolderItem **ppid)
         if (FAILED_UNEXPECTEDLY(hr))
             return hr;
         return hr;
+    }
+
+    else if (V_VT(&index) == VT_ERROR)
+    {
+        return ShellObjectCreatorInit<CFolderItem>(m_Folder, static_cast<LPCITEMIDLIST>(m_idlist), IID_PPV_ARG(FolderItem, ppid));
     }
 
     FIXME("Index type %d not handled.\n", V_VT(&index));
@@ -622,13 +885,19 @@ HRESULT STDMETHODCALLTYPE CFolderItems::get_Verbs(FolderItemVerbs **ppfic)
 {
     if (!ppfic)
         return E_POINTER;
+    *ppfic = NULL;
 
-    CComPtr<CFolderItemVerbs> pVerbs;
-    HRESULT hr = CFolderItemVerbs::CreateInstance(pVerbs);
+    long count;
+    HRESULT hr = get_Count(&count);
     if (FAILED(hr))
         return hr;
-    long count;
-    if (SUCCEEDED(hr = get_Count(&count)) && count)
+    if (!count)
+        return S_FALSE;
+
+    CComPtr<CFolderItemVerbs> pVerbs;
+    hr = CFolderItemVerbs::CreateInstance(pVerbs);
+    if (FAILED(hr))
+        return hr;
     {
         CComPtr<IContextMenu> pCM;
         if (SUCCEEDED(hr = GetUIObjectOfFolderItems(this, IID_PPV_ARG(IContextMenu, &pCM))))
@@ -644,4 +913,296 @@ HRESULT CFolderItems::InvokeVerbHelper(HWND hWnd, IContextMenu &cm, VARIANT &vVe
     PCWSTR pszArgs = V_VT(&vArgs) == VT_BSTR && !StrIsNullOrEmpty(V_BSTR(&vArgs)) ? V_BSTR(&vArgs) : NULL;
     HRESULT hr = SHELL_InvokeCommandOnContextMenu(hWnd, &cm, pszVerb, !!pszVerb, pszArgs, 0, 0, pSite);
     return SUCCEEDED(hr) ? hr : S_FALSE;
+}
+
+CFolderItemsFDF::CFolderItemsFDF()
+{
+}
+
+CFolderItemsFDF::~CFolderItemsFDF()
+{
+    for (int i = 0; i < m_Items.GetSize(); i++)
+        ILFree(m_Items[i]);
+    SysFreeString(m_bstrFilter);
+}
+
+HRESULT CFolderItemsFDF::SetItems(PCIDLIST_ABSOLUTE pidlFolder, UINT cidl, PCUITEMID_CHILD_ARRAY apidl)
+{
+    HRESULT hr = Initialize(pidlFolder);
+    if (FAILED(hr))
+        return hr;
+
+    for (int i = 0; i < m_Items.GetSize(); i++)
+        ILFree(m_Items[i]);
+    m_Items.RemoveAll();
+
+    for (UINT i = 0; i < cidl; i++)
+    {
+        PITEMID_CHILD pidl = ILClone(apidl[i]);
+        if (!pidl)
+            return E_OUTOFMEMORY;
+        if (!m_Items.Add(pidl))
+        {
+            ILFree(pidl);
+            return E_OUTOFMEMORY;
+        }
+    }
+    return S_OK;
+}
+
+BOOL CFolderItemsFDF::IncludeItem(PCUITEMID_CHILD pidl)
+{
+    CComHeapPtr<ITEMIDLIST> pidlFull;
+    if (FAILED(SHILCombine(m_idlist, pidl, &pidlFull)))
+        return FALSE;
+
+    if ((m_Contf & (SHCONTF_FOLDERS | SHCONTF_NONFOLDERS)) != (SHCONTF_FOLDERS | SHCONTF_NONFOLDERS))
+    {
+        BOOL folder = (SHGetAttributes(NULL, pidlFull, SFGAO_FOLDER) & SFGAO_FOLDER) != 0;
+        if (folder ? !(m_Contf & SHCONTF_FOLDERS) : !(m_Contf & SHCONTF_NONFOLDERS))
+            return FALSE;
+    }
+
+    if (!m_bstrFilter)
+        return TRUE;
+
+    CComHeapPtr<WCHAR> pszPath;
+    if (FAILED(SHELL_DisplayNameOf(NULL, pidlFull, SHGDN_FORPARSING | SHGDN_INFOLDER, &pszPath)))
+        return FALSE;
+    return PathMatchSpecW(pszPath, m_bstrFilter);
+}
+
+long CFolderItemsFDF::GetVisibleCount()
+{
+    long count = 0;
+
+    for (int i = 0; i < m_Items.GetSize(); i++)
+    {
+        if (IncludeItem(m_Items[i]))
+            count++;
+    }
+    return count;
+}
+
+PCUITEMID_CHILD CFolderItemsFDF::GetVisibleItem(long index)
+{
+    for (int i = 0; i < m_Items.GetSize(); i++)
+    {
+        if (!IncludeItem(m_Items[i]))
+            continue;
+        if (index-- == 0)
+            return m_Items[i];
+    }
+    return NULL;
+}
+
+HRESULT CFolderItemsFDF::GetContextMenu(IContextMenu **ppcm)
+{
+    CSimpleArray<PCUITEMID_CHILD> items;
+    CComPtr<IShellFolder> psf;
+    HRESULT hr;
+
+    for (int i = 0; i < m_Items.GetSize(); i++)
+    {
+        if (IncludeItem(m_Items[i]) && !items.Add(m_Items[i]))
+            return E_OUTOFMEMORY;
+    }
+    if (!items.GetSize())
+        return S_FALSE;
+
+    hr = SHBindToObject(NULL, m_idlist, NULL, IID_PPV_ARG(IShellFolder, &psf));
+    if (FAILED_UNEXPECTEDLY(hr))
+        return hr;
+    return psf->GetUIObjectOf(NULL, items.GetSize(), items.GetData(), IID_IContextMenu, NULL, (void **)ppcm);
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemsFDF::get_Count(long *plCount)
+{
+    if (!plCount)
+        return E_POINTER;
+    if (!m_Folder)
+        return E_FAIL;
+
+    *plCount = GetVisibleCount();
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemsFDF::get_Application(IDispatch **ppid)
+{
+    if (!ppid)
+        return E_POINTER;
+    *ppid = NULL;
+    if (!m_Folder)
+        return E_FAIL;
+    return m_Folder->get_Application(ppid);
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemsFDF::get_Parent(IDispatch **ppid)
+{
+    if (ppid)
+        *ppid = NULL;
+    return E_NOTIMPL;
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemsFDF::Item(VARIANT var, FolderItem **ppid)
+{
+    CComVariant index;
+    HRESULT hr;
+
+    if (!ppid)
+        return E_POINTER;
+    *ppid = NULL;
+    if (!m_Folder)
+        return E_FAIL;
+
+    hr = VariantCopyInd(&index, &var);
+    if (FAILED(hr))
+        return hr;
+
+    if (V_VT(&index) == VT_I2)
+        VariantChangeType(&index, &index, 0, VT_I4);
+
+    if (V_VT(&index) == VT_I4)
+    {
+        PCUITEMID_CHILD pidlChild = V_I4(&index) >= 0 ? GetVisibleItem(V_I4(&index)) : NULL;
+        if (!pidlChild)
+            return S_FALSE;
+
+        CComHeapPtr<ITEMIDLIST> pidlFull;
+        if (FAILED_UNEXPECTEDLY(hr = SHILCombine(m_idlist, pidlChild, &pidlFull)))
+            return hr;
+        return ShellObjectCreatorInit<CFolderItem>(m_Folder, pidlFull, IID_PPV_ARG(FolderItem, ppid));
+    }
+    else if (V_VT(&index) == VT_BSTR)
+    {
+        if (!V_BSTR(&index))
+            return S_FALSE;
+
+        for (int i = 0; i < m_Items.GetSize(); i++)
+        {
+            CComHeapPtr<ITEMIDLIST> pidlFull;
+            CComHeapPtr<WCHAR> pszName;
+
+            if (!IncludeItem(m_Items[i]))
+                continue;
+            if (FAILED_UNEXPECTEDLY(hr = SHILCombine(m_idlist, m_Items[i], &pidlFull)))
+                return hr;
+            if (FAILED(SHELL_DisplayNameOf(NULL, pidlFull, SHGDN_FORPARSING | SHGDN_INFOLDER, &pszName)))
+                continue;
+            if (!lstrcmpiW(pszName, V_BSTR(&index)))
+                return ShellObjectCreatorInit<CFolderItem>(m_Folder, pidlFull, IID_PPV_ARG(FolderItem, ppid));
+        }
+        return S_OK;
+    }
+
+    return E_INVALIDARG;
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemsFDF::_NewEnum(IUnknown **ppunk)
+{
+    CComObject<CFolderItemsFDF> *pObj;
+    CComPtr<IUnknown> pItems;
+    CSimpleArray<PCUITEMID_CHILD> items;
+    HRESULT hr;
+
+    if (!ppunk)
+        return E_POINTER;
+    *ppunk = NULL;
+    if (!m_Folder)
+        return E_FAIL;
+
+    for (int i = 0; i < m_Items.GetSize(); i++)
+    {
+        if (IncludeItem(m_Items[i]) && !items.Add(m_Items[i]))
+            return E_OUTOFMEMORY;
+    }
+
+    hr = CComObject<CFolderItemsFDF>::CreateInstance(&pObj);
+    if (FAILED_UNEXPECTEDLY(hr))
+        return hr;
+    pItems = static_cast<IPersistFolder *>(pObj);
+    hr = pObj->SetItems(m_idlist, items.GetSize(), items.GetData());
+    if (FAILED_UNEXPECTEDLY(hr))
+        return hr;
+    return pItems->QueryInterface(IID_FolderItems, (void **)ppunk);
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemsFDF::InvokeVerbEx(VARIANT vVerb, VARIANT vArgs)
+{
+    CComPtr<IContextMenu> pCM;
+    HRESULT hr = GetContextMenu(&pCM);
+    if (hr != S_OK)
+        return SUCCEEDED(hr) ? S_FALSE : hr;
+    return CFolderItems::InvokeVerbHelper(NULL, *pCM, vVerb, vArgs, NULL);
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemsFDF::Filter(LONG grfFlags, BSTR bstrFilter)
+{
+    if (bstrFilter)
+    {
+        if (!*bstrFilter)
+            bstrFilter = NULL;
+        else if ((bstrFilter = SysAllocString(bstrFilter)) == NULL)
+            return E_OUTOFMEMORY;
+    }
+    SysFreeString(m_bstrFilter);
+    m_bstrFilter = bstrFilter;
+    m_Contf = grfFlags;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemsFDF::get_Verbs(FolderItemVerbs **ppfic)
+{
+    CComPtr<IContextMenu> pCM;
+    CComPtr<CFolderItemVerbs> pVerbs;
+    HRESULT hr;
+
+    if (!ppfic)
+        return E_POINTER;
+    *ppfic = NULL;
+
+    hr = GetContextMenu(&pCM);
+    if (hr != S_OK)
+        return SUCCEEDED(hr) ? S_FALSE : hr;
+
+    hr = CFolderItemVerbs::CreateInstance(pVerbs);
+    if (FAILED(hr))
+        return hr;
+    hr = pVerbs->Init(*static_cast<IContextMenu*>(pCM));
+    if (FAILED(hr))
+        return hr;
+    *ppfic = pVerbs.Detach();
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemsFDF::GetClassID(CLSID *pClassID)
+{
+    if (!pClassID)
+        return E_POINTER;
+    *pClassID = CLSID_FolderItemsFDF;
+    return S_OK;
+}
+
+HRESULT STDMETHODCALLTYPE CFolderItemsFDF::Initialize(PCIDLIST_ABSOLUTE pidl)
+{
+    CComPtr<IDispatch> pApplication;
+    CComPtr<Folder> pFolder;
+    HRESULT hr;
+
+    if (!pidl)
+        return E_INVALIDARG;
+
+    hr = CShellDispatch_Constructor(IID_PPV_ARG(IDispatch, &pApplication));
+    if (FAILED_UNEXPECTEDLY(hr))
+        return hr;
+    hr = CFolder::CreateInstance(pidl, pApplication, IID_PPV_ARG(Folder, &pFolder));
+    if (FAILED_UNEXPECTEDLY(hr))
+        return hr;
+
+    m_idlist.Free();
+    hr = SHILClone(pidl, &m_idlist);
+    if (FAILED(hr))
+        return hr;
+    m_Folder = pFolder;
+    return S_OK;
 }

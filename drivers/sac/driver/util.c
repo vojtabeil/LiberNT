@@ -10,6 +10,7 @@
 
 #include "sacdrv.h"
 
+#include <ndk/obfuncs.h>
 #include <ndk/rtlfuncs.h>
 
 /* GLOBALS ********************************************************************/
@@ -1155,16 +1156,17 @@ VOID
 NTAPI
 FreeMachineInformation(VOID)
 {
-    ASSERT(MachineInformation);
+    if (!MachineInformation) return;
 
     /* Free every cached string of machine information */
-    if (MachineInformation->MachineName) SacFreePool(MachineInformation);
+    if (MachineInformation->MachineName) SacFreePool(MachineInformation->MachineName);
     if (MachineInformation->MachineGuid) SacFreePool(MachineInformation->MachineGuid);
     if (MachineInformation->ProcessorArchitecture) SacFreePool(MachineInformation->ProcessorArchitecture);
     if (MachineInformation->MajorVersion) SacFreePool(MachineInformation->MajorVersion);
     if (MachineInformation->BuildNumber) SacFreePool(MachineInformation->BuildNumber);
     if (MachineInformation->ProductType) SacFreePool(MachineInformation->ProductType);
     if (MachineInformation->ServicePack) SacFreePool(MachineInformation->ServicePack);
+    SacFreePool(MachineInformation);
 }
 
 BOOLEAN
@@ -1192,7 +1194,7 @@ VerifyEventWaitable(IN HANDLE Handle,
     }
 
     /* Check if the object itself is NOT being used */
-    ObjectType = OBJECT_TO_OBJECT_HEADER(Object)->Type;
+    ObjectType = ObGetObjectType(Object);
     if (ObjectType->TypeInfo.UseDefaultObject == FALSE)
     {
         /* Get the actual object that's being used for the wait */

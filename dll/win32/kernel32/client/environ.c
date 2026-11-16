@@ -265,28 +265,33 @@ LPSTR
 WINAPI
 GetEnvironmentStringsA(VOID)
 {
-    ULONG Length, Size;
+    ULONG Size;
+    SIZE_T EnvironmentSize;
     NTSTATUS Status;
-    PWCHAR Environment, p;
+    PWCHAR Environment;
     PCHAR Buffer = NULL;
 
     RtlAcquirePebLock();
-    p = Environment = NtCurrentPeb()->ProcessParameters->Environment;
+    Environment = NtCurrentPeb()->ProcessParameters->Environment;
 
-    do
+    Status = BasepQueryEnvironmentSizeW(Environment, &EnvironmentSize);
+    if (NT_SUCCESS(Status) && EnvironmentSize > MAXULONG)
+        Status = STATUS_INVALID_PARAMETER;
+
+    if (!NT_SUCCESS(Status))
     {
-        p += wcslen(p) + 1;
-    } while (*p);
+        BaseSetLastNTError(Status);
+        RtlReleasePebLock();
+        return NULL;
+    }
 
-    Length = p - Environment + 1;
-
-    Status = RtlUnicodeToMultiByteSize(&Size, Environment, Length * sizeof(WCHAR));
+    Status = RtlUnicodeToMultiByteSize(&Size, Environment, (ULONG)EnvironmentSize);
     if (NT_SUCCESS(Status))
     {
         Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size);
         if (Buffer)
         {
-            Status = RtlUnicodeToOemN(Buffer, Size, 0, Environment, Length * sizeof(WCHAR));
+            Status = RtlUnicodeToOemN(Buffer, Size, 0, Environment, (ULONG)EnvironmentSize);
             if (!NT_SUCCESS(Status))
             {
                 RtlFreeHeap(RtlGetProcessHeap(), 0, Buffer);
@@ -317,23 +322,25 @@ WINAPI
 GetEnvironmentStringsW(VOID)
 {
     PWCHAR Environment, p;
-    ULONG Length;
+    SIZE_T EnvironmentSize;
+    NTSTATUS Status;
 
     RtlAcquirePebLock();
 
-    p = Environment = NtCurrentPeb()->ProcessParameters->Environment;
+    Environment = NtCurrentPeb()->ProcessParameters->Environment;
 
-    do
+    Status = BasepQueryEnvironmentSizeW(Environment, &EnvironmentSize);
+    if (!NT_SUCCESS(Status))
     {
-        p += wcslen(p) + 1;
-    } while (*p);
+        BaseSetLastNTError(Status);
+        RtlReleasePebLock();
+        return NULL;
+    }
 
-    Length = p - Environment + 1;
-
-    p = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length * sizeof(WCHAR));
+    p = RtlAllocateHeap(RtlGetProcessHeap(), 0, EnvironmentSize);
     if (p)
     {
-        RtlCopyMemory(p, Environment, Length * sizeof(WCHAR));
+        RtlCopyMemory(p, Environment, EnvironmentSize);
     }
     else
     {
@@ -522,8 +529,25 @@ BOOL
 WINAPI
 SetEnvironmentStringsA(IN LPCH NewEnvironment)
 {
-    STUB;
-    return FALSE;
+    LPCH Current;
+    LPWSTR NewEnvironmentW;
+    INT Count;
+    BOOL Result;
+
+    for (Current = NewEnvironment; *Current; Current += strlen(Current) + 1);
+
+    Count = MultiByteToWideChar(CP_ACP, 0, NewEnvironment, (INT)(Current - NewEnvironment) + 1, NULL, 0);
+    NewEnvironmentW = RtlAllocateHeap(RtlGetProcessHeap(), 0, Count * sizeof(WCHAR));
+    if (!NewEnvironmentW)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+
+    MultiByteToWideChar(CP_ACP, 0, NewEnvironment, (INT)(Current - NewEnvironment) + 1, NewEnvironmentW, Count);
+    Result = SetEnvironmentStringsW(NewEnvironmentW);
+    RtlFreeHeap(RtlGetProcessHeap(), 0, NewEnvironmentW);
+    return Result;
 }
 
 /*
@@ -533,8 +557,45 @@ BOOL
 WINAPI
 SetEnvironmentStringsW(IN LPWCH NewEnvironment)
 {
-    STUB;
-    return FALSE;
+    LPWCH Current, Separator;
+    PWSTR Environment;
+    UNICODE_STRING Name, Value;
+    NTSTATUS Status;
+
+    for (Current = NewEnvironment; *Current; Current += wcslen(Current) + 1)
+    {
+        Separator = wcschr(Current + 1, L'=');
+        if (!Separator)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+    }
+
+    Status = RtlCreateEnvironment(FALSE, &Environment);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return FALSE;
+    }
+
+    for (Current = NewEnvironment; *Current; Current += wcslen(Current) + 1)
+    {
+        Separator = wcschr(Current + 1, L'=');
+        Name.Buffer = Current;
+        Name.Length = Name.MaximumLength = (USHORT)((Separator - Current) * sizeof(WCHAR));
+        RtlInitUnicodeString(&Value, Separator + 1);
+        Status = RtlSetEnvironmentVariable(&Environment, &Name, &Value);
+        if (!NT_SUCCESS(Status))
+        {
+            RtlDestroyEnvironment(Environment);
+            BaseSetLastNTError(Status);
+            return FALSE;
+        }
+    }
+
+    RtlSetCurrentEnvironment(Environment, NULL);
+    return TRUE;
 }
 
 /* EOF */

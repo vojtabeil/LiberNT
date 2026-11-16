@@ -327,7 +327,7 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
 {
     static const _TCHAR digits_l[] = _T("0123456789abcdef0x");
     static const _TCHAR digits_u[] = _T("0123456789ABCDEF0X");
-    static const char *_nullstring = "(null)";
+    static const _TCHAR _nullstring[] = _T("(null)");
     _TCHAR buffer[BUFFER_SIZE + 1];
     _TCHAR chr, *string;
     STRING *nt_string;
@@ -438,8 +438,11 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
             }
             else if (chr == _T('l'))
             {
-                /* Check if this is the 2nd 'l' in a row */
-                if (format[-2] == 'l') flags |= FLAG_INT64;
+                if (*format == _T('l'))
+                {
+                    format++;
+                    flags |= FLAG_INT64;
+                }
                 else flags |= FLAG_LONG;
             }
             else if (chr == _T('I'))
@@ -485,12 +488,15 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
             case _T('C'):
 #ifndef _UNICODE
                 if (!(flags & FLAG_SHORT)) flags |= FLAG_WIDECHAR;
+#else
+                if (flags & FLAG_SHORT) flags &= ~FLAG_WIDECHAR;
 #endif
                 goto case_char;
 
             case _T('c'):
 #ifdef _UNICODE
                 if (!(flags & FLAG_SHORT)) flags |= FLAG_WIDECHAR;
+                else flags &= ~FLAG_WIDECHAR;
 #endif
             case_char:
                 string = buffer;
@@ -522,6 +528,8 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
                 string = va_arg(argptr, void*);
 #ifndef _UNICODE
                 if (!(flags & FLAG_SHORT)) flags |= FLAG_WIDECHAR;
+#else
+                if (flags & FLAG_SHORT) flags &= ~FLAG_WIDECHAR;
 #endif
                 goto case_string;
 
@@ -529,19 +537,35 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
                 string = va_arg(argptr, void*);
 #ifdef _UNICODE
                 if (!(flags & FLAG_SHORT)) flags |= FLAG_WIDECHAR;
+                else flags &= ~FLAG_WIDECHAR;
 #endif
 
             case_string:
                 if (!string)
                 {
+                    /* Keep the placeholder in the output encoding so wide
+                     * formatting does not require an ANSI code-page lookup. */
                     string = (_TCHAR*)_nullstring;
+#ifdef _UNICODE
+                    flags |= FLAG_WIDECHAR;
+#else
                     flags &= ~FLAG_WIDECHAR;
+#endif
                 }
 
+#ifdef _USER32_WSPRINTF
+                if (flags & FLAG_WIDECHAR)
+                    len = wcslen((wchar_t*)string);
+                else
+                    len = strlen((char*)string);
+                if (precision >= 0 && len > precision)
+                    len = precision;
+#else
                 if (flags & FLAG_WIDECHAR)
                     len = wcsnlen((wchar_t*)string, (unsigned)precision);
                 else
                     len = strnlen((char*)string, (unsigned)precision);
+#endif
                 precision = 0;
                 break;
 
@@ -613,6 +637,9 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
             case _T('u'):
             case_unsigned:
                 val64 = va_arg_fu(argptr, flags);
+#ifndef _USER32_WSPRINTF
+                if (!val64 && base == 16) prefix = 0;
+#endif
 
             case_number:
 #ifdef _UNICODE
@@ -634,6 +661,14 @@ streamout(FILE *stream, const _TCHAR *format, va_list argptr)
                 break;
 
             default:
+#ifndef _USER32_WSPRINTF
+                if (chr == _T('%'))
+                {
+                    if ((written = streamout_char(stream, chr)) == 0) return -1;
+                    written_all += written;
+                    continue;
+                }
+#endif
                 /* Treat anything else as a new character */
                 format--;
                 continue;

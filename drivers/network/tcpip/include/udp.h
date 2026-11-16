@@ -11,7 +11,7 @@
 #define UDP_DYNAMIC_PORTS 0x8000
 
 /* UDPv4 header structure */
-#include <pshpack1.h>
+#pragma pack(push, 1)
 typedef struct UDP_HEADER {
   USHORT SourcePort; /* Source port */
   USHORT DestPort;   /* Destination port */
@@ -27,7 +27,7 @@ typedef struct UDP_PSEUDO_HEADER {
   UCHAR Protocol;      /* Protocol */
   USHORT UDPLength;    /* Size of UDP datagram */
 } UDP_PSEUDO_HEADER, *PUDP_PSEUDO_HEADER;
-#include <poppack.h>
+#pragma pack(pop)
 
 typedef struct UDP_STATISTICS {
   ULONG InputDatagrams;
@@ -61,5 +61,33 @@ NTSTATUS UDPShutdown(
   VOID);
 UINT UDPAllocatePort( UINT HintPort );
 VOID UDPFreePort( UINT Port );
+
+NTSTATUS LibIP6QueryTable(
+    ULONG TableId,
+    PVOID Buffer,
+    ULONG Length,
+    PULONG Count,
+    PULONG Needed,
+    PVOID Statistics);
+
+NTSTATUS LibICMP6EchoRequest(
+    PDEVICE_OBJECT DeviceObject,
+    PIRP Irp,
+    PIO_STACK_LOCATION IrpSp);
+
+NTSTATUS LibUDPOpen(
+    PADDRESS_FILE AddrFile,
+    USHORT Port,
+    PUSHORT AllocatedPort);
+
+VOID LibUDPClose(
+    PADDRESS_FILE AddrFile);
+
+NTSTATUS LibUDPSendDatagram(
+    PADDRESS_FILE AddrFile,
+    PTDI_CONNECTION_INFORMATION ConnInfo,
+    PCHAR BufferData,
+    ULONG DataSize,
+    PULONG DataUsed);
 
 /* EOF */

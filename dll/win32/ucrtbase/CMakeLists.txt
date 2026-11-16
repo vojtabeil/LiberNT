@@ -16,23 +16,56 @@ add_compile_definitions(
 add_library(ucrtbase SHARED
     printf.c
     stubs.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/acosh.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/acoshf.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/asinh.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/asinhf.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/atanh.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/atanhf.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/cbrt.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/cbrtf.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/copysign.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/copysignf.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/fdim.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/fmax.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/fmin.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/erf.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/erff.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/expm1.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/expm1f.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/log1p.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/log1pf.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/nearbyint.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/nearbyintf.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/remainder.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/remainderf.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/rint.c
+    ${REACTOS_SOURCE_DIR}/sdk/lib/crt/math/rintf.c
     ucrtbase_stubs.c
     ucrtbase.def
+    ucrtbase.rc
 )
 
-if(NOT MSVC)
-    target_compile_options(ucrtbase PRIVATE -Wno-builtin-declaration-mismatch)
+if(NOT ARCH STREQUAL "amd64" AND NOT ARCH STREQUAL "i386")
+    target_sources(ucrtbase PRIVATE fma3_unavailable.c)
 endif()
 
-if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    # Silence warnings in ucrtbase_stubs.c
-    target_compile_options(ucrtbase PRIVATE -Wno-incompatible-library-redeclaration)
+if(ARCH STREQUAL "arm64" AND ARM64EC_RUNTIME)
+    target_sources(ucrtbase PRIVATE arm64ec_memory.c)
+    set_source_files_properties(arm64ec_memory.c PROPERTIES COMPILE_OPTIONS "-fno-builtin")
+elseif(ARCH STREQUAL "arm64")
+    set_target_properties(ucrtbase PROPERTIES REACTOS_LSE_ATOMICS lse_atomics_um)
+endif()
+
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(ucrtbase PRIVATE -Wno-builtin-declaration-mismatch)
 endif()
 
 set_entrypoint(ucrtbase __acrt_DllMain 12)
 
 target_link_libraries(ucrtbase
     ucrt
+    msvcrt_undname_ucrt
     msvcrt_shared
     crtmath
     vcruntime
@@ -41,8 +74,10 @@ target_link_libraries(ucrtbase
     wine
 )
 
-# Implicitly link to vcstartup
-target_link_libraries(libucrtbase INTERFACE vcstartup)
+# Implicitly link executable consumers to vcstartup. DLLs provide their own
+# entry points and must not receive the executable startup objects.
+target_link_libraries(libucrtbase INTERFACE
+    $<$<STREQUAL:$<TARGET_PROPERTY:TYPE>,EXECUTABLE>:vcstartup>)
 
 if(MSVC)
     target_link_libraries(ucrtbase runtmchk)

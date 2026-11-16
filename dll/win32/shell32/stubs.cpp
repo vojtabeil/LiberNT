@@ -746,19 +746,6 @@ SHSetUserPicturePathW(LPCWSTR lpPath, int csidl, LPVOID lpUnknown)
 /*
  * Unimplemented
  */
-EXTERN_C BOOL
-WINAPI
-PathIsSlowW(
-    _In_ LPCWSTR pszFile,
-    _In_ DWORD dwAttr)
-{
-    FIXME("PathIsSlowW() stub\n");
-    return FALSE;
-}
-
-/*
- * Unimplemented
- */
 EXTERN_C DWORD
 WINAPI
 SHGetProcessDword(DWORD dwUnknown1, DWORD dwUnknown2)
@@ -775,61 +762,234 @@ DWORD WINAPI CheckStagingArea(VOID)
     return 0;
 }
 
-/*
- * Unimplemented
- */
-
-EXTERN_C HRESULT
+EXTERN_C VOID
 WINAPI
-GetAppPathFromLink(IShellItem* pItem,
-                   LPWSTR pwszPathBuffer,
-                   DWORD dwBufferLen)
+SHChangeNotifyRegisterThread(_In_ SCNRT_STATUS Status)
 {
-    FIXME("GetAppPathFromLink() stub\n");
-    return S_OK;
+    /* ReactOS registers change notifications synchronously, so the
+     * asynchronous register/deregister opt-in has nothing to switch. */
+    TRACE("SHChangeNotifyRegisterThread(%d)\n", Status);
 }
 
-/*
- * Unimplemented
- */
-EXTERN_C HRESULT
-WINAPI
-GetCurrentProcessExplicitAppUserModelID(PWSTR *AppID)
-{
-    return SHStrDupW(L"ROS FixMe", AppID);
-}
-
-/*
- * Unimplemented
- */
-HRESULT WINAPI
-SetCurrentProcessExplicitAppUserModelID(PCWSTR AppID)
-{
-    FIXME("SetCurrentProcessExplicitAppUserModelID stub\n");
-    return S_OK;
-}
-
-/*
- * Unimplemented
- */
 EXTERN_C DWORD
 WINAPI
-RunInstallUninstallStubs(VOID)
+DisconnectWindowsDialog(_In_ HWND hwndParent)
 {
-    FIXME("RunInstallUninstallStubs() stub!\n");
-    return 0;
+    FIXME("DisconnectWindowsDialog(%p) stub\n", hwndParent);
+    return ERROR_CALL_NOT_IMPLEMENTED;
 }
 
-/*
- * Unimplemented
- */
+EXTERN_C int
+WINAPI
+SHMapIDListToSystemImageListIndex(
+    _In_ IShellFolder *psf,
+    _In_ PCUITEMID_CHILD pidl,
+    _In_ DWORD dwFlags,
+    _Out_opt_ int *piIndexSel)
+{
+    FIXME("SHMapIDListToSystemImageListIndex(%p, %p, 0x%lx, %p) stub\n",
+          psf, pidl, dwFlags, piIndexSel);
+
+    if (piIndexSel)
+        *piIndexSel = -1;
+    return -1;
+}
+
 EXTERN_C HRESULT
 WINAPI
-SHQueryUserNotificationState(QUERY_USER_NOTIFICATION_STATE *pquns)
+SHMapIDListToSystemImageListIndexAsync(
+    _In_ PVOID pts,
+    _In_ IShellFolder *psf,
+    _In_ PCUITEMID_CHILD pidl,
+    _In_ DWORD dwFlags,
+    _In_opt_ PVOID pfn,
+    _In_opt_ PVOID pvData,
+    _In_opt_ PVOID pvHint,
+    _Out_opt_ int *piIndex)
 {
-    FIXME("SHQueryUserNotificationState() stub\n");
-    if (!pquns)
+    FIXME("SHMapIDListToSystemImageListIndexAsync(%p, %p, %p, 0x%lx) stub\n",
+          pts, psf, pidl, dwFlags);
+
+    UNREFERENCED_PARAMETER(pfn);
+    UNREFERENCED_PARAMETER(pvData);
+    UNREFERENCED_PARAMETER(pvHint);
+
+    if (piIndex)
+        *piIndex = -1;
+    return E_NOTIMPL;
+}
+
+EXTERN_C HRESULT
+WINAPI
+PathGetPathDisplayName(
+    _In_ LPCWSTR pszPath,
+    _Out_writes_(cchPath) LPWSTR pszDisplayName,
+    _In_ UINT cchPath)
+{
+    FIXME("PathGetPathDisplayName(%s, %p, %u) stub\n",
+          debugstr_w(pszPath), pszDisplayName, cchPath);
+
+    if (!pszDisplayName || !cchPath)
         return E_INVALIDARG;
-    *pquns = QUNS_ACCEPTS_NOTIFICATIONS;
+
+    *pszDisplayName = UNICODE_NULL;
+    return E_NOTIMPL;
+}
+
+EXTERN_C BOOL
+WINAPI
+PathComparePaths(_In_ LPCWSTR pszPath1, _In_ LPCWSTR pszPath2)
+{
+    if (!pszPath1 || !pszPath2)
+        return FALSE;
+
+    return (StrCmpIW(pszPath1, pszPath2) == 0);
+}
+
+EXTERN_C HRESULT
+WINAPI
+SHEnableServiceObject(_In_ REFCLSID rclsid, _In_ BOOL fEnable)
+{
+    FIXME("SHEnableServiceObject(%s, %d) stub\n", wine_dbgstr_guid(&rclsid), fEnable);
+    return E_NOTIMPL;
+}
+
+EXTERN_C HRESULT
+WINAPI
+Shell32Ordinal206(PVOID Arg1)
+{
+    UNREFERENCED_PARAMETER(Arg1);
+
+    FIXME("shell32.#206 stub\n");
+    return E_NOTIMPL;
+}
+
+EXTERN_C HRESULT
+WINAPI
+Shell32Ordinal792(PVOID Arg1, PVOID Arg2, PVOID Arg3)
+{
+    UNREFERENCED_PARAMETER(Arg1);
+    UNREFERENCED_PARAMETER(Arg2);
+    UNREFERENCED_PARAMETER(Arg3);
+
+    FIXME("shell32.#792 stub\n");
+    return E_NOTIMPL;
+}
+
+EXTERN_C HRESULT
+WINAPI
+Shell32Ordinal885(PVOID Arg1)
+{
+    UNREFERENCED_PARAMETER(Arg1);
+
+    FIXME("shell32.#885 stub\n");
+    return E_NOTIMPL;
+}
+
+EXTERN_C BOOL
+WINAPI
+Shell32Ordinal892(PVOID Arg1, PVOID Arg2, PVOID Arg3)
+{
+    UNREFERENCED_PARAMETER(Arg1);
+    UNREFERENCED_PARAMETER(Arg2);
+    UNREFERENCED_PARAMETER(Arg3);
+
+    FIXME("shell32.#892 stub\n");
+    return FALSE;
+}
+
+EXTERN_C HRESULT
+WINAPI
+Shell32Ordinal893(PVOID Arg1, PVOID Arg2, PVOID Arg3, PVOID Arg4, PVOID Arg5, PVOID Arg6)
+{
+    UNREFERENCED_PARAMETER(Arg1);
+    UNREFERENCED_PARAMETER(Arg2);
+    UNREFERENCED_PARAMETER(Arg3);
+    UNREFERENCED_PARAMETER(Arg4);
+    UNREFERENCED_PARAMETER(Arg5);
+    UNREFERENCED_PARAMETER(Arg6);
+
+    FIXME("shell32.#893 stub\n");
+    return E_NOTIMPL;
+}
+
+EXTERN_C HRESULT
+WINAPI
+Shell32Ordinal894(PVOID Arg1, PVOID Arg2, PVOID Arg3, PVOID Arg4, PVOID Arg5, PVOID Arg6, PVOID Arg7)
+{
+    UNREFERENCED_PARAMETER(Arg1);
+    UNREFERENCED_PARAMETER(Arg2);
+    UNREFERENCED_PARAMETER(Arg3);
+    UNREFERENCED_PARAMETER(Arg4);
+    UNREFERENCED_PARAMETER(Arg5);
+    UNREFERENCED_PARAMETER(Arg6);
+    UNREFERENCED_PARAMETER(Arg7);
+
+    FIXME("shell32.#894 stub\n");
+    return E_NOTIMPL;
+}
+
+EXTERN_C HRESULT
+WINAPI
+Shell32Ordinal895(PVOID Arg1, PVOID Arg2, PVOID Arg3)
+{
+    UNREFERENCED_PARAMETER(Arg1);
+    UNREFERENCED_PARAMETER(Arg2);
+    UNREFERENCED_PARAMETER(Arg3);
+
+    FIXME("shell32.#895 stub\n");
+    return E_NOTIMPL;
+}
+
+EXTERN_C HRESULT
+WINAPI
+Shell32Ordinal896(PVOID Arg1)
+{
+    UNREFERENCED_PARAMETER(Arg1);
+
+    FIXME("shell32.#896 stub\n");
+    return E_NOTIMPL;
+}
+
+EXTERN_C HRESULT
+WINAPI
+Shell32Ordinal899(PVOID Arg1)
+{
+    UNREFERENCED_PARAMETER(Arg1);
     return S_OK;
 }
+
+EXTERN_C HRESULT
+WINAPI
+Shell32Ordinal904(PVOID Arg1, PVOID Arg2)
+{
+    UNREFERENCED_PARAMETER(Arg1);
+    UNREFERENCED_PARAMETER(Arg2);
+
+    FIXME("shell32.#904 stub\n");
+    return E_NOTIMPL;
+}
+
+EXTERN_C HRESULT
+WINAPI
+Shell32Ordinal905(PVOID Arg1, PVOID Arg2)
+{
+    UNREFERENCED_PARAMETER(Arg1);
+
+    FIXME("shell32.#905 stub\n");
+
+    if (Arg2)
+        *(PDWORD)Arg2 = 0;
+
+    return E_FAIL;
+}
+
+EXTERN_C HRESULT
+WINAPI
+Shell32Ordinal906(VOID)
+{
+
+    FIXME("shell32.#906 stub\n");
+    return E_NOTIMPL;
+}
+

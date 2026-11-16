@@ -41,6 +41,7 @@ TestNodeName(VOID)
         PCSTR NodeName;
         PCSTR ExpectedAddress;
         INT Flags;
+        INT HintFlags;
     } Tests[] =
     {
         { "",                               LocalAddress },
@@ -51,13 +52,14 @@ TestNodeName(VOID)
         { "7.8.9.10",                       "7.8.9.10",         AI_NUMERICHOST },
         { "0.0.0.0",                        "0.0.0.0",          AI_NUMERICHOST },
         { "255.255.255.255",                "255.255.255.255",  AI_NUMERICHOST },
-        { "0.0.0.0 ",                       "0.0.0.0",    /* no AI_NUMERICHOST */ },
+        { "0.0.0.0 ",                       NULL },
         { "0.0.0.0:80",                     NULL },
         { "0.0.0.0.0",                      NULL },
         { "1.1.1.256",                      NULL },
-        { "1.2.3",                          NULL },
-        { "1.2.3.0x4",                      "1.2.3.4",          AI_NUMERICHOST },
-        { "1.2.3.010",                      "1.2.3.8",          AI_NUMERICHOST },
+        /* Not numeric, and a DNS server may still answer these as names, so only the parse is checked */
+        { "1.2.3",                          NULL,               0, AI_NUMERICHOST },
+        { "1.2.3.0x4",                      NULL,               0, AI_NUMERICHOST },
+        { "1.2.3.010",                      NULL,               0, AI_NUMERICHOST },
         /* let's just assume this one doesn't change any time soon ;) */
         { "google-public-dns-a.google.com", "8.8.8.8" },
     };
@@ -74,6 +76,7 @@ TestNodeName(VOID)
         trace("%d: '%s'\n", i, Tests[i].NodeName);
         StartSeh()
             AddrInfo = InvalidPointer;
+            Hints.ai_flags = Tests[i].HintFlags;
             Error = getaddrinfo(Tests[i].NodeName, NULL, &Hints, &AddrInfo);
             if (Tests[i].ExpectedAddress)
             {
@@ -201,7 +204,7 @@ START_TEST(getaddrinfo)
     PADDRINFOA AddrInfo;
     PADDRINFOW AddrInfoW;
     ADDRINFOA Hints;
-    ADDRINFOW HintsW;
+    ADDRINFOW HintsW = {0};
     CHAR LocalHostName[128];
     struct hostent *Hostent;
 

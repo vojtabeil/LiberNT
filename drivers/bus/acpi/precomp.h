@@ -16,5 +16,12 @@
 #include <wdmguid.h>
 #include <acpiioct.h>
 #include <ntintsafe.h>
+#include <reactos/hal/acpi_pci.h>
+#include <reactos/drivers/acpi/acpipci.h>
+#include <reactos/drivers/acpi/acpisystem.h>
+#include <reactos/drivers/acpi/acpipm.h>
+
+BOOLEAN
+OslInitializeExecQueue(VOID);
 
 #endif /* _ACPI_PCH_ */

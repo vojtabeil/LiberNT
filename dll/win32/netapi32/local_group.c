@@ -182,6 +182,11 @@ OpenAliasByName(SAM_HANDLE DomainHandle,
                                     &Use);
     if (!NT_SUCCESS(Status))
     {
+#ifdef __REACTOS__
+        if (Status == STATUS_NONE_MAPPED)
+            TRACE("SamLookupNamesInDomain(%wZ): name not found in domain\n", AliasName);
+        else
+#endif
         ERR("SamLookupNamesInDomain(%wZ) failed (Status %08lx)\n", AliasName, Status);
         return NetpNtStatusToApiStatus(Status);
     }
@@ -1370,11 +1375,11 @@ NetLocalGroupGetMembers(
     UNICODE_STRING AliasName;
     PMEMBER_ENUM_CONTEXT EnumContext = NULL;
     LPVOID Buffer = NULL;
-    PLOCALGROUP_MEMBERS_INFO_0 MembersInfo0;
-    PLOCALGROUP_MEMBERS_INFO_1 MembersInfo1;
-    PLOCALGROUP_MEMBERS_INFO_2 MembersInfo2;
-    PLOCALGROUP_MEMBERS_INFO_3 MembersInfo3;
-    LPWSTR Ptr;
+    PLOCALGROUP_MEMBERS_INFO_0 MembersInfo0 = NULL;
+    PLOCALGROUP_MEMBERS_INFO_1 MembersInfo1 = NULL;
+    PLOCALGROUP_MEMBERS_INFO_2 MembersInfo2 = NULL;
+    PLOCALGROUP_MEMBERS_INFO_3 MembersInfo3 = NULL;
+    LPWSTR Ptr = NULL;
     ULONG Size = 0;
     ULONG SidLength;
     ULONG i;
@@ -1404,6 +1409,10 @@ NetLocalGroupGetMembers(
         ApiStatus = NetApiBufferAllocate(sizeof(MEMBER_ENUM_CONTEXT), (PVOID*)&EnumContext);
         if (ApiStatus != NERR_Success)
             goto done;
+
+#ifdef __REACTOS__
+        ZeroMemory(EnumContext, sizeof(*EnumContext));
+#endif
 
         /* Connect to the SAM Server */
         Status = SamConnect((servername != NULL) ? &ServerName : NULL,
@@ -1443,6 +1452,9 @@ NetLocalGroupGetMembers(
         {
             if (EnumContext->DomainHandle != NULL)
                 SamCloseHandle(EnumContext->DomainHandle);
+#ifdef __REACTOS__
+            EnumContext->DomainHandle = NULL;
+#endif
 
             /* Open the Acount Domain */
             Status = OpenAccountDomain(EnumContext->ServerHandle,

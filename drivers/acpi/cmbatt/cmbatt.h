@@ -162,6 +162,7 @@ typedef struct _CMBATT_DEVICE_EXTENSION
     PDEVICE_OBJECT PdoDeviceObject;
     PDEVICE_OBJECT AttachedDevice;
     FAST_MUTEX FastMutex;
+    KMUTEX StaticInfoMutex;
     ULONG HandleCount;
     PIRP PowerIrp;
     POWER_STATE PowerState;
@@ -172,13 +173,15 @@ typedef struct _CMBATT_DEVICE_EXTENSION
     PUNICODE_STRING DeviceName;
     ACPI_INTERFACE_STANDARD AcpiInterface;
     BOOLEAN DelayNotification;
-    BOOLEAN ArFlag;
+    volatile LONG ArFlag;
     PVOID ClassData;
     BOOLEAN Started;
     BOOLEAN NotifySent;
     LONG ArLockValue;
     ULONG TagData;
-    ULONG Tag;
+    volatile LONG Tag;
+    volatile LONG CachedInfoTag;
+    volatile LONG StaticInfoGeneration;
     ACPI_BST_DATA BstData;
     ACPI_BATT_STATIC_INFO BattInfo;
     ULONG Id;
@@ -272,6 +275,16 @@ CmBattNotifyHandler(
     IN ULONG NotifyValue
 );
 
+VOID
+NTAPI
+CmBattWaitWakeLoop(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN UCHAR MinorFunction,
+    IN POWER_STATE PowerState,
+    IN PVOID Context,
+    IN PIO_STATUS_BLOCK IoStatusBlock
+);
+
 NTSTATUS
 NTAPI
 CmBattWmiDeRegistration(
@@ -334,5 +347,6 @@ CmBattQueryTag(
 
 extern PDEVICE_OBJECT AcAdapterPdo;
 extern ULONG CmBattDebug;
+extern UNICODE_STRING GlobalRegistryPath;
 
 #endif /* _CMBATT_PCH_ */

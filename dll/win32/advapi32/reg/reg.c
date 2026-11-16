@@ -5,6 +5,7 @@
  * PURPOSE:         Registry functions
  * PROGRAMMER:      Ariadne ( ariadne@xs4all.nl)
  *                  Thomas Weidenmueller <w3seek@reactos.com>
+ *                  Ahmed ARIF <arif.ing@outlook.com>
  * UPDATE HISTORY:
  *                  Created 01/11/98
  *                  19990309 EA Stubs
@@ -55,13 +56,16 @@ static NTSTATUS OpenLocalMachineKey (PHANDLE KeyHandle);
 static NTSTATUS OpenUsersKey (PHANDLE KeyHandle);
 static NTSTATUS OpenCurrentConfigKey(PHANDLE KeyHandle);
 
+NTSTATUS WINAPI RemapPredefinedHandleInternal(HKEY hkey, HKEY override);
 
 /* FUNCTIONS ****************************************************************/
 /* check if value type needs string conversion (Ansi<->Unicode) */
+#ifndef _ADVAPI32_VISTA_
 __inline static int is_string( DWORD type )
 {
     return (type == REG_SZ) || (type == REG_EXPAND_SZ) || (type == REG_MULTI_SZ);
 }
+#endif
 
 /************************************************************************
  *  RegInitDefaultHandles
@@ -125,11 +129,9 @@ OpenPredefinedKey(IN ULONG Index,
         case 3: /* HKEY_USERS */
             Status = OpenUsersKey (Handle);
             break;
-#if 0
         case 4: /* HKEY_PERFORMANCE_DATA */
-            Status = OpenPerformanceDataKey (Handle);
+            Status = STATUS_INVALID_HANDLE;
             break;
-#endif
 
         case 5: /* HKEY_CURRENT_CONFIG */
             Status = OpenCurrentConfigKey (Handle);
@@ -167,6 +169,11 @@ MapDefaultKey(OUT PHANDLE RealKey,
     }
 
     /* Handle special cases here */
+    if (Key == HKEY_PERFORMANCE_TEXT || Key == HKEY_PERFORMANCE_NLSTEXT)
+    {
+        return STATUS_INVALID_HANDLE;
+    }
+
     Index = GetPredefKeyIndex(Key);
     if (Index >= MAX_DEFAULT_HANDLES)
     {
@@ -378,6 +385,11 @@ RegOverridePredefKey(IN HKEY hKey,
     {
         PHANDLE Handle;
         ULONG Index;
+        NTSTATUS RemapStatus;
+
+        RemapStatus = RemapPredefinedHandleInternal(hKey, hNewHKey);
+        if (!NT_SUCCESS(RemapStatus))
+            return RtlNtStatusToDosError(RemapStatus);
 
         Index = GetPredefKeyIndex(hKey);
         Handle = &DefaultHandleTable[Index];
@@ -917,12 +929,43 @@ RegConnectRegistryW(LPCWSTR lpMachineName,
  *  Create key and all necessary intermediate keys
  */
 static NTSTATUS
+CreateKeyInTransaction(PHANDLE KeyHandle,
+                       ACCESS_MASK DesiredAccess,
+                       POBJECT_ATTRIBUTES ObjectAttributes,
+                       PUNICODE_STRING ClassString,
+                       ULONG CreateOptions,
+                       HANDLE TransactionHandle,
+                       PULONG Disposition)
+{
+    if (TransactionHandle)
+    {
+        return NtCreateKeyTransacted(KeyHandle,
+                                     DesiredAccess,
+                                     ObjectAttributes,
+                                     0,
+                                     ClassString,
+                                     CreateOptions,
+                                     TransactionHandle,
+                                     Disposition);
+    }
+
+    return NtCreateKey(KeyHandle,
+                       DesiredAccess,
+                       ObjectAttributes,
+                       0,
+                       ClassString,
+                       CreateOptions,
+                       Disposition);
+}
+
+static NTSTATUS
 CreateNestedKey(PHKEY KeyHandle,
                 POBJECT_ATTRIBUTES ObjectAttributes,
                 PUNICODE_STRING ClassString,
                 DWORD dwOptions,
                 REGSAM samDesired,
-                DWORD *lpdwDisposition)
+                DWORD *lpdwDisposition,
+                HANDLE TransactionHandle)
 {
     OBJECT_ATTRIBUTES LocalObjectAttributes;
     UNICODE_STRING LocalKeyName;
@@ -933,13 +976,13 @@ CreateNestedKey(PHKEY KeyHandle,
     PWCHAR Ptr;
     HANDLE LocalKeyHandle;
 
-    Status = NtCreateKey((PHANDLE) KeyHandle,
-                         samDesired,
-                         ObjectAttributes,
-                         0,
-                         ClassString,
-                         dwOptions,
-                         (PULONG)lpdwDisposition);
+    Status = CreateKeyInTransaction((PHANDLE) KeyHandle,
+                                    samDesired,
+                                    ObjectAttributes,
+                                    ClassString,
+                                    dwOptions,
+                                    TransactionHandle,
+                                    (PULONG)lpdwDisposition);
     TRACE("NtCreateKey(%wZ) called (Status %lx)\n", ObjectAttributes->ObjectName, Status);
     if (Status != STATUS_OBJECT_NAME_NOT_FOUND)
         return Status;
@@ -968,13 +1011,13 @@ CreateNestedKey(PHKEY KeyHandle,
         *Ptr = (WCHAR)0;
         LocalKeyName.Length = (USHORT)wcslen(LocalKeyName.Buffer) * sizeof(WCHAR);
 
-        Status = NtCreateKey(&LocalKeyHandle,
-                             KEY_CREATE_SUB_KEY,
-                             &LocalObjectAttributes,
-                             0,
-                             NULL,
-                             0,
-                             &Disposition);
+        Status = CreateKeyInTransaction(&LocalKeyHandle,
+                                        KEY_CREATE_SUB_KEY,
+                                        &LocalObjectAttributes,
+                                        NULL,
+                                        0,
+                                        TransactionHandle,
+                                        &Disposition);
         TRACE("NtCreateKey(%wZ) called (Status %lx)\n", &LocalKeyName, Status);
     }
 
@@ -997,23 +1040,23 @@ CreateNestedKey(PHKEY KeyHandle,
 
         if (Length == FullNameLength)
         {
-            Status = NtCreateKey((PHANDLE) KeyHandle,
-                                 samDesired,
-                                 ObjectAttributes,
-                                 0,
-                                 ClassString,
-                                 dwOptions,
-                                 (PULONG)lpdwDisposition);
+            Status = CreateKeyInTransaction((PHANDLE) KeyHandle,
+                                            samDesired,
+                                            ObjectAttributes,
+                                            ClassString,
+                                            dwOptions,
+                                            TransactionHandle,
+                                            (PULONG)lpdwDisposition);
             break;
         }
 
-        Status = NtCreateKey(&LocalKeyHandle,
-                             KEY_CREATE_SUB_KEY,
-                             &LocalObjectAttributes,
-                             0,
-                             NULL,
-                             0,
-                             &Disposition);
+        Status = CreateKeyInTransaction(&LocalKeyHandle,
+                                        KEY_CREATE_SUB_KEY,
+                                        &LocalObjectAttributes,
+                                        NULL,
+                                        0,
+                                        TransactionHandle,
+                                        &Disposition);
         TRACE("NtCreateKey(%wZ) called (Status %lx)\n", &LocalKeyName, Status);
         if (!NT_SUCCESS(Status))
             break;
@@ -1156,7 +1199,8 @@ RegCreateKeyExW(
                              (lpClass == NULL)? NULL : &ClassString,
                              dwOptions,
                              samDesired,
-                             lpdwDisposition);
+                             lpdwDisposition,
+                             NULL);
 
     ClosePredefKey(ParentKey);
 
@@ -1180,6 +1224,9 @@ RegCreateKeyA(HKEY hKey,
               LPCSTR lpSubKey,
               PHKEY phkResult)
 {
+    if (!phkResult)
+        return ERROR_INVALID_PARAMETER;
+
     return RegCreateKeyExA(hKey,
                            lpSubKey,
                            0,
@@ -1202,6 +1249,9 @@ RegCreateKeyW(HKEY hKey,
               LPCWSTR lpSubKey,
               PHKEY phkResult)
 {
+    if (!phkResult)
+        return ERROR_INVALID_PARAMETER;
+
     return RegCreateKeyExW(hKey,
                            lpSubKey,
                            0,
@@ -2428,7 +2478,7 @@ RegEnumKeyExA(
 {
     WCHAR* NameBuffer = NULL;
     WCHAR* ClassBuffer = NULL;
-    DWORD NameLength, ClassLength;
+    DWORD NameLength = 0, ClassLength = 0;
     LONG ErrorCode;
 
     /* Allocate our buffers */
@@ -2479,7 +2529,7 @@ RegEnumKeyExA(
 
     if (lpClass)
     {
-        RtlUnicodeToMultiByteN(lpClass, *lpcbClass, 0, NameBuffer, *lpcbClass * sizeof(WCHAR));
+        RtlUnicodeToMultiByteN(lpClass, *lpcbClass, 0, ClassBuffer, *lpcbClass * sizeof(WCHAR));
         if (ClassLength > *lpcbClass)
             lpClass[*lpcbClass] = '\0';
     }
@@ -2524,6 +2574,11 @@ RegEnumKeyExW(
     HANDLE KeyHandle;
     LONG ErrorCode = ERROR_SUCCESS;
     NTSTATUS Status;
+
+    if (hKey == HKEY_PERFORMANCE_TEXT || hKey == HKEY_PERFORMANCE_NLSTEXT)
+    {
+        return ERROR_NO_MORE_ITEMS;
+    }
 
     Status = MapDefaultKey(&KeyHandle,
                            hKey);
@@ -3247,6 +3302,14 @@ RegOpenKeyA(HKEY hKey,
         return ERROR_SUCCESS;
     }
 
+    if (!lpSubKey &&
+        (hKey == HKEY_PERFORMANCE_DATA ||
+         hKey == HKEY_PERFORMANCE_TEXT ||
+         hKey == HKEY_PERFORMANCE_NLSTEXT))
+    {
+        return ERROR_INVALID_HANDLE;
+    }
+
     return RegOpenKeyExA(hKey,
                          lpSubKey,
                          0,
@@ -3356,6 +3419,8 @@ RegOpenKeyExW(HKEY hKey,
         return ERROR_INVALID_HANDLE;
     }
 
+    *phkResult = NULL;
+
     if (IsPredefKey(hKey) && (!lpSubKey || !*lpSubKey))
     {
         *phkResult = hKey;
@@ -3410,9 +3475,10 @@ RegOpenKeyExW(HKEY hKey,
                                KeyHandle,
                                NULL);
 
-    Status = NtOpenKey((PHANDLE)phkResult,
-                       samDesired,
-                       &ObjectAttributes);
+    Status = NtOpenKeyEx((PHANDLE)phkResult,
+                         samDesired,
+                         &ObjectAttributes,
+                         ulOptions & REG_OPTION_BACKUP_RESTORE);
 
 Exit:
 
@@ -3427,6 +3493,233 @@ Exit:
     }
 
     ClosePredefKey(KeyHandle);
+
+    return ErrorCode;
+}
+
+
+LONG WINAPI
+RegCreateKeyTransactedW(
+    _In_ HKEY hKey,
+    _In_ LPCWSTR lpSubKey,
+    _In_ DWORD Reserved,
+    _In_opt_ LPWSTR lpClass,
+    _In_ DWORD dwOptions,
+    _In_ REGSAM samDesired,
+    _In_opt_ LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+    _Out_ PHKEY phkResult,
+    _Out_opt_ LPDWORD lpdwDisposition,
+    _In_ HANDLE hTransaction,
+    _Reserved_ PVOID pExtendedParameter)
+{
+    UNICODE_STRING SubKeyString;
+    UNICODE_STRING ClassString;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    HANDLE ParentKey;
+    ULONG Attributes = OBJ_CASE_INSENSITIVE;
+    NTSTATUS Status;
+
+    if (Reserved != 0 || pExtendedParameter)
+        return ERROR_INVALID_PARAMETER;
+
+    if (!hTransaction || hTransaction == INVALID_HANDLE_VALUE)
+        return ERROR_INVALID_TRANSACTION;
+
+    if (!phkResult)
+        return ERROR_BADKEY;
+
+    Status = MapDefaultKey(&ParentKey, hKey);
+    if (!NT_SUCCESS(Status))
+        return RtlNtStatusToDosError(Status);
+
+    if (dwOptions & REG_OPTION_OPEN_LINK)
+        Attributes |= OBJ_OPENLINK;
+
+    RtlInitUnicodeString(&ClassString, lpClass);
+    RtlInitUnicodeString(&SubKeyString, lpSubKey);
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &SubKeyString,
+                               Attributes,
+                               (HANDLE)((ULONG_PTR)ParentKey & ~0x2),
+                               lpSecurityAttributes ? (PSECURITY_DESCRIPTOR)lpSecurityAttributes->lpSecurityDescriptor : NULL);
+    Status = CreateNestedKey(phkResult,
+                             &ObjectAttributes,
+                             (lpClass == NULL) ? NULL : &ClassString,
+                             dwOptions,
+                             samDesired,
+                             lpdwDisposition,
+                             hTransaction);
+
+    ClosePredefKey(ParentKey);
+
+    return NT_SUCCESS(Status) ? ERROR_SUCCESS : RtlNtStatusToDosError(Status);
+}
+
+
+LONG WINAPI
+RegCreateKeyTransactedA(
+    _In_ HKEY hKey,
+    _In_ LPCSTR lpSubKey,
+    _In_ DWORD Reserved,
+    _In_opt_ LPSTR lpClass,
+    _In_ DWORD dwOptions,
+    _In_ REGSAM samDesired,
+    _In_opt_ LPSECURITY_ATTRIBUTES lpSecurityAttributes,
+    _Out_ PHKEY phkResult,
+    _Out_opt_ LPDWORD lpdwDisposition,
+    _In_ HANDLE hTransaction,
+    _Reserved_ PVOID pExtendedParameter)
+{
+    UNICODE_STRING SubKeyString;
+    UNICODE_STRING ClassString;
+    LONG ErrorCode;
+
+    RtlInitEmptyUnicodeString(&ClassString, NULL, 0);
+    RtlInitEmptyUnicodeString(&SubKeyString, NULL, 0);
+
+    if (lpClass && !RtlCreateUnicodeStringFromAsciiz(&ClassString, lpClass))
+    {
+        ErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+        goto Exit;
+    }
+
+    if (lpSubKey && !RtlCreateUnicodeStringFromAsciiz(&SubKeyString, lpSubKey))
+    {
+        ErrorCode = ERROR_NOT_ENOUGH_MEMORY;
+        goto Exit;
+    }
+
+    ErrorCode = RegCreateKeyTransactedW(hKey,
+                                        SubKeyString.Buffer,
+                                        Reserved,
+                                        ClassString.Buffer,
+                                        dwOptions,
+                                        samDesired,
+                                        lpSecurityAttributes,
+                                        phkResult,
+                                        lpdwDisposition,
+                                        hTransaction,
+                                        pExtendedParameter);
+
+Exit:
+    RtlFreeUnicodeString(&SubKeyString);
+    RtlFreeUnicodeString(&ClassString);
+
+    return ErrorCode;
+}
+
+
+LONG WINAPI
+RegOpenKeyTransactedW(
+    _In_ HKEY hKey,
+    _In_opt_ LPCWSTR lpSubKey,
+    _In_opt_ DWORD ulOptions,
+    _In_ REGSAM samDesired,
+    _Out_ PHKEY phkResult,
+    _In_ HANDLE hTransaction,
+    _Reserved_ PVOID pExtendedParameter)
+{
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UNICODE_STRING SubKeyString;
+    HANDLE KeyHandle;
+    NTSTATUS Status;
+    ULONG Attributes = OBJ_CASE_INSENSITIVE;
+    BOOLEAN SubKeyStringAllocated = FALSE;
+
+    if (!phkResult || pExtendedParameter)
+        return ERROR_INVALID_PARAMETER;
+
+    if (!hTransaction || hTransaction == INVALID_HANDLE_VALUE)
+        return ERROR_INVALID_TRANSACTION;
+
+    if (IsPredefKey(hKey) && (!lpSubKey || !*lpSubKey))
+    {
+        *phkResult = hKey;
+        return ERROR_SUCCESS;
+    }
+
+    Status = MapDefaultKey(&KeyHandle, hKey);
+    if (!NT_SUCCESS(Status))
+        return RtlNtStatusToDosError(Status);
+
+    if (ulOptions & REG_OPTION_OPEN_LINK)
+        Attributes |= OBJ_OPENLINK;
+
+    if (lpSubKey == NULL || wcscmp(lpSubKey, L"\\") == 0)
+    {
+        RtlInitUnicodeString(&SubKeyString, L"");
+    }
+    else
+    {
+        RtlInitUnicodeString(&SubKeyString, lpSubKey);
+
+        if ((ULONG_PTR)lpSubKey & 1)
+        {
+            UNICODE_STRING AlignedString;
+
+            Status = RtlDuplicateUnicodeString(RTL_DUPLICATE_UNICODE_STRING_NULL_TERMINATE,
+                                               &SubKeyString,
+                                               &AlignedString);
+            if (!NT_SUCCESS(Status))
+                goto Exit;
+
+            SubKeyString = AlignedString;
+            SubKeyStringAllocated = TRUE;
+        }
+    }
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &SubKeyString,
+                               Attributes,
+                               (HANDLE)((ULONG_PTR)KeyHandle & ~0x2),
+                               NULL);
+
+    Status = NtOpenKeyTransactedEx((PHANDLE)phkResult,
+                                   samDesired,
+                                   &ObjectAttributes,
+                                   ulOptions & REG_OPTION_BACKUP_RESTORE,
+                                   hTransaction);
+
+Exit:
+    if (SubKeyStringAllocated)
+        RtlFreeUnicodeString(&SubKeyString);
+
+    ClosePredefKey(KeyHandle);
+
+    return NT_SUCCESS(Status) ? ERROR_SUCCESS : RtlNtStatusToDosError(Status);
+}
+
+
+LONG WINAPI
+RegOpenKeyTransactedA(
+    _In_ HKEY hKey,
+    _In_opt_ LPCSTR lpSubKey,
+    _In_opt_ DWORD ulOptions,
+    _In_ REGSAM samDesired,
+    _Out_ PHKEY phkResult,
+    _In_ HANDLE hTransaction,
+    _Reserved_ PVOID pExtendedParameter)
+{
+    UNICODE_STRING SubKeyString;
+    LONG ErrorCode;
+
+    if (lpSubKey)
+    {
+        if (!RtlCreateUnicodeStringFromAsciiz(&SubKeyString, lpSubKey))
+            return ERROR_NOT_ENOUGH_MEMORY;
+    }
+    else
+        RtlInitEmptyUnicodeString(&SubKeyString, NULL, 0);
+
+    ErrorCode = RegOpenKeyTransactedW(hKey,
+                                      SubKeyString.Buffer,
+                                      ulOptions,
+                                      samDesired,
+                                      phkResult,
+                                      hTransaction,
+                                      pExtendedParameter);
+
+    RtlFreeUnicodeString(&SubKeyString);
 
     return ErrorCode;
 }
@@ -4469,6 +4762,33 @@ Cleanup:
     ClosePredefKey(KeyHandle);
 
     return ErrorCode;
+}
+
+
+/******************************************************************************
+ * RegRenameKey [ADVAPI32.@]
+ *
+ */
+LSTATUS WINAPI RegRenameKey(HKEY hkey, LPCWSTR subkey_name, LPCWSTR new_name)
+{
+    UNICODE_STRING str;
+    LSTATUS ret;
+    HKEY subkey;
+
+    TRACE("%p, %s, %s.\n", hkey, debugstr_w(subkey_name), debugstr_w(new_name));
+
+    RtlInitUnicodeString(&str, new_name);
+
+    if (!subkey_name)
+        return RtlNtStatusToDosError(NtRenameKey(hkey, &str));
+
+    if ((ret = RegOpenKeyExW(hkey, subkey_name, 0, KEY_WRITE, &subkey)))
+        return ret;
+
+    ret = RtlNtStatusToDosError(NtRenameKey(subkey, &str));
+    RegCloseKey(subkey);
+
+    return ret;
 }
 
 

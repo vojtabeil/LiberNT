@@ -2,7 +2,9 @@
  *                              Kernel Functions                              *
  ******************************************************************************/
 $if (_WDMDDK_)
-#if defined(_M_IX86)
+#if defined(_M_ARM64EC)
+$include(arm64/ke.h)
+#elif defined(_M_IX86)
 $include(x86/ke.h)
 #elif defined(_M_AMD64)
 $include(amd64/ke.h)
@@ -16,6 +18,8 @@ $include(mips/ke.h)
 $include(arm/ke.h)
 #elif defined(_M_ARM64)
 $include(arm64/ke.h)
+#elif defined(_M_RISCV64)
+$include(riscv64/ke.h)
 #else
 #error Unknown Architecture
 #endif
@@ -45,6 +49,21 @@ FASTCALL
 KeInvalidateRangeAllCaches(
   _In_ PVOID BaseAddress,
   _In_ ULONG Length);
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+KeInitializeTriageDumpDataArray(
+  _Out_writes_bytes_(Size) PKTRIAGE_DUMP_DATA_ARRAY TriageDumpDataArray,
+  _In_ ULONG Size);
+
+NTKERNELAPI
+NTSTATUS
+NTAPI
+KeAddTriageDumpDataBlock(
+  _Inout_ PKTRIAGE_DUMP_DATA_ARRAY TriageDumpDataArray,
+  _In_ PVOID Address,
+  _In_ SIZE_T Size);
 $endif (_NTDDK_)
 
 #if (NTDDI_VERSION >= NTDDI_WIN2K)
@@ -157,7 +176,7 @@ KeQueryActiveProcessors(VOID);
 $endif (_WDMDDK_ || _NTDDK_)
 
 $if (_WDMDDK_)
-#if !defined(_M_AMD64)
+#if !defined(_M_AMD64) && !(defined(_M_ARM64) && !defined(_NTOSKRNL_) && !defined(_NTHAL_) && !defined(_NTSYSTEM_))
 NTKERNELAPI
 ULONGLONG
 NTAPI
@@ -169,6 +188,31 @@ NTAPI
 KeQuerySystemTime(
   _Out_ PLARGE_INTEGER CurrentTime);
 #endif /* !_M_AMD64 */
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
+NTKERNELAPI
+VOID
+NTAPI
+KeQuerySystemTimePrecise(
+  _Out_ PLARGE_INTEGER CurrentTime);
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_WINBLUE)
+NTKERNELAPI
+ULONGLONG
+NTAPI
+KeQueryInterruptTimePrecise(
+  _Out_ PULONG64 QpcTimeStamp);
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_WIN10)
+_IRQL_requires_same_
+NTKERNELAPI
+ULONG64
+NTAPI
+KeQueryUnbiasedInterruptTimePrecise(
+  _Out_ PULONG64 QpcTimeStamp);
+#endif
 
 #if !defined(_X86_) && !defined(_M_ARM)
 _Requires_lock_not_held_(*SpinLock)
@@ -456,6 +500,16 @@ BOOLEAN
 NTAPI
 KeRemoveQueueDpc(
   _Inout_ PRKDPC Dpc);
+
+#if (NTDDI_VERSION >= NTDDI_WINBLUE)
+_IRQL_requires_max_(HIGH_LEVEL)
+NTKERNELAPI
+BOOLEAN
+NTAPI
+KeRemoveQueueDpcEx(
+  _Inout_ PRKDPC Dpc,
+  _In_ BOOLEAN WaitIfActive);
+#endif
 
 _IRQL_requires_max_(DISPATCH_LEVEL)
 NTKERNELAPI
@@ -1164,6 +1218,21 @@ KeRemoveQueueEx(
   _Out_writes_to_(Count, return) PLIST_ENTRY *EntryArray,
   _In_ ULONG Count);
 $endif (_NTIFS_)
+$if (_NTDDK_)
+
+_Must_inspect_result_
+_IRQL_requires_max_(APC_LEVEL)
+NTKERNELAPI
+NTSTATUS
+NTAPI
+KeExpandKernelStackAndCalloutEx(
+  _In_ PEXPAND_STACK_CALLOUT Callout,
+  _In_opt_ PVOID Parameter,
+  _In_ SIZE_T Size,
+  _In_ BOOLEAN Wait,
+  _In_opt_ PVOID Context);
+
+$endif (_NTDDK_)
 
 #endif /* (NTDDI_VERSION >= NTDDI_VISTA) */
 
@@ -1187,7 +1256,7 @@ KeDeregisterProcessorChangeCallback(
 #endif /* (NTDDI_VERSION >= NTDDI_WS08) */
 $endif (_WDMDDK_)
 $if (_WDMDDK_ || _NTDDK_)
-#if (NTDDI_VERSION >= NTDDI_WIN7)
+#if (NTDDI_VERSION >= NTDDI_WIN7) || defined(_STORPORT_)
 
 NTKERNELAPI
 ULONG
@@ -1257,9 +1326,24 @@ KeQueryLogicalProcessorRelationship(
   _Out_writes_bytes_opt_(*Length) PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX Information,
   _Inout_ PULONG Length);
 
+_IRQL_requires_min_(DISPATCH_LEVEL)
+NTKERNELAPI
+LOGICAL
+NTAPI
+KeShouldYieldProcessor(VOID);
+
 $endif (_WDMDDK_ || _NTDDK_)
 
 $if (_WDMDDK_)
+_IRQL_requires_max_(DISPATCH_LEVEL)
+_IRQL_requires_min_(PASSIVE_LEVEL)
+_IRQL_requires_same_
+ULONG64
+NTAPI
+KeQueryTotalCycleTimeProcess(
+  _Inout_ PKPROCESS Process,
+  _Out_ PULONG64 CycleTimeStamp);
+
 _IRQL_requires_max_(APC_LEVEL)
 _IRQL_requires_min_(PASSIVE_LEVEL)
 _IRQL_requires_same_
@@ -1393,12 +1477,7 @@ void __PREfastPagedCodeLocked(void);
 #define PAGED_ASSERT( exp ) ASSERT( exp )
 #endif
 
-#define PAGED_CODE() { \
-  if (KeGetCurrentIrql() > APC_LEVEL) { \
-    KdPrint( ("NTDDK: Pageable code called at IRQL > APC_LEVEL (%d)\n", KeGetCurrentIrql() )); \
-    PAGED_ASSERT(FALSE); \
-  } \
-}
+#define PAGED_CODE() PAGED_ASSERT(KeGetCurrentIrql() <= APC_LEVEL);
 
 #define PAGED_CODE_LOCKED() NOP_FUNCTION;
 

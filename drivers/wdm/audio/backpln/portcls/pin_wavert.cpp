@@ -27,34 +27,54 @@ protected:
     KSPIN_DESCRIPTOR * m_KsPinDescriptor;
     PMINIPORTWAVERT m_Miniport;
     PMINIPORTWAVERTSTREAM m_Stream;
+    PMINIPORTWAVERTSTREAMNOTIFICATION m_StreamNotification;
+    PMINIPORTWAVERTOUTPUTSTREAM m_OutputStream;
     PPORTWAVERTSTREAM m_PortStream;
     KSSTATE m_State;
     PKSDATAFORMAT m_Format;
     KSPIN_CONNECT * m_ConnectDetails;
+    KSAUDIO_POSITION m_Position;
 
-    PVOID m_CommonBuffer;
+    KSRTAUDIO_HWLATENCY m_Latency;
+    PKPROCESS m_UserProcess;
+    PVOID m_UserAddress;
+    PKEVENT m_UserEvent;
+
+    PUCHAR m_CommonBuffer;
     ULONG m_CommonBufferSize;
     ULONG m_CommonBufferOffset;
 
-    IIrpQueue * m_IrpQueue;
-
     BOOL m_Capture;
-
-    ULONG m_TotalPackets;
-    ULONG m_PreCompleted;
-    ULONG m_PostCompleted;
-
-    ULONGLONG m_Delay;
 
     MEMORY_CACHING_TYPE m_CacheType;
     PMDL m_Mdl;
+
+    PSUBDEVICE_DESCRIPTOR m_Descriptor;
+    KSPIN_LOCK m_EventListLock;
+    LIST_ENTRY m_EventList;
 
     NTSTATUS NTAPI HandleKsProperty(IN PIRP Irp);
     NTSTATUS NTAPI HandleKsStream(IN PIRP Irp);
     VOID NTAPI SetStreamState(IN KSSTATE State);
     friend VOID NTAPI SetStreamWorkerRoutine(IN PDEVICE_OBJECT  DeviceObject, IN PVOID  Context);
     friend VOID NTAPI CloseStreamRoutine(IN PDEVICE_OBJECT  DeviceObject, IN PVOID Context);
-
+    friend VOID NTAPI WorkerStreamRoutine(IN PVOID Context);
+    friend NTSTATUS NTAPI PinWaveRTAudioGetAudioBuffer(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+    friend NTSTATUS NTAPI PinWaveRTAudioGetHwLatency(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+    friend NTSTATUS NTAPI PinWaveRTAudioPosition(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+    friend NTSTATUS NTAPI PinWaveRTAudioGetRTAudioPosition(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+    friend NTSTATUS NTAPI PinWaveRTAudioGetClockRegister(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+    friend NTSTATUS NTAPI PinWaveRTAudioGetBufferWithNotification(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+    friend NTSTATUS NTAPI PinWaveRTAudioRegisterNotificationEvent(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+    friend NTSTATUS NTAPI PinWaveRTAudioUnregisterNotificationEvent(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    friend NTSTATUS NTAPI PinWaveRTAudioQueryNotificationSupport(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+#endif
+#if (NTDDI_VERSION >= NTDDI_THRESHOLD)
+    friend NTSTATUS NTAPI PinWaveRTAudioGetPacketCount(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+    friend NTSTATUS NTAPI PinWaveRTAudioGetPresentationPosition(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+    friend NTSTATUS NTAPI PinWaveRTAudioSetWritePacket(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+#endif
 };
 
 typedef struct
@@ -64,6 +84,362 @@ typedef struct
     KSSTATE State;
 }SETSTREAM_CONTEXT, *PSETSTREAM_CONTEXT;
 
+NTSTATUS NTAPI PinWaveRTAudioGetAudioBuffer(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+NTSTATUS NTAPI PinWaveRTAudioGetHwLatency(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+NTSTATUS NTAPI PinWaveRTAudioPosition(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+NTSTATUS NTAPI PinWaveRTAudioGetRTAudioPosition(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+NTSTATUS NTAPI PinWaveRTAudioGetClockRegister(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+NTSTATUS NTAPI PinWaveRTAudioGetBufferWithNotification(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+NTSTATUS NTAPI PinWaveRTAudioRegisterNotificationEvent(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+NTSTATUS NTAPI PinWaveRTAudioUnregisterNotificationEvent(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+NTSTATUS NTAPI PinWaveRTAudioQueryNotificationSupport(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+#endif
+#if (NTDDI_VERSION >= NTDDI_THRESHOLD)
+NTSTATUS NTAPI PinWaveRTAudioGetPacketCount(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+NTSTATUS NTAPI PinWaveRTAudioGetPresentationPosition(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+NTSTATUS NTAPI PinWaveRTAudioSetWritePacket(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data);
+#endif
+
+DEFINE_KSPROPERTY_TABLE(PinWaveRTAudioSet) {
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_BUFFER, PinWaveRTAudioGetAudioBuffer, sizeof(KSRTAUDIO_BUFFER_PROPERTY), sizeof(KSRTAUDIO_BUFFER), NULL, NULL, 0, NULL, NULL, 0),
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_HWLATENCY, PinWaveRTAudioGetHwLatency, sizeof(KSPROPERTY), sizeof(KSRTAUDIO_HWLATENCY), NULL, NULL, 0, NULL, NULL, 0),
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_POSITIONREGISTER, PinWaveRTAudioGetRTAudioPosition, sizeof(KSRTAUDIO_HWREGISTER_PROPERTY), sizeof(KSRTAUDIO_HWREGISTER), NULL, NULL, 0, NULL, NULL, 0),
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_CLOCKREGISTER, PinWaveRTAudioGetClockRegister, sizeof(KSRTAUDIO_HWREGISTER_PROPERTY), sizeof(KSRTAUDIO_HWREGISTER), NULL, NULL, 0, NULL, NULL, 0),
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_BUFFER_WITH_NOTIFICATION, PinWaveRTAudioGetBufferWithNotification, sizeof(KSRTAUDIO_BUFFER_PROPERTY_WITH_NOTIFICATION), sizeof(KSRTAUDIO_BUFFER), NULL, NULL, 0, NULL, NULL, 0),
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_REGISTER_NOTIFICATION_EVENT, PinWaveRTAudioRegisterNotificationEvent, sizeof(KSRTAUDIO_NOTIFICATION_EVENT_PROPERTY), 0, PinWaveRTAudioRegisterNotificationEvent, NULL, 0, NULL, NULL, 0),
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_UNREGISTER_NOTIFICATION_EVENT, PinWaveRTAudioUnregisterNotificationEvent, sizeof(KSRTAUDIO_NOTIFICATION_EVENT_PROPERTY), 0, PinWaveRTAudioUnregisterNotificationEvent, NULL, 0, NULL, NULL, 0),
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_QUERY_NOTIFICATION_SUPPORT, PinWaveRTAudioQueryNotificationSupport, sizeof(KSPROPERTY), sizeof(BOOL), NULL, NULL, 0, NULL, NULL, 0),
+#endif
+#if (NTDDI_VERSION >= NTDDI_THRESHOLD)
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_PACKETCOUNT, PinWaveRTAudioGetPacketCount, sizeof(KSPROPERTY), sizeof(ULONG), NULL, NULL, 0, NULL, NULL, 0),
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_PRESENTATION_POSITION, PinWaveRTAudioGetPresentationPosition, sizeof(KSPROPERTY), sizeof(KSAUDIO_PRESENTATION_POSITION), NULL, NULL, 0, NULL, NULL, 0),
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_RTAUDIO_SETWRITEPACKET, NULL, sizeof(KSPROPERTY), sizeof(KSRTAUDIO_SETWRITEPACKET_INFO), PinWaveRTAudioSetWritePacket, NULL, 0, NULL, NULL, 0),
+#endif
+};
+
+
+DEFINE_KSPROPERTY_TABLE(PinWaveRTPositionSet) {
+    DEFINE_KSPROPERTY_ITEM(KSPROPERTY_AUDIO_POSITION, PinWaveRTAudioPosition, sizeof(KSPROPERTY), sizeof(KSAUDIO_POSITION), NULL, NULL, 0, NULL, NULL, 0)
+};
+
+KSPROPERTY_SET PinWaveRTPropertySet[] = {
+    {
+        &KSPROPSETID_Audio,
+        RTL_NUMBER_OF(PinWaveRTPositionSet),
+        PinWaveRTPositionSet,
+        0,
+        NULL
+    },
+    {
+        &KSPROPSETID_RtAudio,
+        sizeof(PinWaveRTAudioSet) / sizeof(KSPROPERTY_ITEM),
+        (const KSPROPERTY_ITEM *)&PinWaveRTAudioSet,
+        0,
+        NULL
+    }
+};
+//==================================================================================================================================
+NTSTATUS
+NTAPI
+PinWaveRTAudioPosition(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data)
+{
+    PSUBDEVICE_DESCRIPTOR Descriptor = (PSUBDEVICE_DESCRIPTOR)KSPROPERTY_ITEM_IRP_STORAGE(Irp);
+    CPortPinWaveRT *Pin = (CPortPinWaveRT *)Descriptor->PortPin;
+    NTSTATUS Status;
+
+    Status = Pin->m_Stream->GetPosition((PKSAUDIO_POSITION)Data);
+    if (NT_SUCCESS(Status))
+        Irp->IoStatus.Information = sizeof(KSAUDIO_POSITION);
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+PinWaveRTAudioGetAudioBuffer(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data)
+{
+    UNIMPLEMENTED_ONCE;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS
+NTAPI
+PinWaveRTAudioGetHwLatency(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data)
+{
+    PKSRTAUDIO_HWLATENCY HwLatency;
+    PSUBDEVICE_DESCRIPTOR Descriptor;
+    CPortPinWaveRT *Pin;
+
+    // Get sub device descriptor
+    Descriptor = (PSUBDEVICE_DESCRIPTOR)KSPROPERTY_ITEM_IRP_STORAGE(Irp);
+
+    // Sanity check
+    PC_ASSERT(Descriptor);
+    PC_ASSERT(Descriptor->PortPin);
+    PC_ASSERT_IRQL(DISPATCH_LEVEL);
+
+    // Cast to pin impl
+    Pin = (CPortPinWaveRT *)Descriptor->PortPin;
+
+    // Cast to output buffer
+    HwLatency = (PKSRTAUDIO_HWLATENCY)Data;
+
+    if (Request->Flags & KSPROPERTY_TYPE_GET)
+    {
+        RtlMoveMemory(HwLatency, &Pin->m_Latency, sizeof(KSRTAUDIO_HWLATENCY));
+        Irp->IoStatus.Information = sizeof(KSRTAUDIO_HWLATENCY);
+        return STATUS_SUCCESS;
+    }
+    // Not supported
+    return STATUS_NOT_SUPPORTED;
+}
+
+NTSTATUS
+NTAPI
+PinWaveRTAudioGetRTAudioPosition(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data)
+{
+    UNIMPLEMENTED_ONCE;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS
+NTAPI
+PinWaveRTAudioGetClockRegister(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data)
+{
+    UNIMPLEMENTED_ONCE;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS
+NTAPI
+PinWaveRTAudioGetBufferWithNotification(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data)
+{
+    PSUBDEVICE_DESCRIPTOR Descriptor;
+    CPortPinWaveRT *Pin;
+    NTSTATUS Status;
+    PKSRTAUDIO_BUFFER_PROPERTY_WITH_NOTIFICATION Property;
+    PKSRTAUDIO_BUFFER Buffer;
+
+    // Get sub device descriptor
+    Descriptor = (PSUBDEVICE_DESCRIPTOR)KSPROPERTY_ITEM_IRP_STORAGE(Irp);
+
+    // Sanity check
+    PC_ASSERT(Descriptor);
+    PC_ASSERT(Descriptor->PortPin);
+    PC_ASSERT_IRQL(DISPATCH_LEVEL);
+
+    // Cast to pin impl
+    Pin = (CPortPinWaveRT *)Descriptor->PortPin;
+
+    // Get input buffer
+    Property = (PKSRTAUDIO_BUFFER_PROPERTY_WITH_NOTIFICATION)Request;
+
+    /* The request describes audio duration, not the backing allocation size.
+     * Let the miniport choose its byte/frame alignment and allocate the MDL. */
+    Status = Pin->m_StreamNotification->AllocateBufferWithNotification(Property->NotificationCount, Property->RequestedBufferSize, &Pin->m_Mdl, &Pin->m_CommonBufferSize, &Pin->m_CommonBufferOffset, &Pin->m_CacheType);
+    if (!NT_SUCCESS(Status))
+    {
+        // Failed to allocate buffer
+        DPRINT1("AllocateBufferWithNotification failed with %x\n", Status);
+        return Status;
+    }
+    // Get output buffer
+    Buffer = (PKSRTAUDIO_BUFFER)Data;
+
+    // Get current process
+    Pin->m_UserProcess = (PKPROCESS)IoGetCurrentProcess();
+
+    // Map buffer
+    Pin->m_UserAddress = MmMapLockedPagesSpecifyCache(
+        Pin->m_Mdl, UserMode, Pin->m_CacheType, Property->BaseAddress, FALSE, NormalPagePriority);
+    if (!Pin->m_UserAddress)
+    {
+        DPRINT1("MmMapLockedPagesSpecifyCache failed with %x\n", Status);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    // Return result
+    Buffer->BufferAddress = (PUCHAR)Pin->m_UserAddress + Pin->m_CommonBufferOffset;
+    Buffer->ActualBufferSize = Pin->m_CommonBufferSize;
+    Buffer->CallMemoryBarrier = Pin->m_CacheType == MmWriteCombined;
+
+    Irp->IoStatus.Information = sizeof(KSRTAUDIO_BUFFER);
+    DPRINT("PinWaveRTAudioGetBufferWithNotification success\n");
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+PinWaveRTAudioRegisterNotificationEvent(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data)
+{
+    PSUBDEVICE_DESCRIPTOR Descriptor;
+    CPortPinWaveRT *Pin;
+    NTSTATUS Status;
+    PKSRTAUDIO_NOTIFICATION_EVENT_PROPERTY Property;
+
+    DPRINT("PinWaveRTAudioRegisterNotificationEvent entered\n");
+
+    // Get sub device descriptor
+    Descriptor = (PSUBDEVICE_DESCRIPTOR)KSPROPERTY_ITEM_IRP_STORAGE(Irp);
+
+    // Sanity check
+    PC_ASSERT(Descriptor);
+    PC_ASSERT(Descriptor->PortPin);
+    PC_ASSERT_IRQL(DISPATCH_LEVEL);
+
+    // Cast to pin impl
+    Pin = (CPortPinWaveRT *)Descriptor->PortPin;
+
+    // Get input buffer
+    Property = (PKSRTAUDIO_NOTIFICATION_EVENT_PROPERTY)Request;
+
+    // Referece notification event
+    Status = ObReferenceObjectByHandle(
+        Property->NotificationEvent, 0, *ExEventObjectType, UserMode, (PVOID*) &Pin->m_UserEvent, NULL);
+    if (!NT_SUCCESS(Status))
+    {
+        // Failed to reference event
+        DPRINT1("ObReferenceObjectByHandle failed with %x\n", Status);
+        return Status;
+    }
+
+    // Register event
+    Status = Pin->m_StreamNotification->RegisterNotificationEvent(Pin->m_UserEvent);
+    if (!NT_SUCCESS(Status))
+    {
+        ObDereferenceObject(Pin->m_UserEvent);
+        Pin->m_UserEvent = NULL;
+        DPRINT1("RegisterNotificationEvent failed with %x\n", Status);
+        return Status;
+    }
+
+    // Done
+    Irp->IoStatus.Information = 0;
+    DPRINT("PinWaveRTAudioRegisterNotificationEvent success\n");
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+PinWaveRTAudioUnregisterNotificationEvent(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data)
+{
+    PSUBDEVICE_DESCRIPTOR Descriptor;
+    CPortPinWaveRT *Pin;
+    NTSTATUS Status;
+    PKSRTAUDIO_NOTIFICATION_EVENT_PROPERTY Property;
+
+    // Get sub device descriptor
+    Descriptor = (PSUBDEVICE_DESCRIPTOR)KSPROPERTY_ITEM_IRP_STORAGE(Irp);
+
+    // Sanity check
+    PC_ASSERT(Descriptor);
+    PC_ASSERT(Descriptor->PortPin);
+    PC_ASSERT_IRQL(DISPATCH_LEVEL);
+
+    // Cast to pin impl
+    Pin = (CPortPinWaveRT *)Descriptor->PortPin;
+
+    // Get input buffer
+    Property = (PKSRTAUDIO_NOTIFICATION_EVENT_PROPERTY)Request;
+
+    if (Pin->m_UserEvent == NULL)
+    {
+        // Reference notification event
+        Status = ObReferenceObjectByHandle(
+            Property->NotificationEvent, 0, *ExEventObjectType, UserMode, (PVOID*) &Pin->m_UserEvent, NULL);
+        if (!NT_SUCCESS(Status))
+        {
+            // Failed to reference event
+            DPRINT1("ObReferenceObjectByHandle failed with %x\n", Status);
+            return Status;
+        }
+    }
+    // Unregister event
+    Status = Pin->m_StreamNotification->UnregisterNotificationEvent(Pin->m_UserEvent);
+    if (!NT_SUCCESS(Status))
+    {
+        // Failed to reference event
+        DPRINT1("RegisterNotificationEvent failed with %x\n", Status);
+        return Status;
+    }
+    ObDereferenceObject(Pin->m_UserEvent);
+    Pin->m_UserEvent = NULL;
+
+    // Done
+    Irp->IoStatus.Information = 0;
+    return STATUS_SUCCESS;
+}
+
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+NTSTATUS
+NTAPI
+PinWaveRTAudioQueryNotificationSupport(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data)
+{
+    PSUBDEVICE_DESCRIPTOR Descriptor = (PSUBDEVICE_DESCRIPTOR)KSPROPERTY_ITEM_IRP_STORAGE(Irp);
+    CPortPinWaveRT *Pin = (CPortPinWaveRT *)Descriptor->PortPin;
+
+    UNREFERENCED_PARAMETER(Request);
+    *(PBOOL)Data = Pin->m_StreamNotification != NULL;
+    Irp->IoStatus.Information = sizeof(BOOL);
+    return STATUS_SUCCESS;
+}
+#endif
+
+#if (NTDDI_VERSION >= NTDDI_THRESHOLD)
+NTSTATUS
+NTAPI
+PinWaveRTAudioGetPacketCount(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data)
+{
+    PSUBDEVICE_DESCRIPTOR Descriptor = (PSUBDEVICE_DESCRIPTOR)KSPROPERTY_ITEM_IRP_STORAGE(Irp);
+    CPortPinWaveRT *Pin = (CPortPinWaveRT *)Descriptor->PortPin;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(Request);
+    if (!Pin->m_OutputStream)
+        return STATUS_NOT_SUPPORTED;
+
+    Status = Pin->m_OutputStream->GetPacketCount((PULONG)Data);
+    if (NT_SUCCESS(Status))
+        Irp->IoStatus.Information = sizeof(ULONG);
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+PinWaveRTAudioGetPresentationPosition(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data)
+{
+    PSUBDEVICE_DESCRIPTOR Descriptor = (PSUBDEVICE_DESCRIPTOR)KSPROPERTY_ITEM_IRP_STORAGE(Irp);
+    CPortPinWaveRT *Pin = (CPortPinWaveRT *)Descriptor->PortPin;
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(Request);
+    if (!Pin->m_OutputStream)
+        return STATUS_NOT_SUPPORTED;
+
+    Status = Pin->m_OutputStream->GetOutputStreamPresentationPosition((PKSAUDIO_PRESENTATION_POSITION)Data);
+    if (NT_SUCCESS(Status))
+        Irp->IoStatus.Information = sizeof(KSAUDIO_PRESENTATION_POSITION);
+    return Status;
+}
+
+NTSTATUS
+NTAPI
+PinWaveRTAudioSetWritePacket(IN PIRP Irp, IN PKSIDENTIFIER Request, IN OUT PVOID Data)
+{
+    PSUBDEVICE_DESCRIPTOR Descriptor = (PSUBDEVICE_DESCRIPTOR)KSPROPERTY_ITEM_IRP_STORAGE(Irp);
+    CPortPinWaveRT *Pin = (CPortPinWaveRT *)Descriptor->PortPin;
+    PKSRTAUDIO_SETWRITEPACKET_INFO Packet = (PKSRTAUDIO_SETWRITEPACKET_INFO)Data;
+
+    UNREFERENCED_PARAMETER(Request);
+    if (!Pin->m_OutputStream)
+        return STATUS_NOT_SUPPORTED;
+
+    Irp->IoStatus.Information = 0;
+    return Pin->m_OutputStream->SetWritePacket(Packet->PacketNumber, Packet->Flags, Packet->EosPacketLength);
+}
+#endif
+
 //==================================================================================================================================
 
 NTSTATUS
@@ -72,6 +448,8 @@ CPortPinWaveRT::QueryInterface(
     IN  REFIID refiid,
     OUT PVOID* Output)
 {
+    UNICODE_STRING GuidString;
+
     DPRINT("IServiceSink_fnQueryInterface entered\n");
 
     if (IsEqualGUIDAligned(refiid, IID_IIrpTarget) ||
@@ -80,6 +458,12 @@ CPortPinWaveRT::QueryInterface(
         *Output = PVOID(PUNKNOWN((IIrpTarget*)this));
         PUNKNOWN(*Output)->AddRef();
         return STATUS_SUCCESS;
+    }
+    if (RtlStringFromGUID(refiid, &GuidString) == STATUS_SUCCESS)
+    {
+        DPRINT1("IPinWaveRT_fnQueryInterface no interface!!! iface %S\n", GuidString.Buffer);
+        ASSERT(FALSE);
+        RtlFreeUnicodeString(&GuidString);
     }
     return STATUS_UNSUCCESSFUL;
 }
@@ -108,7 +492,6 @@ CPortPinWaveRT::HandleKsProperty(
 {
     PKSPROPERTY Property;
     NTSTATUS Status;
-    UNICODE_STRING GuidString;
     PIO_STACK_LOCATION IoStack;
 
     IoStack = IoGetCurrentIrpStackLocation(Irp);
@@ -150,9 +533,7 @@ CPortPinWaveRT::HandleKsProperty(
 
                     DPRINT("Setting state %u %x\n", *State, Status);
                     if (NT_SUCCESS(Status))
-                    {
                         m_State = *State;
-                    }
                 }
                 Irp->IoStatus.Status = Status;
                 IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -252,24 +633,16 @@ CPortPinWaveRT::HandleKsProperty(
         }
 
     }
-    RtlStringFromGUID(Property->Set, &GuidString);
-    DPRINT("Unhandled property Set |%S| Id %u Flags %x\n", GuidString.Buffer, Property->Id, Property->Flags);
-    RtlFreeUnicodeString(&GuidString);
-
-    Irp->IoStatus.Status = STATUS_NOT_IMPLEMENTED;
-    Irp->IoStatus.Information = 0;
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-    return STATUS_NOT_IMPLEMENTED;
-}
-
-NTSTATUS
-NTAPI
-CPortPinWaveRT::HandleKsStream(
-    IN PIRP Irp)
-{
-    DPRINT("IPortPinWaveRT_HandleKsStream entered State %u Stream %p is UNIMPLEMENTED\n", m_State, m_Stream);
-
-    return STATUS_PENDING;
+    /* handle property with subdevice descriptor */
+    Status = PcHandlePropertyWithTable(
+        Irp, m_Descriptor->FilterPropertySetCount, m_Descriptor->FilterPropertySet,
+        m_Descriptor);
+    if (Status != STATUS_PENDING)
+    {
+        Irp->IoStatus.Status = Status;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    }
+    return Status;
 }
 
 NTSTATUS
@@ -288,14 +661,19 @@ CPortPinWaveRT::DeviceIoControl(
             return HandleKsProperty(Irp);
 
         case IOCTL_KS_ENABLE_EVENT:
-            /* FIXME UNIMPLEMENTED */
-            UNIMPLEMENTED_ONCE;
-            break;
+            IoStack = IoGetCurrentIrpStackLocation(Irp);
+            Irp->IoStatus.Status = PcHandleEnableEventWithTable(Irp,
+                                                                 m_Descriptor);
+            if (Irp->IoStatus.Status != STATUS_PENDING)
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return Irp->IoStatus.Status;
 
         case IOCTL_KS_DISABLE_EVENT:
-            /* FIXME UNIMPLEMENTED */
-            UNIMPLEMENTED_ONCE;
-            break;
+            Irp->IoStatus.Status = PcHandleDisableEventWithTable(Irp,
+                                                                  m_Descriptor);
+            if (Irp->IoStatus.Status != STATUS_PENDING)
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return Irp->IoStatus.Status;
 
         case IOCTL_KS_HANDSHAKE:
             /* FIXME UNIMPLEMENTED */
@@ -306,15 +684,6 @@ CPortPinWaveRT::DeviceIoControl(
             /* FIXME UNIMPLEMENTED */
             UNIMPLEMENTED_ONCE;
             return KsDefaultDeviceIoCompletion(DeviceObject, Irp);
-
-        case IOCTL_KS_RESET_STATE:
-            /* FIXME UNIMPLEMENTED */
-            UNIMPLEMENTED_ONCE;
-            break;
-
-        case IOCTL_KS_WRITE_STREAM:
-        case IOCTL_KS_READ_STREAM:
-            return HandleKsStream(Irp);
 
         default:
             return KsDefaultDeviceIoCompletion(DeviceObject, Irp);
@@ -369,13 +738,81 @@ CloseStreamRoutine(
 
     This = (CPortPinWaveRT*)Ctx->Pin;
 
+    DPRINT("CloseStreamRoutine entered Irql %u\n", KeGetCurrentIrql());
+
     if (This->m_Stream)
     {
         if (This->m_State != KSSTATE_STOP)
         {
-            This->m_Stream->SetState(KSSTATE_STOP);
-            KeStallExecutionProcessor(10);
+            DPRINT("Set state to stop %u\n", This->m_State);
+
+            if (This->m_State == KSSTATE_RUN)
+            {
+                DPRINT("Setting to pause\n");
+                This->m_Stream->SetState(KSSTATE_PAUSE);
+                This->m_State = KSSTATE_PAUSE;
+            }
+
+            if (This->m_State == KSSTATE_PAUSE)
+            {
+                DPRINT("Setting to acquire\n");
+                This->m_Stream->SetState(KSSTATE_ACQUIRE);
+                This->m_State = KSSTATE_ACQUIRE;
+            }
+            if (This->m_State == KSSTATE_ACQUIRE)
+            {
+                DPRINT("Setting to stop\n");
+                This->m_Stream->SetState(KSSTATE_STOP);
+                This->m_State = KSSTATE_STOP;
+            }
         }
+    }
+
+    if (This->m_StreamNotification)
+    {
+        if (This->m_UserAddress)
+        {
+            KAPC_STATE ApcState;
+            PKPROCESS Process = (PKPROCESS)PsGetCurrentProcess();
+            if (Process != This->m_UserProcess)
+            {
+                DPRINT("Before KeStackAttachProcess\n");
+                KeStackAttachProcess(This->m_UserProcess, &ApcState);
+            }
+
+            MmUnmapLockedPages(This->m_UserAddress, This->m_Mdl);
+
+            if (Process != This->m_UserProcess)
+            {
+                DPRINT("Before KeUnstackDetachProcess\n");
+                KeUnstackDetachProcess(&ApcState);
+            }
+
+            This->m_UserAddress = NULL;
+        }
+        if (This->m_CommonBufferSize)
+        {
+            DPRINT("Before FreeBufferWithNotification\n");
+            This->m_StreamNotification->FreeBufferWithNotification(This->m_Mdl, This->m_CommonBufferSize);
+            This->m_Mdl = NULL;
+            This->m_CommonBufferSize = 0;
+        }
+        DPRINT("Before UnregisterNotificationEvent\n");
+        if (This->m_UserEvent)
+        {
+            This->m_StreamNotification->UnregisterNotificationEvent(This->m_UserEvent);
+            ObDereferenceObject(This->m_UserEvent);
+            This->m_UserEvent = NULL;
+        }
+        DPRINT("Before StreamNotification->Release\n");
+        This->m_StreamNotification->Release();
+        This->m_StreamNotification = NULL;
+    }
+
+    if (This->m_OutputStream)
+    {
+        This->m_OutputStream->Release();
+        This->m_OutputStream = NULL;
     }
 
     Status = This->m_Port->QueryInterface(IID_ISubdevice, (PVOID*)&ISubDevice);
@@ -395,20 +832,15 @@ CloseStreamRoutine(
         This->m_Format = NULL;
     }
 
-    if (This->m_IrpQueue)
-    {
-        This->m_IrpQueue->Release();
-    }
-
-    // complete the irp
+    // Complete the irp
     Ctx->Irp->IoStatus.Information = 0;
     Ctx->Irp->IoStatus.Status = STATUS_SUCCESS;
     IoCompleteRequest(Ctx->Irp, IO_NO_INCREMENT);
 
-    // free the work item
+    // Free the work item
     IoFreeWorkItem(Ctx->WorkItem);
 
-    // free work item ctx
+    // Free work item ctx
     FreeItem(Ctx, TAG_PORTCLASS);
 
     if (This->m_Stream)
@@ -418,6 +850,9 @@ CloseStreamRoutine(
         DPRINT("Closing stream at Irql %u\n", KeGetCurrentIrql());
         Stream->Release();
     }
+
+    DPRINT("Freeing Pin %p\n", This);
+    This->Release();
 }
 
 NTSTATUS
@@ -427,6 +862,16 @@ CPortPinWaveRT::Close(
     IN PIRP Irp)
 {
     PCLOSESTREAM_CONTEXT Ctx;
+    PIO_STACK_LOCATION IoStack;
+
+    IoStack = IoGetCurrentIrpStackLocation(Irp);
+    if (m_Descriptor->EventList && m_Descriptor->EventListLock)
+    {
+        KsFreeEventList(IoStack->FileObject,
+                        m_Descriptor->EventList,
+                        KSEVENTS_SPINLOCK,
+                        m_Descriptor->EventListLock);
+    }
 
     if (m_Stream)
     {
@@ -451,12 +896,11 @@ CPortPinWaveRT::Close(
         Irp->IoStatus.Information = 0;
         Irp->IoStatus.Status = STATUS_PENDING;
 
-        // defer work item
+        // Defer work item
         IoQueueWorkItem(Ctx->WorkItem, CloseStreamRoutine, DelayedWorkQueue, (PVOID)Ctx);
         // Return result
         return STATUS_PENDING;
     }
-
     Irp->IoStatus.Information = 0;
     Irp->IoStatus.Status = STATUS_SUCCESS;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
@@ -550,8 +994,8 @@ CPortPinWaveRT::Init(
 {
     NTSTATUS Status;
     PKSDATAFORMAT DataFormat;
-    BOOLEAN Capture;
-    KSRTAUDIO_HWLATENCY Latency;
+    ISubdevice *Subdevice = NULL;
+    PSUBDEVICE_DESCRIPTOR SubDeviceDescriptor = NULL;
 
     Port->AddRef();
     Filter->AddRef();
@@ -572,31 +1016,18 @@ CPortPinWaveRT::Init(
 
     RtlMoveMemory(m_Format, DataFormat, DataFormat->FormatSize);
 
-    Status = NewIrpQueue(&m_IrpQueue);
-    if (!NT_SUCCESS(Status))
-    {
-        goto cleanup;
-    }
-
-    Status = m_IrpQueue->Init(ConnectDetails, KsPinDescriptor, 0, 0, FALSE);
-    if (!NT_SUCCESS(Status))
-    {
-        goto cleanup;
-    }
-
     Status = NewPortWaveRTStream(&m_PortStream);
     if (!NT_SUCCESS(Status))
     {
         goto cleanup;
     }
-
     if (KsPinDescriptor->Communication == KSPIN_COMMUNICATION_SINK && KsPinDescriptor->DataFlow == KSPIN_DATAFLOW_IN)
     {
-        Capture = FALSE;
+        m_Capture = FALSE;
     }
     else if (KsPinDescriptor->Communication == KSPIN_COMMUNICATION_SINK && KsPinDescriptor->DataFlow == KSPIN_DATAFLOW_OUT)
     {
-        Capture = TRUE;
+        m_Capture = TRUE;
     }
     else
     {
@@ -604,49 +1035,102 @@ CPortPinWaveRT::Init(
         KeBugCheck(0);
         while(TRUE);
     }
-
-    Status = m_Miniport->NewStream(&m_Stream, m_PortStream, ConnectDetails->PinId, Capture, m_Format);
+    Status = m_Miniport->NewStream(&m_Stream, m_PortStream, ConnectDetails->PinId, m_Capture, m_Format);
     DPRINT("CPortPinWaveRT::Init Status %x\n", Status);
+    if (!NT_SUCCESS(Status))
+        goto cleanup;
+
+    // Get subdevice interface
+    Status = Port->QueryInterface(IID_ISubdevice, (PVOID *)&Subdevice);
 
     if (!NT_SUCCESS(Status))
         goto cleanup;
 
-    m_Stream->GetHWLatency(&Latency);
-    // delay of 10 millisec
-    m_Delay = Int32x32To64(10, -10000);
-
-    Status = m_Stream->AllocateAudioBuffer(16384 * 11, &m_Mdl, &m_CommonBufferSize, &m_CommonBufferOffset, &m_CacheType);
+    Status = Subdevice->GetDescriptor(&SubDeviceDescriptor);
     if (!NT_SUCCESS(Status))
     {
-        DPRINT("AllocateAudioBuffer failed with %x\n", Status);
+        // Failed to get descriptor
+        Subdevice->Release();
         goto cleanup;
     }
 
-    m_CommonBuffer = MmGetSystemAddressForMdlSafe(m_Mdl, NormalPagePriority);
-    if (!m_CommonBuffer)
+    // Initialize event management
+    InitializeListHead(&m_EventList);
+    KeInitializeSpinLock(&m_EventListLock);
+
+    Status = PcCreateSubdeviceDescriptor(
+        &m_Descriptor, SubDeviceDescriptor->InterfaceCount, SubDeviceDescriptor->Interfaces,
+        0, /* FIXME KSINTERFACE_STANDARD with KSINTERFACE_STANDARD_STREAMING / KSINTERFACE_STANDARD_LOOPED_STREAMING */
+        NULL,
+        sizeof(PinWaveRTPropertySet) / sizeof(KSPROPERTY_SET),
+        PinWaveRTPropertySet,
+        0,
+        0,
+        0,
+        NULL,
+        0,
+        NULL,
+        SubDeviceDescriptor->DeviceDescriptor);
+    if (!NT_SUCCESS(Status))
     {
-        DPRINT("Failed to get system address %x\n", Status);
-        IoFreeMdl(m_Mdl);
-        m_Mdl = NULL;
+        Subdevice->Release();
         goto cleanup;
     }
 
-    DPRINT("Setting state to acquire %x\n", m_Stream->SetState(KSSTATE_ACQUIRE));
-    DPRINT("Setting state to pause %x\n", m_Stream->SetState(KSSTATE_PAUSE));
-    m_State = KSSTATE_PAUSE;
+    m_Descriptor->UnknownStream = (PUNKNOWN)m_Stream;
+    m_Descriptor->UnknownMiniport = SubDeviceDescriptor->UnknownMiniport;
+    m_Descriptor->PortPin = (PVOID)this;
+    m_Descriptor->IsPin = TRUE;
+    m_Descriptor->PinId = ConnectDetails->PinId;
+    m_Descriptor->EventList = &m_EventList;
+    m_Descriptor->EventListLock = &m_EventListLock;
+
+    // Release subdevice descriptor
+    Subdevice->Release();
+
+    m_Stream->GetHWLatency(&m_Latency);
+    DPRINT("Latency FifoSize %u ChipsetDelay %u CodecDelay %u\n", m_Latency.FifoSize, m_Latency.ChipsetDelay, m_Latency.CodecDelay);
+
+    Status = m_Stream->QueryInterface(IID_IMiniportWaveRTStreamNotification, (PVOID*)&m_StreamNotification);
+    if (!NT_SUCCESS(Status))
+    {
+        DPRINT("QueryInterface failed with %x\n", Status);
+        goto cleanup;
+    }
+
+    if (!m_Capture)
+    {
+        Status = m_Stream->QueryInterface(IID_IMiniportWaveRTOutputStream, (PVOID*)&m_OutputStream);
+        if (!NT_SUCCESS(Status))
+            m_OutputStream = NULL;
+    }
+    m_State = KSSTATE_STOP;
     return STATUS_SUCCESS;
 
 cleanup:
-    if (m_IrpQueue)
-    {
-        m_IrpQueue->Release();
-        m_IrpQueue = NULL;
-    }
-
     if (m_Format)
     {
         FreeItem(m_Format, TAG_PORTCLASS);
         m_Format = NULL;
+    }
+
+    if (m_StreamNotification)
+    {
+        if (m_CommonBuffer)
+        {
+            m_StreamNotification->FreeBufferWithNotification(m_Mdl, m_CommonBufferSize);
+            m_Mdl = NULL;
+            m_CommonBufferSize = 0;
+            m_CommonBuffer = NULL;
+            m_CommonBufferOffset = 0;
+        }
+        m_StreamNotification->Release();
+        m_StreamNotification = NULL;
+    }
+    if (m_OutputStream)
+    {
+        m_OutputStream->Release();
+        m_OutputStream = NULL;
     }
 
     if (m_Stream)
@@ -678,7 +1162,7 @@ NewPortPinWaveRT(
 
     This->AddRef();
 
-    // store result
+    // Store result
     *OutPin = (PPORTPINWAVERT)This;
 
     return STATUS_SUCCESS;

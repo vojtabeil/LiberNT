@@ -7,6 +7,7 @@
 
 #include <ntddk.h>
 #include <ata.h>
+#include <drivers/ata/identify_funcs.h>
 #include <storport.h>
 
 #define NDEBUG
@@ -19,20 +20,57 @@
 #endif
 
 #define MAXIMUM_AHCI_PORT_COUNT             32
-#define MAXIMUM_AHCI_PRDT_ENTRIES           32
-#define MAXIMUM_AHCI_PORT_NCS               30
+/* Storport hands out page-granular SG elements, so a 128 KB transfer needs
+ * 32 entries when perfectly aligned and 33 when it is not. Give the table
+ * headroom and keep AHCI_COMMAND_TABLE a multiple of 128 bytes. */
+#define MAXIMUM_AHCI_PRDT_ENTRIES           64
+/* A real HBA implements up to 32 command slots (CAP.NCS is a 0-based 5-bit
+ * field), so the slot array must be able to hold all of them. */
+#define MAXIMUM_AHCI_PORT_NCS               32
 #define MAXIMUM_QUEUE_BUFFER_SIZE           255
+#define MAXIMUM_COMPLETION_QUEUE_SIZE       (2 * MAXIMUM_QUEUE_BUFFER_SIZE)
 #define MAXIMUM_TRANSFER_LENGTH             (128*1024) // 128 KB
+#define AHCI_LINK_ERROR_HISTORY             4
+#define AHCI_PORT_PRESENCE_DETECT_MS        30
 
 #define DEVICE_ATA_BLOCK_SIZE               512
+
+#define AHCI_SENSE_ERRORCODE_FIXED_CURRENT  0x70
+#define AHCI_ADSENSE_NO_SENSE               0x00
+#define AHCI_ADSENSE_LUN_COMMUNICATION      0x08
+#define AHCI_ADSENSE_UNRECOVERED_ERROR      0x11
+#define AHCI_ADSENSE_ILLEGAL_BLOCK          0x21
+#define AHCI_ADSENSE_WRITE_PROTECT          0x27
+#define AHCI_ADSENSE_INTERNAL_TARGET_FAILURE 0x44
+#define AHCI_SENSEQ_COMM_CRC_ERROR          0x03
+
+/* Largest sector count expressible in a 48-bit command (16-bit count field);
+ * a 28-bit command uses an 8-bit count where 0 means 256. */
+#define MAXIMUM_LBA28_SECTORS               256
+#define MAXIMUM_LBA48_SECTORS               65536
+
+/* A 28-bit command can address LBA 0 .. 0x0FFFFFFF (128 GiB at 512 bytes). */
+#define MAXIMUM_LBA28_ADDRESS               0x0FFFFFFFULL
 
 // device type (DeviceParams)
 #define AHCI_DEVICE_TYPE_ATA                1
 #define AHCI_DEVICE_TYPE_ATAPI              2
 #define AHCI_DEVICE_TYPE_NODEVICE           3
 
+typedef enum _AHCI_PORT_RECOVERY_STATE
+{
+    AhciRecoveryIdle = 0,
+    AhciRecoveryWaitCommandEngine,
+    AhciRecoveryWaitNcqLog,
+    AhciRecoveryComresetAsserted,
+    AhciRecoveryWaitLink,
+    AhciRecoveryWaitReady,
+    AhciRecoveryWaitFisEngine
+} AHCI_PORT_RECOVERY_STATE;
+
 // section 3.1.2
-#define AHCI_Global_HBA_CAP_S64A            (1 << 31)
+#define AHCI_Global_HBA_CAP_S64A            (1U << 31)
+#define AHCI_Global_HBA_CAP_SNCQ            (1UL << 30)
 
 // FIS Types : https://wiki.osdev.org/AHCI
 #define FIS_TYPE_REG_H2D        0x27 // Register FIS - host to device
@@ -71,25 +109,30 @@
 #define ATA_FLAGS_DATA_OUT                  (1 << 2)
 #define ATA_FLAGS_48BIT_COMMAND             (1 << 3)
 #define ATA_FLAGS_USE_DMA                   (1 << 4)
+#define ATA_FLAGS_NCQ                       (1 << 5)
+
+#define AHCI_TRIM_PAYLOAD_SIZE              512
+#define AHCI_TRIM_MAX_RANGES                (AHCI_TRIM_PAYLOAD_SIZE / sizeof(ULONG64))
+#define AHCI_TRIM_RANGE_MAX_SECTORS         0xFFFF
+#define AHCI_TRIM_MAX_DESCRIPTORS           (AHCI_TRIM_MAX_RANGES / 2)
 
 #define IsAtaCommand(AtaFunction)           (AtaFunction & ATA_FUNCTION_ATA_COMMAND)
 #define IsAtapiCommand(AtaFunction)         (AtaFunction & ATA_FUNCTION_ATAPI_COMMAND)
 #define IsDataTransferNeeded(SrbExtension)  (SrbExtension->Flags & (ATA_FLAGS_DATA_IN | ATA_FLAGS_DATA_OUT))
 #define IsAdapterCAPS64(CAP)                (CAP & AHCI_Global_HBA_CAP_S64A)
 
-// 3.1.1 NCS = CAP[12:08] -> Align
-#define AHCI_Global_Port_CAP_NCS(x)         (((x) & 0xF00) >> 8)
+// 3.1.1 CAP.NCS is a 0-based 5-bit field [12:08], so the number of usable
+// command slots is NCS + 1. The old mask (0xF00) dropped bit 12 and omitted
+// the +1, which under-reported a 32-slot controller as 15 slots.
+// Every caller wants the count, so the macro yields the clamped count.
+#define AHCI_Global_Port_CAP_NCS_RAW(x)     (((x) >> 8) & 0x1F)
+#define AHCI_Global_Port_CAP_NCS(x)         (((AHCI_Global_Port_CAP_NCS_RAW(x) + 1) > MAXIMUM_AHCI_PORT_NCS) ? MAXIMUM_AHCI_PORT_NCS : (AHCI_Global_Port_CAP_NCS_RAW(x) + 1))
 
 #define ROUND_UP(N, S) ((((N) + (S) - 1) / (S)) * (S))
 //#define AhciDebugPrint(format, ...) StorPortDebugPrint(0, format, __VA_ARGS__)
 #define AhciDebugPrint(format, ...) DbgPrint("(%s:%d) " format, __RELFILE__, __LINE__, ##__VA_ARGS__)
 
-typedef
-VOID
-(*PAHCI_COMPLETION_ROUTINE) (
-    __in PVOID PortExtension,
-    __in PVOID Srb
-    );
+typedef VOID (*PAHCI_COMPLETION_ROUTINE)(__in PVOID PortExtension, __in PVOID Srb);
 
 //////////////////////////////////////////////////////////////
 //              ---- Support Structures ---                 //
@@ -217,9 +260,10 @@ typedef struct _AHCI_SET_DEVICE_BITS_FIS
 
 typedef struct _AHCI_QUEUE
 {
-    PVOID Buffer[MAXIMUM_QUEUE_BUFFER_SIZE];  // because Storahci hold Srb queue of 255 size
+    PVOID Buffer[MAXIMUM_COMPLETION_QUEUE_SIZE];
     ULONG Head;
     ULONG Tail;
+    ULONG Capacity;
 } AHCI_QUEUE, *PAHCI_QUEUE;
 
 //////////////////////////////////////////////////////////////
@@ -464,7 +508,25 @@ typedef struct _AHCI_PORT_EXTENSION
     ULONG PortNumber;
     ULONG QueueSlots;                                   // slots which we have already assigned task (Slot)
     ULONG CommandIssuedSlots;                           // slots which has been programmed
+    ULONG NcqQueueSlots;                                // prepared NCQ slots not yet issued
+    ULONG NcqIssuedSlots;                               // NCQ slots tracked through PxSACT
     ULONG MaxPortQueueDepth;
+    ULONG ErrorLogCount;
+    ULONG RecoveryState;
+    ULONG RecoveryTicks;
+    ULONG RecoveryResetAttempt;
+    BOOLEAN HotPlugPending;
+    ULONG RecoveryNcqActiveSlots;
+    ULONG RecoveryInternalSlot;
+    BOOLEAN RecoveryIsCommandError;
+    BOOLEAN RecoveryIsNcqError;
+    BOOLEAN RecoveryNcqLogError;
+    UCHAR RecoveryLinkSpeed;
+    BOOLEAN LinkTransferVerified;
+    BOOLEAN LinkErrorDubious[AHCI_LINK_ERROR_HISTORY];
+    ULONG LinkErrorNext;
+    ULONG LinkErrorCount;
+    LONGLONG LinkErrorTime[AHCI_LINK_ERROR_HISTORY];
 
     struct
     {
@@ -473,6 +535,10 @@ typedef struct _AHCI_PORT_EXTENSION
         UCHAR AccessType;
         UCHAR DeviceType;
         UCHAR IsActive;
+        UCHAR NcqSupported;
+        UCHAR NcqReadLogged;
+        UCHAR NcqWriteLogged;
+        ULONG NcqQueueDepth;
         LARGE_INTEGER MaxLba;
         ULONG BytesPerLogicalSector;
         ULONG BytesPerPhysicalSector;
@@ -482,6 +548,8 @@ typedef struct _AHCI_PORT_EXTENSION
     } DeviceParams;
 
     STOR_DPC CommandCompletion;
+    STOR_DPC ErrorRecovery;
+
     PAHCI_PORT Port;                                    // AHCI Port Infomation
     AHCI_QUEUE SrbQueue;                                // pending Srbs
     AHCI_QUEUE CompletionQueue;
@@ -491,6 +559,10 @@ typedef struct _AHCI_PORT_EXTENSION
     STOR_DEVICE_POWER_STATE DevicePowerState;           // Device Power State
     PIDENTIFY_DEVICE_DATA IdentifyDeviceData;
     STOR_PHYSICAL_ADDRESS IdentifyDeviceDataPhysicalAddress;
+    PGP_LOG_NCQ_COMMAND_ERROR NcqErrorLog;
+    STOR_PHYSICAL_ADDRESS NcqErrorLogPhysicalAddress;
+    PAHCI_COMMAND_TABLE NcqErrorCommandTable;
+    STOR_PHYSICAL_ADDRESS NcqErrorCommandTablePhysicalAddress;
     struct _AHCI_ADAPTER_EXTENSION* AdapterExtension;   // Port's Adapter Information
 } AHCI_PORT_EXTENSION, *PAHCI_PORT_EXTENSION;
 
@@ -538,6 +610,7 @@ typedef struct _LOCAL_SCATTER_GATHER_LIST
 typedef struct _AHCI_SRB_EXTENSION
 {
     AHCI_COMMAND_TABLE CommandTable;
+    UCHAR TrimPayload[AHCI_TRIM_PAYLOAD_SIZE];
     ULONG AtaFunction;
     ULONG Flags;
 
@@ -559,6 +632,7 @@ typedef struct _AHCI_SRB_EXTENSION
     LOCAL_SCATTER_GATHER_LIST Sgl;
     PLOCAL_SCATTER_GATHER_LIST pSgl;
     PAHCI_COMPLETION_ROUTINE CompletionRoutine;
+    BOOLEAN AutosenseActive;
 
     // for alignment purpose -- 128 byte alignment
     // do not try to access (R/W) this field
@@ -569,94 +643,59 @@ typedef struct _AHCI_SRB_EXTENSION
 //                       Declarations                       //
 //////////////////////////////////////////////////////////////
 
-VOID
-AhciProcessIO (
-    __in PAHCI_ADAPTER_EXTENSION AdapterExtension,
-    __in UCHAR PathId,
-    __in PSCSI_REQUEST_BLOCK Srb
-    );
+VOID AhciProcessIO(__in PAHCI_ADAPTER_EXTENSION AdapterExtension, __in UCHAR PathId, __in PSCSI_REQUEST_BLOCK Srb);
 
-BOOLEAN
-AhciAdapterReset (
-    __in PAHCI_ADAPTER_EXTENSION AdapterExtension
-    );
+VOID AhciProcessSrb(__in PAHCI_PORT_EXTENSION PortExtension, __in PSCSI_REQUEST_BLOCK Srb, __in ULONG SlotIndex);
 
-FORCEINLINE
-VOID
-AhciZeroMemory (
-    __out PCHAR Buffer,
-    __in ULONG BufferSize
-    );
+VOID AhciInterruptHandler(__in PAHCI_PORT_EXTENSION PortExtension);
 
-FORCEINLINE
-BOOLEAN
-IsPortValid (
-    __in PAHCI_ADAPTER_EXTENSION AdapterExtension,
-    __in ULONG pathId
-    );
+VOID NTAPI AhciErrorRecoveryDpcRoutine(__in PSTOR_DPC Dpc, __in PVOID HwDeviceExtension, __in PVOID SystemArgument1, __in PVOID SystemArgument2);
 
-UCHAR DeviceRequestSense (
-    __in PAHCI_ADAPTER_EXTENSION AdapterExtension,
-    __in PSCSI_REQUEST_BLOCK Srb,
-    __in PCDB Cdb
-    );
+VOID NTAPI AhciRecoveryTimer(__in PVOID DeviceExtension);
 
-UCHAR DeviceRequestReadWrite (
-    __in PAHCI_ADAPTER_EXTENSION AdapterExtension,
-    __in PSCSI_REQUEST_BLOCK Srb,
-    __in PCDB Cdb
-    );
+VOID AhciSchedulePort(__in PAHCI_PORT_EXTENSION PortExtension);
 
-UCHAR DeviceRequestCapacity (
-    __in PAHCI_ADAPTER_EXTENSION AdapterExtension,
-    __in PSCSI_REQUEST_BLOCK Srb,
-    __in PCDB Cdb
-    );
+VOID AhciActivatePort(__in PAHCI_PORT_EXTENSION PortExtension);
 
-UCHAR
-DeviceInquiryRequest (
-    __in PAHCI_ADAPTER_EXTENSION AdapterExtension,
-    __in PSCSI_REQUEST_BLOCK Srb,
-    __in PCDB Cdb
-    );
+BOOLEAN AhciAdapterReset(__in PAHCI_ADAPTER_EXTENSION AdapterExtension);
 
-UCHAR DeviceRequestComplete (
-    __in PAHCI_ADAPTER_EXTENSION AdapterExtension,
-    __in PSCSI_REQUEST_BLOCK Srb,
-    __in PCDB Cdb
-    );
+FORCEINLINE VOID AhciZeroMemory(__out PCHAR Buffer, __in ULONG BufferSize);
 
-UCHAR DeviceReportLuns (
-    __in PAHCI_ADAPTER_EXTENSION AdapterExtension,
-    __in PSCSI_REQUEST_BLOCK Srb,
-    __in PCDB Cdb
-    );
+VOID AhciCopyAtaString(__out PUCHAR Destination, __in PUCHAR Source, __in ULONG Length);
 
-FORCEINLINE
-BOOLEAN
-AddQueue (
-    __inout PAHCI_QUEUE Queue,
-    __in PVOID Srb
-    );
+VOID AhciFillScsiString(__out PUCHAR Destination, __in ULONG DestinationLength, __in PUCHAR Source);
 
-FORCEINLINE
-PVOID
-RemoveQueue (
-    __inout PAHCI_QUEUE Queue
-    );
+FORCEINLINE BOOLEAN IsPortValid(__in PAHCI_ADAPTER_EXTENSION AdapterExtension, __in ULONG pathId);
+
+UCHAR DeviceRequestSense(__in PAHCI_ADAPTER_EXTENSION AdapterExtension, __in PSCSI_REQUEST_BLOCK Srb, __in PCDB Cdb);
+
+UCHAR AhciATAPICommand(__in PAHCI_ADAPTER_EXTENSION AdapterExtension, __in PSCSI_REQUEST_BLOCK Srb, __in PCDB Cdb);
+
+UCHAR DeviceRequestReadWrite(__in PAHCI_ADAPTER_EXTENSION AdapterExtension, __in PSCSI_REQUEST_BLOCK Srb, __in PCDB Cdb);
+
+UCHAR DeviceRequestCapacity(__in PAHCI_ADAPTER_EXTENSION AdapterExtension, __in PSCSI_REQUEST_BLOCK Srb, __in PCDB Cdb);
+
+UCHAR DeviceInquiryRequest(__in PAHCI_ADAPTER_EXTENSION AdapterExtension, __in PSCSI_REQUEST_BLOCK Srb, __in PCDB Cdb);
+
+UCHAR DeviceRequestComplete(__in PAHCI_ADAPTER_EXTENSION AdapterExtension, __in PSCSI_REQUEST_BLOCK Srb, __in PCDB Cdb);
+
+UCHAR DeviceRequestFlush(__in PAHCI_ADAPTER_EXTENSION AdapterExtension, __in PSCSI_REQUEST_BLOCK Srb, __in PCDB Cdb);
+
+UCHAR DeviceRequestUnmap(__in PAHCI_ADAPTER_EXTENSION AdapterExtension, __in PSCSI_REQUEST_BLOCK Srb, __in PCDB Cdb);
+
+UCHAR DeviceReportLuns(__in PAHCI_ADAPTER_EXTENSION AdapterExtension, __in PSCSI_REQUEST_BLOCK Srb, __in PCDB Cdb);
+
+FORCEINLINE BOOLEAN AddQueue(__inout PAHCI_QUEUE Queue, __in PVOID Srb);
+
+FORCEINLINE PVOID RemoveQueue(__inout PAHCI_QUEUE Queue);
+
+FORCEINLINE PVOID PeekQueue(__in PAHCI_QUEUE Queue);
 
 FORCEINLINE
 PAHCI_SRB_EXTENSION
-GetSrbExtension(
-    __in PSCSI_REQUEST_BLOCK Srb
-    );
+GetSrbExtension(__in PSCSI_REQUEST_BLOCK Srb);
 
-FORCEINLINE
-ULONG64
-AhciGetLba (
-    __in PCDB Cdb,
-    __in ULONG CdbLength
-    );
+FORCEINLINE ULONG64 AhciGetLba(__in PCDB Cdb, __in ULONG CdbLength);
 
 //////////////////////////////////////////////////////////////
 //                       Assertions                         //

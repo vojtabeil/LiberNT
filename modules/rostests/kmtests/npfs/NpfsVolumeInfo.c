@@ -62,7 +62,10 @@ TestVolumeInfo(
     ok_eq_long(VolumeInfo.VolumeCreationTime.HighPart, 0);
     ok_eq_ulong(VolumeInfo.VolumeSerialNumber, 0);
     ok_bool_false(VolumeInfo.SupportsObjects, "VolumeInfo.SupportsObjects");
-    ok_eq_ulong(VolumeInfo.VolumeLabelLength, 18);
+    if (GetNTVersion() < _WIN32_WINNT_VISTA)
+        ok_eq_ulong(VolumeInfo.VolumeLabelLength, 5 * sizeof(WCHAR));
+    else
+        ok_eq_ulong(VolumeInfo.VolumeLabelLength, 18);
     ok_eq_size(RtlCompareMemory(VolumeInfo.VolumeLabel, L"NamedP", 10), 10);
     ok_eq_wchar(VolumeInfo.VolumeLabel[5], 0xFFFF);
     ok_eq_ulong(IoStatusBlock.Information, (FIELD_OFFSET(FILE_FS_VOLUME_INFORMATION, VolumeLabel) + 5 * sizeof(WCHAR)));
@@ -89,7 +92,8 @@ TestVolumeInfo(
                                           FileFsDeviceInformation);
     ok_eq_hex(Status, STATUS_SUCCESS);
     ok_eq_hex(IoStatusBlock.Status, STATUS_SUCCESS);
-    ok_eq_ulong(FileFsDeviceInfo.Characteristics, 0);
+    ok_eq_ulong(FileFsDeviceInfo.Characteristics,
+                GetNTVersion() >= _WIN32_WINNT_WIN8 ? FILE_DEVICE_ALLOW_APPCONTAINER_TRAVERSAL : 0);
     ok_eq_ulong(FileFsDeviceInfo.DeviceType, FILE_DEVICE_NAMED_PIPE);
     ok_eq_ulong(IoStatusBlock.Information, sizeof(FileFsDeviceInfo));
 

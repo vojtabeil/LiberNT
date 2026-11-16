@@ -18,6 +18,7 @@
 #include <acpiioct.h>
 #include <ntintsafe.h>
 #include <initguid.h>
+#include <reactos/drivers/acpi/acpipci.h>
 
 /* TEST DEFINITIONS ***********************************************************/
 
@@ -36,7 +37,7 @@
 #define ok_eq_hex_ex(entry, value, expected)       ok_eq_print_ex(entry, value, expected, "0x%08lx")
 #define ok_eq_pointer_ex(entry, value, expected)   ok_eq_print_ex(entry, value, expected, "%p")
 #define ok_eq_int_ex(entry, value, expected)       ok_eq_print_ex(entry, value, expected, "%d")
-#define ok_eq_uint_ex(entry, value, expected)      ok_eq_print_ex(entry, value, expected, "%u")
+#define ok_eq_uint_ex(entry, value, expected)      ok_eq_print_ex(entry, (UINT)(value), (UINT)(expected), "%u")
 #define ok_eq_ulong_ex(entry, value, expected)     ok_eq_print_ex(entry, value, expected, "%lu")
 #define ok_eq_ulonglong_ex(entry, value, expected) ok_eq_print_ex(entry, value, expected, "%I64u")
 
@@ -62,7 +63,7 @@ typedef struct _EVAL_TEST_ENTRY
 #define STM_TEST_FLAG_IS_TODO                      (1 << 12)
 
 #define GTM_TEST_FLAG_BAD_SIGNARUTE                (1 << 0)
-#define GTM_TEST_FLAG_BUFFER_HAS_SIGNARUTE         (1 << 1)
+#define GTM_TEST_FLAG_BUFFER_HAS_SIGNATURE         (1 << 1)
 #define GTM_TEST_FLAG_BUFFER_HAS_COUNT             (1 << 2)
 #define GTM_TEST_FLAG_BUFFER_HAS_LENGTH            (1 << 3)
 #define GTM_TEST_FLAG_ARG_HAS_BUFFER_TYPE          (1 << 4)
@@ -73,12 +74,15 @@ typedef struct _EVAL_TEST_ENTRY
 #define GTM_TEST_FLAG_IS_TODO                      (1 << 9)
 
 #define GTM_TEST_FLAG_METHOD_SUCCESS \
-    (GTM_TEST_FLAG_BUFFER_HAS_SIGNARUTE | \
+    (GTM_TEST_FLAG_BUFFER_HAS_SIGNATURE | \
      GTM_TEST_FLAG_BUFFER_HAS_COUNT | GTM_TEST_FLAG_BUFFER_HAS_LENGTH | \
      GTM_TEST_FLAG_ARG_HAS_BUFFER_TYPE | GTM_TEST_FLAG_ARG_HAS_DATA_LENGTH)
 
 #define DSM_TEST_FLAG_EMPTY_PACKAGE                (1 << 0)
 #define DSM_TEST_FLAG_LARGE_SUB_PACKAGE_BUFFER     (1 << 1)
+#define DSM_TEST_FLAG_RAW_PAYLOAD_4                (1 << 2)
+#define DSM_TEST_FLAG_RAW_PAYLOAD_8                (1 << 3)
+#define DSM_TEST_RAW_PAYLOAD                       0x80000001UL
 
     NTSTATUS Status;
     ULONG Value;
@@ -141,7 +145,7 @@ ExFreePoolWithTag(PVOID MemPtr, ULONG Tag)
     PULONG_PTR Mem = MemPtr;
 
     Mem -= 2;
-    ok(Mem[1] == Tag, "Tag is %lx, expected %lx\n", Tag, Mem[1]);
+    ok(Mem[1] == Tag, "Tag is %Ix, expected %lx\n", Mem[1], Tag);
     HeapFree(GetProcessHeap(), 0, Mem);
 
     --DrvpBlocksAllocated;
@@ -156,7 +160,7 @@ IoGetCurrentIrpStackLocation(PIRP Irp)
 
 /* ACPI DEFINITIONS ***********************************************************/
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 typedef struct _IDE_ACPI_TIMING_MODE_BLOCK
 {
     struct
@@ -167,7 +171,7 @@ typedef struct _IDE_ACPI_TIMING_MODE_BLOCK
 
     ULONG ModeFlags;
 } IDE_ACPI_TIMING_MODE_BLOCK, *PIDE_ACPI_TIMING_MODE_BLOCK;
-#include <poppack.h>
+#pragma pack(pop)
 
 #define STM_ID_BLOCK_SIZE    512
 
@@ -181,6 +185,47 @@ typedef struct _PDO_DEVICE_DATA
 {
     HANDLE AcpiHandle;
 } PDO_DEVICE_DATA, *PPDO_DEVICE_DATA;
+
+typedef struct _FDO_DEVICE_DATA
+{
+    ULONG Dummy;
+} FDO_DEVICE_DATA, *PFDO_DEVICE_DATA;
+
+struct acpi_device
+{
+    struct
+    {
+        unsigned int power_manageable:1;
+        unsigned int force_power_state:1;
+        unsigned int processor_id:1;
+    } flags;
+    struct
+    {
+        char *hardware_id;
+        unsigned int processor_id;
+    } pnp;
+    struct
+    {
+        struct
+        {
+            unsigned int explicit_get:1;
+            unsigned int power_resources:1;
+        } flags;
+        struct
+        {
+            struct
+            {
+                unsigned int valid:1;
+                unsigned int explicit_set:1;
+            } flags;
+            struct
+            {
+                UINT32 count;
+                ACPI_HANDLE handles[10];
+            } resources;
+        } states[ACPI_STATE_D3_COLD + 1];
+    } power;
+};
 
 typedef struct _GTM_OBJECT_BUFFER
 {
@@ -225,6 +270,90 @@ static const ULONG DrvpMyDsmIntegerFields[3] =
 };
 
 static const EVAL_TEST_ENTRY* DrvpEvalTestEntry;
+static ACPI_HANDLE CorrectHandle = (ACPI_HANDLE)(ULONG_PTR)FAKE_SB_NAMESPACE_ACPI_HANDLE;
+
+int
+acpi_bus_get_device(ACPI_HANDLE Handle, struct acpi_device **Device)
+{
+    UNREFERENCED_PARAMETER(Handle);
+    ok(0, "Unexpected call to acpi_bus_get_device\n");
+    *Device = NULL;
+    return -1;
+}
+
+ACPI_STATUS
+acpi_evaluate_integer(ACPI_HANDLE Handle, ACPI_STRING Pathname, struct acpi_object_list *Arguments, unsigned long long *Data)
+{
+    UNREFERENCED_PARAMETER(Handle);
+    UNREFERENCED_PARAMETER(Pathname);
+    UNREFERENCED_PARAMETER(Arguments);
+    UNREFERENCED_PARAMETER(Data);
+    ok(0, "Unexpected call to acpi_evaluate_integer\n");
+    return AE_NOT_FOUND;
+}
+
+ACPI_STATUS
+AcpiGetType(ACPI_HANDLE Object, ACPI_OBJECT_TYPE *OutType)
+{
+    UNREFERENCED_PARAMETER(Object);
+    UNREFERENCED_PARAMETER(OutType);
+    return AE_NOT_FOUND;
+}
+
+ACPI_STATUS
+AcpiGetTable(ACPI_STRING Signature, UINT32 Instance, ACPI_TABLE_HEADER **OutTable)
+{
+    UNREFERENCED_PARAMETER(Signature);
+    UNREFERENCED_PARAMETER(Instance);
+    UNREFERENCED_PARAMETER(OutTable);
+    ok(0, "Unexpected call to AcpiGetTable\n");
+    return AE_NOT_FOUND;
+}
+
+void
+AcpiPutTable(ACPI_TABLE_HEADER *Table)
+{
+    UNREFERENCED_PARAMETER(Table);
+    ok(0, "Unexpected call to AcpiPutTable\n");
+}
+
+int
+acpi_bus_get_power(ACPI_HANDLE Handle, int *State)
+{
+    UNREFERENCED_PARAMETER(Handle);
+    UNREFERENCED_PARAMETER(State);
+    ok(0, "Unexpected call to acpi_bus_get_power\n");
+    return -1;
+}
+
+int
+acpi_bus_set_power(ACPI_HANDLE Handle, int State)
+{
+    UNREFERENCED_PARAMETER(Handle);
+    UNREFERENCED_PARAMETER(State);
+    ok(0, "Unexpected call to acpi_bus_set_power\n");
+    return -1;
+}
+
+BOOLEAN
+NTAPI
+AcpiFindPciDeviceInNamespace(
+    _In_ ULONG Segment,
+    _In_ ULONG Bus,
+    _In_ ULONG Device,
+    _In_ ULONG Function,
+    _Out_ ACPI_HANDLE *OutHandle)
+{
+    UNREFERENCED_PARAMETER(Segment);
+    UNREFERENCED_PARAMETER(Bus);
+    UNREFERENCED_PARAMETER(Device);
+    UNREFERENCED_PARAMETER(Function);
+
+    if (OutHandle)
+        *OutHandle = CorrectHandle;
+
+    return TRUE;
+}
 
 void *
 AcpiOsAllocate (
@@ -248,9 +377,18 @@ AcpiGetName (
 {
     /* We don't support anything else */
     ok(NameType == ACPI_SINGLE_NAME, "Unexpected call to %s\n", __FUNCTION__);
+    if (NameType != ACPI_SINGLE_NAME)
+        return AE_BAD_PARAMETER;
 
     /* Return a NULL-terminated string */
-    if (Buffer->Length < (4 + 1))
+    if (Buffer->Length == ACPI_ALLOCATE_BUFFER)
+    {
+        Buffer->Pointer = AcpiOsAllocate(4 + 1);
+        if (Buffer->Pointer == NULL)
+            return AE_NO_MEMORY;
+        Buffer->Length = 4 + 1;
+    }
+    else if (Buffer->Length < (4 + 1))
         return AE_BUFFER_OVERFLOW;
 
     switch ((ULONG_PTR)Handle)
@@ -272,6 +410,20 @@ AcpiGetName (
     }
 
     return AE_OK;
+}
+
+ACPI_STATUS
+AcpiGetNextObject(
+    ACPI_OBJECT_TYPE Type,
+    ACPI_HANDLE Parent,
+    ACPI_HANDLE Child,
+    ACPI_HANDLE *OutHandle)
+{
+    UNREFERENCED_PARAMETER(Type);
+    UNREFERENCED_PARAMETER(Parent);
+    UNREFERENCED_PARAMETER(Child);
+    UNREFERENCED_PARAMETER(OutHandle);
+    return AE_NOT_FOUND;
 }
 
 ACPI_STATUS
@@ -532,6 +684,17 @@ AcpiEvaluateObject (
             {
                 ++Arg;
 
+                if (DrvpEvalTestEntry->Flags & (DSM_TEST_FLAG_RAW_PAYLOAD_4 | DSM_TEST_FLAG_RAW_PAYLOAD_8))
+                {
+                    /* A package payload too short for one argument reaches the method as raw bytes. */
+                    ok_eq_uint_ex(DrvpEvalTestEntry, Arg->Type, ACPI_TYPE_BUFFER);
+                    ok_eq_uint_ex(DrvpEvalTestEntry, Arg->Buffer.Length,
+                                  (DrvpEvalTestEntry->Flags & DSM_TEST_FLAG_RAW_PAYLOAD_4) ? 4 : 8);
+                    if (Arg->Type == ACPI_TYPE_BUFFER && Arg->Buffer.Length >= sizeof(ULONG))
+                        ok_eq_hex_ex(DrvpEvalTestEntry, *(PULONG)Arg->Buffer.Pointer, DSM_TEST_RAW_PAYLOAD);
+                    return AE_OK;
+                }
+
                 ok_eq_uint_ex(DrvpEvalTestEntry, Arg->Type, ACPI_TYPE_PACKAGE);
 
                 if (DrvpEvalTestEntry->Flags & DSM_TEST_FLAG_EMPTY_PACKAGE)
@@ -604,6 +767,41 @@ AcpiEvaluateObject (
     return AE_NOT_FOUND;
 }
 
+ACPI_STATUS
+AcpiGetHandle (
+    ACPI_HANDLE             Parent,
+    const char              *Pathname,
+    ACPI_HANDLE             *RetHandle)
+{
+    if (RetHandle)
+        *RetHandle = NULL;
+    return AE_NOT_FOUND;
+}
+
+ACPI_STATUS
+AcpiGetParent(ACPI_HANDLE Object, ACPI_HANDLE *OutHandle)
+{
+    UNREFERENCED_PARAMETER(Object);
+    UNREFERENCED_PARAMETER(OutHandle);
+    ok(0, "Unexpected call to AcpiGetParent\n");
+    return AE_NOT_FOUND;
+}
+
+ACPI_STATUS
+AcpiWalkNamespace (
+    ACPI_OBJECT_TYPE        Type,
+    ACPI_HANDLE             StartObject,
+    UINT32                  MaxDepth,
+    ACPI_WALK_CALLBACK      DescendingCallback,
+    ACPI_WALK_CALLBACK      AscendingCallback,
+    void                    *Context,
+    void                    **ReturnValue)
+{
+    if (ReturnValue)
+        *ReturnValue = NULL;
+    return AE_NOT_FOUND;
+}
+
 #include "../../../../drivers/bus/acpi/eval.c"
 
 /* GLOBALS ********************************************************************/
@@ -624,8 +822,8 @@ static const EVAL_TEST_ENTRY DrvpSmtTests[] =
     { __LINE__, STM_TEST_FLAG_LARGE_ARG_BUFFER, STATUS_ACPI_INVALID_ARGTYPE },
     { __LINE__, STM_TEST_FLAG_SUB_IN_BUFFER, STATUS_SUCCESS, 1 },
     { __LINE__, STM_TEST_FLAG_SUB_IN_BUFFER, STATUS_SUCCESS, 9 },
-    { __LINE__, STM_TEST_FLAG_SUB_IRP_BUFFER | STM_TEST_FLAG_IS_TODO, STATUS_SUCCESS, 1 },
-    { __LINE__, STM_TEST_FLAG_SUB_IRP_BUFFER | STM_TEST_FLAG_IS_TODO, STATUS_SUCCESS, 9 },
+    { __LINE__, STM_TEST_FLAG_SUB_IRP_BUFFER, STATUS_ACPI_INVALID_ARGTYPE, 1 },
+    { __LINE__, STM_TEST_FLAG_SUB_IRP_BUFFER, STATUS_ACPI_INVALID_ARGTYPE, 9 },
     { __LINE__, STM_TEST_FLAG_SET_IN_BUFFER, STATUS_SUCCESS, 0 },
     { __LINE__, STM_TEST_FLAG_SET_IRP_BUFFER, STATUS_INFO_LENGTH_MISMATCH, 0 },
     { __LINE__, STM_TEST_FLAG_SET_IRP_BUFFER, STATUS_INFO_LENGTH_MISMATCH,
@@ -638,14 +836,14 @@ static const EVAL_TEST_ENTRY DrvpSmtTests[] =
                 sizeof(ACPI_EVAL_INPUT_BUFFER) - 2 },
     { __LINE__, STM_TEST_FLAG_SET_IRP_BUFFER, STATUS_INFO_LENGTH_MISMATCH,
                 sizeof(ACPI_EVAL_INPUT_BUFFER) - 1 },
-    { __LINE__, STM_TEST_FLAG_SET_IRP_BUFFER | STM_TEST_FLAG_IS_TODO, STATUS_INSUFFICIENT_RESOURCES,
+    { __LINE__, STM_TEST_FLAG_SET_IRP_BUFFER, STATUS_INFO_LENGTH_MISMATCH,
                 sizeof(ACPI_EVAL_INPUT_BUFFER) },
-    { __LINE__, STM_TEST_FLAG_SET_IRP_BUFFER | STM_TEST_FLAG_IS_TODO, STATUS_INSUFFICIENT_RESOURCES,
+    { __LINE__, STM_TEST_FLAG_SET_IRP_BUFFER, STATUS_INFO_LENGTH_MISMATCH,
                 sizeof(ACPI_EVAL_INPUT_BUFFER) + 1 },
-    { __LINE__, STM_TEST_FLAG_SET_IRP_BUFFER | STM_TEST_FLAG_IS_TODO, STATUS_INSUFFICIENT_RESOURCES,
+    { __LINE__, STM_TEST_FLAG_SET_IRP_BUFFER, STATUS_INFO_LENGTH_MISMATCH,
                 sizeof(ACPI_EVAL_INPUT_BUFFER) + 2 },
-    { __LINE__, STM_TEST_FLAG_BAD_ARG_TYPE | STM_TEST_FLAG_IS_TODO, STATUS_SUCCESS, 0 },
-    { __LINE__, STM_TEST_FLAG_CHANGE_ARG_COUNT, STATUS_ACPI_INCORRECT_ARGUMENT_COUNT, 0 },
+    { __LINE__, STM_TEST_FLAG_BAD_ARG_TYPE, STATUS_UNSUCCESSFUL, 0 },
+    { __LINE__, STM_TEST_FLAG_CHANGE_ARG_COUNT, STATUS_SUCCESS, 0 },
 
 #if 0
     /*
@@ -666,8 +864,10 @@ static const EVAL_TEST_ENTRY DrvpGtmTests[] =
     { __LINE__, GTM_TEST_FLAG_METHOD_SUCCESS, STATUS_SUCCESS },
     { __LINE__, GTM_TEST_FLAG_METHOD_SUCCESS |
                 GTM_TEST_FLAG_INC_OUT_BUFFER, STATUS_SUCCESS, 1 },
-    { __LINE__, GTM_TEST_FLAG_METHOD_SUCCESS |
-                GTM_TEST_FLAG_DEC_OUT_BUFFER | GTM_TEST_FLAG_IS_TODO, STATUS_BUFFER_OVERFLOW, 1 },
+    { __LINE__, GTM_TEST_FLAG_BUFFER_HAS_SIGNATURE |
+                GTM_TEST_FLAG_BUFFER_HAS_COUNT |
+                GTM_TEST_FLAG_BUFFER_HAS_LENGTH |
+                GTM_TEST_FLAG_DEC_OUT_BUFFER, STATUS_BUFFER_OVERFLOW, 1 },
     { __LINE__, GTM_TEST_FLAG_SET_OUT_BUFFER, STATUS_SUCCESS, 0 },
     { __LINE__, GTM_TEST_FLAG_SET_OUT_BUFFER, STATUS_BUFFER_TOO_SMALL, 1 },
     { __LINE__, GTM_TEST_FLAG_SET_OUT_BUFFER, STATUS_BUFFER_TOO_SMALL,
@@ -678,13 +878,13 @@ static const EVAL_TEST_ENTRY DrvpGtmTests[] =
                 FIELD_OFFSET(ACPI_EVAL_OUTPUT_BUFFER, Argument) + 1 },
     { __LINE__, GTM_TEST_FLAG_SET_OUT_BUFFER, STATUS_BUFFER_TOO_SMALL,
                 sizeof(ACPI_EVAL_OUTPUT_BUFFER) - 1 },
-    { __LINE__, GTM_TEST_FLAG_BUFFER_HAS_SIGNARUTE |
+    { __LINE__, GTM_TEST_FLAG_BUFFER_HAS_SIGNATURE |
                 GTM_TEST_FLAG_BUFFER_HAS_COUNT |
                 GTM_TEST_FLAG_BUFFER_HAS_LENGTH |
                 GTM_TEST_FLAG_SET_OUT_BUFFER,
                 STATUS_BUFFER_OVERFLOW,
                 sizeof(ACPI_EVAL_OUTPUT_BUFFER) },
-    { __LINE__, GTM_TEST_FLAG_BUFFER_HAS_SIGNARUTE |
+    { __LINE__, GTM_TEST_FLAG_BUFFER_HAS_SIGNATURE |
                 GTM_TEST_FLAG_BUFFER_HAS_COUNT |
                 GTM_TEST_FLAG_BUFFER_HAS_LENGTH |
                 GTM_TEST_FLAG_SET_OUT_BUFFER,
@@ -695,8 +895,8 @@ static const EVAL_TEST_ENTRY DrvpGtmTests[] =
     { __LINE__, GTM_TEST_FLAG_BAD_SIGNARUTE, STATUS_INVALID_PARAMETER_1 },
     { __LINE__, GTM_TEST_FLAG_BAD_SIGNARUTE | GTM_TEST_FLAG_SET_OUT_BUFFER,
                 STATUS_INVALID_PARAMETER_1, 0 },
-    { __LINE__, GTM_TEST_FLAG_BAD_SIGNARUTE | GTM_TEST_FLAG_SET_OUT_BUFFER | GTM_TEST_FLAG_IS_TODO,
-                STATUS_BUFFER_TOO_SMALL,
+    { __LINE__, GTM_TEST_FLAG_BAD_SIGNARUTE | GTM_TEST_FLAG_SET_OUT_BUFFER,
+                STATUS_INVALID_PARAMETER_1,
                 sizeof(ACPI_EVAL_OUTPUT_BUFFER) - 1 },
     { __LINE__, GTM_TEST_FLAG_BAD_SIGNARUTE | GTM_TEST_FLAG_SET_OUT_BUFFER,
                 STATUS_INVALID_PARAMETER_1,
@@ -723,6 +923,8 @@ static const EVAL_TEST_ENTRY DrvpDsmTests[] =
     { __LINE__, 0, STATUS_SUCCESS },
     { __LINE__, DSM_TEST_FLAG_EMPTY_PACKAGE, STATUS_SUCCESS },
     { __LINE__, DSM_TEST_FLAG_LARGE_SUB_PACKAGE_BUFFER, STATUS_ACPI_INVALID_ARGTYPE },
+    { __LINE__, DSM_TEST_FLAG_RAW_PAYLOAD_4, STATUS_SUCCESS },
+    { __LINE__, DSM_TEST_FLAG_RAW_PAYLOAD_8, STATUS_SUCCESS },
 };
 
 /* FUNCTIONS ******************************************************************/
@@ -923,7 +1125,7 @@ DrvEvaluateGtmObject(
     todo_if(!is_reactos() && (TestEntry->Flags & GTM_TEST_FLAG_IS_TODO) && (Status != TestEntry->Status))
         ok_eq_hex_ex(TestEntry, Status, TestEntry->Status);
 
-    if (TestEntry->Flags & GTM_TEST_FLAG_BUFFER_HAS_SIGNARUTE)
+    if (TestEntry->Flags & GTM_TEST_FLAG_BUFFER_HAS_SIGNATURE)
         Signature = ACPI_EVAL_OUTPUT_BUFFER_SIGNATURE;
     else
         Signature = 0;
@@ -1246,6 +1448,11 @@ DrvEvaluateDsmObject(
         InputSize -= ACPI_METHOD_ARGUMENT_LENGTH(MY_DSM_PACKAGE_ENTRY_SIZE);
         InputSize += ACPI_METHOD_ARGUMENT_LENGTH(ACPI_METHOD_ARGUMENT_LENGTH(0));
     }
+    else if (TestEntry->Flags & (DSM_TEST_FLAG_RAW_PAYLOAD_4 | DSM_TEST_FLAG_RAW_PAYLOAD_8))
+    {
+        InputSize -= ACPI_METHOD_ARGUMENT_LENGTH(MY_DSM_PACKAGE_ENTRY_SIZE);
+        InputSize += ACPI_METHOD_ARGUMENT_LENGTH((TestEntry->Flags & DSM_TEST_FLAG_RAW_PAYLOAD_4) ? 4 : 8);
+    }
 
     InputBuffer->MethodNameAsUlong = 'MSD_'; // _DSM
     InputBuffer->Signature = ACPI_EVAL_INPUT_BUFFER_COMPLEX_SIGNATURE;
@@ -1272,6 +1479,12 @@ DrvEvaluateDsmObject(
         /* Empty package */
         Argument->DataLength = ACPI_METHOD_ARGUMENT_LENGTH(0);
         Argument->Argument = 0;
+    }
+    else if (TestEntry->Flags & (DSM_TEST_FLAG_RAW_PAYLOAD_4 | DSM_TEST_FLAG_RAW_PAYLOAD_8))
+    {
+        /* The layout a display driver sends: raw bytes under the package type */
+        Argument->DataLength = (TestEntry->Flags & DSM_TEST_FLAG_RAW_PAYLOAD_4) ? 4 : 8;
+        Argument->Argument = DSM_TEST_RAW_PAYLOAD;
     }
     else
     {

@@ -12,6 +12,7 @@
 #include <srv.h>
 
 #include <winuser.h>
+#include <ndk/mmfuncs.h>
 
 #define NDEBUG
 #include <debug.h>
@@ -132,6 +133,7 @@ CsrProcessRefcountZero(IN PCSR_PROCESS CsrProcess)
 
     /* Close the Client Port if there is one */
     if (CsrProcess->ClientPort) NtClose(CsrProcess->ClientPort);
+    if (CsrProcess->ClientViewBase) NtUnmapViewOfSection(NtCurrentProcess(), (PVOID)CsrProcess->ClientViewBase);
 
     /* Close the process handle */
     NtClose(CsrProcess->ProcessHandle);
@@ -166,7 +168,7 @@ CsrLockedDereferenceProcess(PCSR_PROCESS CsrProcess)
     if (LockCount == 0)
     {
         /* Call the generic cleanup code */
-        DPRINT1("Should kill process: %p\n", CsrProcess);
+        DPRINT("Should kill process: %p\n", CsrProcess);
         CsrProcessRefcountZero(CsrProcess);
         /* Acquire the lock again, it was released in CsrProcessRefcountZero */
         CsrAcquireProcessLock();
@@ -461,7 +463,9 @@ CsrCreateProcess(IN HANDLE hProcess,
 
     /* Inherit the Process Data */
     CurrentProcess = CurrentThread->Process;
-    ProcessData = &CsrProcess->ServerData[CSR_SERVER_DLL_MAX];
+    ProcessData = (PVOID)((ULONG_PTR)CsrProcess +
+                          FIELD_OFFSET(CSR_PROCESS, ServerData) +
+                          CSR_SERVER_DLL_MAX * sizeof(PVOID));
     for (i = 0; i < CSR_SERVER_DLL_MAX; i++)
     {
         /* Get the current Server */
@@ -597,6 +601,7 @@ CsrCreateProcess(IN HANDLE hProcess,
     if (!NT_SUCCESS(Status))
     {
         /* Bail out */
+        UnProtectHandle(CsrThread->ThreadHandle);
         CsrDeallocateProcess(CsrProcess);
         CsrDeallocateThread(CsrThread);
         CsrReleaseProcessLock();
@@ -604,7 +609,8 @@ CsrCreateProcess(IN HANDLE hProcess,
     }
 
     /* Reference the session */
-    CsrReferenceNtSession(NtSession);
+    if (NtSession)
+        CsrReferenceNtSession(NtSession);
     CsrProcess->NtSession = NtSession;
 
     /* Setup Process Data */
@@ -756,6 +762,7 @@ CsrDestroyProcess(IN PCLIENT_ID Cid,
 
     /* Set the terminated flag */
     CsrProcess->Flags |= CsrProcessTerminating;
+    CsrLockedReferenceProcess(CsrProcess);
 
     /* Get the List Pointers */
     NextEntry = CsrProcess->ThreadList.Flink;
@@ -797,9 +804,11 @@ CsrDestroyProcess(IN PCLIENT_ID Cid,
 
         /* Dereference the thread */
         CsrLockedDereferenceThread(CsrThread);
+        NextEntry = CsrProcess->ThreadList.Flink;
     }
 
     /* Release the Process Lock and return success */
+    CsrLockedDereferenceProcess(CsrProcess);
     CsrReleaseProcessLock();
     return STATUS_SUCCESS;
 }
@@ -1167,10 +1176,10 @@ PCSR_PROCESS
 NTAPI
 FindProcessForShutdown(IN PLUID CallerLuid)
 {
-    PCSR_PROCESS CsrProcess, ReturnCsrProcess = NULL;
+    PCSR_PROCESS CsrProcess, ReturnCsrProcess = NULL, SystemCsrProcess = NULL;
     PCSR_THREAD CsrThread;
     NTSTATUS Status;
-    ULONG Level = 0;
+    ULONG Level = 0, SystemLevel = 0;
     LUID ProcessLuid;
     LUID SystemLuid = SYSTEM_LUID;
     PLIST_ENTRY NextEntry;
@@ -1232,8 +1241,19 @@ FindProcessForShutdown(IN PLUID CallerLuid)
             CsrProcess->ShutdownFlags |= CsrShutdownOther;
         }
 
-        /* Check if we're past the previous level */
-        if ((CsrProcess->ShutdownLevel > Level) || !ReturnCsrProcess)
+        /* The caller's session goes down before the system one does */
+        if (CsrProcess->ShutdownFlags & CsrShutdownSystem)
+        {
+            if ((CsrProcess->ShutdownLevel >= SystemLevel) || !SystemCsrProcess)
+            {
+                SystemLevel = CsrProcess->ShutdownLevel;
+                SystemCsrProcess = CsrProcess;
+            }
+            continue;
+        }
+
+        /* Equal levels shut the youngest process down first */
+        if ((CsrProcess->ShutdownLevel >= Level) || !ReturnCsrProcess)
         {
             /* Update the level */
             Level = CsrProcess->ShutdownLevel;
@@ -1242,6 +1262,9 @@ FindProcessForShutdown(IN PLUID CallerLuid)
             ReturnCsrProcess = CsrProcess;
         }
     }
+
+    if (!ReturnCsrProcess)
+        ReturnCsrProcess = SystemCsrProcess;
 
     /* Check if we found a process */
     if (ReturnCsrProcess)

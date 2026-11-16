@@ -2304,8 +2304,8 @@ WCacheWriteBlocks__(
 //    BOOLEAN Aligned = FALSE;
 
     BOOLEAN WriteThrough = FALSE;
-    lba_t   WTh_Lba;
-    ULONG   WTh_BCount;
+    lba_t   WTh_Lba = 0;
+    ULONG   WTh_BCount = 0;
 
     WcPrint(("WC:W %x (%x)\n", Lba, BCount));
 
@@ -2751,6 +2751,7 @@ WCacheFlushAllRW(
         block_array = Cache->FrameList[frame].Frame;
         if(!block_array) {
             BrutePoint();
+            continue;
         }
         ASSERT(!WCacheGetModFlag(block_array, Lba-firstLba));
     }
@@ -2903,7 +2904,7 @@ WCacheFlushBlocks__(
     IN ULONG BCount           // number of blocks to be flushed
     )
 {
-    OSSTATUS status;
+    OSSTATUS status = STATUS_INVALID_PARAMETER;
 
     if(!(Cache->ReadProc)) return STATUS_INVALID_PARAMETER;
     ExAcquireResourceExclusiveLite(&(Cache->WCacheLock), TRUE);

@@ -29,10 +29,6 @@ FlushFileBuffers(IN HANDLE hFile)
 
     hFile = TranslateStdHandle(hFile);
 
-    if (IsConsoleHandle(hFile))
-    {
-        return FlushConsoleInputBuffer(hFile);
-    }
 
     Status = NtFlushBuffersFile(hFile,
                                 &IoStatusBlock);
@@ -65,11 +61,6 @@ SetFilePointer(HANDLE hFile,
    TRACE("SetFilePointer(hFile %p, lDistanceToMove %d, dwMoveMethod %lu)\n",
       hFile,lDistanceToMove,dwMoveMethod);
 
-   if(IsConsoleHandle(hFile))
-   {
-     SetLastError(ERROR_INVALID_HANDLE);
-     return INVALID_SET_FILE_POINTER;
-   }
 
    if (lpDistanceToMoveHigh)
    {
@@ -184,11 +175,6 @@ SetFilePointerEx(HANDLE hFile,
     FILE_POSITION_INFORMATION FilePosition;
     FILE_STANDARD_INFORMATION FileStandard;
 
-    if (IsConsoleHandle(hFile))
-    {
-        BaseSetLastNTError(STATUS_INVALID_HANDLE);
-        return FALSE;
-    }
 
     switch (dwMoveMethod)
     {
@@ -275,12 +261,6 @@ GetFileType(HANDLE hFile)
   /* Get real handle */
   hFile = TranslateStdHandle(hFile);
 
-  /* Check for console handle */
-  if (IsConsoleHandle(hFile))
-    {
-      if (VerifyConsoleIoHandle(hFile))
-	return FILE_TYPE_CHAR;
-    }
 
   Status = NtQueryVolumeInformationFile(hFile,
 					&StatusBlock,
@@ -305,6 +285,7 @@ GetFileType(HANDLE hFile)
       case FILE_DEVICE_VIRTUAL_DISK:
 	return FILE_TYPE_DISK;
 
+      case FILE_DEVICE_CONSOLE:
       case FILE_DEVICE_KEYBOARD:
       case FILE_DEVICE_MOUSE:
       case FILE_DEVICE_NULL:
@@ -320,6 +301,7 @@ GetFileType(HANDLE hFile)
 	return FILE_TYPE_PIPE;
     }
 
+  SetLastError(NO_ERROR);
   return FILE_TYPE_UNKNOWN;
 }
 
@@ -455,11 +437,6 @@ GetFileInformationByHandle(HANDLE hFile,
    NTSTATUS errCode;
    IO_STATUS_BLOCK IoStatusBlock;
 
-   if(IsConsoleHandle(hFile))
-   {
-     SetLastError(ERROR_INVALID_HANDLE);
-     return FALSE;
-   }
 
    errCode = NtQueryInformationFile(hFile,
 				    &IoStatusBlock,
@@ -686,11 +663,6 @@ GetFileAttributesByHandle(IN HANDLE hFile,
 
     UNREFERENCED_PARAMETER(dwFlags);
 
-    if (IsConsoleHandle(hFile))
-    {
-        SetLastError(ERROR_INVALID_HANDLE);
-        return FALSE;
-    }
 
     Status = NtQueryInformationFile(hFile,
                                     &IoStatusBlock,
@@ -722,11 +694,6 @@ SetFileAttributesByHandle(IN HANDLE hFile,
 
     UNREFERENCED_PARAMETER(dwFlags);
 
-    if (IsConsoleHandle(hFile))
-    {
-        SetLastError(ERROR_INVALID_HANDLE);
-        return FALSE;
-    }
 
     Status = NtQueryInformationFile(hFile,
                                     &IoStatusBlock,
@@ -887,11 +854,6 @@ GetFileTime(IN HANDLE hFile,
     IO_STATUS_BLOCK IoStatusBlock;
     FILE_BASIC_INFORMATION FileBasic;
 
-    if(IsConsoleHandle(hFile))
-    {
-        BaseSetLastNTError(STATUS_INVALID_HANDLE);
-        return FALSE;
-    }
 
     Status = NtQueryInformationFile(hFile,
                                     &IoStatusBlock,
@@ -939,11 +901,6 @@ SetFileTime(IN HANDLE hFile,
     IO_STATUS_BLOCK IoStatusBlock;
     FILE_BASIC_INFORMATION FileBasic;
 
-    if(IsConsoleHandle(hFile))
-    {
-        BaseSetLastNTError(STATUS_INVALID_HANDLE);
-        return FALSE;
-    }
 
     memset(&FileBasic, 0, sizeof(FILE_BASIC_INFORMATION));
 
@@ -994,11 +951,6 @@ SetEndOfFile(HANDLE hFile)
 	FILE_POSITION_INFORMATION		 FilePosInfo;
 	NTSTATUS Status;
 
-	if(IsConsoleHandle(hFile))
-	{
-		SetLastError(ERROR_INVALID_HANDLE);
-		return FALSE;
-	}
 
 	//get current position
 	Status = NtQueryInformationFile(

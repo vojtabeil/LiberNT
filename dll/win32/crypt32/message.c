@@ -88,6 +88,13 @@ static CERT_INFO *CRYPT_GetSignerCertInfoFromMsg(HCRYPTMSG msg,
 static PCCERT_CONTEXT WINAPI CRYPT_DefaultGetSignerCertificate(void *pvGetArg,
  DWORD dwCertEncodingType, PCERT_INFO pSignerId, HCERTSTORE hMsgCertStore)
 {
+#ifdef __REACTOS__
+    if (GET_CERT_ENCODING_TYPE(dwCertEncodingType) != X509_ASN_ENCODING)
+    {
+        SetLastError(CRYPT_E_NOT_FOUND);
+        return NULL;
+    }
+#endif
     return CertFindCertificateInStore(hMsgCertStore, dwCertEncodingType, 0,
      CERT_FIND_SUBJECT_CERT, pSignerId, NULL);
 }
@@ -213,6 +220,19 @@ BOOL WINAPI CryptVerifyMessageSignature(PCRYPT_VERIFY_MESSAGE_PARA pVerifyPara,
         if (ret && pcbDecoded)
             ret = CryptMsgGetParam(msg, CMSG_CONTENT_PARAM, 0, pbDecoded,
              pcbDecoded);
+#ifdef __REACTOS__
+        if (ret && pcbDecoded && !pbDecoded)
+        {
+            DWORD type = 0, size = sizeof(type);
+
+            if (CryptMsgGetParam(msg, CMSG_TYPE_PARAM, 0, &type, &size) &&
+             type == CMSG_SIGNED)
+            {
+                CryptMsgClose(msg);
+                return TRUE;
+            }
+        }
+#endif
         if (ret)
         {
             CERT_INFO *certInfo = CRYPT_GetSignerCertInfoFromMsg(msg,
@@ -289,10 +309,28 @@ BOOL WINAPI CryptHashMessage(PCRYPT_HASH_MESSAGE_PARA pHashPara,
     info.pvHashAuxInfo = pHashPara->pvHashAuxInfo;
     msg = CryptMsgOpenToEncode(pHashPara->dwMsgEncodingType, flags, CMSG_HASHED,
      &info, NULL, NULL);
+#ifdef __REACTOS__
+    if (msg && !pbHashedBlob && !pcbComputedHash)
+    {
+        DWORD size = 0;
+
+        CryptMsgClose(msg);
+        for (i = 0; i < cToBeHashed; i++)
+            size += rgcbToBeHashed[i];
+        size = CryptMsgCalculateEncodedLength(pHashPara->dwMsgEncodingType,
+         flags, CMSG_HASHED, &info, NULL, size);
+        *pcbHashedBlob = size;
+        return size != 0;
+    }
+#endif
     if (msg)
     {
         for (i = 0, ret = TRUE; ret && i < cToBeHashed; i++)
             ret = CryptMsgUpdate(msg, rgpbToBeHashed[i], rgcbToBeHashed[i], i == cToBeHashed - 1);
+#ifdef __REACTOS__
+        if (!cToBeHashed)
+            ret = CryptMsgUpdate(msg, NULL, 0, TRUE);
+#endif
         if (ret)
         {
             ret = CryptMsgGetParam(msg, CMSG_CONTENT_PARAM, 0, pbHashedBlob,
@@ -303,6 +341,10 @@ BOOL WINAPI CryptHashMessage(PCRYPT_HASH_MESSAGE_PARA pHashPara,
         }
         CryptMsgClose(msg);
     }
+#ifdef __REACTOS__
+    if (!ret && GetLastError() != ERROR_MORE_DATA)
+        *pcbHashedBlob = 0;
+#endif
     return ret;
 }
 
@@ -351,13 +393,22 @@ BOOL WINAPI CryptVerifyDetachedMessageHash(PCRYPT_HASH_MESSAGE_PARA pHashPara,
         }
         if (ret)
         {
+#ifdef __REACTOS__
+            if (cToBeHashed || pcbComputedHash)
+                ret = CryptMsgControl(msg, 0, CMSG_CTRL_VERIFY_HASH, NULL);
+#else
             ret = CryptMsgControl(msg, 0, CMSG_CTRL_VERIFY_HASH, NULL);
+#endif
             if (ret && pcbComputedHash)
                 ret = CryptMsgGetParam(msg, CMSG_COMPUTED_HASH_PARAM, 0,
                  pbComputedHash, pcbComputedHash);
         }
         CryptMsgClose(msg);
     }
+#ifdef __REACTOS__
+    if (!ret && pcbComputedHash && GetLastError() != ERROR_MORE_DATA)
+        *pcbComputedHash = 0;
+#endif
     return ret;
 }
 
@@ -390,16 +441,33 @@ BOOL WINAPI CryptVerifyMessageHash(PCRYPT_HASH_MESSAGE_PARA pHashPara,
         ret = CryptMsgUpdate(msg, pbHashedBlob, cbHashedBlob, TRUE);
         if (ret)
         {
+#ifdef __REACTOS__
+            if (pcbToBeHashed)
+                ret = CryptMsgGetParam(msg, CMSG_CONTENT_PARAM, 0,
+                 pbToBeHashed, pcbToBeHashed);
+            if (ret && (pbToBeHashed || pcbComputedHash))
+                ret = CryptMsgControl(msg, 0, CMSG_CTRL_VERIFY_HASH, NULL);
+#else
             ret = CryptMsgControl(msg, 0, CMSG_CTRL_VERIFY_HASH, NULL);
             if (ret && pcbToBeHashed)
                 ret = CryptMsgGetParam(msg, CMSG_CONTENT_PARAM, 0,
                  pbToBeHashed, pcbToBeHashed);
+#endif
             if (ret && pcbComputedHash)
                 ret = CryptMsgGetParam(msg, CMSG_COMPUTED_HASH_PARAM, 0,
                  pbComputedHash, pcbComputedHash);
         }
         CryptMsgClose(msg);
     }
+#ifdef __REACTOS__
+    if (!ret && GetLastError() != ERROR_MORE_DATA)
+    {
+        if (pcbToBeHashed)
+            *pcbToBeHashed = 0;
+        if (pcbComputedHash)
+            *pcbComputedHash = 0;
+    }
+#endif
     return ret;
 }
 
@@ -427,6 +495,20 @@ BOOL WINAPI CryptSignMessage(PCRYPT_SIGN_MESSAGE_PARA pSignPara,
         SetLastError(E_INVALIDARG);
         return FALSE;
     }
+#ifdef __REACTOS__
+    ret = TRUE;
+    hCryptProv = 0;
+    keySpec = 0;
+    if (pSignPara->pSigningCert)
+        ret = CryptAcquireCertificatePrivateKey(pSignPara->pSigningCert,
+         CRYPT_ACQUIRE_CACHE_FLAG, NULL, &hCryptProv, &keySpec, &freeProv);
+    if (!ret)
+        return FALSE;
+
+    memset(&signer, 0, sizeof(signer));
+    signer.cbSize = sizeof(signer);
+    signer.pCertInfo = pSignPara->pSigningCert ? pSignPara->pSigningCert->pCertInfo : NULL;
+#else
     if (!pSignPara->pSigningCert)
         return TRUE;
 
@@ -438,6 +520,7 @@ BOOL WINAPI CryptSignMessage(PCRYPT_SIGN_MESSAGE_PARA pSignPara,
     memset(&signer, 0, sizeof(signer));
     signer.cbSize = sizeof(signer);
     signer.pCertInfo = pSignPara->pSigningCert->pCertInfo;
+#endif
     signer.hCryptProv = hCryptProv;
     signer.dwKeySpec = keySpec;
     signer.HashAlgorithm = pSignPara->HashAlgorithm;
@@ -449,7 +532,11 @@ BOOL WINAPI CryptSignMessage(PCRYPT_SIGN_MESSAGE_PARA pSignPara,
 
     memset(&signInfo, 0, sizeof(signInfo));
     signInfo.cbSize = sizeof(signInfo);
+#ifdef __REACTOS__
+    signInfo.cSigners = pSignPara->pSigningCert ? 1 : 0;
+#else
     signInfo.cSigners = 1;
+#endif
     signInfo.rgSigners = &signer;
 
     if (pSignPara->cMsgCert)

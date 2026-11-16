@@ -10,9 +10,15 @@
 
 /* CONSTANTS ******************************************************************/
 
-#define HANDLE_DETACHED_PROCESS     (HANDLE)-1
-#define HANDLE_CREATE_NEW_CONSOLE   (HANDLE)-2
-#define HANDLE_CREATE_NO_WINDOW     (HANDLE)-3
+#define CONSOLE_HANDLE_ALLOC            ((HANDLE)(LONG_PTR)-1)
+#define CONSOLE_HANDLE_ALLOC_NO_WINDOW  ((HANDLE)(LONG_PTR)-2)
+
+typedef struct _BASE_PSEUDO_CONSOLE
+{
+    HANDLE Signal;
+    HANDLE Reference;
+    HANDLE Process;
+} BASE_PSEUDO_CONSOLE, *PBASE_PSEUDO_CONSOLE;
 
 
 /* FUNCTION PROTOTYPES ********************************************************/
@@ -22,59 +28,7 @@ WINAPI
 ConDllInitialize(IN ULONG Reason,
                  IN PWSTR SessionDir);
 
-VOID
-InitializeCtrlHandling(VOID);
-
-DWORD
-WINAPI
-ConsoleControlDispatcher(IN LPVOID lpThreadParameter);
-
-DWORD
-WINAPI
-PropDialogHandler(IN LPVOID lpThreadParameter);
-
-BOOL WINAPI
-GetConsoleHandleInformation(IN HANDLE hHandle,
-                            OUT LPDWORD lpdwFlags);
-
-BOOL WINAPI
-SetConsoleHandleInformation(IN HANDLE hHandle,
-                            IN DWORD dwMask,
-                            IN DWORD dwFlags);
-
 HANDLE
 TranslateStdHandle(HANDLE hHandle);
-
-VOID
-SetTEBLangID(VOID);
-
-VOID
-SetUpConsoleInfo(IN BOOLEAN CaptureTitle,
-                 IN OUT LPDWORD pTitleLength,
-                 IN OUT LPWSTR* lpTitle OPTIONAL,
-                 IN OUT LPDWORD pDesktopLength,
-                 IN OUT LPWSTR* lpDesktop OPTIONAL,
-                 IN OUT PCONSOLE_START_INFO ConsoleStartInfo);
-
-VOID
-SetUpHandles(IN PCONSOLE_START_INFO ConsoleStartInfo);
-
-VOID
-InitExeName(VOID);
-
-VOID
-SetUpAppName(IN BOOLEAN CaptureStrings,
-             IN OUT LPDWORD CurDirLength,
-             IN OUT LPWSTR* CurDir,
-             IN OUT LPDWORD AppNameLength,
-             IN OUT LPWSTR* AppName);
-
-USHORT
-GetCurrentExeName(OUT PWCHAR ExeName,
-                  IN USHORT BufferSize);
-
-LPCWSTR
-IntCheckForConsoleFileName(IN LPCWSTR pszName,
-                           IN DWORD dwDesiredAccess);
 
 /* EOF */

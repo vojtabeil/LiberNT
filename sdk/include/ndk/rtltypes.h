@@ -25,6 +25,7 @@ Author:
 #include <umtypes.h>
 #include <mmtypes.h>
 #include <ldrtypes.h>
+#include <reactos/wow64shared.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -80,14 +81,6 @@ extern "C" {
 //
 #define RTL_RANGE_LIST_ADD_IF_CONFLICT                      0x00000001
 #define RTL_RANGE_LIST_ADD_SHARED                           0x00000002
-
-//
-// Flags for RtlIsRangeAvailable
-//
-// Both are viewable through PCI.sys's behaviors on ROM space and Shared IRQs.
-//
-#define RTL_RANGE_LIST_SHARED_OK                           0x00000001
-#define RTL_RANGE_LIST_NULL_CONFLICT_OK                    0x00000002
 
 #define RTL_RANGE_SHARED                                    0x01
 #define RTL_RANGE_CONFLICT                                  0x02
@@ -206,6 +199,10 @@ C_ASSERT(HEAP_CREATE_VALID_MASK == 0x0007F0FF);
 #define IMAGE_FILE_MACHINE_NATIVE IMAGE_FILE_MACHINE_AMD64
 #elif defined(_M_ARM64)
 #define IMAGE_FILE_MACHINE_NATIVE IMAGE_FILE_MACHINE_ARM64
+#elif defined(_M_RISCV64)
+#define IMAGE_FILE_MACHINE_NATIVE IMAGE_FILE_MACHINE_RISCV64
+#elif defined(_M_PPC)
+#define IMAGE_FILE_MACHINE_NATIVE IMAGE_FILE_MACHINE_POWERPC
 #else
 #error Define these please!
 #endif
@@ -229,6 +226,8 @@ C_ASSERT(HEAP_CREATE_VALID_MASK == 0x0007F0FF);
 #define RTL_QUERY_REGISTRY_NOEXPAND                         0x00000010
 #define RTL_QUERY_REGISTRY_DIRECT                           0x00000020
 #define RTL_QUERY_REGISTRY_DELETE                           0x00000040
+#define RTL_QUERY_REGISTRY_TYPECHECK                        0x00000100
+#define RTL_QUERY_REGISTRY_TYPECHECK_SHIFT                  24
 
 //
 // Versioning
@@ -691,11 +690,20 @@ typedef NTSTATUS
 // RTL Secure Memory callbacks
 //
 #ifdef NTOS_MODE_USER
-typedef NTSTATUS
+typedef BOOLEAN
 (NTAPI *PRTL_SECURE_MEMORY_CACHE_CALLBACK)(
     _In_ PVOID Address,
     _In_ SIZE_T Length
 );
+#endif
+
+//
+// RtlBarrier Flags
+//
+#ifdef NTOS_MODE_USER
+#define RTL_BARRIER_FLAGS_SPIN_ONLY                         0x00000001
+#define RTL_BARRIER_FLAGS_BLOCK_ONLY                        0x00000002
+#define RTL_BARRIER_FLAGS_DELETE_SAFE                       0x00010000
 #endif
 
 //
@@ -824,6 +832,44 @@ typedef struct _RTL_AVL_TABLE
 #define  RTL_GENERIC_TABLE  RTL_AVL_TABLE
 #define PRTL_GENERIC_TABLE PRTL_AVL_TABLE
 #endif /* RTL_USE_AVL_TABLES */
+
+//
+// RTL Dynamic Hash Table
+//
+#define RTL_HASH_ALLOCATED_HEADER 0x00000001
+
+typedef struct _RTL_DYNAMIC_HASH_TABLE_ENTRY
+{
+    LIST_ENTRY Linkage;
+    ULONG_PTR Signature;
+} RTL_DYNAMIC_HASH_TABLE_ENTRY, *PRTL_DYNAMIC_HASH_TABLE_ENTRY;
+
+typedef struct _RTL_DYNAMIC_HASH_TABLE_CONTEXT
+{
+    PLIST_ENTRY ChainHead;
+    PLIST_ENTRY PrevLinkage;
+    ULONG_PTR Signature;
+} RTL_DYNAMIC_HASH_TABLE_CONTEXT, *PRTL_DYNAMIC_HASH_TABLE_CONTEXT;
+
+typedef struct _RTL_DYNAMIC_HASH_TABLE_ENUMERATOR
+{
+    RTL_DYNAMIC_HASH_TABLE_ENTRY HashEntry;
+    PLIST_ENTRY ChainHead;
+    ULONG BucketIndex;
+} RTL_DYNAMIC_HASH_TABLE_ENUMERATOR, *PRTL_DYNAMIC_HASH_TABLE_ENUMERATOR;
+
+typedef struct _RTL_DYNAMIC_HASH_TABLE
+{
+    ULONG Flags;
+    ULONG Shift;
+    ULONG TableSize;
+    ULONG Pivot;
+    ULONG DivisorMask;
+    ULONG NumEntries;
+    ULONG NonEmptyBuckets;
+    ULONG NumEnumerators;
+    PVOID Directory;
+} RTL_DYNAMIC_HASH_TABLE, *PRTL_DYNAMIC_HASH_TABLE;
 
 //
 // RTL Compression Buffer
@@ -969,6 +1015,13 @@ typedef struct _ACTIVATION_CONTEXT_STACK_FRAMELIST
 
 #endif /* NTOS_MODE_USER */
 
+#ifndef NTOS_MODE_USER
+typedef struct _RTL_AVL_TREE
+{
+    PRTL_BALANCED_NODE Root;
+} RTL_AVL_TREE, *PRTL_AVL_TREE;
+#endif
+
 #if (NTDDI_VERSION >= NTDDI_WS03SP1)
 typedef struct _ACTIVATION_CONTEXT_STACK
 {
@@ -1058,6 +1111,13 @@ typedef struct _RTL_HEAP_USAGE
     ULONG_PTR Reserved[8];
 } RTL_HEAP_USAGE, *PRTL_HEAP_USAGE;
 
+#define RTL_HEAP_ENTRY_BUSY         0x0001
+#define RTL_HEAP_ENTRY_REGION       0x0002
+#define RTL_HEAP_ENTRY_BLOCK        0x0010
+#define RTL_HEAP_ENTRY_UNCOMMITTED  0x1000
+#define RTL_HEAP_ENTRY_COMMITTED    0x4000
+#define RTL_HEAP_ENTRY_LFH          0x8000
+
 typedef struct _RTL_HEAP_WALK_ENTRY
 {
     PVOID DataAddress;
@@ -1076,8 +1136,8 @@ typedef struct _RTL_HEAP_WALK_ENTRY
         } Block;
         struct
         {
-            ULONG_PTR CommittedSize;
-            ULONG_PTR UnCommittedSize;
+            ULONG CommittedSize;
+            ULONG UnCommittedSize;
             PVOID FirstEntry;
             PVOID LastEntry;
         } Segment;
@@ -1219,23 +1279,43 @@ typedef struct _RTL_DEBUG_INFORMATION
 //
 // Fiber local storage data
 //
-#define RTL_FLS_MAXIMUM_AVAILABLE 128
-typedef struct _RTL_FLS_DATA
+#ifdef NTOS_MODE_USER
+typedef struct _FLS_CALLBACK
 {
-    LIST_ENTRY ListEntry;
-    PVOID Data[RTL_FLS_MAXIMUM_AVAILABLE];
-} RTL_FLS_DATA, *PRTL_FLS_DATA;
+    PVOID Unknown;
+    PFLS_CALLBACK_FUNCTION Callback;
+} FLS_CALLBACK, *PFLS_CALLBACK;
+
+typedef struct _FLS_INFO_CHUNK
+{
+    ULONG Count;
+    FLS_CALLBACK Callbacks[ANYSIZE_ARRAY];
+} FLS_INFO_CHUNK, *PFLS_INFO_CHUNK;
+
+typedef struct _GLOBAL_FLS_DATA
+{
+    PFLS_INFO_CHUNK FlsCallbackChunks[8];
+    LIST_ENTRY FlsListHead;
+    ULONG FlsHighIndex;
+} GLOBAL_FLS_DATA, *PGLOBAL_FLS_DATA;
+
+typedef struct _TEB_FLS_DATA
+{
+    LIST_ENTRY FlsListEntry;
+    PVOID *FlsDataChunks[8];
+} TEB_FLS_DATA, *PTEB_FLS_DATA;
+#endif /* NTOS_MODE_USER */
 
 
 //
 // Unload Event Trace Structure for RtlGetUnloadEventTrace
 //
-#define RTL_UNLOAD_EVENT_TRACE_NUMBER 16
+#define RTL_UNLOAD_EVENT_TRACE_NUMBER 64
 
 typedef struct _RTL_UNLOAD_EVENT_TRACE
 {
     PVOID BaseAddress;
-    ULONG SizeOfImage;
+    SIZE_T SizeOfImage;
     ULONG Sequence;
     ULONG TimeDateStamp;
     ULONG CheckSum;
@@ -1586,8 +1666,19 @@ typedef struct _RTL_USER_PROCESS_PARAMETERS
 #if (NTDDI_VERSION >= NTDDI_LONGHORN) || defined(__REACTOS__)
     SIZE_T EnvironmentSize;
 #endif
-#if (NTDDI_VERSION >= NTDDI_WIN7)
+#if (NTDDI_VERSION >= NTDDI_WIN7) || defined(__REACTOS__)
     SIZE_T EnvironmentVersion;
+#endif
+#if (NTDDI_VERSION >= NTDDI_WIN8) || defined(__REACTOS__)
+    PVOID PackageDependencyData;
+    ULONG ProcessGroupId;
+    ULONG LoaderThreads;
+    UNICODE_STRING RedirectionDllName;
+    UNICODE_STRING HeapPartitionName;
+    PULONGLONG DefaultThreadpoolCpuSetMasks;
+    ULONG DefaultThreadpoolCpuSetMaskCount;
+    ULONG DefaultThreadpoolThreadMaximum;
+    ULONG HeapMemoryTypeMask;
 #endif
 } RTL_USER_PROCESS_PARAMETERS, *PRTL_USER_PROCESS_PARAMETERS;
 
@@ -1725,6 +1816,7 @@ typedef struct _RTL_ATOM_TABLE
         PHANDLE_TABLE ExHandleTable;
 #endif
     };
+    ULONG Flags;
     ULONG NumberOfBuckets;
     PRTL_ATOM_TABLE_ENTRY Buckets[1];
 } RTL_ATOM_TABLE, *PRTL_ATOM_TABLE;
@@ -1742,6 +1834,19 @@ typedef struct _RTL_TIME_ZONE_INFORMATION
     TIME_FIELDS DaylightDate;
     LONG DaylightBias;
 } RTL_TIME_ZONE_INFORMATION, *PRTL_TIME_ZONE_INFORMATION;
+
+typedef struct _RTL_DYNAMIC_TIME_ZONE_INFORMATION
+{
+    LONG Bias;
+    WCHAR StandardName[32];
+    TIME_FIELDS StandardDate;
+    LONG StandardBias;
+    WCHAR DaylightName[32];
+    TIME_FIELDS DaylightDate;
+    LONG DaylightBias;
+    WCHAR TimeZoneKeyName[128];
+    BOOLEAN DynamicDaylightTimeDisabled;
+} RTL_DYNAMIC_TIME_ZONE_INFORMATION, *PRTL_DYNAMIC_TIME_ZONE_INFORMATION;
 
 //
 // Hotpatch Header
@@ -2037,6 +2142,75 @@ typedef struct _UNWIND_HISTORY_TABLE
 } UNWIND_HISTORY_TABLE, *PUNWIND_HISTORY_TABLE;
 
 #endif /* _M_AMD64 */
+
+#ifdef _M_ARM64
+
+typedef struct _KNONVOLATILE_CONTEXT_POINTERS {
+    PULONG64 X19;
+    PULONG64 X20;
+    PULONG64 X21;
+    PULONG64 X22;
+    PULONG64 X23;
+    PULONG64 X24;
+    PULONG64 X25;
+    PULONG64 X26;
+    PULONG64 X27;
+    PULONG64 X28;
+    PULONG64 Fp;
+    PULONG64 Lr;
+    PULONG64 D8;
+    PULONG64 D9;
+    PULONG64 D10;
+    PULONG64 D11;
+    PULONG64 D12;
+    PULONG64 D13;
+    PULONG64 D14;
+    PULONG64 D15;
+} KNONVOLATILE_CONTEXT_POINTERS, *PKNONVOLATILE_CONTEXT_POINTERS;
+
+#define UNW_FLAG_NHANDLER 0x0
+#define UNW_FLAG_EHANDLER 0x1
+#define UNW_FLAG_UHANDLER 0x2
+#define UNW_FLAG_CHAININFO 0x4
+#define UNW_FLAG_NO_EPILOGUE  0x80000000UL
+
+typedef struct _RUNTIME_FUNCTION {
+    ULONG BeginAddress;
+    union {
+        ULONG UnwindData;
+        struct {
+            ULONG Flag : 2;
+            ULONG FunctionLength : 11;
+            ULONG RegF : 3;
+            ULONG RegI : 4;
+            ULONG H : 1;
+            ULONG CR : 2;
+            ULONG FrameSize : 9;
+        } DUMMYSTRUCTNAME;
+    } DUMMYUNIONNAME;
+} RUNTIME_FUNCTION, *PRUNTIME_FUNCTION;
+
+#define UNWIND_HISTORY_TABLE_SIZE 12
+
+typedef struct _UNWIND_HISTORY_TABLE_ENTRY
+{
+    ULONG64 ImageBase;
+    PRUNTIME_FUNCTION FunctionEntry;
+} UNWIND_HISTORY_TABLE_ENTRY, *PUNWIND_HISTORY_TABLE_ENTRY;
+
+typedef struct _UNWIND_HISTORY_TABLE
+{
+    ULONG Count;
+    UCHAR  LocalHint;
+    UCHAR  GlobalHint;
+    UCHAR  Search;
+    UCHAR  Once;
+    ULONG64 LowAddress;
+    ULONG64 HighAddress;
+    UNWIND_HISTORY_TABLE_ENTRY Entry[UNWIND_HISTORY_TABLE_SIZE];
+} UNWIND_HISTORY_TABLE, *PUNWIND_HISTORY_TABLE;
+
+#endif /* _M_ARM64 */
 
 #endif /* !NTOS_MODE_USER */
 

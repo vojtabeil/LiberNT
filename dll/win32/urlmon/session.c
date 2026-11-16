@@ -76,9 +76,21 @@ static HRESULT get_protocol_cf(LPCWSTR schema, DWORD schema_len, CLSID *pclsid, 
     static const WCHAR wszProtocolsKey[] =
         {'P','R','O','T','O','C','O','L','S','\\','H','a','n','d','l','e','r','\\'};
 
+#ifdef __REACTOS__
+    if ((size_t)schema_len > (~(size_t)0 - sizeof(wszProtocolsKey)) / sizeof(WCHAR) - 1)
+        return E_OUTOFMEMORY;
+    wszKey = malloc(sizeof(wszProtocolsKey) + ((size_t)schema_len + 1) * sizeof(WCHAR));
+    if (!wszKey) return E_OUTOFMEMORY;
+#else
     wszKey = malloc(sizeof(wszProtocolsKey) + (schema_len + 1) * sizeof(WCHAR));
+#endif
     memcpy(wszKey, wszProtocolsKey, sizeof(wszProtocolsKey));
+#ifdef __REACTOS__
+    memcpy(wszKey + ARRAY_SIZE(wszProtocolsKey), schema, (size_t)schema_len * sizeof(WCHAR));
+    wszKey[ARRAY_SIZE(wszProtocolsKey) + schema_len] = 0;
+#else
     memcpy(wszKey + ARRAY_SIZE(wszProtocolsKey), schema, (schema_len+1)*sizeof(WCHAR));
+#endif
 
     res = RegOpenKeyW(HKEY_CLASSES_ROOT, wszKey, &hkey);
     free(wszKey);
@@ -116,6 +128,10 @@ HRESULT register_namespace(IClassFactory *cf, REFIID clsid, LPCWSTR protocol, BO
     name_space *new_name_space;
 
     new_name_space = malloc(sizeof(name_space));
+#ifdef __REACTOS__
+    if (!new_name_space)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     if(!urlmon_protocol)
         IClassFactory_AddRef(cf);
@@ -238,6 +254,26 @@ HRESULT get_protocol_handler(IUri *uri, CLSID *clsid, IClassFactory **ret)
     SysFreeString(scheme);
     return hres;
 }
+
+#ifdef __REACTOS__
+BOOL is_direct_builtin_protocol(IUri *uri)
+{
+    name_space *ns;
+    BSTR name;
+    BOOL ret;
+
+    if(FAILED(IUri_GetSchemeName(uri, &name)))
+        return FALSE;
+
+    EnterCriticalSection(&session_cs);
+    ns = find_name_space(name);
+    ret = ns && ns->urlmon;
+    LeaveCriticalSection(&session_cs);
+
+    SysFreeString(name);
+    return ret;
+}
+#endif
 
 IInternetProtocol *get_mime_filter(LPCWSTR mime)
 {
@@ -371,6 +407,10 @@ static HRESULT WINAPI InternetSession_RegisterMimeFilter(IInternetSession *iface
     TRACE("(%p %s %s)\n", pCF, debugstr_guid(rclsid), debugstr_w(pwzType));
 
     filter = malloc(sizeof(mime_filter));
+#ifdef __REACTOS__
+    if (!filter)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     IClassFactory_AddRef(pCF);
     filter->cf = pCF;
@@ -429,6 +469,9 @@ static HRESULT WINAPI InternetSession_CreateBinding(IInternetSession *iface,
     if(FAILED(hres))
         return hres;
 
+#ifdef __REACTOS__
+    protocol->url_binding = szUrl != NULL;
+#endif
     *ppOInetProt = (IInternetProtocol*)&protocol->IInternetProtocolEx_iface;
     return S_OK;
 }

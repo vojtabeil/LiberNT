@@ -19,6 +19,8 @@
 #ifndef __MSXML_DISPEX__
 #define __MSXML_DISPEX__
 
+#include <stdbool.h>
+
 #include "dispex.h"
 
 #include "wine/list.h"
@@ -45,19 +47,24 @@ typedef enum tid_t
     IXMLDOMDocumentFragment_tid,
     IXMLDOMDocumentType_tid,
     IXMLDOMElement_tid,
+    IXMLDOMEntity_tid,
     IXMLDOMEntityReference_tid,
     IXMLDOMImplementation_tid,
     IXMLDOMNamedNodeMap_tid,
     IXMLDOMNode_tid,
     IXMLDOMNodeList_tid,
+    IXMLDOMNotation_tid,
     IXMLDOMParseError2_tid,
     IXMLDOMProcessingInstruction_tid,
     IXMLDOMSchemaCollection_tid,
     IXMLDOMSchemaCollection2_tid,
     IXMLDOMSelection_tid,
     IXMLDOMText_tid,
-    IXMLElement_tid,
-    IXMLDocument_tid,
+    IXMLElement2_tid,
+#ifdef __REACTOS__
+    IXMLAttribute_tid,
+#endif
+    IXMLDocument2_tid,
     IXMLHTTPRequest_tid,
     IXSLProcessor_tid,
     IXSLTemplate_tid,
@@ -76,10 +83,17 @@ typedef enum tid_t
     IMXWriter_tid,
     IVBMXNamespaceManager_tid,
     IServerXMLHTTPRequest_tid,
+#ifdef __REACTOS__
+    IMXNamespacePrefixes_tid,
+    IServerXMLHTTPRequest2_tid,
+#endif
     LAST_tid
 } tid_t;
 
 extern HRESULT get_typeinfo(tid_t tid, ITypeInfo **typeinfo);
+#ifdef __REACTOS__
+extern HRESULT get_class_typeinfo(const CLSID *clsid, ITypeInfo **typeinfo);
+#endif
 extern void release_typelib(void);
 
 typedef struct dispex_data_t dispex_data_t;
@@ -106,6 +120,16 @@ typedef struct
 
     dispex_static_data_t *data;
 } DispatchEx;
+
+#ifdef __REACTOS__
+struct enumvariant_funcs
+{
+    HRESULT (*get_item)(IUnknown*, LONG, VARIANT*);
+    HRESULT (*next)(IUnknown*);
+};
+
+extern HRESULT create_enumvariant( IUnknown*, BOOL, const struct enumvariant_funcs*, IEnumVARIANT**);
+#endif
 
 void init_dispex(DispatchEx*,IUnknown*,dispex_static_data_t*);
 void release_dispex(DispatchEx*);
@@ -144,6 +168,17 @@ static inline HRESULT return_bstrn(const WCHAR *value, int len, BSTR *p)
 }
 
 extern HRESULT dom_document_create(MSXML_VERSION class_version, void **document);
+#ifdef __REACTOS__
+extern HRESULT dom_freethreaded_document_create(MSXML_VERSION class_version, void **document);
+
+struct dom_builder;
+extern HRESULT dom_builder_create(IUnknown *output, struct dom_builder **builder);
+extern void dom_builder_release(struct dom_builder *builder);
+extern ISAXContentHandler *dom_builder_get_content_handler(struct dom_builder *builder);
+extern ISAXLexicalHandler *dom_builder_get_lexical_handler(struct dom_builder *builder);
+extern HRESULT dom_builder_declaration(struct dom_builder *builder);
+extern void dom_builder_get_output(struct dom_builder *builder, VARIANT *dest);
+#endif
 
 typedef struct bsc_t bsc_t;
 

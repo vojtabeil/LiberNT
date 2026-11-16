@@ -1091,7 +1091,8 @@ Return Value:
 
     WDFCASSERT((sizeof(m_WdfPowerStates)/sizeof(m_WdfPowerStates[0]))
                ==
-               (WdfDevStatePowerNull - WdfDevStatePowerObjectCreated));
+               (WdfDevStatePowerInitialPowerUpFailedPowerDown -
+                WdfDevStatePowerObjectCreated));
 
     // we assume these are the same length when we update the history index
     WDFCASSERT((sizeof(m_PowerMachine.m_Queue.Events)/
@@ -2275,12 +2276,13 @@ Return Value:
 
 
 
-    This->m_Device->m_PkgIo->ResumeProcessingForPower();
+    (VOID)!This->m_Device->m_PkgIo->ResumeProcessingForPower();
 
     if (This->m_SelfManagedIoMachine != NULL) {
         NTSTATUS status;
 
-        status = This->m_SelfManagedIoMachine->Start();
+        status = This->m_SelfManagedIoMachine->Start(
+            (WDF_POWER_DEVICE_STATE)This->m_DevicePowerState);
 
         if (!NT_SUCCESS(status)) {
             // return WdfDevStatePowerInitialSelfManagedIoFailed; __REACTOS__ : allow to fail
@@ -2384,7 +2386,8 @@ Return Value:
     // Tell the driver to stop its self-managed I/O.
     //
     if (This->m_SelfManagedIoMachine != NULL) {
-        status = This->m_SelfManagedIoMachine->Suspend();
+        status = This->m_SelfManagedIoMachine->Suspend(
+            WdfPowerDeviceD3Final);
 
         if (!NT_SUCCESS(status)) {
             DoTraceLevelMessage(
@@ -2399,7 +2402,21 @@ Return Value:
 
 
     // Top-edge queue hold.
-    This->m_Device->m_PkgIo->StopProcessingForPower(FxIoStopProcessingForPowerHold);
+    (VOID)!This->m_Device->m_PkgIo->StopProcessingForPower(FxIoStopProcessingForPowerHold);
+
+    status = FxCxInvokeDeviceD0ExitPreHardwareDisabled(
+        This->m_Device->GetHandle(),
+        WdfPowerDeviceD3Final);
+    if (!NT_SUCCESS(status)) {
+        DoTraceLevelMessage(
+            This->GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
+            "EvtCxDeviceD0ExitPreHardwareDisabled WDFDEVICE 0x%p "
+            "!devobj 0x%p failed, %!STATUS!",
+            This->m_Device->GetHandle(),
+            This->m_Device->GetDeviceObject(),
+            status);
+        failed = TRUE;
+    }
 
     if (This->PowerDmaPowerDown() == FALSE) {
         failed = TRUE;
@@ -2717,7 +2734,8 @@ Return Value:
         //
         // Tell the driver to stop its self-managed I/O
         //
-        status = m_SelfManagedIoMachine->Suspend();
+        status = m_SelfManagedIoMachine->Suspend(
+            GetTargetDevicePowerStateFromPendingDevicePowerDownIrp());
 
         if (!NT_SUCCESS(status)) {
             DoTraceLevelMessage(
@@ -2733,9 +2751,44 @@ Return Value:
 
 
     // Top-edge queue hold
-    m_Device->m_PkgIo->StopProcessingForPower(FxIoStopProcessingForPowerHold);
+    (VOID)!m_Device->m_PkgIo->StopProcessingForPower(FxIoStopProcessingForPowerHold);
 
     PowerPolicyProcessEvent(PwrPolPowerDownIoStopped);
+}
+
+WDF_POWER_DEVICE_STATE
+FxPkgPnp::GetTargetDevicePowerStateFromPendingDevicePowerDownIrp(
+    VOID
+    )
+{
+    WDF_POWER_DEVICE_STATE state;
+    FxIrp irp;
+
+    state = WdfPowerDeviceD3Final;
+    if (m_PendingDevicePowerIrp == NULL) {
+        ASSERT(FALSE);
+        return state;
+    }
+
+    irp.SetIrp(m_PendingDevicePowerIrp);
+    switch (irp.GetParameterPowerShutdownType()) {
+    case PowerActionShutdown:
+    case PowerActionShutdownReset:
+    case PowerActionShutdownOff:
+        break;
+
+    default:
+        state =
+            (WDF_POWER_DEVICE_STATE)irp.GetParameterPowerStateDeviceState();
+        break;
+    }
+
+    if (m_SystemPowerState == PowerSystemHibernate &&
+        GetUsageCount(WdfSpecialFileHibernation) != 0) {
+        state = WdfPowerDevicePrepareForHibernation;
+    }
+
+    return state;
 }
 
 BOOLEAN
@@ -2794,6 +2847,20 @@ Return Value:
         // S4.  Tell the driver that it should do special handling.
         //
         state = WdfPowerDevicePrepareForHibernation;
+    }
+
+    status = FxCxInvokeDeviceD0ExitPreHardwareDisabled(
+        m_Device->GetHandle(),
+        state);
+    if (!NT_SUCCESS(status)) {
+        DoTraceLevelMessage(
+            GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
+            "EvtCxDeviceD0ExitPreHardwareDisabled WDFDEVICE 0x%p "
+            "!devobj 0x%p failed, %!STATUS!",
+            m_Device->GetHandle(),
+            m_Device->GetDeviceObject(),
+            status);
+        failed = TRUE;
     }
 
     if (PowerDmaPowerDown() == FALSE) {
@@ -2963,6 +3030,20 @@ Return Value:
         // S4.  Tell the driver that it should do special handling.
         //
         state = WdfPowerDevicePrepareForHibernation;
+    }
+
+    status = FxCxInvokeDeviceD0ExitPreHardwareDisabled(
+        m_Device->GetHandle(),
+        state);
+    if (!NT_SUCCESS(status)) {
+        DoTraceLevelMessage(
+            GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
+            "EvtCxDeviceD0ExitPreHardwareDisabled WDFDEVICE 0x%p "
+            "!devobj 0x%p failed, %!STATUS!",
+            m_Device->GetHandle(),
+            m_Device->GetDeviceObject(),
+            status);
+        failed = TRUE;
     }
 
     if (PowerDmaPowerDown()  == FALSE) {
@@ -3221,12 +3302,13 @@ Return Value:
 
 
     // Top-edge queue release
-    This->m_Device->m_PkgIo->ResumeProcessingForPower();
+    (VOID)!This->m_Device->m_PkgIo->ResumeProcessingForPower();
 
     if (This->m_SelfManagedIoMachine != NULL) {
         NTSTATUS    status;
 
-        status = This->m_SelfManagedIoMachine->Start();
+        status = This->m_SelfManagedIoMachine->Start(
+            (WDF_POWER_DEVICE_STATE)This->m_DevicePowerState);
 
         if (!NT_SUCCESS(status)) {
             DoTraceLevelMessage(
@@ -3281,12 +3363,13 @@ Return Value:
 
 
     // Top-edge queue release
-    This->m_Device->m_PkgIo->ResumeProcessingForPower();
+    (VOID)!This->m_Device->m_PkgIo->ResumeProcessingForPower();
 
     if (This->m_SelfManagedIoMachine != NULL) {
         NTSTATUS    status;
 
-        status = This->m_SelfManagedIoMachine->Start();
+        status = This->m_SelfManagedIoMachine->Start(
+            (WDF_POWER_DEVICE_STATE)This->m_DevicePowerState);
 
         if (!NT_SUCCESS(status)) {
             DoTraceLevelMessage(
@@ -3336,7 +3419,7 @@ Return Value:
 
 
 
-    This->m_Device->m_PkgIo->StopProcessingForPower(FxIoStopProcessingForPowerHold);
+    (VOID)!This->m_Device->m_PkgIo->StopProcessingForPower(FxIoStopProcessingForPowerHold);
 
     return WdfDevStatePowerWakingDmaEnableFailed;
 }
@@ -3363,7 +3446,7 @@ Return Value:
 
 
 
-    This->m_Device->m_PkgIo->StopProcessingForPower(FxIoStopProcessingForPowerHold);
+    (VOID)!This->m_Device->m_PkgIo->StopProcessingForPower(FxIoStopProcessingForPowerHold);
 
     return WdfDevStatePowerWakingDmaEnableFailedNP;
 }
@@ -3668,6 +3751,7 @@ FxPkgPnp::PowerDmaEnableAndScan(
     )
 {
     FxTransactionedEntry* ple;
+    NTSTATUS status;
 
     if (PowerDmaPowerUp() == FALSE) {
         return FALSE;
@@ -3685,6 +3769,20 @@ FxPkgPnp::PowerDmaEnableAndScan(
         }
 
         m_EnumInfo->m_ChildListList.UnlockFromEnum(GetDriverGlobals());
+    }
+
+    status = FxCxInvokeDeviceD0EntryPostHardwareEnabled(
+        m_Device->GetHandle(),
+        (WDF_POWER_DEVICE_STATE)m_DevicePowerState);
+    if (!NT_SUCCESS(status)) {
+        DoTraceLevelMessage(
+            GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
+            "EvtCxDeviceD0EntryPostHardwareEnabled WDFDEVICE 0x%p "
+            "!devobj 0x%p failed, %!STATUS!",
+            m_Device->GetHandle(),
+            m_Device->GetDeviceObject(),
+            status);
+        return FALSE;
     }
 
     if (ImplicitPowerUp == FALSE) {
@@ -3770,6 +3868,19 @@ Return Value:
 {
     NTSTATUS status;
 
+    status = FxCxInvokeDeviceD0ExitPreHardwareDisabled(
+        This->m_Device->GetHandle(),
+        WdfPowerDeviceD3Final);
+    if (!NT_SUCCESS(status)) {
+        DoTraceLevelMessage(
+            This->GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
+            "EvtCxDeviceD0ExitPreHardwareDisabled WDFDEVICE 0x%p "
+            "!devobj 0x%p failed, %!STATUS!",
+            This->m_Device->GetHandle(),
+            This->m_Device->GetDeviceObject(),
+            status);
+    }
+
     (void) This->PowerDmaPowerDown();
 
     status = This->m_DeviceD0ExitPreInterruptsDisabled.Invoke(
@@ -3814,6 +3925,19 @@ Return Value:
     NTSTATUS status;
 
     COVERAGE_TRAP();
+
+    status = FxCxInvokeDeviceD0ExitPreHardwareDisabled(
+        This->m_Device->GetHandle(),
+        WdfPowerDeviceD3Final);
+    if (!NT_SUCCESS(status)) {
+        DoTraceLevelMessage(
+            This->GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
+            "EvtCxDeviceD0ExitPreHardwareDisabled WDFDEVICE 0x%p "
+            "!devobj 0x%p failed, %!STATUS!",
+            This->m_Device->GetHandle(),
+            This->m_Device->GetDeviceObject(),
+            status);
+    }
 
     (void) This->PowerDmaPowerDown();
 
@@ -3994,6 +4118,19 @@ Return Value:
 {
     NTSTATUS status;
 
+    status = FxCxInvokeDeviceD0ExitPreHardwareDisabled(
+        This->m_Device->GetHandle(),
+        WdfPowerDeviceD3Final);
+    if (!NT_SUCCESS(status)) {
+        DoTraceLevelMessage(
+            This->GetDriverGlobals(), TRACE_LEVEL_ERROR, TRACINGPNP,
+            "EvtCxDeviceD0ExitPreHardwareDisabled WDFDEVICE 0x%p "
+            "!devobj 0x%p failed, %!STATUS!",
+            This->m_Device->GetHandle(),
+            This->m_Device->GetDeviceObject(),
+            status);
+    }
+
     (void) This->PowerDmaPowerDown();
 
     status = This->m_DeviceD0ExitPreInterruptsDisabled.Invoke(
@@ -4040,7 +4177,7 @@ Return Value:
 
 
 
-    This->m_Device->m_PkgIo->StopProcessingForPower(FxIoStopProcessingForPowerHold);
+    (VOID)!This->m_Device->m_PkgIo->StopProcessingForPower(FxIoStopProcessingForPowerHold);
 
     return WdfDevStatePowerInitialDmaEnableFailed;
 }
@@ -5252,7 +5389,7 @@ Return Value:
     //
     // Set our new state
     //
-    ASSERT(State <= 0xFF);
+    ASSERT((ULONG) State <= 0xFF);
     m_DevicePowerState = (BYTE) State;
 
     //

@@ -419,6 +419,7 @@ BOOL NLS_IsUnicodeOnlyLcid(LCID lcid)
  * DATE_USE_ALT_CALENDAR           - Requires GetCalendarInfo to work first.
  * DATE_LTRREADING/DATE_RTLREADING - Not yet implemented.
  */
+/* TODO: serve GetDateFormat and GetTimeFormat from kernelbase as Windows 11 does, once its get_date_format handles DATE_USE_ALT_CALENDAR and Japanese era years */
 static INT NLS_GetDateTimeFormatW(LCID lcid, DWORD dwFlags,
                                   const SYSTEMTIME* lpTime, LPCWSTR lpFormat,
                                   LPWSTR lpStr, INT cchOut)
@@ -877,24 +878,19 @@ static INT NLS_GetDateTimeFormatA(LCID lcid, DWORD dwFlags,
     cp = node->dwCodePage;
   }
 
+  if (cchOut < 0 || (cchOut && !lpStr))
+  {
+    SetLastError(ERROR_INVALID_PARAMETER);
+    return 0;
+  }
+
   if (lpFormat)
     MultiByteToWideChar(cp, 0, lpFormat, -1, szFormat, ARRAY_SIZE(szFormat));
 
-  if (cchOut > (int) ARRAY_SIZE(szOut))
-    cchOut = ARRAY_SIZE(szOut);
-
-  szOut[0] = '\0';
-
   iRet = NLS_GetDateTimeFormatW(lcid, dwFlags, lpTime, lpFormat ? szFormat : NULL,
-                                lpStr ? szOut : NULL, cchOut);
-
-  if (lpStr)
-  {
-    if (szOut[0])
-      WideCharToMultiByte(cp, 0, szOut, iRet ? -1 : cchOut, lpStr, cchOut, 0, 0);
-    else if (cchOut && iRet)
-      *lpStr = '\0';
-  }
+                                szOut, ARRAY_SIZE(szOut));
+  if (iRet)
+    iRet = WideCharToMultiByte(cp, 0, szOut, -1, lpStr, cchOut, 0, 0);
   return iRet;
 }
 
@@ -1127,240 +1123,267 @@ INT WINAPI GetTimeFormatW(LCID lcid, DWORD dwFlags, const SYSTEMTIME* lpTime,
  *
  * See GetNumberFormatA.
  */
+static void NLS_GroupingToString(UINT grouping, WCHAR *buffer)
+{
+    UINT last_digit = grouping % 10;
+    WCHAR tmp[10], *p = tmp;
+
+    if (last_digit == 0)
+    {
+        grouping /= 10;
+        if (grouping % 10 == 0)
+            last_digit = ~0;
+    }
+
+    while (grouping)
+    {
+        *p++ = '0' + grouping % 10;
+        grouping /= 10;
+    }
+    while (p > tmp)
+    {
+        *buffer++ = *(--p);
+        if (p > tmp) *buffer++ = ';';
+    }
+    if (last_digit != 0)
+    {
+        *buffer++ = ';';
+        *buffer++ = '0';
+        if (last_digit == ~0)
+        {
+            *buffer++ = ';';
+            *buffer++ = '0';
+        }
+    }
+    *buffer = 0;
+}
+
+static WCHAR *NLS_PrependStr(WCHAR *end, const WCHAR *str)
+{
+    UINT len = strlenW(str);
+    return memcpy(end - len, str, len * sizeof(WCHAR));
+}
+
+static WCHAR *NLS_FormatNumber(WCHAR *end, const WCHAR *value, const WCHAR *decimal_sep,
+                               const WCHAR *thousand_sep, const WCHAR *grouping, UINT digits, BOOL lzero)
+{
+    BOOL round = FALSE, repeat = FALSE;
+    UINT i, len = 0, prev = ~0;
+    const WCHAR *frac = NULL;
+
+    *(--end) = 0;
+
+    for (i = 0; value[i]; i++)
+    {
+        if (value[i] >= '0' && value[i] <= '9') continue;
+        if (value[i] != '.') return NULL;
+        if (frac) return NULL;
+        frac = value + i + 1;
+    }
+
+    len = frac ? strlenW(frac) : 0;
+
+    if (len > digits)
+    {
+        round = frac[digits] >= '5';
+        len = digits;
+    }
+    while (digits > len)
+    {
+        (*--end) = '0';
+        digits--;
+    }
+    while (len)
+    {
+        WCHAR ch = frac[--len];
+        if (round)
+        {
+            if (ch != '9')
+            {
+                ch++;
+                round = FALSE;
+            }
+            else ch = '0';
+        }
+        *(--end) = ch;
+    }
+    if (*end) end = NLS_PrependStr(end, decimal_sep);
+
+    len = frac ? frac - value - 1 : strlenW(value);
+
+    while (len && *value == '0')
+    {
+        value++;
+        len--;
+    }
+    if (len) lzero = FALSE;
+
+    while (grouping[0] == '0' && grouping[1] == ';')
+        grouping += 2;
+
+    while (len)
+    {
+        UINT limit = prev;
+
+        if (!repeat)
+        {
+            limit = *grouping - '0';
+            if (grouping[1] == ';')
+            {
+                grouping += 2;
+                if (limit)
+                    prev = limit;
+                else
+                {
+                    prev = ~0;
+                    if (grouping[0] == '0' && grouping[1] != ';')
+                    {
+                        repeat = TRUE;
+                        limit = prev;
+                    }
+                }
+            }
+            else
+            {
+                repeat = TRUE;
+                if (!limit)
+                    limit = prev;
+                else
+                    prev = ~0;
+            }
+        }
+
+        while (len && limit--)
+        {
+            WCHAR ch = value[--len];
+            if (round)
+            {
+                if (ch != '9')
+                {
+                    ch++;
+                    round = FALSE;
+                }
+                else ch = '0';
+            }
+            *(--end) = ch;
+        }
+        if (len) end = NLS_PrependStr(end, thousand_sep);
+    }
+    if (round) *(--end) = '1';
+    else if (lzero) *(--end) = '0';
+    return end;
+}
+
+static INT NLS_ReturnFormatted(const WCHAR *num, WCHAR *buffer, int len)
+{
+    INT ret = strlenW(num) + 1;
+
+    if (!len) return ret;
+    lstrcpynW(buffer, num, len);
+    if (ret > len)
+    {
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    return ret;
+}
+
 INT WINAPI GetNumberFormatW(LCID lcid, DWORD dwFlags,
                             LPCWSTR lpszValue,  const NUMBERFMTW *lpFormat,
                             LPWSTR lpNumberStr, int cchOut)
 {
-  WCHAR szBuff[128], *szOut = szBuff + ARRAY_SIZE(szBuff) - 1;
-  WCHAR szNegBuff[8];
-  const WCHAR *lpszNeg = NULL, *lpszNegStart, *szSrc;
-  DWORD dwState = 0, dwDecimals = 0, dwGroupCount = 0, dwCurrentGroupCount = 0;
-  INT iRet;
+    WCHAR *num, fmt_decimal[4], fmt_thousand[4], fmt_neg[5], grouping[24], output[256];
+    const WCHAR *decimal_sep = fmt_decimal, *thousand_sep = fmt_thousand;
+    DWORD digits, lzero, order;
+    BOOL negative;
 
-  TRACE("(0x%04x,0x%08x,%s,%p,%p,%d)\n", lcid, dwFlags, debugstr_w(lpszValue),
-        lpFormat, lpNumberStr, cchOut);
+    TRACE("(0x%04x,0x%08x,%s,%p,%p,%d)\n", lcid, dwFlags, debugstr_w(lpszValue),
+          lpFormat, lpNumberStr, cchOut);
 
-  if (!lpszValue || cchOut < 0 || (cchOut > 0 && !lpNumberStr) ||
-      !IsValidLocale(lcid, 0) ||
-      (lpFormat && (dwFlags || !lpFormat->lpDecimalSep || !lpFormat->lpThousandSep)))
-  {
-    goto error;
-  }
-
-  if (!lpFormat)
-  {
-    const NLS_FORMAT_NODE *node = NLS_GetFormats(lcid, dwFlags);
-
-    if (!node)
-      goto error;
-    lpFormat = &node->fmt;
-    lpszNegStart = lpszNeg = GetNegative(node);
-  }
-  else
-  {
-    GetLocaleInfoW(lcid, LOCALE_SNEGATIVESIGN|(dwFlags & LOCALE_NOUSEROVERRIDE),
-                   szNegBuff, ARRAY_SIZE(szNegBuff));
-    lpszNegStart = lpszNeg = szNegBuff;
-  }
-  lpszNeg = lpszNeg + strlenW(lpszNeg) - 1;
-
-  dwFlags &= (LOCALE_NOUSEROVERRIDE|LOCALE_USE_CP_ACP);
-
-  /* Format the number backwards into a temporary buffer */
-
-  szSrc = lpszValue;
-  *szOut-- = '\0';
-
-  /* Check the number for validity */
-  while (*szSrc)
-  {
-    if (*szSrc >= '0' && *szSrc <= '9')
+    if (!lpszValue || cchOut < 0 || (cchOut > 0 && !lpNumberStr) || !IsValidLocale(ConvertDefaultLocale(lcid), 0))
     {
-      dwState |= NF_DIGITS;
-      if (dwState & NF_ISREAL)
-        dwDecimals++;
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
     }
-    else if (*szSrc == '-')
-    {
-      if (dwState)
-        goto error; /* '-' not first character */
-      dwState |= NF_ISNEGATIVE;
-    }
-    else if (*szSrc == '.')
-    {
-      if (dwState & NF_ISREAL)
-        goto error; /* More than one '.' */
-      dwState |= NF_ISREAL;
-    }
-    else
-      goto error; /* Invalid char */
-    szSrc++;
-  }
-  szSrc--; /* Point to last character */
 
-  if (!(dwState & NF_DIGITS))
-    goto error; /* No digits */
+    negative = (*lpszValue == '-');
+    dwFlags &= LOCALE_NOUSEROVERRIDE;
 
-  /* Add any trailing negative sign */
-  if (dwState & NF_ISNEGATIVE)
-  {
-    switch (lpFormat->NegativeOrder)
+    if (!lpFormat)
     {
-    case NLS_NEG_PARENS:
-      *szOut-- = ')';
-      break;
-    case NLS_NEG_RIGHT:
-    case NLS_NEG_RIGHT_SPACE:
-      while (lpszNeg >= lpszNegStart)
-        *szOut-- = *lpszNeg--;
-     if (lpFormat->NegativeOrder == NLS_NEG_RIGHT_SPACE)
-       *szOut-- = ' ';
-      break;
-    }
-  }
-
-  /* Copy all digits up to the decimal point */
-  if (!lpFormat->NumDigits)
-  {
-    if (dwState & NF_ISREAL)
-    {
-      while (*szSrc != '.') /* Don't write any decimals or a separator */
-      {
-        if (*szSrc >= '5' || (*szSrc == '4' && (dwState & NF_ROUND)))
-          dwState |= NF_ROUND;
-        else
-          dwState &= ~NF_ROUND;
-        szSrc--;
-      }
-      szSrc--;
-    }
-  }
-  else
-  {
-    LPWSTR lpszDec = lpFormat->lpDecimalSep + strlenW(lpFormat->lpDecimalSep) - 1;
-
-    if (dwDecimals <= lpFormat->NumDigits)
-    {
-      dwDecimals = lpFormat->NumDigits - dwDecimals;
-      while (dwDecimals--)
-        *szOut-- = '0'; /* Pad to correct number of dp */
+        GetLocaleInfoW(lcid, LOCALE_SGROUPING | dwFlags, grouping, ARRAY_SIZE(grouping));
+        GetLocaleInfoW(lcid, LOCALE_SDECIMAL | dwFlags, fmt_decimal, ARRAY_SIZE(fmt_decimal));
+        GetLocaleInfoW(lcid, LOCALE_STHOUSAND | dwFlags, fmt_thousand, ARRAY_SIZE(fmt_thousand));
+        GetLocaleInfoW(lcid, LOCALE_IDIGITS | LOCALE_RETURN_NUMBER | dwFlags,
+                       (WCHAR *)&digits, sizeof(DWORD) / sizeof(WCHAR));
+        GetLocaleInfoW(lcid, LOCALE_ILZERO | LOCALE_RETURN_NUMBER | dwFlags,
+                       (WCHAR *)&lzero, sizeof(DWORD) / sizeof(WCHAR));
+        GetLocaleInfoW(lcid, LOCALE_INEGNUMBER | LOCALE_RETURN_NUMBER | dwFlags,
+                       (WCHAR *)&order, sizeof(DWORD) / sizeof(WCHAR));
     }
     else
     {
-      dwDecimals -= lpFormat->NumDigits;
-      /* Skip excess decimals, and determine if we have to round the number */
-      while (dwDecimals--)
-      {
-        if (*szSrc >= '5' || (*szSrc == '4' && (dwState & NF_ROUND)))
-          dwState |= NF_ROUND;
-        else
-          dwState &= ~NF_ROUND;
-        szSrc--;
-      }
-    }
-
-    if (dwState & NF_ISREAL)
-    {
-      while (*szSrc != '.')
-      {
-        if (dwState & NF_ROUND)
+        if (dwFlags)
         {
-          if (*szSrc == '9')
-            *szOut-- = '0'; /* continue rounding */
-          else
-          {
-            dwState &= ~NF_ROUND;
-            *szOut-- = (*szSrc)+1;
-          }
-          szSrc--;
+            SetLastError(ERROR_INVALID_FLAGS);
+            return 0;
         }
+        decimal_sep = lpFormat->lpDecimalSep;
+        thousand_sep = lpFormat->lpThousandSep;
+        NLS_GroupingToString(lpFormat->Grouping, grouping);
+        digits = lpFormat->NumDigits;
+        lzero = lpFormat->LeadingZero;
+        order = lpFormat->NegativeOrder;
+        if (!decimal_sep || !thousand_sep)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+    }
+
+    if (negative)
+    {
+        lpszValue++;
+        if (strchrW(lpszValue, '0') && !lpszValue[strspnW(lpszValue, L"0.")])
+            negative = FALSE;
         else
-          *szOut-- = *szSrc--; /* Write existing decimals */
-      }
-      szSrc--; /* Skip '.' */
+            GetLocaleInfoW(lcid, LOCALE_SNEGATIVESIGN | dwFlags, fmt_neg, ARRAY_SIZE(fmt_neg));
     }
 
-    while (lpszDec >= lpFormat->lpDecimalSep)
-      *szOut-- = *lpszDec--; /* Write decimal separator */
-  }
-
-  dwGroupCount = lpFormat->Grouping == 32 ? 3 : lpFormat->Grouping;
-
-  /* Write the remaining whole number digits, including grouping chars */
-  while (szSrc >= lpszValue && *szSrc >= '0' && *szSrc <= '9')
-  {
-    if (dwState & NF_ROUND)
+    if (!(num = NLS_FormatNumber(output + ARRAY_SIZE(output) - 6, lpszValue,
+                                 decimal_sep, thousand_sep, grouping, digits, lzero)))
     {
-      if (*szSrc == '9')
-        *szOut-- = '0'; /* continue rounding */
-      else
-      {
-        dwState &= ~NF_ROUND;
-        *szOut-- = (*szSrc)+1;
-      }
-      szSrc--;
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
     }
-    else
-      *szOut-- = *szSrc--;
+    if (!*num && strpbrkW(lpszValue, L"0123456789"))
+        num = NLS_PrependStr(num, L"0");
 
-    dwState |= NF_DIGITS_OUT;
-    dwCurrentGroupCount++;
-    if (szSrc >= lpszValue && dwCurrentGroupCount == dwGroupCount && *szSrc != '-')
+    if (negative)
     {
-      LPWSTR lpszGrp = lpFormat->lpThousandSep + strlenW(lpFormat->lpThousandSep) - 1;
-
-      while (lpszGrp >= lpFormat->lpThousandSep)
-        *szOut-- = *lpszGrp--; /* Write grouping char */
-
-      dwCurrentGroupCount = 0;
-      if (lpFormat->Grouping == 32)
-        dwGroupCount = 2; /* Indic grouping: 3 then 2 */
+        switch (order)
+        {
+        case 0:
+            num = NLS_PrependStr(num, L"(");
+            strcatW(num, L")");
+            break;
+        case 2:
+            num = NLS_PrependStr(num, L" ");
+        case 1:
+            num = NLS_PrependStr(num, fmt_neg);
+            break;
+        case 4:
+            strcatW(num, L" ");
+        case 3:
+            strcatW(num, fmt_neg);
+            break;
+        default:
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
     }
-  }
-  if (dwState & NF_ROUND)
-  {
-    *szOut-- = '1'; /* e.g. .6 > 1.0 */
-  }
-  else if (!(dwState & NF_DIGITS_OUT) && lpFormat->LeadingZero)
-    *szOut-- = '0'; /* Add leading 0 if we have no digits before the decimal point */
 
-  /* Add any leading negative sign */
-  if (dwState & NF_ISNEGATIVE)
-  {
-    switch (lpFormat->NegativeOrder)
-    {
-    case NLS_NEG_PARENS:
-      *szOut-- = '(';
-      break;
-    case NLS_NEG_LEFT_SPACE:
-      *szOut-- = ' ';
-      /* Fall through */
-    case NLS_NEG_LEFT:
-      while (lpszNeg >= lpszNegStart)
-        *szOut-- = *lpszNeg--;
-      break;
-    }
-  }
-  szOut++;
-
-  iRet = strlenW(szOut) + 1;
-  if (cchOut)
-  {
-    if (iRet <= cchOut)
-      memcpy(lpNumberStr, szOut, iRet * sizeof(WCHAR));
-    else
-    {
-      memcpy(lpNumberStr, szOut, cchOut * sizeof(WCHAR));
-      lpNumberStr[cchOut - 1] = '\0';
-      SetLastError(ERROR_INSUFFICIENT_BUFFER);
-      iRet = 0;
-    }
-  }
-  return iRet;
-
-error:
-  SetLastError(lpFormat && dwFlags ? ERROR_INVALID_FLAGS : ERROR_INVALID_PARAMETER);
-  return 0;
+    return NLS_ReturnFormatted(num, lpNumberStr, cchOut);
 }
 
 #if _WIN32_WINNT >= 0x600
@@ -1402,286 +1425,159 @@ INT WINAPI GetCurrencyFormatW(LCID lcid, DWORD dwFlags,
                               LPCWSTR lpszValue,  const CURRENCYFMTW *lpFormat,
                               LPWSTR lpCurrencyStr, int cchOut)
 {
-  static const BYTE NLS_NegCyFormats[16] =
-  {
-    CF_PARENS|CF_CY_LEFT,                       /* ($1.1) */
-    CF_MINUS_LEFT|CF_MINUS_BEFORE|CF_CY_LEFT,   /* -$1.1  */
-    CF_MINUS_LEFT|CF_CY_LEFT,                   /* $-1.1  */
-    CF_MINUS_RIGHT|CF_CY_LEFT,                  /* $1.1-  */
-    CF_PARENS|CF_CY_RIGHT,                      /* (1.1$) */
-    CF_MINUS_LEFT|CF_CY_RIGHT,                  /* -1.1$  */
-    CF_MINUS_RIGHT|CF_MINUS_BEFORE|CF_CY_RIGHT, /* 1.1-$  */
-    CF_MINUS_RIGHT|CF_CY_RIGHT,                 /* 1.1$-  */
-    CF_MINUS_LEFT|CF_CY_RIGHT|CF_CY_SPACE,      /* -1.1 $ */
-    CF_MINUS_LEFT|CF_MINUS_BEFORE|CF_CY_LEFT|CF_CY_SPACE,   /* -$ 1.1 */
-    CF_MINUS_RIGHT|CF_CY_RIGHT|CF_CY_SPACE,     /* 1.1 $-  */
-    CF_MINUS_RIGHT|CF_CY_LEFT|CF_CY_SPACE,      /* $ 1.1-  */
-    CF_MINUS_LEFT|CF_CY_LEFT|CF_CY_SPACE,       /* $ -1.1  */
-    CF_MINUS_RIGHT|CF_MINUS_BEFORE|CF_CY_RIGHT|CF_CY_SPACE, /* 1.1- $ */
-    CF_PARENS|CF_CY_LEFT|CF_CY_SPACE,           /* ($ 1.1) */
-    CF_PARENS|CF_CY_RIGHT|CF_CY_SPACE,          /* (1.1 $) */
-  };
-  static const BYTE NLS_PosCyFormats[4] =
-  {
-    CF_CY_LEFT,              /* $1.1  */
-    CF_CY_RIGHT,             /* 1.1$  */
-    CF_CY_LEFT|CF_CY_SPACE,  /* $ 1.1 */
-    CF_CY_RIGHT|CF_CY_SPACE, /* 1.1 $ */
-  };
-  WCHAR szBuff[128], *szOut = szBuff + ARRAY_SIZE(szBuff) - 1;
-  WCHAR szNegBuff[8];
-  const WCHAR *lpszNeg = NULL, *lpszNegStart, *szSrc, *lpszCy, *lpszCyStart;
-  DWORD dwState = 0, dwDecimals = 0, dwGroupCount = 0, dwCurrentGroupCount = 0, dwFmt;
-  INT iRet;
+    WCHAR *num, fmt_decimal[4], fmt_thousand[4], fmt_symbol[13], fmt_neg[5], grouping[20], output[256];
+    const WCHAR *decimal_sep = fmt_decimal, *thousand_sep = fmt_thousand, *symbol = fmt_symbol;
+    DWORD digits, lzero, pos_order, neg_order;
+    BOOL negative;
 
-  TRACE("(0x%04x,0x%08x,%s,%p,%p,%d)\n", lcid, dwFlags, debugstr_w(lpszValue),
-        lpFormat, lpCurrencyStr, cchOut);
+    TRACE("(0x%04x,0x%08x,%s,%p,%p,%d)\n", lcid, dwFlags, debugstr_w(lpszValue),
+          lpFormat, lpCurrencyStr, cchOut);
 
-  if (!lpszValue || cchOut < 0 || (cchOut > 0 && !lpCurrencyStr) ||
-      !IsValidLocale(lcid, 0) ||
-      (lpFormat && (dwFlags || !lpFormat->lpDecimalSep || !lpFormat->lpThousandSep ||
-      !lpFormat->lpCurrencySymbol || lpFormat->NegativeOrder > 15 ||
-      lpFormat->PositiveOrder > 3)))
-  {
-    goto error;
-  }
-
-  if (!lpFormat)
-  {
-    const NLS_FORMAT_NODE *node = NLS_GetFormats(lcid, dwFlags);
-
-    if (!node)
-      goto error;
-
-    lpFormat = &node->cyfmt;
-    lpszNegStart = lpszNeg = GetNegative(node);
-  }
-  else
-  {
-    GetLocaleInfoW(lcid, LOCALE_SNEGATIVESIGN|(dwFlags & LOCALE_NOUSEROVERRIDE),
-                   szNegBuff, ARRAY_SIZE(szNegBuff));
-    lpszNegStart = lpszNeg = szNegBuff;
-  }
-  dwFlags &= (LOCALE_NOUSEROVERRIDE|LOCALE_USE_CP_ACP);
-
-  lpszNeg = lpszNeg + strlenW(lpszNeg) - 1;
-  lpszCyStart = lpFormat->lpCurrencySymbol;
-  lpszCy = lpszCyStart + strlenW(lpszCyStart) - 1;
-
-  /* Format the currency backwards into a temporary buffer */
-
-  szSrc = lpszValue;
-  *szOut-- = '\0';
-
-  /* Check the number for validity */
-  while (*szSrc)
-  {
-    if (*szSrc >= '0' && *szSrc <= '9')
+    if (!lpszValue || cchOut < 0 || (cchOut > 0 && !lpCurrencyStr) || !IsValidLocale(ConvertDefaultLocale(lcid), 0))
     {
-      dwState |= NF_DIGITS;
-      if (dwState & NF_ISREAL)
-        dwDecimals++;
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
     }
-    else if (*szSrc == '-')
+
+    negative = (*lpszValue == '-');
+    dwFlags &= LOCALE_NOUSEROVERRIDE;
+
+    if (!lpFormat)
     {
-      if (dwState)
-        goto error; /* '-' not first character */
-      dwState |= NF_ISNEGATIVE;
-    }
-    else if (*szSrc == '.')
-    {
-      if (dwState & NF_ISREAL)
-        goto error; /* More than one '.' */
-      dwState |= NF_ISREAL;
-    }
-    else
-      goto error; /* Invalid char */
-    szSrc++;
-  }
-  szSrc--; /* Point to last character */
-
-  if (!(dwState & NF_DIGITS))
-    goto error; /* No digits */
-
-  if (dwState & NF_ISNEGATIVE)
-    dwFmt = NLS_NegCyFormats[lpFormat->NegativeOrder];
-  else
-    dwFmt = NLS_PosCyFormats[lpFormat->PositiveOrder];
-
-  /* Add any trailing negative or currency signs */
-  if (dwFmt & CF_PARENS)
-    *szOut-- = ')';
-
-  while (dwFmt & (CF_MINUS_RIGHT|CF_CY_RIGHT))
-  {
-    switch (dwFmt & (CF_MINUS_RIGHT|CF_MINUS_BEFORE|CF_CY_RIGHT))
-    {
-    case CF_MINUS_RIGHT:
-    case CF_MINUS_RIGHT|CF_CY_RIGHT:
-      while (lpszNeg >= lpszNegStart)
-        *szOut-- = *lpszNeg--;
-      dwFmt &= ~CF_MINUS_RIGHT;
-      break;
-
-    case CF_CY_RIGHT:
-    case CF_MINUS_BEFORE|CF_CY_RIGHT:
-    case CF_MINUS_RIGHT|CF_MINUS_BEFORE|CF_CY_RIGHT:
-      while (lpszCy >= lpszCyStart)
-        *szOut-- = *lpszCy--;
-      if (dwFmt & CF_CY_SPACE)
-        *szOut-- = ' ';
-      dwFmt &= ~(CF_CY_RIGHT|CF_MINUS_BEFORE);
-      break;
-    }
-  }
-
-  /* Copy all digits up to the decimal point */
-  if (!lpFormat->NumDigits)
-  {
-    if (dwState & NF_ISREAL)
-    {
-      while (*szSrc != '.') /* Don't write any decimals or a separator */
-      {
-        if (*szSrc >= '5' || (*szSrc == '4' && (dwState & NF_ROUND)))
-          dwState |= NF_ROUND;
-        else
-          dwState &= ~NF_ROUND;
-        szSrc--;
-      }
-      szSrc--;
-    }
-  }
-  else
-  {
-    LPWSTR lpszDec = lpFormat->lpDecimalSep + strlenW(lpFormat->lpDecimalSep) - 1;
-
-    if (dwDecimals <= lpFormat->NumDigits)
-    {
-      dwDecimals = lpFormat->NumDigits - dwDecimals;
-      while (dwDecimals--)
-        *szOut-- = '0'; /* Pad to correct number of dp */
+        GetLocaleInfoW(lcid, LOCALE_SCURRENCY | dwFlags, fmt_symbol, ARRAY_SIZE(fmt_symbol));
+        GetLocaleInfoW(lcid, LOCALE_SMONGROUPING | dwFlags, grouping, ARRAY_SIZE(grouping));
+        GetLocaleInfoW(lcid, LOCALE_SMONDECIMALSEP | dwFlags, fmt_decimal, ARRAY_SIZE(fmt_decimal));
+        GetLocaleInfoW(lcid, LOCALE_SMONTHOUSANDSEP | dwFlags, fmt_thousand, ARRAY_SIZE(fmt_thousand));
+        GetLocaleInfoW(lcid, LOCALE_ICURRDIGITS | LOCALE_RETURN_NUMBER | dwFlags,
+                       (WCHAR *)&digits, sizeof(DWORD) / sizeof(WCHAR));
+        GetLocaleInfoW(lcid, LOCALE_ILZERO | LOCALE_RETURN_NUMBER | dwFlags,
+                       (WCHAR *)&lzero, sizeof(DWORD) / sizeof(WCHAR));
+        GetLocaleInfoW(lcid, LOCALE_ICURRENCY | LOCALE_RETURN_NUMBER | dwFlags,
+                       (WCHAR *)&pos_order, sizeof(DWORD) / sizeof(WCHAR));
+        GetLocaleInfoW(lcid, LOCALE_INEGCURR | LOCALE_RETURN_NUMBER | dwFlags,
+                       (WCHAR *)&neg_order, sizeof(DWORD) / sizeof(WCHAR));
     }
     else
     {
-      dwDecimals -= lpFormat->NumDigits;
-      /* Skip excess decimals, and determine if we have to round the number */
-      while (dwDecimals--)
-      {
-        if (*szSrc >= '5' || (*szSrc == '4' && (dwState & NF_ROUND)))
-          dwState |= NF_ROUND;
-        else
-          dwState &= ~NF_ROUND;
-        szSrc--;
-      }
-    }
-
-    if (dwState & NF_ISREAL)
-    {
-      while (*szSrc != '.')
-      {
-        if (dwState & NF_ROUND)
+        if (dwFlags)
         {
-          if (*szSrc == '9')
-            *szOut-- = '0'; /* continue rounding */
-          else
-          {
-            dwState &= ~NF_ROUND;
-            *szOut-- = (*szSrc)+1;
-          }
-          szSrc--;
+            SetLastError(ERROR_INVALID_FLAGS);
+            return 0;
         }
-        else
-          *szOut-- = *szSrc--; /* Write existing decimals */
-      }
-      szSrc--; /* Skip '.' */
+        decimal_sep = lpFormat->lpDecimalSep;
+        thousand_sep = lpFormat->lpThousandSep;
+        symbol = lpFormat->lpCurrencySymbol;
+        NLS_GroupingToString(lpFormat->Grouping, grouping);
+        digits = lpFormat->NumDigits;
+        lzero = lpFormat->LeadingZero;
+        pos_order = lpFormat->PositiveOrder;
+        neg_order = lpFormat->NegativeOrder;
+        if (!decimal_sep || !thousand_sep || !symbol)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
     }
-    while (lpszDec >= lpFormat->lpDecimalSep)
-      *szOut-- = *lpszDec--; /* Write decimal separator */
-  }
 
-  dwGroupCount = lpFormat->Grouping == 32 ? 3 : lpFormat->Grouping;
-
-  /* Write the remaining whole number digits, including grouping chars */
-  while (szSrc >= lpszValue && *szSrc >= '0' && *szSrc <= '9')
-  {
-    if (dwState & NF_ROUND)
+    if (negative)
     {
-      if (*szSrc == '9')
-        *szOut-- = '0'; /* continue rounding */
-      else
-      {
-        dwState &= ~NF_ROUND;
-        *szOut-- = (*szSrc)+1;
-      }
-      szSrc--;
+        lpszValue++;
+        GetLocaleInfoW(lcid, LOCALE_SNEGATIVESIGN | dwFlags, fmt_neg, ARRAY_SIZE(fmt_neg));
+    }
+
+    if (!(num = NLS_FormatNumber(output + ARRAY_SIZE(output) - 20, lpszValue,
+                                 decimal_sep, thousand_sep, grouping, digits, lzero)))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    if (negative)
+    {
+        switch (neg_order)
+        {
+        case 14:
+            num = NLS_PrependStr(num, L" ");
+        case 0:
+            num = NLS_PrependStr(num, symbol);
+            num = NLS_PrependStr(num, L"(");
+            strcatW(num, L")");
+            break;
+        case 9:
+            num = NLS_PrependStr(num, L" ");
+        case 1:
+            num = NLS_PrependStr(num, symbol);
+            num = NLS_PrependStr(num, fmt_neg);
+            break;
+        case 2:
+            num = NLS_PrependStr(num, fmt_neg);
+            num = NLS_PrependStr(num, symbol);
+            break;
+        case 11:
+            num = NLS_PrependStr(num, L" ");
+        case 3:
+            num = NLS_PrependStr(num, symbol);
+            strcatW(num, fmt_neg);
+            break;
+        case 15:
+            strcatW(num, L" ");
+        case 4:
+            strcatW(num, symbol);
+            num = NLS_PrependStr(num, L"(");
+            strcatW(num, L")");
+            break;
+        case 8:
+            strcatW(num, L" ");
+        case 5:
+            num = NLS_PrependStr(num, fmt_neg);
+            strcatW(num, symbol);
+            break;
+        case 6:
+            strcatW(num, fmt_neg);
+            strcatW(num, symbol);
+            break;
+        case 10:
+            strcatW(num, L" ");
+        case 7:
+            strcatW(num, symbol);
+            strcatW(num, fmt_neg);
+            break;
+        case 12:
+            num = NLS_PrependStr(num, fmt_neg);
+            num = NLS_PrependStr(num, L" ");
+            num = NLS_PrependStr(num, symbol);
+            break;
+        case 13:
+            strcatW(num, fmt_neg);
+            strcatW(num, L" ");
+            strcatW(num, symbol);
+            break;
+        default:
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
     }
     else
-      *szOut-- = *szSrc--;
-
-    dwState |= NF_DIGITS_OUT;
-    dwCurrentGroupCount++;
-    if (szSrc >= lpszValue && dwCurrentGroupCount == dwGroupCount && *szSrc != '-')
     {
-      LPWSTR lpszGrp = lpFormat->lpThousandSep + strlenW(lpFormat->lpThousandSep) - 1;
-
-      while (lpszGrp >= lpFormat->lpThousandSep)
-        *szOut-- = *lpszGrp--; /* Write grouping char */
-
-      dwCurrentGroupCount = 0;
-      if (lpFormat->Grouping == 32)
-        dwGroupCount = 2; /* Indic grouping: 3 then 2 */
+        switch (pos_order)
+        {
+        case 2:
+            num = NLS_PrependStr(num, L" ");
+        case 0:
+            num = NLS_PrependStr(num, symbol);
+            break;
+        case 3:
+            strcatW(num, L" ");
+        case 1:
+            strcatW(num, symbol);
+            break;
+        default:
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
     }
-  }
-  if (dwState & NF_ROUND)
-    *szOut-- = '1'; /* e.g. .6 > 1.0 */
-  else if (!(dwState & NF_DIGITS_OUT) && lpFormat->LeadingZero)
-    *szOut-- = '0'; /* Add leading 0 if we have no digits before the decimal point */
 
-  /* Add any leading negative or currency sign */
-  while (dwFmt & (CF_MINUS_LEFT|CF_CY_LEFT))
-  {
-    switch (dwFmt & (CF_MINUS_LEFT|CF_MINUS_BEFORE|CF_CY_LEFT))
-    {
-    case CF_MINUS_LEFT:
-    case CF_MINUS_LEFT|CF_CY_LEFT:
-      while (lpszNeg >= lpszNegStart)
-        *szOut-- = *lpszNeg--;
-      dwFmt &= ~CF_MINUS_LEFT;
-      break;
-
-    case CF_CY_LEFT:
-    case CF_CY_LEFT|CF_MINUS_BEFORE:
-    case CF_MINUS_LEFT|CF_MINUS_BEFORE|CF_CY_LEFT:
-      if (dwFmt & CF_CY_SPACE)
-        *szOut-- = ' ';
-      while (lpszCy >= lpszCyStart)
-        *szOut-- = *lpszCy--;
-      dwFmt &= ~(CF_CY_LEFT|CF_MINUS_BEFORE);
-      break;
-    }
-  }
-  if (dwFmt & CF_PARENS)
-    *szOut-- = '(';
-  szOut++;
-
-  iRet = strlenW(szOut) + 1;
-  if (cchOut)
-  {
-    if (iRet <= cchOut)
-      memcpy(lpCurrencyStr, szOut, iRet * sizeof(WCHAR));
-    else
-    {
-      memcpy(lpCurrencyStr, szOut, cchOut * sizeof(WCHAR));
-      lpCurrencyStr[cchOut - 1] = '\0';
-      SetLastError(ERROR_INSUFFICIENT_BUFFER);
-      iRet = 0;
-    }
-  }
-  return iRet;
-
-error:
-  SetLastError(lpFormat && dwFlags ? ERROR_INVALID_FLAGS : ERROR_INVALID_PARAMETER);
-  return 0;
+    return NLS_ReturnFormatted(num, lpCurrencyStr, cchOut);
 }
 
 #if _WIN32_WINNT >= 0x600
@@ -1704,81 +1600,6 @@ int WINAPI GetCurrencyFormatEx(LPCWSTR localename, DWORD flags, LPCWSTR value,
  *        alternate calendars is determined.
  */
 
-/* Types for Enum* internals are declared in lcformat_private.h */
-
-/******************************************************************************
- * NLS_EnumDateFormats <internal>
- * Enumerates date formats for a specified locale.
- *
- * PARAMS
- *    ctxt [I] enumeration context, see 'struct enumdateformats_context'
- *
- * RETURNS
- *    Success: TRUE.
- *    Failure: FALSE. Use GetLastError() to determine the cause.
- */
-BOOL NLS_EnumDateFormats(const struct enumdateformats_context *ctxt)
-{
-    WCHAR bufW[256];
-    char bufA[256];
-    LCTYPE lctype;
-    CALID cal_id;
-    INT ret;
-
-    if (!ctxt->u.callback)
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    if (!GetLocaleInfoW(ctxt->lcid, LOCALE_ICALENDARTYPE|LOCALE_RETURN_NUMBER, (LPWSTR)&cal_id, sizeof(cal_id)/sizeof(WCHAR)))
-        return FALSE;
-
-    switch (ctxt->flags & ~LOCALE_USE_CP_ACP)
-    {
-    case 0:
-    case DATE_SHORTDATE:
-        lctype = LOCALE_SSHORTDATE;
-        break;
-    case DATE_LONGDATE:
-        lctype = LOCALE_SLONGDATE;
-        break;
-    case DATE_YEARMONTH:
-        lctype = LOCALE_SYEARMONTH;
-        break;
-    default:
-        FIXME("Unknown date format (0x%08x)\n", ctxt->flags);
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    lctype |= ctxt->flags & LOCALE_USE_CP_ACP;
-    if (ctxt->unicode)
-        ret = GetLocaleInfoW(ctxt->lcid, lctype, bufW, ARRAY_SIZE(bufW));
-    else
-        ret = GetLocaleInfoA(ctxt->lcid, lctype, bufA, ARRAY_SIZE(bufA));
-
-    if (ret)
-    {
-        switch (ctxt->type)
-        {
-        case CALLBACK_ENUMPROC:
-            ctxt->u.callback(ctxt->unicode ? bufW : (WCHAR*)bufA);
-            break;
-        case CALLBACK_ENUMPROCEX:
-            ctxt->u.callbackex(ctxt->unicode ? bufW : (WCHAR*)bufA, cal_id);
-            break;
-        case CALLBACK_ENUMPROCEXEX:
-            ctxt->u.callbackexex(bufW, cal_id, ctxt->lParam);
-            break;
-        default:
-            ;
-        }
-    }
-
-    return TRUE;
-}
-
 /**************************************************************************
  *              EnumDateFormatsExA    (KERNEL32.@)
  *
@@ -1787,687 +1608,45 @@ BOOL NLS_EnumDateFormats(const struct enumdateformats_context *ctxt)
  */
 BOOL WINAPI EnumDateFormatsExA(DATEFMT_ENUMPROCEXA proc, LCID lcid, DWORD flags)
 {
-    struct enumdateformats_context ctxt;
-
-    ctxt.type = CALLBACK_ENUMPROCEX;
-    ctxt.u.callbackex = (DATEFMT_ENUMPROCEXW)proc;
-    ctxt.lcid = lcid;
-    ctxt.flags = flags;
-    ctxt.unicode = FALSE;
-
-    return NLS_EnumDateFormats(&ctxt);
+    return Internal_EnumDateFormats((DATEFMT_ENUMPROCW)proc, NlsValidateLocale(&lcid, 0),
+                                    flags, FALSE, TRUE, FALSE, 0);
 }
-
-/**************************************************************************
- *              EnumDateFormatsExW    (KERNEL32.@)
- */
-BOOL WINAPI EnumDateFormatsExW(DATEFMT_ENUMPROCEXW proc, LCID lcid, DWORD flags)
-{
-    struct enumdateformats_context ctxt;
-
-    ctxt.type = CALLBACK_ENUMPROCEX;
-    ctxt.u.callbackex = proc;
-    ctxt.lcid = lcid;
-    ctxt.flags = flags;
-    ctxt.unicode = TRUE;
-
-    return NLS_EnumDateFormats(&ctxt);
-}
-
-/**************************************************************************
- *              EnumDateFormatsW	(KERNEL32.@)
- */
-BOOL WINAPI EnumDateFormatsW(DATEFMT_ENUMPROCW proc, LCID lcid, DWORD flags)
-{
-    struct enumdateformats_context ctxt;
-
-    ctxt.type = CALLBACK_ENUMPROC;
-    ctxt.u.callback = proc;
-    ctxt.lcid = lcid;
-    ctxt.flags = flags;
-    ctxt.unicode = TRUE;
-
-    return NLS_EnumDateFormats(&ctxt);
-}
-
-#if _WIN32_WINNT >= 0x600
-/**************************************************************************
- *              EnumDateFormatsExEx	(KERNEL32.@)
- */
-BOOL WINAPI EnumDateFormatsExEx(DATEFMT_ENUMPROCEXEX proc, const WCHAR *locale, DWORD flags, LPARAM lParam)
-{
-    struct enumdateformats_context ctxt;
-
-    ctxt.type = CALLBACK_ENUMPROCEXEX;
-    ctxt.u.callbackexex = proc;
-    ctxt.lcid = LocaleNameToLCID(locale, 0);
-    ctxt.flags = flags;
-    ctxt.lParam = lParam;
-    ctxt.unicode = TRUE;
-
-    return NLS_EnumDateFormats(&ctxt);
-}
-#endif /* _WIN32_WINNT >= 0x600 */
-
-BOOL NLS_EnumTimeFormats(struct enumtimeformats_context *ctxt)
-{
-    WCHAR bufW[256];
-    char bufA[256];
-    LCTYPE lctype;
-    INT ret;
-
-    if (!ctxt->u.callback)
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    switch (ctxt->flags & ~LOCALE_USE_CP_ACP)
-    {
-    case 0:
-        lctype = LOCALE_STIMEFORMAT;
-        break;
-    case TIME_NOSECONDS:
-        lctype = LOCALE_SSHORTTIME;
-        break;
-    default:
-        FIXME("Unknown time format (%d)\n", ctxt->flags);
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return FALSE;
-    }
-
-    lctype |= ctxt->flags & LOCALE_USE_CP_ACP;
-    if (ctxt->unicode)
-        ret = GetLocaleInfoW(ctxt->lcid, lctype, bufW, ARRAY_SIZE(bufW));
-    else
-        ret = GetLocaleInfoA(ctxt->lcid, lctype, bufA, ARRAY_SIZE(bufA));
-
-    if (ret)
-    {
-        switch (ctxt->type)
-        {
-        case CALLBACK_ENUMPROC:
-            ctxt->u.callback(ctxt->unicode ? bufW : (WCHAR*)bufA);
-            break;
-        case CALLBACK_ENUMPROCEX:
-            ctxt->u.callbackex(bufW, ctxt->lParam);
-            break;
-        default:
-            ;
-        }
-    }
-
-    return TRUE;
-}
-
-/**************************************************************************
- *              EnumTimeFormatsW	(KERNEL32.@)
- */
-BOOL WINAPI EnumTimeFormatsW(TIMEFMT_ENUMPROCW proc, LCID lcid, DWORD flags)
-{
-    struct enumtimeformats_context ctxt;
-
-    ctxt.type = CALLBACK_ENUMPROC;
-    ctxt.u.callback = proc;
-    ctxt.lcid = lcid;
-    ctxt.flags = flags;
-    ctxt.unicode = TRUE;
-
-    return NLS_EnumTimeFormats(&ctxt);
-}
-
-#if _WIN32_WINNT >= 0x600
-/**************************************************************************
- *              EnumTimeFormatsEx	(KERNEL32.@)
- */
-BOOL WINAPI EnumTimeFormatsEx(TIMEFMT_ENUMPROCEX proc, const WCHAR *locale, DWORD flags, LPARAM lParam)
-{
-    struct enumtimeformats_context ctxt;
-
-    ctxt.type = CALLBACK_ENUMPROCEX;
-    ctxt.u.callbackex = proc;
-    ctxt.lcid = LocaleNameToLCID(locale, 0);
-    ctxt.flags = flags;
-    ctxt.lParam = lParam;
-    ctxt.unicode = TRUE;
-
-    return NLS_EnumTimeFormats(&ctxt);
-}
-#endif /* _WIN32_WINNT >= 0x600 */
-
-
-/******************************************************************************
- * NLS_EnumCalendarInfo <internal>
- * Enumerates calendar information for a specified locale.
- *
- * PARAMS
- *    ctxt [I] enumeration context, see 'struct enumcalendar_context'
- *
- * RETURNS
- *    Success: TRUE.
- *    Failure: FALSE. Use GetLastError() to determine the cause.
- *
- * NOTES
- *    When the ANSI version of this function is used with a Unicode-only LCID,
- *    the call can succeed because the system uses the system code page.
- *    However, characters that are undefined in the system code page appear
- *    in the string as a question mark (?).
- *
- * TODO
- *    The above note should be respected by GetCalendarInfoA.
- */
-BOOL NLS_EnumCalendarInfo(const struct enumcalendar_context *ctxt)
-{
-  WCHAR *buf, *opt = NULL, *iter = NULL;
-  CALID calendar = ctxt->calendar;
-  BOOL ret = FALSE;
-  int bufSz = 200;		/* the size of the buffer */
-
-  if (ctxt->u.callback == NULL)
-  {
-    SetLastError(ERROR_INVALID_PARAMETER);
-    return FALSE;
-  }
-
-  buf = HeapAlloc(GetProcessHeap(), 0, bufSz);
-  if (buf == NULL)
-  {
-    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-    return FALSE;
-  }
-
-  if (calendar == ENUM_ALL_CALENDARS)
-  {
-    int optSz = GetLocaleInfoW(ctxt->lcid, LOCALE_IOPTIONALCALENDAR, NULL, 0);
-    if (optSz > 1)
-    {
-      opt = HeapAlloc(GetProcessHeap(), 0, optSz * sizeof(WCHAR));
-      if (opt == NULL)
-      {
-        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-        goto cleanup;
-      }
-      if (GetLocaleInfoW(ctxt->lcid, LOCALE_IOPTIONALCALENDAR, opt, optSz))
-        iter = opt;
-    }
-    calendar = NLS_GetLocaleNumber(ctxt->lcid, LOCALE_ICALENDARTYPE);
-  }
-
-  while (TRUE)			/* loop through calendars */
-  {
-    do				/* loop until there's no error */
-    {
-      if (ctxt->caltype & CAL_RETURN_NUMBER)
-        ret = GetCalendarInfoW(ctxt->lcid, calendar, ctxt->caltype, NULL, bufSz / sizeof(WCHAR), (LPDWORD)buf);
-      else if (ctxt->unicode)
-        ret = GetCalendarInfoW(ctxt->lcid, calendar, ctxt->caltype, buf, bufSz / sizeof(WCHAR), NULL);
-      else ret = GetCalendarInfoA(ctxt->lcid, calendar, ctxt->caltype, (CHAR*)buf, bufSz / sizeof(CHAR), NULL);
-
-      if (!ret)
-      {
-        if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
-        {				/* so resize it */
-          int newSz;
-          if (ctxt->unicode)
-            newSz = GetCalendarInfoW(ctxt->lcid, calendar, ctxt->caltype, NULL, 0, NULL) * sizeof(WCHAR);
-          else newSz = GetCalendarInfoA(ctxt->lcid, calendar, ctxt->caltype, NULL, 0, NULL) * sizeof(CHAR);
-          if (bufSz >= newSz)
-          {
-            ERR("Buffer resizing disorder: was %d, requested %d.\n", bufSz, newSz);
-            goto cleanup;
-          }
-          bufSz = newSz;
-          WARN("Buffer too small; resizing to %d bytes.\n", bufSz);
-          buf = HeapReAlloc(GetProcessHeap(), 0, buf, bufSz);
-          if (buf == NULL)
-            goto cleanup;
-        } else goto cleanup;
-      }
-    } while (!ret);
-
-    /* Here we are. We pass the buffer to the correct version of
-     * the callback. Because it's not the same number of params,
-     * we must check for Ex, but we don't care about Unicode
-     * because the buffer is already in the correct format.
-     */
-    switch (ctxt->type)
-    {
-    case CALLBACK_ENUMPROC:
-      ret = ctxt->u.callback(buf);
-      break;
-    case CALLBACK_ENUMPROCEX:
-      ret = ctxt->u.callbackex(buf, calendar);
-      break;
-    case CALLBACK_ENUMPROCEXEX:
-      ret = ctxt->u.callbackexex(buf, calendar, NULL, ctxt->lParam);
-      break;
-    default:
-      ;
-    }
-
-    if (!ret) {			/* the callback told to stop */
-      ret = TRUE;
-      break;
-    }
-
-    if ((iter == NULL) || (*iter == 0))	/* no more calendars */
-      break;
-
-    calendar = 0;
-    while ((*iter >= '0') && (*iter <= '9'))
-      calendar = calendar * 10 + *iter++ - '0';
-
-    if (*iter++ != 0)
-    {
-      SetLastError(ERROR_BADDB);
-      ret = FALSE;
-      break;
-    }
-  }
-
-cleanup:
-  HeapFree(GetProcessHeap(), 0, opt);
-  HeapFree(GetProcessHeap(), 0, buf);
-  return ret;
-}
-
-/******************************************************************************
- *		EnumCalendarInfoW	[KERNEL32.@]
- */
-BOOL WINAPI EnumCalendarInfoW( CALINFO_ENUMPROCW calinfoproc,LCID locale,
-                               CALID calendar,CALTYPE caltype )
-{
-  struct enumcalendar_context ctxt;
-
-  TRACE("(%p,0x%08x,0x%08x,0x%08x)\n", calinfoproc, locale, calendar, caltype);
-
-  ctxt.type = CALLBACK_ENUMPROC;
-  ctxt.u.callback = calinfoproc;
-  ctxt.lcid = locale;
-  ctxt.calendar = calendar;
-  ctxt.caltype = caltype;
-  ctxt.lParam = 0;
-  ctxt.unicode = TRUE;
-  return NLS_EnumCalendarInfo(&ctxt);
-}
-
-/******************************************************************************
- *		EnumCalendarInfoExA	[KERNEL32.@]
- */
-
-/******************************************************************************
- *		EnumCalendarInfoExW	[KERNEL32.@]
- */
-BOOL WINAPI EnumCalendarInfoExW( CALINFO_ENUMPROCEXW calinfoproc,LCID locale,
-                                 CALID calendar,CALTYPE caltype )
-{
-  struct enumcalendar_context ctxt;
-
-  TRACE("(%p,0x%08x,0x%08x,0x%08x)\n", calinfoproc, locale, calendar, caltype);
-
-  ctxt.type = CALLBACK_ENUMPROCEX;
-  ctxt.u.callbackex = calinfoproc;
-  ctxt.lcid = locale;
-  ctxt.calendar = calendar;
-  ctxt.caltype = caltype;
-  ctxt.lParam = 0;
-  ctxt.unicode = TRUE;
-  return NLS_EnumCalendarInfo(&ctxt);
-}
-
-#if _WIN32_WINNT >= 0x600
-/******************************************************************************
- *		EnumCalendarInfoExEx	[KERNEL32.@]
- */
-BOOL WINAPI EnumCalendarInfoExEx( CALINFO_ENUMPROCEXEX calinfoproc, LPCWSTR locale, CALID calendar,
-    LPCWSTR reserved, CALTYPE caltype, LPARAM lParam)
-{
-  struct enumcalendar_context ctxt;
-
-  TRACE("(%p,%s,0x%08x,%p,0x%08x,0x%ld)\n", calinfoproc, debugstr_w(locale), calendar, reserved, caltype, lParam);
-
-  ctxt.type = CALLBACK_ENUMPROCEXEX;
-  ctxt.u.callbackexex = calinfoproc;
-  ctxt.lcid = LocaleNameToLCID(locale, 0);
-  ctxt.calendar = calendar;
-  ctxt.caltype = caltype;
-  ctxt.lParam = lParam;
-  ctxt.unicode = TRUE;
-  return NLS_EnumCalendarInfo(&ctxt);
-}
-#endif /* _WIN32_WINNT >= 0x600 */
-
-/*********************************************************************
- *	GetCalendarInfoW				(KERNEL32.@)
- *
- */
-int WINAPI GetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType,
-			    LPWSTR lpCalData, int cchData, LPDWORD lpValue)
-{
-    static const LCTYPE caltype_lctype_map[] = {
-        0, /* not used */
-        0, /* CAL_ICALINTVALUE */
-        0, /* CAL_SCALNAME */
-        0, /* CAL_IYEAROFFSETRANGE */
-        0, /* CAL_SERASTRING */
-        LOCALE_SSHORTDATE,
-        LOCALE_SLONGDATE,
-        LOCALE_SDAYNAME1,
-        LOCALE_SDAYNAME2,
-        LOCALE_SDAYNAME3,
-        LOCALE_SDAYNAME4,
-        LOCALE_SDAYNAME5,
-        LOCALE_SDAYNAME6,
-        LOCALE_SDAYNAME7,
-        LOCALE_SABBREVDAYNAME1,
-        LOCALE_SABBREVDAYNAME2,
-        LOCALE_SABBREVDAYNAME3,
-        LOCALE_SABBREVDAYNAME4,
-        LOCALE_SABBREVDAYNAME5,
-        LOCALE_SABBREVDAYNAME6,
-        LOCALE_SABBREVDAYNAME7,
-        LOCALE_SMONTHNAME1,
-        LOCALE_SMONTHNAME2,
-        LOCALE_SMONTHNAME3,
-        LOCALE_SMONTHNAME4,
-        LOCALE_SMONTHNAME5,
-        LOCALE_SMONTHNAME6,
-        LOCALE_SMONTHNAME7,
-        LOCALE_SMONTHNAME8,
-        LOCALE_SMONTHNAME9,
-        LOCALE_SMONTHNAME10,
-        LOCALE_SMONTHNAME11,
-        LOCALE_SMONTHNAME12,
-        LOCALE_SMONTHNAME13,
-        LOCALE_SABBREVMONTHNAME1,
-        LOCALE_SABBREVMONTHNAME2,
-        LOCALE_SABBREVMONTHNAME3,
-        LOCALE_SABBREVMONTHNAME4,
-        LOCALE_SABBREVMONTHNAME5,
-        LOCALE_SABBREVMONTHNAME6,
-        LOCALE_SABBREVMONTHNAME7,
-        LOCALE_SABBREVMONTHNAME8,
-        LOCALE_SABBREVMONTHNAME9,
-        LOCALE_SABBREVMONTHNAME10,
-        LOCALE_SABBREVMONTHNAME11,
-        LOCALE_SABBREVMONTHNAME12,
-        LOCALE_SABBREVMONTHNAME13,
-        LOCALE_SYEARMONTH,
-        0, /* CAL_ITWODIGITYEARMAX */
-#if (WINVER >= 0x0600) /* ReactOS */
-        LOCALE_SSHORTESTDAYNAME1,
-        LOCALE_SSHORTESTDAYNAME2,
-        LOCALE_SSHORTESTDAYNAME3,
-        LOCALE_SSHORTESTDAYNAME4,
-        LOCALE_SSHORTESTDAYNAME5,
-        LOCALE_SSHORTESTDAYNAME6,
-        LOCALE_SSHORTESTDAYNAME7,
-#endif
-        LOCALE_SMONTHDAY,
-        0, /* CAL_SABBREVERASTRING */
-    };
-    DWORD localeflags = 0;
-    CALTYPE calinfo;
-
-    if (CalType & CAL_NOUSEROVERRIDE)
-	FIXME("flag CAL_NOUSEROVERRIDE used, not fully implemented\n");
-    if (CalType & CAL_USE_CP_ACP)
-	FIXME("flag CAL_USE_CP_ACP used, not fully implemented\n");
-
-    if (CalType & CAL_RETURN_NUMBER) {
-        if (!lpValue)
-        {
-            SetLastError( ERROR_INVALID_PARAMETER );
-            return 0;
-        }
-	if (lpCalData != NULL)
-	    WARN("lpCalData not NULL (%p) when it should!\n", lpCalData);
-	if (cchData != 0)
-	    WARN("cchData not 0 (%d) when it should!\n", cchData);
-    } else {
-	if (lpValue != NULL)
-	    WARN("lpValue not NULL (%p) when it should!\n", lpValue);
-    }
-
-    /* FIXME: No verification is made yet wrt Locale
-     * for the CALTYPES not requiring GetLocaleInfoA */
-
-    calinfo = CalType & 0xffff;
 
 #ifdef __REACTOS__
-    if (CalType & LOCALE_RETURN_GENITIVE_NAMES)
-#else
-    if (CalType & CAL_RETURN_GENITIVE_NAMES)
-#endif
-        localeflags |= LOCALE_RETURN_GENITIVE_NAMES;
-
-    switch (calinfo) {
-	case CAL_ICALINTVALUE:
-#ifdef __REACTOS__
-        if (IS_LCID_JAPANESE(Locale))
-        {
-            if (CalType & CAL_RETURN_NUMBER)
-            {
-                *lpValue = CAL_JAPAN;
-                return sizeof(DWORD) / sizeof(WCHAR);
-            }
-            else
-            {
-                static const WCHAR fmtW[] = {'%','u',0};
-                WCHAR buffer[10];
-                int ret = snprintfW( buffer, 10, fmtW, CAL_JAPAN ) + 1;
-                if (!lpCalData) return ret;
-                if (ret <= cchData)
-                {
-                    strcpyW( lpCalData, buffer );
-                    return ret;
-                }
-                SetLastError( ERROR_INSUFFICIENT_BUFFER );
-                return 0;
-            }
-        }
-#endif
-            if (CalType & CAL_RETURN_NUMBER)
-                return GetLocaleInfoW(Locale, LOCALE_RETURN_NUMBER | LOCALE_ICALENDARTYPE,
-                        (LPWSTR)lpValue, 2);
-            return GetLocaleInfoW(Locale, LOCALE_ICALENDARTYPE, lpCalData, cchData);
-	case CAL_SCALNAME:
-#ifdef __REACTOS__
-        if (IS_LCID_JAPANESE(Locale) && Calendar == CAL_JAPAN)
-        {
-            // Wareki
-            lpCalData[0] = 0x548C;
-            lpCalData[1] = 0x66A6;
-            lpCalData[2] = 0;
-            return 3;
-        }
-#endif
-            FIXME("Unimplemented caltype %d\n", calinfo);
-            if (lpCalData) *lpCalData = 0;
-	    return 1;
-	case CAL_IYEAROFFSETRANGE:
-#ifdef __REACTOS__
-        if (IS_LCID_JAPANESE(Locale) && Calendar == CAL_JAPAN)
-        {
-            PCJAPANESE_ERA pEra = JapaneseEra_Find(NULL);
-            if (pEra)
-            {
-                if (CalType & CAL_RETURN_NUMBER)
-                {
-                    *lpValue = pEra->wYear;
-                    return sizeof(DWORD) / sizeof(WCHAR);
-                }
-                else
-                {
-                    static const WCHAR fmtW[] = {'%','u',0};
-                    WCHAR buffer[10];
-                    int ret = snprintfW( buffer, 10, fmtW, pEra->wYear ) + 1;
-                    if (!lpCalData) return ret;
-                    if (ret <= cchData)
-                    {
-                        strcpyW( lpCalData, buffer );
-                        return ret;
-                    }
-                    SetLastError( ERROR_INSUFFICIENT_BUFFER );
-                    return 0;
-                }
-            }
-            else
-            {
-                SetLastError(ERROR_INVALID_PARAMETER);
-                return 0;
-            }
-        }
-#endif
-            FIXME("Unimplemented caltype %d\n", calinfo);
-	    return 0;
-	case CAL_SERASTRING:
-#ifdef __REACTOS__
-        if (IS_LCID_JAPANESE(Locale) && Calendar == CAL_JAPAN)
-        {
-            PCJAPANESE_ERA pEra = JapaneseEra_Find(NULL);
-            if (pEra)
-            {
-                RtlStringCchCopyW(lpCalData, cchData, pEra->szEraName);
-                return strlenW(lpCalData) + 1;
-            }
-            else
-            {
-                SetLastError(ERROR_INVALID_PARAMETER);
-                return 0;
-            }
-        }
-#endif
-            FIXME("Unimplemented caltype %d\n", calinfo);
-	    return 0;
-	case CAL_SSHORTDATE:
-	case CAL_SLONGDATE:
-	case CAL_SDAYNAME1:
-	case CAL_SDAYNAME2:
-	case CAL_SDAYNAME3:
-	case CAL_SDAYNAME4:
-	case CAL_SDAYNAME5:
-	case CAL_SDAYNAME6:
-	case CAL_SDAYNAME7:
-	case CAL_SABBREVDAYNAME1:
-	case CAL_SABBREVDAYNAME2:
-	case CAL_SABBREVDAYNAME3:
-	case CAL_SABBREVDAYNAME4:
-	case CAL_SABBREVDAYNAME5:
-	case CAL_SABBREVDAYNAME6:
-	case CAL_SABBREVDAYNAME7:
-	case CAL_SMONTHNAME1:
-	case CAL_SMONTHNAME2:
-	case CAL_SMONTHNAME3:
-	case CAL_SMONTHNAME4:
-	case CAL_SMONTHNAME5:
-	case CAL_SMONTHNAME6:
-	case CAL_SMONTHNAME7:
-	case CAL_SMONTHNAME8:
-	case CAL_SMONTHNAME9:
-	case CAL_SMONTHNAME10:
-	case CAL_SMONTHNAME11:
-	case CAL_SMONTHNAME12:
-	case CAL_SMONTHNAME13:
-	case CAL_SABBREVMONTHNAME1:
-	case CAL_SABBREVMONTHNAME2:
-	case CAL_SABBREVMONTHNAME3:
-	case CAL_SABBREVMONTHNAME4:
-	case CAL_SABBREVMONTHNAME5:
-	case CAL_SABBREVMONTHNAME6:
-	case CAL_SABBREVMONTHNAME7:
-	case CAL_SABBREVMONTHNAME8:
-	case CAL_SABBREVMONTHNAME9:
-	case CAL_SABBREVMONTHNAME10:
-	case CAL_SABBREVMONTHNAME11:
-	case CAL_SABBREVMONTHNAME12:
-	case CAL_SABBREVMONTHNAME13:
-	case CAL_SYEARMONTH:
-            return GetLocaleInfoW(Locale, caltype_lctype_map[calinfo] | localeflags, lpCalData, cchData);
-	case CAL_ITWODIGITYEARMAX:
-#ifdef __REACTOS__
-        if (IS_LCID_JAPANESE(Locale) && Calendar == CAL_JAPAN)
-        {
-            if (CalType & CAL_RETURN_NUMBER)
-            {
-                *lpValue = JAPANESE_MAX_TWODIGITYEAR;
-                return sizeof(DWORD) / sizeof(WCHAR);
-            }
-            else
-            {
-                static const WCHAR fmtW[] = {'%','u',0};
-                WCHAR buffer[10];
-                int ret = snprintfW( buffer, 10, fmtW, JAPANESE_MAX_TWODIGITYEAR ) + 1;
-                if (!lpCalData) return ret;
-                if (ret <= cchData)
-                {
-                    strcpyW( lpCalData, buffer );
-                    return ret;
-                }
-                SetLastError( ERROR_INSUFFICIENT_BUFFER );
-                return 0;
-            }
-        }
-#endif
-            if (CalType & CAL_RETURN_NUMBER)
-            {
-                *lpValue = CALINFO_MAX_YEAR;
-                return sizeof(DWORD) / sizeof(WCHAR);
-            }
-            else
-            {
-                static const WCHAR fmtW[] = {'%','u',0};
-                WCHAR buffer[10];
-                int ret = snprintfW( buffer, 10, fmtW, CALINFO_MAX_YEAR  ) + 1;
-                if (!lpCalData) return ret;
-                if (ret <= cchData)
-                {
-                    strcpyW( lpCalData, buffer );
-                    return ret;
-                }
-                SetLastError( ERROR_INSUFFICIENT_BUFFER );
-                return 0;
-            }
-	    break;
-#ifdef __REACTOS__
-    case CAL_SABBREVERASTRING:
-        if (IS_LCID_JAPANESE(Locale) && Calendar == CAL_JAPAN)
-        {
-            PCJAPANESE_ERA pEra = JapaneseEra_Find(NULL);
-            if (pEra)
-            {
-                RtlStringCchCopyW(lpCalData, cchData, pEra->szEraAbbrev);
-                return strlenW(lpCalData) + 1;
-            }
-        }
-        SetLastError(ERROR_INVALID_PARAMETER);
-        return 0;
-#endif
-	default:
-            FIXME("Unknown caltype %d\n", calinfo);
-            SetLastError(ERROR_INVALID_FLAGS);
-            return 0;
-    }
-    return 0;
-}
-
-#if _WIN32_WINNT >= 0x600
-/*********************************************************************
- *	GetCalendarInfoEx				(KERNEL32.@)
- */
-int WINAPI GetCalendarInfoEx(LPCWSTR locale, CALID calendar, LPCWSTR lpReserved, CALTYPE caltype,
-    LPWSTR data, int len, DWORD *value)
+static NTSTATUS NLS_CreateTwoDigitYearMaxKey(PHANDLE KeyHandle)
 {
-    static int once;
+    static const PCWSTR KeyNames[] = { L"Control Panel", L"International", L"Calendars", L"TwoDigitYearMax" };
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UNICODE_STRING KeyName;
+    HANDLE ParentKey, Key;
+    NTSTATUS Status;
+    ULONG i;
 
-    LCID lcid = LocaleNameToLCID(locale, 0);
-    if (!once++)
-        FIXME("(%s, %d, %p, 0x%08x, %p, %d, %p): semi-stub\n", debugstr_w(locale), calendar, lpReserved, caltype,
-        data, len, value);
-    return GetCalendarInfoW(lcid, calendar, caltype, data, len, value);
+    Status = RtlOpenCurrentUser(KEY_CREATE_SUB_KEY, &ParentKey);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    for (i = 0; i < ARRAY_SIZE(KeyNames); i++)
+    {
+        RtlInitUnicodeString(&KeyName, KeyNames[i]);
+        InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE, ParentKey, NULL);
+        Status = NtCreateKey(&Key,
+                             (i + 1 < ARRAY_SIZE(KeyNames)) ? KEY_CREATE_SUB_KEY : KEY_SET_VALUE,
+                             &ObjectAttributes,
+                             0,
+                             NULL,
+                             REG_OPTION_NON_VOLATILE,
+                             NULL);
+        NtClose(ParentKey);
+        if (!NT_SUCCESS(Status))
+            return Status;
+        ParentKey = Key;
+    }
+
+    *KeyHandle = ParentKey;
+    return STATUS_SUCCESS;
 }
 #endif
-
 
 /*********************************************************************
  *	SetCalendarInfoW				(KERNEL32.@)
@@ -2476,7 +1655,62 @@ int WINAPI GetCalendarInfoEx(LPCWSTR locale, CALID calendar, LPCWSTR lpReserved,
  */
 int WINAPI	SetCalendarInfoW(LCID Locale, CALID Calendar, CALTYPE CalType, LPCWSTR lpCalData)
 {
+#ifdef __REACTOS__
+    WCHAR ValueNameBuffer[11];
+    WCHAR DataBuffer[11];
+    UNICODE_STRING ValueName;
+    UNICODE_STRING Data;
+    HANDLE Key;
+    NTSTATUS Status;
+    ULONG Value = 0;
+    SIZE_T i;
+
+    if ((CalType & ~CAL_USE_CP_ACP) != CAL_ITWODIGITYEARMAX)
+    {
+        SetLastError(ERROR_INVALID_FLAGS);
+        return 0;
+    }
+
+    if (!lpCalData || !lpCalData[0] ||
+        !GetCalendarInfoW(Locale, Calendar, CAL_ITWODIGITYEARMAX, NULL, 0, NULL))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    for (i = 0; lpCalData[i]; i++)
+    {
+        if (lpCalData[i] < L'0' || lpCalData[i] > L'9' ||
+            Value > (MAXULONG - (ULONG)(lpCalData[i] - L'0')) / 10)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+        Value = Value * 10 + (ULONG)(lpCalData[i] - L'0');
+    }
+
+    RtlInitEmptyUnicodeString(&ValueName, ValueNameBuffer, sizeof(ValueNameBuffer));
+    RtlInitEmptyUnicodeString(&Data, DataBuffer, sizeof(DataBuffer));
+    Status = RtlIntegerToUnicodeString(Calendar, 10, &ValueName);
+    if (NT_SUCCESS(Status))
+        Status = RtlIntegerToUnicodeString(Value, 10, &Data);
+    if (NT_SUCCESS(Status))
+        Status = NLS_CreateTwoDigitYearMaxKey(&Key);
+    if (NT_SUCCESS(Status))
+    {
+        Status = NtSetValueKey(Key, &ValueName, 0, REG_SZ, DataBuffer, Data.Length + sizeof(WCHAR));
+        NtClose(Key);
+    }
+    if (!NT_SUCCESS(Status))
+    {
+        SetLastError(ERROR_INTERNAL_ERROR);
+        return 0;
+    }
+
+    return TRUE;
+#else
     FIXME("(%08x,%08x,%08x,%s): stub\n",
 	  Locale, Calendar, CalType, debugstr_w(lpCalData));
     return 0;
+#endif
 }

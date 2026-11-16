@@ -15,9 +15,7 @@
 #define NDEBUG
 #include <debug.h>
 
-#if DBG
 DEBUG_CHANNEL(kernel32file);
-#endif
 
 /* FUNCTIONS ****************************************************************/
 
@@ -36,7 +34,7 @@ CopyLoop (
     NTSTATUS errCode;
     IO_STATUS_BLOCK IoStatusBlock;
     UCHAR *lpBuffer = NULL;
-    SIZE_T RegionSize = 0x10000;
+    SIZE_T RegionSize = 0x40000;
     LARGE_INTEGER BytesCopied;
     DWORD CallbackReason;
     DWORD ProgressResult;
@@ -198,6 +196,48 @@ SetLastWriteTime(
     return errCode;
 }
 
+static BOOL
+BasepIsSameDestination(
+    HANDLE FileHandleSource,
+    LPCWSTR lpNewFileName)
+{
+    FILE_INTERNAL_INFORMATION SourceId, DestId;
+    ULONG SourceVolumeBuffer[(sizeof(FILE_FS_VOLUME_INFORMATION) + MAX_PATH * sizeof(WCHAR)) / sizeof(ULONG)];
+    ULONG DestVolumeBuffer[(sizeof(FILE_FS_VOLUME_INFORMATION) + MAX_PATH * sizeof(WCHAR)) / sizeof(ULONG)];
+    PFILE_FS_VOLUME_INFORMATION SourceVolume = (PFILE_FS_VOLUME_INFORMATION)SourceVolumeBuffer;
+    PFILE_FS_VOLUME_INFORMATION DestVolume = (PFILE_FS_VOLUME_INFORMATION)DestVolumeBuffer;
+    IO_STATUS_BLOCK IoStatusBlock;
+    HANDLE FileHandleDest;
+    BOOL SameFile = FALSE;
+
+    FileHandleDest = CreateFileW(lpNewFileName,
+                                 0,
+                                 FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                 NULL,
+                                 OPEN_EXISTING,
+                                 0,
+                                 NULL);
+    if (FileHandleDest == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    if (NT_SUCCESS(NtQueryInformationFile(FileHandleSource, &IoStatusBlock, &SourceId,
+                                          sizeof(SourceId), FileInternalInformation)) &&
+        NT_SUCCESS(NtQueryInformationFile(FileHandleDest, &IoStatusBlock, &DestId,
+                                          sizeof(DestId), FileInternalInformation)) &&
+        SourceId.IndexNumber.QuadPart == DestId.IndexNumber.QuadPart &&
+        NT_SUCCESS(NtQueryVolumeInformationFile(FileHandleSource, &IoStatusBlock, SourceVolume,
+                                                sizeof(SourceVolumeBuffer), FileFsVolumeInformation)) &&
+        NT_SUCCESS(NtQueryVolumeInformationFile(FileHandleDest, &IoStatusBlock, DestVolume,
+                                                sizeof(DestVolumeBuffer), FileFsVolumeInformation)) &&
+        SourceVolume->VolumeSerialNumber == DestVolume->VolumeSerialNumber)
+    {
+        SameFile = TRUE;
+    }
+
+    NtClose(FileHandleDest);
+    return SameFile;
+}
+
 BOOL
 BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
                  IN LPCWSTR lpNewFileName,
@@ -216,14 +256,16 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
     FILE_BASIC_INFORMATION FileBasic;
     BOOL RC = FALSE;
     BOOL KeepDestOnError = FALSE;
+    BOOL NoDeleteAccess = FALSE;
     DWORD SystemError;
 
     FileHandleSource = CreateFileW(lpExistingFileName,
                                    GENERIC_READ,
-                                   FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                   FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                                    NULL,
                                    OPEN_EXISTING,
-                                   FILE_ATTRIBUTE_NORMAL|FILE_FLAG_NO_BUFFERING,
+                                   FILE_ATTRIBUTE_NORMAL |
+                                   ((dwCopyFlags & COPY_FILE_NO_BUFFERING) ? FILE_FLAG_NO_BUFFERING : 0),
                                    NULL);
     if (INVALID_HANDLE_VALUE != FileHandleSource)
     {
@@ -248,15 +290,31 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
                 TRACE("Status 0x%08x obtaining FileBasicInformation for source\n", errCode);
                 BaseSetLastNTError(errCode);
             }
+            else if (!(dwCopyFlags & COPY_FILE_FAIL_IF_EXISTS) &&
+                     BasepIsSameDestination(FileHandleSource, lpNewFileName))
+            {
+                SetLastError(ERROR_SHARING_VIOLATION);
+            }
             else
             {
                 FileHandleDest = CreateFileW(lpNewFileName,
-                                             GENERIC_WRITE,
-                                             FILE_SHARE_WRITE,
+                                             GENERIC_WRITE | DELETE,
+                                             FILE_SHARE_READ | FILE_SHARE_WRITE,
                                              NULL,
                                              (dwCopyFlags & COPY_FILE_FAIL_IF_EXISTS) ? CREATE_NEW : CREATE_ALWAYS,
                                              FileBasic.FileAttributes,
                                              NULL);
+                if (INVALID_HANDLE_VALUE == FileHandleDest && GetLastError() == ERROR_SHARING_VIOLATION)
+                {
+                    NoDeleteAccess = TRUE;
+                    FileHandleDest = CreateFileW(lpNewFileName,
+                                                 GENERIC_WRITE,
+                                                 FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                                 NULL,
+                                                 (dwCopyFlags & COPY_FILE_FAIL_IF_EXISTS) ? CREATE_NEW : CREATE_ALWAYS,
+                                                 FileBasic.FileAttributes,
+                                                 NULL);
+                }
                 if (INVALID_HANDLE_VALUE != FileHandleDest)
                 {
                     if (!(dwCopyFlags & COPY_FILE_FAIL_IF_EXISTS) && GetLastError() == ERROR_ALREADY_EXISTS)
@@ -288,7 +346,7 @@ BasepCopyFileExW(IN LPCWSTR lpExistingFileName,
                         }
                     }
                     NtClose(FileHandleDest);
-                    if (! RC && ! KeepDestOnError)
+                    if (! RC && ! KeepDestOnError && ! NoDeleteAccess)
                     {
                         SystemError = GetLastError();
                         SetFileAttributesW(lpNewFileName, FILE_ATTRIBUTE_NORMAL);
@@ -324,7 +382,7 @@ CopyFileExW(IN LPCWSTR lpExistingFileName,
             IN LPBOOL pbCancel OPTIONAL,
             IN DWORD dwCopyFlags)
 {
-    BOOL Ret;
+    BOOL Ret = FALSE;
     HANDLE ExistingHandle, NewHandle;
 
     ExistingHandle = INVALID_HANDLE_VALUE;
@@ -389,7 +447,7 @@ PrivCopyFileExW(IN LPCWSTR lpExistingFileName,
                 IN LPBOOL pbCancel,
                 IN DWORD dwCopyFlags)
 {
-    BOOL Ret;
+    BOOL Ret = FALSE;
     HANDLE ExistingHandle, NewHandle;
 
     ExistingHandle = INVALID_HANDLE_VALUE;

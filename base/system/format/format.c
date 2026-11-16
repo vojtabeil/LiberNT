@@ -66,12 +66,17 @@ BOOL    QuickFormat = FALSE;
 DWORD   ClusterSize = 0;
 BOOL    CompressDrive = FALSE;
 BOOL    GotALabel = FALSE;
+BOOL    ForceDismount = FALSE;
+BOOL    NoPrompt = FALSE;
 PWCHAR  Label = L"";
 PWCHAR  Drive = NULL;
 PWCHAR  FileSystem = L"FAT";
 
 WCHAR   RootDirectory[MAX_PATH];
 WCHAR   LabelString[12];
+
+static BOOL ReadInputLine(PWSTR Buffer, INT Count);
+static BOOLEAN ConfirmForceDismount(VOID);
 
 #ifndef FMIFS_IMPORT_DLL
 //
@@ -189,6 +194,14 @@ static int ParseCommandLine(int argc, WCHAR *argv[])
                     CompressDrive = TRUE;
                     gotCompressed = TRUE;
                 }
+                else if (!_wcsicmp(&argv[i][1], L"X"))
+                {
+                    ForceDismount = TRUE;
+                }
+                else if (!_wcsicmp(&argv[i][1], L"Y"))
+                {
+                    NoPrompt = TRUE;
+                }
                 else
                 {
                     return i;
@@ -250,6 +263,9 @@ FormatExCallback(
             }
             break;
 
+        case VOLUMEINUSE:
+            return ConfirmForceDismount();
+
         case DONEWITHSTRUCTURE:
         case UNKNOWN2:
         case UNKNOWN3:
@@ -257,7 +273,6 @@ FormatExCallback(
         case UNKNOWN5:
         case INSUFFICIENTRIGHTS:
         case FSNOTSUPPORTED:
-        case VOLUMEINUSE:
         case UNKNOWN9:
         case UNKNOWNA:
         case UNKNOWNC:
@@ -317,6 +332,45 @@ static BOOLEAN LoadFMIFSEntryPoints(VOID)
 // Tell the user how to use the program
 //
 //----------------------------------------------------------------------
+static BOOLEAN ConfirmForceDismount(VOID)
+{
+    WCHAR input[16];
+    PCWSTR pszMsg;
+    INT Len;
+
+    if (ForceDismount || NoPrompt)
+        return TRUE;
+
+    ConResPuts(StdOut, STRING_FORCE_DISMOUNT);
+    Len = LoadStringW(NULL, STRING_YES_NO_FAQ, (PWSTR)&pszMsg, 0);
+    if (Len < 2) pszMsg = L"YN";
+    while (ReadInputLine(input, ARRAYSIZE(input)))
+    {
+        if (towupper(input[0]) == pszMsg[0])
+            return TRUE;
+        if (towupper(input[0]) == pszMsg[1])
+            return FALSE;
+    }
+    return FALSE;
+}
+
+static BOOL ReadInputLine(PWSTR Buffer, INT Count)
+{
+    SIZE_T Length;
+
+    if (!fgetws(Buffer, Count, stdin))
+    {
+        Buffer[0] = UNICODE_NULL;
+        return FALSE;
+    }
+
+    Length = wcslen(Buffer);
+    while (Length > 0 && (Buffer[Length - 1] == L'\n' || Buffer[Length - 1] == L'\r'))
+        Buffer[--Length] = UNICODE_NULL;
+
+    return TRUE;
+}
+
 static VOID Usage(LPWSTR ProgramName)
 {
     WCHAR szFormats[MAX_PATH];
@@ -368,12 +422,6 @@ int wmain(int argc, WCHAR *argv[])
 
     /* Initialize the Console Standard Streams */
     ConInitStdStreams();
-
-    ConPuts(StdOut,
-        L"\n"
-        L"Formatx v1.0 by Mark Russinovich\n"
-        L"Systems Internals - http://www.sysinternals.com\n"
-        L"ReactOS adaptation 1999 by Emanuele Aliberti\n\n");
 
 #ifndef FMIFS_IMPORT_DLL
     //
@@ -512,16 +560,12 @@ int wmain(int argc, WCHAR *argv[])
     {
         if (volumeName[0])
         {
-            while (TRUE)
+            ConResPrintf(StdOut, STRING_LABEL_NAME_EDIT, RootDirectory[0]);
+            ReadInputLine(input, ARRAYSIZE(input));
+            if (_wcsicmp(input, volumeName))
             {
-                ConResPrintf(StdOut, STRING_LABEL_NAME_EDIT, RootDirectory[0]);
-                fgetws(input, ARRAYSIZE(input), stdin);
-                input[wcslen(input) - 1] = UNICODE_NULL;
-
-                if (!_wcsicmp(input, volumeName))
-                    break;
-
                 ConResPuts(StdOut, STRING_ERROR_LABEL);
+                return -1;
             }
         }
 
@@ -531,7 +575,11 @@ int wmain(int argc, WCHAR *argv[])
         if (Len < 2) pszMsg = L"YN";
         while (TRUE)
         {
-            fgetws(input, ARRAYSIZE(input), stdin);
+            if (!ReadInputLine(input, ARRAYSIZE(input)))
+            {
+                ConPuts(StdOut, L"\n");
+                return 0;
+            }
             if (towupper(input[0]) == pszMsg[0])
                 break;
             if (towupper(input[0]) == pszMsg[1])
@@ -596,11 +644,10 @@ int wmain(int argc, WCHAR *argv[])
     //
     // Get the label if we don't have it
     //
-    if (!GotALabel)
+    if (!GotALabel && !NoPrompt)
     {
         ConResPuts(StdOut, STRING_ENTER_LABEL);
-        fgetws(input, ARRAYSIZE(LabelString), stdin);
-        input[wcslen(input) - 1] = UNICODE_NULL;
+        ReadInputLine(input, ARRAYSIZE(input));
 
         if (!SetVolumeLabelW(RootDirectory, input))
         {

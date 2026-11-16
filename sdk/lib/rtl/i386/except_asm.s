@@ -83,6 +83,8 @@ _RtlpCaptureContext@4:
     mov dword ptr [ebx+CONTEXT_EDI], 0
 
 CaptureRest:
+    mov dword ptr [ebx+CONTEXT_FLAGS], CONTEXT_FULL
+
     /* Capture the segment registers */
     mov [ebx+CONTEXT_SEGCS], cs
     mov [ebx+CONTEXT_SEGDS], ds
@@ -172,10 +174,10 @@ _RtlpExecuteHandler2@20:
     push edx
 
     /* Push the exception list */
-    push [fs:TEB_EXCEPTION_LIST]
+    push fs:[TEB_EXCEPTION_LIST]
 
     /* Link us to it */
-    mov [fs:TEB_EXCEPTION_LIST], esp
+    mov fs:[TEB_EXCEPTION_LIST], esp
 
     /* Call the handler */
     push [ebp+20]
@@ -186,10 +188,10 @@ _RtlpExecuteHandler2@20:
     call ecx
 
     /* Unlink us */
-    mov esp, [fs:TEB_EXCEPTION_LIST]
+    mov esp, fs:[TEB_EXCEPTION_LIST]
 
     /* Restore it */
-    pop [fs:TEB_EXCEPTION_LIST]
+    pop fs:[TEB_EXCEPTION_LIST]
 
     /* Undo stack frame and return */
     mov esp, ebp
@@ -284,6 +286,13 @@ _RtlRaiseException@4:
     call _RtlpCheckForActiveDebugger@0
     test al, al
     jnz DebuggerActive1
+
+    /* A dispatched breakpoint reports the address of the breakpoint */
+    mov eax, [ebp+8]
+    cmp dword ptr [eax+EXCEPTION_RECORD_EXCEPTION_CODE], HEX(80000003)
+    jne NotBreakpoint
+    dec dword ptr [esp+CONTEXT_EIP]
+NotBreakpoint:
 
     /* Dispatch the exception */
     push esp

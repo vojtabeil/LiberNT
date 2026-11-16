@@ -1951,7 +1951,7 @@ Return Value:
             WDFREQUEST_FXREQUEST(Request)->SetImpersonationFlags(Options->Flags);
 
             *PGLOBALS_ACTION(&DriverGlobals) = SubmitSyncCallCompletion;
-            (void) WDFIOTARGET_FXIOTARGET(Target)->SubmitSync(
+            (void)!WDFIOTARGET_FXIOTARGET(Target)->SubmitSync(
                 WDFREQUEST_FXREQUEST(Request),
                 Options,
                 PGLOBALS_ACTION(&DriverGlobals)
@@ -2475,7 +2475,7 @@ WDFEXPORT(WdfRequestGetParameters)(
 
 
 
-    (VOID) pRequest->GetParameters(Parameters);
+    (VOID)!pRequest->GetParameters(Parameters);
 
     return;
 }
@@ -3802,6 +3802,24 @@ Returns:
                                    &pFxDriverGlobals);
 
     return pRequest->IsReserved();
+}
+
+__drv_maxIRQL(DISPATCH_LEVEL)
+ULONG
+NTAPI
+WDFEXPORT(WdfRequestGetRequestorProcessId)(
+    _In_ PWDF_DRIVER_GLOBALS DriverGlobals,
+    _In_ WDFREQUEST Request
+    )
+{
+    FxRequest* pRequest;
+
+    FxObjectHandleGetPtr(GetFxDriverGlobals(DriverGlobals),
+                         Request,
+                         FX_TYPE_REQUEST,
+                         (PVOID*)&pRequest);
+
+    return pRequest->GetRequestorProcessId();
 }
 
 

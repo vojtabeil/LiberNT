@@ -297,11 +297,11 @@ MountMgrCheckUnprocessedVolumes(IN PDEVICE_EXTENSION DeviceExtension,
     /* No offline volumes, nothing more to do */
     if (IsListEmpty(&(DeviceExtension->OfflineDeviceListHead)))
     {
-        KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+        MmpReleaseDeviceLock(DeviceExtension);
         return STATUS_SUCCESS;
     }
 
-    KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+    MmpReleaseDeviceLock(DeviceExtension);
 
     /* Reactivate all the offline volumes */
     while (!IsListEmpty(&(DeviceExtension->OfflineDeviceListHead)))
@@ -440,7 +440,7 @@ MountMgrNextDriveLetterWorker(IN PDEVICE_EXTENSION DeviceExtension,
     UCHAR DriveLetter;
     PLIST_ENTRY NextEntry;
     PMOUNTDEV_UNIQUE_ID UniqueId;
-    BOOLEAN Removable, GptDriveLetter;
+    BOOLEAN Removable, DriveLetterAllowed;
     PDEVICE_INFORMATION DeviceInformation;
     WCHAR NameBuffer[DRIVE_LETTER_LENGTH];
     PSYMLINK_INFORMATION SymlinkInformation;
@@ -454,7 +454,7 @@ MountMgrNextDriveLetterWorker(IN PDEVICE_EXTENSION DeviceExtension,
     }
 
     /* Then, get information about the device */
-    Status = QueryDeviceInformation(DeviceName, &TargetDeviceName, NULL, &Removable, &GptDriveLetter, NULL, NULL, NULL);
+    Status = QueryDeviceInformation(DeviceName, &TargetDeviceName, NULL, &Removable, &DriveLetterAllowed, NULL, NULL, NULL);
     if (!NT_SUCCESS(Status))
     {
         return Status;
@@ -502,10 +502,10 @@ MountMgrNextDriveLetterWorker(IN PDEVICE_EXTENSION DeviceExtension,
     }
 
     /* If we didn't find a drive letter online, ensure this is not
-     * a no-drive entry by querying GPT attributes & database */
+     * a no-drive entry according to partition policy or the database */
     if (NextEntry == &(DeviceInformation->SymbolicLinksListHead))
     {
-        if (!GptDriveLetter || HasNoDriveLetterEntry(DeviceInformation->UniqueId))
+        if (!DriveLetterAllowed || HasNoDriveLetterEntry(DeviceInformation->UniqueId))
         {
             DriveLetterInfo->DriveLetterWasAssigned = FALSE;
             DriveLetterInfo->CurrentDriveLetter = 0;
@@ -513,9 +513,7 @@ MountMgrNextDriveLetterWorker(IN PDEVICE_EXTENSION DeviceExtension,
         }
     }
 
-    /* If automount is disabled, and the device is not removable
-     * but needs a drive letter, don't assign one and bail out */
-    if (DeviceExtension->NoAutoMount && !Removable)
+    if (!MountMgrAutoMountAllowed(DeviceExtension, Removable))
     {
         if (DriveLetterInfo->DriveLetterWasAssigned)
         {
@@ -584,6 +582,10 @@ MountMgrNextDriveLetterWorker(IN PDEVICE_EXTENSION DeviceExtension,
          DriveLetterInfo->CurrentDriveLetter++)
     {
         NameBuffer[LETTER_POSITION] = DriveLetterInfo->CurrentDriveLetter;
+        if (IsDriveLetterReserved(&SymbolicName, DeviceInformation->UniqueId))
+        {
+            continue;
+        }
 
         Status = MountMgrCreatePointWorker(DeviceExtension, &SymbolicName, &TargetDeviceName);
         if (NT_SUCCESS(Status))
@@ -1112,15 +1114,16 @@ MountMgrValidateBackPointer(IN PASSOCIATED_DEVICE_ENTRY AssociatedDeviceEntry,
     }
 
     /* Create a string with the substitute name */
-    SubstituteName.Length = ReparseData->SymbolicLinkReparseBuffer.SubstituteNameLength;
+    SubstituteName.Length = ReparseData->MountPointReparseBuffer.SubstituteNameLength;
     SubstituteName.MaximumLength = SubstituteName.Length;
-    SubstituteName.Buffer = (PWSTR)((ULONG_PTR)ReparseData->SymbolicLinkReparseBuffer.PathBuffer + ReparseData->SymbolicLinkReparseBuffer.SubstituteNameOffset);
+    SubstituteName.Buffer = (PWSTR)((ULONG_PTR)ReparseData->MountPointReparseBuffer.PathBuffer + ReparseData->MountPointReparseBuffer.SubstituteNameOffset);
 
     /* If that's a volume name that matches our associated device, that's a success! */
     if (MOUNTMGR_IS_VOLUME_NAME(&SubstituteName))
     {
         if (SubstituteName.Length == 98 && SubstituteName.Buffer[1] == L'?')
         {
+            SubstituteName.Length -= sizeof(WCHAR);
             for (SymlinksEntry = DeviceInformation->SymbolicLinksListHead.Flink;
                  SymlinksEntry != &(DeviceInformation->SymbolicLinksListHead);
                  SymlinksEntry = SymlinksEntry->Flink)
@@ -1337,7 +1340,7 @@ MountMgrQueryVolumePaths(IN PDEVICE_EXTENSION DeviceExtension,
         /* Move the next pointer to use in the array */
         ++CurrentPath;
         /* Multiply String.Length by the number of found paths, we always add it after a path */
-        OutputPathLength += (*CurrentPath)->MultiSzLength + InnerStrings * AssociatedDeviceEntry->String.Length - sizeof(UNICODE_NULL);
+        OutputPathLength += CurrentPath[-1]->MultiSzLength + InnerStrings * AssociatedDeviceEntry->String.Length - sizeof(UNICODE_NULL);
     }
 
     /* Allocate the output buffer */
@@ -1421,6 +1424,7 @@ MountMgrQueryVolumePaths(IN PDEVICE_EXTENSION DeviceExtension,
 
     /* MultiSz: don't forget last null char */
     (*VolumePaths)->MultiSz[Written] = UNICODE_NULL;
+    (*VolumePaths)->MultiSzLength = (Written + 1) * sizeof(WCHAR);
     /* Cleanup everything and return success! */
     if (Paths != NULL)
     {
@@ -1519,9 +1523,9 @@ MountMgrQueryDosVolumePaths(IN PDEVICE_EXTENSION DeviceExtension,
         /* Reconcile database */
         ReconcileContext.DeviceExtension = DeviceExtension;
         ReconcileContext.DeviceInformation = FailedDevice;
-        KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+        MmpReleaseDeviceLock(DeviceExtension);
         ReconcileThisDatabaseWithMasterWorker(&ReconcileContext);
-        KeWaitForSingleObject(&DeviceExtension->DeviceLock, Executive, KernelMode, FALSE, NULL);
+        MmpAcquireDeviceLock(DeviceExtension);
 
         /* Look for our device, to check it's online */
         for (Entry = DeviceExtension->DeviceListHead.Flink;
@@ -2020,8 +2024,10 @@ MountMgrVolumeMountPointChanged(IN PDEVICE_EXTENSION DeviceExtension,
 
     VolumeMountPoint = (PMOUNTMGR_VOLUME_MOUNT_POINT)Irp->AssociatedIrp.SystemBuffer;
 
-    if (((ULONG)VolumeMountPoint->SourceVolumeNameLength + VolumeMountPoint->TargetVolumeNameLength) <
-        Stack->Parameters.DeviceIoControl.InputBufferLength)
+    if ((ULONG)VolumeMountPoint->SourceVolumeNameOffset + VolumeMountPoint->SourceVolumeNameLength >
+            Stack->Parameters.DeviceIoControl.InputBufferLength ||
+        (ULONG)VolumeMountPoint->TargetVolumeNameOffset + VolumeMountPoint->TargetVolumeNameLength >
+            Stack->Parameters.DeviceIoControl.InputBufferLength)
     {
         return STATUS_INVALID_PARAMETER;
     }
@@ -2210,6 +2216,8 @@ Cleanup:
         ObDereferenceObject(FileObject);
     }
 
+    ZwClose(Handle);
+
     return Status;
 }
 
@@ -2295,6 +2303,10 @@ MountMgrVolumeMountPointCreated(IN PDEVICE_EXTENSION DeviceExtension,
             FreePool(SourceSymbolicName.Buffer);
             return Status;
         }
+    }
+    else
+    {
+        FreePool(LinkTarget.Buffer);
     }
 
     FreePool(SourceDeviceName.Buffer);
@@ -2535,6 +2547,10 @@ MountMgrVolumeMountPointDeleted(IN PDEVICE_EXTENSION DeviceExtension,
             return Status;
         }
     }
+    else
+    {
+        FreePool(LinkTarget.Buffer);
+    }
 
     FreePool(SourceDeviceName.Buffer);
 
@@ -2679,7 +2695,7 @@ MountMgrDeviceControl(IN PDEVICE_OBJECT DeviceObject,
     Stack = IoGetCurrentIrpStackLocation(Irp);
     DeviceExtension = DeviceObject->DeviceExtension;
 
-    KeWaitForSingleObject(&(DeviceExtension->DeviceLock), Executive, KernelMode, FALSE, NULL);
+    MmpAcquireDeviceLock(DeviceExtension);
 
     switch (Stack->Parameters.DeviceIoControl.IoControlCode)
     {
@@ -2713,10 +2729,10 @@ MountMgrDeviceControl(IN PDEVICE_OBJECT DeviceObject,
             break;
 
         case IOCTL_MOUNTMGR_VOLUME_MOUNT_POINT_CREATED:
-            KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+            MmpReleaseDeviceLock(DeviceExtension);
 
             LockStatus = WaitForRemoteDatabaseSemaphore(DeviceExtension);
-            KeWaitForSingleObject(&(DeviceExtension->DeviceLock), Executive, KernelMode, FALSE, NULL);
+            MmpAcquireDeviceLock(DeviceExtension);
             Status = MountMgrVolumeMountPointCreated(DeviceExtension, Irp, LockStatus);
             if (NT_SUCCESS(LockStatus))
             {
@@ -2726,10 +2742,10 @@ MountMgrDeviceControl(IN PDEVICE_OBJECT DeviceObject,
             break;
 
         case IOCTL_MOUNTMGR_VOLUME_MOUNT_POINT_DELETED:
-            KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+            MmpReleaseDeviceLock(DeviceExtension);
 
             LockStatus = WaitForRemoteDatabaseSemaphore(DeviceExtension);
-            KeWaitForSingleObject(&(DeviceExtension->DeviceLock), Executive, KernelMode, FALSE, NULL);
+            MmpAcquireDeviceLock(DeviceExtension);
             Status = MountMgrVolumeMountPointDeleted(DeviceExtension, Irp, LockStatus);
             if (NT_SUCCESS(LockStatus))
             {
@@ -2751,7 +2767,7 @@ MountMgrDeviceControl(IN PDEVICE_OBJECT DeviceObject,
             goto Complete;
 
         case IOCTL_MOUNTMGR_VOLUME_ARRIVAL_NOTIFICATION:
-            KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+            MmpReleaseDeviceLock(DeviceExtension);
             Status = MountMgrVolumeArrivalNotification(DeviceExtension, Irp);
             goto Complete;
 
@@ -2779,7 +2795,7 @@ MountMgrDeviceControl(IN PDEVICE_OBJECT DeviceObject,
             Status = STATUS_INVALID_DEVICE_REQUEST;
     }
 
-    KeReleaseSemaphore(&(DeviceExtension->DeviceLock), IO_NO_INCREMENT, 1, FALSE);
+    MmpReleaseDeviceLock(DeviceExtension);
 
     if (Status != STATUS_PENDING)
     {

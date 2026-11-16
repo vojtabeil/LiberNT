@@ -19,13 +19,8 @@
 
 /* GLOBALS ******************************************************************/
 
-static VOID CALLBACK ServiceMain(DWORD, LPWSTR*);
 static WCHAR ServiceName[] = L"EventLog";
-static SERVICE_TABLE_ENTRYW ServiceTable[2] =
-{
-    { ServiceName, ServiceMain },
-    { NULL, NULL }
-};
+static DWORD LoadLogs(VOID);
 
 SERVICE_STATUS ServiceStatus;
 SERVICE_STATUS_HANDLE ServiceStatusHandle;
@@ -39,9 +34,10 @@ PEVENTSOURCE EventLogSource = NULL;
 static VOID
 UpdateServiceStatus(DWORD dwState)
 {
-    ServiceStatus.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+    ServiceStatus.dwServiceType = SERVICE_WIN32_SHARE_PROCESS;
     ServiceStatus.dwCurrentState = dwState;
-    ServiceStatus.dwControlsAccepted = 0;
+    ServiceStatus.dwControlsAccepted = (dwState == SERVICE_RUNNING) ?
+                                       (SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN) : 0;
     ServiceStatus.dwWin32ExitCode = 0;
     ServiceStatus.dwServiceSpecificExitCode = 0;
     ServiceStatus.dwCheckPoint = 0;
@@ -77,6 +73,7 @@ ServiceControlHandler(DWORD dwControl,
 
             /* Stop listening to incoming RPC messages */
             RpcMgmtStopServerListening(NULL);
+            LogfCloseAll();
             UpdateServiceStatus(SERVICE_STOPPED);
             return ERROR_SUCCESS;
 
@@ -103,6 +100,8 @@ ServiceControlHandler(DWORD dwControl,
                             0,
                             EVENT_EventlogStopped, 0, NULL, 0, NULL);
 
+            RpcMgmtStopServerListening(NULL);
+            LogfCloseAll();
             UpdateServiceStatus(SERVICE_STOPPED);
             return ERROR_SUCCESS;
 
@@ -228,11 +227,16 @@ ReportProductInfoEvent(VOID)
 }
 
 
-static VOID CALLBACK
+VOID WINAPI
 ServiceMain(DWORD argc,
             LPWSTR* argv)
 {
     DWORD dwError;
+    struct
+    {
+        SYSTEMTIME Time;
+        ULONG Reserved[2];
+    } StartData;
 
     UNREFERENCED_PARAMETER(argc);
     UNREFERENCED_PARAMETER(argv);
@@ -251,6 +255,16 @@ ServiceMain(DWORD argc,
 
     UpdateServiceStatus(SERVICE_START_PENDING);
 
+    dwError = LoadLogs();
+    if (dwError != ERROR_SUCCESS)
+    {
+        LogfCloseAll();
+        UpdateServiceStatus(SERVICE_STOPPED);
+        ServiceStatus.dwWin32ExitCode = dwError;
+        SetServiceStatus(ServiceStatusHandle, &ServiceStatus);
+        return;
+    }
+
     dwError = ServiceInit();
     if (dwError != ERROR_SUCCESS)
     {
@@ -264,13 +278,15 @@ ServiceMain(DWORD argc,
 
         ReportProductInfoEvent();
 
+        RtlZeroMemory(&StartData, sizeof(StartData));
+        GetSystemTime(&StartData.Time);
         LogfReportEvent(EVENTLOG_INFORMATION_TYPE,
                         0,
                         EVENT_EventlogStarted,
                         0,
                         NULL,
-                        0,
-                        NULL);
+                        sizeof(StartData),
+                        &StartData);
     }
 
     DPRINT("ServiceMain() done\n");
@@ -494,9 +510,9 @@ LoadLogFiles(HKEY eventlogKey)
 }
 
 
-int wmain(int argc, WCHAR* argv[])
+static DWORD
+LoadLogs(VOID)
 {
-    INT RetCode = 0;
     LONG Result;
     HKEY elogKey;
     WCHAR LogPath[MAX_PATH];
@@ -521,8 +537,7 @@ int wmain(int argc, WCHAR* argv[])
         if (Result != ERROR_SUCCESS)
         {
             DPRINT1("Fatal error: cannot open eventlog registry key.\n");
-            RetCode = 1;
-            goto bye_bye;
+            return Result;
         }
 
         LoadLogFiles(elogKey);
@@ -534,12 +549,7 @@ int wmain(int argc, WCHAR* argv[])
         DPRINT1("The 'EventLog' source is unavailable. The EventLog service will not be able to log its own events.\n");
     }
 
-    StartServiceCtrlDispatcher(ServiceTable);
-
-bye_bye:
-    LogfCloseAll();
-
-    return RetCode;
+    return ERROR_SUCCESS;
 }
 
 VOID PRINT_RECORD(PEVENTLOGRECORD pRec)

@@ -9,6 +9,7 @@
 
 #include <winioctl.h>
 #include <mountdev.h>
+#include <ntddscsi.h>
 
 WCHAR Letter;
 HANDLE Device;
@@ -134,7 +135,7 @@ QueryDeviceName(VOID)
     ok_type(Ret == 0, "DeviceIoControl succeed\n");
     Error = GetLastError();
     ok_type(Error == ERROR_MORE_DATA, "Expecting ERROR_MORE_DATA, got %ld\n", Error);
-    ok_type(Size == sizeof(MOUNTDEV_NAME), "Invalid output size: %ld\n", Size);
+    ok_type(Size == (DriveType == DRIVE_FIXED ? FIELD_OFFSET(MOUNTDEV_NAME, Name) : sizeof(MOUNTDEV_NAME)), "Invalid output size: %ld\n", Size);
 
     AllocatedMDN = HeapAlloc(GetProcessHeap(), 0, FIELD_OFFSET(MOUNTDEV_NAME, Name) + MDN.NameLength + sizeof(UNICODE_NULL));
     if (AllocatedMDN == NULL)
@@ -164,7 +165,7 @@ QueryDeviceName(VOID)
             IsValid = (AllocatedMDN->Name[12] == Letter && AllocatedMDN->Name[13] == L':');
         }
 
-        ok_type(IsValid, "Invalid name: %.*S\n", AllocatedMDN->NameLength, AllocatedMDN->Name);
+        ok_type(IsValid, "Invalid name: %.*ls\n", (int)(AllocatedMDN->NameLength / sizeof(WCHAR)), AllocatedMDN->Name);
     }
     else
     {
@@ -200,7 +201,7 @@ QueryUniqueId(VOID)
     ok_type(Ret == 0, "DeviceIoControl succeed\n");
     Error = GetLastError();
     ok_type(Error == ERROR_MORE_DATA, "Expecting ERROR_MORE_DATA, got %ld\n", Error);
-    ok_type(Size == sizeof(MOUNTDEV_UNIQUE_ID), "Invalid output size: %ld\n", Size);
+    ok_type(Size == (DriveType == DRIVE_FIXED ? FIELD_OFFSET(MOUNTDEV_UNIQUE_ID, UniqueId) : sizeof(MOUNTDEV_UNIQUE_ID)), "Invalid output size: %ld\n", Size);
 
     AllocatedMUI = HeapAlloc(GetProcessHeap(), 0, FIELD_OFFSET(MOUNTDEV_UNIQUE_ID, UniqueId) + MUI.UniqueIdLength + sizeof(UNICODE_NULL));
     if (AllocatedMUI == NULL)
@@ -254,6 +255,57 @@ QuerySuggestedLinkName(VOID)
     ok_type(Size == 0, "Invalid output size: %ld\n", Size);
 }
 
+typedef struct _TEST_SPTD
+{
+    SCSI_PASS_THROUGH_DIRECT Sptd;
+    UCHAR Sense[32];
+} TEST_SPTD;
+
+static BOOL ScsiInquiry(HANDLE Disk, PVOID Data)
+{
+    TEST_SPTD Request;
+    DWORD Returned;
+
+    ZeroMemory(&Request, sizeof(Request));
+    Request.Sptd.Length = sizeof(Request.Sptd);
+    Request.Sptd.CdbLength = 6;
+    Request.Sptd.SenseInfoLength = sizeof(Request.Sense);
+    Request.Sptd.DataIn = SCSI_IOCTL_DATA_IN;
+    Request.Sptd.DataTransferLength = 36;
+    Request.Sptd.TimeOutValue = 5;
+    Request.Sptd.DataBuffer = Data;
+    Request.Sptd.SenseInfoOffset = FIELD_OFFSET(TEST_SPTD, Sense);
+    Request.Sptd.Cdb[0] = 0x12;
+    Request.Sptd.Cdb[4] = 36;
+    return DeviceIoControl(Disk, IOCTL_SCSI_PASS_THROUGH_DIRECT, &Request, sizeof(Request),
+                           &Request, sizeof(Request), &Returned, NULL);
+}
+
+static void Test_ScsiPassThroughDirectBadBuffer(void)
+{
+    UCHAR Inquiry[36];
+    PVOID Reserved;
+    HANDLE Disk;
+
+    Disk = CreateFileW(L"\\\\.\\PhysicalDrive0", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                       NULL, OPEN_EXISTING, 0, NULL);
+    if (Disk == INVALID_HANDLE_VALUE)
+    {
+        skip("PhysicalDrive0 is not available: %lu\n", GetLastError());
+        return;
+    }
+
+    Reserved = VirtualAlloc(NULL, 0x10000, MEM_RESERVE, PAGE_READWRITE);
+    ok(Reserved != NULL, "VirtualAlloc failed: %lu\n", GetLastError());
+    if (Reserved)
+    {
+        ok(!ScsiInquiry(Disk, Reserved), "A pass-through with an unreadable buffer succeeded\n");
+        VirtualFree(Reserved, 0, MEM_RELEASE);
+    }
+    ok(ScsiInquiry(Disk, Inquiry), "A pass-through with a valid buffer failed: %lu\n", GetLastError());
+    CloseHandle(Disk);
+}
+
 START_TEST(DeviceIoControl)
 {
     UINT Ret;
@@ -262,6 +314,7 @@ START_TEST(DeviceIoControl)
     BOOL DiskDone, CdRomDone;
 
     Test_DeviceIoControl_Parameters();
+    Test_ScsiPassThroughDirectBadBuffer();
 
     DiskDone = FALSE;
     CdRomDone = FALSE;

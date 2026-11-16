@@ -52,10 +52,12 @@ int kickoff_telnetd(void)
 //  DetectPlatform();
   SetConsoleCtrlHandler(Cleanup, 1);
 
-  if (!StartSocketInterface())
-    ErrorExit("Unable to start socket interface\n");
+  /* Services start before the network stack is ready: keep trying instead of exiting */
+  while (!StartSocketInterface())
+    Sleep(2000);
 
-  CreateSocket();
+  while (!CreateSocket())
+    Sleep(2000);
 
   while(!bShutdown) {
     WaitForConnect();
@@ -99,21 +101,29 @@ static BOOLEAN StartSocketInterface(void)
 }
 
 /* CreateSocket */
-static void CreateSocket(void)
+static BOOLEAN CreateSocket(void)
 {
    struct sockaddr_in sa;
 
    sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-   if (sock < 0)
-     ErrorExit("Cannot create socket");
+   if (sock < 0) {
+     telnetd_printf("Cannot create socket, WSAGetLastError=%d\n", WSAGetLastError());
+     return FALSE;
+   }
 
    memset(&sa, 0, sizeof(sa));
    sa.sin_family = AF_INET;
    sa.sin_addr.s_addr = INADDR_ANY;
    sa.sin_port = htons(TELNET_PORT);
 
-   if (bind(sock, (struct sockaddr*) &sa, sizeof(sa)) != 0)
-      ErrorExit("Cannot bind address to socket");
+   if (bind(sock, (struct sockaddr*) &sa, sizeof(sa)) != 0 ||
+       listen(sock, SOMAXCONN) != 0) {
+     telnetd_printf("Cannot bind or listen, WSAGetLastError=%d\n", WSAGetLastError());
+     closesocket(sock);
+     return FALSE;
+   }
+
+   return TRUE;
 }
 
 /* WaitForConnect */
@@ -121,9 +131,6 @@ static void WaitForConnect(void)
 {
   struct sockaddr_in sa;
   int new_sock;
-
-  if (listen(sock, 1) < 0)
-     ErrorExit("Cannot listen on socket");
 
   if ((new_sock = accept(sock, (struct sockaddr*) &sa, NULL)) < 0) {
     fprintf(stderr, "Failed to accept incoming call\n");
@@ -419,7 +426,7 @@ static void RunShell(client_t *client)
                       NULL,                      // process security attributes 
                       NULL,                      // primary thread security attributes 
                       TRUE,                      // handles are inherited 
-                      DETACHED_PROCESS +         // creation flags 
+                      CREATE_NO_WINDOW |         // hidden console the shell's children inherit 
                       CREATE_NEW_PROCESS_GROUP,
                       NULL,                      // use parent's environment 
                       NULL,                      // use parent's current directory 

@@ -10,7 +10,9 @@ extern "C" {
 /* Built in class atoms */
 #define WC_MENU       (MAKEINTATOM(0x8000))
 #define WC_DESKTOP    (MAKEINTATOM(0x8001))
+#ifndef WC_DIALOG
 #define WC_DIALOG     (MAKEINTATOM(0x8002))
+#endif
 #define WC_SWITCH     (MAKEINTATOM(0x8003))
 #define WC_ICONTITLE  (MAKEINTATOM(0x8004))
 
@@ -63,6 +65,9 @@ extern "C" {
 #define WM_UAHINIT          0x0000031b
 #define WM_CBT              0x000003FF // ReactOS only.
 #define WM_MAXIMUM          0x0001FFFF
+
+#define HSHELL_FULLSCREENENTER 53
+#define HSHELL_FULLSCREENEXIT  54
 
 /* Non SDK DCE types */
 #define DCX_USESTYLE     0x00010000
@@ -399,13 +404,15 @@ typedef struct _USERAPIHOOKINFO
     LPCWSTR m_funname2;
 } USERAPIHOOKINFO,*PUSERAPIHOOKINFO;
 
+#ifndef __WINESRC__
 #if (WINVER == _WIN32_WINNT_WINXP)
 BOOL WINAPI RegisterUserApiHook(HINSTANCE hInstance, USERAPIHOOKPROC CallbackFunc);
 #elif (WINVER == _WIN32_WINNT_WS03)
 BOOL WINAPI RegisterUserApiHook(PUSERAPIHOOKINFO puah);
 #endif
-
 BOOL WINAPI UnregisterUserApiHook(VOID);
+#endif
+BOOL WINAPI UserSetLightColorScheme(BOOL Light);
 
 /* dwType for NtUserQueryInputContext */
 typedef enum _QUERY_INPUT_CONTEXT
@@ -413,7 +420,9 @@ typedef enum _QUERY_INPUT_CONTEXT
     QIC_INPUTPROCESSID = 0,
     QIC_INPUTTHREADID,
     QIC_DEFAULTWINDOWIME,
-    QIC_DEFAULTIMC
+    QIC_DEFAULTIMC,
+    QIC_ROS_IMEWINDOW = 0x10000, /* ReactOS: IME window associated with this context */
+    QIC_ROS_CLIENTIMCDATA /* ReactOS: client data, accessible only within the owning process */
 } QUERY_INPUT_CONTEXT;
 
 /* NtUserSetImeHotKey actions */
@@ -423,6 +432,20 @@ typedef enum tagSETIMEHOTKEY_ACTION
     SETIMEHOTKEY_ADD,
     SETIMEHOTKEY_INITIALIZE
 } SETIMEHOTKEY_ACTION;
+
+#define ZBID_DEFAULT 0
+#define ZBID_DESKTOP 1
+#define ZBID_IMMERSIVE_RESTRICTED 15
+#define ZBID_MAX     18
+
+BOOL WINAPI IsTopLevelWindow(HWND hWnd);
+BOOL WINAPI GetWindowBand(HWND hWnd, PDWORD pdwBand);
+HWND WINAPI CreateWindowInBand(DWORD dwExStyle, LPCWSTR lpClassName, LPCWSTR lpWindowName,
+                               DWORD dwStyle, int x, int y, int nWidth, int nHeight,
+                               HWND hWndParent, HMENU hMenu, HINSTANCE hInstance,
+                               LPVOID lpParam, DWORD dwBand);
+HWND WINAPI GhostWindowFromHungWindow(HWND hwndHung);
+HWND WINAPI HungWindowFromGhostWindow(HWND hwndGhost);
 
 #ifdef __cplusplus
 } /* extern "C" */

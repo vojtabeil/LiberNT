@@ -1,11 +1,13 @@
 
-include_directories(${REACTOS_SOURCE_DIR}/win32ss ../gditools)
+include_directories(${REACTOS_SOURCE_DIR}/subsystems/win/win32k ../gditools)
 
 list(APPEND SOURCE
     AddFontMemResourceEx.c
     AddFontResource.c
     AddFontResourceEx.c
+    AlphaBlend.c
     BeginPath.c
+    CjkFaceNames.c
     CombineRgn.c
     CombineTransform.c
     CreateBitmap.c
@@ -24,9 +26,12 @@ list(APPEND SOURCE
     EngCreateSemaphore.c
     EngReleaseSemaphore.c
     EnumFontFamilies.c
+    FontFolder.c
     ExcludeClipRect.c
     ExtCreatePen.c
     ExtCreateRegion.c
+    ExtTextOut.c
+    GdiBatch.c
     FrameRgn.c
     GdiConvertBitmap.c
     GdiConvertBrush.c
@@ -65,6 +70,7 @@ list(APPEND SOURCE
     PatBlt.c
     Rectangle.c
     RealizePalette.c
+    ScreenRows.c
     SelectObject.c
     SetBoundsRect.c
     SetBrushOrgEx.c
@@ -78,9 +84,12 @@ list(APPEND SOURCE
     SetWindowExtEx.c
     SetWorldTransform.c
     StretchBlt.c
-    TextTransform.c)
+    TextTransform.c
+    TypoMetrics.c)
 
 list(APPEND PCH_SKIP_SOURCE
+    ScriptGetFontTags.c
+    ScriptGetLogicalWidths.c
     testlist.c)
 
 add_executable(gdi32_apitest
@@ -88,7 +97,7 @@ add_executable(gdi32_apitest
     ${PCH_SKIP_SOURCE}
     resource.rc)
 
-target_link_libraries(gdi32_apitest ${PSEH_LIB} gditools win32ksys)
+target_link_libraries(gdi32_apitest ${PSEH_LIB} gditools)
 set_module_type(gdi32_apitest win32cui)
 add_importlibs(gdi32_apitest gdi32 user32 msvcrt kernel32 ntdll)
 add_pch(gdi32_apitest precomp.h "${PCH_SKIP_SOURCE}")

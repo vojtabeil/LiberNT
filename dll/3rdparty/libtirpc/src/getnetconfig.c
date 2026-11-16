@@ -52,7 +52,8 @@ static void wintirpc_debug(char *fmt, ...)
 }
 #else
 #define MSVCRT_CHECK_PMT(x) (x)
-char * CDECL strtok_s(char *str, const char *delim, char **ctx)
+#define strtok_s libtirpc_strtok_s
+static char * CDECL strtok_s(char *str, const char *delim, char **ctx)
 {
     if (!MSVCRT_CHECK_PMT(delim != NULL)) return NULL;
     if (!MSVCRT_CHECK_PMT(ctx != NULL)) return NULL;
@@ -183,6 +184,10 @@ __nc_error()
 	}
 	if ((nc_addr = (int *)thr_getspecific(nc_key)) == NULL) {
 		nc_addr = (int *)malloc(sizeof (int *));
+#ifdef __REACTOS__
+		if (!nc_addr)
+			abort();
+#endif
 		if (thr_setspecific(nc_key, (void *) nc_addr) == 0) {
 			if (nc_addr)
 				free(nc_addr);
@@ -719,6 +724,7 @@ struct netconfig	*ncp;
     p->nc_lookups = (char **)malloc((size_t)(p->nc_nlookups+1) * sizeof(char *));
     if (p->nc_lookups == NULL) {
 		free(p->nc_netid);
+		free(p);
 		return(NULL);
     }
     for (i=0; i < p->nc_nlookups; i++) {

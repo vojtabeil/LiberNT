@@ -75,6 +75,17 @@ static HRESULT FtpProtocol_open_request(Protocol *prot, IUri *uri, DWORD request
         return hres;
 
     hres = UrlUnescapeW(url, NULL, &path_size, URL_UNESCAPE_INPLACE);
+#ifdef __REACTOS__
+    if(SUCCEEDED(hres)) {
+        BSTR host;
+
+        This->base.flags |= FLAG_NO_CONNECT_STATUS;
+        if(SUCCEEDED(IUri_GetHost(uri, &host))) {
+            IInternetProtocolSink_ReportProgress(This->base.protocol_sink, BINDSTATUS_SENDINGREQUEST, host);
+            SysFreeString(host);
+        }
+    }
+#endif
     if(SUCCEEDED(hres)) {
         This->base.request = InternetOpenUrlW(internet_session, url, NULL, 0,
                 request_flags|INTERNET_FLAG_EXISTING_CONNECT|INTERNET_FLAG_PASSIVE,
@@ -460,6 +471,10 @@ HRESULT FtpProtocol_Construct(IUnknown *outer, void **ppv)
     URLMON_LockModule();
 
     ret = calloc(1, sizeof(FtpProtocol));
+#ifdef __REACTOS__
+    if (!ret)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     ret->base.vtbl = &AsyncProtocolVtbl;
     ret->IUnknown_inner.lpVtbl            = &FtpProtocolUnkVtbl;

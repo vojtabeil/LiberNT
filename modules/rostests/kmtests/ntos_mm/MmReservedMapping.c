@@ -8,10 +8,10 @@
 
 #include <kmt_test.h>
 
-static BOOLEAN g_IsPae;
 static BOOLEAN g_IsReactOS;
 
 #ifdef _M_IX86
+static BOOLEAN g_IsPae;
 
 #define IS_PAE() (g_IsPae)
 
@@ -36,8 +36,8 @@ static BOOLEAN g_IsReactOS;
 
 #define PTI_SHIFT  12L
 #define PTE_BASE    0xFFFFF68000000000ULL
-PULONGLONG
 FORCEINLINE
+PULONGLONG
 _MiAddressToPte(PVOID Address)
 {
     ULONG64 Offset = (ULONG64)Address >> (PTI_SHIFT - 3);
@@ -75,16 +75,36 @@ ValidateMapping(
     _In_ PPFN_NUMBER Pfns)
 {
     BOOLEAN Valid = TRUE;
-#if defined(_M_IX86) || defined(_M_AMD64)
+    BOOLEAN PageValid;
     PUCHAR CurrentAddress;
-    ULONGLONG PteValue, ExpectedValue;
+    PFN_NUMBER Pfn;
     ULONG i;
-
-#ifdef _M_AMD64
-    if (skip(GetNTVersion() < _WIN32_WINNT_WIN10, 
-             "Win10 1607+ breaks these next tests.\n"))
-        return Valid;
+#if defined(_M_IX86) || defined(_M_AMD64)
+    ULONGLONG PteValue, ExpectedValue;
 #endif
+
+    /* Validate the mapping without relying on a fixed self-map address or
+     * the operating system's private encoding of unused PTEs. */
+    for (i = 0; i < TotalPtes; i++)
+    {
+        CurrentAddress = (PUCHAR)BaseAddress + i * PAGE_SIZE;
+        PageValid = MmIsAddressValid(CurrentAddress);
+        Valid &= ok(PageValid == (i < ValidPtes),
+                    "[%lu] Address %p is %s, expected %s\n", i, CurrentAddress,
+                    PageValid ? "mapped" : "unmapped",
+                    i < ValidPtes ? "mapped" : "unmapped");
+        if (PageValid && i < ValidPtes)
+        {
+            Pfn = MmGetPhysicalAddress(CurrentAddress).QuadPart >> PAGE_SHIFT;
+            Valid &= ok(Pfn == Pfns[i],
+                        "[%lu] Address %p has PFN %Ix, expected %Ix\n",
+                        i, CurrentAddress, Pfn, Pfns[i]);
+        }
+    }
+
+#if defined(_M_IX86) || defined(_M_AMD64)
+    if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+        return Valid;
 
     for (i = 0; i < ValidPtes; i++)
     {
@@ -111,6 +131,12 @@ ValidateMapping(
     }
     CurrentAddress = (PUCHAR)BaseAddress - 1 * PAGE_SIZE;
     PteValue = GET_PTE_VALUE(CurrentAddress);
+
+    if (!g_IsReactOS && GetNTVersion() >= _WIN32_WINNT_VISTA)
+    {
+        skip(FALSE, "Reserved-mapping free PTE metadata is native-NT internal state\n");
+        return Valid;
+    }
 
     if (skip(GetNTVersion() < _WIN32_WINNT_WIN10, 
              "DVRT (Win10 1607+) breaks these next tests.\n"))
@@ -332,7 +358,9 @@ START_TEST(MmReservedMapping)
 {
     PVOID Mapping;
 
+#ifdef _M_IX86
     g_IsPae = ExIsProcessorFeaturePresent(PF_PAE_ENABLED);
+#endif
     g_IsReactOS = *(PULONG)(KI_USER_SHARED_DATA + PAGE_SIZE - sizeof(ULONG)) == 0x8eac705;
     if (!g_IsReactOS)
         trace("Not ReactOS\n");

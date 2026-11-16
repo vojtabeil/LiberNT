@@ -119,6 +119,7 @@ BOOLEAN ARPTransmit(PIP_ADDRESS Address, PVOID LinkAddress,
  */
 {
     PNDIS_PACKET NdisPacket;
+    IP_ADDRESS Sender;
     UCHAR ProtoAddrLen;
     USHORT ProtoType;
 
@@ -128,6 +129,11 @@ BOOLEAN ARPTransmit(PIP_ADDRESS Address, PVOID LinkAddress,
      * gratuitous ARP packet sent */
     if (!Address)
         Address = &Interface->Unicast;
+
+    if (!IsInterfaceAddress(Interface, Address))
+        GetInterfaceSourceAddress(Interface, Address, NULL, &Sender);
+    else
+        Sender = *Address;
 
     switch (Address->Type) {
         case IP_ADDRESS_V4:
@@ -152,7 +158,7 @@ BOOLEAN ARPTransmit(PIP_ADDRESS Address, PVOID LinkAddress,
         (UCHAR)Interface->AddressLength, /* Hardware address length */
         (UCHAR)ProtoAddrLen,             /* Protocol address length */
         Interface->Address,              /* Sender's (local) hardware address */
-        &Interface->Unicast.Address.IPv4Address,/* Sender's (local) protocol address */
+        &Sender.Address.IPv4Address,     /* Sender's (local) protocol address */
         LinkAddress,                     /* Target's (remote) hardware address */
         &Address->Address.IPv4Address,   /* Target's (remote) protocol address */
         ARP_OPCODE_REQUEST);             /* ARP request */
@@ -168,6 +174,31 @@ BOOLEAN ARPTransmit(PIP_ADDRESS Address, PVOID LinkAddress,
     (*Interface->Transmit)(Interface->Context, NdisPacket,
         0, NULL, LAN_PROTO_ARP);
 
+    return TRUE;
+}
+
+
+BOOLEAN ARPTransmitDad(PIP_INTERFACE Interface, IPv4_RAW_ADDRESS Address, BOOLEAN Announce)
+{
+    IPv4_RAW_ADDRESS Sender = Announce ? Address : 0;
+    PNDIS_PACKET NdisPacket;
+
+    NdisPacket = PrepareARPPacket(
+        Interface,
+        WN2H(0x0001),
+        (USHORT)ETYPE_IPv4,
+        (UCHAR)Interface->AddressLength,
+        4,
+        Interface->Address,
+        &Sender,
+        NULL,
+        &Address,
+        ARP_OPCODE_REQUEST);
+    if (!NdisPacket)
+        return FALSE;
+
+    PC(NdisPacket)->DLComplete = ARPTransmitComplete;
+    (*Interface->Transmit)(Interface->Context, NdisPacket, 0, NULL, LAN_PROTO_ARP);
     return TRUE;
 }
 
@@ -261,14 +292,23 @@ VOID ARPReceive(
     TargetProtoAddress = (PVOID)(SenderProtoAddress + Header->ProtoAddrLen + Header->HWAddrLen);
 
     AddrInitIPv4(&DstAddress, *((PULONG)TargetProtoAddress));
-    if (!AddrIsEqual(&DstAddress, &Interface->Unicast))
+    AddrInitIPv4(&SrcAddress, *((PULONG)SenderProtoAddress));
+    NteDadConflict(Interface, SrcAddress.Address.IPv4Address, DstAddress.Address.IPv4Address, SenderHWAddress);
+    if (!IsInterfaceAddress(Interface, &DstAddress))
     {
+        /* RFC 826: a sender already in the table is refreshed whoever the packet is for */
+        NCE = NBLocateNeighbor(&SrcAddress, Interface);
+        if (NCE)
+        {
+            if (!(NCE->State & NUD_PERMANENT))
+                NBUpdateNeighbor(NCE, SenderHWAddress, 0);
+            NBDereferenceNeighbor(NCE);
+        }
+
         ExFreePool(DataBuffer);
         Packet->Free(Packet);
         return;
     }
-
-    AddrInitIPv4(&SrcAddress, *((PULONG)SenderProtoAddress));
 
     /* Check if we know the sender */
     NCE = NBLocateNeighbor(&SrcAddress, Interface);
@@ -276,12 +316,15 @@ VOID ARPReceive(
         /* We know the sender. Update the hardware address
            and state in our neighbor address cache */
         NBUpdateNeighbor(NCE, SenderHWAddress, 0);
+        NBDereferenceNeighbor(NCE);
     } else {
         /* The packet had our protocol address as target. The sender
            may want to communicate with us soon, so add his address
            to our address cache */
-        NBAddNeighbor(Interface, &SrcAddress, SenderHWAddress,
-                      Header->HWAddrLen, 0, ARP_COMPLETE_TIMEOUT);
+        NCE = NBAddNeighbor(Interface, &SrcAddress, SenderHWAddress,
+                            Header->HWAddrLen, 0, ARP_COMPLETE_TIMEOUT);
+        if (NCE)
+            NBDereferenceNeighbor(NCE);
     }
 
     if (Header->Opcode != ARP_OPCODE_REQUEST)
@@ -300,7 +343,7 @@ VOID ARPReceive(
         (UCHAR)Interface->AddressLength, /* Hardware address length */
         (UCHAR)Header->ProtoAddrLen,     /* Protocol address length */
         Interface->Address,              /* Sender's (local) hardware address */
-        &Interface->Unicast.Address.IPv4Address,/* Sender's (local) protocol address */
+        TargetProtoAddress,              /* Sender's (local) protocol address */
         SenderHWAddress,                 /* Target's (remote) hardware address */
         SenderProtoAddress,              /* Target's (remote) protocol address */
         ARP_OPCODE_REPLY);               /* ARP reply */

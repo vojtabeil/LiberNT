@@ -39,7 +39,11 @@
 #include "softpub.h"
 
 #include "msipriv.h"
+#ifdef __REACTOS__
 #include "winemsi_s.h"
+#else
+#include "winemsi.h"
+#endif
 
 #include "initguid.h"
 #include "msxml2.h"
@@ -253,6 +257,9 @@ UINT WINAPI MsiInstallProductW(LPCWSTR szPackagePath, LPCWSTR szCommandLine)
         }
     }
 
+#ifdef __REACTOS__
+    options |= REACTOS_OPENPACKAGEFLAGS_INSTALL;
+#endif
     r = MSI_OpenPackageW( szPackagePath, options, &package );
     if (r == ERROR_SUCCESS)
     {
@@ -323,7 +330,11 @@ static UINT get_patch_product_codes( LPCWSTR szPatchPackage, WCHAR ***product_co
 
     r = MsiOpenDatabaseW( szPatchPackage, MSIDBOPEN_READONLY, &patch );
     if (r != ERROR_SUCCESS)
+#ifdef __REACTOS__
+        return ERROR_PATCH_PACKAGE_OPEN_FAILED;
+#else
         return r;
+#endif
 
     r = MsiGetSummaryInformationW( patch, NULL, 0, &info );
     if (r != ERROR_SUCCESS)
@@ -478,7 +489,15 @@ UINT WINAPI MsiApplyMultiplePatchesW(LPCWSTR szPatchPackages,
         len = end - beg;
         while (len && beg[len - 1] == ' ') len--;
 
+#ifdef __REACTOS__
+        if (!len)
+        {
+            while (beg > szPatchPackages && beg[-1] == ' ') beg--;
+            len = end - beg;
+        }
+#else
         if (!len) return ERROR_INVALID_NAME;
+#endif
 
         patch = malloc((len + 1) * sizeof(WCHAR));
         if (!patch)
@@ -487,6 +506,13 @@ UINT WINAPI MsiApplyMultiplePatchesW(LPCWSTR szPatchPackages,
         memcpy(patch, beg, len * sizeof(WCHAR));
         patch[len] = '\0';
 
+#ifdef __REACTOS__
+        if (!*patch)
+            r = ERROR_PATH_NOT_FOUND;
+        else if (GetFileAttributesW(patch) == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND)
+            r = ERROR_FILE_NOT_FOUND;
+        else
+#endif
         r = MSI_ApplyPatchW(patch, szProductCode, szPropertiesList);
         free(patch);
 
@@ -1509,7 +1535,35 @@ UINT WINAPI MsiGetProductInfoExW(LPCWSTR szProductCode, LPCWSTR szUserSid,
         else if (dwContext == MSIINSTALLCONTEXT_MACHINE)
             hkey = classes;
 
+#ifdef __REACTOS__
+        if (!wcscmp( szProperty, INSTALLPROPERTY_PACKAGENAMEW ))
+        {
+            HKEY source;
+
+            if (RegOpenKeyExW(hkey, L"SourceList", 0, KEY_READ, &source) != ERROR_SUCCESS)
+                goto done;
+
+            val = reg_get_value(source, szProperty, &type);
+            RegCloseKey(source);
+        }
+        else
+            val = reg_get_value(hkey, szProperty, &type);
+
+        if (val && type == REG_SZ && !wcscmp( szProperty, INSTALLPROPERTY_PACKAGECODEW ))
+        {
+            WCHAR packagecode[GUID_SIZE];
+
+            if (!unsquash_guid(val, packagecode))
+            {
+                r = ERROR_BAD_CONFIGURATION;
+                goto done;
+            }
+            free(val);
+            val = wcsdup(packagecode);
+        }
+#else
         val = reg_get_value(hkey, szProperty, &type);
+#endif
         if (!val)
             val = wcsdup(L"");
 
@@ -1854,6 +1908,41 @@ UINT WINAPI MsiGetPatchInfoW( LPCWSTR patch, LPCWSTR attr, LPWSTR buffer, LPDWOR
     if (wcscmp( INSTALLPROPERTY_LOCALPACKAGEW, attr ))
         return ERROR_UNKNOWN_PROPERTY;
 
+#ifdef __REACTOS__
+    {
+        static const MSIINSTALLCONTEXT contexts[] =
+        {
+            MSIINSTALLCONTEXT_USERMANAGED, MSIINSTALLCONTEXT_USERUNMANAGED, MSIINSTALLCONTEXT_MACHINE
+        };
+        DWORD size = buflen ? *buflen : 0, len, i;
+        BOOL empty = FALSE;
+
+        for (index = 0; MsiEnumProductsW( index, product ) == ERROR_SUCCESS; index++)
+        {
+            for (i = 0; i < ARRAY_SIZE(contexts); i++)
+            {
+                len = 0;
+                r = MsiGetPatchInfoExW( patch, product, NULL, contexts[i], attr, NULL, &len );
+                if (r != ERROR_SUCCESS)
+                    continue;
+                if (!len)
+                {
+                    empty = TRUE;
+                    continue;
+                }
+                if (buflen) *buflen = size;
+                return MsiGetPatchInfoExW( patch, product, NULL, contexts[i], attr, buffer, buflen );
+            }
+        }
+        if (empty)
+        {
+            if (buffer && size) buffer[0] = 0;
+            if (buflen) *buflen = 0;
+            return ERROR_SUCCESS;
+        }
+    }
+    return ERROR_UNKNOWN_PRODUCT;
+#else
     index = 0;
     while (1)
     {
@@ -1877,6 +1966,7 @@ UINT WINAPI MsiGetPatchInfoW( LPCWSTR patch, LPCWSTR attr, LPWSTR buffer, LPDWOR
     }
 
     return ERROR_UNKNOWN_PRODUCT;
+#endif
 }
 
 UINT WINAPI MsiEnableLogA( DWORD dwLogMode, const char *szLogFile, DWORD attributes )
@@ -1935,6 +2025,23 @@ UINT WINAPI MsiEnumComponentCostsA( MSIHANDLE handle, const char *component, DWO
     if (!drive || !buflen) return ERROR_INVALID_PARAMETER;
     if (component && !(componentW = strdupAtoW( component ))) return ERROR_OUTOFMEMORY;
 
+#ifdef __REACTOS__
+    {
+        MSIPACKAGE *package = msihandle2msiinfo( handle, MSIHANDLETYPE_PACKAGE );
+
+        if (package) msiobj_release( &package->hdr );
+        else if (msi_get_remote( handle ))
+        {
+            WCHAR buffer[3];
+
+            len = ARRAY_SIZE(buffer);
+            r = MsiEnumComponentCostsW( handle, componentW, index, state, buffer, &len, cost, temp );
+            if (!r) r = msi_strncpyWtoA( buffer, -1, drive, buflen, TRUE );
+            free( componentW );
+            return r;
+        }
+    }
+#endif
     len = *buflen;
     if (!(driveW = malloc( len * sizeof(WCHAR) )))
     {
@@ -2001,7 +2108,16 @@ UINT WINAPI MsiEnumComponentCostsW( MSIHANDLE handle, const WCHAR *component, DW
         return r;
     }
 
+#ifdef __REACTOS__
+    if (msi_get_property_int( package->db, L"CostingComplete", -1 ) == -1)
+    {
+        msiobj_release( &package->hdr );
+        return ERROR_INVALID_HANDLE_STATE;
+    }
+    if (!msi_get_property_int( package->db, L"CostingComplete", 0 ) || !package->install_validated)
+#else
     if (!msi_get_property_int( package->db, L"CostingComplete", 0 ))
+#endif
     {
         msiobj_release( &package->hdr );
         return ERROR_FUNCTION_NOT_CALLED;
@@ -2044,6 +2160,16 @@ UINT WINAPI MsiEnumComponentCostsW( MSIHANDLE handle, const WCHAR *component, DW
     }
     else if (IStorage_Stat( package->db->storage, &stat, STATFLAG_NONAME ) == S_OK)
     {
+#ifdef __REACTOS__
+        WIN32_FILE_ATTRIBUTE_DATA data;
+
+        if (!stat.cbSize.QuadPart && package->db->path &&
+            GetFileAttributesExW( package->db->path, GetFileExInfoStandard, &data ))
+        {
+            stat.cbSize.u.LowPart = data.nFileSizeLow;
+            stat.cbSize.u.HighPart = data.nFileSizeHigh;
+        }
+#endif
         *temp = cost_from_size( stat.cbSize.QuadPart );
         *buflen = set_drive( drive, path[0] );
         r = ERROR_SUCCESS;
@@ -2536,6 +2662,13 @@ HRESULT WINAPI MsiGetFileSignatureInformationW( const WCHAR *path, DWORD flags, 
 
     if (!path || !cert) return E_INVALIDARG;
 
+#ifdef __REACTOS__
+    if (GetFileAttributesW( path ) == INVALID_FILE_ATTRIBUTES)
+    {
+        *cert = NULL;
+        return CRYPT_E_FILE_ERROR;
+    }
+#endif
     info.cbStruct       = sizeof(info);
     info.pcwszFilePath  = path;
     info.hFile          = NULL;
@@ -2552,6 +2685,10 @@ HRESULT WINAPI MsiGetFileSignatureInformationW( const WCHAR *path, DWORD flags, 
 
     hr = WinVerifyTrustEx( INVALID_HANDLE_VALUE, &generic_verify_v2, &data );
     *cert = NULL;
+#ifdef __REACTOS__
+    if (hr == TRUST_E_NOSIGNATURE || hr == TRUST_E_SUBJECT_FORM_UNKNOWN || hr == TRUST_E_PROVIDER_UNKNOWN)
+        hr = HRESULT_FROM_WIN32(ERROR_FUNCTION_FAILED);
+#endif
     if (FAILED(hr)) goto done;
 
     if (!(signer = WTHelperGetProvSignerFromChain( data.hWVTStateData, 0, FALSE, 0 )))
@@ -2833,6 +2970,18 @@ static INSTALLSTATE MSI_GetComponentPath( const WCHAR *szProduct, const WCHAR *s
     if (state == INSTALLSTATE_LOCAL && !*path)
         state = INSTALLSTATE_NOTUSED;
 
+    if (wcslen(path) > 2 && !wcsncmp(path, L"<\\", 2))
+    {
+        WCHAR *assembly_path = msi_get_assembly_path(path + 2);
+        if (assembly_path)
+        {
+            free(path);
+            path = assembly_path;
+            if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+                state = INSTALLSTATE_LOCAL;
+        }
+    }
+
     if (msi_strcpy_to_awstring(path, -1, lpPathBuf, pcchBuf) == ERROR_MORE_DATA)
         state = INSTALLSTATE_MOREDATA;
 
@@ -2857,8 +3006,34 @@ INSTALLSTATE WINAPI MsiGetComponentPathExW( LPCWSTR product, LPCWSTR comp, LPCWS
     return MSI_GetComponentPath( product, comp, usersid, ctx, &path, buflen );
 }
 
+#ifdef __REACTOS__
+static INSTALLSTATE get_component_path_a( LPCSTR product, LPCSTR comp, LPCSTR usersid,
+                                          MSIINSTALLCONTEXT ctx, LPSTR buf, LPDWORD buflen );
+
 INSTALLSTATE WINAPI MsiGetComponentPathExA( LPCSTR product, LPCSTR comp, LPCSTR usersid,
                                             MSIINSTALLCONTEXT ctx, LPSTR buf, LPDWORD buflen )
+{
+    DWORD size = buflen ? *buflen : 0;
+    INSTALLSTATE r = get_component_path_a( product, comp, usersid, ctx, buf, buflen );
+
+    if (buflen)
+    {
+        if (r == INSTALLSTATE_MOREDATA)
+            *buflen *= 2;
+        else if (r == INSTALLSTATE_INVALIDARG || (r == INSTALLSTATE_UNKNOWN && buf))
+            *buflen = 0;
+        else if (r == INSTALLSTATE_UNKNOWN)
+            *buflen = size * 2;
+    }
+    return r;
+}
+
+static INSTALLSTATE get_component_path_a( LPCSTR product, LPCSTR comp, LPCSTR usersid,
+                                          MSIINSTALLCONTEXT ctx, LPSTR buf, LPDWORD buflen )
+#else
+INSTALLSTATE WINAPI MsiGetComponentPathExA( LPCSTR product, LPCSTR comp, LPCSTR usersid,
+                                            MSIINSTALLCONTEXT ctx, LPSTR buf, LPDWORD buflen )
+#endif
 {
     WCHAR *productW = NULL, *compW = NULL, *usersidW =  NULL;
     INSTALLSTATE r = INSTALLSTATE_UNKNOWN;
@@ -2897,7 +3072,11 @@ INSTALLSTATE WINAPI MsiGetComponentPathW( LPCWSTR product, LPCWSTR comp, LPWSTR 
  */
 INSTALLSTATE WINAPI MsiGetComponentPathA( LPCSTR product, LPCSTR comp, LPSTR buf, LPDWORD buflen )
 {
+#ifdef __REACTOS__
+    return get_component_path_a( product, comp, "s-1-1-0", MSIINSTALLCONTEXT_ALL, buf, buflen );
+#else
     return MsiGetComponentPathExA( product, comp, "s-1-1-0", MSIINSTALLCONTEXT_ALL, buf, buflen );
+#endif
 }
 
 static UINT query_feature_state( const WCHAR *product, const WCHAR *squashed, const WCHAR *usersid,
@@ -3214,6 +3393,11 @@ UINT WINAPI MsiGetFileVersionW( const WCHAR *path, WCHAR *verbuf, DWORD *verlen,
     if ((verbuf && !verlen) || (langbuf && !langlen))
         return ERROR_INVALID_PARAMETER;
 
+#ifdef __REACTOS__
+    if (path && GetFileAttributesW( path ) == INVALID_FILE_ATTRIBUTES)
+        return ERROR_FILE_NOT_FOUND;
+
+#endif
     ret = get_file_version( path, verbuf, verlen, langbuf, langlen );
     if (ret == ERROR_RESOURCE_DATA_NOT_FOUND && verlen)
     {
@@ -3560,6 +3744,20 @@ static USERINFOSTATE MSI_GetUserInfo(LPCWSTR szProduct,
             goto done;
         }
 
+#ifdef __REACTOS__
+        if (lpUserNameBuf->str.w)
+        {
+            DWORD needed = lpUserNameBuf->unicode ? lstrlenW(user) :
+                           WideCharToMultiByte(CP_ACP, 0, user, -1, NULL, 0, NULL, NULL) - 1;
+
+            if (needed >= *pcchUserNameBuf)
+            {
+                *pcchUserNameBuf = needed;
+                state = USERINFOSTATE_MOREDATA;
+                goto done;
+            }
+        }
+#endif
         r = msi_strcpy_to_awstring(user, -1, lpUserNameBuf, pcchUserNameBuf);
         if (r == ERROR_MORE_DATA)
         {

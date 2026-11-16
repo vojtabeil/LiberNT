@@ -20,18 +20,19 @@
 
 #define COBJMACROS
 
-#ifdef __REACTOS__
+#include <stdarg.h>
+#if defined(__REACTOS__) && (DLL_EXPORT_VERSION < 0x0a00)
 #define WIN32_NO_STATUS
 #endif
-
-#include <stdarg.h>
+#ifdef __REACTOS__
+/* NDK loads the Win32 types before its NTSTATUS definitions. */
+#include <ndk/rtlfuncs.h>
+#endif
 #include "windef.h"
 #include "winbase.h"
 #include "winreg.h"
 #include "winnls.h"
-#ifdef __REACTOS__
-#include <ndk/rtlfuncs.h>
-#else
+#ifndef __REACTOS__
 #include "winternl.h"
 #endif
 #include "shlwapi.h"
@@ -53,7 +54,11 @@
 #include "wine/exception.h"
 
 #include "msipriv.h"
+#ifdef __REACTOS__
 #include "winemsi_s.h"
+#else
+#include "winemsi.h"
+#endif
 #include "resource.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(msi);
@@ -340,11 +345,22 @@ static void MSI_FreePackage( MSIOBJECTHDR *arg)
 {
     MSIPACKAGE *package = (MSIPACKAGE *)arg;
 
-    msi_destroy_assembly_caches( package );
-
     if( package->dialog )
         msi_dialog_destroy( package->dialog );
 
+#ifdef __REACTOS__
+    if (package->property_table_held)
+    {
+        MSIQUERY *view;
+
+        if (MSI_DatabaseOpenViewW( package->db, L"ALTER TABLE `_Property` FREE", &view ) == ERROR_SUCCESS)
+        {
+            MSI_ViewExecute( view, 0 );
+            MSI_ViewClose( view );
+            msiobj_release( &view->hdr );
+        }
+    }
+#endif
     msiobj_release( &package->db->hdr );
     free_package_structures(package);
     CloseHandle( package->log_file );
@@ -356,6 +372,10 @@ static void MSI_FreePackage( MSIOBJECTHDR *arg)
         custom_stop_server(package->custom_server_32_process, package->custom_server_32_pipe);
     if (package->custom_server_64_process)
         custom_stop_server(package->custom_server_64_process, package->custom_server_64_pipe);
+#ifdef __REACTOS__
+    if (package->custom_server_emulated_process)
+        custom_stop_server(package->custom_server_emulated_process, package->custom_server_emulated_pipe);
+#endif
 
     if (package->delete_on_close) DeleteFileW( package->localfile );
     free( package->localfile );
@@ -375,6 +395,20 @@ static UINT create_temp_property_table(MSIPACKAGE *package)
     rc = MSI_ViewExecute(view, 0);
     MSI_ViewClose(view);
     msiobj_release(&view->hdr);
+#ifdef __REACTOS__
+    if (rc != ERROR_SUCCESS)
+    {
+        rc = MSI_DatabaseOpenViewW(package->db, L"ALTER TABLE `_Property` HOLD", &view);
+        if (rc != ERROR_SUCCESS)
+            return rc;
+
+        rc = MSI_ViewExecute(view, 0);
+        MSI_ViewClose(view);
+        msiobj_release(&view->hdr);
+    }
+    if (rc == ERROR_SUCCESS)
+        package->property_table_held = TRUE;
+#endif
     return rc;
 }
 
@@ -744,16 +778,22 @@ static VOID set_installer_properties(MSIPACKAGE *package)
     msi_set_property( package->db, L"AdminUser", L"1", -1 );
     msi_set_property( package->db, L"Privileged", L"1", -1 );
     msi_set_property( package->db, L"MsiRunningElevated", L"1", -1 );
+    msi_set_property( package->db, L"MsiTrueAdminUser", L"1", -1 );
 
     /* set the os things */
     OSVersion.dwOSVersionInfoSize = sizeof(OSVersion);
-    RtlGetVersion((PRTL_OSVERSIONINFOW)&OSVersion);
+#ifdef __REACTOS__
+    GetVersionExW((OSVERSIONINFOW *)&OSVersion);
+    verval = OSVersion.dwMinorVersion + OSVersion.dwMajorVersion * 100;
+#else
+    RtlGetVersion(&OSVersion);
     verval = OSVersion.dwMinorVersion + OSVersion.dwMajorVersion * 100;
     if (verval > 603)
     {
         verval = 603;
         OSVersion.dwBuildNumber = 9600;
     }
+#endif
     len = swprintf( verstr, ARRAY_SIZE(verstr), L"%u", verval );
     switch (OSVersion.dwPlatformId)
     {
@@ -781,10 +821,26 @@ static VOID set_installer_properties(MSIPACKAGE *package)
 
     GetNativeSystemInfo( &sys_info );
     len = swprintf( bufstr, ARRAY_SIZE(bufstr), L"%d", sys_info.wProcessorLevel );
+#ifdef __REACTOS__
+    {
+        USHORT process_machine, native_machine;
+
+        if (IsWow64Process2( GetCurrentProcess(), &process_machine, &native_machine ) &&
+#ifdef __REACTOS__
+            (native_machine == IMAGE_FILE_MACHINE_ARM64 || native_machine == IMAGE_FILE_MACHINE_RISCV64))
+#else
+            native_machine == IMAGE_FILE_MACHINE_ARM64)
+#endif
+            msi_set_property( package->db, L"Intel", L"0", 1 );
+        else
+            msi_set_property( package->db, L"Intel", bufstr, len );
+    }
+#else
     msi_set_property( package->db, L"Intel", bufstr, len );
+#endif
     if (sys_info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_INTEL)
     {
-        GetSystemDirectoryW( pth, MAX_PATH );
+        wcscpy( pth, sysdir );
         PathAddBackslashW( pth );
         msi_set_property( package->db, L"SystemFolder", pth, -1 );
 
@@ -798,13 +854,17 @@ static VOID set_installer_properties(MSIPACKAGE *package)
         PathAddBackslashW( pth );
         msi_set_property( package->db, L"CommonFilesFolder", pth, -1 );
     }
-    else if (sys_info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64)
+    else if (sys_info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64 ||
+#ifdef __REACTOS__
+             sys_info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_RISCV64 ||
+#endif
+             sys_info.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_ARM64)
     {
         msi_set_property( package->db, L"MsiAMD64", bufstr, -1 );
         msi_set_property( package->db, L"Msix64", bufstr, -1 );
         msi_set_property( package->db, L"VersionNT64", verstr, -1 );
 
-        GetSystemDirectoryW( pth, MAX_PATH );
+        wcscpy( pth, sysdir );
         PathAddBackslashW( pth );
         msi_set_property( package->db, L"System64Folder", pth, -1 );
 
@@ -941,6 +1001,7 @@ static MSIPACKAGE *alloc_package( void )
         list_init( &package->patches );
         list_init( &package->binaries );
         list_init( &package->cabinet_streams );
+        list_init( &package->drlocators );
     }
 
     return package;
@@ -972,6 +1033,7 @@ void msi_adjust_privilege_properties( MSIPACKAGE *package )
     msi_set_property( package->db, L"AdminUser", L"1", -1 );
     msi_set_property( package->db, L"Privileged", L"1", -1 );
     msi_set_property( package->db, L"MsiRunningElevated", L"1", -1 );
+    msi_set_property( package->db, L"MsiTrueAdminUser", L"1", -1 );
 }
 
 MSIPACKAGE *MSI_CreatePackage( MSIDATABASE *db )
@@ -1007,7 +1069,11 @@ MSIPACKAGE *MSI_CreatePackage( MSIDATABASE *db )
         len = swprintf( uilevel, ARRAY_SIZE(uilevel), L"%u", gUILevel & INSTALLUILEVEL_MASK );
         msi_set_property( package->db, L"UILevel", uilevel, len );
 
+#ifdef __REACTOS__
+        r = db->memory_only ? ERROR_SUCCESS : msi_load_suminfo_properties( package );
+#else
         r = msi_load_suminfo_properties( package );
+#endif
         if (r != ERROR_SUCCESS)
         {
             msiobj_release( &package->hdr );
@@ -1107,6 +1173,8 @@ static UINT parse_suminfo( MSISUMMARYINFO *si, MSIPACKAGE *package )
     package->version = msi_suminfo_get_int32( si, PID_PAGECOUNT );
     TRACE("version: %d\n", package->version);
 
+    package->platform = PLATFORM_INTEL;
+
     template = msi_suminfo_dup_string( si, PID_TEMPLATE );
     if (!template)
         return ERROR_SUCCESS; /* native accepts missing template property */
@@ -1114,13 +1182,8 @@ static UINT parse_suminfo( MSISUMMARYINFO *si, MSIPACKAGE *package )
     TRACE("template: %s\n", debugstr_w(template));
 
     p = wcschr( template, ';' );
-    if (!p)
-    {
-        WARN("invalid template string %s\n", debugstr_w(template));
-        free( template );
-        return ERROR_PATCH_PACKAGE_INVALID;
-    }
-    *p = 0;
+    if (p) *p++ = 0;
+
     platform = template;
     if ((q = wcschr( platform, ',' ))) *q = 0;
     package->platform = parse_platform( platform );
@@ -1136,8 +1199,8 @@ static UINT parse_suminfo( MSISUMMARYINFO *si, MSIPACKAGE *package )
         free( template );
         return ERROR_INSTALL_PLATFORM_UNSUPPORTED;
     }
-    p++;
-    if (!*p)
+
+    if (!p || !*p)
     {
         free( template );
         return ERROR_SUCCESS;
@@ -1168,27 +1231,45 @@ static UINT parse_suminfo( MSISUMMARYINFO *si, MSIPACKAGE *package )
     return ERROR_SUCCESS;
 }
 
+static BOOL validate_package_platform( enum platform platform )
+{
+    USHORT proc_machine, native_machine;
+    IsWow64Process2( GetCurrentProcess(), &proc_machine, &native_machine );
+    switch (platform)
+    {
+    case PLATFORM_INTEL:
+        return native_machine == IMAGE_FILE_MACHINE_I386 ||
+               native_machine == IMAGE_FILE_MACHINE_AMD64 ||
+#ifdef __REACTOS__
+               native_machine == IMAGE_FILE_MACHINE_RISCV64 ||
+#endif
+               native_machine == IMAGE_FILE_MACHINE_ARM64;
+    case PLATFORM_X64:
+        return native_machine == IMAGE_FILE_MACHINE_AMD64 ||
+#ifdef __REACTOS__
+               native_machine == IMAGE_FILE_MACHINE_RISCV64 ||
+#endif
+               native_machine == IMAGE_FILE_MACHINE_ARM64;
+    case PLATFORM_ARM:
+        return native_machine == IMAGE_FILE_MACHINE_ARM;
+    case PLATFORM_ARM64:
+        return native_machine == IMAGE_FILE_MACHINE_ARM64;
+    case PLATFORM_INTEL64:
+    default:
+        return FALSE;
+    }
+}
+
 static UINT validate_package( MSIPACKAGE *package )
 {
     UINT i;
 
-    if (package->platform == PLATFORM_INTEL64)
+    if (!validate_package_platform( package->platform ))
         return ERROR_INSTALL_PLATFORM_UNSUPPORTED;
-#ifndef __arm__
-    if (package->platform == PLATFORM_ARM)
-        return ERROR_INSTALL_PLATFORM_UNSUPPORTED;
-#endif
-#ifndef __aarch64__
-    if (package->platform == PLATFORM_ARM64)
-        return ERROR_INSTALL_PLATFORM_UNSUPPORTED;
-#endif
-    if (package->platform == PLATFORM_X64)
-    {
-        if (!is_64bit && !is_wow64)
-            return ERROR_INSTALL_PLATFORM_UNSUPPORTED;
-        if (package->version < 200)
-            return ERROR_INSTALL_PACKAGE_INVALID;
-    }
+
+    if (package->platform == PLATFORM_X64 && package->version < 200)
+        return ERROR_INSTALL_PACKAGE_INVALID;
+
     if (!package->num_langids)
     {
         return ERROR_SUCCESS;
@@ -1329,58 +1410,6 @@ UINT msi_set_original_database_property( MSIDATABASE *db, const WCHAR *package )
     return r;
 }
 
-#ifdef __REACTOS__
-BOOL WINAPI ApphelpCheckRunAppEx(HANDLE FileHandle, PVOID Unk1, PVOID Unk2, PCWSTR ApplicationName, PVOID Environment, USHORT ExeType, PULONG Reason, PVOID *SdbQueryAppCompatData, PULONG SdbQueryAppCompatDataSize,
-    PVOID *SxsData, PULONG SxsDataSize, PULONG FusionFlags, PULONG64 SomeFlag1, PULONG SomeFlag2);
-BOOL WINAPI SE_DynamicShim(LPCWSTR ProcessImage, PVOID hsdb, PVOID pQueryResult, LPCSTR Module, LPDWORD lpdwDynamicToken);
-PVOID WINAPI SdbInitDatabase(DWORD flags, LPCWSTR path);
-PVOID WINAPI SdbReleaseDatabase(PVOID hsdb);
-
-#define HID_DOS_PATHS 0x1
-#define SDB_DATABASE_MAIN_SHIM 0x80030000
-
-#define APPHELP_VALID_RESULT 0x10000
-#define APPHELP_RESULT_FOUND 0x40000
-
-static void
-AppHelpCheckPackage(LPCWSTR szPackage)
-{
-    USHORT ExeType = 0;
-    ULONG Reason = 0;
-
-    PVOID QueryResult = NULL;
-    ULONG QueryResultSize = 0;
-
-    HANDLE Handle = NULL;
-    BOOL Continue = ApphelpCheckRunAppEx(
-        Handle, NULL, NULL, szPackage, NULL, ExeType, &Reason, &QueryResult, &QueryResultSize, NULL,
-        NULL, NULL, NULL, NULL);
-
-    if (Continue)
-    {
-        if ((Reason & (APPHELP_VALID_RESULT | APPHELP_RESULT_FOUND)) == (APPHELP_VALID_RESULT | APPHELP_RESULT_FOUND))
-        {
-            DWORD dwToken;
-            PVOID hsdb = SdbInitDatabase(HID_DOS_PATHS | SDB_DATABASE_MAIN_SHIM, NULL);
-            if (hsdb)
-            {
-                BOOL bShim = SE_DynamicShim(szPackage, hsdb, QueryResult, "msi.dll", &dwToken);
-                ERR("ReactOS HACK(CORE-13283): Used SE_DynamicShim %d!\n", bShim);
-
-                SdbReleaseDatabase(hsdb);
-            }
-            else
-            {
-                ERR("Unable to open SDB_DATABASE_MAIN_SHIM\n");
-            }
-        }
-    }
-
-    if (QueryResult)
-        RtlFreeHeap(RtlGetProcessHeap(), 0, QueryResult);
-}
-#endif
-
 UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
 {
     MSIDATABASE *db;
@@ -1419,15 +1448,15 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
 
             file = cachefile;
         }
-#ifdef __REACTOS__
-        AppHelpCheckPackage(file);
-#endif
-
         r = MSI_OpenDatabaseW( file, MSIDBOPEN_READONLY, &db );
         if (r != ERROR_SUCCESS)
         {
             if (GetFileAttributesW( file ) == INVALID_FILE_ATTRIBUTES)
                 return ERROR_FILE_NOT_FOUND;
+#ifdef __REACTOS__
+            if (r == ERROR_FUNCTION_FAILED)
+                return ERROR_INSTALL_PACKAGE_INVALID;
+#endif
             return r;
         }
         r = get_local_package( db, localfile );
@@ -1576,6 +1605,10 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
     MSI_RecordSetInteger(data_row, 2, package->num_langids ? package->langids[0] : 0);
     MSI_RecordSetInteger(data_row, 3, msi_get_string_table_codepage(package->db->strings));
     MSI_ProcessMessageVerbatim(package, INSTALLMESSAGE_COMMONDATA, data_row);
+#ifdef __REACTOS__
+    if (dwOptions & REACTOS_OPENPACKAGEFLAGS_INSTALL)
+        MSI_ProcessMessageVerbatim(package, INSTALLMESSAGE_COMMONDATA, data_row);
+#endif
 
     info_row = MSI_CreateRecord(0);
     if (!info_row)
@@ -1604,6 +1637,81 @@ UINT MSI_OpenPackageW(LPCWSTR szPackage, DWORD dwOptions, MSIPACKAGE **pPackage)
     return ERROR_SUCCESS;
 }
 
+#ifdef __REACTOS__
+static UINT create_folder_cache_table( MSIPACKAGE *package )
+{
+    static const int folders[] =
+    {
+        CSIDL_PROGRAMS, CSIDL_PERSONAL, CSIDL_FAVORITES, CSIDL_STARTUP, CSIDL_RECENT, CSIDL_SENDTO,
+        CSIDL_STARTMENU, CSIDL_DESKTOPDIRECTORY, CSIDL_NETHOOD, CSIDL_TEMPLATES, CSIDL_COMMON_STARTMENU,
+        CSIDL_COMMON_PROGRAMS, CSIDL_COMMON_STARTUP, CSIDL_COMMON_DESKTOPDIRECTORY, CSIDL_APPDATA,
+        CSIDL_PRINTHOOD, CSIDL_LOCAL_APPDATA, CSIDL_COMMON_APPDATA, CSIDL_MYPICTURES,
+        CSIDL_COMMON_ADMINTOOLS, CSIDL_ADMINTOOLS
+    };
+    WCHAR path[MAX_PATH + 1];
+    MSIQUERY *view;
+    MSIRECORD *rec;
+    UINT i, r;
+
+    r = MSI_DatabaseOpenViewW( package->db, L"CREATE TABLE `#_FolderCache` ( `FolderId` SHORT NOT NULL TEMPORARY, "
+                                            L"`FolderPath` LONGCHAR NOT NULL TEMPORARY PRIMARY KEY `FolderId`) HOLD", &view );
+    if (r != ERROR_SUCCESS) return r;
+    r = MSI_ViewExecute( view, 0 );
+    MSI_ViewClose( view );
+    msiobj_release( &view->hdr );
+    if (r != ERROR_SUCCESS) return r;
+
+    r = MSI_DatabaseOpenViewW( package->db, L"INSERT INTO `#_FolderCache` (`FolderId`,`FolderPath`) VALUES (?,?)", &view );
+    if (r != ERROR_SUCCESS) return r;
+
+    for (i = 0; i < ARRAY_SIZE(folders); i++)
+    {
+        if (SHGetFolderPathW( NULL, folders[i], NULL, 0, path ) != S_OK || !path[0]) continue;
+        PathAddBackslashW( path );
+        if (!(rec = MSI_CreateRecord( 2 ))) break;
+        MSI_RecordSetInteger( rec, 1, folders[i] );
+        MSI_RecordSetStringW( rec, 2, path );
+        MSI_ViewExecute( view, rec );
+        msiobj_release( &rec->hdr );
+    }
+    MSI_ViewClose( view );
+    msiobj_release( &view->hdr );
+    return ERROR_SUCCESS;
+}
+
+static UINT create_empty_package( MSIPACKAGE **ret )
+{
+    WCHAR temppath[MAX_PATH], filename[MAX_PATH];
+    MSIPACKAGE *package;
+    MSIDATABASE *db;
+    UINT r;
+
+    if (!GetTempPathW( MAX_PATH, temppath ) || !GetTempFileNameW( temppath, L"msi", 0, filename ))
+        return ERROR_FUNCTION_FAILED;
+
+    r = MSI_OpenDatabaseW( filename, MSIDBOPEN_CREATEDIRECT, &db );
+    if (r != ERROR_SUCCESS)
+    {
+        DeleteFileW( filename );
+        return r;
+    }
+    db->memory_only = TRUE;
+
+    package = MSI_CreatePackage( db );
+    msiobj_release( &db->hdr );
+    if (!package) return ERROR_FUNCTION_FAILED;
+
+    r = create_folder_cache_table( package );
+    if (r != ERROR_SUCCESS)
+    {
+        msiobj_release( &package->hdr );
+        return r;
+    }
+    *ret = package;
+    return ERROR_SUCCESS;
+}
+#endif
+
 UINT WINAPI MsiOpenPackageExW( const WCHAR *szPackage, DWORD dwOptions, MSIHANDLE *phPackage )
 {
     MSIPACKAGE *package = NULL;
@@ -1616,13 +1724,30 @@ UINT WINAPI MsiOpenPackageExW( const WCHAR *szPackage, DWORD dwOptions, MSIHANDL
 
     if ( !*szPackage )
     {
+#ifdef __REACTOS__
+        ret = create_empty_package( &package );
+        if (ret != ERROR_SUCCESS) return ret;
+        *phPackage = alloc_msihandle( &package->hdr );
+        msiobj_release( &package->hdr );
+        return *phPackage ? ERROR_SUCCESS : ERROR_NOT_ENOUGH_MEMORY;
+#else
         FIXME("Should create an empty database and package\n");
         return ERROR_FUNCTION_FAILED;
+#endif
     }
 
     if( dwOptions )
         FIXME( "dwOptions %#lx not supported\n", dwOptions );
 
+#ifdef __REACTOS__
+    if (szPackage[0] != '#' && PathIsRelativeW( szPackage ) && !UrlIsW( szPackage, URLIS_URL ) &&
+        GetFileAttributesW( szPackage ) != INVALID_FILE_ATTRIBUTES)
+    {
+        MSI_ProcessMessage( NULL, INSTALLMESSAGE_INITIALIZE, 0 );
+        MSI_ProcessMessage( NULL, INSTALLMESSAGE_TERMINATE, 0 );
+        return ERROR_INSTALL_PACKAGE_OPEN_FAILED;
+    }
+#endif
     ret = MSI_OpenPackageW( szPackage, 0, &package );
     if( ret == ERROR_SUCCESS )
     {
@@ -1778,6 +1903,11 @@ static INT internal_ui_handler(MSIPACKAGE *package, INSTALLMESSAGE eMessageType,
         case 1:
             /* do nothing */
             return 0;
+#ifdef __REACTOS__
+        case 2:
+            msi_dialog_show_cancel(package, MSI_RecordGetInteger(record, 2) != 0);
+            return 1;
+#endif
         default:
             /* fall through */
             ;
@@ -2149,7 +2279,7 @@ UINT msi_set_property( MSIDATABASE *db, const WCHAR *name, const WCHAR *value, i
 UINT WINAPI MsiSetPropertyW( MSIHANDLE hInstall, LPCWSTR szName, LPCWSTR szValue)
 {
     MSIPACKAGE *package;
-    UINT ret;
+    UINT ret = 0;
 
     package = msihandle2msiinfo( hInstall, MSIHANDLETYPE_PACKAGE);
     if( !package )
@@ -2317,7 +2447,7 @@ UINT WINAPI MsiGetPropertyA(MSIHANDLE hinst, const char *name, char *buf, DWORD 
     MSIRECORD *row;
     WCHAR *nameW;
     int len = 0;
-    UINT r;
+    UINT r = 0;
 
     if (!name)
         return ERROR_INVALID_PARAMETER;
@@ -2388,7 +2518,7 @@ UINT WINAPI MsiGetPropertyW(MSIHANDLE hinst, const WCHAR *name, WCHAR *buf, DWOR
     MSIPACKAGE *package;
     MSIRECORD *row;
     int len = 0;
-    UINT r;
+    UINT r = 0;
 
     if (!name)
         return ERROR_INVALID_PARAMETER;
@@ -2453,6 +2583,23 @@ UINT __cdecl s_remote_GetProperty(MSIHANDLE hinst, LPCWSTR property, LPWSTR *val
 {
     WCHAR empty[1];
     UINT r;
+#ifdef __REACTOS__
+    MSIPACKAGE *package = msihandle2msiinfo(hinst, MSIHANDLETYPE_PACKAGE);
+    BOOL deferred = FALSE;
+
+    if (package)
+    {
+        deferred = package->scheduled_action_running || package->commit_action_running ||
+                   package->rollback_action_running;
+        msiobj_release(&package->hdr);
+    }
+    if (deferred && wcscmp(property, L"CustomActionData") && wcscmp(property, L"ProductCode") &&
+        wcscmp(property, L"UserSID"))
+    {
+        *size = 0;
+        return ERROR_SUCCESS;
+    }
+#endif
 
     *size = 0;
     r = MsiGetPropertyW(hinst, property, empty, size);

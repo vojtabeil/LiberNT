@@ -51,9 +51,13 @@ BEGIN
     IDS_VOL_OPEN "वॉल्यूम नियंत्रण &खोलें"
     IDS_VOL_RUN "SNDVOL32.EXE"
     IDS_VOL_MUTED "वॉल्यूम (मौन)"
+    IDS_VOL_NODEVICE "No Audio Output Device is installed."
 
     //Keyboard-Mouse related strings
     IDS_KEYS_STICKY "स्टिकीकी"
     IDS_KEYS_MOUSE "माउसकी"
     IDS_KEYS_FILTER "फ़िल्टरकी"
+    IDS_BT_DEVICES "Bluetooth Devices"
+    IDS_BT_SHOW "Show Bluetooth &Devices"
+    IDS_BT_SETTINGS "Open &Settings"
 END

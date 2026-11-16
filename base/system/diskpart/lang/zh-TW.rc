@@ -12,7 +12,7 @@ LANGUAGE LANG_CHINESE, SUBLANG_CHINESE_TRADITIONAL
 /* Basic application information */
 STRINGTABLE
 BEGIN
-    IDS_APP_HEADER "ReactOS DiskPart"
+    IDS_APP_HEADER "LiberNT DiskPart"
     IDS_APP_USAGE "\n磁碟分區實用工具\n\n\
 Usage: DISKPART [/S 檔名] [/T 逾時] [/?]\n\n\
 /S <檔名>\t執行指定的指令碼。\n\
@@ -80,7 +80,7 @@ STRINGTABLE
 BEGIN
     IDS_DELETE_PARTITION_FAIL "\nDiskPart 無法刪除指定的磁碟分割。\n請確認已選擇的磁碟分割能夠正確地刪除。\n"
     IDS_DELETE_PARTITION_SUCCESS "\nDiskPart 成功刪除指定的磁碟分割。\n"
-    IDS_DELETE_PARTITION_SYSTEM "\nThe selected partition may be neccessary to the operation of your computer, and may not be deleted.\n"
+    IDS_DELETE_PARTITION_SYSTEM "\nThe selected partition may be necessary to the operation of your computer, and may not be deleted.\n"
 END
 
 /* Disk Information Labels */
@@ -125,7 +125,7 @@ END
 STRINGTABLE
 BEGIN
     IDS_FORMAT_FAIL "\nDiskPart failed to format the selected volume.\n"
-    IDS_FORMAT_SUCCESS "\nDiskPart successfully formated the selected volume.\n"
+    IDS_FORMAT_SUCCESS "\nDiskPart successfully formatted the selected volume.\n"
     IDS_FORMAT_PROGRESS "\r  %3lu percent completed"
 END
 
@@ -183,6 +183,18 @@ END
 /* Select command strings */
 STRINGTABLE
 BEGIN
+    IDS_SHRINK_QUERYMAX "\nThe maximum number of reclaimable bytes is: %4I64u %s\n"
+    IDS_SHRINK_SUCCESS "\nDiskPart successfully shrunk the volume by: %4I64u %s\n"
+    IDS_SHRINK_FS_NOT_SUPPORTED "\nVirtual Disk Service error:\nThe volume cannot be shrunk because the file system does not support it.\n\n"
+    IDS_SHRINK_TOO_BIG "\nVirtual Disk Service error:\nThe specified shrink size is too big and will cause the volume to be \nsmaller than the minimum volume size.\n\n"
+    IDS_SHRINK_TOO_SMALL "\nVirtual Disk Service error:\nThe specified shrink size is less than then minimum shrink size allowed.\n\n"
+    IDS_SHRINK_NO_VOLUME "\nThere is no volume in focus.\nSelect a volume and try again.\n"
+    IDS_EXTEND_SUCCESS "\nDiskPart successfully extended the volume.\n"
+    IDS_EXTEND_FS_SUCCESS "\nDiskPart successfully extended the file system on the volume.\n"
+    IDS_EXTEND_NO_SPACE "\nThere is not enough usable free space on specified disk(s) to extend the\nvolume.\n"
+    IDS_EXTEND_NOT_ENOUGH "\nVirtual Disk Service error:\nThere is not enough usable space for this operation.\n\n"
+    IDS_EXTEND_FS_NOT_SUPPORTED "\nVirtual Disk Service error:\nThe volume cannot be extended because the file system does not support it.\n\n"
+    IDS_RESIZE_INVALID_PARAMETER "\nDiskPart has encountered an error: The parameter is incorrect.\nSee the System Event Log for more information.\n\n"
     IDS_SELECT_NO_DISK "\n目前沒有選擇磁碟。\n請選擇一個磁碟，然後再試一次。\n\n"
     IDS_SELECT_DISK "\n磁碟 %lu 現在是所選擇的磁碟。\n\n"
     IDS_SELECT_DISK_INVALID "\n無效的磁碟。\n\n"

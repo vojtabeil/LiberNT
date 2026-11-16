@@ -36,6 +36,9 @@
 #include "mshtml.h"
 
 #include "wine/test.h"
+#ifdef __REACTOS__
+#include "../mshtml/httpserver.h"
+#endif
 
 #define EXPECT_REF(node,ref) _expect_ref((IUnknown*)node, ref, __LINE__)
 static void _expect_ref(IUnknown* obj, ULONG ref, int line)
@@ -87,6 +90,9 @@ static BOOL g_enablecallchecks;
         ok(called_ ## func, "expected " #func "\n"); \
         expect_ ## func = called_ ## func = FALSE; \
     }while(0)
+
+#define CLEAR_CALLED(func) \
+    expect_ ## func = called_ ## func = 0
 
 /* object site */
 DEFINE_EXPECT(site_qi_IServiceProvider);
@@ -1403,8 +1409,8 @@ static void set_xhr_site(IXMLHttpRequest *xhr)
     CHECK_CALLED(sp_queryservice_SID_secmgr_htmldoc2);
     todo_wine
     CHECK_CALLED(sp_queryservice_SID_secmgr_xmldomdoc);
-    /* this one isn't very reliable
-    CHECK_CALLED(sp_queryservice_SID_secmgr_secmgr); */
+    /* this one isn't very reliable */
+    CLEAR_CALLED(sp_queryservice_SID_secmgr_secmgr);
 todo_wine {
     CHECK_CALLED(htmldoc2_get_all);
     CHECK_CALLED(collection_get_length);
@@ -1919,10 +1925,18 @@ START_TEST(httpreq)
 
     IXMLHttpRequest_Release(xhr);
 
+#ifdef __REACTOS__
+    /* The requests load their test.winehq.org pages from a loopback server, with their URLs unchanged */
+    ok(start_local_http_server(L"invalid.host.test.winehq.org"), "the local http server did not start\n");
+#endif
+
     test_XMLHTTP();
     test_server_xhr();
     test_safe_httpreq();
     test_supporterrorinfo();
 
+#ifdef __REACTOS__
+    stop_local_http_server();
+#endif
     CoUninitialize();
 }

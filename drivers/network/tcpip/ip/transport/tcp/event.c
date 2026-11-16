@@ -45,7 +45,7 @@ CompleteBucket(PCONNECTION_ENDPOINT Connection, PTDI_BUCKET Bucket, const BOOLEA
     }
     else
     {
-        ChewCreate(BucketCompletionWorker, Bucket);
+        ChewCreateHighPriority(BucketCompletionWorker, Bucket);
     }
 }
 
@@ -182,13 +182,16 @@ VOID
 TCPFinEventHandler(void *arg, const err_t err)
 {
    PCONNECTION_ENDPOINT Connection = (PCONNECTION_ENDPOINT)arg, LastConnection;
-   const NTSTATUS Status = TCPTranslateError(err);
+   NTSTATUS Status = TCPTranslateError(err);
 
    ASSERT(Connection->SocketContext == NULL);
    ASSERT(Connection->AddressFile);
    ASSERT(err != ERR_OK);
 
    LockObject(Connection);
+
+   if (err == ERR_RST && IsListEmpty(&Connection->ConnectRequest))
+       Status = STATUS_CONNECTION_RESET;
 
    /* Complete all outstanding requests now */
    FlushAllQueues(Connection, Status);
@@ -227,14 +230,14 @@ TCPFinEventHandler(void *arg, const err_t err)
    UnlockObject(Connection);
 }
 
-VOID
+NTSTATUS
 TCPAcceptEventHandler(void *arg, PTCP_PCB newpcb)
 {
     PCONNECTION_ENDPOINT Connection = (PCONNECTION_ENDPOINT)arg;
     PTDI_BUCKET Bucket;
     PLIST_ENTRY Entry;
     PIRP Irp;
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_PENDING;
 
     LockObject(Connection);
 
@@ -275,6 +278,7 @@ TCPAcceptEventHandler(void *arg, PTCP_PCB newpcb)
             UnlockObject(Bucket->AssociatedEndpoint);
 
             LibTCPAccept(newpcb, (PTCP_PCB)Connection->SocketContext, Bucket->AssociatedEndpoint);
+            LibTCPWfpEstablish(Bucket->AssociatedEndpoint, newpcb, FALSE);
         }
 
         DereferenceObject(Bucket->AssociatedEndpoint);
@@ -287,7 +291,15 @@ TCPAcceptEventHandler(void *arg, PTCP_PCB newpcb)
         }
     }
 
+    if (Status == STATUS_SUCCESS)
+    {
+        UnlockObject(Connection);
+        return STATUS_SUCCESS;
+    }
+
+    Status = LibTCPDeferAcceptLocked(Connection, newpcb);
     UnlockObject(Connection);
+    return Status;
 }
 
 VOID
@@ -334,7 +346,9 @@ TCPSendEventHandler(void *arg, const u16_t space)
 
         Status = TCPTranslateError(LibTCPSend(Connection,
                                               SendBuffer,
-                                              SendLen, &BytesSent, TRUE));
+                                              SendLen, &BytesSent,
+                                              ((PTDI_REQUEST_KERNEL_SEND)&IoGetCurrentIrpStackLocation(Irp)->Parameters)->SendFlags,
+                                              TRUE));
 
         TI_DbgPrint(DEBUG_TCP,("TCP Bytes: %d\n", BytesSent));
 
@@ -385,8 +399,6 @@ TCPRecvEventHandler(void *arg)
     PIRP Irp;
     PMDL Mdl;
     UINT Received;
-    UINT RecvLen;
-    PUCHAR RecvBuffer;
     NTSTATUS Status;
 
     LockObject(Connection);
@@ -399,9 +411,7 @@ TCPRecvEventHandler(void *arg)
         Irp = Bucket->Request.RequestContext;
         Mdl = Irp->MdlAddress;
 
-        NdisQueryBuffer( Mdl, &RecvBuffer, &RecvLen );
-
-        Status = LibTCPGetDataFromConnectionQueue(Connection, RecvBuffer, RecvLen, &Received);
+        Status = LibTCPGetDataFromConnectionQueue(Connection, Mdl, &Received, TRUE);
         if (Status == STATUS_PENDING)
         {
             InsertHeadList(&Connection->ReceiveRequest, &Bucket->Entry);

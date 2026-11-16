@@ -1,6 +1,5 @@
 
-remove_definitions(-DWINVER=0x502 -D_WIN32_WINNT=0x502)
-add_definitions(-DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000005)
+remove_definitions(-DWINVER=${REACTOS_TARGET_NT} -D_WIN32_WINNT=${REACTOS_TARGET_NT})
 
 list(APPEND SOURCE
     broadcast.c
@@ -29,7 +28,13 @@ list(APPEND SOURCE
     wsprintf.c)
 
 list(APPEND PCH_SKIP_SOURCE
-    testlist.c)
+    testlist.c
+    class.c
+    monitor.c
+    win.c
+    winstation.c)
+
+set_property(SOURCE win.c APPEND PROPERTY COMPILE_OPTIONS -iquote ${REACTOS_SOURCE_DIR}/sdk/include/wine)
 
 add_executable(user32_winetest
     ${SOURCE}
@@ -44,9 +49,11 @@ if(MSVC)
     remove_target_compile_option(user32_winetest "/we4477")
 endif()
 
-if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+if(NOT MSVC)
     target_compile_options(user32_winetest PRIVATE
-    -Wno-format
+    -UNTDDI_VERSION -DNTDDI_VERSION=0x0A000005
+    -U_WIN32_WINNT -D_WIN32_WINNT=0x0A00
+    -UWINVER -DWINVER=0x0A00
     -Wno-int-conversion)
 endif()
 
@@ -55,3 +62,11 @@ set_module_type(user32_winetest win32cui)
 add_importlibs(user32_winetest user32 gdi32 advapi32 imm32 hid msvcrt kernel32 ntdll)
 add_pch(user32_winetest precomp.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET user32_winetest)
+
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(user32_winetest PRIVATE -Wno-pragma-pack -Wno-unused-const-variable)
+endif()
+
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(user32_winetest PRIVATE -Wno-format-overflow)
+endif()

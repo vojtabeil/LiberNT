@@ -44,9 +44,13 @@ BEGIN
     IDS_VOL_OPEN "&Lautstärkeregelung öffnen"
     IDS_VOL_RUN "SNDVOL32.EXE"
     IDS_VOL_MUTED "Lautstärke (ausgeschaltet)"
+    IDS_VOL_NODEVICE "No Audio Output Device is installed."
 
     //Keyboard-Mouse related strings
     IDS_KEYS_STICKY "Einrastfunktion"
     IDS_KEYS_MOUSE "Tastaturmaus"
     IDS_KEYS_FILTER "Anschlagverzögerung"
+    IDS_BT_DEVICES "Bluetooth Devices"
+    IDS_BT_SHOW "Show Bluetooth &Devices"
+    IDS_BT_SETTINGS "Open &Settings"
 END

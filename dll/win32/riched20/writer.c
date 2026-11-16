@@ -54,6 +54,13 @@ ME_StreamOutInit(ME_TextEditor *editor, EDITSTREAM *stream)
 {
   ME_OutStream *pStream = calloc(1, sizeof(*pStream));
 
+#ifdef __REACTOS__
+  if (!pStream)
+  {
+    stream->dwError = ERROR_NOT_ENOUGH_MEMORY;
+    return NULL;
+  }
+#endif
   pStream->stream = stream;
   pStream->stream->dwError = 0;
   pStream->nColorTblLen = 1;
@@ -686,13 +693,8 @@ static BOOL stream_out_para_props( ME_TextEditor *editor, ME_OutStream *pStream,
             /* Word bar tab (vertical bar). Handled below */
             break;
         }
-#ifdef __REACTOS__ /* Import fix from Wine-11.3 */
         if ((ULONG)fmt->rgxTabs[i] >> 28 <= 5)
           strcat(props, leader[(ULONG)fmt->rgxTabs[i] >> 28]);
-#else
-        if (fmt->rgxTabs[i] >> 28 <= 5)
-          strcat(props, leader[fmt->rgxTabs[i] >> 28]);
-#endif
         sprintf(props+strlen(props), "\\tx%ld", fmt->rgxTabs[i]&0x00FFFFFF);
       }
     }
@@ -880,6 +882,13 @@ ME_StreamOutRTFText(ME_OutStream *pStream, const WCHAR *text, LONG nChars)
       fit = min(nChars, STREAMOUT_BUFFER_SIZE / 6);
       nBytes = WideCharToMultiByte(CP_UTF8, 0, text, fit, buffer,
                                    STREAMOUT_BUFFER_SIZE, NULL, NULL);
+#ifdef __REACTOS__
+      if (!nBytes)
+      {
+        pStream->stream->dwError = GetLastError();
+        return FALSE;
+      }
+#endif
       nChars -= fit;
       text += fit;
       for (i = 0; i < nBytes; i++)
@@ -908,6 +917,13 @@ ME_StreamOutRTFText(ME_OutStream *pStream, const WCHAR *text, LONG nChars)
       nBytes = WideCharToMultiByte(pStream->nCodePage, 0, text, 1,
                                    letter, 3, NULL,
                                    (pStream->nCodePage == CP_SYMBOL) ? NULL : &unknown);
+#ifdef __REACTOS__
+      if (!nBytes)
+      {
+        pStream->stream->dwError = GetLastError();
+        return FALSE;
+      }
+#endif
       if (unknown)
         pos += sprintf(buffer + pos, "\\u%d?", (short)*text);
       else if ((BYTE)*letter < 128) {
@@ -1159,12 +1175,41 @@ static BOOL ME_StreamOutText(ME_TextEditor *editor, ME_OutStream *pStream,
 
         nSize = WideCharToMultiByte(nCodePage, 0, get_text( cursor.run, cursor.nOffset ),
                                     nLen, NULL, 0, NULL, NULL);
+#ifdef __REACTOS__
+        if (!nSize && nLen)
+        {
+          pStream->stream->dwError = GetLastError();
+          success = FALSE;
+          break;
+        }
+#endif
         if (nSize > nBufLen) {
+#ifdef __REACTOS__
+          char *new_buffer = realloc(buffer, nSize);
+          if (!new_buffer)
+          {
+            pStream->stream->dwError = ERROR_NOT_ENOUGH_MEMORY;
+            success = FALSE;
+            break;
+          }
+          buffer = new_buffer;
+#else
           buffer = realloc(buffer, nSize);
+#endif
           nBufLen = nSize;
         }
+#ifdef __REACTOS__
+        if (nSize && !WideCharToMultiByte(nCodePage, 0, get_text( cursor.run, cursor.nOffset ),
+                                        nLen, buffer, nSize, NULL, NULL))
+        {
+          pStream->stream->dwError = GetLastError();
+          success = FALSE;
+          break;
+        }
+#else
         WideCharToMultiByte(nCodePage, 0, get_text( cursor.run, cursor.nOffset ),
                             nLen, buffer, nSize, NULL, NULL);
+#endif
         success = ME_StreamOutMove(pStream, buffer, nSize);
       }
     }
@@ -1185,6 +1230,9 @@ LRESULT ME_StreamOutRange(ME_TextEditor *editor, DWORD dwFormat,
 {
   ME_OutStream *pStream = ME_StreamOutInit(editor, stream);
 
+#ifdef __REACTOS__
+  if (!pStream) return 0;
+#endif
   if (dwFormat & SF_RTF)
     ME_StreamOutRTF(editor, pStream, start, nChars, dwFormat);
   else if (dwFormat & SF_TEXT || dwFormat & SF_TEXTIZED)

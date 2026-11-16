@@ -74,9 +74,7 @@
 #include "shlwapi.h"
 
 #include "wine/debug.h"
-#include "wine/heap.h"
 #ifdef __REACTOS__
-#include "wine/unicode.h"
 EXTERN_C HRESULT DoInitAutoCompleteWithCWD(FileOpenDlgInfos *pInfo, HWND hwndEdit);
 EXTERN_C HRESULT DoReleaseAutoCompleteWithCWD(FileOpenDlgInfos *pInfo);
 #endif
@@ -330,10 +328,10 @@ static BOOL get_config_key_string(HKEY hkey, const WCHAR *name, WCHAR **value)
     if (type != REG_SZ && type != REG_EXPAND_SZ)
         return FALSE;
 
-    str = heap_alloc(size);
+    str = malloc(size);
     if (RegQueryValueExW(hkey, name, 0, &type, (BYTE *)str, &size))
     {
-        heap_free(str);
+        free(str);
         return FALSE;
     }
 
@@ -372,7 +370,7 @@ static void filedlg_collect_places_pidls(FileOpenDlgInfos *fodInfos)
         CSIDL_MYDOCUMENTS,
         CSIDL_DRIVES,
         CSIDL_NETWORK,
-#else        
+#else
         CSIDL_DESKTOP,
         CSIDL_MYDOCUMENTS,
         CSIDL_DRIVES,
@@ -403,7 +401,7 @@ static void filedlg_collect_places_pidls(FileOpenDlgInfos *fodInfos)
                 hr = SHParseDisplayName(str, NULL, &fodInfos->places[i], 0, NULL);
                 if (FAILED(hr))
                     WARN("Failed to parse custom places location, %s.\n", debugstr_w(str));
-                heap_free(str);
+                free(str);
             }
         }
 
@@ -514,7 +512,7 @@ static WCHAR *heap_strdupAtoW(const char *str)
         return NULL;
 
     len = MultiByteToWideChar(CP_ACP, 0, str, -1, 0, 0);
-    ret = heap_alloc(len * sizeof(WCHAR));
+    ret = malloc(len * sizeof(WCHAR));
     MultiByteToWideChar(CP_ACP, 0, str, -1, ret, len);
 
     return ret;
@@ -542,7 +540,11 @@ static void init_filedlg_infoW(OPENFILENAMEW *ofn, FileOpenDlgInfos *info)
     if (ofn->lpstrDefExt)
     {
         INT cchExt = lstrlenW(ofn->lpstrDefExt);
-        LPWSTR pszExt = heap_alloc((cchExt + 1) * sizeof(WCHAR));
+        LPWSTR pszExt = malloc((cchExt + 1) * sizeof(WCHAR));
+#ifdef __REACTOS__
+        if (!pszExt)
+            RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
         lstrcpyW(pszExt, ofn->lpstrDefExt);
         info->defext = pszExt;
     }
@@ -554,7 +556,7 @@ static void init_filedlg_infoW(OPENFILENAMEW *ofn, FileOpenDlgInfos *info)
 
     if (ofn->lpstrFile)
     {
-        info->filename = heap_alloc(ofn->nMaxFile * sizeof(WCHAR));
+        info->filename = malloc(ofn->nMaxFile * sizeof(WCHAR));
         lstrcpynW(info->filename, ofn->lpstrFile, ofn->nMaxFile);
     }
 
@@ -563,7 +565,7 @@ static void init_filedlg_infoW(OPENFILENAMEW *ofn, FileOpenDlgInfos *info)
         DWORD len = ExpandEnvironmentStringsW(ofn->lpstrInitialDir, NULL, 0);
         if (len)
         {
-            info->initdir = heap_alloc(len * sizeof(WCHAR));
+            info->initdir = malloc(len * sizeof(WCHAR));
             ExpandEnvironmentStringsW(ofn->lpstrInitialDir, info->initdir, len);
         }
     }
@@ -585,7 +587,7 @@ static void init_filedlg_infoA(OPENFILENAMEA *ofn, FileOpenDlgInfos *info)
     if (ofn->lpstrFile)
     {
         len = MultiByteToWideChar(CP_ACP, 0, ofn->lpstrFile, ofn->nMaxFile, NULL, 0);
-        ofnW.lpstrFile = heap_alloc(len * sizeof(WCHAR));
+        ofnW.lpstrFile = malloc(len * sizeof(WCHAR));
         MultiByteToWideChar(CP_ACP, 0, ofn->lpstrFile, ofn->nMaxFile, ofnW.lpstrFile, len);
         ofnW.nMaxFile = len;
     }
@@ -601,7 +603,7 @@ static void init_filedlg_infoA(OPENFILENAMEA *ofn, FileOpenDlgInfos *info)
         s++;
         n = s - ofn->lpstrFilter;
         len = MultiByteToWideChar(CP_ACP, 0, ofn->lpstrFilter, n, NULL, 0);
-        ofnW.lpstrFilter = heap_alloc(len * sizeof(WCHAR));
+        ofnW.lpstrFilter = malloc(len * sizeof(WCHAR));
         MultiByteToWideChar(CP_ACP, 0, ofn->lpstrFilter, n, (WCHAR *)ofnW.lpstrFilter, len);
     }
 
@@ -617,7 +619,7 @@ static void init_filedlg_infoA(OPENFILENAMEA *ofn, FileOpenDlgInfos *info)
         if (*s) s = s+strlen(s)+1;
         n = s - ofn->lpstrCustomFilter;
         len = MultiByteToWideChar(CP_ACP, 0, ofn->lpstrCustomFilter, n, NULL, 0);
-        ofnW.lpstrCustomFilter = heap_alloc(len * sizeof(WCHAR));
+        ofnW.lpstrCustomFilter = malloc(len * sizeof(WCHAR));
         MultiByteToWideChar(CP_ACP, 0, ofn->lpstrCustomFilter, n, ofnW.lpstrCustomFilter, len);
     }
 
@@ -628,8 +630,8 @@ static void init_filedlg_infoA(OPENFILENAMEA *ofn, FileOpenDlgInfos *info)
     info->unicode = FALSE;
 
     /* free what was duplicated */
-    heap_free((void *)ofnW.lpstrInitialDir);
-    heap_free(ofnW.lpstrFile);
+    free((void *)ofnW.lpstrInitialDir);
+    free(ofnW.lpstrFile);
 }
 
 /***********************************************************************
@@ -646,7 +648,7 @@ static BOOL GetFileDialog95(FileOpenDlgInfos *info, UINT dlg_type)
     /* save current directory */
     if (info->ofnInfos->Flags & OFN_NOCHANGEDIR)
     {
-        current_dir = heap_alloc(MAX_PATH * sizeof(WCHAR));
+        current_dir = malloc(MAX_PATH * sizeof(WCHAR));
         GetCurrentDirectoryW(MAX_PATH, current_dir);
     }
 
@@ -663,47 +665,28 @@ static BOOL GetFileDialog95(FileOpenDlgInfos *info, UINT dlg_type)
         ret = FALSE;
     }
 
-#ifdef __REACTOS__
-    /* set the lpstrFileTitle */
-    if (ret && info->ofnInfos->lpstrFile && info->ofnInfos->lpstrFileTitle)
-    {
-        if (info->unicode)
-        {
-            LPOPENFILENAMEW ofn = info->ofnInfos;
-            WCHAR *file_title = PathFindFileNameW(ofn->lpstrFile);
-            lstrcpynW(ofn->lpstrFileTitle, file_title, ofn->nMaxFileTitle);
-        }
-        else
-        {
-            LPOPENFILENAMEA ofn = (LPOPENFILENAMEA)info->ofnInfos;
-            char *file_title = PathFindFileNameA(ofn->lpstrFile);
-            lstrcpynA(ofn->lpstrFileTitle, file_title, ofn->nMaxFileTitle);
-        }
-    }
-#endif
-
     if (current_dir)
     {
         SetCurrentDirectoryW(current_dir);
-        heap_free(current_dir);
+        free(current_dir);
     }
 
     if (!info->unicode)
     {
-        heap_free((void *)info->defext);
-        heap_free((void *)info->title);
-        heap_free((void *)info->filter);
-        heap_free((void *)info->customfilter);
+        free((void *)info->defext);
+        free((void *)info->title);
+        free((void *)info->filter);
+        free((void *)info->customfilter);
     }
 #ifdef __REACTOS__
     else
     {
-        heap_free((void *)info->defext);
+        free((void *)info->defext);
     }
 #endif
 
-    heap_free(info->filename);
-    heap_free(info->initdir);
+    free(info->filename);
+    free(info->initdir);
 
     for (i = 0; i < ARRAY_SIZE(info->places); i++)
         ILFree(info->places[i]);
@@ -785,7 +768,11 @@ int COMDLG32_SplitFileNames(LPWSTR lpstrEdit, UINT nStrLen, LPWSTR *lpstrFileLis
 
 	/* we might get single filename without any '"',
 	 * so we need nStrLen + terminating \0 + end-of-list \0 */
-	*lpstrFileList = heap_alloc((nStrLen + 2) * sizeof(WCHAR));
+	*lpstrFileList = malloc((nStrLen + 2) * sizeof(WCHAR));
+#ifdef __REACTOS__
+	if (!*lpstrFileList)
+		RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 	*sizeUsed = 0;
 
 	/* build delimited file list from filenames */
@@ -979,6 +966,29 @@ static INT_PTR CALLBACK FileOpenDlgProcUserTemplate(HWND hwnd, UINT uMsg, WPARAM
     return FALSE;
 }
 
+#ifdef __REACTOS__
+static INT_PTR CALLBACK FileOpenDlgProcHookInit(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    FileOpenDlgInfos *fodInfos = get_filedlg_infoptr(GetParent(hwnd));
+    DLGPROC hook;
+    INT_PTR ret;
+
+    if (!fodInfos)
+        return FALSE;
+
+    hook = (DLGPROC)fodInfos->ofnInfos->lpfnHook;
+    ret = hook(hwnd, uMsg, wParam, lParam);
+    if (uMsg != WM_INITDIALOG)
+        return ret;
+
+    if (fodInfos->unicode)
+        SetWindowLongPtrW(hwnd, DWLP_DLGPROC, (LONG_PTR)hook);
+    else
+        SetWindowLongPtrA(hwnd, DWLP_DLGPROC, (LONG_PTR)hook);
+    return FALSE;
+}
+
+#endif
 static HWND CreateTemplateDialog(FileOpenDlgInfos *fodInfos, HWND hwnd)
 {
     LPCVOID template;
@@ -1030,6 +1040,16 @@ static HWND CreateTemplateDialog(FileOpenDlgInfos *fodInfos, HWND hwnd)
           return NULL;
     	}
       }
+#ifdef __REACTOS__
+      if (fodInfos->unicode)
+          hChildDlg = CreateDialogIndirectParamW(hinst, template, hwnd,
+              is_dialog_hooked(fodInfos) ? FileOpenDlgProcHookInit : FileOpenDlgProcUserTemplate,
+              (LPARAM)fodInfos->ofnInfos);
+      else
+          hChildDlg = CreateDialogIndirectParamA(hinst, template, hwnd,
+              is_dialog_hooked(fodInfos) ? FileOpenDlgProcHookInit : FileOpenDlgProcUserTemplate,
+              (LPARAM)fodInfos->ofnInfos);
+#else
       if (fodInfos->unicode)
           hChildDlg = CreateDialogIndirectParamW(hinst, template, hwnd,
               is_dialog_hooked(fodInfos) ? (DLGPROC)fodInfos->ofnInfos->lpfnHook : FileOpenDlgProcUserTemplate,
@@ -1038,6 +1058,7 @@ static HWND CreateTemplateDialog(FileOpenDlgInfos *fodInfos, HWND hwnd)
           hChildDlg = CreateDialogIndirectParamA(hinst, template, hwnd,
               is_dialog_hooked(fodInfos) ? (DLGPROC)fodInfos->ofnInfos->lpfnHook : FileOpenDlgProcUserTemplate,
               (LPARAM)fodInfos->ofnInfos);
+#endif
       return hChildDlg;
     }
     else if (is_dialog_hooked(fodInfos))
@@ -1113,7 +1134,7 @@ static INT_PTR FILEDLG95_Handle_GetFilePath(HWND hwnd, DWORD size, LPVOID result
 
     /* get path and filenames */
     len = SendMessageW( fodInfos->DlgInfos.hwndFileName, WM_GETTEXTLENGTH, 0, 0 );
-    buffer = heap_alloc( (len + 2 + MAX_PATH) * sizeof(WCHAR) );
+    buffer = malloc( (len + 2 + MAX_PATH) * sizeof(WCHAR) );
     COMDLG32_GetDisplayNameOf( fodInfos->ShellInfos.pidlAbsCurrent, buffer );
     if (len)
     {
@@ -1133,7 +1154,7 @@ static INT_PTR FILEDLG95_Handle_GetFilePath(HWND hwnd, DWORD size, LPVOID result
         if (total <= size) WideCharToMultiByte( CP_ACP, 0, buffer, -1, result, size, NULL, NULL );
         TRACE( "CDM_GETFILEPATH: returning %u %s\n", total, debugstr_a(result));
     }
-    heap_free( buffer );
+    free( buffer );
     return total;
 }
 
@@ -1146,7 +1167,11 @@ static INT_PTR FILEDLG95_HandleCustomDialogMessages(HWND hwnd, UINT uMsg, WPARAM
 {
     FileOpenDlgInfos *fodInfos = get_filedlg_infoptr(hwnd);
     WCHAR lpstrPath[MAX_PATH];
+#ifdef __REACTOS__
+    INT_PTR retval = FALSE;
+#else
     INT_PTR retval;
+#endif
 
     if(!fodInfos) return FALSE;
 
@@ -1223,7 +1248,7 @@ static INT_PTR FILEDLG95_HandleCustomDialogMessages(HWND hwnd, UINT uMsg, WPARAM
                 if (pszExt)
                 {
                     INT cchExt = lstrlenW(pszExt);
-                    fodInfos->defext = heap_alloc((cchExt + 1) * sizeof(WCHAR));
+                    fodInfos->defext = malloc((cchExt + 1) * sizeof(WCHAR));
                     lstrcpyW((LPWSTR)fodInfos->defext, pszExt);
                 }
             }
@@ -1234,7 +1259,7 @@ static INT_PTR FILEDLG95_HandleCustomDialogMessages(HWND hwnd, UINT uMsg, WPARAM
                     fodInfos->defext = heap_strdupAtoW(pszExt);
             }
 
-            heap_free(olddefext);
+            free(olddefext);
             break;
         }
 #endif
@@ -1842,8 +1867,8 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
             else
                 *fodInfos->filename = '\0';
 
-            heap_free(fodInfos->initdir);
-            fodInfos->initdir = heap_alloc((lstrlenW(tmpBuf) + 1)*sizeof(WCHAR));
+            free(fodInfos->initdir);
+            fodInfos->initdir = malloc((lstrlenW(tmpBuf) + 1)*sizeof(WCHAR));
             lstrcpyW(fodInfos->initdir, tmpBuf);
             handledPath = TRUE;
             TRACE("Value in Filename includes path, overriding InitialDir: %s, %s\n",
@@ -1877,8 +1902,8 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
             result = GetFullPathNameW(tmpBuf, MAX_PATH, tmpBuf2, &nameBit);
             if (result) {
                 *nameBit = 0x00;
-                heap_free(fodInfos->initdir);
-                fodInfos->initdir = heap_alloc((lstrlenW(tmpBuf2) + 1) * sizeof(WCHAR));
+                free(fodInfos->initdir);
+                fodInfos->initdir = malloc((lstrlenW(tmpBuf2) + 1) * sizeof(WCHAR));
                 lstrcpyW(fodInfos->initdir, tmpBuf2);
                 handledPath = TRUE;
                 TRACE("Value in InitDir changed to %s\n", debugstr_w(fodInfos->initdir));
@@ -1886,7 +1911,7 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
         }
         else if (fodInfos->initdir)
         {
-            heap_free(fodInfos->initdir);
+            free(fodInfos->initdir);
             fodInfos->initdir = NULL;
             TRACE("Value in InitDir is not an existing path, changed to (nil)\n");
         }
@@ -1897,7 +1922,7 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
   {
       /* 2.5. Win2000+: Recently used defext */
       if (win2000plus) {
-          fodInfos->initdir = heap_alloc(MAX_PATH * sizeof(WCHAR));
+          fodInfos->initdir = malloc(MAX_PATH * sizeof(WCHAR));
           fodInfos->initdir[0] = '\0';
 
           FILEDLG95_MRU_load_ext(fodInfos->initdir, MAX_PATH, fodInfos->defext);
@@ -1905,7 +1930,7 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
           if (fodInfos->initdir[0] && PathIsDirectoryW(fodInfos->initdir)) {
              handledPath = TRUE;
           } else {
-             heap_free(fodInfos->initdir);
+             free(fodInfos->initdir);
              fodInfos->initdir = NULL;
           }
       }
@@ -1931,8 +1956,8 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
             *nameBit = 0x00;
 
             len = lstrlenW(tmpBuf);
-            heap_free(fodInfos->initdir);
-            fodInfos->initdir = heap_alloc((len+1)*sizeof(WCHAR));
+            free(fodInfos->initdir);
+            fodInfos->initdir = malloc((len+1)*sizeof(WCHAR));
             lstrcpyW(fodInfos->initdir, tmpBuf);
 
             handledPath = TRUE;
@@ -1944,7 +1969,7 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
 
       /* 4. Win2000+: Recently used */
       if (!handledPath && win2000plus) {
-          fodInfos->initdir = heap_alloc(MAX_PATH * sizeof(WCHAR));
+          fodInfos->initdir = malloc(MAX_PATH * sizeof(WCHAR));
           fodInfos->initdir[0] = '\0';
 
           FILEDLG95_MRU_load_filename(fodInfos->initdir);
@@ -1952,7 +1977,7 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
           if (fodInfos->initdir[0] && PathFileExistsW(fodInfos->initdir)){
              handledPath = TRUE;
           }else{
-             heap_free(fodInfos->initdir);
+             free(fodInfos->initdir);
              fodInfos->initdir = NULL;
           }
       }
@@ -1984,8 +2009,8 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
 
            } else {
 
-               heap_free(fodInfos->initdir);
-               fodInfos->initdir = heap_alloc(MAX_PATH * sizeof(WCHAR));
+               free(fodInfos->initdir);
+               fodInfos->initdir = malloc(MAX_PATH * sizeof(WCHAR));
                GetCurrentDirectoryW(MAX_PATH, fodInfos->initdir);
 
                handledPath = TRUE;
@@ -1999,7 +2024,7 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
 
       /* 6. Win98+ and 2000+: Use personal files dir, others use current dir */
       if (!handledPath && (win2000plus || win98plus)) {
-          fodInfos->initdir = heap_alloc(MAX_PATH * sizeof(WCHAR));
+          fodInfos->initdir = malloc(MAX_PATH * sizeof(WCHAR));
 
           if (SHGetFolderPathW(hwnd, CSIDL_PERSONAL, 0, 0, fodInfos->initdir) == S_OK)
           {
@@ -2017,7 +2042,7 @@ static LRESULT FILEDLG95_InitControls(HWND hwnd)
 
           handledPath = TRUE;
       } else if (!handledPath) {
-          fodInfos->initdir = heap_alloc(MAX_PATH * sizeof(WCHAR));
+          fodInfos->initdir = malloc(MAX_PATH * sizeof(WCHAR));
           GetCurrentDirectoryW(MAX_PATH, fodInfos->initdir);
           handledPath = TRUE;
           TRACE("No initial dir specified, using current dir of %s\n", debugstr_w(fodInfos->initdir));
@@ -2545,7 +2570,7 @@ static void FILEDLG95_MRU_save_filename(LPCWSTR filename)
 
         final_len = path_len + lstrlenW(module_name) + 2;
 
-        final = heap_alloc(final_len * sizeof(WCHAR));
+        final = malloc(final_len * sizeof(WCHAR));
         if(!final)
             return;
         lstrcpyW(final, module_name);
@@ -2556,12 +2581,12 @@ static void FILEDLG95_MRU_save_filename(LPCWSTR filename)
                 final_len * sizeof(WCHAR));
         if(ret){
             WARN("Error saving MRU data to slot %s: %ld\n", wine_dbgstr_w(slot_name), ret);
-            heap_free(final);
+            free(final);
             RegCloseKey(hkey);
             return;
         }
 
-        heap_free(final);
+        free(final);
     }
 
     { /* update MRUList value */
@@ -2904,7 +2929,7 @@ FILEDLG95_AddDotExtIfNeeded(FileOpenDlgInfos *fodInfos, LPWSTR lpstrPathAndFile)
     if (the_ext && *the_ext &&
         (*ext == UNICODE_NULL || lstrcmpiW(ext + 1, the_ext) != 0))
     {
-        if (strlenW(lpstrPathAndFile) + 1 + strlenW(the_ext) + 1 <=
+        if (wcslen(lpstrPathAndFile) + 1 + wcslen(the_ext) + 1 <=
             fodInfos->ofnInfos->nMaxFile)
         {
             /* Make the extension lowercase */
@@ -2930,7 +2955,7 @@ FILEDLG95_AddDotExtIfNeeded(FileOpenDlgInfos *fodInfos, LPWSTR lpstrPathAndFile)
     /* Set/clear the output OFN_EXTENSIONDIFFERENT flag */
     if (*ext)
         ext++;
-    if (!lstrcmpiW(fodInfos->defext, ext))
+    if (!fodInfos->defext || !lstrcmpiW(fodInfos->defext, ext))
         fodInfos->ofnInfos->Flags &= ~OFN_EXTENSIONDIFFERENT;
     else
         fodInfos->ofnInfos->Flags |= OFN_EXTENSIONDIFFERENT;
@@ -2939,14 +2964,8 @@ FILEDLG95_AddDotExtIfNeeded(FileOpenDlgInfos *fodInfos, LPWSTR lpstrPathAndFile)
 }
 #endif
 
-#ifdef __REACTOS__
-int FILEDLG95_ValidatePathAction(struct FileOpenDlgInfos *fodInfos, LPWSTR lpstrPathAndFile,
-                                 IShellFolder **ppsf, HWND hwnd, DWORD flags, BOOL isSaveDlg,
-                                 int defAction)
-#else
 int FILEDLG95_ValidatePathAction(LPWSTR lpstrPathAndFile, IShellFolder **ppsf,
                                  HWND hwnd, DWORD flags, BOOL isSaveDlg, int defAction)
-#endif
 {
     int nOpenAction = defAction;
     LPWSTR lpszTemp, lpszTemp1;
@@ -3014,7 +3033,8 @@ int FILEDLG95_ValidatePathAction(LPWSTR lpstrPathAndFile, IShellFolder **ppsf,
             /* the path component is valid, we have a pidl of the next path component */
             TRACE("parse OK attr=0x%08lx pidl=%p\n", dwAttributes, pidl);
 #ifdef __REACTOS__
-            if((dwAttributes & (SFGAO_FOLDER | SFGAO_FILESYSANCESTOR)) == (SFGAO_FOLDER | SFGAO_FILESYSANCESTOR))
+            if((dwAttributes & (SFGAO_FOLDER | SFGAO_FILESYSANCESTOR)) ==
+               (SFGAO_FOLDER | SFGAO_FILESYSANCESTOR))
 #else
             if(dwAttributes & SFGAO_FOLDER)
 #endif
@@ -3054,17 +3074,8 @@ int FILEDLG95_ValidatePathAction(LPWSTR lpstrPathAndFile, IShellFolder **ppsf,
             {
                 if( (flags & OFN_FILEMUSTEXIST) && !isSaveDlg )
                 {
-#ifdef __REACTOS__
-                    FILEDLG95_AddDotExtIfNeeded(fodInfos, lpstrPathAndFile);
-                    if (!PathFileExistsW(lpstrPathAndFile))
-                    {
-                        FILEDLG95_OnOpenMessage(hwnd, 0, IDS_FILENOTEXISTING);
-                        break;
-                    }
-#else
                     FILEDLG95_OnOpenMessage(hwnd, 0, IDS_FILENOTEXISTING);
                     break;
-#endif
                 }
             }
             /* change to the current folder */
@@ -3130,7 +3141,7 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
 */
 
   COMDLG32_GetCanonicalPath(fodInfos->ShellInfos.pidlAbsCurrent, lpstrFileList, lpstrPathAndFile);
-  heap_free(lpstrFileList);
+  free(lpstrFileList);
 
 /*
   Step 2: here we have a cleaned up path
@@ -3151,10 +3162,12 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
     nOpenAction = ONOPEN_BROWSE;
 
 #ifdef __REACTOS__
-  nOpenAction = FILEDLG95_ValidatePathAction(fodInfos, lpstrPathAndFile, &lpsf, hwnd,
-#else
-  nOpenAction = FILEDLG95_ValidatePathAction(lpstrPathAndFile, &lpsf, hwnd,
+  if ((fodInfos->ofnInfos->Flags & OFN_FILEMUSTEXIST) &&
+      !(fodInfos->DlgInfos.dwDlgProp & FODPROP_SAVEDLG))
+    FILEDLG95_AddDotExtIfNeeded(fodInfos, lpstrPathAndFile);
 #endif
+
+  nOpenAction = FILEDLG95_ValidatePathAction(lpstrPathAndFile, &lpsf, hwnd,
                                              fodInfos->ofnInfos->Flags,
                                              fodInfos->DlgInfos.dwDlgProp & FODPROP_SAVEDLG,
                                              nOpenAction);
@@ -3181,9 +3194,9 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
         DWORD len;
 
         /* replace the current filter */
-        heap_free(fodInfos->ShellInfos.lpstrCurrentFilter);
+        free(fodInfos->ShellInfos.lpstrCurrentFilter);
         len = lstrlenW(lpszTemp)+1;
-        fodInfos->ShellInfos.lpstrCurrentFilter = heap_alloc(len * sizeof(WCHAR));
+        fodInfos->ShellInfos.lpstrCurrentFilter = malloc(len * sizeof(WCHAR));
         lstrcpyW( fodInfos->ShellInfos.lpstrCurrentFilter, lpszTemp);
 
         /* set the filter cb to the extension when possible */
@@ -3265,7 +3278,7 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
             if (lpstrFilter != (LPWSTR)CB_ERR)  /* control is not empty */
             {
                 WCHAR* filterSearchIndex;
-                filterExt = heap_alloc((lstrlenW(lpstrFilter) + 1) * sizeof(WCHAR));
+                filterExt = malloc((lstrlenW(lpstrFilter) + 1) * sizeof(WCHAR));
                 lstrcpyW(filterExt, lpstrFilter);
 
                 /* if a semicolon-separated list of file extensions was given, do not include the
@@ -3287,7 +3300,7 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
                 }
                 else
                 {
-                    heap_free(filterExt);
+                    free(filterExt);
                     filterExt = NULL;
                 }
             }
@@ -3295,7 +3308,7 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
             if (!filterExt)
             {
                 /* use the default file extension */
-                filterExt = heap_alloc((lstrlenW(fodInfos->defext) + 1) * sizeof(WCHAR));
+                filterExt = malloc((lstrlenW(fodInfos->defext) + 1) * sizeof(WCHAR));
                 lstrcpyW(filterExt, fodInfos->defext);
             }
 
@@ -3307,7 +3320,7 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
                 lstrcatW(lpstrPathAndFile, filterExt);
             }
 
-            heap_free(filterExt);
+            free(filterExt);
 
             /* In Open dialog: if file does not exist try without extension */
             if (!(fodInfos->DlgInfos.dwDlgProp & FODPROP_SAVEDLG) && !PathFileExistsW(lpstrPathAndFile))
@@ -3417,7 +3430,6 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
               fodInfos->ofnInfos->nFileExtension = (*lpszTemp) ? (lpszTemp - tempFileA) + 1 : 0;
           }
 
-#ifdef __REACTOS__
           /* set the lpstrFileTitle */
           if(fodInfos->ofnInfos->lpstrFileTitle)
 	  {
@@ -3434,7 +3446,6 @@ BOOL FILEDLG95_OnOpen(HWND hwnd)
                     ofn->lpstrFileTitle, ofn->nMaxFileTitle, NULL, NULL);
             }
 	  }
-#endif
 
           /* copy currently selected filter to lpstrCustomFilter */
           if (fodInfos->ofnInfos->lpstrCustomFilter)
@@ -3626,7 +3637,7 @@ static HRESULT FILEDLG95_FILETYPE_Init(HWND hwnd)
 
       /* Copy the extensions */
       if (! *lpstrPos) return E_FAIL;	/* malformed filter */
-      if (!(lpstrExt = heap_alloc((lstrlenW(lpstrPos)+1)*sizeof(WCHAR)))) return E_FAIL;
+      if (!(lpstrExt = malloc((lstrlenW(lpstrPos)+1)*sizeof(WCHAR)))) return E_FAIL;
       lstrcpyW(lpstrExt,lpstrPos);
 
       /* Add the item at the end of the combo */
@@ -3658,7 +3669,7 @@ static HRESULT FILEDLG95_FILETYPE_Init(HWND hwnd)
       nFilters++;
 
       /* Copy the extensions */
-      if (!(lpstrExt = heap_alloc((lstrlenW(lpstrPos)+1)*sizeof(WCHAR)))) return E_FAIL;
+      if (!(lpstrExt = malloc((lstrlenW(lpstrPos)+1)*sizeof(WCHAR)))) return E_FAIL;
       lstrcpyW(lpstrExt,lpstrPos);
       lpstrPos += lstrlenW(lpstrPos) + 1;
 
@@ -3707,7 +3718,7 @@ static HRESULT FILEDLG95_FILETYPE_Init(HWND hwnd)
       DWORD len;
       CharLowerW(lpstrFilter); /* lowercase */
       len = lstrlenW(lpstrFilter)+1;
-      fodInfos->ShellInfos.lpstrCurrentFilter = heap_alloc( len * sizeof(WCHAR) );
+      fodInfos->ShellInfos.lpstrCurrentFilter = malloc( len * sizeof(WCHAR) );
       lstrcpyW(fodInfos->ShellInfos.lpstrCurrentFilter,lpstrFilter);
     }
   } else
@@ -3739,7 +3750,7 @@ static BOOL FILEDLG95_FILETYPE_OnCommand(HWND hwnd, WORD wNotifyCode)
         (fodInfos->customfilter == NULL ? 1 : 0);
 
       /* Set the current filter with the current selection */
-      heap_free(fodInfos->ShellInfos.lpstrCurrentFilter);
+      free(fodInfos->ShellInfos.lpstrCurrentFilter);
 
       lpstrFilter = (LPWSTR) CBGetItemDataPtr(fodInfos->DlgInfos.hwndFileTypeCB,
                                              iItem);
@@ -3748,7 +3759,7 @@ static BOOL FILEDLG95_FILETYPE_OnCommand(HWND hwnd, WORD wNotifyCode)
           DWORD len;
           CharLowerW(lpstrFilter); /* lowercase */
           len = lstrlenW(lpstrFilter)+1;
-          fodInfos->ShellInfos.lpstrCurrentFilter = heap_alloc( len * sizeof(WCHAR) );
+          fodInfos->ShellInfos.lpstrCurrentFilter = malloc( len * sizeof(WCHAR) );
           lstrcpyW(fodInfos->ShellInfos.lpstrCurrentFilter,lpstrFilter);
           if(fodInfos->ofnInfos->Flags & OFN_EXPLORER)
               SendCustomDlgNotificationMessage(hwnd,CDN_TYPECHANGE);
@@ -3805,12 +3816,12 @@ static void FILEDLG95_FILETYPE_Clean(HWND hwnd)
   {
     for(iPos = iCount-1;iPos>=0;iPos--)
     {
-      heap_free((void *)CBGetItemDataPtr(fodInfos->DlgInfos.hwndFileTypeCB,iPos));
+      free((void *)CBGetItemDataPtr(fodInfos->DlgInfos.hwndFileTypeCB,iPos));
       SendMessageW(fodInfos->DlgInfos.hwndFileTypeCB, CB_DELETESTRING, iPos, 0);
     }
   }
   /* Current filter */
-  heap_free(fodInfos->ShellInfos.lpstrCurrentFilter);
+  free(fodInfos->ShellInfos.lpstrCurrentFilter);
 }
 
 /***********************************************************************
@@ -3841,7 +3852,11 @@ static void FILEDLG95_LOOKIN_Init(HWND hwndCombo)
   LPITEMIDLIST	pidlDrives, pidlTmp, pidlTmp1, pidlAbsTmp;
   HDC hdc;
   TEXTMETRICW tm;
-  LookInInfos *liInfos = heap_alloc_zero(sizeof(*liInfos));
+  LookInInfos *liInfos = calloc(1, sizeof(*liInfos));
+#ifdef __REACTOS__
+  if (!liInfos)
+      RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
   TRACE("%p\n", hwndCombo);
 
@@ -4077,7 +4092,11 @@ static int FILEDLG95_LOOKIN_AddItem(HWND hwnd,LPITEMIDLIST pidl, int iInsertId)
   if(!(liInfos = GetPropA(hwnd,LookInInfosStr)))
     return -1;
 
-  tmpFolder = heap_alloc_zero(sizeof(*tmpFolder));
+  tmpFolder = calloc(1, sizeof(*tmpFolder));
+#ifdef __REACTOS__
+  if (!tmpFolder)
+      RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
   tmpFolder->m_iIndent = 0;
 
   /* Calculate the indentation of the item in the lookin*/
@@ -4123,7 +4142,7 @@ static int FILEDLG95_LOOKIN_AddItem(HWND hwnd,LPITEMIDLIST pidl, int iInsertId)
   }
 
   ILFree( tmpFolder->pidlItem );
-  heap_free( tmpFolder );
+  free( tmpFolder );
   return -1;
 
 }
@@ -4219,7 +4238,7 @@ static int FILEDLG95_LOOKIN_RemoveMostExpandedItem(HWND hwnd)
   {
     SFOLDER *tmpFolder = (LPSFOLDER) CBGetItemDataPtr(hwnd,iItemPos);
     ILFree(tmpFolder->pidlItem);
-    heap_free(tmpFolder);
+    free(tmpFolder);
     SendMessageW(hwnd, CB_DELETESTRING, iItemPos, 0);
     liInfos->iMaxIndentation--;
 
@@ -4282,13 +4301,13 @@ static void FILEDLG95_LOOKIN_Clean(HWND hwnd)
       {
         SFOLDER *tmpFolder = (LPSFOLDER) CBGetItemDataPtr(fodInfos->DlgInfos.hwndLookInCB,iPos);
         ILFree(tmpFolder->pidlItem);
-        heap_free(tmpFolder);
+        free(tmpFolder);
         SendMessageW(fodInfos->DlgInfos.hwndLookInCB, CB_DELETESTRING, iPos, 0);
       }
     }
 
     /* LookInInfos structure */
-    heap_free(liInfos);
+    free(liInfos);
     RemovePropA(fodInfos->DlgInfos.hwndLookInCB,LookInInfosStr);
 }
 
@@ -4336,7 +4355,7 @@ void FILEDLG95_FILENAME_FillFromSelection (HWND hwnd)
 
     /* Allocate a buffer */
     nAllFilesMaxLength = MAX_PATH + 3;
-    lpstrAllFiles = heap_alloc_zero(nAllFilesMaxLength * sizeof(WCHAR));
+    lpstrAllFiles = malloc(nAllFilesMaxLength * sizeof(WCHAR));
     if (!lpstrAllFiles)
         goto ret;
 
@@ -4351,7 +4370,7 @@ void FILEDLG95_FILENAME_FillFromSelection (HWND hwnd)
                 if (nAllFilesLength + MAX_PATH + 3 > nAllFilesMaxLength)
                 {
                     nAllFilesMaxLength *= 2;
-                    lpstrTmp = HeapReAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, lpstrAllFiles, nAllFilesMaxLength * sizeof(WCHAR));
+                    lpstrTmp = realloc(lpstrAllFiles, nAllFilesMaxLength * sizeof(WCHAR));
                     if (!lpstrTmp)
                         goto ret;
                     lpstrAllFiles = lpstrTmp;
@@ -4366,6 +4385,7 @@ void FILEDLG95_FILENAME_FillFromSelection (HWND hwnd)
             }
         }
     }
+    lpstrAllFiles[nAllFilesLength] = 0;
 
     if (nFiles != 0)
     {
@@ -4383,40 +4403,8 @@ void FILEDLG95_FILENAME_FillFromSelection (HWND hwnd)
     }
 
 ret:
-    heap_free(lpstrAllFiles);
+    free(lpstrAllFiles);
     COMCTL32_ReleaseStgMedium(medium);
-}
-
-
-/* copied from shell32 to avoid linking to it
- * Although shell32 is already linked the behaviour of exported StrRetToStrN
- * is dependent on whether emulated OS is unicode or not.
- */
-static HRESULT COMDLG32_StrRetToStrNW (LPWSTR dest, DWORD len, LPSTRRET src, const ITEMIDLIST *pidl)
-{
-	switch (src->uType)
-	{
-	  case STRRET_WSTR:
-	    lstrcpynW(dest, src->pOleStr, len);
-	    CoTaskMemFree(src->pOleStr);
-	    break;
-
-	  case STRRET_CSTR:
-            if (!MultiByteToWideChar( CP_ACP, 0, src->cStr, -1, dest, len ) && len)
-                  dest[len-1] = 0;
-	    break;
-
-	  case STRRET_OFFSET:
-            if (!MultiByteToWideChar( CP_ACP, 0, ((LPCSTR)&pidl->mkid)+src->uOffset, -1, dest, len ) && len)
-                  dest[len-1] = 0;
-	    break;
-
-	  default:
-	    FIXME("unknown type %x!\n", src->uType);
-	    if (len) *dest = '\0';
-	    return E_FAIL;
-	}
-	return S_OK;
 }
 
 /***********************************************************************
@@ -4435,13 +4423,17 @@ static int FILEDLG95_FILENAME_GetFileNames (HWND hwnd, LPWSTR * lpstrFileList, U
 
 	/* get the filenames from the filename control */
 	nStrLen = GetWindowTextLengthW( fodInfos->DlgInfos.hwndFileName );
-	lpstrEdit = heap_alloc( (nStrLen+1)*sizeof(WCHAR) );
+	lpstrEdit = malloc( (nStrLen+1)*sizeof(WCHAR) );
+#ifdef __REACTOS__
+	if (!lpstrEdit)
+		RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 	GetWindowTextW( fodInfos->DlgInfos.hwndFileName, lpstrEdit, nStrLen+1);
 
 	TRACE("nStrLen=%u str=%s\n", nStrLen, debugstr_w(lpstrEdit));
 
 	nFileCount = COMDLG32_SplitFileNames(lpstrEdit, nStrLen, lpstrFileList, sizeUsed);
-	heap_free(lpstrEdit);
+	free(lpstrEdit);
 	return nFileCount;
 }
 
@@ -4558,7 +4550,7 @@ static HRESULT GetName(LPSHELLFOLDER lpsf, LPITEMIDLIST pidl,DWORD dwFlags,LPWST
   /* Get the display name of the pidl relative to the folder */
   if (SUCCEEDED(hRes = IShellFolder_GetDisplayNameOf(lpsf, pidl, dwFlags, &str)))
   {
-      return COMDLG32_StrRetToStrNW(lpstrFileName, MAX_PATH, &str, pidl);
+      return StrRetToBufW(&str, pidl, lpstrFileName, MAX_PATH);
   }
   return E_FAIL;
 }
@@ -4854,11 +4846,11 @@ short WINAPI GetFileTitleA(LPCSTR lpFile, LPSTR lpTitle, WORD cbBuf)
     LPWSTR lpWTitle;
 
     RtlCreateUnicodeStringFromAsciiz(&strWFile, lpFile);
-    lpWTitle = heap_alloc(cbBuf * sizeof(WCHAR));
+    lpWTitle = malloc(cbBuf * sizeof(WCHAR));
     ret = GetFileTitleW(strWFile.Buffer, lpWTitle, cbBuf);
     if (!ret) WideCharToMultiByte( CP_ACP, 0, lpWTitle, -1, lpTitle, cbBuf, NULL, NULL );
     RtlFreeUnicodeString( &strWFile );
-    heap_free( lpWTitle );
+    free( lpWTitle );
     return ret;
 }
 

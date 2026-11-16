@@ -50,6 +50,7 @@ extern SYSTEM_BASIC_INFORMATION CsrNtSysInfo;
 extern HANDLE CsrHeap;
 extern PVOID CsrSrvSharedSectionHeap;
 extern PVOID *CsrSrvSharedStaticServerData;
+extern PULONG CsrSrvSharedStaticServerData32;
 extern HANDLE CsrInitializationEvent;
 extern PCSR_SERVER_DLL CsrLoadedServerDll[CSR_SERVER_DLL_MAX];
 extern ULONG CsrMaxApiRequestThreads;
@@ -86,6 +87,21 @@ VOID
 NTAPI
 CsrReleaseCapturedArguments(IN PCSR_API_MESSAGE ApiMessage);
 
+#ifdef _WIN64
+VOID
+NTAPI
+CsrWow64MessageToServer(IN OUT PCSR_API_MESSAGE ApiMessage);
+
+VOID
+NTAPI
+CsrWow64MessageToClient(IN OUT PCSR_API_MESSAGE ApiMessage);
+
+ULONG_PTR
+NTAPI
+CsrWow64GetMessagePointerOffset(IN PCSR_API_MESSAGE ApiMessage,
+                                IN ULONG Offset32);
+#endif
+
 NTSTATUS
 NTAPI
 CsrLoadServerDll(IN PCHAR DllString,
@@ -114,15 +130,13 @@ VOID
 NTAPI
 CsrRemoveProcess(IN PCSR_PROCESS CsrProcess);
 
-ULONG
+NTSTATUS
 NTAPI
-CsrApiRequestThread(
-    _In_ PVOID Parameter);
+CsrApiRequestThread(IN PVOID Parameter);
 
-ULONG
+VOID
 NTAPI
-CsrSbApiRequestThread(
-    _In_ PVOID Parameter);
+CsrSbApiRequestThread(IN PVOID Parameter);
 
 NTSTATUS
 NTAPI

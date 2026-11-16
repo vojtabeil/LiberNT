@@ -23,10 +23,10 @@
  * populated correctly and the ismb* functions should reference it.
  */
 
-#include <stdio.h>
-#include <limits.h>
-#include <mbctype.h>
-#include <mbstring.h>
+#include "include/stdio.h"
+#include "include/limits.h"
+#include "include/mbctype.h"
+#include "include/mbstring.h"
 
 #include "msvcrt.h"
 #include "mtdll.h"
@@ -56,6 +56,10 @@ static struct cp_extra_info_t g_cpextrainfo[] =
     {0, {1, 255, 0, 0}}       /* match all with FIXME */
 };
 
+#ifdef __REACTOS__
+static BYTE johab_lead_bytes[MAX_LEADBYTES] = {0x81, 0xd3, 0xd8, 0xde, 0xe0, 0xf9, 0, 0};
+
+#endif
 /* Maps cp932 single byte character to multi byte character */
 static const unsigned char mbbtombc_932[] = {
   0x40,0x49,0x68,0x94,0x90,0x93,0x95,0x66,0x69,0x6a,0x96,0x7b,0x43,0x7c,0x44,0x5e,
@@ -180,7 +184,11 @@ static inline unsigned char *u__strnset( unsigned char *s, unsigned char c, size
  */
 unsigned char* CDECL __p__mbctype(void)
 {
+#if defined(__REACTOS__) && _MSVCR_VER == 0
+  return MSVCRT_mbctype;
+#else
   return get_mbcinfo()->mbctype;
+#endif
 }
 
 /*********************************************************************
@@ -287,6 +295,10 @@ threadmbcinfo* create_mbcinfo(int cp, LCID lcid, threadmbcinfo *old_mbcinfo)
   memset(mbcinfo->mbcasemap, 0, sizeof(unsigned char[256]));
 
   bytes = cpi.LeadByte;
+#ifdef __REACTOS__
+  if (newcp == 1361)
+    bytes = johab_lead_bytes;
+#endif
   while (bytes[0] || bytes[1])
   {
     for (i = bytes[0]; i <= bytes[1]; i++)
@@ -1957,6 +1969,7 @@ int CDECL _ismbcalnum(unsigned int ch)
  */
 int CDECL _ismbcspace_l(unsigned int ch, _locale_t locale)
 {
+    if (ch <= 0x7f) return MSVCRT__ctype[ch + 1] & _SPACE;
     return _iswspace_l( msvcrt_mbc_to_wc_l(ch, locale), locale );
 }
 

@@ -11,8 +11,41 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(wgl);
 
+/* WGL_ARB_make_current_read */
+#ifndef ERROR_INCOMPATIBLE_DEVICE_CONTEXTS_ARB
+#define ERROR_INCOMPATIBLE_DEVICE_CONTEXTS_ARB 0x2054
+#endif
+
+extern BOOL APIENTRY GdiSetPixelFormat(HDC hdc, INT ipfd);
+extern PGDI_TABLE_ENTRY WINAPI GdiQueryTable(VOID);
+
+static BOOL
+is_process_owned_dc(HDC hdc)
+{
+    PGDI_TABLE_ENTRY table = GdiQueryTable();
+    DWORD owner;
+
+    if (!table)
+        return FALSE;
+
+    owner = table[GDI_HANDLE_GET_INDEX(hdc)].ProcessId & ~1;
+    return owner == HandleToUlong(NtCurrentTeb()->ClientId.UniqueProcess);
+}
+
 static CRITICAL_SECTION dc_data_cs = {NULL, -1, 0, 0, 0, 0};
 static struct wgl_dc_data* dc_data_list = NULL;
+DWORD PixelFormatInitTlsIndex = TLS_OUT_OF_INDEXES;
+
+BOOL
+IntIsPixelFormatInitializing(VOID)
+{
+    DWORD error = GetLastError();
+    BOOL initializing = TlsGetValue(PixelFormatInitTlsIndex) != NULL;
+
+    /* A vendor may query DXGI before this DC's format data is published. */
+    SetLastError(error);
+    return initializing;
+}
 
 LIST_ENTRY ContextListHead;
 
@@ -23,6 +56,9 @@ get_dc_data_ex(HDC hdc, INT format, UINT size, PIXELFORMATDESCRIPTOR *descr)
 {
     HWND hwnd = NULL;
     struct wgl_dc_data* data;
+    struct wgl_dc_data* existing;
+    PVOID previous_initializing;
+    volatile BOOL initialized = FALSE;
     DWORD objType = GetObjectType(hdc);
     ULONG flags = 0;
     union
@@ -36,10 +72,19 @@ get_dc_data_ex(HDC hdc, INT format, UINT size, PIXELFORMATDESCRIPTOR *descr)
     if(objType == OBJ_DC)
     {
         hwnd = WindowFromDC(hdc);
-        if(!hwnd)
-            return NULL;
-        id.hwnd = hwnd;
-        flags = WGL_DC_OBJ_DC;
+        if(hwnd)
+        {
+            id.hwnd = hwnd;
+            flags = WGL_DC_OBJ_DC;
+        }
+        else
+        {
+            /* A screen DC has no window but remains owned while checked out.
+             * A released cached window DC is public and must not be reused. */
+            if (!is_process_owned_dc(hdc))
+                return NULL;
+            id.hdc = hdc;
+        }
     }
     else if(objType == OBJ_MEMDC)
     {
@@ -54,33 +99,94 @@ get_dc_data_ex(HDC hdc, INT format, UINT size, PIXELFORMATDESCRIPTOR *descr)
     data = dc_data_list;
     while(data)
     {
-        if(data->owner.u == id.u)
+        if((data->owner.u == id.u) && (data->flags == flags))
         {
             LeaveCriticalSection(&dc_data_cs);
             return data;
         }
         data = data->next;
     }
+    LeaveCriticalSection(&dc_data_cs);
+
+    /* The ICD may call back into us from another thread while holding its
+     * own locks, so never call it with dc_data_cs held. */
     data= HeapAlloc(GetProcessHeap(), 0, sizeof(*data));
     if(!data)
+        return NULL;
+
+    previous_initializing = TlsGetValue(PixelFormatInitTlsIndex);
+    if (!TlsSetValue(PixelFormatInitTlsIndex, (PVOID)1))
     {
-        LeaveCriticalSection(&dc_data_cs);
+        HeapFree(GetProcessHeap(), 0, data);
         return NULL;
     }
-    /* initialize the structure */
-    data->owner.u = id.u;
-    data->flags = flags;
-    data->pixelformat = 0;
-    data->sw_data = NULL;
-    /* Load the driver */
-    data->icd_data = IntGetIcdData(hdc);
-    /* Get the number of available formats for this DC once and for all */
-    if(data->icd_data)
-        data->nb_icd_formats = data->icd_data->DrvDescribePixelFormat(hdc, format, size, descr);
-    else
-        data->nb_icd_formats = 0;
-    TRACE("ICD %S has %u formats for HDC %x.\n", data->icd_data ? data->icd_data->DriverName : NULL, data->nb_icd_formats, hdc);
-    data->nb_sw_formats = sw_DescribePixelFormat(hdc, 0, 0, NULL);
+    _SEH2_TRY
+    {
+        /* initialize the structure */
+        data->owner.u = id.u;
+        data->flags = flags;
+        data->pixelformat = 0;
+        data->sw_data = NULL;
+        data->AdapterLuidValid = FALSE;
+        /* Load the driver */
+        data->icd_data = IntGetIcdData(hdc, &data->AdapterLuid,
+                                       &data->AdapterLuidValid);
+        /* Get the number of available formats for this DC once and for all */
+        if(data->icd_data)
+            data->nb_icd_formats = data->icd_data->DrvDescribePixelFormat(hdc, format, size, descr);
+        else
+            data->nb_icd_formats = 0;
+        TRACE("ICD %S has %u formats for HDC %x.\n", data->icd_data ? data->icd_data->DriverName : NULL, data->nb_icd_formats, hdc);
+        data->nb_sw_formats = sw_DescribePixelFormat(hdc, 0, 0, NULL);
+        /* The ICD/software split is decided here once per DC; a loaded ICD
+         * that offers no format is a hardware path silently lost. */
+        if (data->icd_data == NULL || data->nb_icd_formats == 0)
+        {
+            D3DKMT_OPENADAPTERFROMHDC DcAdapter;
+            LUID DcLuid = {0, 0};
+
+            RtlZeroMemory(&DcAdapter, sizeof(DcAdapter));
+            DcAdapter.hDc = hdc;
+            if (NT_SUCCESS(D3DKMTOpenAdapterFromHdc(&DcAdapter)) && DcAdapter.hAdapter != 0)
+            {
+                D3DKMT_CLOSEADAPTER Close = { DcAdapter.hAdapter };
+
+                DcLuid = DcAdapter.AdapterLuid;
+                D3DKMTCloseAdapter(&Close);
+            }
+            ERR("HDC %p: ICD %S offers %u format(s), software offers %u; ICD adapter LUID %08lx-%08lx (%s), DC adapter LUID %08lx-%08lx source %u\n",
+                hdc,
+                data->icd_data ? data->icd_data->DriverName : L"(none)",
+                data->nb_icd_formats,
+                data->nb_sw_formats,
+                data->AdapterLuid.HighPart,
+                data->AdapterLuid.LowPart,
+                data->AdapterLuidValid ? "valid" : "unknown",
+                DcLuid.HighPart,
+                DcLuid.LowPart,
+                DcAdapter.VidPnSourceId);
+        }
+        initialized = TRUE;
+    }
+    _SEH2_FINALLY
+    {
+        TlsSetValue(PixelFormatInitTlsIndex, previous_initializing);
+        if (!initialized)
+            HeapFree(GetProcessHeap(), 0, data);
+    }
+    _SEH2_END;
+
+    EnterCriticalSection(&dc_data_cs);
+    for (existing = dc_data_list; existing != NULL; existing = existing->next)
+    {
+        if (existing->owner.u == id.u && existing->flags == flags)
+        {
+            /* Another thread completed the same DC while we queried it. */
+            LeaveCriticalSection(&dc_data_cs);
+            HeapFree(GetProcessHeap(), 0, data);
+            return existing;
+        }
+    }
     data->next = dc_data_list;
     dc_data_list = data;
     LeaveCriticalSection(&dc_data_cs);
@@ -92,6 +198,52 @@ struct wgl_dc_data*
 get_dc_data(HDC hdc)
 {
     return get_dc_data_ex(hdc, 0, 0, NULL);
+}
+
+struct wgl_dc_data* IntGetDcData(HDC hdc)
+{
+    HWND hwnd;
+    struct wgl_dc_data *data;
+    ULONG flags = 0;
+    union
+    {
+        HWND hwnd;
+        HDC hdc;
+        HANDLE u;
+    } id;
+
+    if (GetObjectType(hdc) == OBJ_DC)
+    {
+        hwnd = WindowFromDC(hdc);
+        if (hwnd != NULL)
+        {
+            id.hwnd = hwnd;
+            flags = WGL_DC_OBJ_DC;
+        }
+        else
+        {
+            if (!is_process_owned_dc(hdc))
+                return NULL;
+            id.hdc = hdc;
+        }
+    }
+    else if (GetObjectType(hdc) == OBJ_MEMDC)
+    {
+        id.hdc = hdc;
+    }
+    else
+    {
+        return NULL;
+    }
+
+    EnterCriticalSection(&dc_data_cs);
+    for (data = dc_data_list; data != NULL; data = data->next)
+    {
+        if ((data->owner.u == id.u) && (data->flags == flags))
+            break;
+    }
+    LeaveCriticalSection(&dc_data_cs);
+    return data;
 }
 
 void release_dc_data(struct wgl_dc_data* dc_data)
@@ -151,7 +303,7 @@ INT WINAPI wglDescribePixelFormat(HDC hdc, INT format, UINT size, PIXELFORMATDES
         struct ICD_Data* icd_data = dc_data->icd_data;
         /* SetPixelFormat may have NULLified this */
         if (!icd_data)
-            icd_data = IntGetIcdData(hdc);
+            icd_data = IntGetIcdData(hdc, NULL, NULL);
         if(!icd_data->DrvDescribePixelFormat(hdc, format, size, descr))
         {
             ret = 0;
@@ -198,7 +350,8 @@ INT WINAPI wglChoosePixelFormat(HDC hdc, const PIXELFORMATDESCRIPTOR* ppfd)
     {
         if (!wglDescribePixelFormat( hdc, i, sizeof(format), &format )) continue;
 
-        if (ppfd->iPixelType != format.iPixelType)
+        if ((ppfd->iPixelType == PFD_TYPE_COLORINDEX) !=
+            (format.iPixelType == PFD_TYPE_COLORINDEX))
         {
             TRACE( "pixel type mismatch for iPixelFormat=%d\n", i );
             continue;
@@ -260,7 +413,6 @@ INT WINAPI wglChoosePixelFormat(HDC hdc, const PIXELFORMATDESCRIPTOR* ppfd)
 
             if (bestDBuffer != -1 && (format.dwFlags & PFD_DOUBLEBUFFER) != bestDBuffer) continue;
         }
-
         /* Stereo, see the comments above. */
         if (!(ppfd->dwFlags & PFD_STEREO_DONTCARE))
         {
@@ -270,6 +422,11 @@ INT WINAPI wglChoosePixelFormat(HDC hdc, const PIXELFORMATDESCRIPTOR* ppfd)
 
             if (bestStereo != -1 && (format.dwFlags & PFD_STEREO) != bestStereo) continue;
         }
+
+        /* Establish a baseline only after all mandatory capabilities and
+         * preferred boolean flags have been considered. */
+        if (!best_format)
+            goto found;
 
         /* Below we will do a number of checks to select the 'best' pixelformat.
          * We assume the precedence cColorBits > cAlphaBits > cDepthBits > cStencilBits -> cAuxBuffers.
@@ -619,13 +776,140 @@ INT WINAPI wglGetPixelFormat(HDC hdc)
 
     if(!dc_data)
     {
-        SetLastError(ERROR_INVALID_HANDLE);
+        SetLastError(ERROR_INVALID_PIXEL_FORMAT);
         return 0;
     }
 
     ret = dc_data->pixelformat;
     release_dc_data(dc_data);
     return ret;
+}
+
+/* Release the drawable binding through the implementation that established it.
+ * A same-context rebind must keep thread ownership throughout the transition. */
+static
+VOID
+IntReleaseContext(struct wgl_context* ctx, BOOL keep_ownership)
+{
+    if(ctx->icd_data)
+        ctx->icd_data->DrvReleaseContext(ctx->dhglrc);
+    else
+        sw_ReleaseContext(ctx->dhglrc);
+    if(!keep_ownership)
+        InterlockedExchange(&ctx->thread_id, 0);
+}
+
+static
+PFN_WGL_MAKE_CONTEXT_CURRENT_ARB
+IntGetMakeContextCurrentARB(struct ICD_Data* icd_data)
+{
+    PFN_WGL_MAKE_CONTEXT_CURRENT_ARB entry = icd_data->MakeContextCurrentARB;
+
+    if(!entry)
+    {
+        entry = (PFN_WGL_MAKE_CONTEXT_CURRENT_ARB)icd_data->DrvGetProcAddress("wglMakeContextCurrentARB");
+        if(entry)
+            InterlockedCompareExchangePointer((PVOID*)&icd_data->MakeContextCurrentARB, (PVOID)entry, NULL);
+    }
+    return entry;
+}
+
+/* WGL_ARB_make_current_read binds the drawables in the ICD, but the thread's
+ * current context, its DC, its GL dispatch and the context's thread ownership
+ * are opengl32 state exactly as for wglMakeCurrent. Validate before touching
+ * that state, hand ownership over, and let the ICD bind once. */
+static
+BOOL
+WINAPI
+IntMakeContextCurrentARB(HDC hDrawDC, HDC hReadDC, HGLRC hglrc)
+{
+    struct wgl_context* ctx;
+    struct wgl_context* old_ctx = get_context(IntGetCurrentRC());
+    struct wgl_dc_data* draw_data;
+    struct wgl_dc_data* read_data;
+    const GLCLTPROCTABLE* table;
+    PFN_WGL_MAKE_CONTEXT_CURRENT_ARB make_current;
+    LONG thread_id = (LONG)GetCurrentThreadId();
+    LONG owner_thread;
+
+    if(!hglrc)
+    {
+        if(old_ctx)
+        {
+            IntReleaseContext(old_ctx, FALSE);
+            IntMakeCurrent(NULL, NULL, NULL);
+            IntSetCurrentDispatchTable(IntGetNoContextDispatchTable());
+        }
+        return TRUE;
+    }
+
+    ctx = get_context(hglrc);
+    if(!ctx)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    /* A DC released with its window is no longer a drawable. */
+    draw_data = get_dc_data(hDrawDC);
+    read_data = (!hReadDC || hReadDC == hDrawDC) ? draw_data : get_dc_data(hReadDC);
+    if(!draw_data || !read_data)
+    {
+        SetLastError(ERROR_INVALID_HANDLE);
+        return FALSE;
+    }
+
+    /* The software implementation does not expose this extension. */
+    make_current = ctx->icd_data ? IntGetMakeContextCurrentARB(ctx->icd_data) : NULL;
+    if(!make_current)
+    {
+        SetLastError(ERROR_INVALID_FUNCTION);
+        return FALSE;
+    }
+
+    /* Only DrvSetContext returns the ICD's dispatch table, so an ICD that has
+     * never been bound by wglMakeCurrent in this process cannot be bound here. */
+    table = ctx->icd_data->ProcTable;
+    if(!table)
+    {
+        WARN("ICD %S has no dispatch table yet.\n", ctx->icd_data->DriverName);
+        SetLastError(ERROR_INVALID_OPERATION);
+        return FALSE;
+    }
+
+    if((draw_data->icd_data != ctx->icd_data) || (draw_data->pixelformat != ctx->pixelformat))
+    {
+        SetLastError(ERROR_INVALID_PIXEL_FORMAT);
+        return FALSE;
+    }
+    if(read_data->icd_data != ctx->icd_data)
+    {
+        SetLastError(ERROR_INCOMPATIBLE_DEVICE_CONTEXTS_ARB);
+        return FALSE;
+    }
+
+    owner_thread = InterlockedCompareExchange(&ctx->thread_id, thread_id, 0);
+    if(owner_thread != 0 && owner_thread != thread_id)
+    {
+        SetLastError(ERROR_BUSY);
+        return FALSE;
+    }
+
+    if(old_ctx)
+        IntReleaseContext(old_ctx, old_ctx == ctx);
+
+    if(!make_current(hDrawDC, hReadDC, hglrc))
+    {
+        /* As for wglMakeCurrent, a failed bind leaves nothing current. */
+        InterlockedExchange(&ctx->thread_id, 0);
+        IntMakeCurrent(NULL, NULL, NULL);
+        IntSetCurrentDispatchTable(IntGetNoContextDispatchTable());
+        return FALSE;
+    }
+
+    IntSetCurrentDispatchTable(&table->glDispatchTable);
+    IntMakeCurrent(hglrc, hDrawDC, draw_data);
+    return TRUE;
 }
 
 PROC WINAPI wglGetProcAddress(LPCSTR name)
@@ -640,7 +924,11 @@ PROC WINAPI wglGetProcAddress(LPCSTR name)
 
     /* Forward */
     if(context->icd_data)
+    {
+        if(!strcmp(name, "wglMakeContextCurrentARB"))
+            return IntGetMakeContextCurrentARB(context->icd_data) ? (PROC)IntMakeContextCurrentARB : NULL;
         return context->icd_data->DrvGetProcAddress(name);
+    }
     return sw_GetProcAddress(name);
 }
 
@@ -655,6 +943,7 @@ BOOL WINAPI wglMakeCurrent(HDC hdc, HGLRC hglrc)
     struct wgl_context* old_ctx = get_context(IntGetCurrentRC());
     const GLCLTPROCTABLE* apiTable;
     LONG thread_id = (LONG)GetCurrentThreadId();
+    LONG owner_thread;
 
     if(ctx)
     {
@@ -676,25 +965,19 @@ BOOL WINAPI wglMakeCurrent(HDC hdc, HGLRC hglrc)
             return FALSE;
         }
 
-        /* Set the thread ID */
-        if(InterlockedCompareExchange(&ctx->thread_id, thread_id, 0) != 0)
+        /* Claim an unbound context, or rebind our current context to this DC. */
+        owner_thread = InterlockedCompareExchange(&ctx->thread_id, thread_id, 0);
+        if(owner_thread != 0 && owner_thread != thread_id)
         {
-            /* Already current for a thread. Maybe it's us ? */
             release_dc_data(dc_data);
-            if(ctx->thread_id != thread_id)
-                SetLastError(ERROR_BUSY);
-            return (ctx->thread_id == thread_id);
+            SetLastError(ERROR_BUSY);
+            return FALSE;
         }
 
+        /* The ICD must drop the previous drawable before DrvSetContext even for
+         * the same context, which keeps its thread ownership meanwhile. */
         if(old_ctx)
-        {
-            /* Unset it */
-            if(old_ctx->icd_data)
-                old_ctx->icd_data->DrvReleaseContext(old_ctx->dhglrc);
-            else
-                sw_ReleaseContext(old_ctx->dhglrc);
-            InterlockedExchange(&old_ctx->thread_id, 0);
-        }
+            IntReleaseContext(old_ctx, old_ctx == ctx);
 
         /* Call the ICD or SW implementation */
         if(ctx->icd_data)
@@ -705,11 +988,14 @@ BOOL WINAPI wglMakeCurrent(HDC hdc, HGLRC hglrc)
                 ERR("DrvSetContext failed!\n");
                 /* revert */
                 InterlockedExchange(&ctx->thread_id, 0);
-                IntSetCurrentDispatchTable(NULL);
+                IntMakeCurrent(NULL, NULL, NULL);
+                IntSetCurrentDispatchTable(IntGetNoContextDispatchTable());
                 SetLastError(ERROR_INVALID_PARAMETER);
                 return FALSE;
             }
             set_api_table(apiTable);
+            if(ctx->icd_data->ProcTable != apiTable)
+                InterlockedExchangePointer((PVOID*)&ctx->icd_data->ProcTable, (PVOID)apiTable);
             /* Make it current */
             IntMakeCurrent(hglrc, hdc, dc_data);
         }
@@ -730,14 +1016,10 @@ BOOL WINAPI wglMakeCurrent(HDC hdc, HGLRC hglrc)
     }
     else if(old_ctx)
     {
-        if(old_ctx->icd_data)
-            old_ctx->icd_data->DrvReleaseContext(old_ctx->dhglrc);
-        else
-            sw_ReleaseContext(old_ctx->dhglrc);
-        InterlockedExchange(&old_ctx->thread_id, 0);
+        IntReleaseContext(old_ctx, FALSE);
         /* Unset it */
         IntMakeCurrent(NULL, NULL, NULL);
-        IntSetCurrentDispatchTable(NULL);
+        IntSetCurrentDispatchTable(IntGetNoContextDispatchTable());
         /* Test conformance (extreme cases) */
         return hglrc == NULL;
     }
@@ -847,6 +1129,8 @@ BOOL WINAPI wglSetPixelFormat(HDC hdc, INT format, const PIXELFORMATDESCRIPTOR *
         {
             TRACE("Success!\n");
             dc_data->pixelformat = format;
+            /* Keep win32k's window/DC bookkeeping in sync with the ICD. */
+            GdiSetPixelFormat(hdc, format);
         }
         return ret;
     }
@@ -855,6 +1139,11 @@ BOOL WINAPI wglSetPixelFormat(HDC hdc, INT format, const PIXELFORMATDESCRIPTOR *
     if(sw_format <= dc_data->nb_sw_formats)
     {
         TRACE("Calling SW implementation.\n");
+        if (dc_data->icd_data != NULL)
+        {
+            ERR("HDC %p: software format %i chosen although ICD %S offers %u format(s)\n",
+                hdc, sw_format, dc_data->icd_data->DriverName, dc_data->nb_icd_formats);
+        }
         ret = sw_SetPixelFormat(hdc, dc_data, sw_format);
         if(ret)
         {
@@ -937,8 +1226,10 @@ IntDeleteAllContexts(void)
 
     while (Entry != &ContextListHead)
     {
+        LIST_ENTRY* Next = Entry->Flink;
+
         context = CONTAINING_RECORD(Entry, struct wgl_context, ListEntry);
         wglDeleteContext((HGLRC)context);
-        Entry = Entry->Flink;
+        Entry = Next;
     }
 }

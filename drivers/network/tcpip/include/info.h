@@ -7,6 +7,38 @@
 
 #pragma once
 
+NTSTATUS
+InfoIp6QueryTable(ULONG TableId, PVOID Buffer, ULONG Length, PULONG Information);
+
+struct _IP6_ADDRESS_SET;
+struct _IP6_ROUTE_SET;
+struct _IP6_INTERFACE_SET;
+struct _IP6_NEIGHBOR_SET;
+struct _IP6_BEST_ROUTE;
+
+NTSTATUS
+LibIP6SetAddress(struct _IP6_ADDRESS_SET *Request);
+
+NTSTATUS
+LibIP6SetRoute(struct _IP6_ROUTE_SET *Request);
+
+NTSTATUS
+LibIP6SetInterface(struct _IP6_INTERFACE_SET *Request);
+
+NTSTATUS
+LibIP6SetNeighbor(struct _IP6_NEIGHBOR_SET *Request);
+
+NTSTATUS
+LibIP6GetBestRoute(struct _IP6_BEST_ROUTE *Request);
+
+struct _IP_PATH_TABLE;
+
+NTSTATUS
+LibIP6QueryPaths(struct _IP_PATH_TABLE *Table, ULONG Length, PULONG Information);
+
+NTSTATUS
+LibIP6FlushPaths(VOID);
+
 #include <tcpioctl.h>
 /* FIXME */
 #define DWORD ULONG
@@ -111,6 +143,10 @@ TDI_STATUS InfoTdiQueryGetInterfaceMIB(TDIEntityID ID,
 				       PNDIS_BUFFER Buffer,
 				       PUINT BufferSize);
 
+TDI_STATUS InfoTdiQueryGetIFInfo(PVOID Context,
+                                 PNDIS_BUFFER Buffer,
+                                 PUINT BufferSize);
+
 TDI_STATUS InfoTdiQueryGetIPSnmpInfo( TDIEntityID ID,
                                       PIP_INTERFACE IF,
 				      PNDIS_BUFFER Buffer,
@@ -129,6 +165,10 @@ TDI_STATUS InfoTdiQueryGetConnectionUdpTable( PADDRESS_FILE AddrFile,
                                               PNDIS_BUFFER Buffer,
                                               PUINT BufferSize,
                                               TDI_TCPUDP_CLASS_INFO Class);
+
+TDI_STATUS InfoTdiSetConnectionTcp(PADDRESS_FILE AddrFile,
+                                   PVOID Buffer,
+                                   UINT BufferSize);
 
 TDI_STATUS InfoTdiSetRoute(PIP_INTERFACE IF,
                            PVOID Buffer,
@@ -154,7 +194,7 @@ TDI_STATUS GetAddressFileInfo(TDIObjectID *ID,
                               PUINT BufferSize);
 
 TDI_STATUS SetConnectionInfo(TDIObjectID *ID,
-                             PCONNECTION_ENDPOINT Connection,
+                             PADDRESS_FILE AddressFile,
                              PVOID Buffer,
                              UINT BufferSize);
 

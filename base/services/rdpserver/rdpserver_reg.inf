@@ -1,0 +1,15 @@
+; LiberNT RDP console server: start with the interactive desktop.
+; The server exits at once unless rdpserver.ini sets enabled=1.
+
+[AddReg]
+HKCU,"SOFTWARE\Microsoft\Windows\CurrentVersion\Run","LiberNTRDPServer",0x00020000,"%SystemRoot%\system32\rdpserver\rdpserver.exe %SystemRoot%\system32\rdpserver\rdpserver.ini"
+
+; Hyper-V socket bridge for the enhanced session of Virtual Machine Connection.
+; It listens only while the RDP server answers on 127.0.0.1:3389 (loopback=1).
+HKLM,"SYSTEM\CurrentControlSet\Services\hvsockbridge","Description",0x00000000,"Forwards enhanced session connections from the Hyper-V host to the RDP console server."
+HKLM,"SYSTEM\CurrentControlSet\Services\hvsockbridge","DisplayName",0x00000000,"Hyper-V Socket RDP Bridge"
+HKLM,"SYSTEM\CurrentControlSet\Services\hvsockbridge","ErrorControl",0x00010001,0x00000001
+HKLM,"SYSTEM\CurrentControlSet\Services\hvsockbridge","ImagePath",0x00020000,"%SystemRoot%\system32\rdpserver\hvsockbridge.exe"
+HKLM,"SYSTEM\CurrentControlSet\Services\hvsockbridge","ObjectName",0x00000000,"LocalSystem"
+HKLM,"SYSTEM\CurrentControlSet\Services\hvsockbridge","Start",0x00010001,0x00000002
+HKLM,"SYSTEM\CurrentControlSet\Services\hvsockbridge","Type",0x00010001,0x00000010

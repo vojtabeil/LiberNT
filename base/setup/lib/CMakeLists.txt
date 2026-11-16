@@ -19,8 +19,6 @@ list(APPEND SOURCE
     utils/fsrec.c
     utils/genlist.c
     utils/inicache.c
-    utils/ntverrsrc.c
-    utils/osdetect.c
     utils/partinfo.c
     utils/partlist.c
     utils/regutil.c
@@ -39,6 +37,7 @@ list(APPEND SOURCE
 add_library(setuplib_static ${SOURCE})
 add_pch(setuplib_static precomp.h SOURCE)
 add_dependencies(setuplib_static xdk) # psdk
+target_link_libraries(setuplib_static gptsup)
 
 add_library(setuplib SHARED
     main.c
@@ -48,6 +47,7 @@ target_link_libraries(setuplib setuplib_static)
 
 add_dependencies(setuplib xdk) # psdk
 set_module_type(setuplib nativedll)
-target_link_libraries(setuplib ext2lib vfatlib btrfslib ${PSEH_LIB})
+target_link_libraries(setuplib ext2lib vfatlib ntfslib ${PSEH_LIB})
 add_importlibs(setuplib ntdll)
-add_cd_file(TARGET setuplib DESTINATION reactos/system32 NO_CAB FOR bootcd regtest)
+add_cd_file(TARGET setuplib DESTINATION reactos/system32 NO_CAB FOR bootcd livecd)
+add_cd_file(TARGET setuplib DESTINATION ${ARCH}/system32 FOR preinstall)

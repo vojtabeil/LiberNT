@@ -1,12 +1,6 @@
 
 include_directories(BEFORE ${REACTOS_SOURCE_DIR}/sdk/include/wine)
-remove_definitions(-DWINVER=0x502 -D_WIN32_IE=0x600 -D_WIN32_WINNT=0x502)
-add_definitions(-DWINVER=0x0A00 -D_WIN32_WINNT=0x0A00 -DNTDDI_VERSION=0x0A000007)
-
-# Comment this block out if you want to debug the heap issue with these tests on ROS x64. ROSTESTS-415
-if(ARCH STREQUAL "amd64")
-    add_definitions(-DSKIPBADHEAP_K32_WINETEST=1)
-endif()
+remove_definitions(-DWINVER=${REACTOS_TARGET_NT} -D_WIN32_WINNT=${REACTOS_TARGET_NT} -D_CRT_NON_CONFORMING_SWPRINTFS)
 
 spec2def(dummy.dll dummy.spec)
 add_library(kernel32_winetest_dummy MODULE dummy.c ${CMAKE_CURRENT_BINARY_DIR}/dummy.def)
@@ -76,25 +70,32 @@ endif()
 if (MSVC)
     # error C4101: unreferenced local variable
     target_compile_options(kernel32_winetest PRIVATE /wd4101)
-
-    # Approximates a __FILE__ macro with forward slashes instead of back slashes
-    # and defines it as __FILE_FW_SLASH__.
-    foreach(source_file ${SOURCE})
-        get_filename_component(abs_source_file "${source_file}" ABSOLUTE)
-        file(RELATIVE_PATH rel_path "${CMAKE_SOURCE_DIR}" "${abs_source_file}")
-        string(REPLACE "\\" "/" rel_path_forward "${rel_path}")
-        set_source_files_properties(${source_file} PROPERTIES
-            COMPILE_DEFINITIONS "__FILE_FW_SLASH__=\"../${rel_path_forward}\""
-        )
-    endforeach()
 endif()
+
+# Approximates a __FILE__ macro with forward slashes instead of back slashes
+# and defines it as __FILE_FW_SLASH__.
+foreach(source_file ${SOURCE})
+    get_filename_component(abs_source_file "${source_file}" ABSOLUTE)
+    file(RELATIVE_PATH rel_path "${CMAKE_SOURCE_DIR}" "${abs_source_file}")
+    string(REPLACE "\\" "/" rel_path_forward "${rel_path}")
+    set_source_files_properties(${source_file} PROPERTIES
+        COMPILE_DEFINITIONS "__FILE_FW_SLASH__=\"../${rel_path_forward}\""
+    )
+endforeach()
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
     target_compile_options(kernel32_winetest PRIVATE
-        -Wno-format
+        -UNTDDI_VERSION -DNTDDI_VERSION=0x0A000007
+        -U_WIN32_WINNT -D_WIN32_WINNT=0x0A00
+        -UWINVER -DWINVER=0x0A00
         -Wno-int-conversion
-        -Wno-old-style-declaration
         -Wno-unused)
+endif()
+
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(kernel32_winetest PRIVATE -Wno-format-overflow -Wno-old-style-declaration)
+elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(kernel32_winetest PRIVATE -Wno-pragma-pack)
 endif()
 
 set_module_type(kernel32_winetest win32cui)

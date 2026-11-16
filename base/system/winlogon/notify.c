@@ -9,6 +9,7 @@
 /* INCLUDES ******************************************************************/
 
 #include "winlogon.h"
+#include <reactos/wtssession.h>
 
 /* GLOBALS *******************************************************************/
 
@@ -41,7 +42,6 @@ typedef struct _NOTIFICATION_ITEM
     BOOL bImpersonate;
     BOOL bSmartCardLogon;
     DWORD dwMaxWait;
-    BOOL bSfcNotification;
     PWLX_NOTIFY_HANDLER Handler[LastHandler];
 } NOTIFICATION_ITEM, *PNOTIFICATION_ITEM;
 
@@ -97,9 +97,6 @@ LoadNotifyDll(
     HMODULE hModule;
     LONG lError;
     NOTIFICATION_TYPE Type;
-
-    if (NotificationDll->bSfcNotification)
-        return TRUE; // Already loaded.
 
     lError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\Notify",
@@ -163,69 +160,6 @@ DeleteNotification(
         RtlFreeHeap(RtlGetProcessHeap(), 0, Notification->pszDllName);
 
     RtlFreeHeap(RtlGetProcessHeap(), 0, Notification);
-}
-
-/**
- * @brief
- * Initializes the internal SFC notifications.
- **/
-static
-VOID
-AddSfcNotification(VOID)
-{
-    PNOTIFICATION_ITEM NotificationDll;
-    HMODULE hModule;
-    DWORD dwError;
-    WCHAR szSfcPath[MAX_PATH];
-
-    ExpandEnvironmentStringsW(L"%SystemRoot%\\system32\\sfc.dll",
-                              szSfcPath,
-                              ARRAYSIZE(szSfcPath));
-
-    NotificationDll = RtlAllocateHeap(RtlGetProcessHeap(),
-                                      HEAP_ZERO_MEMORY,
-                                      sizeof(*NotificationDll));
-    if (!NotificationDll)
-        return; // If needed: dwError = ERROR_OUTOFMEMORY;
-
-    NotificationDll->pszDllName = WlStrDup(szSfcPath);
-    if (NotificationDll->pszDllName == NULL)
-    {
-        dwError = ERROR_OUTOFMEMORY;
-        goto done;
-    }
-
-    NotificationDll->bEnabled = TRUE;
-    NotificationDll->dwMaxWait = 30; /* FIXME: ??? */
-    NotificationDll->bSfcNotification = TRUE;
-
-    /* Load sfc.dll, and also sfc_os.dll on systems where it forwards to */
-    hModule = LoadLibraryW(szSfcPath);
-    if (!hModule)
-    {
-        dwError = GetLastError();
-        ERR("LoadLibraryW(%S) failed, Error %lu\n", szSfcPath, dwError);
-        goto done;
-    }
-    NotificationDll->hModule = hModule;
-
-    NotificationDll->Handler[LogonHandler]  = (PWLX_NOTIFY_HANDLER)GetProcAddress(hModule, "SfcWLEventLogon");
-    NotificationDll->Handler[LogoffHandler] = (PWLX_NOTIFY_HANDLER)GetProcAddress(hModule, "SfcWLEventLogoff");
-    if (!NotificationDll->Handler[LogonHandler] || !NotificationDll->Handler[LogoffHandler])
-    {
-        dwError = ERROR_PROC_NOT_FOUND;
-        ERR("Couldn't snap SfcWLEventLogon/SfcWLEventLogoff\n");
-        goto done;
-    }
-
-    InsertHeadList(&NotificationDllListHead,
-                   &NotificationDll->ListEntry);
-
-    dwError = ERROR_SUCCESS;
-
-done:
-    if (dwError != ERROR_SUCCESS)
-        DeleteNotification(NotificationDll);
 }
 
 static
@@ -426,8 +360,6 @@ InitNotifications(VOID)
 
     InitializeListHead(&NotificationDllListHead);
 
-    AddSfcNotification();
-
     lError = RegOpenKeyExW(HKEY_LOCAL_MACHINE,
                            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\\Notify",
                            0,
@@ -576,11 +508,25 @@ CallNotificationDlls(
 {
     PLIST_ENTRY ListEntry;
     WLX_NOTIFICATION_INFO Info;
+    DWORD Event = 0, SessionId;
 
     /* Check for invalid notification type */
     ASSERT(Type < LastHandler);
 
     TRACE("CallNotificationDlls(%s)\n", FuncNames[Type]);
+
+    switch (Type)
+    {
+        case LogonHandler: Event = WTS_SESSION_LOGON; break;
+        case LogoffHandler: Event = WTS_SESSION_LOGOFF; break;
+        case LockHandler: Event = WTS_SESSION_LOCK; break;
+        case UnlockHandler: Event = WTS_SESSION_UNLOCK; break;
+        case DisconnectHandler: Event = WTS_CONSOLE_DISCONNECT; break;
+        case ReconnectHandler: Event = WTS_CONSOLE_CONNECT; break;
+        default: break;
+    }
+    if (Event && ProcessIdToSessionId(GetCurrentProcessId(), &SessionId))
+        NtUserCallTwoParam(Event, SessionId, ROS_WTS_NOTIFY);
 
     /* Set up the notification info structure template */
     Info.Size = sizeof(Info);

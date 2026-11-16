@@ -22,6 +22,21 @@
 #ifndef _INCLUDED_MM2
 #define _INCLUDED_MM2
 
+#include "intrin_target.h"
+
+/* When building with Clang, use Clang's own intrinsics headers instead.
+ * ReactOS's versions use GCC-specific __builtin_ia32_* builtins that
+ * don't exist in Clang. */
+#if _VCRT_USE_CLANG_X86_INTRINSICS
+#include_next <xmmintrin.h>
+/* Define ReactOS-specific macros that code may depend on */
+#ifndef __ATTRIBUTE_SSE__
+#define __ATTRIBUTE_SSE__
+#endif
+#elif _VCRT_ARM64_CODEGEN
+/* ARM64: no x86 intrinsics available */
+#else
+
 #include <mmintrin.h>
 
 #if defined(_MM2_FUNCTIONALITY) && !defined(_MM_FUNCTIONALITY)
@@ -923,6 +938,36 @@ __INTRIN_INLINE_SSE float _mm_cvtss_f32(__m128 __a)
     return __a[0];
 }
 
+#ifdef __clang__
+__INTRIN_INLINE_SSE __m128 _mm_shuffle_ps(__m128 __a, __m128 __b, unsigned int __imm8)
+{
+    return (__m128)__builtin_ia32_shufps((__v4sf)__a, (__v4sf)__b, (int)__imm8);
+}
+#else
+#define _mm_shuffle_ps(a, b, imm8) \
+    ((__m128)__builtin_ia32_shufps((__v4sf)(__m128)(a), (__v4sf)(__m128)(b), (int)(imm8)))
+#endif
+
+__INTRIN_INLINE_SSE __m128 _mm_unpackhi_ps(__m128 __a, __m128 __b)
+{
+    return (__m128)__builtin_ia32_unpckhps((__v4sf)__a, (__v4sf)__b);
+}
+
+__INTRIN_INLINE_SSE __m128 _mm_unpacklo_ps(__m128 __a, __m128 __b)
+{
+    return (__m128)__builtin_ia32_unpcklps((__v4sf)__a, (__v4sf)__b);
+}
+
+__INTRIN_INLINE_SSE __m128 _mm_movehl_ps(__m128 __a, __m128 __b)
+{
+    return (__m128)__builtin_ia32_movhlps((__v4sf)__a, (__v4sf)__b);
+}
+
+__INTRIN_INLINE_SSE __m128 _mm_movelh_ps(__m128 __a, __m128 __b)
+{
+    return (__m128)__builtin_ia32_movlhps((__v4sf)__a, (__v4sf)__b);
+}
+
 __INTRIN_INLINE_SSE __m128 _mm_loadh_pi(__m128 __a, const __m64 *__p)
 {
 #ifdef  __clang__
@@ -1241,4 +1286,5 @@ __INTRIN_INLINE_SSE __m64 _mm_sad_pu8(__m64 __a, __m64 __b)
 }
 #endif // __cplusplus
 
+#endif /* !(__clang__ && !_MSC_VER) */
 #endif /* _INCLUDED_MM2 */

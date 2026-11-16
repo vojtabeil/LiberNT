@@ -16,7 +16,9 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#ifdef __REACTOS__
 #pragma once
+#endif
 
 #define OP_LIST                            \
     X(add,        1, 0,0)                  \
@@ -265,6 +267,13 @@ struct _jsexcept_t {
 
     BOOL enter_notified;
     jsexcept_t *prev;
+#ifdef __REACTOS__
+    BOOL host_info;
+    BOOL resource_message;
+    BOOL host_error;
+    jsstr_t *help_file;
+    DWORD help_context;
+#endif
 };
 
 void enter_script(script_ctx_t*,jsexcept_t*);

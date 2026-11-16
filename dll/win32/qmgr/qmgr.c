@@ -66,7 +66,7 @@ static HRESULT WINAPI BackgroundCopyManager_CreateJob(IBackgroundCopyManager *if
         return hres;
 
     /* Add a reference to the job to job list */
-    *ppJob = (IBackgroundCopyJob *)&job->IBackgroundCopyJob3_iface;
+    *ppJob = (IBackgroundCopyJob *)&job->IBackgroundCopyJob4_iface;
     IBackgroundCopyJob_AddRef(*ppJob);
     EnterCriticalSection(&globalMgr.cs);
     list_add_head(&globalMgr.jobs, &job->entryFromQmgr);
@@ -93,8 +93,8 @@ static HRESULT WINAPI BackgroundCopyManager_GetJob(IBackgroundCopyManager *iface
     {
         if (IsEqualGUID(&cur->jobId, jobID))
         {
-            *job = (IBackgroundCopyJob *)&cur->IBackgroundCopyJob3_iface;
-            IBackgroundCopyJob3_AddRef(&cur->IBackgroundCopyJob3_iface);
+            *job = (IBackgroundCopyJob *)&cur->IBackgroundCopyJob4_iface;
+            IBackgroundCopyJob_AddRef(*job);
             hr = S_OK;
             break;
         }
@@ -108,14 +108,14 @@ static HRESULT WINAPI BackgroundCopyManager_GetJob(IBackgroundCopyManager *iface
 static HRESULT WINAPI BackgroundCopyManager_EnumJobs(IBackgroundCopyManager *iface,
         DWORD flags, IEnumBackgroundCopyJobs **ppEnum)
 {
-    TRACE("(0x%x %p)\n", flags, ppEnum);
+    TRACE("(0x%lx %p)\n", flags, ppEnum);
     return enum_copy_job_create(&globalMgr, ppEnum);
 }
 
 static HRESULT WINAPI BackgroundCopyManager_GetErrorDescription(IBackgroundCopyManager *iface,
         HRESULT hr, DWORD langid, LPWSTR *error_description)
 {
-    FIXME("(0x%08x 0x%x %p): stub\n", hr, langid, error_description);
+    FIXME("(0x%08lx 0x%lx %p): stub\n", hr, langid, error_description);
     return E_NOTIMPL;
 }
 
@@ -147,8 +147,12 @@ HRESULT BackgroundCopyManagerConstructor(LPVOID *ppObj)
 
 DWORD WINAPI fileTransfer(void *param)
 {
+    /* TODO: time-slice jobs of one priority as BITS does; a job that stays connecting holds every other job queued */
     BackgroundCopyManagerImpl *qmgr = &globalMgr;
     HANDLE events[2];
+#ifdef __REACTOS__
+    DWORD timeout = INFINITE;
+#endif
 
     events[0] = stop_event;
     events[1] = qmgr->jobEvent;
@@ -159,12 +163,16 @@ DWORD WINAPI fileTransfer(void *param)
         BOOL haveJob = FALSE;
 
         /* Check if it's the stop_event */
+#ifdef __REACTOS__
+        if (WaitForMultipleObjects(2, events, FALSE, timeout) == WAIT_OBJECT_0)
+#else
         if (WaitForMultipleObjects(2, events, FALSE, INFINITE) == WAIT_OBJECT_0)
+#endif
         {
             LIST_FOR_EACH_ENTRY_SAFE(job, jobCur, &qmgr->jobs, BackgroundCopyJobImpl, entryFromQmgr)
             {
                 list_remove(&job->entryFromQmgr);
-                IBackgroundCopyJob3_Release(&job->IBackgroundCopyJob3_iface);
+                IBackgroundCopyJob4_Release(&job->IBackgroundCopyJob4_iface);
             }
             return 0;
         }
@@ -173,19 +181,55 @@ DWORD WINAPI fileTransfer(void *param)
            this thread ever deletes them so we don't need to worry about jobs
            magically disappearing from the list.  */
         EnterCriticalSection(&qmgr->cs);
+#ifdef __REACTOS__
+        timeout = INFINITE;
+#endif
 
         LIST_FOR_EACH_ENTRY_SAFE(job, jobCur, &qmgr->jobs, BackgroundCopyJobImpl, entryFromQmgr)
         {
             if (job->state == BG_JOB_STATE_ACKNOWLEDGED || job->state == BG_JOB_STATE_CANCELLED)
             {
                 list_remove(&job->entryFromQmgr);
-                IBackgroundCopyJob3_Release(&job->IBackgroundCopyJob3_iface);
+                IBackgroundCopyJob4_Release(&job->IBackgroundCopyJob4_iface);
             }
             else if (job->state == BG_JOB_STATE_QUEUED)
             {
                 haveJob = TRUE;
                 break;
             }
+#ifdef __REACTOS__
+            else if (job->state == BG_JOB_STATE_TRANSIENT_ERROR)
+            {
+                ULONGLONG now = GetTickCount64();
+                ULONGLONG retry = job->retry_time + job->retry_delay * 1000ULL;
+                ULONGLONG give_up = job->transient_since + job->no_progress_timeout * 1000ULL;
+
+                if (now >= give_up)
+                {
+                    job->state = BG_JOB_STATE_ERROR;
+                }
+                else if (now >= retry)
+                {
+                    job->state = BG_JOB_STATE_QUEUED;
+                    job->error.context = 0;
+                    job->error.code = S_OK;
+                    if (job->error.file)
+                    {
+                        IBackgroundCopyFile2_Release(job->error.file);
+                        job->error.file = NULL;
+                    }
+                    haveJob = TRUE;
+                    break;
+                }
+                else
+                {
+                    ULONGLONG next = (retry < give_up) ? retry : give_up;
+
+                    if (next - now < timeout)
+                        timeout = (DWORD)(next - now);
+                }
+            }
+#endif
             else if (job->state == BG_JOB_STATE_CONNECTING
                      || job->state == BG_JOB_STATE_TRANSFERRING)
             {

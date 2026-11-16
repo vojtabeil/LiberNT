@@ -193,7 +193,8 @@ WdmAudRegisterDeviceInterface(
     Status = IoRegisterDeviceInterface(PhysicalDeviceObject, &KSCATEGORY_WDMAUD, NULL, &SymbolicLinkName);
     if (NT_SUCCESS(Status))
     {
-        IoSetDeviceInterfaceState(&SymbolicLinkName, TRUE);
+        if (!NT_SUCCESS(IoSetDeviceInterfaceState(&SymbolicLinkName, TRUE)))
+            DPRINT1("IoSetDeviceInterfaceState(%wZ) failed\n", &SymbolicLinkName);
         RtlFreeUnicodeString(&SymbolicLinkName);
         //DeviceExtension->DeviceInterfaceSupport = TRUE;
         return Status;
@@ -212,15 +213,6 @@ WdmAudOpenSysaudio(
 
     /* get device extension */
     DeviceExtension = (PWDMAUD_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
-
-    if (!DeviceExtension->NumSysAudioDevices)
-    {
-        /* wdmaud failed to open sysaudio */
-        return STATUS_UNSUCCESSFUL;
-    }
-
-    /* sanity check */
-    ASSERT(!IsListEmpty(&DeviceExtension->SysAudioDeviceList));
 
     /* allocate client context struct */
     Client = AllocateItem(NonPagedPool, sizeof(WDMAUD_CLIENT));

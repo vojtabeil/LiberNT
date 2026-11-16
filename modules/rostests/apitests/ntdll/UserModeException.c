@@ -20,9 +20,12 @@ typedef enum _CPU_VENDOR
 
 CPU_VENDOR g_CpuVendor;
 ULONG g_CpuFeatures;
+static BOOL g_IsArm64Host;
 
 #define CPU_FEATURE_VMX 0x01
 #define CPU_FEATURE_HV 0x02
+#define CPU_FEATURE_KVM 0x04
+#define CPU_FEATURE_TCG 0x08
 
 typedef void (*PFUNC)(void);
 
@@ -40,6 +43,8 @@ typedef void (*PFUNC)(void);
 #define FL_PRIV 0x100
 #define FL_ACC 0x200
 #define FL_INVLS 0x400
+#define FL_NONCANONICAL 0x800
+#define FL_TCGNOP 0x1000
 
 typedef struct _TEST_ENTRY
 {
@@ -99,6 +104,8 @@ DetermineCpuFeatures(void)
 {
     INT CpuInfo[4];
     ULONG Features = 0;
+    BOOL (WINAPI *QueryMachines)(HANDLE, PUSHORT, PUSHORT);
+    USHORT ProcessMachine, NativeMachine;
 
     g_CpuVendor = DetermineCpuVendor();
 
@@ -107,7 +114,16 @@ DetermineCpuFeatures(void)
     if (CpuInfo[2] & (1 << 31)) Features |= CPU_FEATURE_HV;
     trace("CPUID 1: 0x%x, 0x%x, 0x%x, 0x%x\n", CpuInfo[0], CpuInfo[1], CpuInfo[2], CpuInfo[3]);
 
+    if (Features & CPU_FEATURE_HV)
+    {
+        __cpuid(CpuInfo, 0x40000000);
+        if (memcmp(&CpuInfo[1], "KVMKVMKVM\0\0\0", 12) == 0) Features |= CPU_FEATURE_KVM;
+        if (memcmp(&CpuInfo[1], "TCGTCGTCGTCG", 12) == 0) Features |= CPU_FEATURE_TCG;
+    }
+
     g_CpuFeatures = Features;
+    QueryMachines = (void *)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "IsWow64Process2");
+    g_IsArm64Host = QueryMachines && QueryMachines(GetCurrentProcess(), &ProcessMachine, &NativeMachine) && NativeMachine == IMAGE_FILE_MACHINE_ARM64;
 }
 
 TEST_ENTRY TestEntries[] =
@@ -127,8 +143,8 @@ TEST_ENTRY TestEntries[] =
 #ifdef _M_AMD64
     { __LINE__, { 0x0F, 0x07, 0xC3 }, 0, FL_ANY | FL_PRIV }, // SYSRET
 #endif
-    { __LINE__, { 0x0F, 0x08, 0xC3 }, 0, FL_ANY | FL_PRIV }, // INVD
-    { __LINE__, { 0x0F, 0x09, 0xC3 }, 0, FL_ANY | FL_PRIV }, // WBINVD
+    { __LINE__, { 0x0F, 0x08, 0xC3 }, 0, FL_ANY | FL_PRIV | FL_TCGNOP }, // INVD
+    { __LINE__, { 0x0F, 0x09, 0xC3 }, 0, FL_ANY | FL_PRIV | FL_TCGNOP }, // WBINVD
     { __LINE__, { 0x0F, 0x20, 0xC3 }, 0, FL_ANY | FL_PRIV }, // MOV CR, XXX
     { __LINE__, { 0x0F, 0x21, 0xC3 }, 0, FL_ANY | FL_PRIV }, // MOV DR, XXX
     { __LINE__, { 0x0F, 0x22, 0xC3 }, 0, FL_ANY | FL_PRIV }, // MOV XXX, CR
@@ -193,7 +209,7 @@ TEST_ENTRY TestEntries[] =
     { __LINE__, { 0x3E, 0x66, 0x67, 0xF0, 0xF3, 0xF4, 0xC3 }, 0, FL_ANY | FL_INVLS | FL_PRIV }, // DS: DATA ADDR LOCK REPZ HLT
 #ifdef _M_AMD64
     /* Check non-canonical address access (causes a #GP) */
-    { __LINE__, { 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0xC3 }, 0, FL_ANY | FL_ACC }, //  MOV AL, [0x1000000000000000]
+    { __LINE__, { 0xA0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0xC3 }, 0, FL_ANY | FL_ACC | FL_NONCANONICAL }, //  MOV AL, [0x1000000000000000]
 #endif
 
 };
@@ -203,12 +219,10 @@ void Test_SingleInstruction(
     PTEST_ENTRY TestEntry)
 {
     PEXCEPTION_POINTERS ExcPtrs;
-    EXCEPTION_RECORD ExceptionRecord;
+    _SEH2_VOLATILE EXCEPTION_RECORD ExceptionRecord = {0};
     NTSTATUS ExpectedStatus, Status = STATUS_SUCCESS;
     PFUNC Func = (PFUNC)RwxMemory;
     ULONG Flags;
-
-    RtlZeroMemory(&ExceptionRecord, sizeof(ExceptionRecord));
 
     RtlCopyMemory(RwxMemory,
                   TestEntry->InstructionBytes,
@@ -230,7 +244,15 @@ void Test_SingleInstruction(
 #ifdef _M_IX86
     if (Flags & FL_INVLS)
     {
-        ExpectedStatus = STATUS_INVALID_LOCK_SEQUENCE;
+        ExpectedStatus = g_IsArm64Host ? STATUS_ILLEGAL_INSTRUCTION : STATUS_INVALID_LOCK_SEQUENCE;
+    }
+    else
+#elif defined(_M_AMD64)
+    /* Windows 11 ARM64 reports invalid LOCK prefixes as illegal instructions,
+     * including LOCK HLT, rather than classifying the privileged opcode. */
+    if (g_IsArm64Host && (Flags & FL_INVLS))
+    {
+        ExpectedStatus = STATUS_ILLEGAL_INSTRUCTION;
     }
     else
 #endif
@@ -245,6 +267,19 @@ void Test_SingleInstruction(
              ((Flags & FL_HV) && !(g_CpuFeatures & CPU_FEATURE_HV)))
     {
         ExpectedStatus = STATUS_ILLEGAL_INSTRUCTION;
+    }
+    else if ((Flags & FL_HV) && (g_CpuFeatures & CPU_FEATURE_TCG))
+    {
+        ExpectedStatus = STATUS_ILLEGAL_INSTRUCTION;
+    }
+    else if ((Flags & FL_HV) && (Flags & FL_ACC) && (g_CpuFeatures & CPU_FEATURE_KVM))
+    {
+        ExpectedStatus = STATUS_ILLEGAL_INSTRUCTION;
+    }
+    else if ((Flags & FL_TCGNOP) && (g_CpuFeatures & CPU_FEATURE_TCG))
+    {
+        /* QEMU TCG executes INVD and WBINVD as no-ops at any privilege level */
+        ExpectedStatus = STATUS_SUCCESS;
     }
     else if (Flags & FL_PRIV)
     {
@@ -275,9 +310,18 @@ void Test_SingleInstruction(
 
     if (Status == STATUS_ACCESS_VIOLATION)
     {
+        ULONG_PTR ExpectedAccessAddress = (ULONG_PTR)-1;
+#ifdef _M_AMD64
+        /* Emulation reports the accessed address, not a native x64 #GP sentinel. */
+        if (g_IsArm64Host && (Flags & FL_NONCANONICAL))
+            ExpectedAccessAddress = 0x1000000000000000ULL;
+        else if ((g_CpuFeatures & CPU_FEATURE_TCG) && (Flags & FL_NONCANONICAL) &&
+                 ExceptionRecord.ExceptionInformation[1] == 0x1000000000000000ULL)
+            ExpectedAccessAddress = 0x1000000000000000ULL;
+#endif
         ok_dec_(__FILE__, TestEntry->Line, ExceptionRecord.NumberParameters, 2);
         ok_size_t_(__FILE__, TestEntry->Line, ExceptionRecord.ExceptionInformation[0], 0);
-        ok_size_t_(__FILE__, TestEntry->Line, ExceptionRecord.ExceptionInformation[1], (LONG_PTR)-1);
+        ok_size_t_(__FILE__, TestEntry->Line, ExceptionRecord.ExceptionInformation[1], ExpectedAccessAddress);
     }
     else
     {
@@ -287,6 +331,47 @@ void Test_SingleInstruction(
         ok_size_t_(__FILE__, TestEntry->Line, ExceptionRecord.ExceptionInformation[1], 0);
 #endif
     }
+}
+
+static
+void
+Test_RaisedAccessViolations(void)
+{
+    static const ULONG_PTR AccessTypes[] = {EXCEPTION_READ_FAULT, EXCEPTION_EXECUTE_FAULT};
+    PVOID RwxMemory;
+    ULONG i;
+
+    RwxMemory = VirtualAlloc(NULL, PAGE_SIZE, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    ok(RwxMemory != NULL, "Failed to allocate RWX memory!\n");
+    if (RwxMemory == NULL) return;
+
+    /* A raised read or execute fault must reach SEH even on writable code. */
+    for (i = 0; i < ARRAYSIZE(AccessTypes); i++)
+    {
+        ULONG_PTR Arguments[] = {AccessTypes[i], (ULONG_PTR)RwxMemory};
+        _SEH2_VOLATILE EXCEPTION_RECORD ExceptionRecord = {0};
+        PEXCEPTION_POINTERS ExcPtrs;
+        NTSTATUS Status = STATUS_SUCCESS;
+
+        _SEH2_TRY
+        {
+            RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, ARRAYSIZE(Arguments), Arguments);
+        }
+        _SEH2_EXCEPT(ExcPtrs = _SEH2_GetExceptionInformation(),
+                     ExceptionRecord = *ExcPtrs->ExceptionRecord,
+                     EXCEPTION_EXECUTE_HANDLER)
+        {
+            Status = _SEH2_GetExceptionCode();
+        }
+        _SEH2_END;
+
+        ok_hex(Status, EXCEPTION_ACCESS_VIOLATION);
+        ok_dec(ExceptionRecord.NumberParameters, ARRAYSIZE(Arguments));
+        ok_size_t(ExceptionRecord.ExceptionInformation[0], AccessTypes[i]);
+        ok_size_t(ExceptionRecord.ExceptionInformation[1], (ULONG_PTR)RwxMemory);
+    }
+
+    VirtualFree(RwxMemory, 0, MEM_RELEASE);
 }
 
 static
@@ -320,5 +405,6 @@ START_TEST(UserModeException)
 {
     DetermineCpuFeatures();
 
+    Test_RaisedAccessViolations();
     Test_InstructionFaults();
 }

@@ -20,26 +20,45 @@ NTSTATUS TCPCheckPeerForAccept(PVOID Context,
     struct tcp_pcb *newpcb = (struct tcp_pcb*)Context;
     NTSTATUS Status;
     PTDI_CONNECTION_INFORMATION WhoIsConnecting;
-    PTA_IP_ADDRESS RemoteAddress;
     ip_addr_t ipaddr;
+    IP_ADDRESS Address;
+    u16_t Port;
 
     if (Request->RequestFlags & TDI_QUERY_ACCEPT)
         DbgPrint("TDI_QUERY_ACCEPT NOT SUPPORTED!!!\n");
 
     WhoIsConnecting = (PTDI_CONNECTION_INFORMATION)Request->ReturnConnectionInformation;
-    RemoteAddress = (PTA_IP_ADDRESS)WhoIsConnecting->RemoteAddress;
 
-    RemoteAddress->TAAddressCount = 1;
-    RemoteAddress->Address[0].AddressLength = TDI_ADDRESS_LENGTH_IP;
-    RemoteAddress->Address[0].AddressType = TDI_ADDRESS_TYPE_IP;
+    Status = TCPTranslateError(LibTCPGetPeerName(newpcb, &ipaddr, &Port));
+    if (!NT_SUCCESS(Status))
+        return Status;
 
-    Status = TCPTranslateError(LibTCPGetPeerName(newpcb,
-                                                 &ipaddr,
-                                                 &RemoteAddress->Address[0].Address[0].sin_port));
+    LibIPAddressFromLwip(&ipaddr, &Address);
+    if (((PTRANSPORT_ADDRESS)WhoIsConnecting->RemoteAddress)->Address[0].AddressType == TDI_ADDRESS_TYPE_IP6)
+        TCPMapToDualStack(&Address);
+    return AddrBuildTransportAddress(&Address, WH2N(Port),
+                                     (PTRANSPORT_ADDRESS)WhoIsConnecting->RemoteAddress,
+                                     WhoIsConnecting->RemoteAddressLength);
+}
 
-    RemoteAddress->Address[0].Address[0].in_addr = ipaddr.addr;
+static BOOLEAN TCPAuthorizeListen(PCONNECTION_ENDPOINT Connection)
+{
+    PADDRESS_FILE AddrFile = Connection->AddressFile;
+    WFP_SHIM_ENDPOINT Endpoint;
 
-    return Status;
+    if (AddrFile->Address.Type == IP_ADDRESS_V6)
+        return TRUE;
+
+    RtlZeroMemory(&Endpoint, sizeof(Endpoint));
+    Endpoint.EndpointId = Connection->WfpEndpointId;
+    Endpoint.WildcardAddress = AddrIsUnspecified(&AddrFile->Address);
+    Endpoint.Protocol = IPPROTO_TCP;
+    Endpoint.LocalAddress = DN2H(AddrFile->Address.Address.IPv4Address);
+    Endpoint.LocalPort = WN2H(AddrFile->Port);
+    Endpoint.InterfaceType = (Endpoint.LocalAddress >> 24) == 127 ? IF_TYPE_SOFTWARE_LOOPBACK : IF_TYPE_ETHERNET_CSMACD;
+    Endpoint.ProcessId = AddrFile->ProcessId;
+
+    return WfpShimAuthorizeListen(&Endpoint);
 }
 
 /* This listen is on a socket we keep as internal.  That socket has the same
@@ -48,7 +67,7 @@ NTSTATUS TCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
 {
     NTSTATUS Status = STATUS_SUCCESS;
     ip_addr_t AddressToBind;
-    TA_IP_ADDRESS LocalAddress;
+    USHORT LocalPort;
 
     ASSERT(Connection);
 
@@ -61,7 +80,9 @@ NTSTATUS TCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
     TI_DbgPrint(DEBUG_TCP, ("Connection->SocketContext %x\n",
         Connection->SocketContext));
 
-    AddressToBind.addr = Connection->AddressFile->Address.Address.IPv4Address;
+    LibIPAddressToLwip(&Connection->AddressFile->Address, &AddressToBind);
+    if (Connection->AddressFile->DualStack)
+        ip_addr_copy(AddressToBind, *IP_ANY_TYPE);
 
     Status = TCPTranslateError(LibTCPBind(Connection,
                                           &AddressToBind,
@@ -73,11 +94,11 @@ NTSTATUS TCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
         if (!Connection->AddressFile->Port)
         {
             /* We did, so we need to copy back the port */
-            Status = TCPGetSockAddress(Connection, (PTRANSPORT_ADDRESS)&LocalAddress, FALSE);
+            Status = TCPGetSockPort(Connection, &LocalPort);
             if (NT_SUCCESS(Status))
             {
                 /* Allocate the port in the port bitmap */
-                UINT AllocatedPort = TCPAllocatePort(LocalAddress.Address[0].Address[0].sin_port);
+                UINT AllocatedPort = TCPAllocatePortForAddress(&Connection->AddressFile->Address, LocalPort);
                 /* This should never fail unless all ports are in use */
                 if (AllocatedPort == (UINT) -1)
                 {
@@ -89,6 +110,9 @@ NTSTATUS TCPListen(PCONNECTION_ENDPOINT Connection, UINT Backlog)
             }
         }
     }
+
+    if (NT_SUCCESS(Status) && !TCPAuthorizeListen(Connection))
+        Status = STATUS_ACCESS_DENIED;
 
     if (NT_SUCCESS(Status))
     {
@@ -140,10 +164,13 @@ NTSTATUS TCPAccept ( PTDI_REQUEST Request,
                      PCONNECTION_ENDPOINT Listener,
                      PCONNECTION_ENDPOINT Connection,
                      PTCP_COMPLETION_ROUTINE Complete,
-                     PVOID Context )
+                     PVOID Context,
+                     PCONNECTION_ENDPOINT *DrainListener )
 {
     NTSTATUS Status;
     PTDI_BUCKET Bucket;
+
+    *DrainListener = NULL;
 
     LockObject(Listener);
 
@@ -157,6 +184,11 @@ NTSTATUS TCPAccept ( PTDI_REQUEST Request,
         Bucket->Request.RequestNotifyObject = Complete;
         Bucket->Request.RequestContext = Context;
         InsertTailList( &Listener->ListenRequest, &Bucket->Entry );
+        if (!IsListEmpty(&Listener->PendingAccepts))
+        {
+            ReferenceObject(Listener);
+            *DrainListener = Listener;
+        }
         Status = STATUS_PENDING;
     }
     else
@@ -165,4 +197,10 @@ NTSTATUS TCPAccept ( PTDI_REQUEST Request,
     UnlockObject(Listener);
 
     return Status;
+}
+
+VOID TCPDrainPendingAccept( PCONNECTION_ENDPOINT Listener )
+{
+    LibTCPDrainPendingAccept(Listener);
+    DereferenceObject(Listener);
 }

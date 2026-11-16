@@ -2,9 +2,9 @@
 list(APPEND HAL_GENERIC_SOURCE
     generic/beep.c
     generic/cmos.c
-    generic/display.c
     generic/dma.c
     generic/drive.c
+    generic/gsihints.c
     generic/halinit.c
     generic/kdpci.c
     generic/memory.c
@@ -16,10 +16,14 @@ list(APPEND HAL_GENERIC_SOURCE
     generic/usage.c
     generic/x86bios.c)
 
+if(ARCH STREQUAL "i386" OR ARCH STREQUAL "amd64")
+    list(APPEND HAL_GENERIC_SOURCE
+        generic/portio.c)
+endif()
+
 if(ARCH STREQUAL "i386")
     list(APPEND HAL_GENERIC_SOURCE
-        generic/bios.c
-        generic/portio.c)
+        generic/bios.c)
 
     list(APPEND HAL_GENERIC_ASM_SOURCE
         generic/v86.S)
@@ -28,3 +32,6 @@ endif()
 add_asm_files(lib_hal_generic_asm ${HAL_GENERIC_ASM_SOURCE})
 add_library(lib_hal_generic OBJECT ${HAL_GENERIC_SOURCE} ${lib_hal_generic_asm})
 add_dependencies(lib_hal_generic asm)
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(lib_hal_generic PRIVATE --param=min-pagesize=0)
+endif()

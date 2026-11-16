@@ -41,13 +41,13 @@ typedef
 NTSTATUS
 (NTAPI *PFN_CLASS_LIBRARY_BIND_CLIENT)(
     _In_ PWDF_CLASS_BIND_INFO ClassBindInfo,
-    _Out_ PWDF_COMPONENT_GLOBALS* Globals);
+    _In_ PWDF_COMPONENT_GLOBALS Globals);
 
 typedef
 VOID
 (NTAPI *PFN_CLASS_LIBRARY_UNBIND_CLIENT)(
     _In_ PWDF_CLASS_BIND_INFO ClassBindInfo,
-    _In_ PWDF_COMPONENT_GLOBALS* Globals);
+    _In_ PWDF_COMPONENT_GLOBALS Globals);
 
 typedef
 NTSTATUS
@@ -103,6 +103,19 @@ typedef struct _WDF_CLASS_BIND_INFO {
     PFN_CLIENT_UNBIND_CLASS ClientUnbindClass;
     PVOID ClassModule;
 } WDF_CLASS_BIND_INFO, *PWDF_CLASS_BIND_INFO;
+
+#if (!defined(WDF_STUB_VERSION)) || (WDF_STUB_VERSION >= 25)
+
+typedef struct _WDF_CLASS_BIND_INFO2 {
+    WDF_CLASS_BIND_INFO V1;
+    PULONG MinimumVersionRequired;
+    PBOOLEAN ClientVersionHigherThanFramework;
+    PULONG FuncCountPtr;
+    PULONG StructCountPtr;
+    size_t *StructTable;
+} WDF_CLASS_BIND_INFO2, *PWDF_CLASS_BIND_INFO2;
+
+#endif
 
 typedef struct _WDF_CLASS_LIBRARY_INFO {
     ULONG Size;
@@ -164,7 +177,7 @@ NTSTATUS
 NTAPI
 WdfVersionBindClass(
     _In_ PWDF_BIND_INFO BindInfo,
-    _Inout_ PWDF_COMPONENT_GLOBALS* Globals,
+    _In_ PWDF_COMPONENT_GLOBALS Globals,
     _In_ PWDF_CLASS_BIND_INFO ClassBindInfo);
 
 

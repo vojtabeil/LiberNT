@@ -676,7 +676,7 @@ static	DWORD	MCIAVI_mciStop(UINT wDevID, DWORD dwFlags, LPMCI_GENERIC_PARMS lpPa
 	break;
 
     case MCI_MODE_NOT_READY:
-        break;
+        break;        
     }
 
     if ((dwFlags & MCI_NOTIFY) && lpParms) {

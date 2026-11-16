@@ -49,7 +49,7 @@ MMRESULT WINAPI acmDriverAddA(PHACMDRIVERID phadid, HINSTANCE hinstModule,
     WCHAR * driverW = NULL;
     LPARAM lParamW = lParam;
 
-    TRACE("(%p, %p, %08lx, %08x, %08x)\n",
+    TRACE("(%p, %p, %08Ix, %08lx, %08lx)\n",
           phadid, hinstModule, lParam, dwPriority, fdwAdd);
 
     if (!phadid) {
@@ -98,7 +98,7 @@ MMRESULT WINAPI acmDriverAddW(PHACMDRIVERID phadid, HINSTANCE hinstModule,
 {
     PWINE_ACMLOCALDRIVER pLocalDrv = NULL;
 
-    TRACE("(%p, %p, %08lx, %08x, %08x)\n",
+    TRACE("(%p, %p, %08Ix, %08lx, %08lx)\n",
           phadid, hinstModule, lParam, dwPriority, fdwAdd);
 
     if (!phadid) {
@@ -120,6 +120,10 @@ MMRESULT WINAPI acmDriverAddW(PHACMDRIVERID phadid, HINSTANCE hinstModule,
         WARN("invalid flag\n");
 	return MMSYSERR_INVALFLAG;
     }
+
+#ifdef __REACTOS__
+    MSACM_GetFirstDriverID();
+#endif
 
     switch (fdwAdd & ACM_DRIVERADDF_TYPEMASK) {
     case ACM_DRIVERADDF_NAME:
@@ -165,7 +169,7 @@ MMRESULT WINAPI acmDriverAddW(PHACMDRIVERID phadid, HINSTANCE hinstModule,
         }
         break;
     default:
-        ERR("invalid flag value 0x%08x for fdwAdd\n", fdwAdd);
+        ERR("invalid flag value 0x%08lx for fdwAdd\n", fdwAdd);
         return MMSYSERR_INVALFLAG;
     }
 
@@ -182,7 +186,7 @@ MMRESULT WINAPI acmDriverClose(HACMDRIVER had, DWORD fdwClose)
     PWINE_ACMDRIVERID	padid;
     PWINE_ACMDRIVER*	tpad;
 
-    TRACE("(%p, %08x)\n", had, fdwClose);
+    TRACE("(%p, %08lx)\n", had, fdwClose);
 
     if (fdwClose) {
         WARN("invalid flag\n");
@@ -225,7 +229,7 @@ MMRESULT WINAPI acmDriverDetailsA(HACMDRIVERID hadid, PACMDRIVERDETAILSA padd, D
     MMRESULT mmr;
     ACMDRIVERDETAILSW	addw;
 
-    TRACE("(%p, %p, %08x)\n", hadid, padd, fdwDetails);
+    TRACE("(%p, %p, %08lx)\n", hadid, padd, fdwDetails);
 
     if (!padd) {
         WARN("invalid parameter\n");
@@ -276,7 +280,7 @@ MMRESULT WINAPI acmDriverDetailsW(HACMDRIVERID hadid, PACMDRIVERDETAILSW padd, D
     HACMDRIVER acmDrvr;
     MMRESULT mmr;
 
-    TRACE("(%p, %p, %08x)\n", hadid, padd, fdwDetails);
+    TRACE("(%p, %p, %08lx)\n", hadid, padd, fdwDetails);
 
     if (!padd) {
         WARN("invalid parameter\n");
@@ -293,6 +297,21 @@ MMRESULT WINAPI acmDriverDetailsW(HACMDRIVERID hadid, PACMDRIVERDETAILSW padd, D
 	return MMSYSERR_INVALFLAG;
     }
 
+#ifdef __REACTOS__
+    {
+        PWINE_ACMDRIVERID padid = MSACM_GetDriverID(hadid);
+
+        if (padid && padid->pLocalDriver && padid->pACMDriverList)
+        {
+            ACMDRIVERDETAILSW paddw;
+            paddw.cbStruct = sizeof(paddw);
+            mmr = MSACM_Message((HACMDRIVER)padid->pACMDriverList, ACMDM_DRIVER_DETAILS, (LPARAM)&paddw, 0);
+            paddw.cbStruct = min(padd->cbStruct, sizeof(*padd));
+            memcpy(padd, &paddw, paddw.cbStruct);
+            return mmr;
+        }
+    }
+#endif
     mmr = acmDriverOpen(&acmDrvr, hadid, 0);
     if (mmr == MMSYSERR_NOERROR) {
         ACMDRIVERDETAILSW paddw;
@@ -318,7 +337,7 @@ MMRESULT WINAPI acmDriverEnum(ACMDRIVERENUMCB fnCallback, DWORD_PTR dwInstance,
     PWINE_ACMDRIVERID	padid;
     DWORD		fdwSupport;
 
-    TRACE("(%p, %08lx, %08x)\n", fnCallback, dwInstance, fdwEnum);
+    TRACE("(%p, %08Ix, %08lx)\n", fnCallback, dwInstance, fdwEnum);
 
     if (!fnCallback) {
         WARN("invalid parameter\n");
@@ -353,7 +372,7 @@ MMRESULT WINAPI acmDriverID(HACMOBJ hao, PHACMDRIVERID phadid, DWORD fdwDriverID
 {
     PWINE_ACMOBJ pao;
 
-    TRACE("(%p, %p, %08x)\n", hao, phadid, fdwDriverID);
+    TRACE("(%p, %p, %08lx)\n", hao, phadid, fdwDriverID);
 
     if (fdwDriverID) {
         WARN("invalid flag\n");
@@ -391,7 +410,7 @@ MMRESULT WINAPI acmDriverID(HACMOBJ hao, PHACMDRIVERID phadid, DWORD fdwDriverID
  */
 LRESULT WINAPI acmDriverMessage(HACMDRIVER had, UINT uMsg, LPARAM lParam1, LPARAM lParam2)
 {
-    TRACE("(%p, %04x, %08lx, %08lx\n", had, uMsg, lParam1, lParam2);
+    TRACE("(%p, %04x, %08Ix, %08Ix\n", had, uMsg, lParam1, lParam2);
 
     if ((uMsg >= ACMDM_USER && uMsg < ACMDM_RESERVED_LOW) ||
 	uMsg == ACMDM_DRIVER_ABOUT ||
@@ -400,7 +419,7 @@ LRESULT WINAPI acmDriverMessage(HACMDRIVER had, UINT uMsg, LPARAM lParam1, LPARA
     {
         PWINE_ACMDRIVERID padid;
         LRESULT lResult;
-        LPDRVCONFIGINFO pConfigInfo = NULL;
+        LPDRVCONFIGINFOEX pConfigInfo = NULL;
         LPWSTR section_name = NULL;
         LPWSTR alias_name = NULL;
 
@@ -425,25 +444,23 @@ LRESULT WINAPI acmDriverMessage(HACMDRIVER had, UINT uMsg, LPARAM lParam1, LPARA
             }
         
             if (pAlias != NULL) {
-                /* DRVCONFIGINFO is only 12 bytes long, but native msacm
-                 * reports a 16-byte structure to codecs, so allocate 16 bytes,
-                 * just to be on the safe side.
-                 */
-                const unsigned int iStructSize = 16;
-                pConfigInfo = HeapAlloc(MSACM_hHeap, 0, iStructSize);
+                pConfigInfo = HeapAlloc(MSACM_hHeap, 0, sizeof(*pConfigInfo));
                 if (!pConfigInfo) {
-                    ERR("OOM while supplying DRVCONFIGINFO for DRV_CONFIGURE, using NULL\n");
+                    ERR("OOM while supplying DRVCONFIGINFOEX for DRV_CONFIGURE, using NULL\n");
                 } else {
-                    static const WCHAR drivers32[] = {'D','r','i','v','e','r','s','3','2','\0'};
+                    /* In some cases (seen in the 32bit world), a DRVCONFIGINFOEX struct is passed
+                     * (with extended size) instead of the documented DRVCONFIGINFO.
+                     * So, always pass a DRVCONFIGINFOEX to be one the safe side
+                     */
+                    pConfigInfo->dwDCISize = sizeof(*pConfigInfo);
 
-                    pConfigInfo->dwDCISize = iStructSize;
-
-                    section_name = HeapAlloc(MSACM_hHeap, 0, (lstrlenW(drivers32) + 1) * sizeof(WCHAR));
-                    if (section_name) lstrcpyW(section_name, drivers32);
+                    section_name = HeapAlloc(MSACM_hHeap, 0, sizeof(L"Drivers32"));
+                    if (section_name) lstrcpyW(section_name, L"Drivers32");
                     pConfigInfo->lpszDCISectionName = section_name;
                     alias_name = HeapAlloc(MSACM_hHeap, 0, (lstrlenW(pAlias) + 1) * sizeof(WCHAR));
                     if (alias_name) lstrcpyW(alias_name, pAlias);
                     pConfigInfo->lpszDCIAliasName = alias_name;
+                    pConfigInfo->dnDevNode = 0; /* FIXME */
 
                     if (pConfigInfo->lpszDCISectionName == NULL || pConfigInfo->lpszDCIAliasName == NULL) {
                         HeapFree(MSACM_hHeap, 0, alias_name);
@@ -494,7 +511,7 @@ MMRESULT WINAPI acmDriverOpen(PHACMDRIVER phad, HACMDRIVERID hadid, DWORD fdwOpe
     PWINE_ACMDRIVER	pad = NULL;
     MMRESULT		ret;
 
-    TRACE("(%p, %p, %08u)\n", phad, hadid, fdwOpen);
+    TRACE("(%p, %p, %08lu)\n", phad, hadid, fdwOpen);
 
     if (!phad) {
         WARN("invalid parameter\n");
@@ -607,7 +624,7 @@ MMRESULT WINAPI acmDriverOpen(PHACMDRIVER phad, HACMDRIVERID hadid, DWORD fdwOpe
 MMRESULT WINAPI acmDriverPriority(HACMDRIVERID hadid, DWORD dwPriority, DWORD fdwPriority)
 {
 
-    TRACE("(%p, %08x, %08x)\n", hadid, dwPriority, fdwPriority);
+    TRACE("(%p, %08lx, %08lx)\n", hadid, dwPriority, fdwPriority);
 
     /* Check for unknown flags */
     if (fdwPriority &
@@ -681,9 +698,13 @@ MMRESULT WINAPI acmDriverPriority(HACMDRIVERID hadid, DWORD dwPriority, DWORD fd
                     return MMSYSERR_NOTSUPPORTED;
                 }
                 if (dwPriority != 1 && dwPriority != (DWORD)-1) {
-                    FIXME("unexpected priority %d, using sign only\n", dwPriority);
+                    FIXME("unexpected priority %ld, using sign only\n", dwPriority);
                     if ((signed)dwPriority < 0) dwPriority = (DWORD)-1;
+#ifdef __REACTOS__
+                    else dwPriority = 1;
+#else
                     if (dwPriority > 0) dwPriority = 1;
+#endif
                 }
                 
                 if (dwPriority == 1 && (padid->pPrevACMDriverID == NULL || 
@@ -748,7 +769,7 @@ MMRESULT WINAPI acmDriverRemove(HACMDRIVERID hadid, DWORD fdwRemove)
     PWINE_ACMDRIVERID padid;
     PWINE_ACMNOTIFYWND panwnd;
 
-    TRACE("(%p, %08x)\n", hadid, fdwRemove);
+    TRACE("(%p, %08lx)\n", hadid, fdwRemove);
 
     padid = MSACM_GetDriverID(hadid);
     panwnd = MSACM_GetNotifyWnd(hadid);

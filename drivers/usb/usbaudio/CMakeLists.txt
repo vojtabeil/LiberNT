@@ -1,14 +1,13 @@
 
 
-remove_definitions(-D_WIN32_WINNT=0x502)
-add_definitions(-D_WIN32_WINNT=0x600)
-
 list(APPEND SOURCE
     usbaudio.c
     pool.c
     filter.c
     pin.c
-    guid.c)
+    guid.c
+    uac/uac_feedback.c
+    uac/uac_desc_validate.c)
 
 add_library(usbaudio MODULE
     ${SOURCE}

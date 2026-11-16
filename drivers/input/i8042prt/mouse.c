@@ -6,7 +6,7 @@
  * PROGRAMMERS: Copyright Victor Kirhenshtein (sauros@iname.com)
                 Copyright Jason Filby (jasonfilby@yahoo.com)
                 Copyright Martijn Vernooij (o112w8r02@sneakemail.com)
-                Copyright 2006-2007 HervÃ© Poussineau (hpoussin@reactos.org)
+                Copyright 2006-2007 Hervé Poussineau (hpoussin@reactos.org)
                 Copyright 2008 Colin Finck (mail@colinfinck.de)
  */
 
@@ -128,11 +128,8 @@ i8042MouHandle(
 			else
 				MouseInput->LastY = (LONG)Output;
 
-			/* Windows wants it the other way around, except when the
-			 * host's PS/2 emulation already reports it that way
-			 * (Hyper-V on Windows 11 24H2+, see CORE-20561) */
-			if (!(i8042HwFlags & FL_HYPERV_SKIP_Y_NEGATION))
-				MouseInput->LastY = -MouseInput->LastY;
+			/* Windows wants it the other way around */
+			MouseInput->LastY = -MouseInput->LastY;
 
 			if (DeviceExtension->MouseType == GenericPS2 ||
 			    DeviceExtension->MouseType == Ps2pp)
@@ -275,6 +272,8 @@ i8042MouDpcRoutine(
 	UNREFERENCED_PARAMETER(SystemArgument1);
 	UNREFERENCED_PARAMETER(SystemArgument2);
 
+
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
 	__analysis_assume(DeferredContext != NULL);
 	DeviceExtension = DeferredContext;
 	PortDeviceExtension = DeviceExtension->Common.PortDeviceExtension;
@@ -365,6 +364,8 @@ i8042DpcRoutineMouseTimeout(
 	UNREFERENCED_PARAMETER(SystemArgument1);
 	UNREFERENCED_PARAMETER(SystemArgument2);
 
+
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
 	__analysis_assume(DeferredContext != NULL);
 	DeviceExtension = DeferredContext;
 	PortDeviceExtension = DeviceExtension->Common.PortDeviceExtension;
@@ -374,7 +375,7 @@ i8042DpcRoutineMouseTimeout(
 	WARN_(I8042PRT, "Mouse initialization timeout! (substate %x)\n",
 		DeviceExtension->MouseResetState);
 
-	PortDeviceExtension->Flags &= ~MOUSE_PRESENT;
+	InterlockedAnd((PLONG)&PortDeviceExtension->Flags, ~MOUSE_PRESENT);
 
 	KeReleaseInterruptSpinLock(PortDeviceExtension->HighestDIRQLInterrupt, Irql);
 }
@@ -459,8 +460,10 @@ i8042MouInternalDeviceControl(
 				i8042DpcRoutineMouseTimeout,
 				DeviceExtension);
 			KeInitializeTimer(&DeviceExtension->TimerMouseTimeout);
+			KeWaitForSingleObject(&DeviceExtension->Common.PortDeviceExtension->PnpMutex, Executive, KernelMode, FALSE, NULL);
 			DeviceExtension->Common.PortDeviceExtension->MouseExtension = DeviceExtension;
-			DeviceExtension->Common.PortDeviceExtension->Flags |= MOUSE_CONNECTED;
+			InterlockedOr((PLONG)&DeviceExtension->Common.PortDeviceExtension->Flags, MOUSE_CONNECTED);
+			KeReleaseMutex(&DeviceExtension->Common.PortDeviceExtension->PnpMutex, FALSE);
 
 			IoMarkIrpPending(Irp);
 			DeviceExtension->MouseState = MouseResetting;
@@ -675,7 +678,7 @@ i8042MouResetIsr(
 			}
 			else
 			{
-				PortDeviceExtension->Flags &= ~MOUSE_PRESENT;
+				InterlockedAnd((PLONG)&PortDeviceExtension->Flags, ~MOUSE_PRESENT);
 				DeviceExtension->MouseState = MouseIdle;
 				WARN_(I8042PRT, "Mouse returned bad reset reply: %x (expected aa)\n", Value);
 			}
@@ -695,7 +698,7 @@ i8042MouResetIsr(
 			}
 			else
 			{
-				PortDeviceExtension->Flags &= ~MOUSE_PRESENT;
+				InterlockedAnd((PLONG)&PortDeviceExtension->Flags, ~MOUSE_PRESENT);
 				DeviceExtension->MouseState = MouseIdle;
 				WARN_(I8042PRT, "Mouse returned bad reset reply part two: %x (expected 0)\n", Value);
 			}
@@ -850,6 +853,9 @@ i8042MouResetIsr(
 			DeviceExtension->MouseResetState++;
 			return TRUE;
 		case 1027:
+			DeviceExtension->MouseResetState++;
+			return TRUE;
+		case 1028:
 			if (0x04 == Value)
 			{
 				DeviceExtension->MouseAttributes.NumberOfButtons = 5;
@@ -861,6 +867,7 @@ i8042MouResetIsr(
 			DeviceExtension->MouseResetState = ExpectingSetSamplingRateACK;
 			return TRUE;
 		case ExpectingSetSamplingRateACK:
+			DeviceExtension->MouseAttributes.SampleRate = (USHORT)PortDeviceExtension->Settings.SampleRate;
 			DeviceExtension->MouseHook.IsrWritePort(
 				DeviceExtension->MouseHook.CallContext,
 				(UCHAR)DeviceExtension->MouseAttributes.SampleRate);
@@ -870,7 +877,7 @@ i8042MouResetIsr(
 			if (MOUSE_NACK == Value)
 			{
 				DeviceExtension->MouseHook.IsrWritePort(DeviceExtension->MouseHook.CallContext, 0x3C);
-				DeviceExtension->MouseAttributes.SampleRate = (USHORT)PortDeviceExtension->Settings.SampleRate;
+				DeviceExtension->MouseAttributes.SampleRate = 60;
 				DeviceExtension->MouseResetState = 1040;
 				return TRUE;
 			}
@@ -891,7 +898,7 @@ i8042MouResetIsr(
 			DeviceExtension->MouseResetState = ExpectingEnableACK;
 			return TRUE;
 		case ExpectingEnableACK:
-			PortDeviceExtension->Flags |= MOUSE_PRESENT;
+			InterlockedOr((PLONG)&PortDeviceExtension->Flags, MOUSE_PRESENT);
 			DeviceExtension->MouseState = MouseIdle;
 			DeviceExtension->MouseTimeoutState = TimeoutCancel;
 			INFO_(I8042PRT, "Mouse type = %u\n", DeviceExtension->MouseType);

@@ -31,6 +31,7 @@ list(APPEND PCH_SKIP_SOURCE
 add_executable(ole32_winetest
     ${SOURCE}
     ${PCH_SKIP_SOURCE})
+target_compile_definitions(ole32_winetest PRIVATE WINETEST_WAIT_CHILD_PROCESS_INFO)
 
 # CMake 3.9 and higher requires to specify this dependency manually
 # see https://gitlab.kitware.com/cmake/cmake/issues/19933
@@ -48,6 +49,8 @@ add_dependencies(ole32_winetest ole32_testlib)
 
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
 	target_compile_options(ole32_winetest PRIVATE -Wno-format-overflow -Wno-discarded-qualifiers)
+elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+	target_compile_options(ole32_winetest PRIVATE -Wno-incompatible-pointer-types-discards-qualifiers)
 endif()
 
 add_pch(ole32_winetest precomp.h "${PCH_SKIP_SOURCE}")

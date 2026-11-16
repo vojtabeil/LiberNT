@@ -7,8 +7,6 @@
 
 #include "msctfime.h"
 
-WINE_DEFAULT_DEBUG_CHANNEL(msctfime);
-
 // The callback function type
 typedef HRESULT (CALLBACK *FN_LanguageProfilesCallback)(TF_LANGUAGEPROFILE profile, LPARAM lParam);
 
@@ -238,6 +236,15 @@ CicProfile::GetActiveLanguageProfile(
         return S_FALSE;
     *pProfile = arg.profile;
     return S_OK;
+}
+
+HRESULT CicProfile::ChangeCurrentLanguage(_In_ LANGID LangID)
+{
+    if (!m_pIPProfiles)
+        return E_FAIL;
+
+    m_dwFlags &= ~4;
+    return m_pIPProfiles->ChangeCurrentLanguage(LangID);
 }
 
 /// @implemented

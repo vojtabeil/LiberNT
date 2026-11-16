@@ -24,6 +24,10 @@ DBG_DEFAULT_CHANNEL(WINDOWS);
 #define INF_ARCH "arm"
 #elif defined(_M_ARM64)
 #define INF_ARCH "arm64"
+#elif defined(_M_RISCV64)
+#define INF_ARCH "riscv64"
+#elif defined(_M_PPC)
+#define INF_ARCH "ppc"
 #endif
 
 // TODO: Move to .h
@@ -400,6 +404,11 @@ LoadReactOSSetup(
     CHAR FilePath[MAX_PATH];
     CHAR UserBootOptions[MAX_OPTIONS_LENGTH+1];
     PCSTR BootOptions;
+#if (_WIN32_WINNT > _WIN32_WINNT_WS03)
+    USHORT OperatingSystemVersion = _WIN32_WINNT;
+#else
+    USHORT OperatingSystemVersion = _WIN32_WINNT_WS03;
+#endif
 
     static PCSTR SourcePaths[] =
     {
@@ -412,7 +421,9 @@ LoadReactOSSetup(
         "ARM\\",
 #elif defined(_M_ARM64)
         "ARM64\\",
-#elif defined(_M_MPPC)
+#elif defined(_M_RISCV64)
+        "RISCV64\\",
+#elif defined(_M_MPPC) || defined(_M_PPC)
         "PPC\\",
 #elif defined(_M_MRX000)
         "MIPS\\",
@@ -444,7 +455,7 @@ LoadReactOSSetup(
     /* Let the user know we started loading */
     UiDrawBackdrop(UiGetScreenHeight());
     UiDrawStatusText("Setup is loading...");
-    UiDrawProgressBarCenter("Loading ReactOS Setup...");
+    UiDrawProgressBarCenter("Loading LiberNT Setup...");
 
     /* Retrieve the system path */
     *BootPath = ANSI_NULL;
@@ -502,17 +513,39 @@ LoadReactOSSetup(
         BootOptions = "";
     TRACE("BootOptions(1): '%s'\n", BootOptions);
 
-    /* Check if a RAM disk file was given */
+    ArgValue = strchr(BootPath, ')');
+    if (StartupSkipsRamDisk() && ArgValue && _strnicmp(BootPath, "ramdisk(", 8) == 0)
+    {
+        RtlStringCbCopyA(FilePath, sizeof(FilePath), ArgValue + 1);
+        RtlStringCbCopyA(BootPath, sizeof(BootPath), SystemPartition);
+        RtlStringCbCatA(BootPath, sizeof(BootPath), FilePath);
+        TRACE("BootPath without RAM disk: '%s'\n", BootPath);
+    }
+
+    /* Check if a RAM disk is needed: either an explicit RDPATH= file,
+     * a writable ramdisk size request (RDRAMSIZE=), or the boot path
+     * itself targets the ramdisk device. */
     FileName = (PSTR)NtLdrGetOptionEx(BootOptions, "RDPATH=", &FileNameLength);
-    if (FileName && (FileNameLength >= 7))
+    if (!StartupSkipsRamDisk() &&
+        ((FileName && (FileNameLength >= 7)) ||
+         NtLdrGetOption(BootOptions, "RDRAMSIZE=") ||
+         _strnicmp(BootPath, "ramdisk(", 8) == 0))
     {
         /* Load the RAM disk */
         Status = RamDiskInitialize(FALSE, BootOptions, SystemPartition);
         if (Status != ESUCCESS)
         {
-            FileName += 7; FileNameLength -= 7;
-            UiMessageBox("Failed to load RAM disk file '%.*s'",
-                         FileNameLength, FileName);
+            if (FileName && (FileNameLength > 7))
+            {
+                FileName += 7; FileNameLength -= 7;
+                UiMessageBox("Failed to load RAM disk file '%.*s'.\n%s",
+                             FileNameLength, FileName, RamDiskGetFailureText());
+            }
+            else
+            {
+                UiMessageBox("Failed to load the RAM disk from '%s'.\n%s",
+                             SystemPartition, RamDiskGetFailureText());
+            }
             return Status;
         }
     }
@@ -690,17 +723,16 @@ LoadReactOSSetup(
     BootOptions = UserBootOptions;
     TRACE("BootOptions(2): '%s'\n", BootOptions);
 
-    /* Handle the SOS option */
-    SosEnabled = !!NtLdrGetOption(BootOptions, "SOS");
-    if (SosEnabled)
-        UiResetForSOS();
-
     /* Allocate and minimally-initialize the Loader Parameter Block */
-    AllocateAndInitLPB(_WIN32_WINNT_WS03, &LoaderBlock);
+    AllocateAndInitLPB(OperatingSystemVersion, &LoaderBlock);
 
     /* Allocate and initialize the setup loader block */
     SetupBlock = &WinLdrSystemBlock->SetupBlock;
+#if (NTDDI_VERSION < NTDDI_WIN7)
     LoaderBlock->SetupLdrBlock = SetupBlock;
+#else
+    /* TODO: Win7+ removed SetupLdrBlock from LOADER_PARAMETER_BLOCK */
+#endif
 
     /* Set textmode setup flag */
     SetupBlock->Flags = SETUPLDR_TEXT_MODE;
@@ -734,7 +766,7 @@ LoadReactOSSetup(
     UiDrawStatusText("The Setup program is starting...");
 
     /* Finish loading */
-    return LoadAndBootWindowsCommon(_WIN32_WINNT_WS03,
+    return LoadAndBootWindowsCommon(OperatingSystemVersion,
                                     LoaderBlock,
                                     BootOptions,
                                     SystemPartition,

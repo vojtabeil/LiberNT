@@ -9,6 +9,7 @@
 /* INCLUDES ******************************************************************/
 
 #include <hal.h>
+#include <reactos/hal/acpi_pci.h>   /* PHAL_ACPI_PCI_ROUTE_QUERY */
 #define NDEBUG
 #include <debug.h>
 
@@ -22,8 +23,39 @@ ULONG HalpMinPciBus, HalpMaxPciBus;
 KSPIN_LOCK HalpPCIConfigLock;
 PCI_CONFIG_HANDLER PCIConfigHandler;
 
+/* Default PCI bus resource apertures */
+#define HALP_PCI_DEFAULT_IO_BASE          0x0ULL
+#define HALP_PCI_DEFAULT_IO_LIMIT         0xFFFFULL
+#define HALP_PCI_DEFAULT_MEM_BASE         0xC0000000ULL
+#define HALP_PCI_DEFAULT_MEM_LIMIT        0xFEBFFFFFULL
+
+/* PCI GSI (Global System Interrupt) routing table */
+typedef struct _HALP_PCI_GSI_INFO
+{
+    BOOLEAN Valid;
+    BOOLEAN FromFirmware;
+    UCHAR Polarity;
+    UCHAR Trigger;
+    USHORT Segment;
+    UCHAR Bus;
+    UCHAR Device;
+    UCHAR Function;
+    UCHAR Pin;
+} HALP_PCI_GSI_INFO, *PHALP_PCI_GSI_INFO;
+
+#define HALP_PCI_GSI_STATIC_CAPACITY 256
+static HALP_PCI_GSI_INFO HalpPciGsiStaticInfo[HALP_PCI_GSI_STATIC_CAPACITY];
+static PHALP_PCI_GSI_INFO HalpPciGsiInfo = HalpPciGsiStaticInfo;
+
+/* HalpAcpiEcamCoverageFlags is defined in halacpi.c and declared in halacpi.h */
+
+/* ACPI PCI routing callback (set by ACPI driver via HalpRegisterPciRouteQuery) */
+static PHAL_ACPI_PCI_ROUTE_QUERY HalpPciRouteQueryCallback;
+
+/* MSI support: TRUE by default on x86 APIC systems, set to FALSE on _OSC failure */
+
 /* PCI Operation Matrix */
-static const UCHAR PCIDeref[4][4] =
+UCHAR PCIDeref[4][4] =
 {
     {0, 1, 2, 2},   // ULONG-aligned offset
     {1, 1, 1, 1},   // UCHAR-aligned offset
@@ -32,7 +64,7 @@ static const UCHAR PCIDeref[4][4] =
 };
 
 /* Type 1 PCI Bus */
-const PCI_CONFIG_HANDLER PCIConfigHandlerType1 =
+PCI_CONFIG_HANDLER PCIConfigHandlerType1 =
 {
     /* Synchronization */
     (FncSync)HalpPCISynchronizeType1,
@@ -54,7 +86,7 @@ const PCI_CONFIG_HANDLER PCIConfigHandlerType1 =
 };
 
 /* Type 2 PCI Bus */
-const PCI_CONFIG_HANDLER PCIConfigHandlerType2 =
+PCI_CONFIG_HANDLER PCIConfigHandlerType2 =
 {
     /* Synchronization */
     (FncSync)HalpPCISynchronizeType2,
@@ -75,7 +107,7 @@ const PCI_CONFIG_HANDLER PCIConfigHandlerType2 =
     }
 };
 
-static PCIPBUSDATA HalpFakePciBusData =
+PCIPBUSDATA HalpFakePciBusData =
 {
     {
         PCI_DATA_TAG,
@@ -91,7 +123,7 @@ static PCIPBUSDATA HalpFakePciBusData =
     32,
 };
 
-const BUS_HANDLER HalpFakePciBusHandler =
+BUS_HANDLER HalpFakePciBusHandler =
 {
     1,
     PCIBus,
@@ -252,6 +284,16 @@ HalpPCIConfig(IN PBUS_HANDLER BusHandler,
     PCIConfigHandler.ReleaseSynchronzation(BusHandler, OldIrql);
 }
 
+static
+ULONG
+HalpPciExtendedConfig(
+    _In_ ULONG BusNumber,
+    _In_ PCI_SLOT_NUMBER Slot,
+    _Inout_updates_bytes_(Length) PUCHAR Buffer,
+    _In_ ULONG Offset,
+    _In_ ULONG Length,
+    _In_ BOOLEAN Write);
+
 VOID
 NTAPI
 HalpReadPCIConfig(IN PBUS_HANDLER BusHandler,
@@ -266,7 +308,7 @@ HalpReadPCIConfig(IN PBUS_HANDLER BusHandler,
         /* Fill the buffer with invalid data */
         RtlFillMemory(Buffer, Length, -1);
     }
-    else
+    else if (HalpPciExtendedConfig(BusHandler->BusNumber, Slot, Buffer, Offset, Length, FALSE) != Length)
     {
         /* Send the request */
         HalpPCIConfig(BusHandler,
@@ -287,7 +329,8 @@ HalpWritePCIConfig(IN PBUS_HANDLER BusHandler,
                    IN ULONG Length)
 {
     /* Validate the PCI Slot */
-    if (HalpValidPCISlot(BusHandler, Slot))
+    if (HalpValidPCISlot(BusHandler, Slot) &&
+        HalpPciExtendedConfig(BusHandler->BusNumber, Slot, Buffer, Offset, Length, TRUE) != Length)
     {
         /* Send the request */
         HalpPCIConfig(BusHandler,
@@ -502,6 +545,146 @@ HalpPhase0SetPciDataByOffset(
 
 /* HAL PCI CALLBACKS *********************************************************/
 
+#ifndef _MINIHAL_
+static ULONGLONG HalpPciExtendedConfigBase;
+static ULONG HalpPciExtendedConfigStartBus;
+static ULONG HalpPciExtendedConfigEndBus;
+static PUCHAR HalpPciExtendedConfigBus[PCI_MAX_BRIDGE_NUMBER + 1];
+#endif
+
+VOID
+NTAPI
+HalpPciSetExtendedConfigWindow(
+    _In_ ULONGLONG BaseAddress,
+    _In_ ULONG StartBus,
+    _In_ ULONG EndBus)
+{
+#ifndef _MINIHAL_
+    HalpPciExtendedConfigBase = BaseAddress;
+    HalpPciExtendedConfigStartBus = StartBus;
+    HalpPciExtendedConfigEndBus = min(EndBus, PCI_MAX_BRIDGE_NUMBER);
+#else
+    UNREFERENCED_PARAMETER(BaseAddress);
+    UNREFERENCED_PARAMETER(StartBus);
+    UNREFERENCED_PARAMETER(EndBus);
+#endif
+}
+
+static
+PUCHAR
+HalpPciExtendedConfigFunction(
+    _In_ ULONG BusNumber,
+    _In_ PCI_SLOT_NUMBER Slot)
+{
+#ifndef _MINIHAL_
+    PHYSICAL_ADDRESS Address;
+    PUCHAR BusBase;
+    PUCHAR Previous;
+    SIZE_T BusSize = (SIZE_T)PCI_EXTENDED_CONFIG_LENGTH * PCI_MAX_DEVICES * PCI_MAX_FUNCTION;
+
+    if (HalpPciExtendedConfigBase == 0 ||
+        BusNumber < HalpPciExtendedConfigStartBus ||
+        BusNumber > HalpPciExtendedConfigEndBus)
+    {
+        return NULL;
+    }
+
+    BusBase = InterlockedCompareExchangePointer((PVOID *)&HalpPciExtendedConfigBus[BusNumber], NULL, NULL);
+    if (BusBase == NULL)
+    {
+        if (KeGetCurrentIrql() > DISPATCH_LEVEL)
+            return NULL;
+
+        Address.QuadPart = HalpPciExtendedConfigBase +
+                           (ULONGLONG)(BusNumber - HalpPciExtendedConfigStartBus) * BusSize;
+        BusBase = MmMapIoSpace(Address, BusSize, MmNonCached);
+        if (BusBase == NULL)
+            return NULL;
+
+        Previous = InterlockedCompareExchangePointer((PVOID *)&HalpPciExtendedConfigBus[BusNumber], BusBase, NULL);
+        if (Previous != NULL)
+        {
+            MmUnmapIoSpace(BusBase, BusSize);
+            BusBase = Previous;
+        }
+    }
+
+    return BusBase +
+           (Slot.u.bits.DeviceNumber * PCI_MAX_FUNCTION + Slot.u.bits.FunctionNumber) * PCI_EXTENDED_CONFIG_LENGTH;
+#else
+    UNREFERENCED_PARAMETER(BusNumber);
+    UNREFERENCED_PARAMETER(Slot);
+    return NULL;
+#endif
+}
+
+static
+ULONG
+HalpPciExtendedConfig(
+    _In_ ULONG BusNumber,
+    _In_ PCI_SLOT_NUMBER Slot,
+    _Inout_updates_bytes_(Length) PUCHAR Buffer,
+    _In_ ULONG Offset,
+    _In_ ULONG Length,
+    _In_ BOOLEAN Write)
+{
+    PUCHAR Function;
+    PUCHAR Register;
+    ULONG Done;
+    ULONG Value;
+    USHORT Word;
+
+    Function = HalpPciExtendedConfigFunction(BusNumber, Slot);
+    if (Function == NULL)
+        return 0;
+
+    for (Done = 0; Done < Length; )
+    {
+        Register = Function + Offset + Done;
+        switch (PCIDeref[(Offset + Done) % sizeof(ULONG)][(Length - Done) % sizeof(ULONG)])
+        {
+            case 0:
+                if (Write)
+                {
+                    RtlCopyMemory(&Value, Buffer + Done, sizeof(ULONG));
+                    WRITE_REGISTER_ULONG((PULONG)Register, Value);
+                }
+                else
+                {
+                    Value = READ_REGISTER_ULONG((PULONG)Register);
+                    RtlCopyMemory(Buffer + Done, &Value, sizeof(ULONG));
+                }
+                Done += sizeof(ULONG);
+                break;
+
+            case 2:
+                if (Write)
+                {
+                    RtlCopyMemory(&Word, Buffer + Done, sizeof(USHORT));
+                    WRITE_REGISTER_USHORT((PUSHORT)Register, Word);
+                }
+                else
+                {
+                    Word = READ_REGISTER_USHORT((PUSHORT)Register);
+                    RtlCopyMemory(Buffer + Done, &Word, sizeof(USHORT));
+                }
+                Done += sizeof(USHORT);
+                break;
+
+            default:
+                if (Write)
+                    WRITE_REGISTER_UCHAR(Register, Buffer[Done]);
+                else
+                    Buffer[Done] = READ_REGISTER_UCHAR(Register);
+                Done += sizeof(UCHAR);
+                break;
+        }
+    }
+
+    return Length;
+}
+
+
 ULONG
 NTAPI
 HalpGetPCIData(IN PBUS_HANDLER BusHandler,
@@ -513,8 +696,12 @@ HalpGetPCIData(IN PBUS_HANDLER BusHandler,
 {
     PCI_SLOT_NUMBER Slot;
     UCHAR PciBuffer[PCI_COMMON_HDR_LENGTH];
-    PPCI_COMMON_CONFIG PciConfig = (PPCI_COMMON_CONFIG)PciBuffer;
+    PPCI_COMMON_HEADER PciConfig = (PPCI_COMMON_HEADER)PciBuffer;
     ULONG Len = 0;
+    PUCHAR ExtendedBuffer = NULL;
+    ULONG ExtendedOffset;
+    ULONG ExtendedLength = 0;
+    ULONG StandardLength;
 
     Slot.u.AsULONG = SlotNumber;
 #ifdef SARCH_XBOX
@@ -526,7 +713,16 @@ HalpGetPCIData(IN PBUS_HANDLER BusHandler,
 #endif
 
     /* Normalize the length */
-    if (Length > sizeof(PCI_COMMON_CONFIG)) Length = sizeof(PCI_COMMON_CONFIG);
+    if (Offset >= PCI_EXTENDED_CONFIG_LENGTH) return 0;
+    if (Length > PCI_EXTENDED_CONFIG_LENGTH - Offset) Length = PCI_EXTENDED_CONFIG_LENGTH - Offset;
+    ExtendedOffset = max(Offset, (ULONG)sizeof(PCI_COMMON_CONFIG));
+    if (Offset + Length > ExtendedOffset)
+    {
+        ExtendedLength = Offset + Length - ExtendedOffset;
+        ExtendedBuffer = (PUCHAR)Buffer + (ExtendedOffset - Offset);
+        Length -= ExtendedLength;
+    }
+    StandardLength = Length;
 
     /* Check if this is a vendor-specific read */
     if (Offset >= PCI_COMMON_HDR_LENGTH)
@@ -578,9 +774,29 @@ HalpGetPCIData(IN PBUS_HANDLER BusHandler,
         }
     }
 
+    if (ExtendedLength && Len == StandardLength)
+    {
+        Len += HalpPciExtendedConfig(BusHandler->BusNumber,
+                                     Slot,
+                                     ExtendedBuffer,
+                                     ExtendedOffset,
+                                     ExtendedLength,
+                                     FALSE);
+    }
+
     /* Update the total length read */
     return Len;
 }
+
+#if defined(_M_AMD64) && !defined(_MINIHAL_)
+ULONG NTAPI HalpKdReadPciConfig(_In_ ULONG BusNumber, _In_ ULONG SlotNumber, _Out_writes_bytes_(Length) PVOID Buffer, _In_ ULONG Offset, _In_ ULONG Length)
+{
+    /* A frozen processor may own this lock. Never wait from KDB. */
+    if (!KeTestSpinLock(&HalpPCIConfigLock))
+        return MAXULONG;
+    return HalGetBusDataByOffset(PCIConfiguration, BusNumber, SlotNumber, Buffer, Offset, Length);
+}
+#endif
 
 ULONG
 NTAPI
@@ -593,8 +809,12 @@ HalpSetPCIData(IN PBUS_HANDLER BusHandler,
 {
     PCI_SLOT_NUMBER Slot;
     UCHAR PciBuffer[PCI_COMMON_HDR_LENGTH];
-    PPCI_COMMON_CONFIG PciConfig = (PPCI_COMMON_CONFIG)PciBuffer;
+    PPCI_COMMON_HEADER PciConfig = (PPCI_COMMON_HEADER)PciBuffer;
     ULONG Len = 0;
+    PUCHAR ExtendedBuffer = NULL;
+    ULONG ExtendedOffset;
+    ULONG ExtendedLength = 0;
+    ULONG StandardLength;
 
     Slot.u.AsULONG = SlotNumber;
 #ifdef SARCH_XBOX
@@ -603,7 +823,16 @@ HalpSetPCIData(IN PBUS_HANDLER BusHandler,
 #endif
 
     /* Normalize the length */
-    if (Length > sizeof(PCI_COMMON_CONFIG)) Length = sizeof(PCI_COMMON_CONFIG);
+    if (Offset >= PCI_EXTENDED_CONFIG_LENGTH) return 0;
+    if (Length > PCI_EXTENDED_CONFIG_LENGTH - Offset) Length = PCI_EXTENDED_CONFIG_LENGTH - Offset;
+    ExtendedOffset = max(Offset, (ULONG)sizeof(PCI_COMMON_CONFIG));
+    if (Offset + Length > ExtendedOffset)
+    {
+        ExtendedLength = Offset + Length - ExtendedOffset;
+        ExtendedBuffer = (PUCHAR)Buffer + (ExtendedOffset - Offset);
+        Length -= ExtendedLength;
+    }
+    StandardLength = Length;
 
     /* Check if this is a vendor-specific read */
     if (Offset >= PCI_COMMON_HDR_LENGTH)
@@ -647,6 +876,16 @@ HalpSetPCIData(IN PBUS_HANDLER BusHandler,
             HalpWritePCIConfig(BusHandler, Slot, Buffer, Offset, Length);
             Len += Length;
         }
+    }
+
+    if (ExtendedLength && Len == StandardLength)
+    {
+        Len += HalpPciExtendedConfig(BusHandler->BusNumber,
+                                     Slot,
+                                     ExtendedBuffer,
+                                     ExtendedOffset,
+                                     ExtendedLength,
+                                     TRUE);
     }
 
     /* Update the total length read */
@@ -931,13 +1170,12 @@ HalpAssignPCISlotResources(IN PBUS_HANDLER BusHandler,
 
 ULONG
 NTAPI
-HaliPciInterfaceReadConfig(
-    _In_ PBUS_HANDLER RootBusHandler,
-    _In_ ULONG BusNumber,
-    _In_ PCI_SLOT_NUMBER SlotNumber,
-    _Out_writes_bytes_(Length) PVOID Buffer,
-    _In_ ULONG Offset,
-    _In_ ULONG Length)
+HaliPciInterfaceReadConfig(IN PBUS_HANDLER RootBusHandler,
+                           IN ULONG BusNumber,
+                           IN PCI_SLOT_NUMBER SlotNumber,
+                           IN PVOID Buffer,
+                           IN ULONG Offset,
+                           IN ULONG Length)
 {
     BUS_HANDLER BusHandler;
 
@@ -949,26 +1187,6 @@ HaliPciInterfaceReadConfig(
     HalpReadPCIConfig(&BusHandler, SlotNumber, Buffer, Offset, Length);
 
     /* Return length */
-    return Length;
-}
-
-ULONG
-NTAPI
-HaliPciInterfaceWriteConfig(
-    _In_ PBUS_HANDLER RootBusHandler,
-    _In_ ULONG BusNumber,
-    _In_ PCI_SLOT_NUMBER SlotNumber,
-    _In_reads_bytes_(Length) PVOID Buffer,
-    _In_ ULONG Offset,
-    _In_ ULONG Length)
-{
-    BUS_HANDLER BusHandler;
-
-    RtlCopyMemory(&BusHandler, &HalpFakePciBusHandler, sizeof(BUS_HANDLER));
-    BusHandler.BusNumber = BusNumber;
-
-    HalpWritePCIConfig(&BusHandler, SlotNumber, Buffer, Offset, Length);
-
     return Length;
 }
 
@@ -1324,5 +1542,220 @@ HalpInitializePciStubs(VOID)
     HalpPCIConfigInitialized = TRUE;
 }
 
-/* EOF */
+VOID
+NTAPI
+HalpRegisterPciRouteQuery(
+    _In_opt_ PHAL_ACPI_PCI_ROUTE_QUERY Provider)
+{
+    HalpPciRouteQueryCallback = Provider;
+}
 
+BOOLEAN
+NTAPI
+HalQueryPciRoutedInterrupt(
+    _In_ ULONG Segment,
+    _In_ ULONG Bus,
+    _In_ ULONG Device,
+    _In_ ULONG Function,
+    _In_ ULONG Pin,
+    _Out_ PULONG Gsi)
+{
+    if (!Gsi)
+        return FALSE;
+
+    *Gsi = 0;
+
+    if (HalpPciRouteQueryCallback == NULL || Pin == 0)
+        return FALSE;
+
+    return HalpPciRouteQueryCallback((USHORT)Segment,
+                                     (UCHAR)Bus,
+                                     (UCHAR)Device,
+                                     (UCHAR)Function,
+                                     (UCHAR)Pin,
+                                     Gsi,
+                                     NULL,
+                                     NULL) &&
+           *Gsi != 0;
+}
+
+VOID
+NTAPI
+HalpSetPciRoutingMap(
+    _In_reads_opt_(EntryCount) const HAL_ACPI_PCI_ROUTE_ENTRY *Entries,
+    _In_ ULONG EntryCount)
+{
+    ULONG Index;
+
+    RtlZeroMemory(HalpPciGsiInfo,
+                  sizeof(HalpPciGsiStaticInfo));
+
+    if (!Entries || EntryCount == 0)
+    {
+        return;
+    }
+
+    for (Index = 0; Index < EntryCount; ++Index)
+    {
+        const HAL_ACPI_PCI_ROUTE_ENTRY *Entry = &Entries[Index];
+
+        if (Entry->Gsi >= RTL_NUMBER_OF(HalpPciGsiStaticInfo))
+        {
+            continue;
+        }
+
+        HalpPciGsiInfo[Entry->Gsi].Valid = TRUE;
+        HalpPciGsiInfo[Entry->Gsi].FromFirmware = TRUE;
+        HalpPciGsiInfo[Entry->Gsi].Polarity = Entry->Polarity;
+        HalpPciGsiInfo[Entry->Gsi].Trigger = Entry->TriggerMode;
+        HalpPciGsiInfo[Entry->Gsi].Segment = (USHORT)Entry->Segment;
+        HalpPciGsiInfo[Entry->Gsi].Bus = Entry->Bus;
+        HalpPciGsiInfo[Entry->Gsi].Device = Entry->Device;
+        HalpPciGsiInfo[Entry->Gsi].Function = 0xFF;
+        HalpPciGsiInfo[Entry->Gsi].Pin = Entry->Pin;
+    }
+}
+
+/* ACPI _PRT line shape for a GSI; FALSE = no entry, caller uses convention */
+BOOLEAN
+NTAPI
+HalpQueryPciGsiRteHints(_In_ ULONG Gsi, _Out_ PBOOLEAN ActiveLow, _Out_ PBOOLEAN LevelTriggered)
+{
+    if (!ActiveLow || !LevelTriggered)
+        return FALSE;
+
+    if (Gsi >= RTL_NUMBER_OF(HalpPciGsiStaticInfo) || !HalpPciGsiInfo[Gsi].Valid)
+        return FALSE;
+
+    *ActiveLow = (HalpPciGsiInfo[Gsi].Polarity != HAL_ACPI_POLARITY_HIGH);
+    *LevelTriggered = (HalpPciGsiInfo[Gsi].Trigger == HAL_ACPI_TRIGGER_LEVEL);
+    return TRUE;
+}
+
+VOID
+NTAPI
+HalpRecordPciMaxGsi(
+    _In_ const HAL_ACPI_PCI_ROUTE_ENTRY *Entry)
+{
+    UNREFERENCED_PARAMETER(Entry);
+}
+
+VOID
+NTAPI
+HalpConfigurePciRootBridge(
+    _In_ const HAL_ACPI_PCI_ROOT_INFO *Info)
+{
+    PBUS_HANDLER Bus;
+    PPCIPBUSDATA BusData;
+    PSUPPORTED_RANGES Ranges;
+    ULONG BusStart;
+    ULONG BusEnd;
+
+    if (!Info)
+    {
+        return;
+    }
+
+    if (Info->BusRangePresent)
+    {
+        BusStart = Info->BusStart;
+        BusEnd = Info->BusEnd;
+    }
+    else
+    {
+        BusStart = Info->Bus;
+        BusEnd = Info->Bus;
+    }
+
+    if (BusStart < HalpMinPciBus)
+        HalpMinPciBus = BusStart;
+    if (BusEnd > HalpMaxPciBus)
+        HalpMaxPciBus = BusEnd;
+
+    Bus = HalHandlerForBus(PCIBus, Info->Bus);
+    if (!Bus || !Bus->BusData)
+    {
+        DPRINT("HAL: No PCI bus handler for ACPI root segment %lu bus %lu\n",
+                Info->Segment,
+                Info->Bus);
+        return;
+    }
+
+    BusData = (PPCIPBUSDATA)Bus->BusData;
+    BusData->PciSegment = (USHORT)Info->Segment;
+
+    BusData->BusNumberStart = (UCHAR)BusStart;
+    BusData->BusNumberEnd = (UCHAR)BusEnd;
+    BusData->BusNumbersConfigured = TRUE;
+
+    if (Info->IoWindow.Present)
+    {
+        BusData->IoWindowBase = Info->IoWindow.Base;
+        BusData->IoWindowLimit = Info->IoWindow.Limit;
+        BusData->IoBase = Info->IoWindow.Base;
+        BusData->IoLimit = Info->IoWindow.Limit;
+        BusData->IoNext = Info->IoWindow.Base;
+    }
+
+    if (Info->MemoryWindow.Present)
+    {
+        BusData->MemoryWindowBase = Info->MemoryWindow.Base;
+        BusData->MemoryWindowLimit = Info->MemoryWindow.Limit;
+        BusData->MemoryBase = Info->MemoryWindow.Base;
+        BusData->MemoryLimit = Info->MemoryWindow.Limit;
+        BusData->MemoryNext = Info->MemoryWindow.Base;
+    }
+
+    if (Info->PrefetchWindow.Present)
+    {
+        BusData->PrefetchWindowBase = Info->PrefetchWindow.Base;
+        BusData->PrefetchWindowLimit = Info->PrefetchWindow.Limit;
+    }
+
+    BusData->ResourcesInitialized = TRUE;
+
+    Ranges = Bus->BusAddresses;
+    if (!Ranges)
+    {
+        return;
+    }
+
+    Ranges->Sorted = TRUE;
+    Ranges->IO.Next = NULL;
+    Ranges->Memory.Next = NULL;
+    Ranges->PrefetchMemory.Next = NULL;
+
+    if (Info->IoWindow.Present)
+    {
+        Ranges->NoIO = 1;
+        Ranges->IO.Base = Info->IoWindow.Base;
+        Ranges->IO.Limit = Info->IoWindow.Limit;
+        Ranges->IO.SystemBase = Info->IoWindow.HasTranslation ?
+                                (LONGLONG)(Info->IoWindow.Base + Info->IoWindow.Translation) :
+                                0;
+        Ranges->IO.SystemAddressSpace = 1;
+    }
+
+    if (Info->MemoryWindow.Present)
+    {
+        Ranges->NoMemory = 1;
+        Ranges->Memory.Base = Info->MemoryWindow.Base;
+        Ranges->Memory.Limit = Info->MemoryWindow.Limit;
+        Ranges->Memory.SystemBase = Info->MemoryWindow.HasTranslation ?
+                                    (LONGLONG)(Info->MemoryWindow.Base + Info->MemoryWindow.Translation) :
+                                    0;
+        Ranges->Memory.SystemAddressSpace = 0;
+    }
+
+    if (Info->PrefetchWindow.Present)
+    {
+        Ranges->NoPrefetchMemory = 1;
+        Ranges->PrefetchMemory.Base = Info->PrefetchWindow.Base;
+        Ranges->PrefetchMemory.Limit = Info->PrefetchWindow.Limit;
+        Ranges->PrefetchMemory.SystemBase = Info->PrefetchWindow.HasTranslation ?
+                                            (LONGLONG)(Info->PrefetchWindow.Base + Info->PrefetchWindow.Translation) :
+                                            0;
+        Ranges->PrefetchMemory.SystemAddressSpace = 0;
+    }
+}
+/* EOF */

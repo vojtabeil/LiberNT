@@ -89,6 +89,23 @@ KdReceivePacket(
     KD_PACKET Packet;
     ULONG Checksum;
 
+    if (KdpScreenMode)
+    {
+        if (PacketType == PACKET_TYPE_KD_STATE_MANIPULATE)
+        {
+            PDBGKD_MANIPULATE_STATE64 ManipulateState;
+
+            ManipulateState = (PDBGKD_MANIPULATE_STATE64)MessageHeader->Buffer;
+            RtlZeroMemory(MessageHeader->Buffer, MessageHeader->MaximumLength);
+            ManipulateState->ApiNumber = DbgKdContinueApi;
+            ManipulateState->u.Continue.ContinueStatus =
+                DBG_EXCEPTION_NOT_HANDLED;
+            return KDP_PACKET_RECEIVED;
+        }
+
+        return KDP_PACKET_TIMEOUT;
+    }
+
     /* Special handling for breakin packet */
     if (PacketType == PACKET_TYPE_KD_POLL_BREAKIN)
     {
@@ -321,6 +338,25 @@ KdSendPacket(
     KDP_STATUS KdStatus;
     ULONG Retries;
 
+    if (KdpScreenMode)
+    {
+        if ((PacketType == PACKET_TYPE_KD_DEBUG_IO) &&
+            (MessageHeader->Length == sizeof(DBGKD_DEBUG_IO)) &&
+            MessageData)
+        {
+            PDBGKD_DEBUG_IO DebugIo;
+
+            DebugIo = (PDBGKD_DEBUG_IO)MessageHeader->Buffer;
+            if ((DebugIo->ApiNumber == DbgKdPrintStringApi) ||
+                (DebugIo->ApiNumber == DbgKdGetStringApi))
+            {
+                KdpScreenPrint(MessageData->Buffer, MessageData->Length);
+            }
+        }
+
+        return;
+    }
+
     /* Initialize a KD_PACKET */
     Packet.PacketLeader = PACKET_LEADER;
     Packet.PacketType = (USHORT)PacketType;
@@ -410,7 +446,7 @@ KdSendPacket(
 
                 /* Reset debugger state */
                 KD_DEBUGGER_NOT_PRESENT = TRUE;
-                SharedUserData->KdDebuggerEnabled &= ~0x00000002;
+                MmWriteableSharedUserData->KdDebuggerEnabled &= ~0x00000002;
                 CurrentPacketId = INITIAL_PACKET_ID | SYNC_PACKET_ID;
                 RemotePacketId  = INITIAL_PACKET_ID;
 

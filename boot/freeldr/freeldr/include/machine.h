@@ -36,6 +36,16 @@ typedef enum tagVIDEODISPLAYMODE
     VideoGraphicsMode
 } VIDEODISPLAYMODE, *PVIDEODISPLAYMODE;
 
+typedef struct _MACH_POINTER_STATE
+{
+    ULONG X;
+    ULONG Y;
+    LONG Wheel;
+    BOOLEAN LeftButton;
+    BOOLEAN RightButton;
+    BOOLEAN Absolute;
+} MACH_POINTER_STATE, *PMACH_POINTER_STATE;
+
 typedef struct tagMACHVTBL
 {
     VOID (*ConsPutChar)(int Ch);
@@ -76,9 +86,12 @@ typedef struct tagMACHVTBL
     BOOLEAN (*InitializeBootDevices)(VOID);
     PCONFIGURATION_COMPONENT_DATA (*HwDetect)(_In_opt_ PCSTR Options);
     VOID (*HwIdle)(VOID);
+    BOOLEAN (*GetPointerState)(ULONG Width, ULONG Height, PMACH_POINTER_STATE State);
+    BOOLEAN (*SetInputTimer)(ULONG Milliseconds);
+    BOOLEAN (*InputTimerExpired)(VOID);
 } MACHVTBL, *PMACHVTBL;
 
-extern MACHVTBL MachVtbl;
+extern FLDRAPI MACHVTBL MachVtbl;
 
 /* NOTE: Implemented by each architecture */
 VOID MachInit(const char *CmdLine);
@@ -130,6 +143,13 @@ VOID MachInit(const char *CmdLine);
 #define MachHwIdle() \
     MachVtbl.HwIdle()
 
+#define MachGetPointerState(W, H, State) \
+    (MachVtbl.GetPointerState && MachVtbl.GetPointerState((W), (H), (State)))
+#define MachSetInputTimer(Milliseconds) \
+    (MachVtbl.SetInputTimer && MachVtbl.SetInputTimer(Milliseconds))
+#define MachInputTimerExpired() \
+    (MachVtbl.InputTimerExpired && MachVtbl.InputTimerExpired())
+
 
 /* ARC FUNCTIONS **************************************************************/
 
@@ -141,5 +161,16 @@ VOID MachPrepareForReactOS(VOID);
 VOID MachGetExtendedBIOSData(PULONG ExtendedBIOSDataArea, PULONG ExtendedBIOSDataSize);
 VOID MachVideoGetFontsFromFirmware(PULONG RomFontPointers);
 ULONG MachGetBootSectorLoadAddress(IN UCHAR DriveNumber);
+
+#ifdef UEFIBOOT
+PVOID UefiGetSmbiosEpsPointer(VOID);
+BOOLEAN UefiGetSmbiosSystemUuid(_Out_ PGUID SystemGuid);
+BOOLEAN UefiFirmwareSetupSupported(VOID);
+VOID UefiBootToFirmware(VOID);
+BOOLEAN UefiGetRandom(_Out_writes_bytes_(Size) PVOID Buffer, _In_ ULONG Size);
+#ifdef FREELDR_HTTP_BOOT
+BOOLEAN UefiHttpBootDownload(_In_ PCSTR Url, _In_opt_ PCSTR StaticIp, _Out_opt_ PBOOLEAN Cancelled);
+#endif
+#endif
 
 /* EOF */

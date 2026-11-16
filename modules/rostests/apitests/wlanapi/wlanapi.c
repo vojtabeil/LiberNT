@@ -24,7 +24,7 @@
 
 static const GUID InterfaceGuid = {0x439b20af, 0x8955, 0x405b, {0x99, 0xf0, 0xa6, 0x2a, 0xf0, 0xc6, 0x8d, 0x43}};
 
-static void WlanOpenHandle_test(void)
+static BOOL WlanOpenHandle_test(void)
 {
     DWORD ret;
     DWORD dwNegotiatedVersion;
@@ -32,12 +32,14 @@ static void WlanOpenHandle_test(void)
 
     /* correct call to determine if WlanSvc is running */
     ret = WlanOpenHandle(1, NULL, &dwNegotiatedVersion, &hClientHandle);
-    if (ret == ERROR_SERVICE_EXISTS)
+    if (ret == ERROR_SERVICE_NOT_ACTIVE)
     {
         skip("Skipping wlanapi tests, WlanSvc is not running\n");
-        return;
+        return FALSE;
     }
     ok(ret == ERROR_SUCCESS, "WlanOpenHandle failed, error %ld\n", ret);
+    if (ret != ERROR_SUCCESS)
+        return FALSE;
     WlanCloseHandle(hClientHandle, NULL);
 
     /* invalid pdwNegotiatedVersion */
@@ -51,6 +53,7 @@ static void WlanOpenHandle_test(void)
     /* invalid pReserved */
     ret = WlanOpenHandle(1, (PVOID) 1, &dwNegotiatedVersion, &hClientHandle);
     ok(ret == ERROR_INVALID_PARAMETER, "expected ERROR_INVALID_PARAMETER, got %ld\n", GetLastError());
+    return TRUE;
 }
 
 static void WlanCloseHandle_test(void)
@@ -217,10 +220,63 @@ static void WlanGetInterfaceCapability_test(void)
     ok(ret == ERROR_INVALID_PARAMETER, "expected failure\n");
 }
 
+static void WlanQueryInterface_test(void)
+{
+    WLAN_OPCODE_VALUE_TYPE ValueType = wlan_opcode_value_type_invalid;
+    PWLAN_INTERFACE_INFO_LIST InterfaceList = NULL;
+    WLAN_INTERFACE_STATE *InterfaceState = NULL;
+    HANDLE ClientHandle = NULL;
+    DWORD NegotiatedVersion;
+    DWORD DataSize = 0;
+    DWORD ret;
+
+    ret = WlanOpenHandle(WLAN_API_VERSION_2_0, NULL, &NegotiatedVersion, &ClientHandle);
+    if (ret == ERROR_SERVICE_NOT_ACTIVE)
+    {
+        skip("WlanSvc is not running\n");
+        return;
+    }
+    ok(ret == ERROR_SUCCESS, "WlanOpenHandle failed, error %lu\n", ret);
+    if (ret != ERROR_SUCCESS)
+        return;
+
+    ret = WlanEnumInterfaces(ClientHandle, NULL, &InterfaceList);
+    ok(ret == ERROR_SUCCESS, "WlanEnumInterfaces failed, error %lu\n", ret);
+    if (ret != ERROR_SUCCESS)
+        goto Cleanup;
+    ok(InterfaceList != NULL, "WlanEnumInterfaces returned no interface list\n");
+    if (InterfaceList == NULL)
+        goto Cleanup;
+    if (InterfaceList->dwNumberOfItems == 0)
+    {
+        skip("No wireless interface is available\n");
+        goto Cleanup;
+    }
+
+    ret = WlanQueryInterface(ClientHandle, &InterfaceList->InterfaceInfo[0].InterfaceGuid, wlan_intf_opcode_interface_state, NULL, &DataSize, (PVOID *)&InterfaceState, &ValueType);
+    ok(ret == ERROR_SUCCESS, "WlanQueryInterface failed, error %lu\n", ret);
+    if (ret == ERROR_SUCCESS)
+    {
+        ok(InterfaceState != NULL, "WlanQueryInterface returned no data\n");
+        ok(DataSize == sizeof(*InterfaceState), "expected data size %Iu, got %lu\n", sizeof(*InterfaceState), DataSize);
+        ok(ValueType == wlan_opcode_value_type_query_only, "expected query-only value type, got %d\n", ValueType);
+        if (InterfaceState != NULL && DataSize >= sizeof(*InterfaceState))
+            ok(*InterfaceState >= wlan_interface_state_not_ready && *InterfaceState <= wlan_interface_state_authenticating, "invalid interface state %d\n", *InterfaceState);
+    }
+
+Cleanup:
+    if (InterfaceState != NULL)
+        WlanFreeMemory(InterfaceState);
+    if (InterfaceList != NULL)
+        WlanFreeMemory(InterfaceList);
+    ret = WlanCloseHandle(ClientHandle, NULL);
+    ok(ret == ERROR_SUCCESS, "WlanCloseHandle failed, error %lu\n", ret);
+}
 
 START_TEST(wlanapi)
 {
-    WlanOpenHandle_test();
+    if (!WlanOpenHandle_test())
+        return;
     WlanCloseHandle_test();
     WlanConnect_test();
     WlanDisconnect_test();
@@ -230,4 +286,5 @@ START_TEST(wlanapi)
     WlanGetProfile_test();
     WlanEnumInterfaces_test();
     WlanGetInterfaceCapability_test();
+    WlanQueryInterface_test();
 }

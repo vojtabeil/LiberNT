@@ -482,13 +482,13 @@ Ext2ReadFile(IN PEXT2_IRP_CONTEXT IrpContext)
     PIRP                Irp = NULL;
     PIO_STACK_LOCATION  IoStackLocation = NULL;
 
-    ULONG               Length;
+    ULONG               Length = 0;
     ULONG               ReturnedLength = 0;
-    LARGE_INTEGER       ByteOffset;
+    LARGE_INTEGER       ByteOffset = {0};
 
     BOOLEAN             OpPostIrp = FALSE;
-    BOOLEAN             PagingIo;
-    BOOLEAN             Nocache;
+    BOOLEAN             PagingIo = FALSE;
+    BOOLEAN             Nocache = FALSE;
     BOOLEAN             SynchronousIo;
     BOOLEAN             MainResourceAcquired = FALSE;
     BOOLEAN             PagingIoResourceAcquired = FALSE;
@@ -822,8 +822,9 @@ Ext2ReadFile(IN PEXT2_IRP_CONTEXT IrpContext)
         }
     } _SEH2_END;
 
-    DEBUG(DL_IO, ("Ext2ReadFile: %wZ fetch at Off=%I64xh Len=%xh Paging=%xh Nocache=%xh Returned=%xh Status=%xh\n",
-                  &Fcb->Mcb->ShortName, ByteOffset.QuadPart, Length, PagingIo, Nocache, ReturnedLength, Status));
+    if (Fcb && Fcb->Mcb)
+        DEBUG(DL_IO, ("Ext2ReadFile: %wZ fetch at Off=%I64xh Len=%xh Paging=%xh Nocache=%xh Returned=%xh Status=%xh\n",
+                      &Fcb->Mcb->ShortName, ByteOffset.QuadPart, Length, PagingIo, Nocache, ReturnedLength, Status));
     return Status;
 
 }
@@ -862,12 +863,12 @@ Ext2ReadComplete (IN PEXT2_IRP_CONTEXT IrpContext)
 NTSTATUS
 Ext2Read (IN PEXT2_IRP_CONTEXT IrpContext)
 {
-    NTSTATUS            Status;
+    NTSTATUS            Status = STATUS_UNSUCCESSFUL;
     PEXT2_VCB           Vcb;
     PEXT2_FCBVCB        FcbOrVcb;
     PDEVICE_OBJECT      DeviceObject;
     PFILE_OBJECT        FileObject;
-    BOOLEAN             bCompleteRequest;
+    BOOLEAN             bCompleteRequest = FALSE;
 
     ASSERT(IrpContext);
 

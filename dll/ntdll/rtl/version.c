@@ -15,6 +15,19 @@
 #define NDEBUG
 #include <debug.h>
 
+/* RtlGetDeviceFamilyInfoEnum is implemented independently of the SDK target. */
+#ifndef UNIFIEDBUILDREVISION_KEY
+#define UNIFIEDBUILDREVISION_KEY L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion"
+#define UNIFIEDBUILDREVISION_VALUE L"UBR"
+#define UNIFIEDBUILDREVISION_MIN 0x00000000
+#define DEVICEFAMILYDEVICEFORM_KEY L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\OEM"
+#define DEVICEFAMILYDEVICEFORM_VALUE L"DeviceForm"
+#define DEVICEFAMILYINFOENUM_DESKTOP 0x00000003
+#define DEVICEFAMILYINFOENUM_SERVER 0x00000009
+#define DEVICEFAMILYDEVICEFORM_UNKNOWN 0x00000000
+#define DEVICEFAMILYDEVICEFORM_MAX 0x0000002F
+#endif
+
 /* FUNCTIONS ******************************************************************/
 
 static signed char g_ReportProductType = 0;
@@ -184,12 +197,6 @@ RtlGetVersion(IN OUT PRTL_OSVERSIONINFOW lpVersionInformation)
     SIZE_T Length;
     PPEB Peb = NtCurrentPeb();
 
-    if (lpVersionInformation->dwOSVersionInfoSize != sizeof(RTL_OSVERSIONINFOW) &&
-        lpVersionInformation->dwOSVersionInfoSize != sizeof(RTL_OSVERSIONINFOEXW))
-    {
-        return STATUS_INVALID_PARAMETER;
-    }
-
     lpVersionInformation->dwMajorVersion = Peb->OSMajorVersion;
     lpVersionInformation->dwMinorVersion = Peb->OSMinorVersion;
     lpVersionInformation->dwBuildNumber = Peb->OSBuildNumber;
@@ -218,6 +225,8 @@ RtlGetVersion(IN OUT PRTL_OSVERSIONINFOW lpVersionInformation)
         InfoEx->wServicePackMajor = (Peb->OSCSDVersion >> 8) & 0xFF;
         InfoEx->wServicePackMinor = Peb->OSCSDVersion & 0xFF;
         InfoEx->wSuiteMask = SharedUserData->SuiteMask & 0xFFFF;
+        if (InfoEx->wSuiteMask & VER_SUITE_SINGLEUSERTS)
+            InfoEx->wSuiteMask &= ~VER_SUITE_TERMINAL;
         InfoEx->wProductType = SharedUserData->NtProductType;
         InfoEx->wReserved = 0;
 
@@ -226,6 +235,85 @@ RtlGetVersion(IN OUT PRTL_OSVERSIONINFOW lpVersionInformation)
     }
 
     return STATUS_SUCCESS;
+}
+
+static ULONG
+RtlpQueryDeviceFamilyValue(
+    _In_ PCWSTR KeyPath,
+    _In_ PCWSTR ValueName,
+    _In_ ULONG DefaultValue)
+{
+    union
+    {
+        KEY_VALUE_PARTIAL_INFORMATION Info;
+        ULONG_PTR Alignment;
+        UCHAR Bytes[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+    } Buffer;
+    PKEY_VALUE_PARTIAL_INFORMATION kvpInfo = (PVOID)Buffer.Bytes;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    UNICODE_STRING KeyName;
+    UNICODE_STRING ValName;
+    HANDLE hKey;
+    ULONG Length;
+    ULONG Value = DefaultValue;
+    NTSTATUS Status;
+
+    RtlInitUnicodeString(&KeyName, KeyPath);
+    RtlInitUnicodeString(&ValName, ValueName);
+
+    InitializeObjectAttributes(&ObjectAttributes, &KeyName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+    Status = NtOpenKey(&hKey, KEY_READ, &ObjectAttributes);
+    if (!NT_SUCCESS(Status))
+        return Value;
+
+    Status = NtQueryValueKey(hKey, &ValName, KeyValuePartialInformation, kvpInfo, sizeof(Buffer), &Length);
+    if (NT_SUCCESS(Status) &&
+        (kvpInfo->Type == REG_DWORD) &&
+        (kvpInfo->DataLength == sizeof(ULONG)))
+    {
+        Value = *(PULONG)kvpInfo->Data;
+    }
+
+    NtClose(hKey);
+    return Value;
+}
+
+VOID
+NTAPI
+RtlGetDeviceFamilyInfoEnum(
+    _Out_opt_ PULONGLONG pullUAPInfo,
+    _Out_opt_ PULONG pulDeviceFamily,
+    _Out_opt_ PULONG pulDeviceForm)
+{
+    PPEB Peb = NtCurrentPeb();
+
+    if (pullUAPInfo != NULL)
+    {
+        ULONG Ubr = RtlpQueryDeviceFamilyValue(UNIFIEDBUILDREVISION_KEY, UNIFIEDBUILDREVISION_VALUE, UNIFIEDBUILDREVISION_MIN);
+
+        *pullUAPInfo = ((ULONGLONG)(Peb->OSMajorVersion & 0xFFFF) << 48) |
+                       ((ULONGLONG)(Peb->OSMinorVersion & 0xFFFF) << 32) |
+                       ((ULONGLONG)(Peb->OSBuildNumber & 0xFFFF) << 16) |
+                       ((ULONGLONG)(Ubr & 0xFFFF));
+    }
+
+    if (pulDeviceFamily != NULL)
+    {
+        *pulDeviceFamily = (SharedUserData->NtProductType == NtProductWinNt) ?
+                           DEVICEFAMILYINFOENUM_DESKTOP :
+                           DEVICEFAMILYINFOENUM_SERVER;
+    }
+
+    if (pulDeviceForm != NULL)
+    {
+        ULONG DeviceForm = RtlpQueryDeviceFamilyValue(DEVICEFAMILYDEVICEFORM_KEY, DEVICEFAMILYDEVICEFORM_VALUE, DEVICEFAMILYDEVICEFORM_UNKNOWN);
+
+        if (DeviceForm > DEVICEFAMILYDEVICEFORM_MAX)
+            DeviceForm = DEVICEFAMILYDEVICEFORM_UNKNOWN;
+
+        *pulDeviceForm = DeviceForm;
+    }
 }
 
 /* EOF */

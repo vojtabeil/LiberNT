@@ -32,9 +32,11 @@ typedef CRYPT_HASH_BLOB CRYPT_DIGEST_DATA;
 #define MSSIP_FLAGS_PROHIBIT_RESIZE_ON_CREATE 0x00010000
 #define MSSIP_FLAGS_USE_CATALOG               0x00020000
 
-#define SPC_INC_PE_RESOURCES_FLAG         0x80
-#define SPC_INC_PE_DEBUG_INFO_FLAG        0x40
-#define SPC_INC_PE_IMPORT_ADDR_TABLE_FLAG 0x20
+#define SPC_EXC_PE_PAGE_HASHES_FLAG         0x010
+#define SPC_INC_PE_IMPORT_ADDR_TABLE_FLAG   0x020
+#define SPC_INC_PE_DEBUG_INFO_FLAG          0x040
+#define SPC_INC_PE_RESOURCES_FLAG           0x080
+#define SPC_INC_PE_PAGE_HASHES_FLAG         0x100
 
 #define MSSIP_ADDINFO_NONE      0
 #define MSSIP_ADDINFO_FLAT      1
@@ -46,7 +48,7 @@ typedef CRYPT_HASH_BLOB CRYPT_DIGEST_DATA;
 
 /**********************************************************************/
 
-#include <pshpack8.h>
+#pragma pack(push,8)
 typedef struct SIP_SUBJECTINFO_ {
     DWORD cbSize;
     GUID *pgSubjectType;
@@ -75,26 +77,26 @@ typedef struct SIP_SUBJECTINFO_ {
 
     LPVOID pClientData;
 } SIP_SUBJECTINFO, *LPSIP_SUBJECTINFO;
-#include <poppack.h>
+#pragma pack(pop)
 
-#include <pshpack8.h>
+#pragma pack(push,8)
 typedef struct MS_ADDINFO_FLAT_ {
   DWORD cbStruct;
 
   struct SIP_INDIRECT_DATA_ *pIndirectData;
 } MS_ADDINFO_FLAT, *PMS_ADDINFO_FLAT;
-#include <poppack.h>
+#pragma pack(pop)
 
-#include <pshpack8.h>
+#pragma pack(push,8)
 typedef struct MS_ADDINFO_CATALOGMEMBER_ {
   DWORD cbStruct;
 
   struct CRYPTCATSTORE_  *pStore;
   struct CRYPTCATMEMBER_ *pMember;
 } MS_ADDINFO_CATALOGMEMBER, *PMS_ADDINFO_CATALOGMEMBER;
-#include <poppack.h>
+#pragma pack(pop)
 
-#include <pshpack8.h>
+#pragma pack(push,8)
 typedef struct MS_ADDINFO_BLOB_ {
   DWORD cbStruct;
 
@@ -104,15 +106,15 @@ typedef struct MS_ADDINFO_BLOB_ {
   DWORD cbMemSignedMsg;
   BYTE *pbMemSignedMsg;
 } MS_ADDINFO_BLOB, *PMS_ADDINFO_BLOB;
-#include <poppack.h>
+#pragma pack(pop)
 
-#include <pshpack8.h>
+#pragma pack(push,8)
 typedef struct SIP_INDIRECT_DATA_ {
   CRYPT_ATTRIBUTE_TYPE_VALUE Data;
   CRYPT_ALGORITHM_IDENTIFIER DigestAlgorithm;
   CRYPT_HASH_BLOB            Digest;
 } SIP_INDIRECT_DATA, *PSIP_INDIRECT_DATA;
-#include <poppack.h>
+#pragma pack(pop)
 
 typedef BOOL (WINAPI * pCryptSIPGetSignedDataMsg)(SIP_SUBJECTINFO *,DWORD *,DWORD,DWORD *,BYTE *);
 typedef BOOL (WINAPI * pCryptSIPPutSignedDataMsg)(SIP_SUBJECTINFO *,DWORD,DWORD *,DWORD,BYTE *);
@@ -120,7 +122,7 @@ typedef BOOL (WINAPI * pCryptSIPCreateIndirectData)(SIP_SUBJECTINFO *,DWORD *,SI
 typedef BOOL (WINAPI * pCryptSIPVerifyIndirectData)(SIP_SUBJECTINFO *,SIP_INDIRECT_DATA *);
 typedef BOOL (WINAPI * pCryptSIPRemoveSignedDataMsg)(SIP_SUBJECTINFO *,DWORD);
 
-#include <pshpack8.h>
+#pragma pack(push,8)
 typedef struct SIP_DISPATCH_INFO_ {
   DWORD cbSize;
 
@@ -132,12 +134,43 @@ typedef struct SIP_DISPATCH_INFO_ {
   pCryptSIPVerifyIndirectData  pfVerify;
   pCryptSIPRemoveSignedDataMsg pfRemove;
 } SIP_DISPATCH_INFO, *LPSIP_DISPATCH_INFO;
-#include <poppack.h>
+#pragma pack(pop)
 
 typedef BOOL (WINAPI *pfnIsFileSupported)(HANDLE,GUID *);
 typedef BOOL (WINAPI *pfnIsFileSupportedName)(WCHAR *,GUID *);
 
-#include <pshpack8.h>
+typedef struct _SIP_CAP_SET_V2
+{
+  DWORD cbSize;
+  DWORD dwVersion;
+  BOOL isMultiSign;
+  DWORD dwReserved;
+} SIP_CAP_SET_V2, *PSIP_CAP_SET_V2;
+
+typedef struct _SIP_CAP_SET_V3
+{
+  DWORD cbSize;
+  DWORD dwVersion;
+  BOOL isMultiSign;
+  union
+  {
+    DWORD dwFlags;
+    DWORD dwReserved;
+  } DUMMYUNIONNAME;
+} SIP_CAP_SET_V3, *PSIP_CAP_SET_V3;
+
+typedef SIP_CAP_SET_V3 SIP_CAP_SET;
+typedef PSIP_CAP_SET_V3 PSIP_CAP_SET;
+
+#define SIP_CAP_SET_VERSION_2 2
+#define SIP_CAP_SET_VERSION_3 3
+#define SIP_CAP_SET_CUR_VER   3
+
+#define SIP_CAP_FLAG_SEALING 0x00000001
+
+typedef BOOL (WINAPI *pCryptSIPGetCaps)(SIP_SUBJECTINFO *,SIP_CAP_SET *);
+
+#pragma pack(push,8)
 typedef struct SIP_ADD_NEWPROVIDER_
 {
   DWORD cbStruct;
@@ -157,10 +190,9 @@ typedef struct SIP_ADD_NEWPROVIDER_
 
   WCHAR *pwszIsFunctionNameFmt2;
 
-  /* NTDDI_VERSION >= NTDDI_WIN8 */
   WCHAR *pwszGetCapFuncName;
 } SIP_ADD_NEWPROVIDER, *PSIP_ADD_NEWPROVIDER;
-#include <poppack.h>
+#pragma pack(pop)
 
 /**********************************************************************/
 
@@ -175,6 +207,7 @@ BOOL WINAPI CryptSIPRetrieveSubjectGuid(LPCWSTR,HANDLE,GUID *);
 BOOL WINAPI CryptSIPRetrieveSubjectGuidForCatalogFile(LPCWSTR,HANDLE,GUID *);
 BOOL WINAPI CryptSIPAddProvider(SIP_ADD_NEWPROVIDER *);
 BOOL WINAPI CryptSIPRemoveProvider(GUID *);
+BOOL WINAPI CryptSIPGetCaps(SIP_SUBJECTINFO *,SIP_CAP_SET *);
 
 #ifdef __cplusplus
 } /* extern "C" */

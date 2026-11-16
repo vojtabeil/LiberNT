@@ -5,6 +5,8 @@
  * COPYRIGHT:   Copyright 2011-2024 Timo Kreuzer (timo.kreuzer@reactos.org)
  */
 
+#ifdef _USE_ML
+
 MACRO(ASSERT_TRAP_FRAME_INTS_ENABLED, Register)
 #if DBG
     LOCAL IntsAreEnabled
@@ -41,13 +43,189 @@ ENDM
 // Clobbers all volatile registers except rax.
 MACRO(HANDLE_USER_APCS, ThreadReg, TrapFrame)
     LOCAL NoUserApcPending
-
     /* Check for pending user APC */
     cmp byte ptr [ThreadReg + ThApcState + AsUserApcPending], 0
     jz NoUserApcPending
     lea rcx, [TrapFrame]
     call KiInitiateUserApc
 NoUserApcPending:
+ENDM
+
+// Pico threads keep their user FS base in ETHREAD. Clobbers rax, rcx and rdx.
+MACRO(RESTORE_PICO_FS_BASE)
+    LOCAL NotPicoThread
+    mov rcx, gs:[PcCurrentThread]
+    test byte ptr [rcx + ThDebugActive], DEBUG_ACTIVE_MINIMAL_THREAD
+    jz NotPicoThread
+    mov eax, [rcx + ETHREAD_UserFsBase]
+    mov edx, [rcx + ETHREAD_UserFsBase + 4]
+    mov ecx, MSR_FS_BASE
+    wrmsr
+NotPicoThread:
+ENDM
+
+#else /* GAS / Clang */
+
+MACRO(ASSERT_TRAP_FRAME_INTS_ENABLED, Register)
+#if DBG
+    test dword ptr [Register + KTRAP_FRAME_EFlags], HEX(200)
+    jnz 1f
+    int HEX(2C)
+1:
+#endif
+ENDM
+
+MACRO(ASSERT_TRAP_FRAME_IRQL_VALID, Register)
+#if DBG
+    mov rax, cr8
+    cmp byte ptr [Register + KTRAP_FRAME_PreviousIrql], al
+    je 1f
+    int HEX(2C)
+1:
+#endif
+ENDM
+
+MACRO(ASSERT_IRQL_PASSIVE)
+#if DBG
+    mov rax, cr8
+    test rax, rax
+    jz 1f
+    int HEX(2C)
+1:
+#endif
+ENDM
+
+// Checks for user APCs and delivers them if necessary.
+// Clobbers all volatile registers except rax.
+MACRO(HANDLE_USER_APCS, ThreadReg, TrapFrame)
+    /* Check for pending user APC */
+    cmp byte ptr [ThreadReg + ThApcState + AsUserApcPending], 0
+    jz 1f
+    lea rcx, [TrapFrame]
+    call KiInitiateUserApc
+1:
+ENDM
+
+// Pico threads keep their user FS base in ETHREAD. Clobbers rax, rcx and rdx.
+MACRO(RESTORE_PICO_FS_BASE)
+    mov rcx, gs:[PcCurrentThread]
+    test byte ptr [rcx + ThDebugActive], DEBUG_ACTIVE_MINIMAL_THREAD
+    jz 1f
+    mov eax, [rcx + ETHREAD_UserFsBase]
+    mov edx, [rcx + ETHREAD_UserFsBase + 4]
+    mov ecx, MSR_FS_BASE
+    wrmsr
+1:
+ENDM
+
+#endif /* _USE_ML */
+
+/* Debug registers belong to the interrupted user thread, not to whichever
+ * thread next runs on this processor. Switch to the processor's kernel debug
+ * state before interrupts can schedule another thread. The normal (no user
+ * debug context) path does not access the hardware debug registers. */
+MACRO(SAVE_DEBUG_REGISTERS, Frame, Scratch)
+    mov Scratch, dr0
+    mov [Frame + KTRAP_FRAME_Dr0], Scratch
+    mov Scratch, dr1
+    mov [Frame + KTRAP_FRAME_Dr1], Scratch
+    mov Scratch, dr2
+    mov [Frame + KTRAP_FRAME_Dr2], Scratch
+    mov Scratch, dr3
+    mov [Frame + KTRAP_FRAME_Dr3], Scratch
+    mov Scratch, dr6
+    mov [Frame + KTRAP_FRAME_Dr6], Scratch
+    mov Scratch, dr7
+    mov [Frame + KTRAP_FRAME_Dr7], Scratch
+ENDM
+
+MACRO(RESTORE_DEBUG_REGISTERS, Frame, Scratch)
+    xor Scratch, Scratch
+    mov dr7, Scratch
+    mov Scratch, [Frame + KTRAP_FRAME_Dr0]
+    mov dr0, Scratch
+    mov Scratch, [Frame + KTRAP_FRAME_Dr1]
+    mov dr1, Scratch
+    mov Scratch, [Frame + KTRAP_FRAME_Dr2]
+    mov dr2, Scratch
+    mov Scratch, [Frame + KTRAP_FRAME_Dr3]
+    mov dr3, Scratch
+    mov Scratch, [Frame + KTRAP_FRAME_Dr6]
+    mov dr6, Scratch
+    mov Scratch, [Frame + KTRAP_FRAME_Dr7]
+    mov dr7, Scratch
+ENDM
+
+/* Clobbers rax and rcx. Must run with kernel GS and interrupts disabled. */
+MACRO(SAVE_USER_DEBUG_REGISTERS, Frame)
+#ifdef _USE_ML
+    LOCAL SaveUserDebugRegisters, UserDebugRegistersSaved
+#endif
+    mov rcx, gs:[PcCurrentThread]
+    test byte ptr [rcx + ThDebugActive], DEBUG_ACTIVE_DR7
+#ifdef _USE_ML
+    jnz SaveUserDebugRegisters
+#else
+    jnz 8f
+#endif
+    xor eax, eax
+    mov [Frame + KTRAP_FRAME_Dr0], rax
+    mov [Frame + KTRAP_FRAME_Dr1], rax
+    mov [Frame + KTRAP_FRAME_Dr2], rax
+    mov [Frame + KTRAP_FRAME_Dr3], rax
+    mov [Frame + KTRAP_FRAME_Dr6], rax
+    mov [Frame + KTRAP_FRAME_Dr7], rax
+#ifdef _USE_ML
+    jmp UserDebugRegistersSaved
+SaveUserDebugRegisters:
+#else
+    jmp 9f
+8:
+#endif
+    SAVE_DEBUG_REGISTERS Frame, rax
+    and qword ptr [Frame + KTRAP_FRAME_Dr6], HEX(0E00F)
+    /* DR7's reserved bit 10 reads as one. Do not expose it in CONTEXT. */
+    and dword ptr [Frame + KTRAP_FRAME_Dr7], DR7_LEGAL
+    xor eax, eax
+    mov dr7, rax
+    mov rcx, gs:[PcCurrentPrcb]
+    mov rax, [rcx + PbProcessorState + PsKernelDr0]
+    mov dr0, rax
+    mov rax, [rcx + PbProcessorState + PsKernelDr1]
+    mov dr1, rax
+    mov rax, [rcx + PbProcessorState + PsKernelDr2]
+    mov dr2, rax
+    mov rax, [rcx + PbProcessorState + PsKernelDr3]
+    mov dr3, rax
+    mov rax, [rcx + PbProcessorState + PsKernelDr6]
+    mov dr6, rax
+    mov rax, [rcx + PbProcessorState + PsKernelDr7]
+    mov dr7, rax
+#ifdef _USE_ML
+UserDebugRegistersSaved:
+#else
+9:
+#endif
+ENDM
+
+/* Preserve rax (the system call result); clobber rcx and rdx only. */
+MACRO(RESTORE_USER_DEBUG_REGISTERS, Frame)
+#ifdef _USE_ML
+    LOCAL UserDebugRegistersRestored
+#endif
+    mov rcx, gs:[PcCurrentThread]
+    test byte ptr [rcx + ThDebugActive], DEBUG_ACTIVE_DR7
+#ifdef _USE_ML
+    jz UserDebugRegistersRestored
+#else
+    jz 9f
+#endif
+    RESTORE_DEBUG_REGISTERS Frame, rdx
+#ifdef _USE_ML
+UserDebugRegistersRestored:
+#else
+9:
+#endif
 ENDM
 
 APIC_EOI = HEX(0FFFFFFFFFFFE00B0)
@@ -77,13 +255,12 @@ TF_CHECKUSERAPC         = HEX(100)
  * EnterTrap - Allocate KTRAP_FRAME_LENGTH and save registers to it
  */
 MACRO(EnterTrap, Flags)
-    LOCAL kernel_mode_entry
 
     /* Save the trap flags for this trap */
     CurrentTrapFlags = VAL(Flags)
 
     /* Size of hardware trap frame */
-    if (Flags AND TF_HAS_ERROR_CODE)
+    if ((Flags) AND TF_HAS_ERROR_CODE)
         .pushframe code
         SIZE_INITIAL_FRAME = 6 * 8
     else
@@ -122,7 +299,7 @@ MACRO(EnterTrap, Flags)
     movaps [rbp + KTRAP_FRAME_Xmm4], xmm4
     movaps [rbp + KTRAP_FRAME_Xmm5], xmm5
 
-    if (Flags AND TF_SEGMENTS)
+    if ((Flags) AND TF_SEGMENTS)
         /* Save segment selectors */
         mov [rbp + KTRAP_FRAME_SegDs], ds
         mov [rbp + KTRAP_FRAME_SegEs], es
@@ -132,6 +309,8 @@ MACRO(EnterTrap, Flags)
 
     /* Save MCXSR */
     stmxcsr [rbp + KTRAP_FRAME_MxCsr]
+
+    mov byte ptr [rbp + KTRAP_FRAME_ExceptionActive], KEXCEPTION_ACTIVE_INTERRUPT_FRAME
 
 #if DBG
     mov ecx, MSR_GS_BASE
@@ -144,42 +323,59 @@ MACRO(EnterTrap, Flags)
     mov ax, [rbp + KTRAP_FRAME_SegCs]
     and al, 1
     mov [rbp + KTRAP_FRAME_PreviousMode], al
+#ifdef _USE_ML
     jz kernel_mode_entry
+#else
+    jz 2f
+#endif
 
     /* Set sane segments */
-    mov ax, (KGDT64_R3_DATA or RPL_MASK)
+    mov ax, (KGDT64_R3_DATA OR RPL_MASK)
     mov ds, ax
     mov es, ax
     swapgs
+
+    SAVE_USER_DEBUG_REGISTERS rbp
 
     /* Load kernel MXCSR */
     ldmxcsr gs:[PcMxCsr]
 
     ASSERT_IRQL_PASSIVE
+#ifdef _USE_ML
+    jmp debug_registers_saved
+#else
+    jmp 3f
+#endif
 
+#ifdef _USE_ML
 kernel_mode_entry:
+#else
+2:
+#endif
+
+    if ((Flags) AND TF_DEBUG)
+        SAVE_DEBUG_REGISTERS rbp, rax
+    else
+        /* Not saved on this path: a context must not report stack contents as debug registers */
+        xor eax, eax
+        mov [rbp + KTRAP_FRAME_Dr0], rax
+        mov [rbp + KTRAP_FRAME_Dr1], rax
+        mov [rbp + KTRAP_FRAME_Dr2], rax
+        mov [rbp + KTRAP_FRAME_Dr3], rax
+        mov [rbp + KTRAP_FRAME_Dr6], rax
+        mov [rbp + KTRAP_FRAME_Dr7], rax
+    endif
+#ifdef _USE_ML
+debug_registers_saved:
+#else
+3:
+#endif
 
 //    if (Flags AND TF_IRQL)
         /* Save previous irql */
         mov rax, cr8
         mov [rbp + KTRAP_FRAME_PreviousIrql], al
 //    endif
-
-    if (Flags AND TF_DEBUG)
-        /* Save debug registers */
-        mov rax, dr0
-        mov [rbp + KTRAP_FRAME_Dr0], rax
-        mov rax, dr1
-        mov [rbp + KTRAP_FRAME_Dr1], rax
-        mov rax, dr2
-        mov [rbp + KTRAP_FRAME_Dr2], rax
-        mov rax, dr3
-        mov [rbp + KTRAP_FRAME_Dr3], rax
-        mov rax, dr6
-        mov [rbp + KTRAP_FRAME_Dr6], rax
-        mov rax, dr7
-        mov [rbp + KTRAP_FRAME_Dr7], rax
-    endif
 
     /* Make sure the direction flag is cleared */
     cld
@@ -189,18 +385,17 @@ ENDM
  *  ExitTrap - Restore registers and free stack space
  */
 MACRO(ExitTrap, Flags)
-    LOCAL kernel_mode_return
 
     ASSERT_TRAP_FRAME_IRQL_VALID rbp
 
-    if (Flags AND TF_SEGMENTS)
+    if ((Flags) AND TF_SEGMENTS)
         /* Restore segment selectors */
         mov ds, [rbp + KTRAP_FRAME_SegDs]
         mov es, [rbp + KTRAP_FRAME_SegEs]
         mov fs, [rbp + KTRAP_FRAME_SegFs]
     endif
 
-    if (Flags AND TF_IRQL)
+    if ((Flags) AND TF_IRQL)
         /* Restore previous irql */
         movzx rax, byte ptr [rbp + KTRAP_FRAME_PreviousIrql]
         mov cr8, rax
@@ -208,9 +403,13 @@ MACRO(ExitTrap, Flags)
 
     /* Check if we came from user mode */
     test byte ptr [rbp + KTRAP_FRAME_SegCs], 1
+#ifdef _USE_ML
     jz kernel_mode_return
+#else
+    jz 2f
+#endif
 
-    if (Flags AND TF_CHECKUSERAPC)
+    if ((Flags) AND TF_CHECKUSERAPC)
         mov r10, gs:[PcCurrentThread]
         HANDLE_USER_APCS r10, rbp
     endif
@@ -219,11 +418,31 @@ MACRO(ExitTrap, Flags)
     ASSERT_IRQL_PASSIVE
 
     cli
+    RESTORE_PICO_FS_BASE
+    RESTORE_USER_DEBUG_REGISTERS rbp
 
     /* Swap gs to user mode */
     swapgs
+#ifdef _USE_ML
+    jmp debug_registers_restored
+#else
+    jmp 3f
+#endif
 
+#ifdef _USE_ML
 kernel_mode_return:
+#else
+2:
+#endif
+
+    if ((Flags) AND TF_DEBUG)
+        RESTORE_DEBUG_REGISTERS rbp, rdx
+    endif
+#ifdef _USE_ML
+debug_registers_restored:
+#else
+3:
+#endif
 
     /* Restore volatile registers */
     mov rax, [rbp + KTRAP_FRAME_Rax]
@@ -251,7 +470,7 @@ kernel_mode_return:
     /* Adjust stack pointer */
     add rsp, KTRAP_FRAME_Rip
 
-    if (Flags AND TF_SEND_EOI)
+    if ((Flags) AND TF_SEND_EOI)
         /* Write 0 to the local APIC EOI register */
         mov dword ptr [APIC_EOI], 0
     endif
@@ -261,6 +480,7 @@ kernel_mode_return:
 ENDM
 
 
+#ifdef _USE_ML
 MACRO(TRAP_ENTRY, Trap, Flags)
     EXTERN Trap&Handler :PROC
     PUBLIC &Trap
@@ -276,4 +496,20 @@ MACRO(TRAP_ENTRY, Trap, Flags)
         ExitTrap Flags
     ENDFUNC
 ENDM
+#else /* GAS / Clang */
+MACRO(TRAP_ENTRY, Trap, Flags)
+    EXTERN \Trap\()Handler :PROC
+    PUBLIC \Trap
+    FUNC \Trap
+        /* Common code to create the trap frame */
+        EnterTrap Flags
 
+        /* Call the C handler */
+        mov rcx, rbp
+        call \Trap\()Handler
+
+        /* Leave */
+        ExitTrap Flags
+    ENDFUNC
+ENDM
+#endif

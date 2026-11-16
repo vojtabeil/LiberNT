@@ -34,6 +34,9 @@ typedef struct {
     HANDLE file;
     ULONG size;
     LONG priority;
+#ifdef __REACTOS__
+    BOOL terminated;
+#endif
 
     LONG ref;
 } FileProtocol;
@@ -180,6 +183,9 @@ static HRESULT WINAPI FileProtocol_Terminate(IInternetProtocolEx *iface, DWORD d
 
     TRACE("(%p)->(%08lx)\n", This, dwOptions);
 
+#ifdef __REACTOS__
+    This->terminated = TRUE;
+#endif
     return S_OK;
 }
 
@@ -243,6 +249,13 @@ static HRESULT WINAPI FileProtocol_UnlockRequest(IInternetProtocolEx *iface)
 
     TRACE("(%p)\n", This);
 
+#ifdef __REACTOS__
+    if (This->terminated && This->file != INVALID_HANDLE_VALUE)
+    {
+        SetFilePointer(This->file, 0, NULL, FILE_BEGIN);
+        This->terminated = FALSE;
+    }
+#endif
     return S_OK;
 }
 
@@ -309,14 +322,12 @@ static HRESULT WINAPI FileProtocol_StartEx(IInternetProtocolEx *iface, IUri *pUr
         return report_result(pOIProtSink, hres, 0);
     }
 
+    /* If path contains fragment part, ignore it. */
+    if((ptr = wcschr(path, '#')))
+        *ptr = 0;
+
     file_handle = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    if(file_handle == INVALID_HANDLE_VALUE && (ptr = wcsrchr(path, '#'))) {
-        /* If path contains fragment part, try without it. */
-        *ptr = 0;
-        file_handle = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL,
-                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-    }
     if(file_handle == INVALID_HANDLE_VALUE)
         return report_result(pOIProtSink, INET_E_RESOURCE_NOT_FOUND, GetLastError());
 
@@ -426,11 +437,18 @@ HRESULT FileProtocol_Construct(IUnknown *outer, LPVOID *ppobj)
     URLMON_LockModule();
 
     ret = malloc(sizeof(FileProtocol));
+#ifdef __REACTOS__
+    if (!ret)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     ret->IUnknown_inner.lpVtbl = &FileProtocolUnkVtbl;
     ret->IInternetProtocolEx_iface.lpVtbl = &FileProtocolExVtbl;
     ret->IInternetPriority_iface.lpVtbl = &FilePriorityVtbl;
     ret->file = INVALID_HANDLE_VALUE;
+#ifdef __REACTOS__
+    ret->terminated = FALSE;
+#endif
     ret->priority = 0;
     ret->ref = 1;
     ret->outer = outer ? outer : &ret->IUnknown_inner;

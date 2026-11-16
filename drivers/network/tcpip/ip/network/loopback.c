@@ -12,6 +12,8 @@
 
 PIP_INTERFACE Loopback = NULL;
 
+#define LOOP_INLINE_STACK (KERNEL_STACK_SIZE / 2)
+
 VOID LoopPassiveWorker(
   PVOID Context)
 {
@@ -70,6 +72,7 @@ VOID LoopTransmit(
             IPInitializePacket(IPPacket, 0);
 
             IPPacket->NdisPacket = XmitPacket;
+            IPPacket->WfpTag = PC(NdisPacket)->WfpTag;
 
             GetDataPtr(IPPacket->NdisPacket,
                        0,
@@ -77,6 +80,14 @@ VOID LoopTransmit(
                        &IPPacket->TotalSize);
 
             IPPacket->MappedHeader = TRUE;
+
+            /* A sender at passive level with stack to spare sees its datagram delivered before the send returns */
+            if (KeGetCurrentIrql() == PASSIVE_LEVEL && IoGetRemainingStackSize() >= LOOP_INLINE_STACK)
+            {
+                (PC(NdisPacket)->DLComplete)(PC(NdisPacket)->Context, NdisPacket, NdisStatus);
+                LoopPassiveWorker(IPPacket);
+                return;
+            }
 
             if (!ChewCreate(LoopPassiveWorker, IPPacket))
             {
@@ -113,6 +124,7 @@ NDIS_STATUS LoopRegisterAdapter(
   BindInfo.Context = NULL;
   BindInfo.HeaderSize = 0;
   BindInfo.MinFrameSize = 0;
+  BindInfo.MTU = 16384;
   BindInfo.Address = NULL;
   BindInfo.AddressLength = 0;
   BindInfo.Transmit = LoopTransmit;
@@ -120,19 +132,13 @@ NDIS_STATUS LoopRegisterAdapter(
   Loopback = IPCreateInterface(&BindInfo);
   if (!Loopback) return NDIS_STATUS_RESOURCES;
 
-  Loopback->MTU = 16384;
-
   Loopback->Name.Buffer = L"Loopback";
   Loopback->Name.MaximumLength = Loopback->Name.Length =
       (USHORT)wcslen(Loopback->Name.Buffer) * sizeof(WCHAR);
 
-  AddrInitIPv4(&Loopback->Unicast, LOOPBACK_ADDRESS_IPv4);
-  AddrInitIPv4(&Loopback->Netmask, LOOPBACK_ADDRMASK_IPv4);
-  AddrInitIPv4(&Loopback->Broadcast, LOOPBACK_BCASTADDR_IPv4);
-
   IPRegisterInterface(Loopback);
 
-  IPAddInterfaceRoute(Loopback);
+  IPAddInterfaceAddress(Loopback, LOOPBACK_ADDRESS_IPv4, LOOPBACK_ADDRMASK_IPv4, NULL, NULL);
 
   TI_DbgPrint(MAX_TRACE, ("Leaving.\n"));
 

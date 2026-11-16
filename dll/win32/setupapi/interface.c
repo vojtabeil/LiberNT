@@ -30,7 +30,7 @@ static const WCHAR DotInterfaces[]  = {'.','I','n','t','e','r','f','a','c','e','
 static const WCHAR Linked[]  = {'L','i','n','k','e','d',0};
 static const WCHAR SymbolicLink[]  = {'S','y','m','b','o','l','i','c','L','i','n','k',0};
 
-static BOOL
+BOOL
 CreateDeviceInterface(
     IN struct DeviceInfo* deviceInfo,
     IN LPCWSTR SymbolicLink,
@@ -64,6 +64,102 @@ DestroyDeviceInterface(
     return HeapFree(GetProcessHeap(), 0, deviceInterface);
 }
 
+static BOOL
+SETUP_IsInterfaceLinked(
+    HKEY hReferenceKey)
+{
+    DWORD LinkedValue = 0, dwLength = sizeof(LinkedValue), dwRegType;
+    HKEY hControlKey;
+    BOOL Result = FALSE;
+
+    if (RegOpenKeyExW(hReferenceKey, Control, 0, KEY_QUERY_VALUE, &hControlKey) == ERROR_SUCCESS)
+    {
+        Result = RegQueryValueExW(hControlKey, Linked, NULL, &dwRegType, (LPBYTE)&LinkedValue, &dwLength) == ERROR_SUCCESS &&
+                 dwRegType == REG_DWORD && LinkedValue != 0;
+        RegCloseKey(hControlKey);
+    }
+    return Result;
+}
+
+static ULONG
+SETUP_GetDeviceInterfaceRank(
+    struct DeviceInfo *deviceInfo,
+    CONST GUID *InterfaceGuid,
+    PCWSTR Order)
+{
+    PLIST_ENTRY InterfaceEntry;
+    ULONG Best = MAXULONG;
+
+    for (InterfaceEntry = deviceInfo->InterfaceListHead.Flink; InterfaceEntry != &deviceInfo->InterfaceListHead; InterfaceEntry = InterfaceEntry->Flink)
+    {
+        struct DeviceInterface *interfaceInfo = CONTAINING_RECORD(InterfaceEntry, struct DeviceInterface, ListEntry);
+        PCWSTR Entry;
+        ULONG Rank;
+
+        if (!IsEqualIID(&interfaceInfo->InterfaceClassGuid, InterfaceGuid) || strlenW(interfaceInfo->SymbolicLink) <= 4)
+            continue;
+        for (Entry = Order, Rank = 0; *Entry && Rank < Best; Entry += strlenW(Entry) + 1, Rank++)
+        {
+            if (strlenW(Entry) > 4 && !strcmpiW(Entry + 4, interfaceInfo->SymbolicLink + 4))
+            {
+                Best = Rank;
+                break;
+            }
+        }
+    }
+    return Best;
+}
+
+static VOID
+SETUP_OrderPresentDevices(
+    struct DeviceInfoSet *list,
+    PLIST_ENTRY Last,
+    CONST GUID *InterfaceGuid)
+{
+    LIST_ENTRY Pending;
+    ULONG Length = 0;
+    PWSTR Order;
+
+    if (CM_Get_Device_Interface_List_SizeW(&Length, (LPGUID)InterfaceGuid, NULL, CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS || Length < 2)
+        return;
+    Order = HeapAlloc(GetProcessHeap(), 0, Length * sizeof(WCHAR));
+    if (!Order)
+        return;
+    if (CM_Get_Device_Interface_ListW((LPGUID)InterfaceGuid, NULL, Order, Length, CM_GET_DEVICE_INTERFACE_LIST_PRESENT) != CR_SUCCESS)
+    {
+        HeapFree(GetProcessHeap(), 0, Order);
+        return;
+    }
+
+    InitializeListHead(&Pending);
+    while (Last->Flink != &list->ListHead)
+    {
+        PLIST_ENTRY Entry = Last->Flink;
+
+        RemoveEntryList(Entry);
+        InsertTailList(&Pending, Entry);
+    }
+    while (!IsListEmpty(&Pending))
+    {
+        PLIST_ENTRY Entry, Best = NULL;
+        ULONG BestRank = MAXULONG;
+
+        for (Entry = Pending.Flink; Entry != &Pending; Entry = Entry->Flink)
+        {
+            ULONG Rank = SETUP_GetDeviceInterfaceRank(CONTAINING_RECORD(Entry, struct DeviceInfo, ListEntry), InterfaceGuid, Order);
+
+            if (!Best || Rank < BestRank)
+            {
+                Best = Entry;
+                BestRank = Rank;
+            }
+        }
+        RemoveEntryList(Best);
+        InsertTailList(&list->ListHead, Best);
+    }
+    HeapFree(GetProcessHeap(), 0, Order);
+}
+
 LONG
 SETUP_CreateInterfaceList(
     struct DeviceInfoSet *list,
@@ -88,6 +184,8 @@ SETUP_CreateInterfaceList(
     DWORD LinkedValue;
     GUID ClassGuid;
     struct DeviceInfo *deviceInfo;
+    PLIST_ENTRY ItemList;
+    PLIST_ENTRY Last = list->ListHead.Blink;
 
     hInterfaceKey = INVALID_HANDLE_VALUE;
     hDeviceInstanceKey = NULL;
@@ -146,7 +244,7 @@ SETUP_CreateInterfaceList(
         if (DeviceInstanceW)
         {
             /* Check if device enumerator is not the right one */
-            if (strcmpW(DeviceInstanceW, InstancePath) != 0)
+            if (strcmpiW(DeviceInstanceW, InstancePath) != 0)
                 continue;
         }
 
@@ -166,19 +264,30 @@ SETUP_CreateInterfaceList(
             KEY_QUERY_VALUE,
             &hKey);
         RegCloseKey(hEnumKey);
+        if (rc == ERROR_FILE_NOT_FOUND)
+            continue;
         if (rc != ERROR_SUCCESS)
             goto cleanup;
         dwLength = sizeof(KeyBuffer) - sizeof(WCHAR);
         rc = RegQueryValueExW(hKey, ClassGUID, NULL, NULL, (LPBYTE)KeyBuffer, &dwLength);
         RegCloseKey(hKey);
-        if (rc != ERROR_SUCCESS)
-            goto cleanup;
-        KeyBuffer[dwLength / sizeof(WCHAR)] = '\0';
-        KeyBuffer[37] = '\0'; /* Replace the } by a NULL character */
-        if (UuidFromStringW(&KeyBuffer[1], &ClassGuid) != RPC_S_OK)
+        if (rc == ERROR_FILE_NOT_FOUND)
         {
-            rc = ERROR_GEN_FAILURE;
+            ClassGuid = GUID_NULL;
+        }
+        else if (rc != ERROR_SUCCESS)
+        {
             goto cleanup;
+        }
+        else
+        {
+            KeyBuffer[dwLength / sizeof(WCHAR)] = '\0';
+            KeyBuffer[37] = '\0'; /* Replace the } by a NULL character */
+            if (UuidFromStringW(&KeyBuffer[1], &ClassGuid) != RPC_S_OK)
+            {
+                rc = ERROR_GEN_FAILURE;
+                goto cleanup;
+            }
         }
         TRACE("ClassGUID %s\n", debugstr_guid(&ClassGuid));
 
@@ -223,16 +332,27 @@ SETUP_CreateInterfaceList(
                 rc = ERROR_GEN_FAILURE;
                 goto cleanup;
             }
+            if (OnlyPresentInterfaces && !SETUP_IsInterfaceLinked(hReferenceKey))
+                continue;
 
             /* We have found a device */
             /* Step 1. Create a device info element */
-            if (!CreateDeviceInfo(list, InstancePath, &ClassGuid, &deviceInfo))
+            for (ItemList = list->ListHead.Flink; ItemList != &list->ListHead; ItemList = ItemList->Flink)
             {
-                rc = GetLastError();
-                goto cleanup;
+                deviceInfo = CONTAINING_RECORD(ItemList, struct DeviceInfo, ListEntry);
+                if (!strcmpiW(deviceInfo->instanceId, InstancePath))
+                    break;
             }
-            TRACE("Adding device %s to list\n", debugstr_w(InstancePath));
-            InsertTailList(&list->ListHead, &deviceInfo->ListEntry);
+            if (ItemList == &list->ListHead)
+            {
+                if (!CreateDeviceInfo(list, InstancePath, &ClassGuid, &deviceInfo))
+                {
+                    rc = GetLastError();
+                    goto cleanup;
+                }
+                TRACE("Adding device %s to list\n", debugstr_w(InstancePath));
+                InsertTailList(&list->ListHead, &deviceInfo->ListEntry);
+            }
 
             /* Step 2. Create an interface list for this element */
             HeapFree(GetProcessHeap(), 0, pSymbolicLink);
@@ -253,8 +373,6 @@ SETUP_CreateInterfaceList(
             }
 
             /* Step 3. Update flags */
-            if (KeyBuffer[1] == '\0')
-                interfaceInfo->Flags |= SPINT_DEFAULT;
             rc = RegOpenKeyExW(hReferenceKey, Control, 0, KEY_QUERY_VALUE, &hControlKey);
             if (rc != ERROR_SUCCESS)
             {
@@ -281,6 +399,8 @@ SETUP_CreateInterfaceList(
             InsertTailList(&deviceInfo->InterfaceListHead, &interfaceInfo->ListEntry);
         }
     }
+    if (OnlyPresentInterfaces && (!MachineName || !*MachineName))
+        SETUP_OrderPresentDevices(list, Last, InterfaceGuid);
     rc = ERROR_SUCCESS;
 
 cleanup:
@@ -295,20 +415,21 @@ cleanup:
     return rc;
 }
 
-static LPWSTR
+LPWSTR
 CreateSymbolicLink(
     IN LPGUID InterfaceGuid,
     IN LPCWSTR ReferenceString,
     IN struct DeviceInfo *devInfo)
 {
-    SIZE_T ActualLength, Length;
+    SIZE_T Length;
     WCHAR GuidString[MAX_GUID_STRING_LEN];
-    LPWSTR SymbolicLink;
+    LPWSTR SymbolicLink, p;
+    BOOL HasReference = (ReferenceString && ReferenceString[0]);
 
     Length = 4 + // "\\\\?\\"
              wcslen(devInfo->instanceId) +
              1 + (MAX_GUID_STRING_LEN - 1) + 1 + // "#{GUID}\\"
-             wcslen(ReferenceString) +
+             (HasReference ? wcslen(ReferenceString) : 0) +
              1; // UNICODE_NULL
 
     SymbolicLink = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, Length * sizeof(WCHAR));
@@ -317,13 +438,18 @@ CreateSymbolicLink(
 
     pSetupStringFromGuid(InterfaceGuid, GuidString, ARRAYSIZE(GuidString));
 
-    ActualLength = swprintf(SymbolicLink,
-                            Length,
-                            L"\\\\?\\%s#%s\\%s",
-                            devInfo->instanceId,
-                            GuidString,
-                            ReferenceString);
-    ASSERT(ActualLength == Length - 1);
+    swprintf(SymbolicLink, Length, L"\\\\?\\%s#%s", devInfo->instanceId, GuidString);
+    for (p = SymbolicLink + 4; *p; p++)
+    {
+        if (*p == L'\\')
+            *p = L'#';
+    }
+    if (HasReference)
+    {
+        wcscat(SymbolicLink, L"\\");
+        wcscat(SymbolicLink, ReferenceString);
+    }
+    CharLowerW(SymbolicLink);
 
     return SymbolicLink;
 }
@@ -515,101 +641,50 @@ cleanup:
     return ret;
 }
 
-HKEY WINAPI
-SetupDiOpenDeviceInterfaceRegKey(
-    IN HDEVINFO  DeviceInfoSet, IN PSP_DEVICE_INTERFACE_DATA  DeviceInterfaceData, IN DWORD  Reserved, IN REGSAM  samDesired)
+LONG
+SETUP_CreateAllInterfaceLists(
+    struct DeviceInfoSet *list,
+    PCWSTR MachineName,
+    PCWSTR DeviceInstanceW,
+    BOOL OnlyPresentInterfaces)
 {
-    HKEY hKey = INVALID_HANDLE_VALUE, hDevKey;
-    struct DeviceInfoSet * list;
+    WCHAR KeyName[MAX_GUID_STRING_LEN + 1];
+    GUID InterfaceGuid;
+    HKEY hClassesKey;
+    DWORD Index, Length;
+    LONG rc;
 
-    TRACE("%p %p %p 0x%08x 0x%08x)\n", DeviceInfoSet, DeviceInterfaceData, Reserved, samDesired);
+    rc = RegOpenKeyExW(list->HKLM, REGSTR_PATH_DEVICE_CLASSES, 0, KEY_ENUMERATE_SUB_KEYS, &hClassesKey);
+    if (rc == ERROR_FILE_NOT_FOUND)
+        return ERROR_SUCCESS;
+    if (rc != ERROR_SUCCESS)
+        return rc;
 
-    if (!DeviceInfoSet)
-        SetLastError(ERROR_INVALID_PARAMETER);
-    else if (DeviceInfoSet == (HDEVINFO)INVALID_HANDLE_VALUE)
-        SetLastError(ERROR_INVALID_HANDLE);
-    else if ((list = (struct DeviceInfoSet *)DeviceInfoSet)->magic != SETUP_DEVICE_INFO_SET_MAGIC)
-        SetLastError(ERROR_INVALID_HANDLE);
-    else if (!DeviceInterfaceData)
-        SetLastError(ERROR_INVALID_PARAMETER);
-    else if (DeviceInterfaceData && DeviceInterfaceData->Reserved == 0)
-        SetLastError(ERROR_INVALID_USER_BUFFER);
-    else if (DeviceInterfaceData && DeviceInterfaceData->cbSize != sizeof(SP_DEVICE_INTERFACE_DATA))
-        SetLastError(ERROR_INVALID_USER_BUFFER);
-    else
+    for (Index = 0; ; Index++)
     {
-        struct DeviceInterface *DevItf;
-        LPWSTR Path, Guid, Slash;
-        DWORD Length;
-        DevItf = (struct DeviceInterface *)DeviceInterfaceData->Reserved;
-
-        Length = wcslen(DevItf->SymbolicLink);
-
-        Path = HeapAlloc(GetProcessHeap(), 0, (Length+2) * sizeof(WCHAR));
-        if (!Path)
+        Length = ARRAY_SIZE(KeyName);
+        rc = RegEnumKeyExW(hClassesKey, Index, KeyName, &Length, NULL, NULL, NULL, NULL);
+        if (rc == ERROR_NO_MORE_ITEMS)
         {
-            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-            return INVALID_HANDLE_VALUE;
+            rc = ERROR_SUCCESS;
+            break;
         }
+        if (rc == ERROR_MORE_DATA)
+            continue;
+        if (rc != ERROR_SUCCESS)
+            break;
+        if (Length != MAX_GUID_STRING_LEN - 1 || KeyName[0] != '{' || KeyName[Length - 1] != '}')
+            continue;
 
-        wcscpy(Path, DevItf->SymbolicLink);
+        KeyName[Length - 1] = UNICODE_NULL;
+        if (UuidFromStringW(&KeyName[1], &InterfaceGuid) != RPC_S_OK)
+            continue;
 
-        Guid = wcsrchr(Path, '}');
-        Slash = wcsrchr(Path, '\\');
-        if (!Guid || !Slash)
-        {
-            HeapFree(GetProcessHeap(), 0, Path);
-            SetLastError(ERROR_INVALID_PARAMETER);
-            return INVALID_HANDLE_VALUE;
-        }
-
-        if ((ULONG_PTR)Slash > (ULONG_PTR)Guid)
-        {
-            /* Create an extra slash */
-            memmove(Slash+1, Slash, (wcslen(Slash) + 1) * sizeof(WCHAR));
-            Slash[1] = L'#';
-        }
-
-        Guid = Path;
-        while((ULONG_PTR)Guid < (ULONG_PTR)Slash)
-        {
-            if (*Guid == L'\\')
-                *Guid = L'#';
-
-            Guid++;
-        }
-
-        hKey = SetupDiOpenClassRegKeyExW(&DeviceInterfaceData->InterfaceClassGuid, samDesired, DIOCR_INTERFACE, NULL, NULL);
-        if (hKey != INVALID_HANDLE_VALUE)
-        {
-            if (RegOpenKeyExW(hKey, Path, 0, samDesired, &hDevKey) == ERROR_SUCCESS)
-            {
-                RegCloseKey(hKey);
-                hKey = hDevKey;
-            }
-            else
-            {
-                RegCloseKey(hKey);
-                hKey = INVALID_HANDLE_VALUE;
-            }
-        }
-
-        HeapFree(GetProcessHeap(), 0, Path);
+        rc = SETUP_CreateInterfaceList(list, MachineName, &InterfaceGuid, DeviceInstanceW, OnlyPresentInterfaces);
+        if (rc != ERROR_SUCCESS)
+            break;
     }
 
-    return hKey;
-}
-
-/***********************************************************************
- *		SetupDiDeleteDeviceInterfaceData (SETUPAPI.@)
- */
-BOOL
-WINAPI
-SetupDiDeleteDeviceInterfaceData(
-    HDEVINFO DeviceInfoSet,
-    PSP_DEVICE_INTERFACE_DATA DeviceInterfaceData)
-{
-    FIXME("SetupDiDeleteDeviceInterfaceData(%p %p) stub\n",
-          DeviceInfoSet, DeviceInterfaceData);
-    return TRUE;
+    RegCloseKey(hClassesKey);
+    return rc;
 }

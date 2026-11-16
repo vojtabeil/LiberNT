@@ -45,6 +45,13 @@ extern "C" {
     (((ULONG_PTR)(Size) + MM_ALLOCATION_GRANULARITY - 1)    \
     & ~(MM_ALLOCATION_GRANULARITY - 1))
 
+/* Native 64-bit stacks must tolerate probes more than one page apart. */
+#ifdef _WIN64
+#define MM_USER_STACK_GUARD_PAGES 3
+#else
+#define MM_USER_STACK_GUARD_PAGES 1
+#endif
+
 //
 // PFN Identity Uses
 //
@@ -88,6 +95,12 @@ extern "C" {
 #define MEM_ROTATE                                          0x800000
 #define MEM_IMAGE                                           SEC_IMAGE
 #define MEM_DOS_LIM                                         0x40000000
+#define MEM_COALESCE_PLACEHOLDERS                           0x00000001
+#define MEM_PRESERVE_PLACEHOLDER                            0x00000002
+#define MEM_REPLACE_PLACEHOLDER                             0x00004000
+#define MEM_RESERVE_PLACEHOLDER                             0x00040000
+#define WRITE_WATCH_FLAG_RESET                              0x01
+#define MEM_UNMAP_WITH_TRANSIENT_BOOST                      0x00000001
 
 //
 // Section Flags for NtCreateSection
@@ -121,6 +134,7 @@ typedef enum _SECTION_INHERIT
 typedef enum _POOL_TYPE
 {
     NonPagedPool,
+    NonPagedPoolExecute = NonPagedPool,
     PagedPool,
     NonPagedPoolMustSucceed,
     DontUseThisType,
@@ -140,7 +154,11 @@ typedef enum _POOL_TYPE
     DontUseThisTypeSession,
     NonPagedPoolCacheAlignedSession,
     PagedPoolCacheAlignedSession,
-    NonPagedPoolCacheAlignedMustSSession
+    NonPagedPoolCacheAlignedMustSSession,
+
+    NonPagedPoolNx = 512,
+    NonPagedPoolNxCacheAligned = NonPagedPoolNx + 4,
+    NonPagedPoolSessionNx = NonPagedPoolNx + 32
 } POOL_TYPE;
 
 #endif // NTOS_MODE_USER
@@ -183,9 +201,102 @@ typedef enum _MEMORY_INFORMATION_CLASS
     MemoryBasicInformation,
     MemoryWorkingSetList,
     MemorySectionName,
-    MemoryBasicVlmInformation,
+    MemoryRegionInformation,
     MemoryWorkingSetExList
 } MEMORY_INFORMATION_CLASS;
+
+typedef struct _MEMORY_REGION_INFORMATION
+{
+    PVOID AllocationBase;
+    ULONG AllocationProtect;
+    union
+    {
+        ULONG RegionType;
+        struct
+        {
+            ULONG Private : 1;
+            ULONG MappedDataFile : 1;
+            ULONG MappedImage : 1;
+            ULONG MappedPageFile : 1;
+            ULONG MappedPhysical : 1;
+            ULONG DirectMapped : 1;
+            ULONG Reserved : 26;
+        } DUMMYSTRUCTNAME;
+    } DUMMYUNIONNAME;
+    SIZE_T RegionSize;
+    SIZE_T CommitSize;
+    ULONG_PTR PartitionId;
+    ULONG_PTR NodePreference;
+} MEMORY_REGION_INFORMATION, *PMEMORY_REGION_INFORMATION;
+
+//
+// Memory Information Classes for NtSetInformationVirtualMemory
+//
+typedef enum _VIRTUAL_MEMORY_INFORMATION_CLASS
+{
+    VmPrefetchInformation,
+    VmPagePriorityInformation,
+    VmCfgCallTargetInformation,
+    VmPageDirtyStateInformation,
+    VmImageHotPatchInformation,
+    VmPhysicalContiguityInformation,
+    VmVirtualMachinePrepopulateInformation,
+    VmRemoveFromWorkingSetInformation
+} VIRTUAL_MEMORY_INFORMATION_CLASS;
+
+typedef struct _MEMORY_RANGE_ENTRY
+{
+    PVOID VirtualAddress;
+    SIZE_T NumberOfBytes;
+} MEMORY_RANGE_ENTRY, *PMEMORY_RANGE_ENTRY;
+
+#ifndef MEM_EXTENDED_PARAMETER_TYPE_BITS
+#define MEM_EXTENDED_PARAMETER_GRAPHICS            0x00000001
+#define MEM_EXTENDED_PARAMETER_NONPAGED            0x00000002
+#define MEM_EXTENDED_PARAMETER_ZERO_PAGES_OPTIONAL 0x00000004
+#define MEM_EXTENDED_PARAMETER_NONPAGED_LARGE      0x00000008
+#define MEM_EXTENDED_PARAMETER_NONPAGED_HUGE       0x00000010
+#define MEM_EXTENDED_PARAMETER_SOFT_FAULT_PAGES    0x00000020
+#define MEM_EXTENDED_PARAMETER_EC_CODE             0x00000040
+
+typedef enum _MEM_EXTENDED_PARAMETER_TYPE
+{
+    MemExtendedParameterInvalidType,
+    MemExtendedParameterAddressRequirements,
+    MemExtendedParameterNumaNode,
+    MemExtendedParameterPartitionHandle,
+    MemExtendedParameterUserPhysicalHandle,
+    MemExtendedParameterAttributeFlags,
+    MemExtendedParameterImageMachine,
+    MemExtendedParameterMax
+} MEM_EXTENDED_PARAMETER_TYPE, *PMEM_EXTENDED_PARAMETER_TYPE;
+
+typedef struct _MEM_ADDRESS_REQUIREMENTS
+{
+    PVOID LowestStartingAddress;
+    PVOID HighestEndingAddress;
+    SIZE_T Alignment;
+} MEM_ADDRESS_REQUIREMENTS, *PMEM_ADDRESS_REQUIREMENTS;
+
+#define MEM_EXTENDED_PARAMETER_TYPE_BITS 8
+
+typedef struct DECLSPEC_ALIGN(8) _MEM_EXTENDED_PARAMETER
+{
+    struct
+    {
+        ULONGLONG Type : MEM_EXTENDED_PARAMETER_TYPE_BITS;
+        ULONGLONG Reserved : 64 - MEM_EXTENDED_PARAMETER_TYPE_BITS;
+    } DUMMYSTRUCTNAME;
+    union
+    {
+        ULONGLONG ULong64;
+        PVOID Pointer;
+        SIZE_T Size;
+        HANDLE Handle;
+        ULONG ULong;
+    } DUMMYUNIONNAME;
+} MEM_EXTENDED_PARAMETER, *PMEM_EXTENDED_PARAMETER;
+#endif
 
 //
 // Section Information Clasess for NtQuerySection
@@ -245,6 +356,13 @@ typedef struct _VM_COUNTERS_EX
     SIZE_T PeakPagefileUsage;
     SIZE_T PrivateUsage;
 } VM_COUNTERS_EX, *PVM_COUNTERS_EX;
+
+typedef struct _VM_COUNTERS_EX2
+{
+    VM_COUNTERS_EX CountersEx;
+    SIZE_T PrivateWorkingSetSize;
+    ULONGLONG SharedCommitUsage;
+} VM_COUNTERS_EX2, *PVM_COUNTERS_EX2;
 #endif
 
 //
@@ -314,8 +432,8 @@ typedef struct _MMPFN_IDENTITY
 //
 typedef struct _MEMORY_WORKING_SET_LIST
 {
-    ULONG NumberOfPages;
-    ULONG WorkingSetList[1];
+    ULONG_PTR NumberOfPages;
+    ULONG_PTR WorkingSetList[1];
 } MEMORY_WORKING_SET_LIST, *PMEMORY_WORKING_SET_LIST;
 
 //
@@ -902,18 +1020,42 @@ typedef struct _MMWSL
 //
 typedef struct _MMSUPPORT_FLAGS
 {
-    ULONG SessionSpace:1;
-    ULONG BeingTrimmed:1;
-    ULONG SessionLeader:1;
-    ULONG TrimHard:1;
-    ULONG MaximumWorkingSetHard:1;
-    ULONG ForceTrim:1;
-    ULONG MinimumWorkingSetHard:1;
-    ULONG Available0:1;
-    ULONG MemoryPriority:8;
-    ULONG GrowWsleHash:1;
-    ULONG AcquiredUnsafe:1;
-    ULONG Available:14;
+    union
+    {
+        struct
+        {
+            union
+            {
+                struct
+                {
+                    UCHAR WorkingSetType:4;
+                    UCHAR Reserved0:2;
+                    UCHAR MaximumWorkingSetHard:1;
+                    UCHAR MinimumWorkingSetHard:1;
+                    UCHAR Reserved1:1;
+                    UCHAR TrimmerState:2;
+                    UCHAR LinearAddressProtected:1;
+                    UCHAR PageStealers:4;
+                };
+                USHORT u1;
+            };
+            UCHAR MemoryPriority;
+            union
+            {
+                struct
+                {
+                    UCHAR WsleDeleted:1;
+                    UCHAR SvmEnabled:1;
+                    UCHAR ForceAge:1;
+                    UCHAR ForceTrim:1;
+                    UCHAR CommitReleaseState:2;
+                    UCHAR Reserved2:2;
+                };
+                UCHAR u2;
+            };
+        };
+        ULONG EntireFlags;
+    };
 } MMSUPPORT_FLAGS, *PMMSUPPORT_FLAGS;
 
 //
@@ -963,6 +1105,93 @@ typedef struct _MMSUPPORT
     PVOID AccessLog;
 #endif
 } MMSUPPORT, *PMMSUPPORT;
+
+typedef struct _MMSUPPORT_INSTANCE
+{
+    ULONG NextPageColor;
+    volatile ULONG PageFaultCount;
+    ULONG_PTR TrimmedPageCount;
+    struct _MMWSL_INSTANCE *VmWorkingSetList;
+    LIST_ENTRY WorkingSetExpansionLinks;
+    volatile ULONG_PTR AgeDistribution[8];
+    struct _KGATE *ExitOutswapGate;
+    SIZE_T MinimumWorkingSetSize;
+    SIZE_T MaximumWorkingSetSize;
+    volatile SIZE_T WorkingSetLeafSize;
+    volatile SIZE_T WorkingSetLeafPrivateSize;
+    volatile SIZE_T WorkingSetSize;
+    volatile SIZE_T WorkingSetPrivateSize;
+    volatile SIZE_T PeakWorkingSetSize;
+    ULONG HardFaultCount;
+    USHORT LastTrimStamp;
+    USHORT PartitionId;
+    ULONG_PTR SelfmapLock;
+    volatile MMSUPPORT_FLAGS Flags;
+    volatile ULONG InterlockedFlags;
+} MMSUPPORT_INSTANCE, *PMMSUPPORT_INSTANCE;
+
+typedef struct _MMSUPPORT_SHARED
+{
+    PVOID WorkingSetLockArray;
+    SIZE_T ReleasedCommitDebt;
+    ULONG_PTR ResetPagesRepurposedCount;
+    PVOID WsSwapSupport;
+    PVOID CommitReleaseContext;
+    PVOID AccessLog;
+    volatile ULONG_PTR ChargedWslePages;
+    volatile ULONG_PTR ActualWslePages;
+    DECLSPEC_CACHEALIGN volatile LONG WorkingSetCoreLock;
+    PVOID ShadowMapping;
+} MMSUPPORT_SHARED, *PMMSUPPORT_SHARED;
+
+typedef struct _MMSUPPORT_FULL
+{
+    MMSUPPORT_INSTANCE Instance;
+    MMSUPPORT_SHARED Shared;
+} MMSUPPORT_FULL, *PMMSUPPORT_FULL;
+
+#if defined(_M_ARM64)
+C_ASSERT(sizeof(MMSUPPORT_INSTANCE) == 0xC0);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, NextPageColor) == 0x000);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, PageFaultCount) == 0x004);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, TrimmedPageCount) == 0x008);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, VmWorkingSetList) == 0x010);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, WorkingSetExpansionLinks) == 0x018);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, AgeDistribution) == 0x028);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, ExitOutswapGate) == 0x068);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, MinimumWorkingSetSize) == 0x070);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, MaximumWorkingSetSize) == 0x078);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, WorkingSetLeafSize) == 0x080);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, WorkingSetLeafPrivateSize) == 0x088);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, WorkingSetSize) == 0x090);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, WorkingSetPrivateSize) == 0x098);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, PeakWorkingSetSize) == 0x0A0);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, HardFaultCount) == 0x0A8);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, LastTrimStamp) == 0x0AC);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, PartitionId) == 0x0AE);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, SelfmapLock) == 0x0B0);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, Flags) == 0x0B8);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_INSTANCE, InterlockedFlags) == 0x0BC);
+C_ASSERT(sizeof(MMSUPPORT_SHARED) == 0x100);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_SHARED, WorkingSetLockArray) == 0x000);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_SHARED, ReleasedCommitDebt) == 0x008);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_SHARED, ResetPagesRepurposedCount) == 0x010);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_SHARED, WsSwapSupport) == 0x018);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_SHARED, CommitReleaseContext) == 0x020);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_SHARED, AccessLog) == 0x028);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_SHARED, ChargedWslePages) == 0x030);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_SHARED, ActualWslePages) == 0x038);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_SHARED, WorkingSetCoreLock) == 0x080);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_SHARED, ShadowMapping) == 0x088);
+C_ASSERT(sizeof(MMSUPPORT_FULL) == 0x200);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_FULL, Instance) == 0x000);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_FULL, Shared) == 0x100);
+C_ASSERT(sizeof(MMSUPPORT_FLAGS) == 0x4);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_FLAGS, u1) == 0x000);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_FLAGS, MemoryPriority) == 0x002);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_FLAGS, u2) == 0x003);
+C_ASSERT(FIELD_OFFSET(MMSUPPORT_FLAGS, EntireFlags) == 0x000);
+#endif
 
 //
 // Memory Information Types

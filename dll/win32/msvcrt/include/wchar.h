@@ -8,15 +8,15 @@
 #ifndef __WINE_WCHAR_H
 #define __WINE_WCHAR_H
 
-#include <corecrt_wctype.h>
-#include <corecrt_wdirect.h>
-#include <corecrt_wio.h>
-#include <corecrt_wprocess.h>
-#include <corecrt_wstdio.h>
-#include <corecrt_wstdlib.h>
-#include <corecrt_wstring.h>
-#include <corecrt_wtime.h>
-#include <sys/stat.h>
+#include "corecrt_wctype.h"
+#include "corecrt_wdirect.h"
+#include "corecrt_wio.h"
+#include "corecrt_wprocess.h"
+#include "corecrt_wstdio.h"
+#include "corecrt_wstdlib.h"
+#include "corecrt_wstring.h"
+#include "corecrt_wtime.h"
+#include "sys/stat.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,14 +44,23 @@ size_t  __cdecl wcsrtombs(char*,const wchar_t**,size_t,mbstate_t*);
 int     __cdecl wctob(wint_t);
 
 _ACRTIMP errno_t __cdecl wmemcpy_s(wchar_t *, size_t, const wchar_t *, size_t);
+_ACRTIMP errno_t __cdecl wmemmove_s(wchar_t *, size_t, const wchar_t *, size_t);
 
-static inline wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n)
+static inline _CONST_RETURN wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n)
 {
     const wchar_t *end;
     for (end = s + n; s < end; s++)
-        if (*s == c) return (wchar_t*)s;
+        if (*s == c) return (_CONST_RETURN wchar_t *)s;
     return NULL;
 }
+
+#ifdef __cplusplus
+extern "C++" inline wchar_t *wmemchr(wchar_t *s, wchar_t c, size_t n)
+{
+    wchar_t const* s_const = s;
+    return const_cast<wchar_t *>(wmemchr(s_const, c, n));
+}
+#endif
 
 static inline int wmemcmp(const wchar_t *s1, const wchar_t *s2, size_t n)
 {
@@ -80,6 +89,16 @@ static inline wchar_t* __cdecl wmemset(wchar_t *s, wchar_t c, size_t n)
     for (i = 0; i < n; i++)
         s[i] = c;
     return s;
+}
+
+static inline int __cdecl fwide(FILE *file, int mode)
+{
+    return mode;
+}
+
+static inline int __cdecl mbsinit(const mbstate_t *state)
+{
+    return !state || !*state;
 }
 
 #ifdef __cplusplus

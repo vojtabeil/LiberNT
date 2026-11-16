@@ -1,901 +1,987 @@
 /*
- * MPEG Splitter Filter
- *
- * Copyright 2003 Robert Shearman
- * Copyright 2004-2005 Christian Costa
- * Copyright 2007 Chris Robinson
- * Copyright 2008 Maarten Lankhorst
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ * PROJECT:     LiberNT DirectShow
+ * LICENSE:     LGPL-2.1-or-later (https://spdx.org/licenses/LGPL-2.1-or-later)
+ * PURPOSE:     MPEG-1 stream splitter filter
+ * COPYRIGHT:   Copyright 2026 Ostap Brehin <osbre@protonmail.com>
  */
 
-#include <assert.h>
-#include <math.h>
+#include "splitter.h"
 
-#include "quartz_private.h"
-#include "pin.h"
-
-#include "uuids.h"
 #include "mmreg.h"
-#include "mmsystem.h"
-
-#include "wine/winternl.h"
-
-#include "wine/unicode.h"
-#include "wine/debug.h"
-
-#include "parser.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(quartz);
 
-#define SEQUENCE_HEADER_CODE     0xB3
-#define PACK_START_CODE          0xBA
+#define PACK_START_CODE     0x000001ba
+#define SYSTEM_START_CODE   0x000001bb
+#define END_START_CODE      0x000001b9
+#define SEQUENCE_START_CODE 0x000001b3
+#define GOP_START_CODE      0x000001b8
 
-#define SYSTEM_START_CODE        0xBB
-#define AUDIO_ELEMENTARY_STREAM  0xC0
-#define VIDEO_ELEMENTARY_STREAM  0xE0
+#define SCAN_SIZE (256 * 1024)
+#define TAIL_SIZE (64 * 1024)
+#define VIDEO_CHUNK_SIZE 16384
 
-#define MPEG_SYSTEM_HEADER 3
-#define MPEG_VIDEO_HEADER 2
-#define MPEG_AUDIO_HEADER 1
-#define MPEG_NO_HEADER 0
-
-typedef struct MPEGSplitterImpl
+enum mpeg_type
 {
-    ParserImpl Parser;
-    IAMStreamSelect IAMStreamSelect_iface;
-    LONGLONG EndOfFile;
-    LONGLONG position;
-    DWORD begin_offset;
-    BYTE header[4];
-
-    /* Whether we just seeked (or started playing) */
-    BOOL seek;
-} MPEGSplitterImpl;
-
-static inline MPEGSplitterImpl *impl_from_IBaseFilter( IBaseFilter *iface )
-{
-    return CONTAINING_RECORD(iface, MPEGSplitterImpl, Parser.filter.IBaseFilter_iface);
-}
-
-static inline MPEGSplitterImpl *impl_from_IMediaSeeking( IMediaSeeking *iface )
-{
-    return CONTAINING_RECORD(iface, MPEGSplitterImpl, Parser.sourceSeeking.IMediaSeeking_iface);
-}
-
-static inline MPEGSplitterImpl *impl_from_IAMStreamSelect( IAMStreamSelect *iface )
-{
-    return CONTAINING_RECORD(iface, MPEGSplitterImpl, IAMStreamSelect_iface);
-}
-
-static int MPEGSplitter_head_check(const BYTE *header)
-{
-    /* If this is a possible start code, check for a system or video header */
-    if (header[0] == 0 && header[1] == 0 && header[2] == 1)
-    {
-        /* Check if we got a system or elementary stream start code */
-        if (header[3] == PACK_START_CODE ||
-            header[3] == VIDEO_ELEMENTARY_STREAM ||
-            header[3] == AUDIO_ELEMENTARY_STREAM)
-            return MPEG_SYSTEM_HEADER;
-
-        /* Check for a MPEG video sequence start code */
-        if (header[3] == SEQUENCE_HEADER_CODE)
-            return MPEG_VIDEO_HEADER;
-    }
-
-    /* This should give a good guess if we have an MPEG audio header */
-    if(header[0] == 0xff && ((header[1]>>5)&0x7) == 0x7 &&
-       ((header[1]>>1)&0x3) != 0 && ((header[2]>>4)&0xf) != 0xf &&
-       ((header[2]>>2)&0x3) != 0x3)
-        return MPEG_AUDIO_HEADER;
-
-    /* Nothing yet.. */
-    return MPEG_NO_HEADER;
-}
-
-static const WCHAR wszAudioStream[] = {'A','u','d','i','o',0};
-
-static const DWORD freqs[10] = { 44100, 48000, 32000, 22050, 24000, 16000, 11025, 12000,  8000, 0 };
-
-static const DWORD tabsel_123[2][3][16] = {
-    { {0,32,64,96,128,160,192,224,256,288,320,352,384,416,448,},
-      {0,32,48,56, 64, 80, 96,112,128,160,192,224,256,320,384,},
-      {0,32,40,48, 56, 64, 80, 96,112,128,160,192,224,256,320,} },
-
-    { {0,32,48,56,64,80,96,112,128,144,160,176,192,224,256,},
-      {0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,},
-      {0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,} }
+    MPEG_SYSTEM,
+    MPEG_AUDIO,
+    MPEG_VIDEO,
 };
 
-static HRESULT parse_header(BYTE *header, LONGLONG *plen, LONGLONG *pduration)
+struct mpeg_audio_header
 {
-    int bitrate_index, freq_index, lsf = 1, mpeg1, layer, padding, bitrate, length;
-    LONGLONG duration;
+    unsigned int version, layer, bitrate, sample_rate, channels, frame_size, samples;
+    unsigned int mode, mode_ext, emphasis;
+    BOOL protection, private_bit, copyright, original, padding;
+};
 
-    if (MPEGSplitter_head_check(header) != MPEG_AUDIO_HEADER)
+struct mpeg_stream
+{
+    struct splitter *filter;
+    BYTE id;
+    BOOL video;
+    LONGLONG position;
+    LONGLONG first_pts;
+    struct mpeg_audio_header audio;
+    REFERENCE_TIME frame_time;
+    DWORD bitrate;
+    BYTE sequence_header[140];
+    DWORD sequence_header_size;
+    DWORD start_time_code;
+};
+
+struct mpeg_splitter
+{
+    IAMStreamSelect IAMStreamSelect_iface;
+    IQualityControl IQualityControl_iface;
+    struct splitter *filter;
+
+    enum mpeg_type type;
+    LONGLONG data_start, data_end;
+    LONGLONG base_pts;
+    REFERENCE_TIME duration;
+    struct mpeg_stream streams[2];
+    unsigned int stream_count;
+};
+
+static const GUID *const sink_subtypes[] =
+{
+    &MEDIASUBTYPE_MPEG1System,
+    &MEDIASUBTYPE_MPEG1VideoCD,
+    &MEDIASUBTYPE_MPEG1Video,
+    &MEDIASUBTYPE_MPEG1Audio,
+};
+
+static struct mpeg_splitter *get_mpeg(struct splitter *filter)
+{
+    return filter->priv;
+}
+
+static DWORD read_be32(const BYTE *p)
+{
+    return (p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+}
+
+static LONGLONG read_pts(const BYTE *p)
+{
+    return ((LONGLONG)(p[0] & 0x0e) << 29) | (p[1] << 22) | ((p[2] & 0xfe) << 14) | (p[3] << 7) | (p[4] >> 1);
+}
+
+static BOOL parse_audio_header(const BYTE *p, struct mpeg_audio_header *header)
+{
+    static const unsigned int bitrates[2][3][15] =
     {
-        FIXME("Not a valid header: %02x:%02x:%02x:%02x\n", header[0], header[1], header[2], header[3]);
-        return E_INVALIDARG;
-    }
+        {
+            {0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448},
+            {0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384},
+            {0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320},
+        },
+        {
+            {0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256},
+            {0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160},
+            {0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160},
+        },
+    };
+    static const unsigned int sample_rates[3] = {44100, 48000, 32000};
+    unsigned int version_bits, layer_bits, bitrate_index, rate_index, lsf;
 
-    mpeg1 = (header[1]>>4)&0x1;
-    if (mpeg1)
-        lsf = ((header[1]>>3)&0x1)^1;
+    if (p[0] != 0xff || (p[1] & 0xe0) != 0xe0)
+        return FALSE;
+    version_bits = (p[1] >> 3) & 3;
+    layer_bits = (p[1] >> 1) & 3;
+    bitrate_index = p[2] >> 4;
+    rate_index = (p[2] >> 2) & 3;
+    if (version_bits == 1 || !layer_bits || bitrate_index == 0 || bitrate_index == 15 || rate_index == 3)
+        return FALSE;
 
-    layer = 4-((header[1]>>1)&0x3);
-    bitrate_index = ((header[2]>>4)&0xf);
-    freq_index = ((header[2]>>2)&0x3) + (mpeg1?(lsf*3):6);
-    padding = ((header[2]>>1)&0x1);
+    lsf = version_bits != 3;
+    header->version = version_bits == 3 ? 1 : version_bits == 2 ? 2 : 25;
+    header->layer = 4 - layer_bits;
+    header->bitrate = bitrates[lsf][header->layer - 1][bitrate_index] * 1000;
+    header->sample_rate = sample_rates[rate_index] >> (version_bits == 3 ? 0 : version_bits == 2 ? 1 : 2);
+    header->padding = (p[2] >> 1) & 1;
+    header->private_bit = p[2] & 1;
+    header->protection = p[1] & 1;
+    header->mode = p[3] >> 6;
+    header->mode_ext = (p[3] >> 4) & 3;
+    header->copyright = (p[3] >> 3) & 1;
+    header->original = (p[3] >> 2) & 1;
+    header->emphasis = p[3] & 3;
+    header->channels = header->mode == 3 ? 1 : 2;
 
-    bitrate = tabsel_123[lsf][layer-1][bitrate_index] * 1000;
-    if (!bitrate)
+    if (header->layer == 1)
     {
-        FIXME("Not a valid header: %02x:%02x:%02x:%02x\n", header[0], header[1], header[2], header[3]);
-        return E_INVALIDARG;
+        header->samples = 384;
+        header->frame_size = (12 * header->bitrate / header->sample_rate + header->padding) * 4;
     }
-
-    if (layer == 1)
-        length = 4 * (12 * bitrate / freqs[freq_index] + padding);
-    else if (layer == 2)
-        length = 144 * bitrate / freqs[freq_index] + padding;
-    else if (layer == 3)
-        length = 144 * bitrate / (freqs[freq_index]<<lsf) + padding;
     else
     {
-        ERR("Impossible layer %d\n", layer);
-        return E_INVALIDARG;
+        header->samples = (header->layer == 3 && lsf) ? 576 : 1152;
+        header->frame_size = header->samples / 8 * header->bitrate / header->sample_rate + header->padding;
+    }
+    return header->frame_size > 4;
+}
+
+static HRESULT init_audio_media_types(const struct mpeg_audio_header *header, LONGLONG pts,
+        AM_MEDIA_TYPE *mts, unsigned int *count)
+{
+    static const WORD modes[4] = {ACM_MPEG_STEREO, ACM_MPEG_JOINTSTEREO, ACM_MPEG_DUALCHANNEL, ACM_MPEG_SINGLECHANNEL};
+    static const WORD layers[4] = {0, ACM_MPEG_LAYER1, ACM_MPEG_LAYER2, ACM_MPEG_LAYER3};
+    MPEGLAYER3WAVEFORMAT *mp3;
+    MPEG1WAVEFORMAT *wfx;
+    unsigned int i;
+
+    *count = header->layer == 3 ? 3 : 2;
+    for (i = 0; i < *count; ++i)
+    {
+        AM_MEDIA_TYPE *mt = &mts[i];
+
+        memset(mt, 0, sizeof(*mt));
+        mt->majortype = MEDIATYPE_Audio;
+        mt->bFixedSizeSamples = TRUE;
+        mt->lSampleSize = 1;
+        mt->formattype = FORMAT_WaveFormatEx;
     }
 
-    duration = (ULONGLONG)10000000 * (ULONGLONG)(length) / (ULONGLONG)(bitrate/8);
-    *plen = length;
-    if (pduration)
-        *pduration += duration;
+    mts[0].subtype = MEDIASUBTYPE_MPEG1AudioPayload;
+    mts[1].subtype = MEDIASUBTYPE_MPEG1Payload;
+    for (i = 0; i < 2; ++i)
+    {
+        if (!(wfx = CoTaskMemAlloc(sizeof(*wfx))))
+            return E_OUTOFMEMORY;
+        memset(wfx, 0, sizeof(*wfx));
+        wfx->wfx.wFormatTag = WAVE_FORMAT_MPEG;
+        wfx->wfx.nChannels = header->channels;
+        wfx->wfx.nSamplesPerSec = header->sample_rate;
+        wfx->wfx.nAvgBytesPerSec = header->bitrate / 8;
+        wfx->wfx.nBlockAlign = header->frame_size - header->padding;
+        wfx->wfx.cbSize = sizeof(*wfx) - sizeof(WAVEFORMATEX);
+        wfx->fwHeadLayer = layers[header->layer];
+        wfx->dwHeadBitrate = header->bitrate;
+        wfx->fwHeadMode = modes[header->mode];
+        wfx->fwHeadModeExt = 1 << header->mode_ext;
+        wfx->wHeadEmphasis = header->emphasis + 1;
+        if (header->private_bit)
+            wfx->fwHeadFlags |= ACM_MPEG_PRIVATEBIT;
+        if (header->copyright)
+            wfx->fwHeadFlags |= ACM_MPEG_COPYRIGHT;
+        if (header->original)
+            wfx->fwHeadFlags |= ACM_MPEG_ORIGINALHOME;
+        if (header->protection)
+            wfx->fwHeadFlags |= ACM_MPEG_PROTECTIONBIT;
+        if (header->version == 1)
+            wfx->fwHeadFlags |= ACM_MPEG_ID_MPEG1;
+        wfx->dwPTSLow = (DWORD)pts;
+        wfx->dwPTSHigh = (DWORD)(pts >> 32);
+        mts[i].cbFormat = sizeof(*wfx);
+        mts[i].pbFormat = (BYTE *)wfx;
+    }
+
+    if (header->layer == 3)
+    {
+        mts[2].subtype = MEDIATYPE_Audio;
+        mts[2].subtype.Data1 = WAVE_FORMAT_MPEGLAYER3;
+        if (!(mp3 = CoTaskMemAlloc(sizeof(*mp3))))
+            return E_OUTOFMEMORY;
+        memset(mp3, 0, sizeof(*mp3));
+        mp3->wfx.wFormatTag = WAVE_FORMAT_MPEGLAYER3;
+        mp3->wfx.nChannels = header->channels;
+        mp3->wfx.nSamplesPerSec = header->sample_rate;
+        mp3->wfx.nAvgBytesPerSec = header->bitrate / 8;
+        mp3->wfx.nBlockAlign = 1;
+        mp3->wfx.cbSize = sizeof(*mp3) - sizeof(WAVEFORMATEX);
+        mp3->wID = MPEGLAYER3_ID_MPEG;
+        mp3->fdwFlags = MPEGLAYER3_FLAG_PADDING_ISO;
+        mp3->nBlockSize = header->frame_size - header->padding;
+        mp3->nFramesPerBlock = 1;
+        mts[2].cbFormat = sizeof(*mp3);
+        mts[2].pbFormat = (BYTE *)mp3;
+    }
     return S_OK;
 }
 
-static HRESULT FillBuffer(MPEGSplitterImpl *This, IMediaSample *pCurrentSample)
+static BOOL parse_sequence_header(struct mpeg_stream *stream, const BYTE *p, DWORD size)
 {
-    Parser_OutputPin * pOutputPin = unsafe_impl_Parser_OutputPin_from_IPin(This->Parser.ppPins[1]);
-    LONGLONG length = 0;
-    LONGLONG pos = BYTES_FROM_MEDIATIME(This->Parser.pInputPin->rtNext);
-    LONGLONG time = This->position, rtstop, rtstart;
-    HRESULT hr;
-    BYTE *fbuf = NULL;
-    DWORD len = IMediaSample_GetActualDataLength(pCurrentSample);
-
-    TRACE("Source length: %u\n", len);
-    IMediaSample_GetPointer(pCurrentSample, &fbuf);
-
-    /* Find the next valid header.. it <SHOULD> be right here */
-    hr = parse_header(fbuf, &length, &This->position);
-    assert(hr == S_OK);
-    IMediaSample_SetActualDataLength(pCurrentSample, length);
-
-    /* Queue the next sample */
-    if (length + 4 == len)
+    static const REFERENCE_TIME frame_times[16] =
     {
-        PullPin *pin = This->Parser.pInputPin;
-        LONGLONG stop = BYTES_FROM_MEDIATIME(pin->rtStop);
+        0, 417083, 416667, 400000, 333667, 333333, 200000, 166833, 166667,
+    };
+    DWORD header_size = 12;
 
-        hr = S_OK;
-        memcpy(This->header, fbuf + length, 4);
-        while (FAILED(hr = parse_header(This->header, &length, NULL)))
+    if (size < 12 || read_be32(p) != SEQUENCE_START_CODE)
+        return FALSE;
+    if (p[11] & 2)
+        header_size += 64;
+    if (header_size + 1 <= size && (p[header_size - 1] & 1))
+        header_size += 64;
+    if (header_size > size)
+        return FALSE;
+
+    memcpy(stream->sequence_header, p, header_size);
+    stream->sequence_header_size = header_size;
+    stream->frame_time = frame_times[p[7] & 0xf];
+    stream->bitrate = ((p[8] << 10) | (p[9] << 2) | (p[10] >> 6)) * 400;
+    return TRUE;
+}
+
+static void find_gop(struct mpeg_stream *stream, const BYTE *p, DWORD size)
+{
+    DWORD i;
+
+    for (i = 0; i + 8 <= size; ++i)
+    {
+        if (read_be32(p + i) == GOP_START_CODE)
         {
-            memmove(This->header, This->header+1, 3);
-            if (pos + 4 >= stop)
-                break;
-            IAsyncReader_SyncRead(pin->pReader, ++pos, 1, This->header + 3);
-        }
-        pin->rtNext = MEDIATIME_FROM_BYTES(pos);
-
-        if (SUCCEEDED(hr))
-        {
-            /* Remove 4 for the last header, which should hopefully work */
-            IMediaSample *sample = NULL;
-            LONGLONG rtSampleStart = pin->rtNext - MEDIATIME_FROM_BYTES(4);
-            LONGLONG rtSampleStop = rtSampleStart + MEDIATIME_FROM_BYTES(length + 4);
-
-            if (rtSampleStop > pin->rtStop)
-                rtSampleStop = MEDIATIME_FROM_BYTES(ALIGNUP(BYTES_FROM_MEDIATIME(pin->rtStop), pin->cbAlign));
-
-            hr = IMemAllocator_GetBuffer(pin->pAlloc, &sample, NULL, NULL, 0);
-            if (SUCCEEDED(hr))
-            {
-                IMediaSample_SetTime(sample, &rtSampleStart, &rtSampleStop);
-                IMediaSample_SetPreroll(sample, FALSE);
-                IMediaSample_SetDiscontinuity(sample, FALSE);
-                IMediaSample_SetSyncPoint(sample, TRUE);
-                hr = IAsyncReader_Request(pin->pReader, sample, 0);
-                if (SUCCEEDED(hr))
-                {
-                    pin->rtCurrent = rtSampleStart;
-                    pin->rtNext = rtSampleStop;
-                }
-                else
-                    IMediaSample_Release(sample);
-            }
-            if (FAILED(hr))
-                FIXME("o_Ox%08x\n", hr);
+            stream->start_time_code = read_be32(p + i + 4) >> 7;
+            return;
         }
     }
-    /* If not, we're presumably at the end of file */
+}
 
-    TRACE("Media time : %u.%03u\n", (DWORD)(This->position/10000000), (DWORD)((This->position/10000)%1000));
+static HRESULT init_video_media_type(const struct mpeg_stream *stream, AM_MEDIA_TYPE *mt)
+{
+    const BYTE *p = stream->sequence_header;
+    MPEG1VIDEOINFO *info;
+    DWORD size = FIELD_OFFSET(MPEG1VIDEOINFO, bSequenceHeader[stream->sequence_header_size]);
 
-    if (IMediaSample_IsDiscontinuity(pCurrentSample) == S_OK) {
-        IPin *victim;
-        EnterCriticalSection(&This->Parser.filter.csFilter);
-        pOutputPin->pin.pin.tStart = time;
-        pOutputPin->pin.pin.dRate = This->Parser.sourceSeeking.dRate;
-        hr = IPin_ConnectedTo(&pOutputPin->pin.pin.IPin_iface, &victim);
-        if (hr == S_OK)
-        {
-            hr = IPin_NewSegment(victim, time, This->Parser.sourceSeeking.llStop,
-                                 This->Parser.sourceSeeking.dRate);
-            if (hr != S_OK)
-                FIXME("NewSegment returns %08x\n", hr);
-            IPin_Release(victim);
-        }
-        LeaveCriticalSection(&This->Parser.filter.csFilter);
-        if (hr != S_OK)
+    memset(mt, 0, sizeof(*mt));
+    mt->majortype = MEDIATYPE_Video;
+    mt->subtype = MEDIASUBTYPE_MPEG1Payload;
+    mt->formattype = FORMAT_MPEGVideo;
+    if (!(info = CoTaskMemAlloc(size)))
+        return E_OUTOFMEMORY;
+    memset(info, 0, size);
+    info->hdr.AvgTimePerFrame = stream->frame_time;
+    info->hdr.dwBitRate = stream->bitrate;
+    info->hdr.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info->hdr.bmiHeader.biWidth = (p[4] << 4) | (p[5] >> 4);
+    info->hdr.bmiHeader.biHeight = ((p[5] & 0xf) << 8) | p[6];
+    info->dwStartTimeCode = stream->start_time_code;
+    info->cbSequenceHeader = stream->sequence_header_size;
+    memcpy(info->bSequenceHeader, p, stream->sequence_header_size);
+    mt->cbFormat = size;
+    mt->pbFormat = (BYTE *)info;
+    return S_OK;
+}
+
+struct pes_packet
+{
+    BYTE id;
+    LONGLONG payload_offset;
+    DWORD payload_size;
+    LONGLONG pts;
+    BOOL has_pts;
+};
+
+static HRESULT read_pes(struct splitter *filter, LONGLONG *offset, LONGLONG end, struct pes_packet *packet)
+{
+    BYTE buffer[32];
+
+    while (*offset + 4 <= end)
+    {
+        DWORD code, length, header;
+        LONG size = (LONG)min((LONGLONG)sizeof(buffer), end - *offset);
+        HRESULT hr;
+
+        if (FAILED(hr = splitter_read(filter, *offset, size, buffer)))
             return hr;
-    }
-    rtstart = (double)(time - pOutputPin->pin.pin.tStart) / pOutputPin->pin.pin.dRate;
-    rtstop = (double)(This->position - pOutputPin->pin.pin.tStart) / pOutputPin->pin.pin.dRate;
-    IMediaSample_SetTime(pCurrentSample, &rtstart, &rtstop);
-    IMediaSample_SetMediaTime(pCurrentSample, &time, &This->position);
+        code = read_be32(buffer);
 
-    hr = BaseOutputPinImpl_Deliver(&pOutputPin->pin, pCurrentSample);
+        if ((code & 0xffffff00) != 0x00000100)
+        {
+            ++*offset;
+            continue;
+        }
+        if (code == END_START_CODE)
+            return S_FALSE;
+        if (code == PACK_START_CODE)
+        {
+            *offset += (size >= 5 && (buffer[4] & 0xc0) == 0x40) ? 14 + (size >= 14 ? (buffer[13] & 7) : 0) : 12;
+            continue;
+        }
+        if (size < 6)
+            return S_FALSE;
+        length = (buffer[4] << 8) | buffer[5];
+        if (code < 0x000001bc)
+        {
+            ++*offset;
+            continue;
+        }
+        if (code == SYSTEM_START_CODE || (code & 0xff) == 0xbc || (code & 0xff) == 0xbe
+                || (code & 0xff) == 0xbf || (code & 0xff) == 0xbd)
+        {
+            *offset += 6 + length;
+            continue;
+        }
 
-    if (hr != S_OK)
-    {
-        if (hr != S_FALSE)
-            TRACE("Error sending sample (%x)\n", hr);
+        packet->id = code & 0xff;
+        packet->has_pts = FALSE;
+        header = 6;
+        while (header < (DWORD)size && buffer[header] == 0xff)
+            ++header;
+        if (header < (DWORD)size && (buffer[header] & 0xc0) == 0x40)
+            header += 2;
+        if (header + 5 <= (DWORD)size && (buffer[header] & 0xf0) == 0x20)
+        {
+            packet->pts = read_pts(buffer + header);
+            packet->has_pts = TRUE;
+            header += 5;
+        }
+        else if (header + 10 <= (DWORD)size && (buffer[header] & 0xf0) == 0x30)
+        {
+            packet->pts = read_pts(buffer + header);
+            packet->has_pts = TRUE;
+            header += 10;
+        }
         else
-            TRACE("S_FALSE (%d), holding\n", IMediaSample_GetActualDataLength(pCurrentSample));
-    }
+            ++header;
 
-    return hr;
-}
-
-
-static HRESULT MPEGSplitter_process_sample(LPVOID iface, IMediaSample * pSample, DWORD_PTR cookie)
-{
-    MPEGSplitterImpl *This = iface;
-    BYTE *pbSrcStream;
-    DWORD cbSrcStream = 0;
-    REFERENCE_TIME tStart, tStop, tAviStart = This->position;
-    HRESULT hr;
-
-    hr = IMediaSample_GetTime(pSample, &tStart, &tStop);
-    if (SUCCEEDED(hr))
-    {
-        cbSrcStream = IMediaSample_GetActualDataLength(pSample);
-        hr = IMediaSample_GetPointer(pSample, &pbSrcStream);
-    }
-
-    /* Flush occurring */
-    if (cbSrcStream == 0)
-    {
-        FIXME(".. Why do I need you?\n");
+        if (header > 6 + length)
+            header = 6 + length;
+        packet->payload_offset = *offset + header;
+        packet->payload_size = 6 + length - header;
+        if (packet->payload_offset + packet->payload_size > end)
+            packet->payload_size = (DWORD)(end - packet->payload_offset);
+        *offset += 6 + length;
         return S_OK;
     }
-
-    /* trace removed for performance reasons */
-    /* TRACE("(%p), %llu -> %llu\n", pSample, tStart, tStop); */
-
-    /* Now, try to find a new header */
-    hr = FillBuffer(This, pSample);
-    if (hr != S_OK)
-    {
-        WARN("Failed with hres: %08x!\n", hr);
-
-        /* Unset progression if denied! */
-        if (hr == VFW_E_WRONG_STATE || hr == S_FALSE)
-        {
-            memcpy(This->header, pbSrcStream, 4);
-            This->Parser.pInputPin->rtCurrent = tStart;
-            This->position = tAviStart;
-        }
-    }
-
-    if (BYTES_FROM_MEDIATIME(tStop) >= This->EndOfFile || This->position >= This->Parser.sourceSeeking.llStop)
-    {
-        unsigned int i;
-
-        TRACE("End of file reached\n");
-
-        for (i = 0; i < This->Parser.cStreams; i++)
-        {
-            IPin* ppin;
-
-            hr = IPin_ConnectedTo(This->Parser.ppPins[i+1], &ppin);
-            if (SUCCEEDED(hr))
-            {
-                hr = IPin_EndOfStream(ppin);
-                IPin_Release(ppin);
-            }
-            if (FAILED(hr))
-                WARN("Error sending EndOfStream to pin %u (%x)\n", i, hr);
-        }
-
-        /* Force the pullpin thread to stop */
-        hr = S_FALSE;
-    }
-
-    return hr;
-}
-
-
-static HRESULT MPEGSplitter_query_accept(LPVOID iface, const AM_MEDIA_TYPE *pmt)
-{
-    if (!IsEqualIID(&pmt->majortype, &MEDIATYPE_Stream))
-        return S_FALSE;
-
-    if (IsEqualIID(&pmt->subtype, &MEDIASUBTYPE_MPEG1Audio))
-        return S_OK;
-
-    if (IsEqualIID(&pmt->subtype, &MEDIASUBTYPE_MPEG1Video))
-        FIXME("MPEG-1 video streams not yet supported.\n");
-    else if (IsEqualIID(&pmt->subtype, &MEDIASUBTYPE_MPEG1System))
-        FIXME("MPEG-1 system streams not yet supported.\n");
-    else if (IsEqualIID(&pmt->subtype, &MEDIASUBTYPE_MPEG1VideoCD))
-        FIXME("MPEG-1 VideoCD streams not yet supported.\n");
-    else FIXME("%s\n", debugstr_guid(&pmt->subtype));
-
     return S_FALSE;
 }
 
-
-static HRESULT MPEGSplitter_init_audio(MPEGSplitterImpl *This, const BYTE *header, PIN_INFO *ppiOutput, AM_MEDIA_TYPE *pamt)
+static HRESULT find_last_pts(struct splitter *filter, LONGLONG *last_pts)
 {
-    WAVEFORMATEX *format;
-    int bitrate_index;
-    int freq_index;
-    int mode_ext;
-    int emphasis;
-    int padding;
-    int lsf = 1;
-    int mpeg1;
-    int layer;
-    int mode;
+    LONGLONG start = max(0, filter->file_size - TAIL_SIZE);
+    DWORD size = (DWORD)(filter->file_size - start), i;
+    BYTE *data;
+    HRESULT hr;
 
-    ZeroMemory(pamt, sizeof(*pamt));
-    ppiOutput->dir = PINDIR_OUTPUT;
-    ppiOutput->pFilter = &This->Parser.filter.IBaseFilter_iface;
-    wsprintfW(ppiOutput->achName, wszAudioStream);
-
-    pamt->formattype = FORMAT_WaveFormatEx;
-    pamt->majortype = MEDIATYPE_Audio;
-    pamt->subtype = MEDIASUBTYPE_MPEG1AudioPayload;
-
-    pamt->lSampleSize = 0;
-    pamt->bFixedSizeSamples = FALSE;
-    pamt->bTemporalCompression = 0;
-
-    mpeg1 = (header[1]>>4)&0x1;
-    if (mpeg1)
-        lsf = ((header[1]>>3)&0x1)^1;
-
-    layer         = 4-((header[1]>>1)&0x3);
-    bitrate_index =   ((header[2]>>4)&0xf);
-    padding       =   ((header[2]>>1)&0x1);
-    freq_index    =   ((header[2]>>2)&0x3) + (mpeg1?(lsf*3):6);
-    mode          =   ((header[3]>>6)&0x3);
-    mode_ext      =   ((header[3]>>4)&0x3);
-    emphasis      =   ((header[3]>>0)&0x3);
-
-    if (!bitrate_index)
-    {
-        /* Set to highest bitrate so samples will fit in for sure */
-        FIXME("Variable-bitrate audio not fully supported.\n");
-        bitrate_index = 15;
-    }
-
-    pamt->cbFormat = ((layer==3)? sizeof(MPEGLAYER3WAVEFORMAT) :
-                                  sizeof(MPEG1WAVEFORMAT));
-    pamt->pbFormat = CoTaskMemAlloc(pamt->cbFormat);
-    if (!pamt->pbFormat)
+    if (!(data = malloc(size)))
         return E_OUTOFMEMORY;
-    ZeroMemory(pamt->pbFormat, pamt->cbFormat);
-    format = (WAVEFORMATEX*)pamt->pbFormat;
-
-    format->wFormatTag      = ((layer == 3) ? WAVE_FORMAT_MPEGLAYER3 :
-                                              WAVE_FORMAT_MPEG);
-    format->nChannels       = ((mode == 3) ? 1 : 2);
-    format->nSamplesPerSec  = freqs[freq_index];
-    format->nAvgBytesPerSec = tabsel_123[lsf][layer-1][bitrate_index] * 1000 / 8;
-
-    if (layer == 3)
-        format->nBlockAlign = format->nAvgBytesPerSec * 8 * 144 /
-                              (format->nSamplesPerSec<<lsf) + padding;
-    else if (layer == 2)
-        format->nBlockAlign = format->nAvgBytesPerSec * 8 * 144 /
-                              format->nSamplesPerSec + padding;
-    else
-        format->nBlockAlign = 4 * (format->nAvgBytesPerSec * 8 * 12 / format->nSamplesPerSec + padding);
-
-    format->wBitsPerSample = 0;
-
-    if (layer == 3)
+    if (FAILED(hr = splitter_read(filter, start, size, data)))
     {
-        MPEGLAYER3WAVEFORMAT *mp3format = (MPEGLAYER3WAVEFORMAT*)format;
-
-        format->cbSize = MPEGLAYER3_WFX_EXTRA_BYTES;
-
-        mp3format->wID = MPEGLAYER3_ID_MPEG;
-        mp3format->fdwFlags = MPEGLAYER3_FLAG_PADDING_ON;
-        mp3format->nBlockSize = format->nBlockAlign;
-        mp3format->nFramesPerBlock = 1;
-
-        /* Beware the evil magic numbers. This struct is apparently horribly
-         * under-documented, and the only references I could find had it being
-         * set to this with no real explanation. It works fine though, so I'm
-         * not complaining (yet).
-         */
-        mp3format->nCodecDelay = 1393;
+        free(data);
+        return hr;
     }
-    else
+
+    for (i = 0; i + 4 <= size && read_be32(data + i) != PACK_START_CODE; ++i)
+        ;
+    while (i + 6 <= size)
     {
-        MPEG1WAVEFORMAT *mpgformat = (MPEG1WAVEFORMAT*)format;
+        DWORD code = read_be32(data + i), length, header;
 
-        format->cbSize = 22;
-
-        mpgformat->fwHeadLayer   = ((layer == 1) ? ACM_MPEG_LAYER1 :
-                                    ((layer == 2) ? ACM_MPEG_LAYER2 :
-                                     ACM_MPEG_LAYER3));
-        mpgformat->dwHeadBitrate = format->nAvgBytesPerSec * 8;
-        mpgformat->fwHeadMode    = ((mode == 3) ? ACM_MPEG_SINGLECHANNEL :
-                                    ((mode == 2) ? ACM_MPEG_DUALCHANNEL :
-                                     ((mode == 1) ? ACM_MPEG_JOINTSTEREO :
-                                      ACM_MPEG_STEREO)));
-        mpgformat->fwHeadModeExt = ((mode == 1) ? 0x0F : (1<<mode_ext));
-        mpgformat->wHeadEmphasis = emphasis + 1;
-        mpgformat->fwHeadFlags   = ACM_MPEG_ID_MPEG1;
+        if ((code & 0xffffff00) != 0x00000100 || code == END_START_CODE)
+            break;
+        if (code == PACK_START_CODE)
+        {
+            i += (data[i + 4] & 0xc0) == 0x40 ? 14 + (i + 13 < size ? (data[i + 13] & 7) : 0) : 12;
+            continue;
+        }
+        length = (data[i + 4] << 8) | data[i + 5];
+        if ((code & 0xff) >= 0xc0 && (code & 0xff) <= 0xef)
+        {
+            header = i + 6;
+            while (header < size && data[header] == 0xff)
+                ++header;
+            if (header < size && (data[header] & 0xc0) == 0x40)
+                header += 2;
+            if (header + 5 <= size && (data[header] & 0xe0) == 0x20)
+                *last_pts = max(*last_pts, read_pts(data + header));
+        }
+        i += 6 + length;
     }
-    pamt->subtype.Data1 = format->wFormatTag;
 
-    TRACE("MPEG audio stream detected:\n"
-          "\tLayer %d (%#x)\n"
-          "\tFrequency: %d\n"
-          "\tChannels: %d (%d)\n"
-          "\tBytesPerSec: %d\n",
-          layer, format->wFormatTag, format->nSamplesPerSec,
-          format->nChannels, mode, format->nAvgBytesPerSec);
-
-    dump_AM_MEDIA_TYPE(pamt);
-
+    free(data);
     return S_OK;
 }
 
-
-static HRESULT MPEGSplitter_pre_connect(IPin *iface, IPin *pConnectPin, ALLOCATOR_PROPERTIES *props)
+static HRESULT parse_system(struct splitter *filter, struct mpeg_splitter *mpeg)
 {
-    PullPin *pPin = impl_PullPin_from_IPin(iface);
-    MPEGSplitterImpl *This = (MPEGSplitterImpl*)pPin->pin.pinInfo.pFilter;
+    LONGLONG offset = 0, end = min(filter->file_size, (LONGLONG)SCAN_SIZE), last_pts = -1;
+    struct mpeg_stream *video = NULL, *audio = NULL;
+    BOOL have_video = FALSE, have_audio = FALSE;
+    struct pes_packet packet;
+    BYTE buffer[160];
     HRESULT hr;
-    LONGLONG pos = 0; /* in bytes */
-    BYTE header[10];
-    int streamtype;
-    LONGLONG total, avail;
-    AM_MEDIA_TYPE amt;
-    PIN_INFO piOutput;
 
-    IAsyncReader_Length(pPin->pReader, &total, &avail);
-    This->EndOfFile = total;
-
-    hr = IAsyncReader_SyncRead(pPin->pReader, pos, 4, header);
-    if (SUCCEEDED(hr))
-        pos += 4;
-
-    /* Skip ID3 v2 tag, if any */
-    if (SUCCEEDED(hr) && !memcmp("ID3", header, 3))
-    do {
-        UINT length = 0;
-        hr = IAsyncReader_SyncRead(pPin->pReader, pos, 6, header + 4);
-        if (FAILED(hr))
-            break;
-        pos += 6;
-        TRACE("Found ID3 v2.%d.%d\n", header[3], header[4]);
-        if(header[3] <= 4 && header[4] != 0xff &&
-           (header[5]&0x0f) == 0 && (header[6]&0x80) == 0 &&
-           (header[7]&0x80) == 0 && (header[8]&0x80) == 0 &&
-           (header[9]&0x80) == 0)
-        {
-            length = (header[6]<<21) | (header[7]<<14) |
-                     (header[8]<< 7) | (header[9]    );
-            if((header[5]&0x10))
-                length += 10;
-            TRACE("Length: %u\n", length);
-        }
-        pos += length;
-
-        /* Read the real header for the mpeg splitter */
-        hr = IAsyncReader_SyncRead(pPin->pReader, pos, 4, header);
-        if (SUCCEEDED(hr))
-            pos += 4;
-    } while (0);
-
-    while(SUCCEEDED(hr))
+    mpeg->base_pts = -1;
+    while ((hr = read_pes(filter, &offset, end, &packet)) == S_OK)
     {
-        TRACE("Testing header %x:%x:%x:%x\n", header[0], header[1], header[2], header[3]);
+        DWORD size = min(packet.payload_size, sizeof(buffer));
 
-        streamtype = MPEGSplitter_head_check(header);
-        if (streamtype == MPEG_AUDIO_HEADER)
+        if (packet.has_pts && (mpeg->base_pts < 0 || packet.pts < mpeg->base_pts))
+            mpeg->base_pts = packet.pts;
+
+        if (packet.id >= 0xe0 && packet.id <= 0xef && !have_video)
         {
-            LONGLONG length;
-            if (parse_header(header, &length, NULL) == S_OK)
+            if (!video)
             {
-                BYTE next_header[4];
-                /* Ensure we have a valid header by seeking for the next frame, some bad
-                 * encoded ID3v2 may have an incorrect length and we end up finding bytes
-                 * like FF FE 00 28 which are nothing more than a Unicode BOM followed by
-                 * ')' character from inside a ID3v2 tag. Unfortunately that sequence
-                 * matches like a valid mpeg audio header.
-                 */
-                hr = IAsyncReader_SyncRead(pPin->pReader, pos + length - 4, 4, next_header);
-                if (FAILED(hr))
-                    break;
-                if (parse_header(next_header, &length, NULL) == S_OK)
-                    break;
-                TRACE("%x:%x:%x:%x is a fake audio header, looking for next...\n",
-                      header[0], header[1], header[2], header[3]);
+                video = &mpeg->streams[mpeg->stream_count++];
+                video->id = packet.id;
+                video->video = TRUE;
+                video->first_pts = -1;
             }
-        }
-        else if (streamtype) /* Video or System stream */
-            break;
+            if (packet.id != video->id)
+                continue;
+            if (packet.has_pts && video->first_pts < 0)
+                video->first_pts = packet.pts;
+            if (FAILED(hr = splitter_read(filter, packet.payload_offset, size, buffer)))
+                return hr;
+            if (!video->sequence_header_size)
+            {
+                DWORD i;
 
-        /* No valid header yet; shift by a byte and check again */
-        memmove(header, header+1, 3);
-        hr = IAsyncReader_SyncRead(pPin->pReader, pos++, 1, header + 3);
+                for (i = 0; i + 4 <= size; ++i)
+                {
+                    if (read_be32(buffer + i) == SEQUENCE_START_CODE)
+                    {
+                        parse_sequence_header(video, buffer + i, size - i);
+                        break;
+                    }
+                }
+            }
+            find_gop(video, buffer, size);
+            have_video = !!video->sequence_header_size;
+        }
+        else if (packet.id >= 0xc0 && packet.id <= 0xdf && !have_audio)
+        {
+            if (!audio)
+            {
+                audio = &mpeg->streams[mpeg->stream_count++];
+                audio->id = packet.id;
+                audio->first_pts = -1;
+            }
+            if (packet.id != audio->id)
+                continue;
+            if (packet.has_pts && audio->first_pts < 0)
+                audio->first_pts = packet.pts;
+            if (FAILED(hr = splitter_read(filter, packet.payload_offset, size, buffer)))
+                return hr;
+            if (size >= 4 && parse_audio_header(buffer, &audio->audio))
+                have_audio = TRUE;
+        }
+
+        if ((have_video || !video) && (have_audio || !audio) && (video || audio) && offset > 65536)
+            break;
     }
     if (FAILED(hr))
         return hr;
-    pos -= 4;
-    This->begin_offset = pos;
-    memcpy(This->header, header, 4);
+    if ((video && !have_video) || (audio && !have_audio) || !mpeg->stream_count)
+        return VFW_E_INVALID_FILE_FORMAT;
+    if (mpeg->base_pts < 0)
+        mpeg->base_pts = 0;
 
-    switch(streamtype)
-    {
-        case MPEG_AUDIO_HEADER:
-        {
-            LONGLONG duration = 0;
-            WAVEFORMATEX *format;
+    if (FAILED(hr = find_last_pts(filter, &last_pts)))
+        return hr;
 
-            hr = MPEGSplitter_init_audio(This, header, &piOutput, &amt);
-            if (SUCCEEDED(hr))
-            {
-                format = (WAVEFORMATEX*)amt.pbFormat;
-
-                props->cbAlign = 1;
-                props->cbPrefix = 0;
-                /* Make the output buffer a multiple of the frame size */
-                props->cbBuffer = 0x4000 / format->nBlockAlign *
-                                 format->nBlockAlign;
-                props->cBuffers = 3;
-                hr = Parser_AddPin(&(This->Parser), &piOutput, props, &amt);
-            }
-
-            if (FAILED(hr))
-            {
-                CoTaskMemFree(amt.pbFormat);
-                ERR("Could not create pin for MPEG audio stream (%x)\n", hr);
-                break;
-            }
-
-            /* Check for idv1 tag, and remove it from stream if found */
-            hr = IAsyncReader_SyncRead(pPin->pReader, This->EndOfFile-128, 3, header);
-            if (FAILED(hr))
-                break;
-            if (!strncmp((char*)header, "TAG", 3))
-                This->EndOfFile -= 128;
-            This->Parser.pInputPin->rtStop = MEDIATIME_FROM_BYTES(This->EndOfFile);
-            This->Parser.pInputPin->rtStart = This->Parser.pInputPin->rtCurrent = MEDIATIME_FROM_BYTES(This->begin_offset);
-
-            duration = (This->EndOfFile-This->begin_offset) * 10000000 / format->nAvgBytesPerSec;
-            TRACE("Duration: %d seconds\n", (DWORD)(duration / 10000000));
-
-            This->Parser.sourceSeeking.llCurrent = 0;
-            This->Parser.sourceSeeking.llDuration = duration;
-            This->Parser.sourceSeeking.llStop = duration;
-            break;
-        }
-        case MPEG_VIDEO_HEADER:
-            FIXME("MPEG video processing not yet supported!\n");
-            hr = E_FAIL;
-            break;
-        case MPEG_SYSTEM_HEADER:
-            FIXME("MPEG system streams not yet supported!\n");
-            hr = E_FAIL;
-            break;
-
-        default:
-            break;
-    }
-    This->position = 0;
-
-    return hr;
-}
-
-static HRESULT MPEGSplitter_cleanup(LPVOID iface)
-{
-    MPEGSplitterImpl *This = iface;
-
-    TRACE("(%p)\n", This);
-
+    if (last_pts > mpeg->base_pts)
+        mpeg->duration = (last_pts - mpeg->base_pts) * 1000 / 9;
+    if (video)
+        mpeg->duration += video->frame_time;
+    mpeg->data_start = 0;
+    mpeg->data_end = filter->file_size;
     return S_OK;
 }
 
-static HRESULT WINAPI MPEGSplitter_seek(IMediaSeeking *iface)
+static HRESULT parse_audio(struct splitter *filter, struct mpeg_splitter *mpeg)
 {
-    MPEGSplitterImpl *This = impl_from_IMediaSeeking(iface);
-    PullPin *pPin = This->Parser.pInputPin;
-    LONGLONG newpos, timepos, bytepos;
-    HRESULT hr = E_INVALIDARG;
-    BYTE header[4];
-
-    newpos = This->Parser.sourceSeeking.llCurrent;
-    if (This->position/1000000 == newpos/1000000)
-    {
-        TRACE("Requesting position %x%08x same as current position %x%08x\n", (DWORD)(newpos>>32), (DWORD)newpos, (DWORD)(This->position>>32), (DWORD)This->position);
-        return S_OK;
-    }
-
-    bytepos = This->begin_offset;
-    timepos = 0;
-    /* http://mpgedit.org/mpgedit/mpeg_format/mpeghdr.htm has a whole read up on audio headers */
-    while (bytepos + 3 < This->EndOfFile)
-    {
-        LONGLONG duration = timepos;
-        LONGLONG length = 0;
-        hr = IAsyncReader_SyncRead(pPin->pReader, bytepos, 4, header);
-        if (hr != S_OK)
-            break;
-        while ((hr=parse_header(header, &length, &duration)) != S_OK &&
-               bytepos + 4 < This->EndOfFile)
-        {
-            /* No valid header yet; shift by a byte and check again */
-            memmove(header, header+1, 3);
-            hr = IAsyncReader_SyncRead(pPin->pReader, ++bytepos + 3, 1, header + 3);
-            if (hr != S_OK)
-                break;
-        }
-        if (hr != S_OK || duration > newpos)
-            break;
-        bytepos += length;
-        timepos = duration;
-    }
-
-    if (SUCCEEDED(hr))
-    {
-        PullPin *pin = This->Parser.pInputPin;
-
-        TRACE("Moving sound to %08u bytes!\n", (DWORD)bytepos);
-
-        EnterCriticalSection(&pin->thread_lock);
-        IPin_BeginFlush(&pin->pin.IPin_iface);
-
-        /* Make sure this is done while stopped, BeginFlush takes care of this */
-        EnterCriticalSection(&This->Parser.filter.csFilter);
-        memcpy(This->header, header, 4);
-
-        pin->rtStart = pin->rtCurrent = MEDIATIME_FROM_BYTES(bytepos);
-        pin->rtStop = MEDIATIME_FROM_BYTES((REFERENCE_TIME)This->EndOfFile);
-        This->seek = TRUE;
-        This->position = newpos;
-        LeaveCriticalSection(&This->Parser.filter.csFilter);
-
-        TRACE("Done flushing\n");
-        IPin_EndFlush(&pin->pin.IPin_iface);
-        LeaveCriticalSection(&pin->thread_lock);
-    }
-    return hr;
-}
-
-static HRESULT MPEGSplitter_disconnect(LPVOID iface)
-{
-    /* TODO: Find memory leaks etc */
-    return S_OK;
-}
-
-static HRESULT MPEGSplitter_first_request(LPVOID iface)
-{
-    MPEGSplitterImpl *This = iface;
-    PullPin *pin = This->Parser.pInputPin;
+    LONGLONG offset = 0, end = filter->file_size;
+    struct mpeg_stream *stream = &mpeg->streams[0];
+    struct mpeg_audio_header next;
+    BYTE buffer[10];
     HRESULT hr;
-    LONGLONG length;
-    IMediaSample *sample;
 
-    TRACE("Seeking? %d\n", This->seek);
+    if (FAILED(hr = splitter_read(filter, 0, min((LONGLONG)sizeof(buffer), end), buffer)))
+        return hr;
+    if (end >= 10 && !memcmp(buffer, "ID3", 3))
+        offset = 10 + ((buffer[6] & 0x7f) << 21 | (buffer[7] & 0x7f) << 14 | (buffer[8] & 0x7f) << 7 | (buffer[9] & 0x7f));
+    if (end >= 128 && SUCCEEDED(splitter_read(filter, end - 128, 3, buffer)) && !memcmp(buffer, "TAG", 3))
+        end -= 128;
 
-    hr = parse_header(This->header, &length, NULL);
-    assert(hr == S_OK);
-
-    if (pin->rtCurrent >= pin->rtStop)
+    for (; offset + 4 <= min(end, (LONGLONG)SCAN_SIZE); ++offset)
     {
-        /* Last sample has already been queued, request nothing more */
-        FIXME("Done!\n");
-        return S_OK;
+        if (FAILED(hr = splitter_read(filter, offset, 4, buffer)))
+            return hr;
+        if (!parse_audio_header(buffer, &stream->audio))
+            continue;
+        if (offset + stream->audio.frame_size + 4 > end)
+            break;
+        if (FAILED(hr = splitter_read(filter, offset + stream->audio.frame_size, 4, buffer)))
+            return hr;
+        if (parse_audio_header(buffer, &next) && next.layer == stream->audio.layer
+                && next.sample_rate == stream->audio.sample_rate)
+            break;
     }
+    if (offset + 4 > end || !stream->audio.bitrate)
+        return VFW_E_INVALID_FILE_FORMAT;
 
-    hr = IMemAllocator_GetBuffer(pin->pAlloc, &sample, NULL, NULL, 0);
+    mpeg->stream_count = 1;
+    stream->id = 0xc0;
+    stream->first_pts = -1;
+    mpeg->data_start = offset;
+    mpeg->data_end = end;
+    mpeg->duration = (end - offset) * 8 * 10000000 / stream->audio.bitrate;
+    return S_OK;
+}
 
-    pin->rtNext = pin->rtCurrent;
-    if (SUCCEEDED(hr))
+static HRESULT parse_video(struct splitter *filter, struct mpeg_splitter *mpeg)
+{
+    struct mpeg_stream *stream = &mpeg->streams[0];
+    BYTE buffer[160];
+    LONG size = (LONG)min(filter->file_size, (LONGLONG)sizeof(buffer));
+    HRESULT hr;
+
+    if (FAILED(hr = splitter_read(filter, 0, size, buffer)))
+        return hr;
+    if (!parse_sequence_header(stream, buffer, size))
+        return VFW_E_INVALID_FILE_FORMAT;
+    find_gop(stream, buffer, size);
+
+    mpeg->stream_count = 1;
+    stream->id = 0xe0;
+    stream->video = TRUE;
+    stream->first_pts = -1;
+    mpeg->data_start = 0;
+    mpeg->data_end = filter->file_size;
+    if (stream->bitrate)
+        mpeg->duration = filter->file_size * 8 * 10000000 / stream->bitrate;
+    return S_OK;
+}
+
+static HRESULT mpeg_splitter_sink_query_accept(const AM_MEDIA_TYPE *mt)
+{
+    unsigned int i;
+
+    if (!IsEqualGUID(&mt->majortype, &MEDIATYPE_Stream))
+        return S_FALSE;
+    if (!IsEqualGUID(&mt->formattype, &GUID_NULL) && !IsEqualGUID(&mt->formattype, &FORMAT_WaveFormatEx))
+        return S_FALSE;
+    for (i = 0; i < ARRAY_SIZE(sink_subtypes); ++i)
     {
-        LONGLONG rtSampleStart = pin->rtNext;
-        /* Add 4 for the next header, which should hopefully work */
-        LONGLONG rtSampleStop = rtSampleStart + MEDIATIME_FROM_BYTES(length + 4);
+        if (IsEqualGUID(&mt->subtype, sink_subtypes[i]))
+            return S_OK;
+    }
+    return S_FALSE;
+}
 
-        if (rtSampleStop > pin->rtStop)
-            rtSampleStop = MEDIATIME_FROM_BYTES(ALIGNUP(BYTES_FROM_MEDIATIME(pin->rtStop), pin->cbAlign));
+static HRESULT mpeg_splitter_sink_get_media_type(unsigned int index, AM_MEDIA_TYPE *mt)
+{
+    if (index >= ARRAY_SIZE(sink_subtypes))
+        return VFW_S_NO_MORE_ITEMS;
 
-        IMediaSample_SetTime(sample, &rtSampleStart, &rtSampleStop);
-        IMediaSample_SetPreroll(sample, FALSE);
-        IMediaSample_SetDiscontinuity(sample, TRUE);
-        IMediaSample_SetSyncPoint(sample, 1);
-        This->seek = FALSE;
+    memset(mt, 0, sizeof(*mt));
+    mt->majortype = MEDIATYPE_Stream;
+    mt->subtype = *sink_subtypes[index];
+    mt->bFixedSizeSamples = TRUE;
+    mt->bTemporalCompression = TRUE;
+    mt->lSampleSize = 1;
+    return S_OK;
+}
 
-        hr = IAsyncReader_Request(pin->pReader, sample, 0);
-        if (SUCCEEDED(hr))
-        {
-            pin->rtCurrent = pin->rtNext;
-            pin->rtNext = rtSampleStop;
-        }
-        else
-            IMediaSample_Release(sample);
+static HRESULT mpeg_splitter_sink_query_interface(struct splitter *filter, REFIID iid, void **out)
+{
+    struct mpeg_splitter *mpeg = get_mpeg(filter);
+
+    if (IsEqualGUID(iid, &IID_IMemInputPin))
+        *out = &filter->sink.IMemInputPin_iface;
+    else if (IsEqualGUID(iid, &IID_IQualityControl))
+        *out = &mpeg->IQualityControl_iface;
+    else
+        return E_NOINTERFACE;
+
+    IUnknown_AddRef((IUnknown *)*out);
+    return S_OK;
+}
+
+static HRESULT mpeg_splitter_parse(struct splitter *filter)
+{
+    struct mpeg_splitter *mpeg = get_mpeg(filter);
+    BYTE header[4];
+    unsigned int i;
+    HRESULT hr;
+
+    memset(mpeg->streams, 0, sizeof(mpeg->streams));
+    mpeg->stream_count = 0;
+    mpeg->duration = 0;
+
+    if (filter->file_size < 4)
+        return VFW_E_INVALID_FILE_FORMAT;
+    if (FAILED(hr = splitter_read(filter, 0, sizeof(header), header)))
+        return hr;
+
+    if (read_be32(header) == PACK_START_CODE)
+    {
+        mpeg->type = MPEG_SYSTEM;
+        hr = parse_system(filter, mpeg);
+    }
+    else if (read_be32(header) == SEQUENCE_START_CODE)
+    {
+        mpeg->type = MPEG_VIDEO;
+        hr = parse_video(filter, mpeg);
+    }
+    else
+    {
+        mpeg->type = MPEG_AUDIO;
+        hr = parse_audio(filter, mpeg);
     }
     if (FAILED(hr))
-        ERR("Horsemen of the apocalypse came to bring error 0x%08x\n", hr);
+        return hr;
 
-    return hr;
+    for (i = 0; i < mpeg->stream_count; ++i)
+    {
+        struct mpeg_stream *stream = &mpeg->streams[i];
+        struct splitter_source *source;
+        AM_MEDIA_TYPE mts[3];
+        unsigned int count = 1, j;
+
+        stream->filter = filter;
+        if (stream->video)
+            hr = init_video_media_type(stream, &mts[0]);
+        else
+            hr = init_audio_media_types(&stream->audio,
+                    stream->first_pts >= 0 ? stream->first_pts : 0, mts, &count);
+        if (FAILED(hr))
+        {
+            for (j = 0; j < count; ++j)
+                FreeMediaType(&mts[j]);
+            return hr;
+        }
+
+        source = splitter_add_source(filter, stream->video ? L"Video" : L"Audio", mts, count, mpeg->duration);
+        for (j = 0; j < count; ++j)
+            FreeMediaType(&mts[j]);
+        if (!source)
+            return E_OUTOFMEMORY;
+        source->priv = stream;
+        if (stream->video)
+        {
+            source->buffer_size = 65536;
+            source->buffer_count = 30;
+        }
+        else
+        {
+            source->buffer_size = max(stream->audio.frame_size * 4, 8192);
+            source->buffer_count = 3;
+        }
+    }
+    return S_OK;
 }
 
-static HRESULT WINAPI MPEGSplitter_QueryInterface(IBaseFilter *iface, REFIID riid, void **ppv)
+static void mpeg_splitter_cleanup(struct splitter *filter)
 {
-    MPEGSplitterImpl *This = impl_from_IBaseFilter(iface);
-    TRACE("(%s, %p)\n", qzdebugstr_guid(riid), ppv);
+    struct mpeg_splitter *mpeg = get_mpeg(filter);
 
-    *ppv = NULL;
+    memset(mpeg->streams, 0, sizeof(mpeg->streams));
+    mpeg->stream_count = 0;
+}
 
-    if ( IsEqualIID(riid, &IID_IUnknown)
-      || IsEqualIID(riid, &IID_IPersist)
-      || IsEqualIID(riid, &IID_IMediaFilter)
-      || IsEqualIID(riid, &IID_IBaseFilter) )
-        *ppv = iface;
-    else if ( IsEqualIID(riid, &IID_IAMStreamSelect) )
-        *ppv = &This->IAMStreamSelect_iface;
+static void mpeg_splitter_destroy(struct splitter *filter)
+{
+    free(filter->priv);
+    filter->priv = NULL;
+}
 
-    if (*ppv)
+static void mpeg_splitter_seek(struct splitter_source *source, REFERENCE_TIME time)
+{
+    struct mpeg_stream *stream = source->priv;
+    struct mpeg_splitter *mpeg = get_mpeg(stream->filter);
+    LONGLONG size = mpeg->data_end - mpeg->data_start, offset = 0;
+
+    if (time > 0 && mpeg->duration > 0)
     {
-        IBaseFilter_AddRef(iface);
+        if (mpeg->type == MPEG_AUDIO)
+            offset = time * (stream->audio.bitrate / 8) / 10000000;
+        else
+            offset = (LONGLONG)((double)size * time / mpeg->duration);
+        offset = min(offset, size);
+    }
+    stream->position = mpeg->data_start + offset;
+}
+
+static HRESULT next_audio_frame(struct mpeg_splitter *mpeg, struct mpeg_stream *stream, struct splitter_sample *sample)
+{
+    struct mpeg_audio_header header;
+    BYTE buffer[4];
+    HRESULT hr;
+
+    while (stream->position + 4 <= mpeg->data_end)
+    {
+        if (FAILED(hr = splitter_read(stream->filter, stream->position, 4, buffer)))
+            return hr;
+        if (parse_audio_header(buffer, &header) && header.layer == stream->audio.layer
+                && header.sample_rate == stream->audio.sample_rate)
+            break;
+        ++stream->position;
+    }
+    if (stream->position + 4 > mpeg->data_end)
+        return S_FALSE;
+
+    sample->offset = stream->position;
+    sample->size = (DWORD)min((LONGLONG)header.frame_size, mpeg->data_end - stream->position);
+    sample->start = (stream->position - mpeg->data_start) * 8 * 10000000 / stream->audio.bitrate;
+    sample->stop = sample->start + (REFERENCE_TIME)header.samples * 10000000 / header.sample_rate;
+    sample->has_time = TRUE;
+    sample->sync_point = TRUE;
+    stream->position += sample->size;
+    return S_OK;
+}
+
+static HRESULT mpeg_splitter_next_sample(struct splitter_source *source, struct splitter_sample *sample)
+{
+    struct mpeg_stream *stream = source->priv;
+    struct mpeg_splitter *mpeg = get_mpeg(stream->filter);
+    struct pes_packet packet;
+    HRESULT hr;
+
+    if (mpeg->type == MPEG_AUDIO)
+        return next_audio_frame(mpeg, stream, sample);
+
+    if (mpeg->type == MPEG_VIDEO)
+    {
+        if (stream->position >= mpeg->data_end)
+            return S_FALSE;
+        sample->offset = stream->position;
+        sample->size = (DWORD)min((LONGLONG)VIDEO_CHUNK_SIZE, mpeg->data_end - stream->position);
+        sample->has_time = stream->position == mpeg->data_start;
+        sample->start = 0;
+        sample->stop = stream->frame_time;
+        sample->sync_point = sample->has_time;
+        stream->position += sample->size;
         return S_OK;
     }
 
-    if (!IsEqualIID(riid, &IID_IPin) && !IsEqualIID(riid, &IID_IVideoWindow))
-        FIXME("No interface for %s!\n", qzdebugstr_guid(riid));
+    while ((hr = read_pes(stream->filter, &stream->position, mpeg->data_end, &packet)) == S_OK)
+    {
+        if (packet.id != stream->id || !packet.payload_size)
+            continue;
 
+        sample->offset = packet.payload_offset;
+        sample->size = packet.payload_size;
+        sample->has_time = packet.has_pts;
+        sample->sync_point = packet.has_pts;
+        if (packet.has_pts)
+        {
+            sample->start = (packet.pts - mpeg->base_pts) * 1000 / 9;
+            if (stream->video)
+                sample->stop = sample->start + stream->frame_time;
+            else
+                sample->stop = sample->start + (REFERENCE_TIME)packet.payload_size * 8 * 10000000 / stream->audio.bitrate;
+        }
+        return S_OK;
+    }
+    return hr;
+}
+
+static inline struct mpeg_splitter *impl_from_IAMStreamSelect(IAMStreamSelect *iface)
+{
+    return CONTAINING_RECORD(iface, struct mpeg_splitter, IAMStreamSelect_iface);
+}
+
+static HRESULT WINAPI stream_select_QueryInterface(IAMStreamSelect *iface, REFIID iid, void **out)
+{
+    struct mpeg_splitter *mpeg = impl_from_IAMStreamSelect(iface);
+    return IUnknown_QueryInterface(mpeg->filter->filter.outer_unk, iid, out);
+}
+
+static ULONG WINAPI stream_select_AddRef(IAMStreamSelect *iface)
+{
+    struct mpeg_splitter *mpeg = impl_from_IAMStreamSelect(iface);
+    return IUnknown_AddRef(mpeg->filter->filter.outer_unk);
+}
+
+static ULONG WINAPI stream_select_Release(IAMStreamSelect *iface)
+{
+    struct mpeg_splitter *mpeg = impl_from_IAMStreamSelect(iface);
+    return IUnknown_Release(mpeg->filter->filter.outer_unk);
+}
+
+static HRESULT WINAPI stream_select_Count(IAMStreamSelect *iface, DWORD *count)
+{
+    struct mpeg_splitter *mpeg = impl_from_IAMStreamSelect(iface);
+
+    TRACE("iface %p, count %p.\n", iface, count);
+
+    EnterCriticalSection(&mpeg->filter->filter.filter_cs);
+    *count = mpeg->filter->source_count;
+    LeaveCriticalSection(&mpeg->filter->filter.filter_cs);
+    return S_OK;
+}
+
+static HRESULT WINAPI stream_select_Info(IAMStreamSelect *iface, LONG index, AM_MEDIA_TYPE **mt,
+        DWORD *flags, LCID *lcid, DWORD *group, WCHAR **name, IUnknown **object, IUnknown **unknown)
+{
+    struct mpeg_splitter *mpeg = impl_from_IAMStreamSelect(iface);
+    struct splitter *filter = mpeg->filter;
+    struct splitter_source *source;
+    struct mpeg_stream *stream;
+    HRESULT hr = S_OK;
+
+    TRACE("iface %p, index %ld.\n", iface, index);
+
+    EnterCriticalSection(&filter->filter.filter_cs);
+
+    if (index < 0 || (DWORD)index >= filter->source_count)
+    {
+        LeaveCriticalSection(&filter->filter.filter_cs);
+        return S_FALSE;
+    }
+    source = filter->sources[index];
+    stream = source->priv;
+
+    if (mt)
+        *mt = CreateMediaType(source->pin.pin.peer ? &source->pin.pin.mt : &source->media_types[0]);
+    if (flags)
+        *flags = AMSTREAMSELECTINFO_ENABLED;
+    if (lcid)
+        *lcid = 0;
+    if (group)
+        *group = stream->video ? 0 : 1;
+    if (name)
+    {
+        if ((*name = CoTaskMemAlloc(11 * sizeof(WCHAR))))
+            swprintf(*name, 11, L"Stream(%02X)", stream->id);
+        else
+            hr = E_OUTOFMEMORY;
+    }
+    if (object)
+    {
+        *object = (IUnknown *)&source->pin.pin.IPin_iface;
+        IUnknown_AddRef(*object);
+    }
+    if (unknown)
+        *unknown = NULL;
+
+    LeaveCriticalSection(&filter->filter.filter_cs);
+    return hr;
+}
+
+static HRESULT WINAPI stream_select_Enable(IAMStreamSelect *iface, LONG index, DWORD flags)
+{
+    FIXME("iface %p, index %ld, flags %#lx, stub!\n", iface, index, flags);
+    return E_NOTIMPL;
+}
+
+static const IAMStreamSelectVtbl stream_select_vtbl =
+{
+    stream_select_QueryInterface,
+    stream_select_AddRef,
+    stream_select_Release,
+    stream_select_Count,
+    stream_select_Info,
+    stream_select_Enable,
+};
+
+static inline struct mpeg_splitter *impl_from_IQualityControl(IQualityControl *iface)
+{
+    return CONTAINING_RECORD(iface, struct mpeg_splitter, IQualityControl_iface);
+}
+
+static HRESULT WINAPI sink_quality_QueryInterface(IQualityControl *iface, REFIID iid, void **out)
+{
+    struct mpeg_splitter *mpeg = impl_from_IQualityControl(iface);
+    return IPin_QueryInterface(&mpeg->filter->sink.pin.IPin_iface, iid, out);
+}
+
+static ULONG WINAPI sink_quality_AddRef(IQualityControl *iface)
+{
+    struct mpeg_splitter *mpeg = impl_from_IQualityControl(iface);
+    return IPin_AddRef(&mpeg->filter->sink.pin.IPin_iface);
+}
+
+static ULONG WINAPI sink_quality_Release(IQualityControl *iface)
+{
+    struct mpeg_splitter *mpeg = impl_from_IQualityControl(iface);
+    return IPin_Release(&mpeg->filter->sink.pin.IPin_iface);
+}
+
+static HRESULT WINAPI sink_quality_Notify(IQualityControl *iface, IBaseFilter *sender, Quality q)
+{
+    TRACE("iface %p, sender %p, type %u, proportion %ld.\n", iface, sender, q.Type, q.Proportion);
+    return S_OK;
+}
+
+static HRESULT WINAPI sink_quality_SetSink(IQualityControl *iface, IQualityControl *sink)
+{
+    TRACE("iface %p, sink %p.\n", iface, sink);
+    return S_OK;
+}
+
+static const IQualityControlVtbl sink_quality_vtbl =
+{
+    sink_quality_QueryInterface,
+    sink_quality_AddRef,
+    sink_quality_Release,
+    sink_quality_Notify,
+    sink_quality_SetSink,
+};
+
+static HRESULT mpeg_splitter_query_interface(struct splitter *filter, REFIID iid, void **out)
+{
+    struct mpeg_splitter *mpeg = get_mpeg(filter);
+
+    if (IsEqualGUID(iid, &IID_IAMStreamSelect))
+    {
+        *out = &mpeg->IAMStreamSelect_iface;
+        IUnknown_AddRef((IUnknown *)*out);
+        return S_OK;
+    }
     return E_NOINTERFACE;
 }
 
-static const IBaseFilterVtbl MPEGSplitter_Vtbl =
+static const struct splitter_ops mpeg_splitter_ops =
 {
-    MPEGSplitter_QueryInterface,
-    Parser_AddRef,
-    Parser_Release,
-    Parser_GetClassID,
-    Parser_Stop,
-    Parser_Pause,
-    Parser_Run,
-    Parser_GetState,
-    Parser_SetSyncSource,
-    Parser_GetSyncSource,
-    Parser_EnumPins,
-    Parser_FindPin,
-    Parser_QueryFilterInfo,
-    Parser_JoinFilterGraph,
-    Parser_QueryVendorInfo
+    .sink_query_accept = mpeg_splitter_sink_query_accept,
+    .sink_get_media_type = mpeg_splitter_sink_get_media_type,
+    .sink_query_interface = mpeg_splitter_sink_query_interface,
+    .parse = mpeg_splitter_parse,
+    .cleanup = mpeg_splitter_cleanup,
+    .destroy = mpeg_splitter_destroy,
+    .seek = mpeg_splitter_seek,
+    .next_sample = mpeg_splitter_next_sample,
+    .query_interface = mpeg_splitter_query_interface,
 };
 
-static HRESULT WINAPI AMStreamSelect_QueryInterface(IAMStreamSelect *iface, REFIID riid, void **ppv)
+HRESULT mpeg1_splitter_create(IUnknown *outer, IUnknown **out)
 {
-    MPEGSplitterImpl *This = impl_from_IAMStreamSelect(iface);
+    struct mpeg_splitter *mpeg;
+    struct splitter *object;
+    HRESULT hr;
 
-    return IBaseFilter_QueryInterface(&This->Parser.filter.IBaseFilter_iface, riid, ppv);
-}
-
-static ULONG WINAPI AMStreamSelect_AddRef(IAMStreamSelect *iface)
-{
-    MPEGSplitterImpl *This = impl_from_IAMStreamSelect(iface);
-
-    return IBaseFilter_AddRef(&This->Parser.filter.IBaseFilter_iface);
-}
-
-static ULONG WINAPI AMStreamSelect_Release(IAMStreamSelect *iface)
-{
-    MPEGSplitterImpl *This = impl_from_IAMStreamSelect(iface);
-
-    return IBaseFilter_Release(&This->Parser.filter.IBaseFilter_iface);
-}
-
-static HRESULT WINAPI AMStreamSelect_Count(IAMStreamSelect *iface, DWORD *streams)
-{
-    MPEGSplitterImpl *This = impl_from_IAMStreamSelect(iface);
-
-    FIXME("(%p/%p)->(%p) stub!\n", This, iface, streams);
-
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI AMStreamSelect_Info(IAMStreamSelect *iface, LONG index, AM_MEDIA_TYPE **media_type, DWORD *flags, LCID *lcid, DWORD *group, WCHAR **name, IUnknown **object, IUnknown **unknown)
-{
-    MPEGSplitterImpl *This = impl_from_IAMStreamSelect(iface);
-
-    FIXME("(%p/%p)->(%d,%p,%p,%p,%p,%p,%p,%p) stub!\n", This, iface, index, media_type, flags, lcid, group, name, object, unknown);
-
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI AMStreamSelect_Enable(IAMStreamSelect *iface, LONG index, DWORD flags)
-{
-    MPEGSplitterImpl *This = impl_from_IAMStreamSelect(iface);
-
-    FIXME("(%p/%p)->(%d,%x) stub!\n", This, iface, index, flags);
-
-    return E_NOTIMPL;
-}
-
-static const IAMStreamSelectVtbl AMStreamSelectVtbl =
-{
-    AMStreamSelect_QueryInterface,
-    AMStreamSelect_AddRef,
-    AMStreamSelect_Release,
-    AMStreamSelect_Count,
-    AMStreamSelect_Info,
-    AMStreamSelect_Enable
-};
-
-HRESULT MPEGSplitter_create(IUnknown * pUnkOuter, LPVOID * ppv)
-{
-    MPEGSplitterImpl *This;
-    HRESULT hr = E_FAIL;
-
-    TRACE("(%p, %p)\n", pUnkOuter, ppv);
-
-    *ppv = NULL;
-
-    if (pUnkOuter)
-        return CLASS_E_NOAGGREGATION;
-
-    This = CoTaskMemAlloc(sizeof(MPEGSplitterImpl));
-    if (!This)
+    if (!(mpeg = calloc(1, sizeof(*mpeg))))
         return E_OUTOFMEMORY;
 
-    ZeroMemory(This, sizeof(MPEGSplitterImpl));
-    hr = Parser_Create(&(This->Parser), &MPEGSplitter_Vtbl, &CLSID_MPEG1Splitter, MPEGSplitter_process_sample, MPEGSplitter_query_accept, MPEGSplitter_pre_connect, MPEGSplitter_cleanup, MPEGSplitter_disconnect, MPEGSplitter_first_request, NULL, NULL, MPEGSplitter_seek, NULL);
-    if (FAILED(hr))
+    if (FAILED(hr = splitter_create(outer, &CLSID_MPEG1Splitter, &mpeg_splitter_ops, L"Input", TRUE, &object)))
     {
-        CoTaskMemFree(This);
+        free(mpeg);
         return hr;
     }
-    This->IAMStreamSelect_iface.lpVtbl = &AMStreamSelectVtbl;
-    This->seek = TRUE;
 
-    /* Note: This memory is managed by the parser filter once created */
-    *ppv = &This->Parser.filter.IBaseFilter_iface;
+    mpeg->IAMStreamSelect_iface.lpVtbl = &stream_select_vtbl;
+    mpeg->IQualityControl_iface.lpVtbl = &sink_quality_vtbl;
+    mpeg->filter = object;
+    object->priv = mpeg;
+    object->no_source_position = TRUE;
 
-    return hr;
+    TRACE("Created MPEG-1 splitter %p.\n", object);
+    *out = &object->filter.IUnknown_inner;
+    return S_OK;
 }

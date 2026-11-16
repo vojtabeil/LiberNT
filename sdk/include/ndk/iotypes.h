@@ -91,8 +91,16 @@ extern POBJECT_TYPE NTSYSAPI IoDriverObjectType;
 //
 // NtCreateFile Attributes
 //
+#if (NTDDI_VERSION < NTDDI_WIN8)
 #define FILE_ATTRIBUTE_VALID_FLAGS              0x00007fb7
 #define FILE_ATTRIBUTE_VALID_SET_FLAGS          0x000031a7
+#elif (NTDDI_VERSION < NTDDI_WIN10_RS2)
+#define FILE_ATTRIBUTE_VALID_FLAGS              0x0002ffb7
+#define FILE_ATTRIBUTE_VALID_SET_FLAGS          0x000231a7
+#else
+#define FILE_ATTRIBUTE_VALID_FLAGS              0x005affb7
+#define FILE_ATTRIBUTE_VALID_SET_FLAGS          0x001a31a7
+#endif
 
 //
 // NtCreateFile OpenType Flags
@@ -262,6 +270,8 @@ typedef enum _INTERFACE_TYPE
     InternalPowerBus,
     PNPISABus,
     PNPBus,
+    Vmcs,
+    ACPIBus,
     MaximumInterfaceType
 }INTERFACE_TYPE, *PINTERFACE_TYPE;
 
@@ -294,7 +304,9 @@ enum _IRQ_DEVICE_POLICY_USHORT {
   IrqPolicyAllProcessorsInMachine = 3,
   IrqPolicyAllProcessorsInGroup = 3,
   IrqPolicySpecifiedProcessors = 4,
-  IrqPolicySpreadMessagesAcrossAllProcessors = 5};
+  IrqPolicySpreadMessagesAcrossAllProcessors = 5,
+  IrqPolicyAllProcessorsInMachineWhenSteered = 6,
+  IrqPolicyAllProcessorsInGroupWhenSteered = 6};
 
 #else /* defined(NT_PROCESSOR_GROUPS) */
 
@@ -304,7 +316,8 @@ typedef enum _IRQ_DEVICE_POLICY {
   IrqPolicyOneCloseProcessor,
   IrqPolicyAllProcessorsInMachine,
   IrqPolicySpecifiedProcessors,
-  IrqPolicySpreadMessagesAcrossAllProcessors
+  IrqPolicySpreadMessagesAcrossAllProcessors,
+  IrqPolicyAllProcessorsInMachineWhenSteered
 } IRQ_DEVICE_POLICY, *PIRQ_DEVICE_POLICY;
 
 #endif
@@ -357,6 +370,12 @@ typedef struct _IO_RESOURCE_DESCRIPTOR {
       ULONG MaximumChannel;
     } Dma;
     struct {
+      ULONG RequestLine;
+      ULONG Reserved;
+      ULONG Channel;
+      ULONG TransferWidth;
+    } DmaV3;
+    struct {
       ULONG Length;
       ULONG Alignment;
       PHYSICAL_ADDRESS MinimumAddress;
@@ -376,6 +395,37 @@ typedef struct _IO_RESOURCE_DESCRIPTOR {
       ULONG Reserved1;
       ULONG Reserved2;
     } ConfigData;
+#if (NTDDI_VERSION >= NTDDI_LONGHORN)
+    /* Describes a memory requirement larger than MAXULONG.  The length and
+     * alignment are scaled down by 8, 16 or 32 bits, selected by the
+     * CM_RESOURCE_MEMORY_LARGE_40/48/64 flag on the descriptor. */
+    struct {
+      ULONG Length40;
+      ULONG Alignment40;
+      PHYSICAL_ADDRESS MinimumAddress;
+      PHYSICAL_ADDRESS MaximumAddress;
+    } Memory40;
+    struct {
+      ULONG Length48;
+      ULONG Alignment48;
+      PHYSICAL_ADDRESS MinimumAddress;
+      PHYSICAL_ADDRESS MaximumAddress;
+    } Memory48;
+    struct {
+      ULONG Length64;
+      ULONG Alignment64;
+      PHYSICAL_ADDRESS MinimumAddress;
+      PHYSICAL_ADDRESS MaximumAddress;
+    } Memory64;
+#endif
+    struct {
+      UCHAR Class;
+      UCHAR Type;
+      UCHAR Reserved1;
+      UCHAR Reserved2;
+      ULONG IdLowPart;
+      ULONG IdHighPart;
+    } Connection;
   } u;
 } IO_RESOURCE_DESCRIPTOR, *PIO_RESOURCE_DESCRIPTOR;
 
@@ -514,6 +564,10 @@ typedef enum _FSINFOCLASS
     FileFsFullSizeInformation,
     FileFsObjectIdInformation,
     FileFsDriverPathInformation,
+    FileFsVolumeFlagsInformation,
+    FileFsSectorSizeInformation,
+    FileFsDataCopyInformation,
+    FileFsMetadataSizeInformation,
     FileFsMaximumInformation
 } FS_INFORMATION_CLASS, *PFS_INFORMATION_CLASS;
 
@@ -902,6 +956,32 @@ typedef struct _FILE_MODE_INFORMATION
     ULONG Mode;
 } FILE_MODE_INFORMATION, *PFILE_MODE_INFORMATION;
 
+typedef struct _FILE_NUMA_NODE_INFORMATION
+{
+    USHORT NodeNumber;
+} FILE_NUMA_NODE_INFORMATION, *PFILE_NUMA_NODE_INFORMATION;
+
+typedef struct _FILE_LINK_ENTRY_INFORMATION
+{
+    ULONG NextEntryOffset;
+    LONGLONG ParentFileId;
+    ULONG FileNameLength;
+    WCHAR FileName[1];
+} FILE_LINK_ENTRY_INFORMATION, *PFILE_LINK_ENTRY_INFORMATION;
+
+typedef struct _FILE_LINKS_INFORMATION
+{
+    ULONG BytesNeeded;
+    ULONG EntriesReturned;
+    FILE_LINK_ENTRY_INFORMATION Entry;
+} FILE_LINKS_INFORMATION, *PFILE_LINKS_INFORMATION;
+
+typedef struct _FILE_IOSTATUSBLOCK_RANGE_INFORMATION
+{
+    PUCHAR IoStatusBlockRange;
+    ULONG Length;
+} FILE_IOSTATUSBLOCK_RANGE_INFORMATION, *PFILE_IOSTATUSBLOCK_RANGE_INFORMATION;
+
 //
 // I/O Error Log Structures
 //
@@ -1062,6 +1142,9 @@ typedef struct _DEVICE_NODE
 #if (NTDDI_VERSION >= NTDDI_LONGHORN)
     ULONG NumaNodeIndex;
 #endif
+#if DBG
+    volatile PVOID DiagWalkOwner;
+#endif
 } DEVICE_NODE, *PDEVICE_NODE;
 
 //
@@ -1098,7 +1181,18 @@ typedef struct _EXTENDED_DEVOBJ_EXTENSION
     LONG StartIoKey;
     ULONG StartIoFlags;
     struct _VPB *Vpb;
+    PVOID DependencyNode;
+    PVOID InterruptContext;
+    LONG InterruptCount;
+    PVOID VerifierContext;
 } EXTENDED_DEVOBJ_EXTENSION, *PEXTENDED_DEVOBJ_EXTENSION;
+
+C_ASSERT(sizeof(PVOID) != 8 || FIELD_OFFSET(EXTENDED_DEVOBJ_EXTENSION, Vpb) == 0x48);
+C_ASSERT(sizeof(PVOID) != 8 || FIELD_OFFSET(EXTENDED_DEVOBJ_EXTENSION, DependencyNode) == 0x50);
+C_ASSERT(sizeof(PVOID) != 8 || FIELD_OFFSET(EXTENDED_DEVOBJ_EXTENSION, InterruptContext) == 0x58);
+C_ASSERT(sizeof(PVOID) != 8 || FIELD_OFFSET(EXTENDED_DEVOBJ_EXTENSION, InterruptCount) == 0x60);
+C_ASSERT(sizeof(PVOID) != 8 || FIELD_OFFSET(EXTENDED_DEVOBJ_EXTENSION, VerifierContext) == 0x68);
+C_ASSERT(sizeof(PVOID) != 8 || sizeof(EXTENDED_DEVOBJ_EXTENSION) == 0x70);
 
 //
 // Extended Driver Object Extension Structure
@@ -1111,7 +1205,21 @@ typedef struct _EXTENDED_DRIVER_EXTENSION
     UNICODE_STRING ServiceKeyName;
     PIO_CLIENT_EXTENSION ClientDriverExtension;
     PFS_FILTER_CALLBACKS FsFilterCallbacks;
+    PVOID KseCallbacks;
+    PVOID DvCallbacks;
+    PVOID VerifierContext;
+    PVOID DriverProxyExtension;
+    LONG PnpUnloadBarrier;
+    LONG PnpUnloadPending;
 } EXTENDED_DRIVER_EXTENSION, *PEXTENDED_DRIVER_EXTENSION;
+
+C_ASSERT(FIELD_OFFSET(EXTENDED_DRIVER_EXTENSION, ServiceKeyName) == 3 * sizeof(PVOID));
+C_ASSERT(FIELD_OFFSET(EXTENDED_DRIVER_EXTENSION, ClientDriverExtension) == 5 * sizeof(PVOID));
+C_ASSERT(FIELD_OFFSET(EXTENDED_DRIVER_EXTENSION, FsFilterCallbacks) == 6 * sizeof(PVOID));
+C_ASSERT(FIELD_OFFSET(EXTENDED_DRIVER_EXTENSION, KseCallbacks) == 7 * sizeof(PVOID));
+C_ASSERT(FIELD_OFFSET(EXTENDED_DRIVER_EXTENSION, DvCallbacks) == 8 * sizeof(PVOID));
+C_ASSERT(FIELD_OFFSET(EXTENDED_DRIVER_EXTENSION, VerifierContext) == 9 * sizeof(PVOID));
+C_ASSERT(FIELD_OFFSET(EXTENDED_DRIVER_EXTENSION, DriverProxyExtension) == 10 * sizeof(PVOID));
 
 #endif // !NTOS_MODE_USER
 

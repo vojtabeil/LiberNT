@@ -11,13 +11,38 @@
 #define comm                    205
 #define profile                 206
 #define nls                     207
+#define kernel32sync            208
 
 
-#if DBG
+typedef struct _BASE_PROC_THREAD_ATTRIBUTE
+{
+    DWORD_PTR Attribute;
+    SIZE_T Size;
+    PVOID Value;
+} BASE_PROC_THREAD_ATTRIBUTE, *PBASE_PROC_THREAD_ATTRIBUTE;
+
+typedef struct _BASE_PROC_THREAD_ATTRIBUTE_LIST
+{
+    DWORD Mask;
+    DWORD Size;
+    DWORD Count;
+    DWORD Reserved;
+    PBASE_PROC_THREAD_ATTRIBUTE ExtendedFlagsAttribute;
+    BASE_PROC_THREAD_ATTRIBUTE Attributes[1];
+} BASE_PROC_THREAD_ATTRIBUTE_LIST, *PBASE_PROC_THREAD_ATTRIBUTE_LIST;
+
+NTSTATUS
+WINAPI
+BasepValidateThreadAttributeList(
+    _In_opt_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList);
+
+NTSTATUS
+WINAPI
+BasepApplyThreadAttributeList(
+    _In_opt_ LPPROC_THREAD_ATTRIBUTE_LIST AttributeList,
+    _In_ HANDLE ThreadHandle);
+
 #define DEBUG_CHANNEL(ch) static ULONG gDebugChannel = ch;
-#else
-#define DEBUG_CHANNEL(ch)
-#endif
 
 #define TRACE(fmt, ...)         TRACE__(gDebugChannel, fmt, ##__VA_ARGS__)
 #define WARN(fmt, ...)          WARN__(gDebugChannel, fmt, ##__VA_ARGS__)
@@ -30,7 +55,7 @@
 
 #define debugstr_a
 #define debugstr_w
-#define debugstr_wn
+#define debugstr_wn(s, n) (s)
 #define wine_dbgstr_w
 #define debugstr_guid
 
@@ -80,10 +105,17 @@ typedef enum _BASE_SEARCH_PATH_TYPE
     BaseSearchPathDll,
     BaseSearchPathApp,
     BaseSearchPathDefault,
+    BaseSearchPathSystem,
     BaseSearchPathEnv,
     BaseSearchPathCurrent,
     BaseSearchPathMax
 } BASE_SEARCH_PATH_TYPE, *PBASE_SEARCH_PATH_TYPE;
+
+typedef struct _BASE_DLL_DIRECTORY_ENTRY
+{
+    LIST_ENTRY ListEntry;
+    WCHAR NtPath[ANYSIZE_ARRAY];
+} BASE_DLL_DIRECTORY_ENTRY, *PBASE_DLL_DIRECTORY_ENTRY;
 
 typedef enum _BASE_CURRENT_DIR_PLACEMENT
 {
@@ -136,10 +168,15 @@ extern BOOL bIsFileApiAnsi;
 extern HMODULE hCurrentModule;
 
 extern RTL_CRITICAL_SECTION BaseDllDirectoryLock;
+extern LIST_ENTRY BaseDllDirectoryList;
+
+VOID
+BasepInheritDllDirectory(VOID);
 
 extern UNICODE_STRING BaseDllDirectory;
 extern UNICODE_STRING BaseDefaultPath;
 extern UNICODE_STRING BaseDefaultPathAppend;
+extern DWORD BaseDefaultDllDirectoriesFlags;
 extern PLDR_DATA_TABLE_ENTRY BasepExeLdrEntry;
 
 extern LPTOP_LEVEL_EXCEPTION_FILTER GlobalTopLevelExceptionFilter;
@@ -171,6 +208,11 @@ PLARGE_INTEGER
 WINAPI
 BaseFormatTimeOut(OUT PLARGE_INTEGER Timeout,
                   IN DWORD dwMilliseconds);
+
+VOID
+WINAPI
+BasepAdjustObjectAttributesForPrivateNamespace(
+    _Inout_ POBJECT_ATTRIBUTES ObjectAttributes);
 
 POBJECT_ATTRIBUTES
 WINAPI
@@ -208,6 +250,16 @@ VOID
 WINAPI
 BaseProcessStartThunk(VOID);
 
+BOOL
+BasepArchUnwindFrame(
+    _Inout_ PCONTEXT Context,
+    _Out_ PULONG_PTR ReturnAddress);
+
+VOID
+WINAPI
+BasepRunApplicationRecovery(
+    _In_ NTSTATUS ExitStatus);
+
 VOID
 NTAPI
 BasepFreeActivationContextActivationBlock(
@@ -238,6 +290,13 @@ BaseThreadStartup(
     _In_ LPTHREAD_START_ROUTINE lpStartAddress,
     _In_ LPVOID lpParameter);
 
+VOID
+FASTCALL
+BaseThreadInitThunk(
+    _In_ DWORD Unknown,
+    _In_ LPTHREAD_START_ROUTINE lpStartAddress,
+    _In_ LPVOID lpParameter);
+
 DECLSPEC_NORETURN
 VOID
 WINAPI
@@ -254,6 +313,10 @@ BaseProcessStartup(
 PVOID
 WINAPI
 BasepIsRealtimeAllowed(IN BOOLEAN Keep);
+
+BOOLEAN
+WINAPI
+BasepIsValidNumaNode(IN ULONG Node);
 
 VOID
 WINAPI
@@ -289,6 +352,18 @@ ULONG
 NTAPI
 BasepAnsiStringToUnicodeSize(IN PANSI_STRING String);
 
+NTSTATUS
+NTAPI
+BasepQueryEnvironmentSizeA(
+    _In_ PCSTR Environment,
+    _Out_ PSIZE_T EnvironmentSize);
+
+NTSTATUS
+NTAPI
+BasepQueryEnvironmentSizeW(
+    _In_ PCWSTR Environment,
+    _Out_ PSIZE_T EnvironmentSize);
+
 extern PRTL_CONVERT_STRING Basep8BitStringToUnicodeString;
 extern PRTL_CONVERT_STRINGA BasepUnicodeStringTo8BitString;
 extern PRTL_COUNT_STRING BasepUnicodeStringTo8BitSize;
@@ -299,7 +374,7 @@ extern HANDLE BaseNamedObjectDirectory;
 
 HANDLE
 WINAPI
-BaseGetNamedObjectDirectory(VOID);
+BasepGetNamedObjectDirectory(VOID);
 
 NTSTATUS
 WINAPI
@@ -316,6 +391,12 @@ BaseComputeProcessDllPath(
     IN LPWSTR FullPath,
     IN PVOID Environment
 );
+
+LPWSTR
+WINAPI
+BaseComputeSecureDllPath(
+    IN LPCWSTR FullPath,
+    IN DWORD Flags);
 
 LPWSTR
 WINAPI
@@ -357,6 +438,44 @@ InitCommandLines(VOID);
 DWORD
 WINAPI
 BaseSetLastNTError(IN NTSTATUS Status);
+
+#ifndef PAGE_ENCLAVE_UNVALIDATED
+#define PAGE_ENCLAVE_UNVALIDATED 0x20000000
+#endif
+
+PVOID
+WINAPI
+BasepOpenEmulatorWork(
+    _In_ HANDLE Process);
+
+VOID
+WINAPI
+BasepCloseEmulatorWork(
+    _In_opt_ PVOID WorkList);
+
+VOID
+WINAPI
+BasepPostEmulatorWork(
+    _In_opt_ PVOID WorkList,
+    _In_ ULONG Id,
+    _In_ PVOID Address,
+    _In_ SIZE_T Size,
+    _In_ ULONG ArgumentCount,
+    _In_ ULONG Argument0,
+    _In_ ULONG Argument1);
+
+NTSTATUS
+WINAPI
+BasepSuspendWow64Thread(
+    _In_ HANDLE Thread,
+    _Out_ PULONG PreviousSuspendCount);
+
+NTSYSAPI
+NTSTATUS
+NTAPI
+RtlWow64SuspendThread(
+    _In_ HANDLE ThreadHandle,
+    _Out_ PULONG PreviousSuspendCount);
 
 VOID
 NTAPI

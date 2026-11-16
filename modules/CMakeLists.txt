@@ -1,19 +1,41 @@
 
 option(ENABLE_ROSAPPS "Enable building the ReactOS extra applications" OFF)
-option(ENABLE_ROSTESTS "Enable building the ReactOS test suite" OFF)
-option(ENABLE_WALLPAPERS "Integrate wallpapers into the built ISOs" OFF)
+option(ENABLE_KMTESTS "Build kernel-mode tests without the full test suite" OFF)
+option(ENABLE_APPSMOKE_TESTS "Build the fast application smoke tests without the full test suite" OFF)
+option(ENABLE_RISCV64_TESTS "Build and package the RISC-V port regression tests" OFF)
+
+if(ENABLE_RISCV64_TESTS)
+    if(NOT ARCH STREQUAL "riscv64")
+        message(FATAL_ERROR "ENABLE_RISCV64_TESTS requires ARCH=riscv64")
+    endif()
+    add_subdirectory(rostests/tests/riscv64)
+endif()
 
 if(ENABLE_ROSAPPS)
     add_subdirectory(rosapps)
 endif()
 
-if(ENABLE_ROSTESTS)
+if(ENABLE_ROSTESTS OR ENABLE_ROSAUTOTEST_BOOT_RUN)
     add_subdirectory(rostests)
+elseif(ENABLE_KMTESTS OR ENABLE_KMTEST_BOOT_RUN)
+    # The boot runner needs the kernel-mode harness, but not the complete
+    # application and Wine test suites.
+    add_subdirectory(rostests/kmtests)
 endif()
 
-if(ENABLE_WALLPAPERS)
-    add_subdirectory(wallpapers)
+if(ENABLE_APPSMOKE_TESTS AND NOT ENABLE_ROSTESTS AND NOT ENABLE_ROSAUTOTEST_BOOT_RUN)
+    add_subdirectory(rostests/apitests/appsmoke)
 endif()
+
+add_subdirectory(wallpapers)
+
+if(ENABLE_ROSV)
+    add_subdirectory(rosv)
+endif()
+
+add_subdirectory(n64emu)
+add_subdirectory(fexbench)
+add_subdirectory(rostests/tests/emulation)
 
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/AHK_Tests/)
     add_subdirectory(AHK_Tests)
@@ -26,7 +48,7 @@ endif()
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/bootcd_extras/)
     file(GLOB_RECURSE EXTRA_FILES RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}/bootcd_extras/ ${CMAKE_CURRENT_SOURCE_DIR}/bootcd_extras/*)
     foreach(item ${EXTRA_FILES})
-        add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcd_extras/${item} DESTINATION extras NO_CAB NAME_ON_CD ${item} FOR bootcd regtest)
+        add_cd_file(FILE ${CMAKE_CURRENT_SOURCE_DIR}/bootcd_extras/${item} DESTINATION extras NO_CAB NAME_ON_CD ${item} FOR bootcd)
     endforeach(item)
 endif()
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/livecd_extras/)
@@ -45,7 +67,6 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/)
 endif()
 
 # Add font file DroidSansFallback.ttf for LiveCD
-# See also boot/bootdata/packages/reactos.dff.in
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/optional/DroidSansFallback.ttf)
-    add_cd_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/optional/DroidSansFallback.ttf" DESTINATION reactos/Fonts FOR livecd)
+    add_cd_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/optional/DroidSansFallback.ttf" DESTINATION reactos/Fonts FOR all)
 endif()

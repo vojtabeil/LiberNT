@@ -25,6 +25,21 @@ extern void ThreadStartupThunk(void*);
 #define KGDT64_R3_CODE          0x0030
 #define KGDT64_R3_CMTEB         0x0050
 
+#ifdef _M_IX86
+static
+BOOLEAN
+IsQemuTcg(VOID)
+{
+    INT CpuInfo[4];
+
+    __cpuid(CpuInfo, 1);
+    if (!(CpuInfo[2] & (1u << 31)))
+        return FALSE;
+    __cpuid(CpuInfo, 0x40000000);
+    return memcmp(&CpuInfo[1], "TCGTCGTCGTCG", 12) == 0;
+}
+#endif
+
 static
 VOID
 InitializeTestContext(PCONTEXT Context)
@@ -151,6 +166,11 @@ START_TEST(NtCreateThread)
 
     ok_hex(Status, STATUS_ACCESS_VIOLATION);
 
+#if !defined(_M_IX86) && !defined(_M_AMD64)
+    skip("No thread startup thunk for this architecture\n");
+    return;
+#endif
+
     InitialTeb.PreviousStackBase = NULL;
     InitialTeb.PreviousStackLimit = NULL;
     InitialTeb.StackBase = StackPtr;
@@ -160,6 +180,9 @@ START_TEST(NtCreateThread)
     TestThreadProcPtr = TestThreadProc;
 
     RtlFillMemory(&TestThreadStartupContext, sizeof(TestThreadStartupContext), 0xCC);
+#ifdef _M_AMD64
+    RtlZeroMemory(&TestThreadStartupContext.FltSave, sizeof(TestThreadStartupContext.FltSave));
+#endif
     InitializeTestContext(&Context);
 
     Status = NtCreateThread(&ThreadHandle,
@@ -224,7 +247,9 @@ START_TEST(NtCreateThread)
     ok_eq_hex(TestThreadStartupContext.FltSave.DataSelector, 0x0000);
     ok_eq_hex(TestThreadStartupContext.FltSave.Reserved3, 0x0000);
     ok_eq_hex(TestThreadStartupContext.FltSave.MxCsr, INITIAL_MXCSR);
-    ok_eq_hex(TestThreadStartupContext.FltSave.MxCsr_Mask, 0x0002FFFF);
+    CONTEXT CurrentContext;
+    RtlCaptureContext(&CurrentContext);
+    ok_eq_hex(TestThreadStartupContext.FltSave.MxCsr_Mask, CurrentContext.FltSave.MxCsr_Mask);
     for (ULONG i = 0; i < ARRAYSIZE(TestThreadStartupContext.FltSave.FloatRegisters); i++)
     {
         ok_eq_hex64(TestThreadStartupContext.FltSave.FloatRegisters[i].Low, 0x0000000000000000ull);
@@ -254,7 +279,10 @@ START_TEST(NtCreateThread)
 
     /* Control */
     ok_eq_hex(TestThreadStartupContext.Esp, Context.Esp);
-    ok_eq_hex(TestThreadStartupContext.EFlags, IsWow64 ? 0x00240ED7 : 0x003C4ED7);
+    if (!IsWow64 && IsQemuTcg())
+        skip("QEMU TCG drops VIF and VIP on a return to user mode\n");
+    else
+        ok_eq_hex(TestThreadStartupContext.EFlags, IsWow64 ? 0x00240ED7 : 0x003C4ED7);
 
     /* Integer (copied) */
     ok_eq_hex(TestThreadStartupContext.Eax, Context.Eax);
@@ -274,13 +302,20 @@ START_TEST(NtCreateThread)
     ok_eq_hex((USHORT)TestThreadStartupContext.SegSs, IsWow64 ? KGDT64_R3_DATA | RPL_MASK : KGDT_R3_DATA | RPL_MASK);
 
     /* Floating point (hardcoded) */
-    ok_eq_hex(TestThreadStartupContext.FloatSave.ControlWord, IsWow64 ? 0x27F : 0xFFFF0A6A);
-    ok_eq_hex(TestThreadStartupContext.FloatSave.StatusWord, IsWow64 ? 0 : 0xFFFF2A2A);
-    ok_eq_hex(TestThreadStartupContext.FloatSave.TagWord, IsWow64 ? 0x0000FFFF : 0xFFFF0000);
-    ok_eq_hex(TestThreadStartupContext.FloatSave.ErrorOffset, IsWow64 ? 0 : 0xAAAAAAAA);
-    ok_eq_hex(TestThreadStartupContext.FloatSave.ErrorSelector, IsWow64 ? 0 : 0x02AAAAAA);
-    ok_eq_hex(TestThreadStartupContext.FloatSave.DataOffset, IsWow64 ? 0 : 0xAAAAAAAA);
-    ok_eq_hex(TestThreadStartupContext.FloatSave.DataSelector, IsWow64 ? 0 : 0xFFFFAAAA);
+    if (!IsWow64 && IsQemuTcg())
+    {
+        skip("QEMU TCG does not mask the x87 control word or store the FNSAVE upper halves and pointers\n");
+    }
+    else
+    {
+        ok_eq_hex(TestThreadStartupContext.FloatSave.ControlWord, IsWow64 ? 0x27F : 0xFFFF0A6A);
+        ok_eq_hex(TestThreadStartupContext.FloatSave.StatusWord, IsWow64 ? 0 : 0xFFFF2A2A);
+        ok_eq_hex(TestThreadStartupContext.FloatSave.TagWord, IsWow64 ? 0x0000FFFF : 0xFFFF0000);
+        ok_eq_hex(TestThreadStartupContext.FloatSave.ErrorOffset, IsWow64 ? 0 : 0xAAAAAAAA);
+        ok_eq_hex(TestThreadStartupContext.FloatSave.ErrorSelector, IsWow64 ? 0 : 0x02AAAAAA);
+        ok_eq_hex(TestThreadStartupContext.FloatSave.DataOffset, IsWow64 ? 0 : 0xAAAAAAAA);
+        ok_eq_hex(TestThreadStartupContext.FloatSave.DataSelector, IsWow64 ? 0 : 0xFFFFAAAA);
+    }
 
     /* Debug registers (reset to 0) */
     ok_eq_hex(TestThreadStartupContext.Dr0, 0x00000000);
@@ -342,4 +377,67 @@ START_TEST(NtCreateThread)
                             FALSE);
     ok_eq_hex(Status, (GetNTVersion() >= _WIN32_WINNT_WIN10) ? STATUS_NOT_SUPPORTED : STATUS_SUCCESS);
 #endif
+}
+
+typedef struct _NATIVE_THREAD_WIN32_RESULT
+{
+    BOOL Created;
+    DWORD Error;
+    DWORD Wait;
+    DWORD ExitCode;
+} NATIVE_THREAD_WIN32_RESULT;
+
+static DWORD WINAPI
+NativeThreadWin32Child(PVOID Parameter)
+{
+    UNREFERENCED_PARAMETER(Parameter);
+    return 37;
+}
+
+static ULONG NTAPI
+NativeThreadWin32Start(PVOID Parameter)
+{
+    NATIVE_THREAD_WIN32_RESULT *Result = Parameter;
+    HANDLE Thread;
+
+    Thread = CreateThread(NULL, 0, NativeThreadWin32Child, NULL, 0, NULL);
+    Result->Created = Thread != NULL;
+    Result->Error = GetLastError();
+    if (Thread)
+    {
+        Result->Wait = WaitForSingleObject(Thread, 5000);
+        GetExitCodeThread(Thread, &Result->ExitCode);
+        CloseHandle(Thread);
+    }
+
+    RtlExitUserThread(0);
+    return 0;
+}
+
+START_TEST(NtCreateThreadWin32)
+{
+    /* Static storage also survives an unexpected timeout in the worker. */
+    static NATIVE_THREAD_WIN32_RESULT Result;
+    HANDLE Thread;
+    NTSTATUS Status;
+    DWORD Wait;
+    UINT Iteration;
+
+    for (Iteration = 0; Iteration < 8; ++Iteration)
+    {
+        ZeroMemory(&Result, sizeof(Result));
+        Result.Wait = WAIT_FAILED;
+        Status = RtlCreateUserThread(NtCurrentProcess(), NULL, FALSE, 0, 0, 0, NativeThreadWin32Start, &Result, &Thread, NULL);
+        ok_hex(Status, STATUS_SUCCESS);
+        if (!NT_SUCCESS(Status)) return;
+
+        Wait = WaitForSingleObject(Thread, 10000);
+        CloseHandle(Thread);
+        ok(Wait == WAIT_OBJECT_0, "iteration %u: native thread wait %lu\n", Iteration, Wait);
+        if (Wait != WAIT_OBJECT_0) return;
+
+        ok(Result.Created, "iteration %u: CreateThread failed in native thread: %lu\n", Iteration, Result.Error);
+        ok(Result.Wait == WAIT_OBJECT_0, "iteration %u: child wait %lu\n", Iteration, Result.Wait);
+        ok(Result.ExitCode == 37, "iteration %u: child exit %lu\n", Iteration, Result.ExitCode);
+    }
 }

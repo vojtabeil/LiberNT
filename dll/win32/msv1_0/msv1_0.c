@@ -12,6 +12,17 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(msv1_0);
 
+typedef struct _LSA_TOKEN_INFORMATION_V1
+{
+    LARGE_INTEGER ExpirationTime;
+    TOKEN_USER User;
+    PTOKEN_GROUPS Groups;
+    TOKEN_PRIMARY_GROUP PrimaryGroup;
+    PTOKEN_PRIVILEGES Privileges;
+    TOKEN_OWNER Owner;
+    TOKEN_DEFAULT_DACL DefaultDacl;
+} LSA_TOKEN_INFORMATION_V1, *PLSA_TOKEN_INFORMATION_V1;
+
 typedef struct _LOGON_LIST_ENTRY
 {
     LIST_ENTRY ListEntry;
@@ -29,6 +40,7 @@ BOOL PackageInitialized = FALSE;
 LIST_ENTRY LogonListHead;
 RTL_RESOURCE LogonListResource;
 ULONG EnumCounter;
+static PLSA_GET_CLIENT_INFO LsaGetClientInfo;
 
 /* FUNCTIONS ***************************************************************/
 
@@ -580,28 +592,14 @@ MsvpChangePassword(IN PLSA_CLIENT_REQUEST ClientRequest,
     ULONG_PTR PtrOffset;
 
     SAMPR_HANDLE ServerHandle = NULL;
-    SAMPR_HANDLE DomainHandle = NULL;
-    SAMPR_HANDLE UserHandle = NULL;
     PRPC_SID DomainSid = NULL;
-    RPC_UNICODE_STRING Names[1];
-    SAMPR_ULONG_ARRAY RelativeIds = {0, NULL};
-    SAMPR_ULONG_ARRAY Use = {0, NULL};
-
+    SAMPR_ENCRYPTED_USER_PASSWORD PasswordBuffer;
     ENCRYPTED_NT_OWF_PASSWORD OldNtPassword;
     ENCRYPTED_NT_OWF_PASSWORD NewNtPassword;
-    ENCRYPTED_LM_OWF_PASSWORD OldLmPassword;
-    ENCRYPTED_LM_OWF_PASSWORD NewLmPassword;
-    OEM_STRING LmPwdString;
-    CHAR LmPwdBuffer[15];
-    BOOLEAN OldLmPasswordPresent = FALSE;
-    BOOLEAN NewLmPasswordPresent = FALSE;
-
-    ENCRYPTED_LM_OWF_PASSWORD OldLmEncryptedWithNewLm;
-    ENCRYPTED_LM_OWF_PASSWORD NewLmEncryptedWithOldLm;
-    ENCRYPTED_LM_OWF_PASSWORD OldNtEncryptedWithNewNt;
-    ENCRYPTED_LM_OWF_PASSWORD NewNtEncryptedWithOldNt;
-    PENCRYPTED_LM_OWF_PASSWORD pOldLmEncryptedWithNewLm = NULL;
-    PENCRYPTED_LM_OWF_PASSWORD pNewLmEncryptedWithOldLm = NULL;
+    ENCRYPTED_NT_OWF_PASSWORD OldNtEncryptedWithNewNt;
+    struct ustring Data;
+    struct ustring Key;
+    ULONG PasswordLength;
 
     TRACE("MsvpChangePassword()\n");
 
@@ -647,212 +645,91 @@ MsvpChangePassword(IN PLSA_CLIENT_REQUEST ClientRequest,
     RequestBuffer->NewPassword.Buffer = FIXUP_POINTER(RequestBuffer->NewPassword.Buffer, PtrOffset);
     RequestBuffer->NewPassword.MaximumLength = RequestBuffer->NewPassword.Length;
 
-    TRACE("Domain: %S\n", RequestBuffer->DomainName.Buffer);
-    TRACE("Account: %S\n", RequestBuffer->AccountName.Buffer);
-    TRACE("Old Password: %S\n", RequestBuffer->OldPassword.Buffer);
-    TRACE("New Password: %S\n", RequestBuffer->NewPassword.Buffer);
+    TRACE("Domain: %wZ\n", &RequestBuffer->DomainName);
+    TRACE("Account: %wZ\n", &RequestBuffer->AccountName);
 
-    /* Connect to the SAM server */
-    Status = SamIConnect(NULL,
-                         &ServerHandle,
-                         SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
-                         TRUE);
-    if (!NT_SUCCESS(Status))
+    if (RequestBuffer->NewPassword.Length > 256 * sizeof(WCHAR))
+        return STATUS_PASSWORD_RESTRICTION;
+
+    if (RequestBuffer->DomainName.Length != 0)
     {
-        TRACE("SamIConnect() failed (Status 0x%08lx)\n", Status);
-        goto done;
+        Status = SamIConnect(NULL,
+                             &ServerHandle,
+                             SAM_SERVER_CONNECT | SAM_SERVER_LOOKUP_DOMAIN,
+                             TRUE);
+        if (!NT_SUCCESS(Status))
+        {
+            TRACE("SamIConnect() failed (Status 0x%08lx)\n", Status);
+            goto done;
+        }
+
+        Status = SamrLookupDomainInSamServer(ServerHandle,
+                                             (PRPC_UNICODE_STRING)&RequestBuffer->DomainName,
+                                             &DomainSid);
+        if (!NT_SUCCESS(Status))
+        {
+            TRACE("SamrLookupDomainInSamServer failed (Status %08lx)\n", Status);
+            goto done;
+        }
     }
 
-    /* Get the domain SID */
-    Status = SamrLookupDomainInSamServer(ServerHandle,
-                                         (PRPC_UNICODE_STRING)&RequestBuffer->DomainName,
-                                         &DomainSid);
-    if (!NT_SUCCESS(Status))
-    {
-        TRACE("SamrLookupDomainInSamServer failed (Status %08lx)\n", Status);
-        goto done;
-    }
-
-    /* Open the domain */
-    Status = SamrOpenDomain(ServerHandle,
-                            DOMAIN_LOOKUP,
-                            DomainSid,
-                            &DomainHandle);
-    if (!NT_SUCCESS(Status))
-    {
-        TRACE("SamrOpenDomain failed (Status %08lx)\n", Status);
-        goto done;
-    }
-
-    Names[0].Length = RequestBuffer->AccountName.Length;
-    Names[0].MaximumLength = RequestBuffer->AccountName.MaximumLength;
-    Names[0].Buffer = RequestBuffer->AccountName.Buffer;
-
-    /* Try to get the RID for the user name */
-    Status = SamrLookupNamesInDomain(DomainHandle,
-                                     1,
-                                     Names,
-                                     &RelativeIds,
-                                     &Use);
-    if (!NT_SUCCESS(Status))
-    {
-        TRACE("SamrLookupNamesInDomain failed (Status %08lx)\n", Status);
-        Status = STATUS_NO_SUCH_USER;
-        goto done;
-    }
-
-    /* Fail, if it is not a user account */
-    if (Use.Element[0] != SidTypeUser)
-    {
-        TRACE("Account is not a user account!\n");
-        Status = STATUS_NO_SUCH_USER;
-        goto done;
-    }
-
-    /* Open the user object */
-    Status = SamrOpenUser(DomainHandle,
-                          USER_CHANGE_PASSWORD,
-                          RelativeIds.Element[0],
-                          &UserHandle);
-    if (!NT_SUCCESS(Status))
-    {
-        TRACE("SamrOpenUser failed (Status %08lx)\n", Status);
-        goto done;
-    }
-
-
-    /* Calculate the NT hash for the old password */
     Status = SystemFunction007(&RequestBuffer->OldPassword,
                                (LPBYTE)&OldNtPassword);
     if (!NT_SUCCESS(Status))
-    {
-        TRACE("SystemFunction007 failed (Status 0x%08lx)\n", Status);
         goto done;
-    }
 
-    /* Calculate the NT hash for the new password */
     Status = SystemFunction007(&RequestBuffer->NewPassword,
                                (LPBYTE)&NewNtPassword);
     if (!NT_SUCCESS(Status))
+        goto done;
+
+    if (!RtlGenRandom(PasswordBuffer.Buffer, sizeof(PasswordBuffer.Buffer)))
     {
-        TRACE("SystemFunction007 failed (Status 0x%08lx)\n", Status);
+        Status = STATUS_INTERNAL_ERROR;
         goto done;
     }
 
-    /* Calculate the LM password and hash for the old password */
-    LmPwdString.Length = 15;
-    LmPwdString.MaximumLength = 15;
-    LmPwdString.Buffer = LmPwdBuffer;
-    ZeroMemory(LmPwdString.Buffer, LmPwdString.MaximumLength);
+    PasswordLength = RequestBuffer->NewPassword.Length;
+    RtlCopyMemory(&PasswordBuffer.Buffer[256 * sizeof(WCHAR) - PasswordLength],
+                  RequestBuffer->NewPassword.Buffer,
+                  PasswordLength);
+    RtlCopyMemory(&PasswordBuffer.Buffer[256 * sizeof(WCHAR)],
+                  &PasswordLength,
+                  sizeof(ULONG));
 
-    Status = RtlUpcaseUnicodeStringToOemString(&LmPwdString,
-                                               &RequestBuffer->OldPassword,
-                                               FALSE);
-    if (NT_SUCCESS(Status))
-    {
-        /* Calculate the LM hash value of the password */
-        Status = SystemFunction006(LmPwdString.Buffer,
-                                   (LPSTR)&OldLmPassword);
-        if (NT_SUCCESS(Status))
-        {
-            OldLmPasswordPresent = TRUE;
-        }
-    }
+    Data.Length = sizeof(PasswordBuffer.Buffer);
+    Data.MaximumLength = sizeof(PasswordBuffer.Buffer);
+    Data.Buffer = PasswordBuffer.Buffer;
+    Key.Length = sizeof(OldNtPassword);
+    Key.MaximumLength = sizeof(OldNtPassword);
+    Key.Buffer = (unsigned char *)&OldNtPassword;
 
-    /* Calculate the LM password and hash for the new password */
-    LmPwdString.Length = 15;
-    LmPwdString.MaximumLength = 15;
-    LmPwdString.Buffer = LmPwdBuffer;
-    ZeroMemory(LmPwdString.Buffer, LmPwdString.MaximumLength);
+    Status = SystemFunction032(&Data, &Key);
+    if (!NT_SUCCESS(Status))
+        goto done;
 
-    Status = RtlUpcaseUnicodeStringToOemString(&LmPwdString,
-                                               &RequestBuffer->NewPassword,
-                                               FALSE);
-    if (NT_SUCCESS(Status))
-    {
-        /* Calculate the LM hash value of the password */
-        Status = SystemFunction006(LmPwdString.Buffer,
-                                   (LPSTR)&NewLmPassword);
-        if (NT_SUCCESS(Status))
-        {
-            NewLmPasswordPresent = TRUE;
-        }
-    }
-
-    /* Encrypt the old and new LM passwords, if they exist */
-    if (OldLmPasswordPresent && NewLmPasswordPresent)
-    {
-        /* Encrypt the old LM password */
-        Status = SystemFunction012((const BYTE *)&OldLmPassword,
-                                   (const BYTE *)&NewLmPassword,
-                                   (LPBYTE)&OldLmEncryptedWithNewLm);
-        if (!NT_SUCCESS(Status))
-        {
-            TRACE("SystemFunction012 failed (Status 0x%08lx)\n", Status);
-            goto done;
-        }
-
-        /* Encrypt the new LM password */
-        Status = SystemFunction012((const BYTE *)&NewLmPassword,
-                                   (const BYTE *)&OldLmPassword,
-                                   (LPBYTE)&NewLmEncryptedWithOldLm);
-        if (!NT_SUCCESS(Status))
-        {
-            TRACE("SystemFunction012 failed (Status 0x%08lx)\n", Status);
-            goto done;
-        }
-
-        pOldLmEncryptedWithNewLm = &OldLmEncryptedWithNewLm;
-        pNewLmEncryptedWithOldLm = &NewLmEncryptedWithOldLm;
-    }
-
-    /* Encrypt the old NT password */
     Status = SystemFunction012((const BYTE *)&OldNtPassword,
                                (const BYTE *)&NewNtPassword,
                                (LPBYTE)&OldNtEncryptedWithNewNt);
     if (!NT_SUCCESS(Status))
-    {
-        TRACE("SystemFunction012 failed (Status 0x%08lx)\n", Status);
         goto done;
-    }
 
-    /* Encrypt the new NT password */
-    Status = SystemFunction012((const BYTE *)&NewNtPassword,
-                               (const BYTE *)&OldNtPassword,
-                               (LPBYTE)&NewNtEncryptedWithOldNt);
+    Status = SamrUnicodeChangePasswordUser2(NULL,
+                                            NULL,
+                                            (PRPC_UNICODE_STRING)&RequestBuffer->AccountName,
+                                            &PasswordBuffer,
+                                            &OldNtEncryptedWithNewNt,
+                                            FALSE,
+                                            NULL,
+                                            NULL);
     if (!NT_SUCCESS(Status))
-    {
-        TRACE("SystemFunction012 failed (Status 0x%08lx)\n", Status);
-        goto done;
-    }
-
-    /* Change the password */
-    Status = SamrChangePasswordUser(UserHandle,
-                                    OldLmPasswordPresent && NewLmPasswordPresent,
-                                    pOldLmEncryptedWithNewLm,
-                                    pNewLmEncryptedWithOldLm,
-                                    TRUE,
-                                    &OldNtEncryptedWithNewNt,
-                                    &NewNtEncryptedWithOldNt,
-                                    FALSE,
-                                    NULL,
-                                    FALSE,
-                                    NULL);
-    if (!NT_SUCCESS(Status))
-    {
-        TRACE("SamrChangePasswordUser failed (Status %08lx)\n", Status);
-        goto done;
-    }
+        TRACE("SamrUnicodeChangePasswordUser2 failed (Status %08lx)\n", Status);
 
 done:
-    if (UserHandle != NULL)
-        SamrCloseHandle(&UserHandle);
-
-    SamIFree_SAMPR_ULONG_ARRAY(&RelativeIds);
-    SamIFree_SAMPR_ULONG_ARRAY(&Use);
-
-    if (DomainHandle != NULL)
-        SamrCloseHandle(&DomainHandle);
+    RtlSecureZeroMemory(&PasswordBuffer, sizeof(PasswordBuffer));
+    RtlSecureZeroMemory(&OldNtPassword, sizeof(OldNtPassword));
+    RtlSecureZeroMemory(&NewNtPassword, sizeof(NewNtPassword));
+    RtlSecureZeroMemory(&OldNtEncryptedWithNewNt, sizeof(OldNtEncryptedWithNewNt));
 
     if (DomainSid != NULL)
         SamIFreeVoid(DomainSid);
@@ -1391,6 +1268,7 @@ LsaApInitializePackage(IN ULONG AuthenticationPackageId,
         InitializeListHead(&LogonListHead);
         RtlInitializeResource(&LogonListResource);
         EnumCounter = 0;
+        NtlmMode = NtlmLsaMode;
         PackageInitialized = TRUE;
     }
 
@@ -1406,6 +1284,7 @@ LsaApInitializePackage(IN ULONG AuthenticationPackageId,
     DispatchTable.FreeClientBuffer = LsaDispatchTable->FreeClientBuffer;
     DispatchTable.CopyToClientBuffer = LsaDispatchTable->CopyToClientBuffer;
     DispatchTable.CopyFromClientBuffer = LsaDispatchTable->CopyFromClientBuffer;
+    LsaGetClientInfo = ((PLSA_SECPKG_FUNCTION_TABLE)LsaDispatchTable)->GetClientInfo;
 
     /* Return the package name */
     NameString = DispatchTable.AllocateLsaHeap(sizeof(LSA_STRING));
@@ -1463,6 +1342,25 @@ LsaApLogonTerminated(
 }
 
 
+static
+BOOLEAN
+MsvpIsInSubmitBuffer(
+    _In_ PVOID SubmitBuffer,
+    _In_ ULONG SubmitBufferSize,
+    _In_opt_ PVOID Data,
+    _In_ ULONG Length)
+{
+    ULONG_PTR Start = (ULONG_PTR)SubmitBuffer;
+    ULONG_PTR Address = (ULONG_PTR)Data;
+
+    if (Length == 0)
+        return TRUE;
+
+    return Address >= Start &&
+           Address - Start <= SubmitBufferSize &&
+           Length <= SubmitBufferSize - (Address - Start);
+}
+
 /*
  * Handle Network logon
  */
@@ -1510,6 +1408,30 @@ LsaApLogonUserEx2_Network(
         (!NtlmFixupAndValidateUStr(&LogonInfo->Workstation, PtrOffset)) ||
         (!NtlmFixupAStr(&LogonInfo->CaseSensitiveChallengeResponse, PtrOffset)) ||
         (!NtlmFixupAStr(&LogonInfo->CaseInsensitiveChallengeResponse, PtrOffset)))
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (!MsvpIsInSubmitBuffer(ProtocolSubmitBuffer,
+                              SubmitBufferSize,
+                              LogonInfo->LogonDomainName.Buffer,
+                              LogonInfo->LogonDomainName.Length) ||
+        !MsvpIsInSubmitBuffer(ProtocolSubmitBuffer,
+                              SubmitBufferSize,
+                              LogonInfo->UserName.Buffer,
+                              LogonInfo->UserName.Length) ||
+        !MsvpIsInSubmitBuffer(ProtocolSubmitBuffer,
+                              SubmitBufferSize,
+                              LogonInfo->Workstation.Buffer,
+                              LogonInfo->Workstation.Length) ||
+        !MsvpIsInSubmitBuffer(ProtocolSubmitBuffer,
+                              SubmitBufferSize,
+                              LogonInfo->CaseSensitiveChallengeResponse.Buffer,
+                              LogonInfo->CaseSensitiveChallengeResponse.Length) ||
+        !MsvpIsInSubmitBuffer(ProtocolSubmitBuffer,
+                              SubmitBufferSize,
+                              LogonInfo->CaseInsensitiveChallengeResponse.Buffer,
+                              LogonInfo->CaseInsensitiveChallengeResponse.Length))
     {
         return STATUS_INVALID_PARAMETER;
     }
@@ -1579,7 +1501,8 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     UNICODE_STRING ComputerName;
     WCHAR ComputerNameData[MAX_COMPUTERNAME_LENGTH + 1];
     PUNICODE_STRING LogonUserName = NULL;
-    LSA_SAM_PWD_DATA LogonPwdData = { FALSE, NULL };
+    LSA_SAM_PWD_DATA LogonPwdData = { FALSE, FALSE, NULL };
+    SECPKG_CLIENT_INFO ClientInfo;
     PUNICODE_STRING LogonDomain = NULL;
     SAMPR_HANDLE UserHandle = NULL;
     PRPC_SID AccountDomainSid = NULL;
@@ -1590,6 +1513,8 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     UCHAR LogonPassHash;
     PUNICODE_STRING ErasePassword = NULL;
     PLOGON_LIST_ENTRY LogonEntry = NULL;
+    BOOLEAN WellKnownLogon = FALSE, ExistingLogon = FALSE;
+    BOOLEAN PlainNetwork;
 
     TRACE("LsaApLogonUserEx2()\n");
 
@@ -1612,10 +1537,16 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     }
     RtlInitUnicodeString(&ComputerName, ComputerNameData);
 
+    PlainNetwork = LogonType == Network &&
+                   SubmitBufferSize >= sizeof(MSV1_0_INTERACTIVE_LOGON) &&
+                   ((PMSV1_0_INTERACTIVE_LOGON)ProtocolSubmitBuffer)->MessageType == MsV1_0InteractiveLogon;
+
     /* Parameters validation */
     if (LogonType == Interactive ||
         LogonType == Batch ||
-        LogonType == Service)
+        LogonType == Service ||
+        LogonType == Unlock ||
+        PlainNetwork)
     {
         PMSV1_0_INTERACTIVE_LOGON LogonInfo;
         ULONG_PTR PtrOffset;
@@ -1719,9 +1650,13 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
         LogonPwdData.PlainPwd = &LogonInfo->Password;
         LogonPwdData.ComputerName = &ComputerName;
 
+        if (!PlainNetwork &&
+            (LsaGetClientInfo != NULL) &&
+            NT_SUCCESS(LsaGetClientInfo(&ClientInfo)))
+            LogonPwdData.TrustedClient = ClientInfo.HasTcbPrivilege;
+
         TRACE("Domain: %wZ\n", &LogonInfo->LogonDomainName);
         TRACE("User: %wZ\n", &LogonInfo->UserName);
-        TRACE("Password: %wZ\n", &LogonInfo->Password);
 
         // TODO: If LogonType == Service, do some extra work using LogonInfo->Password.
     }
@@ -1752,40 +1687,65 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
     }
     // TODO: Add other LogonType validity checks.
 
-    Status = SamValidateUser(LogonType,
-                             LogonUserName,
-                             LogonDomain,
-                             &LogonPwdData,
-                             &ComputerName,
-                             &SpecialAccount,
-                             &AccountDomainSid,
-                             &UserHandle,
-                             &UserInfo,
-                             SubStatus);
-    if (!NT_SUCCESS(Status))
-        goto done;
+    if (LogonType != Network || PlainNetwork)
+    {
+        Status = SamValidateUser(LogonType,
+                                 LogonUserName,
+                                 LogonDomain,
+                                 &LogonPwdData,
+                                 &ComputerName,
+                                 &SpecialAccount,
+                                 &AccountDomainSid,
+                                 &UserHandle,
+                                 &UserInfo,
+                                 SubStatus);
+        if (!NT_SUCCESS(Status))
+            goto done;
+    }
 
     /* Return logon information */
 
-    /* Create and return a new logon id */
-    Status = NtAllocateLocallyUniqueId(LogonId);
-    if (!NT_SUCCESS(Status))
+    if (SpecialAccount && UserInfo->All.UserId == SECURITY_LOCAL_SERVICE_RID)
     {
-        TRACE("NtAllocateLocallyUniqueId failed (Status %08lx)\n", Status);
-        goto done;
+        LUID ServiceLuid = LOCALSERVICE_LUID;
+
+        *LogonId = ServiceLuid;
+        WellKnownLogon = TRUE;
+    }
+    else if (SpecialAccount && UserInfo->All.UserId == SECURITY_NETWORK_SERVICE_RID)
+    {
+        LUID ServiceLuid = NETWORKSERVICE_LUID;
+
+        *LogonId = ServiceLuid;
+        WellKnownLogon = TRUE;
+    }
+    else
+    {
+        /* Create and return a new logon id */
+        Status = NtAllocateLocallyUniqueId(LogonId);
+        if (!NT_SUCCESS(Status))
+        {
+            TRACE("NtAllocateLocallyUniqueId failed (Status %08lx)\n", Status);
+            goto done;
+        }
     }
 
     /* Create the logon session */
     Status = DispatchTable.CreateLogonSession(LogonId);
+    if (WellKnownLogon && Status == STATUS_LOGON_SESSION_COLLISION)
+    {
+        ExistingLogon = TRUE;
+        Status = STATUS_SUCCESS;
+    }
     if (!NT_SUCCESS(Status))
     {
         TRACE("CreateLogonSession failed (Status %08lx)\n", Status);
         goto done;
     }
 
-    SessionCreated = TRUE;
+    SessionCreated = !ExistingLogon;
 
-    LogonEntry = RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(LOGON_LIST_ENTRY));
+    LogonEntry = ExistingLogon ? NULL : RtlAllocateHeap(RtlGetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(LOGON_LIST_ENTRY));
     if (LogonEntry)
     {
         RtlCopyMemory(&LogonEntry->LogonId, LogonId, sizeof(LUID));
@@ -1821,7 +1781,7 @@ LsaApLogonUserEx2(IN PLSA_CLIENT_REQUEST ClientRequest,
         RtlReleaseResource(&LogonListResource);
     }
 
-    if (LogonType == Interactive || LogonType == Batch || LogonType == Service)
+    if (LogonType == Interactive || LogonType == Batch || LogonType == Service || LogonType == Unlock)
     {
         /* Build and fill the interactive profile buffer */
         Status = BuildInteractiveProfileBuffer(ClientRequest,
@@ -1952,7 +1912,7 @@ done:
     if (Status == STATUS_NO_SUCH_USER ||
         Status == STATUS_WRONG_PASSWORD)
     {
-        *SubStatus = Status;
+        *SubStatus = (LogonType == Network || LogonPwdData.TrustedClient) ? Status : STATUS_SUCCESS;
         Status = STATUS_LOGON_FAILURE;
     }
 

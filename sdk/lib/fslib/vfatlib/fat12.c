@@ -196,6 +196,7 @@ Fat12WriteRootDirectory(IN HANDLE FileHandle,
 
     /* Zero the buffer */
     RtlZeroMemory(Buffer, 32 * 1024);
+    FatSetVolumeLabelEntry(Buffer, BootSector->VolumeLabel);
 
     Sectors = 32 * 1024 / BootSector->BytesPerSector;
     for (i = 0; i < RootDirSectors; i += Sectors)
@@ -224,6 +225,8 @@ Fat12WriteRootDirectory(IN HANDLE FileHandle,
             DPRINT("NtWriteFile() failed (Status %lx)\n", Status);
             goto done;
         }
+
+        RtlZeroMemory(Buffer, 32);
 
         UpdateProgress(Context, Sectors);
     }
@@ -294,13 +297,13 @@ Fat12Format(IN HANDLE FileHandle,
     BootSector.Drive = (DiskGeometry->MediaType == FixedMedia) ? 0x80 : 0x00;
     BootSector.ExtBootSignature = 0x29;
     BootSector.VolumeID = CalcVolumeSerialNumber();
-    if ((Label == NULL) || (Label->Buffer == NULL))
+    if ((Label == NULL) || (Label->Buffer == NULL) || (Label->Length == 0))
     {
         memcpy(&BootSector.VolumeLabel[0], "NO NAME    ", 11);
     }
     else
     {
-        RtlUnicodeStringToOemString(&VolumeLabel, Label, TRUE);
+        RtlUpcaseUnicodeStringToOemString(&VolumeLabel, Label, TRUE);
         RtlFillMemory(&BootSector.VolumeLabel[0], 11, ' ');
         memcpy(&BootSector.VolumeLabel[0], VolumeLabel.Buffer,
                VolumeLabel.Length < 11 ? VolumeLabel.Length : 11);

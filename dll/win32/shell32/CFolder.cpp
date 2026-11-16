@@ -41,6 +41,18 @@ CFolder::~CFolder()
 {
 }
 
+HRESULT CFolder::CreateInstance(LPCITEMIDLIST pidl, IDispatch *pDispatch, REFIID riid, void **ppv)
+{
+    return ShellObjectCreatorInit<CFolder>(pidl, pDispatch, riid, ppv);
+}
+
+HRESULT CFolder::CreateInstance(LPCITEMIDLIST pidl, Folder &Instance, REFIID riid, void **ppv)
+{
+    CComPtr<IDispatch> pDisp;
+    HRESULT hr = Instance.get_Application(&pDisp);
+    return SUCCEEDED(hr) ? CreateInstance(pidl, pDisp, riid, ppv) : hr;
+}
+
 HRESULT CFolder::Initialize(LPCITEMIDLIST idlist, IDispatch *pDispatch)
 {
     m_Application = pDispatch;
@@ -72,6 +84,14 @@ HRESULT STDMETHODCALLTYPE CFolder::get_Application(IDispatch **ppid)
 
     if (!ppid)
         return E_INVALIDARG;
+    *ppid = NULL;
+
+    if (!m_Application)
+    {
+        HRESULT hr = CShellDispatch_Constructor(IID_PPV_ARG(IDispatch, &m_Application));
+        if (FAILED_UNEXPECTEDLY(hr))
+            return hr;
+    }
 
     *ppid = m_Application;
     (*ppid)->AddRef();
@@ -135,8 +155,9 @@ HRESULT STDMETHODCALLTYPE CFolder::ParseName(BSTR bName, FolderItem **ppid)
     if (FAILED(hr = SHILCloneParent((LPCITEMIDLIST)combined, &parentPidl)))
         return hr;
     CComPtr<Folder> pParent; // The parent Folder of the thing we just parsed
-    hr = CFolder::CreateInstance(parentPidl, m_Application, IID_PPV_ARG(Folder, &pParent));
-    if (FAILED(hr))
+    if (ILIsEmpty(ILGetNext(relativePidl)))
+        pParent = static_cast<Folder*>(this);
+    else if (FAILED(hr = CFolder::CreateInstance(parentPidl, m_Application, IID_PPV_ARG(Folder, &pParent))))
         return hr;
 
     return ShellObjectCreatorInit<CFolderItem>(pParent, static_cast<LPITEMIDLIST>(combined), IID_PPV_ARG(FolderItem, ppid));

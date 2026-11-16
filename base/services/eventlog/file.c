@@ -396,6 +396,23 @@ LogfCreate(PLOGFILE* LogFile,
                            LogfpWriteFile,
                            LogfpReadFile,
                            LogfpFlushFile);
+    if (Status == STATUS_EVENTLOG_FILE_CORRUPT && !Backup)
+    {
+        DPRINT1("EventLog: Log `%wZ' is corrupt and will be cleared.\n", FileName);
+        Status = ElfCreateFile(&pLogFile->LogFile,
+                               FileName,
+                               FileStdInfo.EndOfFile.LowPart,
+                               MaxSize,
+                               Retention,
+                               TRUE,
+                               Backup,
+                               LogfpAlloc,
+                               LogfpFree,
+                               LogfpSetFileSize,
+                               LogfpWriteFile,
+                               LogfpReadFile,
+                               LogfpFlushFile);
+    }
     if (!NT_SUCCESS(Status))
         goto Quit;
 
@@ -650,7 +667,7 @@ ReadRecord(IN  PEVTLOGFILE LogFile,
     }
 
     /* Add the padding and the User SID */
-    dwPadding = sizeof(ULONG) - (((ULONG_PTR)DstPtr - (ULONG_PTR)Dst) % sizeof(ULONG));
+    dwPadding = ROUND_UP((ULONG_PTR)DstPtr - (ULONG_PTR)Dst, 2 * sizeof(ULONG)) - ((ULONG_PTR)DstPtr - (ULONG_PTR)Dst);
     RtlZeroMemory(DstPtr, dwPadding);
 
     SrcPtr = (PVOID)((ULONG_PTR)Src + Src->UserSidOffset);
@@ -794,7 +811,7 @@ LogfReadEvents(PLOGFILE LogFile,
         {
             if (BufferUsage == 0)
             {
-                Status = STATUS_END_OF_FILE;
+                Status = (Flags & EVENTLOG_SEEK_READ) ? STATUS_INVALID_PARAMETER : STATUS_END_OF_FILE;
                 goto Quit;
             }
             else
@@ -921,7 +938,7 @@ LogfAllocAndBuildNewRecord(PSIZE_T pRecSize,
         SourceNameSize + ComputerNameSize + 2*sizeof(UNICODE_NULL);
 
     /* Align on DWORD boundary for the SID */
-    RecSize = ROUND_UP(RecSize, sizeof(ULONG));
+    RecSize = ROUND_UP(RecSize, 2 * sizeof(ULONG));
 
     RecSize += dwSidLength;
 
@@ -939,7 +956,7 @@ LogfAllocAndBuildNewRecord(PSIZE_T pRecSize,
     RecSize += dwDataSize;
 
     /* Align on DWORD boundary for the full structure */
-    RecSize = ROUND_UP(RecSize, sizeof(ULONG));
+    RecSize += sizeof(ULONG) - (RecSize % sizeof(ULONG));
 
     /* Size of the trailing 'Length' member */
     RecSize += sizeof(ULONG);
@@ -991,15 +1008,14 @@ LogfAllocAndBuildNewRecord(PSIZE_T pRecSize,
     pos += ComputerNameSize + sizeof(UNICODE_NULL);
 
     /* Align on DWORD boundary for the SID */
-    pos = ROUND_UP(pos, sizeof(ULONG));
+    pos = ROUND_UP(pos, 2 * sizeof(ULONG));
 
     pRec->UserSidLength = 0;
-    pRec->UserSidOffset = 0;
+    pRec->UserSidOffset = pos;
     if (dwSidLength)
     {
         RtlCopyMemory(Buffer + pos, pUserSid, dwSidLength);
         pRec->UserSidLength = dwSidLength;
-        pRec->UserSidOffset = pos;
         pos += dwSidLength;
     }
 
@@ -1014,17 +1030,16 @@ LogfAllocAndBuildNewRecord(PSIZE_T pRecSize,
     pRec->NumStrings = wNumStrings;
 
     pRec->DataLength = 0;
-    pRec->DataOffset = 0;
+    pRec->DataOffset = pos;
     if (dwDataSize)
     {
         RtlCopyMemory(Buffer + pos, pRawData, dwDataSize);
         pRec->DataLength = dwDataSize;
-        pRec->DataOffset = pos;
         pos += dwDataSize;
     }
 
     /* Align on DWORD boundary for the full structure */
-    pos = ROUND_UP(pos, sizeof(ULONG));
+    pos += sizeof(ULONG) - (pos % sizeof(ULONG));
 
     /* Initialize the trailing 'Length' member */
     *((PDWORD)(Buffer + pos)) = RecSize;

@@ -219,7 +219,16 @@ NTSTATUS SdbpOpenKey(PUNICODE_STRING FullPath, BOOL bMachine, ACCESS_MASK Access
     Status = NtOpenKey(KeyHandle, Access | Wow64QueryFlag(), &ObjectLayer);
     if (!NT_SUCCESS(Status))
     {
-        SHIM_ERR("Unable to open Key  \"%wZ\" Status 0x%lx\n", FullPath, Status);
+        /* A profile that never had a compatibility layer set has no such key */
+        if (Status == STATUS_OBJECT_NAME_NOT_FOUND ||
+            Status == STATUS_OBJECT_PATH_NOT_FOUND)
+        {
+            SHIM_INFO("No Key \"%wZ\"\n", FullPath);
+        }
+        else
+        {
+            SHIM_ERR("Unable to open Key  \"%wZ\" Status 0x%lx\n", FullPath, Status);
+        }
         SdbFree(FullPath->Buffer);
         FullPath->Buffer = NULL;
     }
@@ -521,6 +530,11 @@ BOOL WINAPI SetPermLayerState(PCWSTR wszPath, PCWSTR wszLayer, DWORD dwFlags, BO
     if (dwWriteFlags & LAYER_APPLY_TO_SYSTEM_EXES)
         *(p++) = '#';
 
+    if (bEnable && wszLayer[0])
+    {
+        SdbpAppendLayer(newLayer, sizeof(newLayer), wszLayer, NULL);
+    }
+
     do
     {
         while (*start == ' ' || *start == '\t')
@@ -535,11 +549,6 @@ BOOL WINAPI SetPermLayerState(PCWSTR wszPath, PCWSTR wszLayer, DWORD dwFlags, BO
         }
         start = p + 1;
     } while (p);
-
-    if (bEnable && wszLayer[0])
-    {
-        SdbpAppendLayer(newLayer, sizeof(newLayer), wszLayer, NULL);
-    }
 
     return SdbSetPermLayerKeys(wszPath, newLayer, bMachine);
 }

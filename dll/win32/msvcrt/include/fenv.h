@@ -6,7 +6,7 @@
 #ifndef _INC_FENV
 #define _INC_FENV
 
-#include <float.h>
+#include "float.h"
 
 #define FE_TONEAREST   _RC_NEAR
 #define FE_UPWARD      _RC_UP
@@ -41,6 +41,8 @@ _ACRTIMP int __cdecl fesetround(int);
 _ACRTIMP int __cdecl fesetexceptflag(const fexcept_t*, int);
 _ACRTIMP int __cdecl feclearexcept(int);
 _ACRTIMP int __cdecl fetestexcept(int);
+
+_ACRTIMP int __cdecl feupdateenv(const fenv_t*);
 
 #ifdef __cplusplus
 }

@@ -22,6 +22,7 @@
 
 #ifdef __REACTOS__
 #include <rtl_vista.h>
+#include <ndk/lpcfuncs.h>
 #define NDEBUG
 #include "wine/list.h"
 #include <debug.h>
@@ -41,7 +42,11 @@ typedef void (NTAPI *RTL_WAITORTIMERCALLBACKFUNC)(PVOID,BOOLEAN);
 typedef VOID (CALLBACK *PRTL_OVERLAPPED_COMPLETION_ROUTINE)(DWORD,DWORD,LPVOID);
 
 typedef void (CALLBACK *PTP_IO_CALLBACK)(PTP_CALLBACK_INSTANCE,void*,void*,IO_STATUS_BLOCK*,PTP_IO);
+typedef void (CALLBACK *PTP_ALPC_CALLBACK)(PTP_CALLBACK_INSTANCE,void*,PTP_ALPC);
 NTSYSAPI NTSTATUS  WINAPI TpSimpleTryPost(PTP_SIMPLE_CALLBACK,PVOID,TP_CALLBACK_ENVIRON *);
+#if defined(_M_ARM64)
+NTSYSAPI BOOLEAN NTAPI RtlIsEcCode(ULONG_PTR CodeAddress);
+#endif
 #define PRTL_WORK_ITEM_ROUTINE WORKERCALLBACKFUNC
 
 #define CRITICAL_SECTION RTL_CRITICAL_SECTION
@@ -55,7 +60,6 @@ NTSYSAPI NTSTATUS  WINAPI TpSimpleTryPost(PTP_SIMPLE_CALLBACK,PVOID,TP_CALLBACK_
 #include <limits.h>
 
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "winternl.h"
 
 #include "wine/debug.h"
@@ -75,6 +79,93 @@ struct rtl_work_item
     PRTL_WORK_ITEM_ROUTINE function;
     PVOID context;
 };
+
+enum threadpool_callback_type
+{
+    THREADPOOL_CALLBACK_SIMPLE,
+    THREADPOOL_CALLBACK_WORK,
+    THREADPOOL_CALLBACK_TIMER,
+    THREADPOOL_CALLBACK_WAIT,
+    THREADPOOL_CALLBACK_IO,
+    THREADPOOL_CALLBACK_ALPC
+};
+
+static PRTLP_THREADPOOL_CALLBACK_DISPATCHER volatile threadpool_callback_dispatcher;
+
+VOID
+NTAPI
+RtlpSetThreadpoolCallbackDispatcher(PRTLP_THREADPOOL_CALLBACK_DISPATCHER dispatcher)
+{
+    InterlockedExchangePointer((PVOID volatile *)&threadpool_callback_dispatcher, (PVOID)dispatcher);
+}
+
+VOID
+NTAPI
+RtlpCallWaitOrTimerCallback(WAITORTIMERCALLBACKFUNC Callback, PVOID Context, BOOLEAN TimerOrWaitFired)
+{
+    PRTLP_THREADPOOL_CALLBACK_DISPATCHER dispatcher;
+
+    dispatcher = (PRTLP_THREADPOOL_CALLBACK_DISPATCHER)InterlockedCompareExchangePointer((PVOID volatile *)&threadpool_callback_dispatcher, NULL, NULL);
+    if (dispatcher)
+    {
+        dispatcher((PVOID)Callback, (ULONG_PTR)Context, TimerOrWaitFired, 0, 0, 0);
+        return;
+    }
+
+    Callback(Context, TimerOrWaitFired);
+}
+
+VOID
+NTAPI
+RtlpCallWorkItemCallback(WORKERCALLBACKFUNC Callback, PVOID Context)
+{
+    PRTLP_THREADPOOL_CALLBACK_DISPATCHER dispatcher;
+
+    dispatcher = (PRTLP_THREADPOOL_CALLBACK_DISPATCHER)InterlockedCompareExchangePointer(
+        (PVOID volatile *)&threadpool_callback_dispatcher, NULL, NULL);
+    if (dispatcher)
+    {
+        dispatcher((PVOID)Callback, (ULONG_PTR)Context, 0, 0, 0, 0);
+        return;
+    }
+
+    Callback(Context);
+}
+
+static void
+threadpool_call_callback(enum threadpool_callback_type type, void *callback, ULONG_PTR argument0, ULONG_PTR argument1, ULONG_PTR argument2, ULONG_PTR argument3, ULONG_PTR argument4)
+{
+    PRTLP_THREADPOOL_CALLBACK_DISPATCHER dispatcher;
+
+    dispatcher = (PRTLP_THREADPOOL_CALLBACK_DISPATCHER)InterlockedCompareExchangePointer((PVOID volatile *)&threadpool_callback_dispatcher, NULL, NULL);
+    if (dispatcher)
+    {
+        dispatcher(callback, argument0, argument1, argument2, argument3, argument4);
+        return;
+    }
+
+    switch (type)
+    {
+        case THREADPOOL_CALLBACK_SIMPLE:
+            ((PTP_SIMPLE_CALLBACK)callback)((TP_CALLBACK_INSTANCE *)argument0, (void *)argument1);
+            break;
+        case THREADPOOL_CALLBACK_WORK:
+            ((PTP_WORK_CALLBACK)callback)((TP_CALLBACK_INSTANCE *)argument0, (void *)argument1, (TP_WORK *)argument2);
+            break;
+        case THREADPOOL_CALLBACK_TIMER:
+            ((PTP_TIMER_CALLBACK)callback)((TP_CALLBACK_INSTANCE *)argument0, (void *)argument1, (TP_TIMER *)argument2);
+            break;
+        case THREADPOOL_CALLBACK_WAIT:
+            ((PTP_WAIT_CALLBACK)callback)((TP_CALLBACK_INSTANCE *)argument0, (void *)argument1, (TP_WAIT *)argument2, (TP_WAIT_RESULT)argument3);
+            break;
+        case THREADPOOL_CALLBACK_IO:
+            ((PTP_IO_CALLBACK)callback)((TP_CALLBACK_INSTANCE *)argument0, (void *)argument1, (void *)argument2, (IO_STATUS_BLOCK *)argument3, (TP_IO *)argument4);
+            break;
+        case THREADPOOL_CALLBACK_ALPC:
+            ((PTP_ALPC_CALLBACK)callback)((TP_CALLBACK_INSTANCE *)argument0, (void *)argument1, (TP_ALPC *)argument2);
+            break;
+    }
+}
 
 #define EXPIRE_NEVER       (~(ULONGLONG)0)
 #define TIMER_QUEUE_MAGIC  0x516d6954   /* TimQ */
@@ -165,6 +256,7 @@ enum threadpool_objtype
     TP_OBJECT_TYPE_TIMER,
     TP_OBJECT_TYPE_WAIT,
     TP_OBJECT_TYPE_IO,
+    TP_OBJECT_TYPE_ALPC,
 };
 
 struct io_completion
@@ -200,6 +292,7 @@ struct threadpool_object
     LONG                    num_pending_callbacks;
     LONG                    num_running_callbacks;
     LONG                    num_associated_callbacks;
+    LONG                    update_serial;
     /* arguments for callback */
     union
     {
@@ -233,8 +326,13 @@ struct threadpool_object
             struct list     wait_entry;
             ULONGLONG       timeout;
             HANDLE          handle;
+            HANDLE          duped_handle;
             DWORD           flags;
             RTL_WAITORTIMERCALLBACKFUNC rtl_callback;
+#ifdef __REACTOS__
+            struct list     rtl_callers;
+            ULONGLONG       rtl_period;
+#endif
         } wait;
         struct
         {
@@ -244,6 +342,17 @@ struct threadpool_object
             BOOL            shutting_down;
             struct io_completion *completions;
         } io;
+        struct
+        {
+            PTP_ALPC_CALLBACK callback;
+            HANDLE          port;
+            BOOL            initialized;
+            BOOL            extended;
+            BOOL            shutting_down;
+            BOOL            queue_reference;
+            BOOL            completion_list_registered;
+            LONG            tracked_reference_count;
+        } alpc;
     } u;
 };
 
@@ -262,6 +371,9 @@ struct threadpool_instance
         LONG                semaphore_count;
         HANDLE              event;
         HMODULE             library;
+        HANDLE              alpc_port;
+        PORT_MESSAGE       *alpc_message;
+        ULONG               alpc_flags;
     } cleanup;
 };
 
@@ -280,13 +392,20 @@ struct threadpool_group
 static RTL_CRITICAL_SECTION_DEBUG timerqueue_debug;
 #endif
 
+enum
+{
+    ABS_TIMER,
+    REL_TIMER
+};
+
 static struct
 {
     CRITICAL_SECTION        cs;
     LONG                    objcount;
     BOOL                    thread_running;
-    struct list             pending_timers;
-    RTL_CONDITION_VARIABLE  update_event;
+    HANDLE                  timers[2];
+    struct list             abs_timers;
+    struct list             rel_timers;
 }
 timerqueue =
 {
@@ -297,12 +416,9 @@ timerqueue =
 #endif
     0,                                          /* objcount */
     FALSE,                                      /* thread_running */
-    LIST_INIT( timerqueue.pending_timers ),     /* pending_timers */
-#if __REACTOS__
-    0,
-#else
-    RTL_CONDITION_VARIABLE_INIT                 /* update_event */
-#endif
+    { 0, 0 },                                   /* timers */
+    LIST_INIT( timerqueue.abs_timers ),         /* abs_timers */
+    LIST_INIT( timerqueue.rel_timers )          /* rel_timers */
 };
 
 #ifndef __REACTOS__
@@ -375,6 +491,8 @@ ioqueue =
 #endif
 };
 
+#define TP_ALPC_RUNDOWN_VALUE ((ULONG_PTR)~(ULONG_PTR)0)
+
 #ifndef __REACTOS__
 static RTL_CRITICAL_SECTION_DEBUG ioqueue_debug =
 {
@@ -414,6 +532,13 @@ static inline struct threadpool_object *impl_from_TP_IO( TP_IO *io )
 {
     struct threadpool_object *object = (struct threadpool_object *)io;
     assert( object->type == TP_OBJECT_TYPE_IO );
+    return object;
+}
+
+static inline struct threadpool_object *impl_from_TP_ALPC( TP_ALPC *alpc )
+{
+    struct threadpool_object *object = (struct threadpool_object *)alpc;
+    assert( object->type == TP_OBJECT_TYPE_ALPC );
     return object;
 }
 
@@ -666,12 +791,18 @@ static void timer_cleanup_callback(struct queue_timer *t)
     RtlLeaveCriticalSection(&q->cs);
 }
 
+#ifdef __REACTOS__
+static VOID NTAPI timer_callback_wrapper(LPVOID p)
+#else
 static DWORD WINAPI timer_callback_wrapper(LPVOID p)
+#endif
 {
     struct queue_timer *t = p;
     t->callback(t->param, TRUE);
     timer_cleanup_callback(t);
+#ifndef __REACTOS__
     return 0;
+#endif
 }
 
 static inline ULONGLONG queue_current_time(void)
@@ -1136,6 +1267,161 @@ NTSTATUS WINAPI RtlDeleteTimer(HANDLE TimerQueue, HANDLE Timer,
 }
 #endif
 /***********************************************************************
+ *           submit_expired_timers     (internal)
+ *
+ * timerqueue.cs held by caller.
+ */
+#ifdef __REACTOS__
+#define TICKS_100NS_PER_SECOND 10000000ULL
+
+static ULONGLONG qpc_from_100ns( ULONGLONG value )
+{
+    LARGE_INTEGER counter, frequency;
+    ULONGLONG seconds, remainder;
+
+    NtQueryPerformanceCounter( &counter, &frequency );
+    seconds = value / TICKS_100NS_PER_SECOND;
+    remainder = value % TICKS_100NS_PER_SECOND;
+    if (seconds > MAXLONGLONG / frequency.QuadPart)
+        return MAXLONGLONG;
+    return seconds * frequency.QuadPart + remainder * frequency.QuadPart / TICKS_100NS_PER_SECOND;
+}
+
+static ULONGLONG qpc_to_100ns( ULONGLONG value )
+{
+    LARGE_INTEGER counter, frequency;
+    ULONGLONG seconds, remainder;
+
+    NtQueryPerformanceCounter( &counter, &frequency );
+    seconds = value / frequency.QuadPart;
+    remainder = value % frequency.QuadPart;
+    if (seconds > MAXLONGLONG / TICKS_100NS_PER_SECOND)
+        return MAXLONGLONG;
+    return seconds * TICKS_100NS_PER_SECOND + remainder * TICKS_100NS_PER_SECOND / frequency.QuadPart;
+}
+
+static ULONGLONG qpc_add_100ns( ULONGLONG base, ULONGLONG value )
+{
+    ULONGLONG delta = qpc_from_100ns( value );
+
+    if (delta >= MAXLONGLONG - base)
+        return MAXLONGLONG;
+    return base + delta;
+}
+#endif
+
+static void submit_expired_timers( struct list *queue, ULONGLONG queue_now, ULONGLONG rel_now )
+{
+    struct threadpool_object *other_timer;
+    struct list *ptr;
+
+    while ((ptr = list_head( queue )))
+    {
+        struct threadpool_object *timer = LIST_ENTRY( ptr, struct threadpool_object, u.timer.timer_entry );
+        assert( timer->type == TP_OBJECT_TYPE_TIMER );
+        assert( timer->u.timer.timer_pending );
+        if (timer->u.timer.timeout > queue_now)
+            return;
+
+        /* Queue a new callback in one of the worker threads. */
+        list_remove( &timer->u.timer.timer_entry );
+        timer->u.timer.timer_pending = FALSE;
+        tp_object_submit( timer, FALSE );
+
+        /* Insert the timer back into the queue, except it's marked for shutdown. */
+        if (timer->u.timer.period && !timer->shutdown)
+        {
+            /* Update timeout when moving timer to relative queue */
+            if (queue == &timerqueue.abs_timers)
+                timer->u.timer.timeout = rel_now;
+
+#ifdef __REACTOS__
+            timer->u.timer.timeout = qpc_add_100ns( timer->u.timer.timeout, (ULONGLONG)timer->u.timer.period * 10000 );
+#else
+            timer->u.timer.timeout += (ULONGLONG)timer->u.timer.period * 10000;
+#endif
+            if (timer->u.timer.timeout <= rel_now)
+                timer->u.timer.timeout = rel_now + 1;
+
+            LIST_FOR_EACH_ENTRY( other_timer, &timerqueue.rel_timers,
+                    struct threadpool_object, u.timer.timer_entry )
+            {
+                assert( other_timer->type == TP_OBJECT_TYPE_TIMER );
+                if (timer->u.timer.timeout < other_timer->u.timer.timeout)
+                    break;
+            }
+            list_add_before( &other_timer->u.timer.timer_entry, &timer->u.timer.timer_entry );
+            timer->u.timer.timer_pending = TRUE;
+        }
+    }
+}
+
+/***********************************************************************
+ *           get_next_timeout          (internal)
+ *
+ * timerqueue.cs held by caller.
+ */
+static ULONGLONG get_next_timeout( struct list *list )
+{
+    ULONGLONG timeout_lower, timeout_upper, new_timeout;
+    struct threadpool_object *other_timer;
+
+    timeout_lower = timeout_upper = MAXLONGLONG;
+
+    /* Determine next timeout and use the window length to optimize wakeup times. */
+    LIST_FOR_EACH_ENTRY( other_timer, list, struct threadpool_object, u.timer.timer_entry )
+    {
+        assert( other_timer->type == TP_OBJECT_TYPE_TIMER );
+        if (other_timer->u.timer.timeout >= timeout_upper)
+            break;
+
+        timeout_lower = other_timer->u.timer.timeout;
+#ifdef __REACTOS__
+        if (list == &timerqueue.rel_timers)
+            new_timeout = qpc_add_100ns( timeout_lower, (ULONGLONG)other_timer->u.timer.window_length * 10000 );
+        else
+#endif
+        new_timeout   = timeout_lower + (ULONGLONG)other_timer->u.timer.window_length * 10000;
+        if (new_timeout < timeout_upper)
+            timeout_upper = new_timeout;
+    }
+    return timeout_lower;
+}
+
+/***********************************************************************
+ *           update_timers             (internal)
+ *
+ * timerqueue.cs held by caller.
+ */
+static void update_timers( ULONGLONG rel_now )
+{
+    LARGE_INTEGER timeout;
+
+    timeout.QuadPart = get_next_timeout( &timerqueue.abs_timers );
+    NtSetTimer( timerqueue.timers[ABS_TIMER], &timeout, NULL, NULL, FALSE, 0, NULL );
+
+    if (timerqueue.objcount)
+    {
+        timeout.QuadPart = get_next_timeout( &timerqueue.rel_timers );
+        if (timeout.QuadPart > rel_now)
+#ifdef __REACTOS__
+            timeout.QuadPart = -(LONGLONG)qpc_to_100ns( timeout.QuadPart - rel_now );
+#else
+            timeout.QuadPart = rel_now - timeout.QuadPart;
+#endif
+        else
+            timeout.QuadPart = 0;
+    }
+    else
+    {
+        /* All timers have been destroyed, if no new timers are created
+         * within some amount of time, then we can shutdown this thread. */
+        timeout.QuadPart = (ULONGLONG)THREADPOOL_WORKER_TIMEOUT * -10000;
+    }
+    NtSetTimer( timerqueue.timers[REL_TIMER], &timeout, NULL, NULL, FALSE, 0, NULL );
+}
+
+/***********************************************************************
  *           timerqueue_thread_proc    (internal)
  */
 #ifdef __REACTOS__
@@ -1144,10 +1430,7 @@ ULONG NTAPI timerqueue_thread_proc(PVOID param )
 static void CALLBACK timerqueue_thread_proc( void *param )
 #endif
 {
-    ULONGLONG timeout_lower, timeout_upper, new_timeout;
-    struct threadpool_object *other_timer;
-    LARGE_INTEGER now, timeout;
-    struct list *ptr;
+    LARGE_INTEGER abs_now, rel_now;
 
     TRACE( "starting timer queue thread\n" );
     set_thread_name(L"wine_threadpool_timerqueue");
@@ -1155,74 +1438,24 @@ static void CALLBACK timerqueue_thread_proc( void *param )
     RtlEnterCriticalSection( &timerqueue.cs );
     for (;;)
     {
-        NtQuerySystemTime( &now );
+        NtQuerySystemTime( &abs_now );
+        NtQueryPerformanceCounter( &rel_now, NULL );
 
-        /* Check for expired timers. */
-        while ((ptr = list_head( &timerqueue.pending_timers )))
-        {
-            struct threadpool_object *timer = LIST_ENTRY( ptr, struct threadpool_object, u.timer.timer_entry );
-            assert( timer->type == TP_OBJECT_TYPE_TIMER );
-            assert( timer->u.timer.timer_pending );
-            if (timer->u.timer.timeout > now.QuadPart)
-                break;
+        submit_expired_timers( &timerqueue.abs_timers, abs_now.QuadPart, rel_now.QuadPart );
+        submit_expired_timers( &timerqueue.rel_timers, rel_now.QuadPart, rel_now.QuadPart );
+        update_timers( rel_now.QuadPart );
 
-            /* Queue a new callback in one of the worker threads. */
-            list_remove( &timer->u.timer.timer_entry );
-            timer->u.timer.timer_pending = FALSE;
-            tp_object_submit( timer, FALSE );
+        RtlLeaveCriticalSection( &timerqueue.cs );
+        NtWaitForMultipleObjects( ARRAY_SIZE(timerqueue.timers),
+                timerqueue.timers, WaitAny, FALSE, NULL );
+        RtlEnterCriticalSection( &timerqueue.cs );
 
-            /* Insert the timer back into the queue, except it's marked for shutdown. */
-            if (timer->u.timer.period && !timer->shutdown)
-            {
-                timer->u.timer.timeout += (ULONGLONG)timer->u.timer.period * 10000;
-                if (timer->u.timer.timeout <= now.QuadPart)
-                    timer->u.timer.timeout = now.QuadPart + 1;
-
-                LIST_FOR_EACH_ENTRY( other_timer, &timerqueue.pending_timers,
-                                     struct threadpool_object, u.timer.timer_entry )
-                {
-                    assert( other_timer->type == TP_OBJECT_TYPE_TIMER );
-                    if (timer->u.timer.timeout < other_timer->u.timer.timeout)
-                        break;
-                }
-                list_add_before( &other_timer->u.timer.timer_entry, &timer->u.timer.timer_entry );
-                timer->u.timer.timer_pending = TRUE;
-            }
-        }
-
-        timeout_lower = timeout_upper = MAXLONGLONG;
-
-        /* Determine next timeout and use the window length to optimize wakeup times. */
-        LIST_FOR_EACH_ENTRY( other_timer, &timerqueue.pending_timers,
-                             struct threadpool_object, u.timer.timer_entry )
-        {
-            assert( other_timer->type == TP_OBJECT_TYPE_TIMER );
-            if (other_timer->u.timer.timeout >= timeout_upper)
-                break;
-
-            timeout_lower = other_timer->u.timer.timeout;
-            new_timeout   = timeout_lower + (ULONGLONG)other_timer->u.timer.window_length * 10000;
-            if (new_timeout < timeout_upper)
-                timeout_upper = new_timeout;
-        }
-
-        /* Wait for timer update events or until the next timer expires. */
-        if (timerqueue.objcount)
-        {
-            timeout.QuadPart = timeout_lower;
-            RtlSleepConditionVariableCS( &timerqueue.update_event, &timerqueue.cs, &timeout );
-            continue;
-        }
-
-        /* All timers have been destroyed, if no new timers are created
-         * within some amount of time, then we can shutdown this thread. */
-        timeout.QuadPart = (ULONGLONG)THREADPOOL_WORKER_TIMEOUT * -10000;
-        if (RtlSleepConditionVariableCS( &timerqueue.update_event, &timerqueue.cs,
-            &timeout ) == STATUS_TIMEOUT && !timerqueue.objcount)
-        {
+        if (!timerqueue.objcount)
             break;
-        }
     }
+
+    NtClose( timerqueue.timers[ABS_TIMER] );
+    NtClose( timerqueue.timers[REL_TIMER] );
 
     timerqueue.thread_running = FALSE;
     RtlLeaveCriticalSection( &timerqueue.cs );
@@ -1264,7 +1497,6 @@ static NTSTATUS tp_new_worker_thread( struct threadpool *pool )
  */
 static NTSTATUS tp_timerqueue_lock( struct threadpool_object *timer )
 {
-    NTSTATUS status = STATUS_SUCCESS;
     assert( timer->type == TP_OBJECT_TYPE_TIMER );
 
     timer->u.timer.timer_initialized    = FALSE;
@@ -1279,24 +1511,44 @@ static NTSTATUS tp_timerqueue_lock( struct threadpool_object *timer )
     /* Make sure that the timerqueue thread is running. */
     if (!timerqueue.thread_running)
     {
+        NTSTATUS status;
         HANDLE thread;
+
+        status = NtCreateTimer( &timerqueue.timers[ABS_TIMER], TIMER_ALL_ACCESS,
+                                NULL, NotificationTimer );
+        if (status != STATUS_SUCCESS)
+        {
+            RtlLeaveCriticalSection( &timerqueue.cs );
+            return status;
+        }
+
+        status = NtCreateTimer( &timerqueue.timers[REL_TIMER], TIMER_ALL_ACCESS,
+                NULL, NotificationTimer );
+        if (status != STATUS_SUCCESS)
+        {
+            NtClose( timerqueue.timers[ABS_TIMER] );
+            RtlLeaveCriticalSection( &timerqueue.cs );
+            return status;
+        }
+
         status = RtlCreateUserThread( GetCurrentProcess(), NULL, FALSE, 0, 0, 0,
                                       timerqueue_thread_proc, NULL, &thread, NULL );
-        if (status == STATUS_SUCCESS)
+        if (status != STATUS_SUCCESS)
         {
-            timerqueue.thread_running = TRUE;
-            NtClose( thread );
+            NtClose( timerqueue.timers[ABS_TIMER] );
+            NtClose( timerqueue.timers[REL_TIMER] );
+            RtlLeaveCriticalSection( &timerqueue.cs );
+            return status;
         }
+        timerqueue.thread_running = TRUE;
+        NtClose( thread );
     }
 
-    if (status == STATUS_SUCCESS)
-    {
-        timer->u.timer.timer_initialized = TRUE;
-        timerqueue.objcount++;
-    }
+    timer->u.timer.timer_initialized = TRUE;
+    timerqueue.objcount++;
 
     RtlLeaveCriticalSection( &timerqueue.cs );
-    return status;
+    return STATUS_SUCCESS;
 }
 
 /***********************************************************************
@@ -1318,17 +1570,42 @@ static void tp_timerqueue_unlock( struct threadpool_object *timer )
             timer->u.timer.timer_pending = FALSE;
         }
 
-        /* If the last timer object was destroyed, then wake up the thread. */
+        /* If the last timer object was destroyed, then update timeout. */
         if (!--timerqueue.objcount)
         {
-            assert( list_empty( &timerqueue.pending_timers ) );
-            RtlWakeAllConditionVariable( &timerqueue.update_event );
+            LARGE_INTEGER rel_now;
+
+            assert( list_empty( &timerqueue.abs_timers ) );
+            assert( list_empty( &timerqueue.rel_timers ) );
+            NtQueryPerformanceCounter( &rel_now, NULL );
+            update_timers( rel_now.QuadPart );
         }
 
         timer->u.timer.timer_initialized = FALSE;
     }
     RtlLeaveCriticalSection( &timerqueue.cs );
 }
+
+#ifdef __REACTOS__
+static ULONGLONG tp_wait_now( void )
+{
+    LARGE_INTEGER counter;
+
+    NtQueryPerformanceCounter( &counter, NULL );
+    return qpc_to_100ns( counter.QuadPart );
+}
+
+static BOOL tp_wait_rearm( struct threadpool_object *wait )
+{
+    ULONGLONG period = wait->u.wait.rtl_period;
+    ULONG maximum, minimum, current;
+
+    if (wait->u.wait.timeout == MAXLONGLONG) return FALSE;
+    if (!period && NT_SUCCESS(NtQueryTimerResolution( &maximum, &minimum, &current ))) period = current;
+    wait->u.wait.timeout = tp_wait_now() + period;
+    return TRUE;
+}
+#endif
 
 /***********************************************************************
  *           waitqueue_thread_proc    (internal)
@@ -1340,12 +1617,17 @@ static void CALLBACK waitqueue_thread_proc( void *param )
 #endif
 {
     struct threadpool_object *objects[MAXIMUM_WAITQUEUE_OBJECTS];
+    LONG update_serials[MAXIMUM_WAITQUEUE_OBJECTS];
     HANDLE handles[MAXIMUM_WAITQUEUE_OBJECTS + 1];
     struct waitqueue_bucket *bucket = param;
     struct threadpool_object *wait, *next;
     LARGE_INTEGER now, timeout;
     DWORD num_handles;
     NTSTATUS status;
+#ifdef __REACTOS__
+    BOOLEAN duplicated_handles[MAXIMUM_WAITQUEUE_OBJECTS];
+    DWORD i;
+#endif
 
     TRACE( "starting wait queue thread\n" );
     set_thread_name(L"wine_threadpool_waitqueue");
@@ -1354,7 +1636,11 @@ static void CALLBACK waitqueue_thread_proc( void *param )
 
     for (;;)
     {
+#ifdef __REACTOS__
+        now.QuadPart = tp_wait_now();
+#else
         NtQuerySystemTime( &now );
+#endif
         timeout.QuadPart = MAXLONGLONG;
         num_handles = 0;
 
@@ -1362,6 +1648,7 @@ static void CALLBACK waitqueue_thread_proc( void *param )
                                   u.wait.wait_entry )
         {
             assert( wait->type == TP_OBJECT_TYPE_WAIT );
+            assert( wait->u.wait.wait_pending );
             if (wait->u.wait.timeout <= now.QuadPart)
             {
                 /* Wait object timed out. */
@@ -1369,7 +1656,12 @@ static void CALLBACK waitqueue_thread_proc( void *param )
                 {
                     list_remove( &wait->u.wait.wait_entry );
                     list_add_tail( &bucket->reserved, &wait->u.wait.wait_entry );
+                    wait->u.wait.wait_pending = FALSE;
                 }
+#ifdef __REACTOS__
+                else if (tp_wait_rearm( wait ))
+                    timeout.QuadPart = 0;
+#endif
                 if ((wait->u.wait.flags & (WT_EXECUTEINWAITTHREAD | WT_EXECUTEINIOTHREAD)))
                 {
                     InterlockedIncrement( &wait->refcount );
@@ -1389,7 +1681,17 @@ static void CALLBACK waitqueue_thread_proc( void *param )
                 assert( num_handles < MAXIMUM_WAITQUEUE_OBJECTS );
                 InterlockedIncrement( &wait->refcount );
                 objects[num_handles] = wait;
-                handles[num_handles] = wait->u.wait.handle;
+                /* NtWaitForMultipleObjects() fails if any invalid handles are passed, and one invalid handle
+                 * should not affect other waiting items. The calling app is allowed to close waitable timer
+                 * handles immediately after submission, so we need a duplicate for those in particular. */
+#ifdef __REACTOS__
+                HANDLE source_handle = wait->u.wait.duped_handle ? wait->u.wait.duped_handle : wait->u.wait.handle;
+                handles[num_handles] = source_handle;
+                duplicated_handles[num_handles] = source_handle && NT_SUCCESS(NtDuplicateObject(NtCurrentProcess(), source_handle, NtCurrentProcess(), &handles[num_handles], 0, 0, DUPLICATE_SAME_ACCESS));
+#else
+                handles[num_handles] = wait->u.wait.duped_handle ? wait->u.wait.duped_handle : wait->u.wait.handle;
+#endif
+                update_serials[num_handles] = wait->update_serial;
                 num_handles++;
             }
         }
@@ -1401,7 +1703,7 @@ static void CALLBACK waitqueue_thread_proc( void *param )
             assert( num_handles == 0 );
             RtlLeaveCriticalSection( &waitqueue.cs );
             timeout.QuadPart = (ULONGLONG)THREADPOOL_WORKER_TIMEOUT * -10000;
-            status = NtWaitForMultipleObjects( 1, &bucket->update_event, TRUE, bucket->alertable, &timeout );
+            status = NtWaitForMultipleObjects( 1, &bucket->update_event, WaitAny, bucket->alertable, &timeout );
             RtlEnterCriticalSection( &waitqueue.cs );
 
             if (status == STATUS_TIMEOUT && !bucket->objcount)
@@ -1410,15 +1712,26 @@ static void CALLBACK waitqueue_thread_proc( void *param )
         else
         {
             handles[num_handles] = bucket->update_event;
+#ifdef __REACTOS__
+            if (timeout.QuadPart != MAXLONGLONG)
+            {
+                now.QuadPart = tp_wait_now();
+                timeout.QuadPart = (timeout.QuadPart > now.QuadPart) ? now.QuadPart - timeout.QuadPart : 0;
+            }
+#endif
             RtlLeaveCriticalSection( &waitqueue.cs );
-            status = NtWaitForMultipleObjects( num_handles + 1, handles, TRUE, bucket->alertable, &timeout );
+            status = NtWaitForMultipleObjects( num_handles + 1, handles, WaitAny, bucket->alertable, &timeout );
+#ifdef __REACTOS__
+            for (i = 0; i < num_handles; ++i)
+                if (duplicated_handles[i]) NtClose( handles[i] );
+#endif
             RtlEnterCriticalSection( &waitqueue.cs );
 
             if (status >= STATUS_WAIT_0 && status < STATUS_WAIT_0 + num_handles)
             {
                 wait = objects[status - STATUS_WAIT_0];
                 assert( wait->type == TP_OBJECT_TYPE_WAIT );
-                if (wait->u.wait.bucket)
+                if (wait->u.wait.bucket && wait->update_serial == update_serials[status - STATUS_WAIT_0])
                 {
                     /* Wait object signaled. */
                     assert( wait->u.wait.bucket == bucket );
@@ -1426,7 +1739,11 @@ static void CALLBACK waitqueue_thread_proc( void *param )
                     {
                         list_remove( &wait->u.wait.wait_entry );
                         list_add_tail( &bucket->reserved, &wait->u.wait.wait_entry );
+                        wait->u.wait.wait_pending = FALSE;
                     }
+#ifdef __REACTOS__
+                    else tp_wait_rearm( wait );
+#endif
                     if ((wait->u.wait.flags & (WT_EXECUTEINWAITTHREAD | WT_EXECUTEINIOTHREAD)))
                     {
                         wait->u.wait.signaled++;
@@ -1438,7 +1755,10 @@ static void CALLBACK waitqueue_thread_proc( void *param )
                     else tp_object_submit( wait, TRUE );
                 }
                 else
-                    WARN("wait object %p triggered while object was destroyed\n", wait);
+                {
+                    WARN("wait object %p triggered while object was %s.\n",
+                            wait, wait->u.wait.bucket ? "updated" : "destroyed");
+                }
             }
 
             /* Release temporary references to wait objects. */
@@ -1524,7 +1844,8 @@ static NTSTATUS tp_waitqueue_lock( struct threadpool_object *wait )
     wait->u.wait.bucket         = NULL;
     wait->u.wait.wait_pending   = FALSE;
     wait->u.wait.timeout        = 0;
-    wait->u.wait.handle         = INVALID_HANDLE_VALUE;
+    wait->u.wait.handle         = NULL;
+    wait->u.wait.duped_handle   = NULL;
 
     RtlEnterCriticalSection( &waitqueue.cs );
 
@@ -1643,6 +1964,23 @@ static void CALLBACK ioqueue_thread_proc( void *param )
 
         TRACE( "io %p, iosb.Status %#lx.\n", io, iosb.Status );
 
+        if (io && io->type == TP_OBJECT_TYPE_ALPC)
+        {
+            if ((ULONG_PTR)value == TP_ALPC_RUNDOWN_VALUE)
+            {
+                if (io->u.alpc.queue_reference)
+                {
+                    io->u.alpc.queue_reference = FALSE;
+                    tp_object_release( io );
+                }
+            }
+            else if (!io->shutdown && !io->u.alpc.shutting_down)
+            {
+                tp_object_submit( io, FALSE );
+            }
+            goto check_idle;
+        }
+
         if (io && (io->shutdown || io->u.io.shutting_down))
         {
             RtlEnterCriticalSection( &io->pool->cs );
@@ -1697,6 +2035,7 @@ static void CALLBACK ioqueue_thread_proc( void *param )
             RtlLeaveCriticalSection( &io->pool->cs );
         }
 
+check_idle:
         if (!ioqueue.objcount)
         {
             /* All I/O objects have been destroyed; if no new objects are
@@ -1774,6 +2113,53 @@ static NTSTATUS tp_ioqueue_lock( struct threadpool_object *io, HANDLE file )
     return status;
 }
 
+static NTSTATUS tp_alpcqueue_lock( struct threadpool_object *alpc )
+{
+    ALPC_PORT_ASSOCIATE_COMPLETION_PORT info;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    assert( alpc->type == TP_OBJECT_TYPE_ALPC );
+
+    RtlEnterCriticalSection( &ioqueue.cs );
+
+    if (!ioqueue.port && (status = NtCreateIoCompletion( &ioqueue.port, IO_COMPLETION_ALL_ACCESS, NULL, 0 )))
+    {
+        RtlLeaveCriticalSection( &ioqueue.cs );
+        return status;
+    }
+
+    if (!ioqueue.thread_running)
+    {
+        HANDLE thread;
+
+        if (!(status = RtlCreateUserThread( GetCurrentProcess(), NULL, FALSE, 0, 0, 0, ioqueue_thread_proc, NULL, &thread, NULL )))
+        {
+            ioqueue.thread_running = TRUE;
+            NtClose( thread );
+        }
+    }
+
+    if (status == STATUS_SUCCESS)
+    {
+        info.CompletionKey = alpc;
+        info.CompletionPort = ioqueue.port;
+        status = NtAlpcSetInformation( alpc->u.alpc.port, AlpcAssociateCompletionPortInformation, &info, sizeof(info) );
+    }
+
+    if (status == STATUS_SUCCESS)
+    {
+        alpc->u.alpc.initialized = TRUE;
+        alpc->u.alpc.shutting_down = FALSE;
+        alpc->u.alpc.queue_reference = TRUE;
+        InterlockedIncrement( &alpc->refcount );
+        if (!ioqueue.objcount++)
+            RtlWakeConditionVariable( &ioqueue.update_event );
+    }
+
+    RtlLeaveCriticalSection( &ioqueue.cs );
+    return status;
+}
+
 /***********************************************************************
  *           tp_threadpool_alloc    (internal)
  *
@@ -1798,7 +2184,7 @@ static NTSTATUS tp_threadpool_alloc( struct threadpool **out )
     pool->shutdown              = FALSE;
 
 #ifdef __REACTOS__
-    RtlInitializeCriticalSection( &pool->cs );
+    RtlInitializeCriticalSectionEx( &pool->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO );
 #else
     RtlInitializeCriticalSectionEx( &pool->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO );
 
@@ -1969,7 +2355,7 @@ static NTSTATUS tp_group_alloc( struct threadpool_group **out )
     group->shutdown     = FALSE;
 
 #ifdef __REACTOS__
-    RtlInitializeCriticalSection( &group->cs );
+    RtlInitializeCriticalSectionEx( &group->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO );
 #else
     RtlInitializeCriticalSectionEx( &group->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO );
 
@@ -2050,6 +2436,7 @@ static void tp_object_initialize( struct threadpool_object *object, struct threa
     object->num_pending_callbacks   = 0;
     object->num_running_callbacks   = 0;
     object->num_associated_callbacks = 0;
+    object->update_serial           = 0;
 
     if (environment)
     {
@@ -2205,7 +2592,7 @@ static void tp_object_wait( struct threadpool_object *object, BOOL group_wait )
     struct threadpool *pool = object->pool;
 
     RtlEnterCriticalSection( &pool->cs );
-    while (!object_is_finished( object, group_wait ))
+    while (!RtlDllShutdownInProgress() && !object_is_finished( object, group_wait ))
     {
         if (group_wait)
             RtlSleepConditionVariableCS( &object->group_finished_event, &pool->cs, NULL );
@@ -2229,6 +2616,35 @@ static void tp_ioqueue_unlock( struct threadpool_object *io )
     RtlLeaveCriticalSection( &ioqueue.cs );
 }
 
+static void tp_alpcqueue_unlock( struct threadpool_object *alpc )
+{
+    ALPC_PORT_ASSOCIATE_COMPLETION_PORT info;
+    BOOL release_reference = FALSE;
+
+    assert( alpc->type == TP_OBJECT_TYPE_ALPC );
+
+    RtlEnterCriticalSection( &ioqueue.cs );
+    if (alpc->u.alpc.initialized)
+    {
+        alpc->u.alpc.shutting_down = TRUE;
+        info.CompletionKey = NULL;
+        info.CompletionPort = NULL;
+        NtAlpcSetInformation( alpc->u.alpc.port, AlpcAssociateCompletionPortInformation, &info, sizeof(info) );
+        alpc->u.alpc.initialized = FALSE;
+
+        assert( ioqueue.objcount );
+        --ioqueue.objcount;
+        if (NtSetIoCompletion( ioqueue.port, alpc, (PVOID)TP_ALPC_RUNDOWN_VALUE, STATUS_SUCCESS, 0 ) != STATUS_SUCCESS)
+        {
+            release_reference = alpc->u.alpc.queue_reference;
+            alpc->u.alpc.queue_reference = FALSE;
+        }
+    }
+    RtlLeaveCriticalSection( &ioqueue.cs );
+
+    if (release_reference) tp_object_release( alpc );
+}
+
 /***********************************************************************
  *           tp_object_prepare_shutdown    (internal)
  *
@@ -2242,6 +2658,17 @@ static void tp_object_prepare_shutdown( struct threadpool_object *object )
         tp_waitqueue_unlock( object );
     else if (object->type == TP_OBJECT_TYPE_IO)
         tp_ioqueue_unlock( object );
+    else if (object->type == TP_OBJECT_TYPE_ALPC)
+        tp_alpcqueue_unlock( object );
+}
+
+static void tp_wait_close_duped_handle( struct threadpool_object *wait )
+{
+    if (wait->u.wait.duped_handle)
+    {
+        NtClose( wait->u.wait.duped_handle );
+        wait->u.wait.duped_handle = NULL;
+    }
 }
 
 /***********************************************************************
@@ -2276,6 +2703,9 @@ static BOOL tp_object_release( struct threadpool_object *object )
 
         tp_group_release( group );
     }
+
+    if (object->type == TP_OBJECT_TYPE_WAIT)
+        tp_wait_close_duped_handle( object );
 
     tp_threadpool_unlock( object->pool );
 
@@ -2350,6 +2780,9 @@ static void tp_object_execute( struct threadpool_object *object, BOOL wait_threa
     instance.cleanup.semaphore_count    = 0;
     instance.cleanup.event              = NULL;
     instance.cleanup.library            = NULL;
+    instance.cleanup.alpc_port          = NULL;
+    instance.cleanup.alpc_message       = NULL;
+    instance.cleanup.alpc_flags         = 0;
 
     switch (object->type)
     {
@@ -2357,7 +2790,7 @@ static void tp_object_execute( struct threadpool_object *object, BOOL wait_threa
         {
             TRACE( "executing simple callback %p(%p, %p)\n",
                    object->u.simple.callback, callback_instance, object->userdata );
-            object->u.simple.callback( callback_instance, object->userdata );
+            threadpool_call_callback(THREADPOOL_CALLBACK_SIMPLE, object->u.simple.callback, (ULONG_PTR)callback_instance, (ULONG_PTR)object->userdata, 0, 0, 0);
             TRACE( "callback %p returned\n", object->u.simple.callback );
             break;
         }
@@ -2366,7 +2799,7 @@ static void tp_object_execute( struct threadpool_object *object, BOOL wait_threa
         {
             TRACE( "executing work callback %p(%p, %p, %p)\n",
                    object->u.work.callback, callback_instance, object->userdata, object );
-            object->u.work.callback( callback_instance, object->userdata, (TP_WORK *)object );
+            threadpool_call_callback(THREADPOOL_CALLBACK_WORK, object->u.work.callback, (ULONG_PTR)callback_instance, (ULONG_PTR)object->userdata, (ULONG_PTR)object, 0, 0);
             TRACE( "callback %p returned\n", object->u.work.callback );
             break;
         }
@@ -2375,7 +2808,7 @@ static void tp_object_execute( struct threadpool_object *object, BOOL wait_threa
         {
             TRACE( "executing timer callback %p(%p, %p, %p)\n",
                    object->u.timer.callback, callback_instance, object->userdata, object );
-            object->u.timer.callback( callback_instance, object->userdata, (TP_TIMER *)object );
+            threadpool_call_callback(THREADPOOL_CALLBACK_TIMER, object->u.timer.callback, (ULONG_PTR)callback_instance, (ULONG_PTR)object->userdata, (ULONG_PTR)object, 0, 0);
             TRACE( "callback %p returned\n", object->u.timer.callback );
             break;
         }
@@ -2384,7 +2817,7 @@ static void tp_object_execute( struct threadpool_object *object, BOOL wait_threa
         {
             TRACE( "executing wait callback %p(%p, %p, %p, %lu)\n",
                    object->u.wait.callback, callback_instance, object->userdata, object, wait_result );
-            object->u.wait.callback( callback_instance, object->userdata, (TP_WAIT *)object, wait_result );
+            threadpool_call_callback(THREADPOOL_CALLBACK_WAIT, object->u.wait.callback, (ULONG_PTR)callback_instance, (ULONG_PTR)object->userdata, (ULONG_PTR)object, wait_result, 0);
             TRACE( "callback %p returned\n", object->u.wait.callback );
             break;
         }
@@ -2394,9 +2827,15 @@ static void tp_object_execute( struct threadpool_object *object, BOOL wait_threa
             TRACE( "executing I/O callback %p(%p, %p, %#Ix, %p, %p)\n",
                     object->u.io.callback, callback_instance, object->userdata,
                     completion.cvalue, &completion.iosb, (TP_IO *)object );
-            object->u.io.callback( callback_instance, object->userdata,
-                    (void *)completion.cvalue, &completion.iosb, (TP_IO *)object );
+            threadpool_call_callback(THREADPOOL_CALLBACK_IO, object->u.io.callback, (ULONG_PTR)callback_instance,
+                    (ULONG_PTR)object->userdata, completion.cvalue, (ULONG_PTR)&completion.iosb, (ULONG_PTR)object);
             TRACE( "callback %p returned\n", object->u.io.callback );
+            break;
+        }
+
+        case TP_OBJECT_TYPE_ALPC:
+        {
+            threadpool_call_callback( THREADPOOL_CALLBACK_ALPC, object->u.alpc.callback, (ULONG_PTR)callback_instance, (ULONG_PTR)object->userdata, (ULONG_PTR)object, 0, 0 );
             break;
         }
 
@@ -2410,7 +2849,7 @@ static void tp_object_execute( struct threadpool_object *object, BOOL wait_threa
     {
         TRACE( "executing finalization callback %p(%p, %p)\n",
                object->finalization_callback, callback_instance, object->userdata );
-        object->finalization_callback( callback_instance, object->userdata );
+        threadpool_call_callback(THREADPOOL_CALLBACK_SIMPLE, object->finalization_callback, (ULONG_PTR)callback_instance, (ULONG_PTR)object->userdata, 0, 0, 0);
         TRACE( "callback %p returned\n", object->finalization_callback );
     }
 
@@ -2436,10 +2875,17 @@ static void tp_object_execute( struct threadpool_object *object, BOOL wait_threa
     }
     if (instance.cleanup.library)
     {
-        LdrUnloadDll( instance.cleanup.library );
+        status = LdrUnloadDll( instance.cleanup.library );
+        if (status != STATUS_SUCCESS) goto skip_cleanup;
+    }
+skip_cleanup:
+    if (instance.cleanup.alpc_message)
+    {
+        NtAlpcSendWaitReceivePort( instance.cleanup.alpc_port, instance.cleanup.alpc_flags | ALPC_MSGFLG_TRACK_PORT_REFERENCES, instance.cleanup.alpc_message, NULL, NULL, NULL, NULL, NULL );
+        RtlFreeHeap( GetProcessHeap(), 0, instance.cleanup.alpc_message );
+        instance.cleanup.alpc_message = NULL;
     }
 
-skip_cleanup:
     if (wait_thread) RtlEnterCriticalSection( &waitqueue.cs );
     RtlEnterCriticalSection( &pool->cs );
 
@@ -2536,6 +2982,64 @@ NTSTATUS WINAPI TpAllocCleanupGroup( TP_CLEANUP_GROUP **out )
     TRACE( "%p\n", out );
 
     return tp_group_alloc( (struct threadpool_group **)out );
+}
+
+static NTSTATUS tp_alloc_alpc_completion( TP_ALPC **out, HANDLE port,
+                                          PTP_ALPC_CALLBACK callback, void *userdata,
+                                          TP_CALLBACK_ENVIRON *environment,
+                                          BOOL extended )
+{
+    struct threadpool_object *object;
+    struct threadpool *pool;
+    NTSTATUS status;
+
+    if (!out || !port || !callback) return STATUS_INVALID_PARAMETER;
+    *out = NULL;
+
+    if (!(object = RtlAllocateHeap( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*object) )))
+        return STATUS_NO_MEMORY;
+
+    if ((status = tp_threadpool_lock( &pool, environment )))
+    {
+        RtlFreeHeap( GetProcessHeap(), 0, object );
+        return status;
+    }
+
+    object->type = TP_OBJECT_TYPE_ALPC;
+    object->u.alpc.callback = callback;
+    object->u.alpc.port = port;
+    object->u.alpc.extended = extended;
+    tp_object_initialize( object, pool, userdata, environment );
+
+    if ((status = tp_alpcqueue_lock( object )))
+    {
+        object->shutdown = TRUE;
+        tp_object_release( object );
+        return status;
+    }
+
+    *out = (TP_ALPC *)object;
+    return STATUS_SUCCESS;
+}
+
+/***********************************************************************
+ *           TpAllocAlpcCompletion    (NTDLL.@)
+ */
+NTSTATUS WINAPI TpAllocAlpcCompletion( TP_ALPC **out, HANDLE port,
+                                       PTP_ALPC_CALLBACK callback, void *userdata,
+                                       TP_CALLBACK_ENVIRON *environment )
+{
+    return tp_alloc_alpc_completion( out, port, callback, userdata, environment, FALSE );
+}
+
+/***********************************************************************
+ *           TpAllocAlpcCompletionEx    (NTDLL.@)
+ */
+NTSTATUS WINAPI TpAllocAlpcCompletionEx( TP_ALPC **out, HANDLE port,
+                                         PTP_ALPC_CALLBACK callback, void *userdata,
+                                         TP_CALLBACK_ENVIRON *environment )
+{
+    return tp_alloc_alpc_completion( out, port, callback, userdata, environment, TRUE );
 }
 
 /***********************************************************************
@@ -2845,6 +3349,52 @@ VOID WINAPI TpCallbackUnloadDllOnCompletion( TP_CALLBACK_INSTANCE *instance, HMO
 }
 
 /***********************************************************************
+ *           TpCallbackSendAlpcMessageOnCompletion    (NTDLL.@)
+ */
+NTSTATUS WINAPI TpCallbackSendAlpcMessageOnCompletion( TP_CALLBACK_INSTANCE *instance,
+                                                       HANDLE port, ULONG flags,
+                                                       PORT_MESSAGE *message )
+{
+    struct threadpool_instance *this;
+    USHORT length;
+
+    if (!instance) return STATUS_INVALID_PARAMETER;
+    this = impl_from_TP_CALLBACK_INSTANCE( instance );
+    if (!this->object || this->object->u.alpc.port != port || this->cleanup.alpc_message)
+        return STATUS_INVALID_PARAMETER;
+
+    length = message->u1.s1.TotalLength;
+    if (!(this->cleanup.alpc_message = RtlAllocateHeap( GetProcessHeap(), 0, length )))
+        return STATUS_NO_MEMORY;
+
+    memcpy( this->cleanup.alpc_message, message, length );
+    this->cleanup.alpc_port = port;
+    this->cleanup.alpc_flags = flags | ALPC_MSGFLG_TRACK_PORT_REFERENCES;
+    InterlockedIncrement( &this->object->u.alpc.tracked_reference_count );
+    return STATUS_SUCCESS;
+}
+
+/***********************************************************************
+ *           TpCallbackSendPendingAlpcMessage    (NTDLL.@)
+ */
+NTSTATUS WINAPI TpCallbackSendPendingAlpcMessage( TP_CALLBACK_INSTANCE *instance )
+{
+    struct threadpool_instance *this;
+    PORT_MESSAGE *message;
+    NTSTATUS status;
+
+    if (!instance) return STATUS_INVALID_PARAMETER;
+    this = impl_from_TP_CALLBACK_INSTANCE( instance );
+    if (!this->cleanup.alpc_message) return STATUS_INVALID_PARAMETER;
+
+    message = this->cleanup.alpc_message;
+    this->cleanup.alpc_message = NULL;
+    status = NtAlpcSendWaitReceivePort( this->cleanup.alpc_port, this->cleanup.alpc_flags, message, NULL, NULL, NULL, NULL, NULL );
+    RtlFreeHeap( GetProcessHeap(), 0, message );
+    return status;
+}
+
+/***********************************************************************
  *           TpDisassociateCallback    (NTDLL.@)
  */
 VOID WINAPI TpDisassociateCallback( TP_CALLBACK_INSTANCE *instance )
@@ -2897,6 +3447,38 @@ VOID WINAPI TpPostWork( TP_WORK *work )
     TRACE( "%p\n", work );
 
     tp_object_submit( this, FALSE );
+}
+
+/***********************************************************************
+ *           TpAlpcRegisterCompletionList    (NTDLL.@)
+ */
+void WINAPI TpAlpcRegisterCompletionList( TP_ALPC *alpc )
+{
+    struct threadpool_object *this = impl_from_TP_ALPC( alpc );
+    ULONG concurrency;
+
+    if (!this->u.alpc.extended) return;
+
+    RtlEnterCriticalSection( &this->pool->cs );
+    this->u.alpc.completion_list_registered = TRUE;
+    concurrency = max( this->pool->max_workers, 1 );
+    RtlLeaveCriticalSection( &this->pool->cs );
+
+    AlpcAdjustCompletionListConcurrencyCount( this->u.alpc.port, concurrency );
+}
+
+/***********************************************************************
+ *           TpAlpcUnregisterCompletionList    (NTDLL.@)
+ */
+void WINAPI TpAlpcUnregisterCompletionList( TP_ALPC *alpc )
+{
+    struct threadpool_object *this = impl_from_TP_ALPC( alpc );
+
+    if (!this->u.alpc.extended) return;
+
+    RtlEnterCriticalSection( &this->pool->cs );
+    this->u.alpc.completion_list_registered = FALSE;
+    RtlLeaveCriticalSection( &this->pool->cs );
 }
 
 /***********************************************************************
@@ -2972,7 +3554,7 @@ VOID WINAPI TpReleaseCleanupGroupMembers( TP_CLEANUP_GROUP *group, BOOL cancel_p
             {
                 TRACE( "executing group cancel callback %p(%p, %p)\n",
                        object->group_cancel_callback, object->userdata, userdata );
-                object->group_cancel_callback( object->userdata, userdata );
+                threadpool_call_callback(THREADPOOL_CALLBACK_SIMPLE, object->group_cancel_callback, (ULONG_PTR)object->userdata, (ULONG_PTR)userdata, 0, 0, 0);
                 TRACE( "callback %p returned\n", object->group_cancel_callback );
             }
 
@@ -2983,6 +3565,18 @@ VOID WINAPI TpReleaseCleanupGroupMembers( TP_CLEANUP_GROUP *group, BOOL cancel_p
         object->shutdown = TRUE;
         tp_object_release( object );
     }
+}
+
+/***********************************************************************
+ *           TpReleaseAlpcCompletion    (NTDLL.@)
+ */
+void WINAPI TpReleaseAlpcCompletion( TP_ALPC *alpc )
+{
+    struct threadpool_object *this = impl_from_TP_ALPC( alpc );
+
+    tp_object_prepare_shutdown( this );
+    this->shutdown = TRUE;
+    tp_object_release( this );
 }
 
 /***********************************************************************
@@ -3107,14 +3701,13 @@ BOOL WINAPI TpSetPoolMinThreads( TP_POOL *pool, DWORD minimum )
     return !status;
 }
 
-/***********************************************************************
- *           TpSetTimer    (NTDLL.@)
- */
-VOID WINAPI TpSetTimer( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LONG window_length )
+static BOOL tp_set_timer( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LONG window_length )
 {
     struct threadpool_object *this = impl_from_TP_TIMER( timer );
     struct threadpool_object *other_timer;
+    struct list *pending_timers;
     BOOL submit_timer = FALSE;
+    BOOL was_pending;
     ULONGLONG timestamp;
 
     TRACE( "%p %p %lu %lu\n", timer, timeout, period, window_length );
@@ -3122,29 +3715,44 @@ VOID WINAPI TpSetTimer( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LO
     RtlEnterCriticalSection( &timerqueue.cs );
 
     assert( this->u.timer.timer_initialized );
+    was_pending = this->u.timer.timer_pending;
     this->u.timer.timer_set = timeout != NULL;
 
     /* Convert relative timeout to absolute timestamp and handle a timeout
      * of zero, which means that the timer is submitted immediately. */
     if (timeout)
     {
-        timestamp = timeout->QuadPart;
-        if ((LONGLONG)timestamp < 0)
+        if (timeout->QuadPart > 0)
         {
-            LARGE_INTEGER now;
-            NtQuerySystemTime( &now );
-            timestamp = now.QuadPart - timestamp;
+            timestamp = timeout->QuadPart;
+            pending_timers = &timerqueue.abs_timers;
         }
-        else if (!timestamp)
+        else if (timeout->QuadPart < 0)
         {
-            if (!period)
-                timeout = NULL;
-            else
-            {
-                LARGE_INTEGER now;
-                NtQuerySystemTime( &now );
-                timestamp = now.QuadPart + (ULONGLONG)period * 10000;
-            }
+            LARGE_INTEGER rel_now;
+            NtQueryPerformanceCounter( &rel_now, NULL );
+#ifdef __REACTOS__
+            timestamp = qpc_add_100ns( rel_now.QuadPart, 0 - (ULONGLONG)timeout->QuadPart );
+#else
+            timestamp = rel_now.QuadPart - timeout->QuadPart;
+#endif
+            pending_timers = &timerqueue.rel_timers;
+        }
+        else if (!period)
+        {
+            timeout = NULL;
+            submit_timer = TRUE;
+        }
+        else
+        {
+            LARGE_INTEGER rel_now;
+            NtQueryPerformanceCounter( &rel_now, NULL );
+#ifdef __REACTOS__
+            timestamp = qpc_add_100ns( rel_now.QuadPart, (ULONGLONG)period * 10000 );
+#else
+            timestamp = rel_now.QuadPart + (ULONGLONG)period * 10000;
+#endif
+            pending_timers = &timerqueue.rel_timers;
             submit_timer = TRUE;
         }
     }
@@ -3163,8 +3771,8 @@ VOID WINAPI TpSetTimer( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LO
         this->u.timer.period        = period;
         this->u.timer.window_length = window_length;
 
-        LIST_FOR_EACH_ENTRY( other_timer, &timerqueue.pending_timers,
-                             struct threadpool_object, u.timer.timer_entry )
+        LIST_FOR_EACH_ENTRY( other_timer, pending_timers, struct threadpool_object,
+                             u.timer.timer_entry )
         {
             assert( other_timer->type == TP_OBJECT_TYPE_TIMER );
             if (this->u.timer.timeout < other_timer->u.timer.timeout)
@@ -3172,9 +3780,13 @@ VOID WINAPI TpSetTimer( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LO
         }
         list_add_before( &other_timer->u.timer.timer_entry, &this->u.timer.timer_entry );
 
-        /* Wake up the timer thread when the timeout has to be updated. */
-        if (list_head( &timerqueue.pending_timers ) == &this->u.timer.timer_entry )
-            RtlWakeAllConditionVariable( &timerqueue.update_event );
+        /* Update timeout if needed. */
+        if (list_head( pending_timers ) == &this->u.timer.timer_entry )
+        {
+            LARGE_INTEGER rel_now;
+            NtQueryPerformanceCounter( &rel_now, NULL );
+            update_timers( rel_now.QuadPart );
+        }
 
         this->u.timer.timer_pending = TRUE;
     }
@@ -3183,21 +3795,47 @@ VOID WINAPI TpSetTimer( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LO
 
     if (submit_timer)
        tp_object_submit( this, FALSE );
+
+    return was_pending;
 }
 
 /***********************************************************************
- *           TpSetWait    (NTDLL.@)
+ *           TpSetTimer    (NTDLL.@)
  */
-VOID WINAPI TpSetWait( TP_WAIT *wait, HANDLE handle, LARGE_INTEGER *timeout )
+VOID WINAPI TpSetTimer( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LONG window_length )
+{
+    tp_set_timer( timer, timeout, period, window_length );
+}
+
+/***********************************************************************
+ *           TpSetTimerEx    (NTDLL.@)
+ */
+BOOL WINAPI TpSetTimerEx( TP_TIMER *timer, LARGE_INTEGER *timeout, LONG period, LONG window_length )
+{
+    return tp_set_timer( timer, timeout, period, window_length );
+}
+
+static BOOL tp_set_wait( TP_WAIT *wait, HANDLE handle, LARGE_INTEGER *timeout )
 {
     struct threadpool_object *this = impl_from_TP_WAIT( wait );
     ULONGLONG timestamp = MAXLONGLONG;
+    BOOL was_pending;
+    BOOL same_handle;
 
     TRACE( "%p %p %p\n", wait, handle, timeout );
 
     RtlEnterCriticalSection( &waitqueue.cs );
 
     assert( this->u.wait.bucket );
+    was_pending = this->u.wait.wait_pending;
+
+    same_handle = this->u.wait.handle == handle;
+    tp_wait_close_duped_handle( this );
+    if (handle && NtDuplicateObject( NtCurrentProcess(), handle, NtCurrentProcess(),
+        &this->u.wait.duped_handle, 0, 0, DUPLICATE_SAME_ACCESS ) != STATUS_SUCCESS)
+    {
+        WARN( "Failed to duplicate handle.\n" );
+    }
     this->u.wait.handle = handle;
 
     if (handle || this->u.wait.wait_pending)
@@ -3208,6 +3846,22 @@ VOID WINAPI TpSetWait( TP_WAIT *wait, HANDLE handle, LARGE_INTEGER *timeout )
         /* Convert relative timeout to absolute timestamp. */
         if (handle && timeout)
         {
+#ifdef __REACTOS__
+            timestamp = tp_wait_now();
+            if (timeout->QuadPart < 0)
+            {
+                timestamp -= timeout->QuadPart;
+            }
+            else
+            {
+                LARGE_INTEGER now;
+
+                /* FIXME: an absolute timeout does not follow later changes of the system time */
+                NtQuerySystemTime( &now );
+                if (timeout->QuadPart > now.QuadPart)
+                    timestamp += timeout->QuadPart - now.QuadPart;
+            }
+#else
             timestamp = timeout->QuadPart;
             if ((LONGLONG)timestamp < 0)
             {
@@ -3215,6 +3869,7 @@ VOID WINAPI TpSetWait( TP_WAIT *wait, HANDLE handle, LARGE_INTEGER *timeout )
                 NtQuerySystemTime( &now );
                 timestamp = now.QuadPart - timestamp;
             }
+#endif
         }
 
         /* Add wait object back into one of the queues. */
@@ -3231,10 +3886,31 @@ VOID WINAPI TpSetWait( TP_WAIT *wait, HANDLE handle, LARGE_INTEGER *timeout )
         }
 
         /* Wake up the wait queue thread. */
+        if (!same_handle)
+            ++this->update_serial;
         NtSetEvent( bucket->update_event, NULL );
     }
 
     RtlLeaveCriticalSection( &waitqueue.cs );
+
+    return was_pending;
+}
+
+/***********************************************************************
+ *           TpSetWait    (NTDLL.@)
+ */
+VOID WINAPI TpSetWait( TP_WAIT *wait, HANDLE handle, LARGE_INTEGER *timeout )
+{
+    tp_set_wait( wait, handle, timeout );
+}
+
+/***********************************************************************
+ *           TpSetWaitEx    (NTDLL.@)
+ */
+BOOL WINAPI TpSetWaitEx( TP_WAIT *wait, HANDLE handle, LARGE_INTEGER *timeout, PVOID reserved )
+{
+    if (reserved) return FALSE;
+    return tp_set_wait( wait, handle, timeout );
 }
 
 /***********************************************************************
@@ -3294,6 +3970,20 @@ void WINAPI TpWaitForIoCompletion( TP_IO *io, BOOL cancel_pending )
 
     if (cancel_pending)
         tp_object_cancel( this );
+    tp_object_wait( this, FALSE );
+}
+
+/***********************************************************************
+ *           TpWaitForAlpcCompletion    (NTDLL.@)
+ */
+void WINAPI TpWaitForAlpcCompletion( TP_ALPC *alpc )
+{
+    struct threadpool_object *this = impl_from_TP_ALPC( alpc );
+    ULONG references;
+
+    references = InterlockedCompareExchange( &this->u.alpc.tracked_reference_count, 0, 0 );
+    if (references)
+        NtAlpcQueryInformation( this->u.alpc.port, AlpcWaitForPortReferences, &references, sizeof(references), NULL );
     tp_object_wait( this, FALSE );
 }
 
@@ -3377,11 +4067,31 @@ NTSTATUS WINAPI TpQueryPoolStackInformation( TP_POOL *pool, TP_POOL_STACK_INFORM
     return STATUS_SUCCESS;
 }
 
-#ifndef __REACTOS__
+#ifdef __REACTOS__
+struct rtl_wait_caller
+{
+    struct list entry;
+    HANDLE      thread;
+};
+#endif
+
 static void CALLBACK rtl_wait_callback( TP_CALLBACK_INSTANCE *instance, void *userdata, TP_WAIT *wait, TP_WAIT_RESULT result )
 {
     struct threadpool_object *object = impl_from_TP_WAIT(wait);
+#ifdef __REACTOS__
+    struct rtl_wait_caller caller;
+
+    caller.thread = NtCurrentTeb()->ClientId.UniqueThread;
+    RtlEnterCriticalSection( &object->pool->cs );
+    list_add_tail( &object->u.wait.rtl_callers, &caller.entry );
+    RtlLeaveCriticalSection( &object->pool->cs );
+    RtlpCallWaitOrTimerCallback( object->u.wait.rtl_callback, userdata, result != STATUS_WAIT_0 );
+    RtlEnterCriticalSection( &object->pool->cs );
+    list_remove( &caller.entry );
+    RtlLeaveCriticalSection( &object->pool->cs );
+#else
     object->u.wait.rtl_callback( userdata, result != STATUS_WAIT_0 );
+#endif
 }
 
 /***********************************************************************
@@ -3432,6 +4142,10 @@ NTSTATUS WINAPI RtlRegisterWait( HANDLE *out, HANDLE handle, RTL_WAITORTIMERCALL
 
     object = impl_from_TP_WAIT(wait);
     object->u.wait.rtl_callback = callback;
+#ifdef __REACTOS__
+    list_init( &object->u.wait.rtl_callers );
+    object->u.wait.rtl_period = (ULONGLONG)milliseconds * 10000;
+#endif
 
     RtlEnterCriticalSection( &waitqueue.cs );
     TpSetWait( (TP_WAIT *)object, handle, get_nt_timeout( &timeout, milliseconds ) );
@@ -3459,6 +4173,10 @@ NTSTATUS WINAPI RtlDeregisterWaitEx( HANDLE handle, HANDLE event )
 {
     struct threadpool_object *object = handle;
     NTSTATUS status;
+#ifdef __REACTOS__
+    struct rtl_wait_caller *caller;
+    LONG own = 0;
+#endif
 
     TRACE( "handle %p, event %p\n", handle, event );
 
@@ -3474,8 +4192,15 @@ NTSTATUS WINAPI RtlDeregisterWaitEx( HANDLE handle, HANDLE event )
     }
 
     RtlEnterCriticalSection( &object->pool->cs );
+#ifdef __REACTOS__
+    LIST_FOR_EACH_ENTRY( caller, &object->u.wait.rtl_callers, struct rtl_wait_caller, entry )
+        if (caller->thread == NtCurrentTeb()->ClientId.UniqueThread) own += 2;
+    if (object->num_pending_callbacks + object->num_running_callbacks
+        + object->num_associated_callbacks > own) status = STATUS_PENDING;
+#else
     if (object->num_pending_callbacks + object->num_running_callbacks
         + object->num_associated_callbacks) status = STATUS_PENDING;
+#endif
     else status = STATUS_SUCCESS;
     RtlLeaveCriticalSection( &object->pool->cs );
 
@@ -3500,7 +4225,6 @@ NTSTATUS WINAPI RtlDeregisterWait(HANDLE WaitHandle)
 {
     return RtlDeregisterWaitEx(WaitHandle, NULL);
 }
-#endif
 
 #ifdef __REACTOS__
 VOID

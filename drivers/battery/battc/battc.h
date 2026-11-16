@@ -12,6 +12,7 @@
 #include <wmilib.h>
 #include <initguid.h>
 #include <batclass.h>
+#include <ntstrsafe.h>
 
 typedef struct _BATTERY_CLASS_DATA
 {
@@ -20,8 +21,10 @@ typedef struct _BATTERY_CLASS_DATA
     BOOLEAN Waiting;
     FAST_MUTEX Mutex;
     UCHAR EventTrigger;
-    PVOID EventTriggerContext;
+    BATTERY_WAIT_STATUS EventTriggerContext;
     UNICODE_STRING InterfaceName;
+    PWMIGUIDREGINFO WmiGuidList;
+    ULONG WmiMiniportGuidCount;
 } BATTERY_CLASS_DATA, *PBATTERY_CLASS_DATA;
 
 /* Memory tags */

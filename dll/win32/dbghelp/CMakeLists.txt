@@ -1,38 +1,14 @@
 
-if(NOT CMAKE_CROSSCOMPILING)
-    add_definitions(-DDBGHELP_STATIC_LIB -DNONAMELESSUNION -D_CRT_NON_CONFORMING_SWPRINTFS)
-
-    include_directories(
-        ${REACTOS_SOURCE_DIR}/tools)
-
-    list(APPEND SOURCE
-        compat.c
-        dbghelp.c
-        dwarf.c
-        inflate.c
-        module.c
-        pe_module.c
-        source.c
-        stabs.c
-        storage.c
-        symbol.c
-        type.c)
-
-    if(ARCH STREQUAL "i386")
-        list(APPEND SOURCE cpu_i386.c)
-    endif()
-
-    add_library(dbghelphost ${SOURCE})
-    target_link_libraries(dbghelphost PRIVATE host_includes)
-else()
+if(CMAKE_CROSSCOMPILING)
     add_definitions(
         -D_WINE
+        -D__WINESRC__
         -DHAVE_ALLOCA_H
-        -D_CRT_NON_CONFORMING_SWPRINTFS
         -D_IMAGEHLP_SOURCE_)
 
     include_directories(
-        BEFORE ${REACTOS_SOURCE_DIR}/sdk/include/wine)
+        BEFORE ${REACTOS_SOURCE_DIR}/sdk/include/wine
+        ${REACTOS_SOURCE_DIR}/sdk/include/reactos/libs/zlib)
 
     spec2def(dbghelp.dll dbghelp.spec ADD_IMPORTLIB)
 
@@ -47,21 +23,25 @@ else()
 #       elf_module.c
         image.c
 #       macho_module.c
-        inflate.c
         minidump.c
         module.c
         msc.c
         path.c
+        pdb.c
         pe_module.c
-        rosstubs.c
-        rsym.c
         source.c
         stabs.c
         stack.c
         storage.c
         symbol.c
-        type.c
-        precomp.h)
+        type.c)
+
+    if(ARCH STREQUAL "riscv64")
+        include_directories(${REACTOS_SOURCE_DIR}/sdk/lib/rtl)
+        list(APPEND SOURCE cpu_riscv64.c)
+    elseif(ARCH STREQUAL "ppc")
+        list(APPEND SOURCE cpu_ppc.c)
+    endif()
 
     add_library(dbghelp MODULE
         ${SOURCE}
@@ -70,12 +50,14 @@ else()
         ${CMAKE_CURRENT_BINARY_DIR}/dbghelp.def)
 
     set_module_type(dbghelp win32dll)
-    target_link_libraries(dbghelp wine ${PSEH_LIB} oldnames)
+    target_link_libraries(dbghelp wine ${PSEH_LIB} oldnames zlib symz)
+    if(ARCH STREQUAL "riscv64")
+        target_link_libraries(dbghelp riscv64_rvuw)
+    endif()
     add_delay_importlibs(dbghelp version)
-    add_importlibs(dbghelp psapi msvcrt kernel32 ntdll)
-    add_pch(dbghelp precomp.h SOURCE)
+    add_importlibs(dbghelp psapi msvcrt kernel32_vista kernel32 ntdll)
     add_cd_file(TARGET dbghelp DESTINATION reactos/system32 FOR all)
-    set_wine_module_FIXME(dbghelp) # CORE-5743: No ARRAY_SIZE macro
+    set_wine_module(dbghelp)
 
     if(MSVC)
         # Disable warning C4146: unary minus operator applied to unsigned type, result still unsigned

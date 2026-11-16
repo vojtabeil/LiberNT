@@ -11,6 +11,16 @@
 #define NDEBUG
 #include <debug.h>
 
+class CPortTopology;
+
+VOID
+NTAPI
+PortTopologyEventDpc(
+    IN PKDPC Dpc,
+    IN PVOID DeferredContext,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2);
+
 class CPortTopology : public CUnknownImpl<IPortTopology, ISubdevice, IPortEvents>
 {
 public:
@@ -34,7 +44,20 @@ protected:
     PSUBDEVICE_DESCRIPTOR m_SubDeviceDescriptor;
     IPortFilterTopology * m_Filter;
 
+    KSPIN_LOCK m_EventListLock;
+    LIST_ENTRY m_EventList;
+    KDPC m_EventDpc;
+    volatile LONG m_EventDpcQueued;
+    GUID m_EventDpcSet;
+    BOOLEAN m_EventDpcHasSet;
+    ULONG m_EventDpcId;
+    BOOL m_EventDpcPinEvent;
+    ULONG m_EventDpcPinId;
+    BOOL m_EventDpcNodeEvent;
+    ULONG m_EventDpcNodeId;
+
     friend PMINIPORTTOPOLOGY GetTopologyMiniport(PPORTTOPOLOGY Port);
+    friend VOID NTAPI PortTopologyEventDpc(PKDPC, PVOID, PVOID, PVOID);
 
 };
 
@@ -80,7 +103,12 @@ NTAPI
 CPortTopology::AddEventToEventList(
     IN PKSEVENT_ENTRY EventEntry)
 {
-    UNIMPLEMENTED;
+    if (EventEntry)
+    {
+        ExInterlockedInsertTailList(&m_EventList,
+                                    &EventEntry->ListEntry,
+                                    &m_EventListLock);
+    }
 }
 
 void
@@ -93,7 +121,60 @@ CPortTopology::GenerateEventList(
     IN  BOOL NodeEvent,
     IN  ULONG NodeId)
 {
-    UNIMPLEMENTED;
+    if (KeGetCurrentIrql() <= DISPATCH_LEVEL)
+    {
+        PcGenerateEventList(m_SubDeviceDescriptor,
+                            Set,
+                            EventId,
+                            PinEvent,
+                            PinId,
+                            NodeEvent,
+                            NodeId);
+        return;
+    }
+
+    if (InterlockedCompareExchange(&m_EventDpcQueued, 1, 0) != 0)
+        return;
+
+    m_EventDpcHasSet = Set != NULL;
+    if (Set)
+        RtlCopyMemory(&m_EventDpcSet, Set, sizeof(m_EventDpcSet));
+    m_EventDpcId = EventId;
+    m_EventDpcPinEvent = PinEvent;
+    m_EventDpcPinId = PinId;
+    m_EventDpcNodeEvent = NodeEvent;
+    m_EventDpcNodeId = NodeId;
+    KeMemoryBarrier();
+
+    if (!KeInsertQueueDpc(&m_EventDpc, NULL, NULL))
+        InterlockedExchange(&m_EventDpcQueued, 0);
+}
+
+VOID
+NTAPI
+PortTopologyEventDpc(
+    IN PKDPC Dpc,
+    IN PVOID DeferredContext,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2)
+{
+    CPortTopology *Port = (CPortTopology *)DeferredContext;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+    ASSERT(Port != NULL);
+
+    PcGenerateEventList(Port->m_SubDeviceDescriptor,
+                        Port->m_EventDpcHasSet ? &Port->m_EventDpcSet : NULL,
+                        Port->m_EventDpcId,
+                        Port->m_EventDpcPinEvent,
+                        Port->m_EventDpcPinId,
+                        Port->m_EventDpcNodeEvent,
+                        Port->m_EventDpcNodeId);
+    InterlockedExchange(&Port->m_EventDpcQueued, 0);
 }
 
 //---------------------------------------------------------------
@@ -188,8 +269,10 @@ CPortTopology::Init(
     IN PUNKNOWN  UnknownAdapter  OPTIONAL,
     IN PRESOURCELIST  ResourceList)
 {
+    PPOWERNOTIFY PowerNotify;
     IMiniportTopology * Miniport;
     NTSTATUS Status;
+    PPCLASS_DEVICE_EXTENSION DeviceExtension;
 
     DPRINT("IPortTopology_fnInit entered This %p DeviceObject %p Irp %p UnknownMiniport %p UnknownAdapter %p ResourceList %p\n",
             this, DeviceObject, Irp, UnknownMiniport, UnknownAdapter, ResourceList);
@@ -201,6 +284,11 @@ CPortTopology::Init(
         DPRINT("IPortTopology_Init called again\n");
         return STATUS_SUCCESS;
     }
+
+    InitializeListHead(&m_EventList);
+    KeInitializeSpinLock(&m_EventListLock);
+    KeInitializeDpc(&m_EventDpc, PortTopologyEventDpc, this);
+    m_EventDpcQueued = 0;
 
     Status = UnknownMiniport->QueryInterface(IID_IMiniportTopology, (PVOID*)&Miniport);
     if (!NT_SUCCESS(Status))
@@ -255,8 +343,41 @@ CPortTopology::Init(
     {
         // store for node property requests
         m_SubDeviceDescriptor->UnknownMiniport = UnknownMiniport;
+        m_SubDeviceDescriptor->EventList = &m_EventList;
+        m_SubDeviceDescriptor->EventListLock = &m_EventListLock;
+    }
+    else
+    {
+        Miniport->Release();
+        m_bInitialized = FALSE;
+        return Status;
     }
 
+    // Does the Miniport adapter support IPowerNotify interface?
+    Status = UnknownMiniport->QueryInterface(IID_IPowerNotify, (PVOID *)&PowerNotify);
+    if (NT_SUCCESS(Status))
+    {
+        // Get device extension
+        DeviceExtension = (PPCLASS_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+        PENTRY_POWER_NOTIFY Notify =
+            (PENTRY_POWER_NOTIFY)AllocateItem(NonPagedPool, sizeof(ENTRY_POWER_NOTIFY), TAG_PORTCLASS);
+        if (Notify)
+        {
+            KIRQL OldLevel;
+
+            // Setup item
+            Notify->PowerNotify = PowerNotify;
+
+            // Acquire lock
+            KeAcquireSpinLock(&DeviceExtension->PowerNotifyListLock, &OldLevel);
+
+            // Insert item
+            InsertTailList(&DeviceExtension->PowerNotifyList, &Notify->Entry);
+
+            // Release lock
+            KeReleaseSpinLock(&DeviceExtension->PowerNotifyListLock, OldLevel);
+        }
+    }
     return STATUS_SUCCESS;
 }
 

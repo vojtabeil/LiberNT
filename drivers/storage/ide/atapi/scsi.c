@@ -228,7 +228,7 @@ AtaReqReleaseResources(
 
         DmaOperations->PutScatterGatherList(DmaAdapter,
                                             Request->SgList,
-                                            !!(Request->Flags & REQUEST_FLAG_DATA_IN));
+                                            !!(Request->Flags & REQUEST_FLAG_DATA_OUT));
     }
     else if (Request->Flags & REQUEST_FLAG_HAS_RESERVED_MAPPING)
     {
@@ -493,8 +493,6 @@ AtaReqStartIo(
     PATAPORT_IO_CONTEXT Device = (PATAPORT_IO_CONTEXT)Request->Device;
     PATAPORT_PORT_DATA PortData = Device->PortData;
     KIRQL OldIrql;
-
-    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
     ASSERT(PortData->Slots[Request->Slot] == Request);
 
     PortData->PrepareIo(PortData->ChannelContext, Request);
@@ -620,7 +618,7 @@ AtaReqGetScatterGatherList(
                                                  Request->DataTransferLength,
                                                  AtaReqPreparePrdTable,
                                                  Request,
-                                                 !!(Request->Flags & REQUEST_FLAG_DATA_IN));
+                                                 !!(Request->Flags & REQUEST_FLAG_DATA_OUT));
     if (NT_SUCCESS(Status))
         return TRUE;
 
@@ -662,8 +660,8 @@ AtaReqSendRequest(
         if (Request->Flags & REQUEST_FLAG_PROGRAM_DMA)
         {
             /* DMA transfer */
-            Device->PortData->LocalSgList.Elements[0].Length = Request->DataTransferLength;
-            AtaReqPreparePrdTable(NULL, NULL, &Device->PortData->LocalSgList, Request);
+            ((PSCATTER_GATHER_LIST)Device->PortData->LocalSgListBuffer)->Elements[0].Length = Request->DataTransferLength;
+            AtaReqPreparePrdTable(NULL, NULL, (PSCATTER_GATHER_LIST)Device->PortData->LocalSgListBuffer, Request);
         }
         else
         {

@@ -23,7 +23,7 @@
  *   functionality
  * - Todo: Handle CommonGroupFlag
  *         Better AddItem Tests (Lots of parameters to test)
- *         Tests for Invalid Characters in Names / Invalid Parameters
+ *         Tests for invalid parameters
  */
 
 #include <stdio.h>
@@ -152,8 +152,13 @@ static char *dde_request(DWORD instance, HCONV hconv, const char *request_str)
 static BOOL check_window_exists(const char *name)
 {
     char title[MAX_PATH];
-    HWND window = NULL;
+#ifdef __REACTOS__
+    char win11_title[MAX_PATH + 16];
+    DWORD start;
+#else
     int i;
+#endif
+    HWND window = NULL;
 
     if (full_title())
     {
@@ -163,8 +168,34 @@ static BOOL check_window_exists(const char *name)
     }
     else
         strcpy(title, name);
+#ifdef __REACTOS__
+    /* Windows 11 titles the folder window "<name> - File Explorer" */
+    sprintf(win11_title, "%s - File Explorer", title);
+#endif
 
-    for (i = 0; i < 20; i++)
+#ifdef __REACTOS__
+    /* Look every millisecond within the 4.5 s the growing steps below add up to */
+    start = GetTickCount();
+    do
+    {
+        if ((window = FindWindowA("ExplorerWClass", title)) ||
+            (window = FindWindowA("CabinetWClass", win11_title)) ||
+            (window = FindWindowA("CabinetWClass", title)))
+        {
+            SendMessageA(window, WM_SYSCOMMAND, SC_CLOSE, 0);
+            break;
+        }
+        Sleep(1);
+    } while (GetTickCount() - start < 4500);
+
+    if (!window)
+        return FALSE;
+
+    start = GetTickCount();
+    while (IsWindow(window) && GetTickCount() - start < 4500)
+        Sleep(1);
+#else
+    for (i = 0; i < 10; i++)
     {
         Sleep(100 * i);
         if ((window = FindWindowA("ExplorerWClass", title)) ||
@@ -175,7 +206,18 @@ static BOOL check_window_exists(const char *name)
         }
     }
 
-    return (window != NULL);
+    if (!window)
+        return FALSE;
+
+    for (i = 0; i < 10; i++)
+    {
+        Sleep(100 * i);
+        if (!IsWindow(window))
+            break;
+    }
+#endif
+
+    return TRUE;
 }
 
 static BOOL check_exists(const char *name)
@@ -221,9 +263,24 @@ static void test_parser(DWORD instance, HCONV hConv)
     ok(error == DMLERR_NO_ERROR, "expected DMLERR_NO_ERROR, got %u\n", error);
     ok(check_exists("test/foobar.lnk"), "link not created\n");
 
-    error = dde_execute(instance, hConv, "[AddItem(notepad,foo bar)]");
+    error = dde_execute(instance, hConv, "[AddItem(notepad\tfoo.txt,foo)]");
+    ok(error == DMLERR_NOTPROCESSED, "expected DMLERR_NOTPROCESSED, got %u\n", error);
+
+    error = dde_execute(instance, hConv, "[AddItem(notepad foo.txt,foo)]");
+    ok(error == DMLERR_NO_ERROR, "expected DMLERR_NO_ERROR, got %u\n", error);
+    ok(check_exists("test/foo.lnk"), "link not created\n");
+
+    error = dde_execute(instance, hConv, "[AddItem(notepad foo.txt bar.txt,foo bar)]");
     ok(error == DMLERR_NO_ERROR, "expected DMLERR_NO_ERROR, got %u\n", error);
     ok(check_exists("test/foo bar.lnk"), "link not created\n");
+
+    error = dde_execute(instance, hConv, "[AddItem(C:\\Program Files\\Internet Explorer\\iexplore.exe,IE)]");
+    ok(error == DMLERR_NO_ERROR, "expected DMLERR_NO_ERROR, got %u\n", error);
+    ok(check_exists("test/IE.lnk"), "link not created\n");
+
+    error = dde_execute(instance, hConv, "[AddItem(C:\\Program Files\\Internet Explorer\\iexplore.exe https://www.winehq.org/,WineHQ)]");
+    ok(error == DMLERR_NO_ERROR, "expected DMLERR_NO_ERROR, got %u\n", error);
+    ok(check_exists("test/WineHQ.lnk"), "link not created\n");
 
     error = dde_execute(instance, hConv, "[AddItem(notepad,a[b,c]d)]");
     ok(error == DMLERR_NOTPROCESSED, "expected DMLERR_NOTPROCESSED, got %u\n", error);
@@ -401,6 +458,9 @@ static void test_request_groups(DWORD instance, HCONV hconv)
 
     list = dde_request(instance, hconv, "Groups");
     ok(list != NULL, "request failed: %u\n", DdeGetLastError(instance));
+#ifdef __REACTOS__
+    if (!list) return;
+#endif
     strcpy(programs, ProgramsDir);
     strcat(programs, "/*");
     hfind = FindFirstFileA(programs, &finddata);
@@ -413,6 +473,74 @@ static void test_request_groups(DWORD instance, HCONV hconv)
         }
     } while (FindNextFileA(hfind, &finddata));
     FindClose(hfind);
+}
+
+static void test_name_sanitization(DWORD instance, HCONV hConv)
+{
+    static const char original_name[] = "\x01\x1F !#$%&'*+,-./:;<=>?@[\\]^`{|}~\x7F\xFF";
+    static const char sanitized_name[] = "__ !#$%&'_+,-.__;_=__@[_]^`{_}~\x7F\xFF";
+    char buf[128];
+    UINT error;
+
+    if (0) /* the directory isn't deleted on windows < 7 */
+    {
+        error = dde_execute(instance, hConv, "[CreateGroup(\" \")]");
+        ok(error == DMLERR_NO_ERROR, "expected DMLERR_NO_ERROR, got %#x\n", error);
+        ok(check_exists(" "), "directory not created\n");
+        ok(!check_window_exists(" "), "window should not exist\n");
+
+        error = dde_execute(instance, hConv, "[DeleteGroup(\" \")]");
+        ok(error == DMLERR_NO_ERROR, "expected DMLERR_NO_ERROR, got %#x\n", error);
+        ok(!check_exists(" "), "directory should not exist\n");
+    }
+
+    if (0) /* these calls will actually delete the start menu */
+    {
+        error = dde_execute(instance, hConv, "[DeleteGroup(\"\")]");
+        ok(error == DMLERR_NO_ERROR, "expected DMLERR_NO_ERROR, got %#x\n", error);
+        ok(!check_exists("../Programs"), "directory should not exist\n");
+
+        error = dde_execute(instance, hConv, "[DeleteGroup(\"..\")]");
+        ok(error == DMLERR_NO_ERROR, "expected DMLERR_NO_ERROR, got %#x\n", error);
+        ok(!check_exists("../../Start Menu"), "directory should not exist\n");
+    }
+
+    sprintf(buf, "[CreateGroup(\"Group%s\")]", original_name);
+    error = dde_execute(instance, hConv, buf);
+    ok(error == DMLERR_NO_ERROR, "expected DMLERR_NO_ERROR, got %#x\n", error);
+    sprintf(buf, "Group%s", sanitized_name);
+    ok(check_exists(buf), "directory not created\n");
+    ok(check_window_exists(buf), "window not created\n");
+
+    sprintf(buf, "[ShowGroup(\"Group%s\", 0)]", original_name);
+    error = dde_execute(instance, hConv, buf);
+    ok(error == DMLERR_NO_ERROR, "expected DMLERR_NO_ERROR, got %#x\n", error);
+    sprintf(buf, "Group%s", sanitized_name);
+    ok(check_window_exists(buf), "window not created\n");
+
+    sprintf(buf, "[AddItem(notepad,\"Notepad%s\")]", original_name);
+    error = dde_execute(instance, hConv, buf);
+    ok(error == DMLERR_NO_ERROR, "expected DMLERR_NO_ERROR, got %#x\n", error);
+    sprintf(buf, "Group%s/Notepad%s.lnk", sanitized_name, sanitized_name);
+    ok(check_exists(buf), "link not created\n");
+
+    sprintf(buf, "[ReplaceItem(\"Notepad%s\")]", original_name);
+    error = dde_execute(instance, hConv, buf);
+    ok(error == DMLERR_NOTPROCESSED, "expected DMLERR_NOTPROCESSED, got %#x\n", error);
+    sprintf(buf, "Group%s/Notepad%s.lnk", sanitized_name, sanitized_name);
+    ok(check_exists(buf), "link should still exist\n");
+
+    sprintf(buf, "[DeleteItem(\"Notepad%s\")]", original_name);
+    error = dde_execute(instance, hConv, buf);
+    ok(error == DMLERR_NOTPROCESSED, "expected DMLERR_NOTPROCESSED, got %#x\n", error);
+    sprintf(buf, "Group%s/Notepad%s.lnk", sanitized_name, sanitized_name);
+    ok(check_exists(buf), "link should still exist\n");
+
+    sprintf(buf, "[DeleteGroup(\"Group%s\")]", original_name);
+    error = dde_execute(instance, hConv, buf);
+    ok(error == DMLERR_NO_ERROR, "expected DMLERR_NO_ERROR, got %#x\n", error);
+    sprintf(buf, "Group%s", sanitized_name);
+    ok(!check_exists(buf), "directory should not exist\n");
 }
 
 START_TEST(progman_dde)
@@ -449,7 +577,7 @@ START_TEST(progman_dde)
 
     /* Cleanup & Exit */
     ret = DdeDisconnect(hConv);
-    ok(ret, "DdeDisonnect() failed: %u\n", DdeGetLastError(instance));
+    ok(ret, "DdeDisconnect() failed: %u\n", DdeGetLastError(instance));
     ret = DdeUninitialize(instance);
     ok(ret, "DdeUninitialize() failed: %u\n", DdeGetLastError(instance));
 
@@ -469,10 +597,11 @@ START_TEST(progman_dde)
 
     /* Run Tests */
     test_progman_dde2(instance, hConv);
+    test_name_sanitization(instance, hConv);
 
     /* Cleanup & Exit */
     ret = DdeDisconnect(hConv);
-    ok(ret, "DdeDisonnect() failed: %u\n", DdeGetLastError(instance));
+    ok(ret, "DdeDisconnect() failed: %u\n", DdeGetLastError(instance));
     ret = DdeUninitialize(instance);
     ok(ret, "DdeUninitialize() failed: %u\n", DdeGetLastError(instance));
 }

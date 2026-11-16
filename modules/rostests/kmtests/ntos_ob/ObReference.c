@@ -15,8 +15,15 @@
     Status = ZwQueryObject(Handle, ObjectBasicInformation,          \
                             &ObjectInfo, sizeof ObjectInfo, NULL);  \
     ok_eq_hex(Status, STATUS_SUCCESS);                              \
-    ok_eq_ulong(ObjectInfo.PointerCount, Pointers);                 \
+    if (GetNTVersion() < _WIN32_WINNT_WIN8)                         \
+        ok_eq_ulong(ObjectInfo.PointerCount, Pointers);            \
     ok_eq_ulong(ObjectInfo.HandleCount, Handles);                   \
+} while (0)
+
+#define CheckRet(Ret, Expected) do                                  \
+{                                                                   \
+    if (GetNTVersion() < _WIN32_WINNT_WIN8)                         \
+        ok_eq_longptr(Ret, Expected);                              \
 } while (0)
 
 static POBJECT_TYPE ObDirectoryObjectType;
@@ -54,11 +61,11 @@ TestReference(
     if (!skip(Object != NULL, "No object to reference!\n"))
     {
         Ret = ObReferenceObject(Object);
-        ok_eq_longptr(Ret, (LONG_PTR)4 + AdditionalReferences);
+        CheckRet(Ret, (LONG_PTR)4 + AdditionalReferences);
         CheckObject(Handle, 5LU + AdditionalReferences, 1LU);
 
         Ret = ObReferenceObject(Object);
-        ok_eq_longptr(Ret, (LONG_PTR)5 + AdditionalReferences);
+        CheckRet(Ret, (LONG_PTR)5 + AdditionalReferences);
         CheckObject(Handle, 6LU + AdditionalReferences, 1LU);
 
         Status = ObReferenceObjectByPointer(Object, DIRECTORY_ALL_ACCESS, NULL, KernelMode);
@@ -70,19 +77,19 @@ TestReference(
         CheckObject(Handle, 8LU + AdditionalReferences, 1LU);
 
         Ret = ObDereferenceObject(Object);
-        ok_eq_longptr(Ret, (LONG_PTR)6 + AdditionalReferences);
+        CheckRet(Ret, (LONG_PTR)6 + AdditionalReferences);
         CheckObject(Handle, 7LU + AdditionalReferences, 1LU);
 
         Ret = ObDereferenceObject(Object);
-        ok_eq_longptr(Ret, (LONG_PTR)5 + AdditionalReferences);
+        CheckRet(Ret, (LONG_PTR)5 + AdditionalReferences);
         CheckObject(Handle, 6LU + AdditionalReferences, 1LU);
 
         Ret = ObDereferenceObject(Object);
-        ok_eq_longptr(Ret, (LONG_PTR)4 + AdditionalReferences);
+        CheckRet(Ret, (LONG_PTR)4 + AdditionalReferences);
         CheckObject(Handle, 5LU + AdditionalReferences, 1LU);
 
         Ret = ObDereferenceObject(Object);
-        ok_eq_longptr(Ret, (LONG_PTR)3 + AdditionalReferences);
+        CheckRet(Ret, (LONG_PTR)3 + AdditionalReferences);
         CheckObject(Handle, 4LU + AdditionalReferences, 1LU);
     }
 
@@ -103,25 +110,25 @@ TestReference(
     if (NameUpper && !skip(Object4 != NULL, "No object to dereference\n"))
     {
         Ret = ObDereferenceObject(Object4);
-        ok_eq_longptr(Ret, (LONG_PTR)4 + AdditionalReferences);
+        CheckRet(Ret, (LONG_PTR)4 + AdditionalReferences);
         CheckObject(Handle, 5LU + AdditionalReferences, 1LU);
     }
     if (Name && !skip(Object3 != NULL, "No object to dereference\n"))
     {
         Ret = ObDereferenceObject(Object3);
-        ok_eq_longptr(Ret, (LONG_PTR)3 + AdditionalReferences);
+        CheckRet(Ret, (LONG_PTR)3 + AdditionalReferences);
         CheckObject(Handle, 4LU + AdditionalReferences, 1LU);
     }
     if (!skip(Object2 != NULL, "No object to dereference\n"))
     {
         Ret = ObDereferenceObject(Object2);
-        ok_eq_longptr(Ret, (LONG_PTR)2 + AdditionalReferences);
+        CheckRet(Ret, (LONG_PTR)2 + AdditionalReferences);
         CheckObject(Handle, 3LU + AdditionalReferences, 1LU);
     }
     if (!skip(Object != NULL, "No object to dereference\n"))
     {
         Ret = ObDereferenceObject(Object);
-        ok_eq_longptr(Ret, (LONG_PTR)1 + AdditionalReferences);
+        CheckRet(Ret, (LONG_PTR)1 + AdditionalReferences);
         CheckObject(Handle, 2LU + AdditionalReferences, 1LU);
     }
 
@@ -171,19 +178,43 @@ START_TEST(ObReference)
         { L"\\YayDirectory6",   OBJ_KERNEL_HANDLE | OBJ_PERMANENT,                          1 },
         { L"\\YayDirectory7",   OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE | OBJ_PERMANENT,   1 },
     };
-    HANDLE ObjectTypeHandle;
+    HANDLE ObjectTypeHandle = NULL;
+    BOOLEAN ObDirectoryObjectTypeReferenced = FALSE;
+    POBJECT_TYPE TypeObjectType = ObGetObjectType(*PsProcessType);
 
     /* ObReferenceObjectByName needs the object type... so get it... */
     RtlInitUnicodeString(&Name, L"\\ObjectTypes\\Directory");
     InitializeObjectAttributes(&ObjectAttributes, &Name, OBJ_KERNEL_HANDLE, NULL, NULL);
-    Status = ObOpenObjectByName(&ObjectAttributes, NULL, KernelMode, NULL, 0, NULL, &ObjectTypeHandle);
+    if (GetNTVersion() >= _WIN32_WINNT_WIN10)
+    {
+        ULONG AccessIndex, ParameterIndex;
+        const ACCESS_MASK AccessMasks[] = { 0, OBJECT_TYPE_CREATE };
+
+        for (AccessIndex = 0; AccessIndex < RTL_NUMBER_OF(AccessMasks); ++AccessIndex)
+        {
+            for (ParameterIndex = 0; ParameterIndex < 3; ++ParameterIndex)
+            {
+                HANDLE InvalidHandle = (HANDLE)(ULONG_PTR)-1;
+                Status = ObOpenObjectByName(ParameterIndex == 0 ? &ObjectAttributes : NULL,
+                                            ParameterIndex == 2 ? TypeObjectType : NULL,
+                                            KernelMode, NULL, AccessMasks[AccessIndex], NULL, &InvalidHandle);
+                ok_eq_hex(Status, STATUS_INVALID_PARAMETER);
+                ok_eq_pointer(InvalidHandle, NULL);
+                if (NT_SUCCESS(Status) && InvalidHandle)
+                    ZwClose(InvalidHandle);
+            }
+        }
+    }
+
+    Status = ObOpenObjectByName(&ObjectAttributes, TypeObjectType, KernelMode, NULL, 0, NULL, &ObjectTypeHandle);
     ok_eq_hex(Status, STATUS_SUCCESS);
     ok(ObjectTypeHandle != NULL, "ObjectTypeHandle = NULL\n");
-    if (!skip(Status == STATUS_SUCCESS && ObjectTypeHandle, "No handle\n"))
+    if (Status == STATUS_SUCCESS && ObjectTypeHandle)
     {
         Status = ObReferenceObjectByHandle(ObjectTypeHandle, 0, NULL, KernelMode, (PVOID)&ObDirectoryObjectType, NULL);
         ok_eq_hex(Status, STATUS_SUCCESS);
         ok(ObDirectoryObjectType != NULL, "ObDirectoryObjectType = NULL\n");
+        ObDirectoryObjectTypeReferenced = NT_SUCCESS(Status) && ObDirectoryObjectType != NULL;
         Status = ZwClose(ObjectTypeHandle);
         ok_eq_hex(Status, STATUS_SUCCESS);
     }
@@ -241,7 +272,8 @@ START_TEST(ObReference)
 
     if (ObDirectoryObjectType)
     {
-        ObDereferenceObject(ObDirectoryObjectType);
+        if (ObDirectoryObjectTypeReferenced)
+            ObDereferenceObject(ObDirectoryObjectType);
         ObDirectoryObjectType = NULL;
     }
 }

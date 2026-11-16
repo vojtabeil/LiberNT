@@ -25,7 +25,7 @@
 #include <gdiplus.h>
 #include <math.h>
 
-#define SEARCH_TIMER_ID 'SR'
+#define SEARCH_TIMER_ID ('S' << 8 | 'R')
 #define TREEVIEW_ICON_SIZE 24
 
 // **** CSideTreeView ****
@@ -96,7 +96,7 @@ CMainWindow::~CMainWindow()
 VOID
 CMainWindow::InitCategoriesList()
 {
-    HTREEITEM hRootItemAvailable;
+    HTREEITEM hRootItemAvailable = NULL;
 
     hRootItemInstalled = m_TreeView->AddCategory(TVI_ROOT, IDS_INSTALLED, IDI_CATEGORY);
     m_TreeView->AddCategory(hRootItemInstalled, IDS_APPLICATIONS, IDI_APPS);

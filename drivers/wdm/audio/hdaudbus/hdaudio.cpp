@@ -13,21 +13,32 @@ NTSTATUS HDA_WaitForTransfer(
 
 	LARGE_INTEGER Timeout;
 	Timeout.QuadPart = -10LL * 1000LL * 1000LL * (LONGLONG)Count;
-	status = KeWaitForSingleObject(&fdoCtx->rirb.xferEvent[codecAddr], Executive, KernelMode, FALSE, &Timeout);
-	KeClearEvent(&fdoCtx->rirb.xferEvent[codecAddr]);
+	ULONG TransferredCount;
+	for (;;) {
+		status = KeWaitForSingleObject(&fdoCtx->rirb.xferEvent[codecAddr], Executive, KernelMode, FALSE, &Timeout);
+		KeClearEvent(&fdoCtx->rirb.xferEvent[codecAddr]);
 
-	SklHdAudBusPrint(DEBUG_LEVEL_VERBOSE, DBG_IOCTL, "%s wait status: 0x%x!\n", __func__, status);
+		SklHdAudBusPrint(DEBUG_LEVEL_VERBOSE, DBG_IOCTL, "%s wait status: 0x%x!\n", __func__, status);
 
-	ULONG TransferredCount = 0;
-	for (ULONG i = 0; i < Count; i++) {
-		if (CodecTransfer[i].Input.IsValid) {
-			TransferredCount++;
+		WdfInterruptAcquireLock(fdoCtx->Interrupt);
+		TransferredCount = 0;
+		for (ULONG i = 0; i < Count; i++) {
+			if (CodecTransfer[i].Input.IsValid) {
+				TransferredCount++;
+			}
 		}
+
+		if (TransferredCount < Count && status == STATUS_TIMEOUT) {
+			InterlockedExchange(&fdoCtx->rirb.cmds[codecAddr], 0);
+			RtlZeroMemory(&fdoCtx->rirb.xfer[codecAddr], sizeof(fdoCtx->rirb.xfer[codecAddr]));
+		}
+		WdfInterruptReleaseLock(fdoCtx->Interrupt);
+
+		if (TransferredCount == Count || status == STATUS_TIMEOUT)
+			break;
 	}
 
 	if (TransferredCount < Count) {
-		InterlockedAdd(&fdoCtx->rirb.cmds[codecAddr], TransferredCount - Count);
-
 		SklHdAudBusPrint(DEBUG_LEVEL_VERBOSE, DBG_IOCTL, "%s timeout (Count: %d, transferred %d)!\n", __func__, Count, TransferredCount);
 		status = STATUS_IO_TIMEOUT;
 		goto out;
@@ -52,6 +63,9 @@ HDA_AsyncWait(WDFWORKITEM WorkItem) {
 		workItemContext->CodecTransfer
 	);
 	UNREFERENCED_PARAMETER(status);
+
+	HDAReleaseCodecVerbs(workItemContext->devData->FdoContext,
+		(UINT16)workItemContext->devData->CodecIds.CodecAddress);
 
 	workItemContext->Callback(
 		workItemContext->CodecTransfer,
@@ -100,8 +114,12 @@ HDA_TransferCodecVerbs(
 		return status;
 	}
 
+	UINT16 codecAddr = (UINT16)devData->CodecIds.CodecAddress;
+	HDAAcquireCodecVerbs(fdoCtx, codecAddr);
+
 	status = SendHDACmds(fdoCtx, Count, CodecTransfer);
 	if (!NT_SUCCESS(status)) {
+		HDAReleaseCodecVerbs(fdoCtx, codecAddr);
 		goto out;
 	}
 
@@ -119,7 +137,13 @@ HDA_TransferCodecVerbs(
 		);
 		attributes.ParentObject = fdoCtx->WdfDevice;
 
-		WdfWorkItemCreate(&workItemConfig, &attributes, &workItem);
+		status = WdfWorkItemCreate(&workItemConfig, &attributes, &workItem);
+		if (!NT_SUCCESS(status)) {
+			HDA_WaitForTransfer(fdoCtx, codecAddr, Count, CodecTransfer);
+			HDAReleaseCodecVerbs(fdoCtx, codecAddr);
+			WdfDeviceResumeIdle(fdoCtx->WdfDevice);
+			goto out;
+		}
 
 		PHDA_ASYNC_CONTEXT workItemContext = HDAAsyncWorkItem_GetContext(workItem);
 		workItemContext->devData = devData;
@@ -130,7 +154,8 @@ HDA_TransferCodecVerbs(
 		WdfWorkItemEnqueue(workItem);
 	}
 	else {
-		status = HDA_WaitForTransfer(fdoCtx, (UINT16)devData->CodecIds.CodecAddress, Count, CodecTransfer);
+		status = HDA_WaitForTransfer(fdoCtx, codecAddr, Count, CodecTransfer);
+		HDAReleaseCodecVerbs(fdoCtx, codecAddr);
 		if (!NT_SUCCESS(status)) {
 			goto out;
 		}
@@ -348,6 +373,7 @@ HDA_SetDmaEngineState(
 		WdfInterruptAcquireLock(devData->FdoContext->Interrupt);
 
 		if (StreamState == RunState && !stream->running) {
+			InterlockedExchange(&stream->notificationPending, FALSE);
 			hdac_stream_setup(stream);
 			hdac_stream_start(stream);
 			stream->running = TRUE;
@@ -355,6 +381,7 @@ HDA_SetDmaEngineState(
 		else if ((StreamState == PauseState || StreamState == StopState) && stream->running) {
 			hdac_stream_stop(stream);
 			stream->running = FALSE;
+			InterlockedExchange(&stream->notificationPending, FALSE);
 		}
 		else if (StreamState == ResetState) {
 			if (!stream->running) {
@@ -400,10 +427,7 @@ HDA_GetLinkPositionRegister(
 		return STATUS_INVALID_HANDLE;
 	}
 
-	if (devData->CodecIds.CtlrVenId != VEN_INTEL) //Experimental Non-Intel support
-		*Position = (ULONG*)(stream->sdAddr + HDA_REG_SD_LPIBA);
-	else
-		*Position = (ULONG *)stream->posbuf; //Use Posbuf for all Intel
+	*Position = (ULONG*)(stream->sdAddr + HDA_REG_SD_LPIBA);
 
 	return STATUS_SUCCESS;
 }
@@ -564,26 +588,38 @@ HDA_AllocateDmaBufferWithNotification(
 	PHYSICAL_ADDRESS maxAddr;
 	maxAddr.QuadPart = devData->FdoContext->is64BitOK ? MAXULONG64 : MAXULONG32;
 
-	UINT32 allocSize = (UINT32)RequestedBufferSize;
+	UINT32 bufferSize = (UINT32)min(RequestedBufferSize, (SIZE_T)HDA_MAX_BDL_ENTRIES * PAGE_SIZE);
 	UINT32 allocOffset = 0;
 	UINT32 halfSize = 0;
 	if (NotificationCount == 2) {
-		halfSize = (UINT32)RequestedBufferSize / 2;
+		UINT32 frameSize = (stream->streamFormat.ContainerSize / 8) * stream->streamFormat.NumberOfChannels;
+		UINT32 align = 128;
+		while (frameSize && align % frameSize)
+			align += 128;
+		UINT32 maxHalf = (HDA_MAX_BDL_ENTRIES / 2) * PAGE_SIZE / align * align;
+		halfSize = (UINT32)min(RequestedBufferSize / 2, (SIZE_T)maxHalf);
+		halfSize = min((halfSize + align - 1) / align * align, maxHalf);
+		bufferSize = halfSize * 2;
 		allocOffset = PAGE_SIZE - (halfSize % PAGE_SIZE);
-		allocSize = (UINT32)RequestedBufferSize + allocOffset;
 	}
+	UINT32 allocSize = bufferSize + allocOffset;
 
 	PMDL mdl = MmAllocatePagesForMdl(zeroAddr, maxAddr, zeroAddr, allocSize);
 	if (!mdl) {
 		return STATUS_NO_MEMORY;
 	}
+	if (MmGetMdlByteCount(mdl) < allocSize) {
+		MmFreePagesFromMdl(mdl);
+		ExFreePool(mdl);
+		return STATUS_INSUFFICIENT_RESOURCES;
+	}
 
 	WdfInterruptAcquireLock(devData->FdoContext->Interrupt);
 	stream->mdlBuf = mdl;
-	stream->bufSz = (UINT32)RequestedBufferSize;
+	stream->bufSz = bufferSize;
 
 	*BufferMdl = mdl;
-	*AllocatedBufferSize = RequestedBufferSize;
+	*AllocatedBufferSize = bufferSize;
 	*OffsetFromFirstPage = allocOffset;
 	*StreamId = stream->streamTag;
 
@@ -593,12 +629,12 @@ HDA_AllocateDmaBufferWithNotification(
 
 		//Set up the BDL
 		PHDAC_BDLENTRY bdl = stream->bdl;
-		UINT32 size = (UINT32)RequestedBufferSize;
+		UINT32 size = bufferSize;
 
 		PPFN_NUMBER pfnArray = MmGetMdlPfnArray(mdl);
 		UINT32 offset = allocOffset;
 		while (halfSize > 0) {
-			if (numBlocks > HDA_MAX_BDL_ENTRIES) {
+			if (numBlocks >= HDA_MAX_BDL_ENTRIES) {
 				SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_IOCTL, "%s Too many BDL entries!\n", __func__);
 				numBlocks = HDA_MAX_BDL_ENTRIES;
 				break;
@@ -630,7 +666,7 @@ HDA_AllocateDmaBufferWithNotification(
 		}
 
 		while (size > 0) {
-			if (numBlocks > HDA_MAX_BDL_ENTRIES) {
+			if (numBlocks >= HDA_MAX_BDL_ENTRIES) {
 				SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_IOCTL, "%s Too many BDL entries!\n", __func__);
 				numBlocks = HDA_MAX_BDL_ENTRIES;
 				break;

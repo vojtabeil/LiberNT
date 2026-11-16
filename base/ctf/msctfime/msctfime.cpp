@@ -105,7 +105,7 @@ Inquire(
     {
         case LANGID_JAPANESE: // Japanese
         {
-            lpIMEInfo->fdwProperty = IME_PROP_COMPLETE_ON_UNSELECT | IME_PROP_SPECIAL_UI |
+            lpIMEInfo->fdwProperty = IME_PROP_COMPLETE_ON_UNSELECT | IME_PROP_CANDLIST_START_FROM_1 |
                                      IME_PROP_AT_CARET | IME_PROP_NEED_ALTKEY |
                                      IME_PROP_KBD_CHAR_FIRST;
             lpIMEInfo->fdwConversionCaps = IME_CMODE_FULLSHAPE | IME_CMODE_KATAKANA |
@@ -154,6 +154,7 @@ Inquire(
         }
     }
 
+    lpIMEInfo->fdwProperty |= IME_PROP_UNICODE;
     return S_OK;
 }
 
@@ -320,7 +321,7 @@ ImeDestroy(
     TRACE("(%u)\n", uReserved);
 
     TLS *pTLS = TLS::PeekTLS();
-    if (pTLS)
+    if (!pTLS)
         return FALSE;
 
     if (!pTLS->m_pBridge || !pTLS->m_pThreadMgr)
@@ -480,6 +481,171 @@ ImeToAsciiEx(
  * @implemented
  * @see https://katahiromz.web.fc2.com/colony3rd/imehackerz/en/NotifyIME.html
  */
+static BOOL
+SetImmCompositionString(
+    _In_ HIMC hIMC,
+    _In_opt_ LPCVOID lpComp,
+    _In_ DWORD dwCompLen,
+    _In_opt_ LPCVOID lpRead,
+    _In_ DWORD dwReadLen)
+{
+    DWORD cchComp, cchRead, dwOffset;
+    SIZE_T cbNeeded;
+    HIMCC hCompStr;
+
+    if (!lpComp)
+        dwCompLen = 0;
+    if (!lpRead)
+        dwReadLen = 0;
+    if ((dwCompLen % sizeof(WCHAR)) || (dwReadLen % sizeof(WCHAR)))
+        return FALSE;
+
+    cchComp = dwCompLen / sizeof(WCHAR);
+    cchRead = dwReadLen / sizeof(WCHAR);
+    cbNeeded = sizeof(COMPOSITIONSTRING);
+    if (cchComp)
+        cbNeeded += (2 * sizeof(DWORD)) + dwCompLen + cchComp;
+    if (cchRead)
+        cbNeeded += (2 * sizeof(DWORD)) + dwReadLen + cchRead;
+    if (cbNeeded > MAXDWORD)
+        return FALSE;
+
+    CicIMCLock imcLock(hIMC);
+    if (FAILED(imcLock.m_hr))
+        return FALSE;
+
+    hCompStr = ImmReSizeIMCC(imcLock.get().hCompStr, (DWORD)cbNeeded);
+    if (!hCompStr)
+        return FALSE;
+    imcLock.get().hCompStr = hCompStr;
+
+    CicIMCCLock<COMPOSITIONSTRING> compLock(hCompStr);
+    if (FAILED(compLock.m_hr))
+        return FALSE;
+
+    COMPOSITIONSTRING *pCS = &compLock.get();
+    ZeroMemory(pCS, cbNeeded);
+    pCS->dwSize = (DWORD)cbNeeded;
+    dwOffset = sizeof(*pCS);
+
+    if (cchComp)
+    {
+        DWORD *pClause;
+
+        pCS->dwCompClauseLen = 2 * sizeof(DWORD);
+        pCS->dwCompClauseOffset = dwOffset;
+        pClause = (DWORD *)((BYTE *)pCS + dwOffset);
+        pClause[0] = 0;
+        pClause[1] = cchComp;
+        dwOffset += pCS->dwCompClauseLen;
+
+        pCS->dwCompStrLen = cchComp;
+        pCS->dwCompStrOffset = dwOffset;
+        CopyMemory((BYTE *)pCS + dwOffset, lpComp, dwCompLen);
+        dwOffset += dwCompLen;
+
+        pCS->dwCompAttrLen = cchComp;
+        pCS->dwCompAttrOffset = dwOffset;
+        FillMemory((BYTE *)pCS + dwOffset, cchComp, ATTR_INPUT);
+        dwOffset += cchComp;
+        pCS->dwCursorPos = cchComp;
+    }
+
+    if (cchRead)
+    {
+        DWORD *pClause;
+
+        pCS->dwCompReadClauseLen = 2 * sizeof(DWORD);
+        pCS->dwCompReadClauseOffset = dwOffset;
+        pClause = (DWORD *)((BYTE *)pCS + dwOffset);
+        pClause[0] = 0;
+        pClause[1] = cchRead;
+        dwOffset += pCS->dwCompReadClauseLen;
+
+        pCS->dwCompReadStrLen = cchRead;
+        pCS->dwCompReadStrOffset = dwOffset;
+        CopyMemory((BYTE *)pCS + dwOffset, lpRead, dwReadLen);
+        dwOffset += dwReadLen;
+
+        pCS->dwCompReadAttrLen = cchRead;
+        pCS->dwCompReadAttrOffset = dwOffset;
+        FillMemory((BYTE *)pCS + dwOffset, cchRead, ATTR_INPUT);
+    }
+
+    return TRUE;
+}
+
+static BOOL
+FinishImmCompositionString(
+    _In_ HIMC hIMC,
+    _In_ BOOL bCancel)
+{
+    HWND hWnd;
+    WCHAR wchResult = 0;
+    LPARAM lParam = 0;
+
+    CicIMCLock imcLock(hIMC);
+    if (FAILED(imcLock.m_hr))
+        return FALSE;
+
+    CicIMCCLock<COMPOSITIONSTRING> compLock(imcLock.get().hCompStr);
+    if (FAILED(compLock.m_hr))
+        return FALSE;
+
+    COMPOSITIONSTRING *pCS = &compLock.get();
+    hWnd = imcLock.get().hWnd;
+
+    if (!bCancel && pCS->dwCompStrLen)
+    {
+        wchResult = *(WCHAR *)((BYTE *)pCS + pCS->dwCompStrOffset);
+        pCS->dwResultStrLen = pCS->dwCompStrLen;
+        pCS->dwResultStrOffset = pCS->dwCompStrOffset;
+        pCS->dwResultClauseLen = pCS->dwCompClauseLen;
+        pCS->dwResultClauseOffset = pCS->dwCompClauseOffset;
+        lParam |= GCS_RESULTSTR | GCS_RESULTCLAUSE;
+    }
+
+    if (!bCancel && pCS->dwCompReadStrLen)
+    {
+        pCS->dwResultReadStrLen = pCS->dwCompReadStrLen;
+        pCS->dwResultReadStrOffset = pCS->dwCompReadStrOffset;
+        pCS->dwResultReadClauseLen = pCS->dwCompReadClauseLen;
+        pCS->dwResultReadClauseOffset = pCS->dwCompReadClauseOffset;
+        lParam |= GCS_RESULTREADSTR | GCS_RESULTREADCLAUSE;
+    }
+
+    pCS->dwCompReadAttrLen = 0;
+    pCS->dwCompReadAttrOffset = 0;
+    pCS->dwCompReadClauseLen = 0;
+    pCS->dwCompReadClauseOffset = 0;
+    pCS->dwCompReadStrLen = 0;
+    pCS->dwCompReadStrOffset = 0;
+    pCS->dwCompAttrLen = 0;
+    pCS->dwCompAttrOffset = 0;
+    pCS->dwCompClauseLen = 0;
+    pCS->dwCompClauseOffset = 0;
+    pCS->dwCompStrLen = 0;
+    pCS->dwCompStrOffset = 0;
+    pCS->dwCursorPos = 0;
+    pCS->dwDeltaStart = 0;
+
+    compLock.unlock();
+    imcLock.unlock();
+
+    if (hWnd && lParam)
+    {
+        SendMessageW(hWnd, WM_IME_STARTCOMPOSITION, 0, 0);
+        SendMessageW(hWnd, WM_IME_COMPOSITION, wchResult, lParam);
+        SendMessageW(hWnd, WM_IME_ENDCOMPOSITION, 0, 0);
+    }
+    else if (hWnd && bCancel)
+    {
+        SendMessageW(hWnd, WM_IME_ENDCOMPOSITION, 0, 0);
+    }
+
+    return TRUE;
+}
+
 EXTERN_C BOOL WINAPI
 NotifyIME(
     _In_ HIMC hIMC,
@@ -490,16 +656,20 @@ NotifyIME(
     TRACE("(%p, 0x%lX, 0x%lX, %p)\n", hIMC, dwAction, dwIndex, dwValue);
 
     TLS *pTLS = TLS::GetTLS();
-    if (!pTLS)
-        return FALSE;
+    if (pTLS && pTLS->m_pBridge && pTLS->m_pThreadMgr)
+    {
+        HRESULT hr = pTLS->m_pBridge->Notify(pTLS, pTLS->m_pThreadMgr, hIMC, dwAction, dwIndex, dwValue);
+        if (hr == S_OK)
+            return TRUE;
+    }
 
-    auto pBridge = pTLS->m_pBridge;
-    auto pThreadMgr = pTLS->m_pThreadMgr;
-    if (!pBridge || !pThreadMgr)
+    if (dwAction != NI_COMPOSITIONSTR)
         return FALSE;
-
-    HRESULT hr = pBridge->Notify(pTLS, pThreadMgr, hIMC, dwAction, dwIndex, dwValue);
-    return (hr == S_OK);
+    if (dwIndex == CPS_COMPLETE)
+        return FinishImmCompositionString(hIMC, FALSE);
+    if (dwIndex == CPS_CANCEL)
+        return FinishImmCompositionString(hIMC, TRUE);
+    return FALSE;
 }
 
 /***********************************************************************
@@ -521,16 +691,12 @@ ImeSetCompositionString(
           lpRead, dwReadLen);
 
     TLS *pTLS = TLS::GetTLS();
-    if (!pTLS)
-        return FALSE;
+    if (pTLS && pTLS->m_pBridge && pTLS->m_pThreadMgr && pTLS->m_pBridge->SetCompositionString(pTLS, pTLS->m_pThreadMgr, hIMC, dwIndex, lpComp, dwCompLen, lpRead, dwReadLen))
+        return TRUE;
 
-    auto pBridge = pTLS->m_pBridge;
-    auto pThreadMgr = pTLS->m_pThreadMgr;
-    if (!pBridge || !pThreadMgr)
+    if (dwIndex != SCS_SETSTR)
         return FALSE;
-
-    return pBridge->SetCompositionString(pTLS, pThreadMgr, hIMC, dwIndex,
-                                         lpComp, dwCompLen, lpRead, dwReadLen);
+    return SetImmCompositionString(hIMC, lpComp, dwCompLen, lpRead, dwReadLen);
 }
 
 /***********************************************************************
@@ -657,6 +823,42 @@ CtfImeIsGuidMapEnable(
     return ret;
 }
 
+static BOOL
+ProcessAppDocumentKey(ITfThreadMgrEx *pThreadMgr, WPARAM wParam, LPARAM lParam)
+{
+    ITfDocumentMgr *pDocMgr = NULL;
+    if (FAILED(pThreadMgr->GetFocus(&pDocMgr)) || !pDocMgr)
+        return FALSE;
+    BOOL fOwn = CicBridge::IsOwnDim(pDocMgr);
+    pDocMgr->Release();
+    if (fOwn)
+        return FALSE;
+
+    ITfKeystrokeMgr *pKeystrokeMgr = NULL;
+    if (FAILED(pThreadMgr->QueryInterface(IID_ITfKeystrokeMgr, (void **)&pKeystrokeMgr)))
+        return FALSE;
+    BOOL fEaten = FALSE;
+    HRESULT hr;
+    if (lParam & 0x80000000)
+        hr = pKeystrokeMgr->KeyUp(wParam, lParam, &fEaten);
+    else
+        hr = pKeystrokeMgr->KeyDown(wParam, lParam, &fEaten);
+    pKeystrokeMgr->Release();
+    return SUCCEEDED(hr) && fEaten;
+}
+
+static LRESULT CALLBACK
+KeyboardHookProc(INT nCode, WPARAM wParam, LPARAM lParam)
+{
+    TLS *pTLS = TLS::PeekTLS();
+    if (nCode == HC_ACTION && pTLS && pTLS->m_pBridge && pTLS->m_pThreadMgr &&
+        ProcessAppDocumentKey(pTLS->m_pThreadMgr, wParam, lParam))
+    {
+        return 1;
+    }
+    return ::CallNextHookEx(NULL, nCode, wParam, lParam);
+}
+
 /***********************************************************************
  *      CtfImeCreateThreadMgr (MSCTFIME.@)
  *
@@ -671,6 +873,9 @@ CtfImeCreateThreadMgr(VOID)
     if (!pTLS)
         return E_OUTOFMEMORY;
 
+    if (g_bWinLogon || (pTLS->m_dwSystemInfoFlags & IME_SYSINFO_WINLOGON))
+        return S_FALSE;
+
     if (!pTLS->m_pBridge)
     {
         pTLS->m_pBridge = new(cicNoThrow) CicBridge();
@@ -678,19 +883,17 @@ CtfImeCreateThreadMgr(VOID)
             return E_OUTOFMEMORY;
     }
 
-    HRESULT hr = S_OK;
-    if (!g_bWinLogon && !(pTLS->m_dwSystemInfoFlags & IME_SYSINFO_WINLOGON))
+    HRESULT hr = pTLS->m_pBridge->InitIMMX(pTLS);
+    if (SUCCEEDED(hr))
     {
-        hr = pTLS->m_pBridge->InitIMMX(pTLS);
-        if (SUCCEEDED(hr))
-        {
-            if (!pTLS->m_pThreadMgr)
-                return E_OUTOFMEMORY;
+        if (!pTLS->m_pThreadMgr)
+            return E_OUTOFMEMORY;
 
-            hr = pTLS->m_pBridge->ActivateIMMX(pTLS, pTLS->m_pThreadMgr);
-            if (FAILED(hr))
-                pTLS->m_pBridge->UnInitIMMX(pTLS);
-        }
+        hr = pTLS->m_pBridge->ActivateIMMX(pTLS, pTLS->m_pThreadMgr);
+        if (FAILED(hr))
+            pTLS->m_pBridge->UnInitIMMX(pTLS);
+        else if (!pTLS->m_hKeyboardHook)
+            pTLS->m_hKeyboardHook = ::SetWindowsHookExW(WH_KEYBOARD, KeyboardHookProc, NULL, ::GetCurrentThreadId());
     }
 
     return hr;
@@ -708,24 +911,24 @@ CtfImeDestroyThreadMgr(VOID)
 
     TLS *pTLS = TLS::PeekTLS();
     if (!pTLS)
-        return E_OUTOFMEMORY;
-
-    if (pTLS->m_pBridge)
-    {
-        pTLS->m_pBridge = new(cicNoThrow) CicBridge();
-        if (!pTLS->m_pBridge)
-            return E_OUTOFMEMORY;
-    }
-
-    if (!pTLS->m_pThreadMgr)
-        return E_OUTOFMEMORY;
+        return S_FALSE;
 
     if (pTLS->m_dwSystemInfoFlags & IME_SYSINFO_WINLOGON)
-        return S_OK;
+        return S_FALSE;
+
+    if (!pTLS->m_pBridge || !pTLS->m_pThreadMgr)
+        return S_FALSE;
 
     HRESULT hr = pTLS->m_pBridge->DeactivateIMMX(pTLS, pTLS->m_pThreadMgr);
     if (hr == S_OK)
+    {
+        if (pTLS->m_hKeyboardHook)
+        {
+            ::UnhookWindowsHookEx(pTLS->m_hKeyboardHook);
+            pTLS->m_hKeyboardHook = NULL;
+        }
         pTLS->m_pBridge->UnInitIMMX(pTLS);
+    }
 
     return hr;
 }
@@ -742,8 +945,10 @@ CtfImeCreateInputContext(
     TRACE("(%p)\n", hIMC);
 
     TLS *pTLS = TLS::GetTLS();
-    if (!pTLS || !pTLS->m_pBridge)
+    if (!pTLS)
         return E_OUTOFMEMORY;
+    if ((pTLS->m_dwSystemInfoFlags & IME_SYSINFO_WINLOGON) || !pTLS->m_pBridge || !pTLS->m_pThreadMgr)
+        return S_FALSE;
 
     return pTLS->m_pBridge->CreateInputContext(pTLS, hIMC);
 }
@@ -760,8 +965,8 @@ CtfImeDestroyInputContext(
     TRACE("(%p)\n", hIMC);
 
     TLS *pTLS = TLS::PeekTLS();
-    if (!pTLS || !pTLS->m_pBridge)
-        return E_OUTOFMEMORY;
+    if (!pTLS || (pTLS->m_dwSystemInfoFlags & IME_SYSINFO_WINLOGON) || !pTLS->m_pBridge)
+        return S_FALSE;
 
     return pTLS->m_pBridge->DestroyInputContext(pTLS, hIMC);
 }
@@ -915,6 +1120,21 @@ EXTERN_C VOID TFUninitLib(VOID)
     }
 }
 
+HRESULT APIENTRY
+MsCtfImeCoCreateInstance(
+    REFCLSID rclsid,
+    LPUNKNOWN pUnkOuter,
+    DWORD dwClsContext,
+    REFIID iid,
+    LPVOID *ppv)
+{
+    if (IsEqualCLSID(rclsid, CLSID_TF_CategoryMgr))
+        return TF_CreateCategoryMgr((ITfCategoryMgr **)ppv);
+    if (IsEqualCLSID(rclsid, CLSID_TF_DisplayAttributeMgr))
+        return TF_CreateDisplayAttributeMgr((ITfDisplayAttributeMgr **)ppv);
+    return cicRealCoCreateInstance(rclsid, pUnkOuter, dwClsContext, iid, ppv);
+}
+
 /// @implemented
 BOOL ProcessAttach(HINSTANCE hinstDLL)
 {
@@ -929,7 +1149,7 @@ BOOL ProcessAttach(HINSTANCE hinstDLL)
 
     cicInitUIFLib();
 
-    if (!TFInitLib())
+    if (!TFInitLib(MsCtfImeCoCreateInstance))
         return FALSE;
 
     gfTFInitLib = TRUE;
@@ -939,8 +1159,6 @@ BOOL ProcessAttach(HINSTANCE hinstDLL)
 /// @implemented
 VOID ProcessDetach(HINSTANCE hinstDLL)
 {
-    TF_DllDetachInOther();
-
     if (gfTFInitLib)
     {
         DetachIME();
@@ -974,12 +1192,12 @@ DllMain(
         }
         case DLL_PROCESS_DETACH:
         {
-            ProcessDetach(hinstDLL);
+            if (!lpvReserved)
+                ProcessDetach(hinstDLL);
             break;
         }
         case DLL_THREAD_DETACH:
         {
-            TF_DllDetachInOther();
             CtfImeThreadDetach();
             TLS::InternalDestroyTLS();
             break;

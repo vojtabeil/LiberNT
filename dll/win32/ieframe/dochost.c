@@ -16,10 +16,13 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <assert.h>
+
 #include "ieframe.h"
 
 #include "exdispid.h"
 #include "mshtml.h"
+#include "mshtmdid.h"
 #include "perhist.h"
 #include "initguid.h"
 
@@ -80,12 +83,46 @@ void abort_dochost_tasks(DocHost *This, task_proc_t proc)
     }
 }
 
+static BOOL fire_titlechange(DocHost *This)
+{
+    IHTMLDocument2 *doc;
+    BSTR title = NULL;
+    DISPPARAMS dp = { NULL, NULL, 0, 0 };
+    HRESULT hres;
+    BOOL has_title = FALSE;
+    VARIANTARG arg;
+
+    if(!This->document)
+        return FALSE;
+
+    hres = IUnknown_QueryInterface(This->document, &IID_IHTMLDocument2, (void **)&doc);
+    if(FAILED(hres))
+        return FALSE;
+
+    hres = IHTMLDocument2_get_title(doc, &title);
+    IHTMLDocument2_Release(doc);
+    if(FAILED(hres) || !title)
+        return FALSE;
+
+    has_title = *title != 0;
+
+    VariantInit(&arg);
+    V_VT(&arg) = VT_BSTR;
+    V_BSTR(&arg) = title;
+    dp.rgvarg = &arg;
+    dp.cArgs = 1;
+    call_sink(This->cps.wbe2, DISPID_TITLECHANGE, &dp);
+    VariantClear(&arg);
+
+    return has_title;
+}
+
 void on_commandstate_change(DocHost *doc_host, LONG command, BOOL enable)
 {
     DISPPARAMS dispparams;
     VARIANTARG params[2];
 
-    TRACE("command=%d enable=%d\n", command, enable);
+    TRACE("command=%ld enable=%d\n", command, enable);
 
     dispparams.cArgs = 2;
     dispparams.cNamedArgs = 0;
@@ -108,7 +145,11 @@ void update_navigation_commands(DocHost *dochost)
     unsigned pos = dochost->travellog.loading_pos == -1 ? dochost->travellog.position : dochost->travellog.loading_pos;
 
     on_commandstate_change(dochost, CSC_NAVIGATEBACK, pos > 0);
+#ifdef __REACTOS__
+    on_commandstate_change(dochost, CSC_NAVIGATEFORWARD, pos + 1 < dochost->travellog.length);
+#else
     on_commandstate_change(dochost, CSC_NAVIGATEFORWARD, pos < dochost->travellog.length);
+#endif
 }
 
 static void notif_complete(DocHost *This, DISPID dispid)
@@ -131,9 +172,9 @@ static void notif_complete(DocHost *This, DISPID dispid)
     V_VT(&url) = VT_BSTR;
     V_BSTR(&url) = SysAllocString(This->url);
 
-    TRACE("%d >>>\n", dispid);
+    TRACE("%ld >>>\n", dispid);
     call_sink(This->cps.wbe2, dispid, &dispparams);
-    TRACE("%d <<<\n", dispid);
+    TRACE("%ld <<<\n", dispid);
 
     SysFreeString(V_BSTR(&url));
 }
@@ -164,7 +205,7 @@ static void object_available(DocHost *This)
 
         hres = IUnknown_QueryInterface(This->document, &IID_IOleObject, (void**)&ole_object);
         if(FAILED(hres)) {
-            FIXME("Could not get IOleObject iface: %08x\n", hres);
+            FIXME("Could not get IOleObject iface: %08lx\n", hres);
             return;
         }
 
@@ -172,7 +213,7 @@ static void object_available(DocHost *This)
         hres = IOleObject_DoVerb(ole_object, OLEIVERB_SHOW, NULL, &This->IOleClientSite_iface, -1, This->hwnd, &rect);
         IOleObject_Release(ole_object);
         if(FAILED(hres))
-            FIXME("DoVerb failed: %08x\n", hres);
+            FIXME("DoVerb failed: %08lx\n", hres);
     }
 }
 
@@ -192,7 +233,7 @@ static HRESULT get_doc_ready_state(DocHost *This, READYSTATE *ret)
             &dp, &var, &ei, NULL);
     IDispatch_Release(disp);
     if(FAILED(hres)) {
-        WARN("Invoke(DISPID_READYSTATE failed: %08x\n", hres);
+        WARN("Invoke(DISPID_READYSTATE failed: %08lx\n", hres);
         return hres;
     }
 
@@ -205,6 +246,19 @@ static HRESULT get_doc_ready_state(DocHost *This, READYSTATE *ret)
     *ret = V_I4(&var);
     return S_OK;
 }
+
+#ifdef __REACTOS__
+BOOL is_document_loading(DocHost *This)
+{
+    READYSTATE ready_state;
+
+    if(!This->document)
+        return FALSE;
+    if(FAILED(get_doc_ready_state(This, &ready_state)))
+        return This->doc_state < READYSTATE_COMPLETE;
+    return ready_state < READYSTATE_COMPLETE;
+}
+#endif
 
 static void advise_prop_notif(DocHost *This, BOOL set)
 {
@@ -269,7 +323,7 @@ static void ready_state_task_destr(task_header_t *_task)
     ready_state_task_t *task = (ready_state_task_t*)_task;
 
     IUnknown_Release(task->doc);
-    heap_free(task);
+    free(task);
 }
 
 static void ready_state_proc(DocHost *This, task_header_t *_task)
@@ -282,7 +336,11 @@ static void ready_state_proc(DocHost *This, task_header_t *_task)
 
 static void push_ready_state_task(DocHost *This, READYSTATE ready_state)
 {
-    ready_state_task_t *task = heap_alloc(sizeof(ready_state_task_t));
+    ready_state_task_t *task = malloc(sizeof(ready_state_task_t));
+#ifdef __REACTOS__
+    if (!task)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
 
     IUnknown_AddRef(This->document);
     task->doc = This->document;
@@ -293,7 +351,7 @@ static void push_ready_state_task(DocHost *This, READYSTATE ready_state)
 
 static void object_available_task_destr(task_header_t *task)
 {
-    heap_free(task);
+    free(task);
 }
 
 static void object_available_proc(DocHost *This, task_header_t *task)
@@ -322,16 +380,20 @@ HRESULT dochost_object_available(DocHost *This, IUnknown *doc)
 
         hres = IOleObject_SetClientSite(oleobj, &This->IOleClientSite_iface);
         if(FAILED(hres))
-            FIXME("SetClientSite failed: %08x\n", hres);
+            FIXME("SetClientSite failed: %08lx\n", hres);
 
         IOleObject_Release(oleobj);
     }else {
-        FIXME("Could not get IOleObject iface: %08x\n", hres);
+        FIXME("Could not get IOleObject iface: %08lx\n", hres);
     }
 
     /* FIXME: Call SetAdvise */
 
-    task = heap_alloc(sizeof(*task));
+    task = malloc(sizeof(*task));
+#ifdef __REACTOS__
+    if (!task)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     push_dochost_task(This, task, object_available_proc, object_available_task_destr, FALSE);
 
     hres = get_doc_ready_state(This, &ready_state);
@@ -353,7 +415,7 @@ static LRESULT resize_document(DocHost *This, LONG width, LONG height)
 {
     RECT rect = {0, 0, width, height};
 
-    TRACE("(%p)->(%d %d)\n", This, width, height);
+    TRACE("(%p)->(%ld %ld)\n", This, width, height);
 
     if(This->view)
         IOleDocumentView_SetRect(This->view, &rect);
@@ -365,13 +427,11 @@ static LRESULT WINAPI doc_view_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 {
     DocHost *This;
 
-    static const WCHAR wszTHIS[] = {'T','H','I','S',0};
-
     if(msg == WM_CREATE) {
         This = *(DocHost**)lParam;
-        SetPropW(hwnd, wszTHIS, This);
+        SetPropW(hwnd, L"THIS", This);
     }else {
-        This = GetPropW(hwnd, wszTHIS);
+        This = GetPropW(hwnd, L"THIS");
     }
 
     switch(msg) {
@@ -384,9 +444,12 @@ static LRESULT WINAPI doc_view_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM l
 
 static void free_travellog_entry(travellog_entry_t *entry)
 {
-    if(entry->stream)
+    if(entry->stream) {
         IStream_Release(entry->stream);
-    heap_free(entry->url);
+        entry->stream = NULL;
+    }
+    free(entry->url);
+    entry->url = NULL;
 }
 
 static IStream *get_travellog_stream(DocHost *This)
@@ -421,29 +484,78 @@ static void dump_travellog(DocHost *This)
         TRACE("%d: =>\n", i);
 }
 
+#ifdef __REACTOS__
+/* The history update comes before the page being left is replaced, while the host may already name the new URL */
+static WCHAR *get_left_page_url(DocHost *This)
+{
+    IHTMLDocument2 *doc;
+    WCHAR *url = NULL;
+    BSTR doc_url;
+
+    if(This->document && SUCCEEDED(IUnknown_QueryInterface(This->document, &IID_IHTMLDocument2, (void**)&doc))) {
+        if(SUCCEEDED(IHTMLDocument2_get_URL(doc, &doc_url)) && doc_url) {
+            url = wcsdup(doc_url);
+            SysFreeString(doc_url);
+        }
+        IHTMLDocument2_Release(doc);
+        if(url)
+            return url;
+    }
+
+    return This->url ? wcsdup(This->url) : NULL;
+}
+#endif
+
 static void update_travellog(DocHost *This)
 {
     travellog_entry_t *new_entry;
+#ifdef __REACTOS__
+    unsigned saved_pos;
+    WCHAR *url = get_left_page_url(This);
+#endif
 
     static const WCHAR about_schemeW[] = {'a','b','o','u','t',':'};
 
-    if(This->url && !_wcsnicmp(This->url, about_schemeW, ARRAY_SIZE(about_schemeW))) {
+#ifdef __REACTOS__
+    if(!url || !wcsnicmp(url, about_schemeW, ARRAY_SIZE(about_schemeW))) {
+        TRACE("Skipping about URL\n");
+        free(url);
+        return;
+    }
+#else
+    if(This->url && !wcsnicmp(This->url, about_schemeW, ARRAY_SIZE(about_schemeW))) {
         TRACE("Skipping about URL\n");
         return;
     }
+#endif
 
     if(!This->travellog.log) {
-        This->travellog.log = heap_alloc(4 * sizeof(*This->travellog.log));
+#ifdef __REACTOS__
+        This->travellog.log = calloc(4, sizeof(*This->travellog.log));
+        if(!This->travellog.log) {
+            free(url);
+            return;
+        }
+#else
+        This->travellog.log = malloc(4 * sizeof(*This->travellog.log));
         if(!This->travellog.log)
             return;
+#endif
 
         This->travellog.size = 4;
-    }else if(This->travellog.size < This->travellog.position+1) {
+    }else if(This->travellog.size < This->travellog.position+2) {
         travellog_entry_t *new_travellog;
 
-        new_travellog = heap_realloc(This->travellog.log, This->travellog.size*2*sizeof(*This->travellog.log));
+        new_travellog = realloc(This->travellog.log, This->travellog.size * 2 * sizeof(*This->travellog.log));
+#ifdef __REACTOS__
+        if(!new_travellog) {
+            free(url);
+            return;
+        }
+#else
         if(!new_travellog)
             return;
+#endif
 
         This->travellog.log = new_travellog;
         This->travellog.size *= 2;
@@ -457,21 +569,36 @@ static void update_travellog(DocHost *This)
 
     new_entry = This->travellog.log + This->travellog.position;
 
-    new_entry->url = heap_strdupW(This->url);
+#ifdef __REACTOS__
+    free_travellog_entry(new_entry);
+    new_entry->url = url;
+    TRACE("Adding %s at %d\n", debugstr_w(url), This->travellog.position);
+    saved_pos = This->travellog.position;
+#else
+    new_entry->url = wcsdup(This->url);
     TRACE("Adding %s at %d\n", debugstr_w(This->url), This->travellog.position);
     if(!new_entry->url)
         return;
+#endif
 
     new_entry->stream = get_travellog_stream(This);
 
     if(This->travellog.loading_pos == -1) {
         This->travellog.position++;
+        assert(This->travellog.position < This->travellog.size);
+        This->travellog.log[This->travellog.position].stream = NULL;
+        This->travellog.log[This->travellog.position].url = NULL;
     }else {
          This->travellog.position = This->travellog.loading_pos;
          This->travellog.loading_pos = -1;
     }
+#ifdef __REACTOS__
+    if(saved_pos + 1 > This->travellog.length)
+        This->travellog.length = saved_pos + 1;
+#else
     if(This->travellog.position > This->travellog.length)
         This->travellog.length = This->travellog.position;
+#endif
 
     dump_travellog(This);
 }
@@ -480,9 +607,6 @@ void create_doc_view_hwnd(DocHost *This)
 {
     RECT rect;
 
-    static const WCHAR wszShell_DocObject_View[] =
-        {'S','h','e','l','l',' ','D','o','c','O','b','j','e','c','t',' ','V','i','e','w',0};
-
     if(!doc_view_atom) {
         static WNDCLASSEXW wndclass = {
             sizeof(wndclass),
@@ -490,7 +614,7 @@ void create_doc_view_hwnd(DocHost *This)
             doc_view_proc,
             0, 0 /* native uses 4*/, NULL, NULL, NULL,
             (HBRUSH)(COLOR_WINDOW + 1), NULL,
-            wszShell_DocObject_View,
+            L"Shell DocObject View",
             NULL
         };
 
@@ -500,8 +624,8 @@ void create_doc_view_hwnd(DocHost *This)
     }
 
     This->container_vtbl->get_docobj_rect(This, &rect);
-    This->hwnd = CreateWindowExW(0, wszShell_DocObject_View,
-         wszShell_DocObject_View,
+    This->hwnd = CreateWindowExW(0, L"Shell DocObject View",
+         L"Shell DocObject View",
          WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN | WS_TABSTOP,
          rect.left, rect.top, rect.right, rect.bottom, This->frame_hwnd,
          NULL, ieframe_instance, This);
@@ -598,6 +722,32 @@ HRESULT refresh_document(DocHost *This, const VARIANT *level)
     return S_OK;
 }
 
+void activate_document(DocHost *This)
+{
+    IOleObject *oleobj;
+    IHlinkTarget *hlink;
+    HRESULT hres;
+
+    if(!This->document) return;
+
+    hres = IUnknown_QueryInterface(This->document, &IID_IHlinkTarget, (void**)&hlink);
+    if(SUCCEEDED(hres)) {
+        IHlinkTarget_Navigate(hlink, 0, NULL);
+        IHlinkTarget_Release(hlink);
+    }
+
+    hres = IUnknown_QueryInterface(This->document, &IID_IOleObject, (void**)&oleobj);
+    if(SUCCEEDED(hres)) {
+        IOleObject_DoVerb(oleobj, OLEIVERB_SHOW, NULL, NULL, -1, 0, NULL);
+        IOleObject_Release(oleobj);
+    }
+
+    refresh_document(This, NULL);
+
+    if(This->view)
+        IOleDocumentView_UIActivate(This->view, TRUE);
+}
+
 void release_dochost_client(DocHost *This)
 {
     if(This->hwnd) {
@@ -656,10 +806,14 @@ static HRESULT WINAPI ClOleCommandTarget_QueryStatus(IOleCommandTarget *iface,
     DocHost *This = impl_from_IOleCommandTarget(iface);
     ULONG i;
 
-    TRACE("(%p)->(%s %u %p %p)\n", This, debugstr_guid(pguidCmdGroup), cCmds, prgCmds,
+    TRACE("(%p)->(%s %lu %p %p)\n", This, debugstr_guid(pguidCmdGroup), cCmds, prgCmds,
           pCmdText);
+#ifdef __REACTOS__
+    if(!pguidCmdGroup && This->olecmd)
+        return IOleCommandTarget_QueryStatus(This->olecmd, pguidCmdGroup, cCmds, prgCmds, pCmdText);
+#endif
     for(i=0; prgCmds && i < cCmds; i++)
-        TRACE("unsupported command %u (%x)\n", prgCmds[i].cmdID, prgCmds[i].cmdf);
+        TRACE("unsupported command %lu (%lx)\n", prgCmds[i].cmdID, prgCmds[i].cmdf);
 
     return E_NOTIMPL;
 }
@@ -670,7 +824,7 @@ static HRESULT WINAPI ClOleCommandTarget_Exec(IOleCommandTarget *iface,
 {
     DocHost *This = impl_from_IOleCommandTarget(iface);
 
-    TRACE("(%p)->(%s %d %d %s %s)\n", This, debugstr_guid(pguidCmdGroup), nCmdID, nCmdexecopt,
+    TRACE("(%p)->(%s %ld %ld %s %s)\n", This, debugstr_guid(pguidCmdGroup), nCmdID, nCmdexecopt,
             debugstr_variant(pvaIn), debugstr_variant(pvaOut));
 
     if(!pguidCmdGroup) {
@@ -679,9 +833,50 @@ static HRESULT WINAPI ClOleCommandTarget_Exec(IOleCommandTarget *iface,
             if(!This->olecmd)
                 return E_NOTIMPL;
             return IOleCommandTarget_Exec(This->olecmd, pguidCmdGroup, nCmdID, nCmdexecopt, pvaIn, pvaOut);
+        case OLECMDID_SETTITLE:
+            if(fire_titlechange(This) && This->olecmd)
+                return IOleCommandTarget_Exec(This->olecmd, pguidCmdGroup, nCmdID, nCmdexecopt, pvaIn, pvaOut);
+            return S_OK;
+#ifdef __REACTOS__
+        case OLECMDID_SETPROGRESSMAX:
+        case OLECMDID_SETPROGRESSPOS: {
+            VARIANTARG args[2];
+            DISPPARAMS dispparams = {args, NULL, 2, 0};
+
+            if(!pvaIn || V_VT(pvaIn) != VT_I4)
+                return E_INVALIDARG;
+            if(nCmdID == OLECMDID_SETPROGRESSMAX)
+                This->progress_max = V_I4(pvaIn);
+            else
+                This->progress = V_I4(pvaIn);
+
+            if(This->busy) {
+                V_VT(args) = VT_I4;
+                V_I4(args) = This->progress_max;
+                V_VT(args+1) = VT_I4;
+                V_I4(args+1) = This->progress;
+                call_sink(This->cps.wbe2, DISPID_PROGRESSCHANGE, &dispparams);
+            }
+
+            if(This->olecmd)
+                return IOleCommandTarget_Exec(This->olecmd, pguidCmdGroup, nCmdID, nCmdexecopt, pvaIn, pvaOut);
+            return S_OK;
+        }
+#endif
         case OLECMDID_SETDOWNLOADSTATE:
             if(pvaIn && V_VT(pvaIn) == VT_I4)
                 This->busy = V_I4(pvaIn) ? VARIANT_TRUE : VARIANT_FALSE;
+#ifdef __REACTOS__
+            if(pvaIn && V_VT(pvaIn) == VT_I4 && V_I4(pvaIn)) {
+                VARIANTARG lock_icon;
+                DISPPARAMS lock_dp = {&lock_icon, NULL, 1, 0};
+
+                /* FIXME: a page loaded over a secure connection reports its key strength */
+                V_VT(&lock_icon) = VT_I4;
+                V_I4(&lock_icon) = secureLockIconUnsecure;
+                call_sink(This->cps.wbe2, DISPID_SETSECURELOCKICON, &lock_dp);
+            }
+#endif
             if(This->olecmd)
                 return IOleCommandTarget_Exec(This->olecmd, pguidCmdGroup, nCmdID, nCmdexecopt, pvaIn, pvaOut);
 
@@ -691,7 +886,7 @@ static HRESULT WINAPI ClOleCommandTarget_Exec(IOleCommandTarget *iface,
             notify_download_state(This, V_I4(pvaIn));
             return S_OK;
         default:
-            TRACE("Unimplemented cmdid %d\n", nCmdID);
+            TRACE("Unimplemented cmdid %ld\n", nCmdID);
             return E_NOTIMPL;
         }
     }
@@ -743,7 +938,7 @@ static HRESULT WINAPI ClOleCommandTarget_Exec(IOleCommandTarget *iface,
         }
 
         default:
-            TRACE("unsupported command %d of CGID_DocHostCmdPriv\n", nCmdID);
+            TRACE("unsupported command %ld of CGID_DocHostCmdPriv\n", nCmdID);
             return E_NOTIMPL;
         }
     }
@@ -756,7 +951,7 @@ static HRESULT WINAPI ClOleCommandTarget_Exec(IOleCommandTarget *iface,
             return S_OK;
 
         default:
-            TRACE("Unimplemented cmdid %d of CGID_Explorer\n", nCmdID);
+            TRACE("Unimplemented cmdid %ld of CGID_Explorer\n", nCmdID);
             return E_NOTIMPL;
         }
     }
@@ -764,7 +959,7 @@ static HRESULT WINAPI ClOleCommandTarget_Exec(IOleCommandTarget *iface,
     if(IsEqualGUID(pguidCmdGroup, &CGID_ShellDocView)) {
         switch(nCmdID) {
         default:
-            TRACE("Unimplemented cmdid %d of CGID_ShellDocView\n", nCmdID);
+            TRACE("Unimplemented cmdid %ld of CGID_ShellDocView\n", nCmdID);
             return E_NOTIMPL;
         }
     }
@@ -775,7 +970,7 @@ static HRESULT WINAPI ClOleCommandTarget_Exec(IOleCommandTarget *iface,
         return IOleCommandTarget_Exec(This->olecmd, pguidCmdGroup, nCmdID, nCmdexecopt, pvaIn, pvaOut);
     }
 
-    TRACE("Unimplemented cmdid %d of group %s\n", nCmdID, debugstr_guid(pguidCmdGroup));
+    TRACE("Unimplemented cmdid %ld of group %s\n", nCmdID, debugstr_guid(pguidCmdGroup));
     return E_NOTIMPL;
 }
 
@@ -817,7 +1012,7 @@ static HRESULT WINAPI DocHostUIHandler_ShowContextMenu(IDocHostUIHandler2 *iface
     DocHost *This = impl_from_IDocHostUIHandler2(iface);
     HRESULT hres;
 
-    TRACE("(%p)->(%d %p %p %p)\n", This, dwID, ppt, pcmdtReserved, pdispReserved);
+    TRACE("(%p)->(%ld %p %p %p)\n", This, dwID, ppt, pcmdtReserved, pdispReserved);
 
     if(This->hostui) {
         hres = IDocHostUIHandler_ShowContextMenu(This->hostui, dwID, ppt, pcmdtReserved,
@@ -855,16 +1050,38 @@ static HRESULT WINAPI DocHostUIHandler_ShowUI(IDocHostUIHandler2 *iface, DWORD d
         IOleInPlaceFrame *pFrame, IOleInPlaceUIWindow *pDoc)
 {
     DocHost *This = impl_from_IDocHostUIHandler2(iface);
-    FIXME("(%p)->(%d %p %p %p %p)\n", This, dwID, pActiveObject, pCommandTarget,
+#ifdef __REACTOS__
+    TRACE("(%p)->(%ld %p %p %p %p)\n", This, dwID, pActiveObject, pCommandTarget,
+          pFrame, pDoc);
+
+    if(!This->hostui)
+        return E_NOTIMPL;
+
+    This->hostui_shown = TRUE;
+    return IDocHostUIHandler_ShowUI(This->hostui, dwID, pActiveObject, pCommandTarget, pFrame, pDoc);
+#else
+    FIXME("(%p)->(%ld %p %p %p %p)\n", This, dwID, pActiveObject, pCommandTarget,
           pFrame, pDoc);
     return E_NOTIMPL;
+#endif
 }
 
 static HRESULT WINAPI DocHostUIHandler_HideUI(IDocHostUIHandler2 *iface)
 {
     DocHost *This = impl_from_IDocHostUIHandler2(iface);
+#ifdef __REACTOS__
+    TRACE("(%p)\n", This);
+
+    /* Only the UI the container was asked to show is hidden again */
+    if(!This->hostui || !This->hostui_shown)
+        return E_NOTIMPL;
+
+    This->hostui_shown = FALSE;
+    return IDocHostUIHandler_HideUI(This->hostui);
+#else
     FIXME("(%p)\n", This);
     return E_NOTIMPL;
+#endif
 }
 
 static HRESULT WINAPI DocHostUIHandler_UpdateUI(IDocHostUIHandler2 *iface)
@@ -916,7 +1133,7 @@ static HRESULT WINAPI DocHostUIHandler_TranslateAccelerator(IDocHostUIHandler2 *
 {
     DocHost *This = impl_from_IDocHostUIHandler2(iface);
     HRESULT hr = S_FALSE;
-    TRACE("(%p)->(%p %p %d)\n", This, lpMsg, pguidCmdGroup, nCmdID);
+    TRACE("(%p)->(%p %p %ld)\n", This, lpMsg, pguidCmdGroup, nCmdID);
 
     if(This->hostui)
         hr = IDocHostUIHandler_TranslateAccelerator(This->hostui, lpMsg, pguidCmdGroup, nCmdID);
@@ -929,7 +1146,7 @@ static HRESULT WINAPI DocHostUIHandler_GetOptionKeyPath(IDocHostUIHandler2 *ifac
 {
     DocHost *This = impl_from_IDocHostUIHandler2(iface);
 
-    TRACE("(%p)->(%p %d)\n", This, pchKey, dw);
+    TRACE("(%p)->(%p %ld)\n", This, pchKey, dw);
 
     if(This->hostui)
         return IDocHostUIHandler_GetOptionKeyPath(This->hostui, pchKey, dw);
@@ -941,8 +1158,19 @@ static HRESULT WINAPI DocHostUIHandler_GetDropTarget(IDocHostUIHandler2 *iface,
         IDropTarget *pDropTarget, IDropTarget **ppDropTarget)
 {
     DocHost *This = impl_from_IDocHostUIHandler2(iface);
+#ifdef __REACTOS__
+    TRACE("(%p)->(%p %p)\n", This, pDropTarget, ppDropTarget);
+
+    /* The container is asked once per host, when the host's drop target is first set up */
+    if(!This->hostui || This->drop_target_asked)
+        return E_NOTIMPL;
+
+    This->drop_target_asked = TRUE;
+    return IDocHostUIHandler_GetDropTarget(This->hostui, pDropTarget, ppDropTarget);
+#else
     FIXME("(%p)\n", This);
     return E_NOTIMPL;
+#endif
 }
 
 static HRESULT WINAPI DocHostUIHandler_GetExternal(IDocHostUIHandler2 *iface,
@@ -973,7 +1201,7 @@ static HRESULT WINAPI DocHostUIHandler_TranslateUrl(IDocHostUIHandler2 *iface,
 {
     DocHost *This = impl_from_IDocHostUIHandler2(iface);
 
-    TRACE("(%p)->(%d %s %p)\n", This, dwTranslate, debugstr_w(pchURLIn), ppchURLOut);
+    TRACE("(%p)->(%ld %s %p)\n", This, dwTranslate, debugstr_w(pchURLIn), ppchURLOut);
 
     if(This->hostui)
         return IDocHostUIHandler_TranslateUrl(This->hostui, dwTranslate,
@@ -997,7 +1225,7 @@ static HRESULT WINAPI DocHostUIHandler_GetOverrideKeyPath(IDocHostUIHandler2 *if
     IDocHostUIHandler2 *handler;
     HRESULT hres;
 
-    TRACE("(%p)->(%p %d)\n", This, pchKey, dw);
+    TRACE("(%p)->(%p %ld)\n", This, pchKey, dw);
 
     if(!This->hostui)
         return S_OK;
@@ -1063,7 +1291,7 @@ static HRESULT WINAPI PropertyNotifySink_OnChanged(IPropertyNotifySink *iface, D
 {
     DocHost *This = impl_from_IPropertyNotifySink(iface);
 
-    TRACE("(%p)->(%d)\n", This, dispID);
+    TRACE("(%p)->(%ld)\n", This, dispID);
 
     switch(dispID) {
     case DISPID_READYSTATE: {
@@ -1080,8 +1308,11 @@ static HRESULT WINAPI PropertyNotifySink_OnChanged(IPropertyNotifySink *iface, D
         update_ready_state(This, ready_state);
         break;
     }
+    case DISPID_IHTMLDOCUMENT2_TITLE:
+        fire_titlechange(This);
+        break;
     default:
-        FIXME("unimplemented dispid %d\n", dispID);
+        FIXME("unimplemented dispid %ld\n", dispID);
         return E_NOTIMPL;
     }
 
@@ -1091,7 +1322,7 @@ static HRESULT WINAPI PropertyNotifySink_OnChanged(IPropertyNotifySink *iface, D
 static HRESULT WINAPI PropertyNotifySink_OnRequestEdit(IPropertyNotifySink *iface, DISPID dispID)
 {
     DocHost *This = impl_from_IPropertyNotifySink(iface);
-    FIXME("(%p)->(%d)\n", This, dispID);
+    FIXME("(%p)->(%ld)\n", This, dispID);
     return E_NOTIMPL;
 }
 
@@ -1103,9 +1334,88 @@ static const IPropertyNotifySinkVtbl PropertyNotifySinkVtbl = {
     PropertyNotifySink_OnRequestEdit
 };
 
+#ifdef __REACTOS__
+static inline DocHost *impl_from_IDocHostShowUI(IDocHostShowUI *iface)
+{
+    return CONTAINING_RECORD(iface, DocHost, IDocHostShowUI_iface);
+}
+
+static HRESULT WINAPI DocHostShowUI_QueryInterface(IDocHostShowUI *iface, REFIID riid, void **ppv)
+{
+    DocHost *This = impl_from_IDocHostShowUI(iface);
+    return IOleClientSite_QueryInterface(&This->IOleClientSite_iface, riid, ppv);
+}
+
+static ULONG WINAPI DocHostShowUI_AddRef(IDocHostShowUI *iface)
+{
+    DocHost *This = impl_from_IDocHostShowUI(iface);
+    return IOleClientSite_AddRef(&This->IOleClientSite_iface);
+}
+
+static ULONG WINAPI DocHostShowUI_Release(IDocHostShowUI *iface)
+{
+    DocHost *This = impl_from_IDocHostShowUI(iface);
+    return IOleClientSite_Release(&This->IOleClientSite_iface);
+}
+
+static IDocHostShowUI *get_container_show_ui(DocHost *This)
+{
+    IDocHostShowUI *show_ui;
+
+    if(!This->hostui || FAILED(IDocHostUIHandler_QueryInterface(This->hostui, &IID_IDocHostShowUI, (void**)&show_ui)))
+        return NULL;
+    return show_ui;
+}
+
+static HRESULT WINAPI DocHostShowUI_ShowMessage(IDocHostShowUI *iface, HWND hwnd, LPOLESTR lpstrText,
+        LPOLESTR lpstrCaption, DWORD dwType, LPOLESTR lpstrHelpFile, DWORD dwHelpContext, LRESULT *plResult)
+{
+    DocHost *This = impl_from_IDocHostShowUI(iface);
+    IDocHostShowUI *show_ui;
+    HRESULT hres;
+
+    TRACE("(%p)->(%p %s %s %lx)\n", This, hwnd, debugstr_w(lpstrText), debugstr_w(lpstrCaption), dwType);
+
+    if(!(show_ui = get_container_show_ui(This)))
+        return S_FALSE;
+
+    hres = IDocHostShowUI_ShowMessage(show_ui, hwnd, lpstrText, lpstrCaption, dwType, lpstrHelpFile, dwHelpContext, plResult);
+    IDocHostShowUI_Release(show_ui);
+    return hres;
+}
+
+static HRESULT WINAPI DocHostShowUI_ShowHelp(IDocHostShowUI *iface, HWND hwnd, LPOLESTR pszHelpFile,
+        UINT uCommand, DWORD dwData, POINT ptMouse, IDispatch *pDispatchObjectHit)
+{
+    DocHost *This = impl_from_IDocHostShowUI(iface);
+    IDocHostShowUI *show_ui;
+    HRESULT hres;
+
+    TRACE("(%p)->(%p %s %u %lx)\n", This, hwnd, debugstr_w(pszHelpFile), uCommand, dwData);
+
+    if(!(show_ui = get_container_show_ui(This)))
+        return S_FALSE;
+
+    hres = IDocHostShowUI_ShowHelp(show_ui, hwnd, pszHelpFile, uCommand, dwData, ptMouse, pDispatchObjectHit);
+    IDocHostShowUI_Release(show_ui);
+    return hres;
+}
+
+static const IDocHostShowUIVtbl DocHostShowUIVtbl = {
+    DocHostShowUI_QueryInterface,
+    DocHostShowUI_AddRef,
+    DocHostShowUI_Release,
+    DocHostShowUI_ShowMessage,
+    DocHostShowUI_ShowHelp
+};
+#endif
+
 void DocHost_Init(DocHost *This, IWebBrowser2 *wb, const IDocHostContainerVtbl* container)
 {
     This->IDocHostUIHandler2_iface.lpVtbl  = &DocHostUIHandler2Vtbl;
+#ifdef __REACTOS__
+    This->IDocHostShowUI_iface.lpVtbl      = &DocHostShowUIVtbl;
+#endif
     This->IOleCommandTarget_iface.lpVtbl   = &OleCommandTargetVtbl;
     This->IPropertyNotifySink_iface.lpVtbl = &PropertyNotifySinkVtbl;
 
@@ -1138,7 +1448,7 @@ void DocHost_Release(DocHost *This)
 
     while(This->travellog.length)
         free_travellog_entry(This->travellog.log + --This->travellog.length);
-    heap_free(This->travellog.log);
+    free(This->travellog.log);
 
-    heap_free(This->url);
+    free(This->url);
 }

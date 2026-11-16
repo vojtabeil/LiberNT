@@ -19,6 +19,14 @@
 static ULONG_PTR PegcControl = 0;
 ULONG_PTR FrameBuffer = 0;
 
+NTSTATUS
+NTAPI
+VidSetVirtualFrameBuffer(
+    _In_opt_ PVOID VirtualFrameBuffer)
+{
+    return VirtualFrameBuffer == NULL ? STATUS_SUCCESS : STATUS_NOT_SUPPORTED;
+}
+
 /* PRIVATE FUNCTIONS **********************************************************/
 
 static BOOLEAN
@@ -380,6 +388,28 @@ Failure:
     if (PegcControl)
         MmUnmapIoSpace((PVOID)PegcControl, PEGC_CONTROL_SIZE);
 
+    return FALSE;
+}
+
+BOOLEAN
+NTAPI
+VidRenderStatusText(
+    _In_ PCSTR String,
+    _Out_writes_bytes_(Width * Height) PUCHAR Coverage,
+    _In_ ULONG Width,
+    _In_ ULONG Height)
+{
+    UNREFERENCED_PARAMETER(String);
+    UNREFERENCED_PARAMETER(Coverage);
+    UNREFERENCED_PARAMETER(Width);
+    UNREFERENCED_PARAMETER(Height);
+    return FALSE;
+}
+
+BOOLEAN
+NTAPI
+VidUseCompactFont(VOID)
+{
     return FALSE;
 }
 

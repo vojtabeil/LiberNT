@@ -1236,7 +1236,6 @@ public:
 
 class CLBarItemButtonBase
     : public CLBarItemBase
-    , public ITfLangBarItem
     , public ITfLangBarItemButton
     , public ITfSource
 {
@@ -1469,7 +1468,6 @@ class CTipbarWnd
     DWORD m_dwTipbarWndFlags;
     LONG m_ButtonWidth;
     DWORD m_dwShowType;
-    DWORD m_dwUnknown21;
     INT m_cxSmallIcon;
     INT m_cySmallIcon;
     INT m_cxDlgFrameX2;
@@ -1478,7 +1476,6 @@ class CTipbarWnd
     HFONT m_hTextFont;
     ITfLangBarMgr_P *m_pLangBarMgr;
     DWORD m_dwUnknown23;
-    CTipbarCtrlButtonHolder *m_pTipbarCtrlButtonHolder;
     DWORD m_dwUnknown23_1[8];
     CUIFWindow *m_pBalloon;
     DWORD m_dwChangingThreadId;
@@ -1506,6 +1503,8 @@ class CTipbarWnd
     friend LONG MyWaitForInputIdle(DWORD dwThreadId, DWORD dwMilliseconds);
 
 public:
+    using CUIFWindow::OnSetFocus;
+
     CTipbarWnd(DWORD style);
     ~CTipbarWnd() override;
 
@@ -1596,9 +1595,9 @@ public:
     }
 
     // IUnknown methods
-    STDMETHOD(QueryInterface)(REFIID riid, void **ppvObj);
-    STDMETHOD_(ULONG, AddRef)();
-    STDMETHOD_(ULONG, Release)();
+    STDMETHOD(QueryInterface)(REFIID riid, void **ppvObj) override;
+    STDMETHOD_(ULONG, AddRef)() override;
+    STDMETHOD_(ULONG, Release)() override;
 
     // ITfLangBarEventSink methods
     STDMETHOD(OnSetFocus)(DWORD dwThreadId) override;
@@ -2078,7 +2077,6 @@ CTipbarAccessible::CTipbarAccessible(CTipbarAccItem *pItem)
 
 CTipbarAccessible::~CTipbarAccessible()
 {
-    m_pTypeInfo = m_pTypeInfo;
     if (m_pTypeInfo)
     {
         m_pTypeInfo->Release();
@@ -3662,7 +3660,7 @@ STDMETHODIMP CLBarItemButtonBase::QueryInterface(REFIID riid, void **ppvObject)
 {
     static const QITAB c_tab[] =
     {
-        QITABENT(CLBarItemButtonBase, ITfLangBarItem),
+        QITABENTMULTI(CLBarItemButtonBase, ITfLangBarItem, ITfLangBarItemButton),
         QITABENT(CLBarItemButtonBase, ITfLangBarItemButton),
         QITABENT(CLBarItemButtonBase, ITfSource),
         { NULL }

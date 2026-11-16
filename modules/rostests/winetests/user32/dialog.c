@@ -34,11 +34,18 @@
 #include <stdarg.h>
 
 #include "wine/test.h"
+
+#ifdef __REACTOS__
+#undef wait_child_process
+#define wait_child_process(pi) wait_child_process_(__FILE__, __LINE__)((pi)->hProcess)
+#endif
 #include "windef.h"
 #include "winbase.h"
 #include "wingdi.h"
 #include "winuser.h"
 #include "winnls.h"
+
+static BOOL (WINAPI *pNtUserModifyUserStartupInfoFlags)(DWORD,DWORD);
 
 #define MAXHWNDS 1024
 static HWND hwnd [MAXHWNDS];
@@ -146,6 +153,17 @@ static const h_entry hierarchy [] = {
     { 84,  4,  WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0},
     {0, 0, 0, 0}
 };
+
+static void pump_messages(void)
+{
+    MSG msg;
+
+    while (PeekMessageA( &msg, 0, 0, 0, PM_REMOVE ))
+    {
+        TranslateMessage( &msg );
+        DispatchMessageA( &msg );
+    }
+}
 
 static DWORD get_button_style(HWND button)
 {
@@ -1250,7 +1268,7 @@ static INT_PTR CALLBACK getdlgitem_test_dialog_proc(HWND hdlg, UINT msg, WPARAM 
         ok(val == -1, "Unexpected id.\n");
 
         val = GetWindowLongPtrA(hwnd, GWLP_ID);
-        ok(val == -1, "Unexpected id %Id.\n", val);
+        ok(val == -1, "Unexpected id %lld.\n", (long long)val);
 
         hwnd = GetDlgItem(hdlg, -2);
         ok(hwnd != NULL, "Expected dialog item.\n");
@@ -1259,7 +1277,7 @@ static INT_PTR CALLBACK getdlgitem_test_dialog_proc(HWND hdlg, UINT msg, WPARAM 
         ok(val == -2, "Unexpected id.\n");
 
         val = GetWindowLongPtrA(hwnd, GWLP_ID);
-        ok(val == -2, "Unexpected id %Id.\n", val);
+        ok(val == -2, "Unexpected id %lld.\n", (long long)val);
 
         EndDialog(hdlg, 0xdead);
     }
@@ -1456,7 +1474,7 @@ static INT_PTR CALLBACK TestControlStyleDlgProc(HWND hdlg, UINT msg,
 }
 
 static const WCHAR testtextW[] = {'W','n','d','T','e','x','t',0};
-static const char *testtext = "WndText";
+static const char *testtext = "WndText\0\0";  /* add a WCHAR null since it can be passed directly to DefWindowProcW */
 
 enum defdlgproc_text
 {
@@ -1614,19 +1632,19 @@ static INT_PTR CALLBACK test_aw_conversion_dlgproc(HWND hdlg, UINT msg, WPARAM w
 
         /* WM_SETTEXT/WM_GETTEXT */
         originalproc = GetWindowLongPtrW(hdlg, DWLP_DLGPROC);
-        ok(originalproc == (ULONG_PTR)test_aw_conversion_dlgproc, "Unexpected dlg proc %#Ix.\n", originalproc);
+        ok(originalproc == (ULONG_PTR)test_aw_conversion_dlgproc, "Unexpected dlg proc %#llx.\n", (unsigned long long)originalproc);
 
         dlgproc = GetWindowLongPtrA(hdlg, DWLP_DLGPROC);
-        ok(dlgproc != (ULONG_PTR)test_aw_conversion_dlgproc, "Unexpected dlg proc %#Ix.\n", dlgproc);
+        ok(dlgproc != (ULONG_PTR)test_aw_conversion_dlgproc, "Unexpected dlg proc %#llx.\n", (unsigned long long)dlgproc);
 
         dlgproc = SetWindowLongPtrA(hdlg, DWLP_DLGPROC, (UINT_PTR)test_aw_conversion_dlgprocA);
         ok(IsWindowUnicode(hdlg), "Expected unicode window.\n");
 
         dlgproc = GetWindowLongPtrW(hdlg, DWLP_DLGPROC);
-        ok(dlgproc != (ULONG_PTR)test_aw_conversion_dlgprocA, "Unexpected dlg proc %#Ix.\n", dlgproc);
+        ok(dlgproc != (ULONG_PTR)test_aw_conversion_dlgprocA, "Unexpected dlg proc %#llx.\n", (unsigned long long)dlgproc);
 
         dlgproc = GetWindowLongPtrA(hdlg, DWLP_DLGPROC);
-        ok(dlgproc == (ULONG_PTR)test_aw_conversion_dlgprocA, "Unexpected dlg proc %#Ix.\n", dlgproc);
+        ok(dlgproc == (ULONG_PTR)test_aw_conversion_dlgprocA, "Unexpected dlg proc %#llx.\n", (unsigned long long)dlgproc);
 
         SetPropA(hdlg, "test_mode", ULongToHandle(DLGPROCTEXT_SETTEXTA));
         ret = SetWindowTextA(hdlg, testtext);
@@ -1659,10 +1677,10 @@ static INT_PTR CALLBACK test_aw_conversion_dlgproc(HWND hdlg, UINT msg, WPARAM w
         ok(IsWindowUnicode(hdlg), "Expected unicode window.\n");
 
         dlgproc = GetWindowLongPtrW(hdlg, DWLP_DLGPROC);
-        ok(dlgproc == (ULONG_PTR)test_aw_conversion_dlgprocW, "Unexpected dlg proc %#Ix.\n", dlgproc);
+        ok(dlgproc == (ULONG_PTR)test_aw_conversion_dlgprocW, "Unexpected dlg proc %#llx.\n", (unsigned long long)dlgproc);
 
         dlgproc = GetWindowLongPtrA(hdlg, DWLP_DLGPROC);
-        ok(dlgproc != (ULONG_PTR)test_aw_conversion_dlgprocW, "Unexpected dlg proc %#Ix.\n", dlgproc);
+        ok(dlgproc != (ULONG_PTR)test_aw_conversion_dlgprocW, "Unexpected dlg proc %#llx.\n", (unsigned long long)dlgproc);
 
         SetPropA(hdlg, "test_mode", ULongToHandle(DLGPROCTEXT_SETTEXTA));
         ret = SetWindowTextA(hdlg, testtext);
@@ -1721,19 +1739,19 @@ static INT_PTR CALLBACK test_aw_conversion_dlgproc2(HWND hdlg, UINT msg, WPARAM 
         dlg_test_aw_message(hdlg, WM_SETTEXT);
 
         originalproc = GetWindowLongPtrW(hdlg, DWLP_DLGPROC);
-        ok(originalproc != (ULONG_PTR)test_aw_conversion_dlgproc2, "Unexpected dlg proc %#Ix.\n", originalproc);
+        ok(originalproc != (ULONG_PTR)test_aw_conversion_dlgproc2, "Unexpected dlg proc %#llx.\n", (unsigned long long)originalproc);
 
         dlgproc = GetWindowLongPtrA(hdlg, DWLP_DLGPROC);
-        ok(dlgproc == (ULONG_PTR)test_aw_conversion_dlgproc2, "Unexpected dlg proc %#Ix.\n", dlgproc);
+        ok(dlgproc == (ULONG_PTR)test_aw_conversion_dlgproc2, "Unexpected dlg proc %#llx.\n", (unsigned long long)dlgproc);
 
         dlgproc = SetWindowLongPtrA(hdlg, DWLP_DLGPROC, (UINT_PTR)test_aw_conversion_dlgprocW);
         ok(!IsWindowUnicode(hdlg), "Unexpected unicode window.\n");
 
         dlgproc = GetWindowLongPtrW(hdlg, DWLP_DLGPROC);
-        ok(dlgproc != (ULONG_PTR)test_aw_conversion_dlgprocW, "Unexpected dlg proc %#Ix.\n", dlgproc);
+        ok(dlgproc != (ULONG_PTR)test_aw_conversion_dlgprocW, "Unexpected dlg proc %#llx.\n", (unsigned long long)dlgproc);
 
         dlgproc = GetWindowLongPtrA(hdlg, DWLP_DLGPROC);
-        ok(dlgproc == (ULONG_PTR)test_aw_conversion_dlgprocW, "Unexpected dlg proc %#Ix.\n", dlgproc);
+        ok(dlgproc == (ULONG_PTR)test_aw_conversion_dlgprocW, "Unexpected dlg proc %#llx.\n", (unsigned long long)dlgproc);
 
         SetPropA(hdlg, "test_mode", ULongToHandle(DLGPROCTEXT_SETTEXTA));
         ret = SetWindowTextA(hdlg, testtext);
@@ -1766,10 +1784,10 @@ static INT_PTR CALLBACK test_aw_conversion_dlgproc2(HWND hdlg, UINT msg, WPARAM 
         ok(!IsWindowUnicode(hdlg), "Unexpected unicode window.\n");
 
         dlgproc = GetWindowLongPtrW(hdlg, DWLP_DLGPROC);
-        ok(dlgproc == (ULONG_PTR)test_aw_conversion_dlgprocA, "Unexpected dlg proc %#Ix.\n", dlgproc);
+        ok(dlgproc == (ULONG_PTR)test_aw_conversion_dlgprocA, "Unexpected dlg proc %#llx.\n", (unsigned long long)dlgproc);
 
         dlgproc = GetWindowLongPtrA(hdlg, DWLP_DLGPROC);
-        ok(dlgproc != (ULONG_PTR)test_aw_conversion_dlgprocA, "Unexpected dlg proc %#Ix.\n", dlgproc);
+        ok(dlgproc != (ULONG_PTR)test_aw_conversion_dlgprocA, "Unexpected dlg proc %#llx.\n", (unsigned long long)dlgproc);
 
         SetPropA(hdlg, "test_mode", ULongToHandle(DLGPROCTEXT_SETTEXTA));
         ret = SetWindowTextA(hdlg, testtext);
@@ -2086,12 +2104,12 @@ static void test_SaveRestoreFocus(void)
     ok (hDlg != 0, "Failed to create test dialog.\n");
 
     foundId = GetWindowLongPtrA(GetFocus(), GWLP_ID);
-    ok (foundId == 1000, "First edit box should have gained focus on dialog creation. Expected: %d, Found: %Id\n", 1000, foundId);
+    ok (foundId == 1000, "First edit box should have gained focus on dialog creation. Expected: %d, Found: %lld\n", 1000, (long long)foundId);
 
     SetFocus(GetNextDlgTabItem(hDlg, GetFocus(), FALSE));
     SendMessageA(hDlg, WM_ACTIVATE, MAKEWPARAM(WA_ACTIVE, 0), 0);
     foundId = GetWindowLongPtrA(GetFocus(), GWLP_ID);
-    ok (foundId == 1001, "First edit box should have regained focus after dialog reactivation. Expected: %d, Found: %Id\n", 1001, foundId);
+    ok (foundId == 1001, "First edit box should have regained focus after dialog reactivation. Expected: %d, Found: %lld\n", 1001, (long long)foundId);
     SetFocus(GetNextDlgTabItem(hDlg, NULL, FALSE));
 
     /* de- then reactivate the dialog */
@@ -2099,38 +2117,38 @@ static void test_SaveRestoreFocus(void)
     SendMessageA(hDlg, WM_ACTIVATE, MAKEWPARAM(WA_ACTIVE, 0), 0);
 
     foundId = GetWindowLongPtrA(GetFocus(), GWLP_ID);
-    ok (foundId == 1000, "First edit box should have regained focus after dialog reactivation. Expected: %d, Found: %Id\n", 1000, foundId);
+    ok (foundId == 1000, "First edit box should have regained focus after dialog reactivation. Expected: %d, Found: %lld\n", 1000, (long long)foundId);
 
     /* select the next tabbable item */
     SetFocus(GetNextDlgTabItem(hDlg, GetFocus(), FALSE));
 
     foundId = GetWindowLongPtrA(GetFocus(), GWLP_ID);
-    ok (foundId == 1001, "Second edit box should have gained focus. Expected: %d, Found: %Id\n", 1001, foundId);
+    ok (foundId == 1001, "Second edit box should have gained focus. Expected: %d, Found: %lld\n", 1001, (long long)foundId);
 
     /* de- then reactivate the dialog */
     SendMessageA(hDlg, WM_ACTIVATE, MAKEWPARAM(WA_INACTIVE, 0), 0);
     SendMessageA(hDlg, WM_ACTIVATE, MAKEWPARAM(WA_ACTIVE, 0), 0);
 
     foundId = GetWindowLongPtrA(GetFocus(), GWLP_ID);
-    ok (foundId == 1001, "Second edit box should have gained focus after dialog reactivation. Expected: %d, Found: %Id\n", 1001, foundId);
+    ok (foundId == 1001, "Second edit box should have gained focus after dialog reactivation. Expected: %d, Found: %lld\n", 1001, (long long)foundId);
 
     /* set focus to the dialog */
     SetFocus(hDlg);
 
     foundId = GetWindowLongPtrA(GetFocus(), GWLP_ID);
-    ok (foundId == 1000, "First edit box should have gained focus on dialog focus. Expected: %d, Found: %Id\n", 1000, foundId);
+    ok (foundId == 1000, "First edit box should have gained focus on dialog focus. Expected: %d, Found: %lld\n", 1000, (long long)foundId);
 
     /* select second tabbable item */
     SetFocus(GetNextDlgTabItem(hDlg, GetNextDlgTabItem(hDlg, NULL, FALSE), FALSE));
 
     foundId = GetWindowLongPtrA(GetFocus(), GWLP_ID);
-    ok (foundId == 1001, "Second edit box should have gained focus. Expected: %d, Found: %Id\n", 1001, foundId);
+    ok (foundId == 1001, "Second edit box should have gained focus. Expected: %d, Found: %lld\n", 1001, (long long)foundId);
 
     /* send WM_ACTIVATE message to already active dialog */
     SendMessageA(hDlg, WM_ACTIVATE, MAKEWPARAM(WA_ACTIVE, 0), 0);
 
     foundId = GetWindowLongPtrA(GetFocus(), GWLP_ID);
-    ok (foundId == 1001, "Second edit box should have gained focus. Expected: %d, Found: %Id\n", 1001, foundId);
+    ok (foundId == 1001, "Second edit box should have gained focus. Expected: %d, Found: %lld\n", 1001, (long long)foundId);
 
     /* disable the 2nd box */
     EnableWindow(GetFocus(), FALSE);
@@ -2252,7 +2270,63 @@ static LRESULT CALLBACK msgbox_hook_proc(INT code, WPARAM wParam, LPARAM lParam)
     return CallNextHookEx(NULL, code, wParam, lParam);
 }
 
-static void test_MessageBox(void)
+static LRESULT CALLBACK msgbox_hook_proc2(INT code, WPARAM wParam, LPARAM lParam)
+{
+    return 1; /* prevent message box or dialog window creation. */
+}
+
+static void test_message_box_startup_info(void)
+{
+    HHOOK hook;
+    HWND hwnd;
+    int ret;
+
+    hook = SetWindowsHookExA( WH_CBT, msgbox_hook_proc2, NULL, GetCurrentThreadId() );
+    ret = DialogBoxParamA( GetModuleHandleA( NULL ), "TEST_EMPTY_DIALOG", 0, NULL, 0 );
+    ok(ret == -1, "got %d\n", ret);
+    UnhookWindowsHookEx( hook );
+
+    hwnd = CreateWindowA( "static", "overlapped2", WS_OVERLAPPED, 0, 0, 0, 0, NULL, NULL, GetModuleHandleW(NULL), NULL );
+    ok( !!hwnd, "got NULL.\n" );
+    pump_messages();
+    ShowWindow( hwnd, SW_SHOWDEFAULT );
+    /* startup info window show flags are in effect. */
+    ret = IsWindowVisible( hwnd );
+    ok( !ret, "got %d.\n", ret );
+    DestroyWindow( hwnd );
+    pump_messages();
+
+    /* set startup info flags once again. */
+    pNtUserModifyUserStartupInfoFlags( STARTF_USESHOWWINDOW, STARTF_USESHOWWINDOW );
+    hook = SetWindowsHookExA( WH_CBT, msgbox_hook_proc2, NULL, GetCurrentThreadId() );
+    ret = MessageBoxA(NULL, "Text", "MSGBOX caption", msgbox_type);
+    todo_wine ok(!ret, "got %d\n", ret); /* Wine returns -1 here. */
+    UnhookWindowsHookEx( hook );
+
+    hwnd = CreateWindowA( "static", "overlapped2", WS_OVERLAPPED, 0, 0, 0, 0, NULL, NULL, GetModuleHandleW(NULL), NULL );
+    ok( !!hwnd, "got NULL.\n" );
+    pump_messages();
+    ShowWindow( hwnd, SW_SHOWDEFAULT );
+    ret = IsWindowVisible( hwnd );
+    /* startup info flags have no effect, while the message box window wasn't even created. */
+    ok( ret, "got %d.\n", ret );
+    DestroyWindow( hwnd );
+    pump_messages();
+
+    /* sanity check, set startup flags once againg and check that it works */
+    pNtUserModifyUserStartupInfoFlags( STARTF_USESHOWWINDOW, STARTF_USESHOWWINDOW );
+    hwnd = CreateWindowA( "static", "overlapped2", WS_OVERLAPPED, 0, 0, 0, 0, NULL, NULL, GetModuleHandleW(NULL), NULL );
+    ok( !!hwnd, "got NULL.\n" );
+    pump_messages();
+    ShowWindow( hwnd, SW_SHOWDEFAULT );
+    ret = IsWindowVisible( hwnd );
+    /* startup info flags have no effect, while the message box window wasn't even created. */
+    ok( !ret, "got %d.\n", ret );
+    DestroyWindow( hwnd );
+    pump_messages();
+}
+
+static void test_MessageBox(char **argv)
 {
     static const UINT tests[] =
     {
@@ -2264,6 +2338,9 @@ static void test_MessageBox(void)
         MB_OKCANCEL | MB_TASKMODAL | MB_TOPMOST,
         MB_OKCANCEL | MB_TASKMODAL | MB_SYSTEMMODAL | MB_TOPMOST,
     };
+    STARTUPINFOA sa = {.cb = sizeof(STARTUPINFOA)};
+    PROCESS_INFORMATION info;
+    char cmdline[MAX_PATH];
     unsigned int i;
     HHOOK hook;
     int ret;
@@ -2282,6 +2359,18 @@ static void test_MessageBox(void)
     }
 
     UnhookWindowsHookEx(hook);
+
+    if (!pNtUserModifyUserStartupInfoFlags)
+    {
+        win_skip("NtUserModifyUserStartupInfoFlags is not available.\n");
+        return;
+    }
+    sa.dwFlags = STARTF_USESHOWWINDOW;
+    sa.wShowWindow = SW_HIDE;
+    sprintf(cmdline, "%s %s message_box_startup_info", argv[0], argv[1]);
+    ret = CreateProcessA(NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &sa, &info);
+    ok(ret, "got error %lu\n", GetLastError());
+    wait_child_process(&info);
 }
 
 static INT_PTR CALLBACK custom_test_dialog_proc(HWND hdlg, UINT msg, WPARAM wparam, LPARAM lparam)
@@ -2440,9 +2529,21 @@ static void test_create_controls(void)
 
 START_TEST(dialog)
 {
+    char **argv;
+    int argc = winetest_get_mainargs( &argv );
+    HMODULE win32u = GetModuleHandleA("win32u.dll");
+
+    pNtUserModifyUserStartupInfoFlags = (void*)GetProcAddress(win32u, "NtUserModifyUserStartupInfoFlags");
+
     g_hinst = GetModuleHandleA (0);
 
     if (!RegisterWindowClasses()) assert(0);
+
+    if (argc == 3 && !strcmp(argv[2], "message_box_startup_info"))
+    {
+        test_message_box_startup_info();
+        return;
+    }
 
     test_dialog_custom_data();
     test_GetNextDlgItem();
@@ -2457,6 +2558,6 @@ START_TEST(dialog)
     test_MessageBoxFontTest();
     test_SaveRestoreFocus();
     test_timer_message();
-    test_MessageBox();
+    test_MessageBox(argv);
     test_capture_release();
 }

@@ -33,60 +33,11 @@
 
 #define NDEBUG
 #include <debug.h>
-#include "hidp.h"
 
 HINSTANCE hDllInstance;
 
 /* device interface GUID for HIDClass devices */
 const GUID HidClassGuid = {0x4D1E55B2, 0xF16F, 0x11CF, {0x88,0xCB,0x00,0x11,0x11,0x00,0x00,0x30}};
-
-PVOID
-NTAPI
-AllocFunction(
-    IN ULONG ItemSize)
-{
-    return LocalAlloc(LHND, ItemSize);
-}
-
-VOID
-NTAPI
-FreeFunction(
-    IN PVOID Item)
-{
-    LocalFree((HLOCAL)Item);
-}
-
-VOID
-NTAPI
-ZeroFunction(
-    IN PVOID Item,
-    IN ULONG ItemSize)
-{
-    memset(Item, 0, ItemSize);
-}
-
-VOID
-NTAPI
-CopyFunction(
-    IN PVOID Target,
-    IN PVOID Source,
-    IN ULONG Length)
-{
-    memcpy(Target, Source, Length);
-}
-
-VOID
-__cdecl
-DebugFunction(
-    IN LPCSTR FormatStr, ...)
-{
-#if 0
-    va_arg list;
-    va_start(list, FormatStr);
-    vDbgPrintEx(FormatStr, list);
-    va_end(list);
-#endif
-}
 
 BOOL WINAPI
 DllMain(HINSTANCE hinstDLL,
@@ -292,12 +243,15 @@ HidD_GetPreparsedData(IN HANDLE HidDeviceObject,
 {
   HID_COLLECTION_INFORMATION hci;
   DWORD RetLen;
+  PHIDP_PREPARSED_DATA NativeData;
   BOOLEAN Ret;
 
   if(PreparsedData == NULL)
   {
     return FALSE;
   }
+
+  *PreparsedData = NULL;
 
   if(!DeviceIoControl(HidDeviceObject, IOCTL_HID_GET_COLLECTION_INFORMATION,
                                        NULL, 0,
@@ -307,8 +261,8 @@ HidD_GetPreparsedData(IN HANDLE HidDeviceObject,
     return FALSE;
   }
 
-  *PreparsedData = LocalAlloc(LHND, hci.DescriptorSize);
-  if(*PreparsedData == NULL)
+  NativeData = LocalAlloc(LPTR, hci.DescriptorSize);
+  if(NativeData == NULL)
   {
     SetLastError(ERROR_NOT_ENOUGH_MEMORY);
     return FALSE;
@@ -316,20 +270,16 @@ HidD_GetPreparsedData(IN HANDLE HidDeviceObject,
 
   Ret = DeviceIoControl(HidDeviceObject, IOCTL_HID_GET_COLLECTION_DESCRIPTOR,
                         NULL, 0,
-                        *PreparsedData, hci.DescriptorSize,
+                        NativeData, hci.DescriptorSize,
                         &RetLen, NULL) != 0;
 
   if(!Ret)
   {
-    /* FIXME - Free the buffer in case we failed to get the descriptor? */
-    LocalFree((HLOCAL)*PreparsedData);
+    LocalFree((HLOCAL)NativeData);
+    return FALSE;
   }
-#if 0
-  else
-  {
-    /* should we truncate the memory in case RetLen < hci.DescriptorSize? */
-  }
-#endif
+
+  *PreparsedData = NativeData;
 
   return Ret;
 }

@@ -6,7 +6,7 @@ $endif()
 
 #define KeMemoryBarrierWithoutFence() _ReadWriteBarrier()
 
-#if defined(_M_IX86) || defined(_M_AMD64)
+#if _VCRT_X86_INTRINSICS
 #define PreFetchCacheLine(l, a)               _mm_prefetch((char const *) a, l)
 #define PF_TEMPORAL_LEVEL_1 _MM_HINT_T0
 #define PF_TEMPORAL_LEVEL_2 _MM_HINT_T1
@@ -14,9 +14,17 @@ $endif()
 #define PF_NON_TEMPORAL_LEVEL_ALL _MM_HINT_NTA
 #define _AcquireBarrier()
 #define _ReleaseBarrier()
-#elif defined(_M_ARM) || defined(_M_ARM64)
+#elif defined(_M_ARM) || _VCRT_ARM64_INTRINSICS
 #define PreFetchCacheLine(l,a)               __prefetch((const void *) (a))
 #define PrefetchForWrite(p)                  __prefetch((const void *) (p))
+#define PF_TEMPORAL_LEVEL_1         0
+#define PF_TEMPORAL_LEVEL_2         1
+#define PF_TEMPORAL_LEVEL_3         2
+#define PF_NON_TEMPORAL_LEVEL_ALL   3
+#define ReadForWriteAccess(p)                (*(p))
+#elif defined(_M_RISCV64)
+#define PreFetchCacheLine(l,a)               __builtin_prefetch((const void *) (a))
+#define PrefetchForWrite(p)                  __builtin_prefetch((const void *) (p), 1)
 #define PF_TEMPORAL_LEVEL_1         0
 #define PF_TEMPORAL_LEVEL_2         1
 #define PF_TEMPORAL_LEVEL_3         2
@@ -37,7 +45,7 @@ MemoryBarrier (
 }
 #define PrefetchForWrite(p)
 #define ReadForWriteAccess(p)                 (*(p))
-#elif defined(_M_AMD64)
+#elif _VCRT_AMD64_INTRINSICS
 #define MemoryBarrier                         __faststorefence
 #define PrefetchForWrite(p)                   _m_prefetchw(p)
 #define ReadForWriteAccess(p)                 (_m_prefetchw(p), *(p))
@@ -47,17 +55,31 @@ MemoryBarrier (
 # define _ReleaseBarrier()                    __dmb(_ARM_BARRIER_ISH)
 # define _DataSynchronizationBarrier()        __dsb(_ARM_BARRIER_SY)
 # define _InstructionSynchronizationBarrier() __isb(_ARM_BARRIER_SY)
-#elif defined(_M_ARM64)
+#elif _VCRT_ARM64_INTRINSICS
 # define MemoryBarrier()                      __dmb(_ARM64_BARRIER_SY)
 # define _AcquireBarrier()                    __dmb(_ARM64_BARRIER_ISH)
 # define _ReleaseBarrier()                    __dmb(_ARM64_BARRIER_ISH)
 # define _DataSynchronizationBarrier()        __dsb(_ARM64_BARRIER_SY)
 # define _InstructionSynchronizationBarrier() __isb(_ARM64_BARRIER_SY)
+#elif defined(_M_RISCV64)
+# define MemoryBarrier()                      __asm__ __volatile__("fence iorw, iorw" ::: "memory")
+# define _AcquireBarrier()                    __asm__ __volatile__("fence r, rw" ::: "memory")
+# define _ReleaseBarrier()                    __asm__ __volatile__("fence rw, w" ::: "memory")
+# define _DataSynchronizationBarrier()        MemoryBarrier()
+# define _InstructionSynchronizationBarrier() __asm__ __volatile__("fence.i" ::: "memory")
+#elif defined(_M_PPC)
+/* lwsync orders everything except store-load; it executes as sync on cores
+ * that predate it. */
+# define MemoryBarrier()                      __asm__ __volatile__("sync" ::: "memory")
+# define _AcquireBarrier()                    __asm__ __volatile__("lwsync" ::: "memory")
+# define _ReleaseBarrier()                    __asm__ __volatile__("lwsync" ::: "memory")
+# define _DataSynchronizationBarrier()        MemoryBarrier()
+# define _InstructionSynchronizationBarrier() __asm__ __volatile__("isync" ::: "memory")
 #else
 #error Unsupported architecture
 #endif /* _M_ARM */
 
-#if defined(_M_IX86) || defined(_M_AMD64)
+#if _VCRT_X86_INTRINSICS
 #define __iso_volatile_load8(p) (*(volatile char*)(p))
 #define __iso_volatile_load16(p) (*(volatile short*)(p))
 #define __iso_volatile_load32(p) (*(volatile int*)(p))

@@ -27,6 +27,8 @@ typedef struct NEIGHBOR_CACHE_TABLE {
 /* Information about a neighbor */
 typedef struct NEIGHBOR_CACHE_ENTRY {
     struct NEIGHBOR_CACHE_ENTRY *Next;  /* Pointer to next entry */
+    LONG RefCount;                      /* Cache, route and active references */
+    BOOLEAN Removed;                    /* Entry is no longer in the cache */
     UCHAR State;                        /* State of NCE */
     UINT EventTimer;                    /* Ticks since last event */
     UINT EventCount;                    /* Number of events */
@@ -35,6 +37,7 @@ typedef struct NEIGHBOR_CACHE_ENTRY {
     PVOID LinkAddress;                  /* Pointer to link address */
     IP_ADDRESS Address;                 /* IP address of neighbor */
     LIST_ENTRY PacketQueue;             /* Packet queue */
+    ULONGLONG NextSolicit;
 } NEIGHBOR_CACHE_ENTRY, *PNEIGHBOR_CACHE_ENTRY;
 
 /* NCE states */
@@ -57,6 +60,8 @@ typedef struct NEIGHBOR_CACHE_ENTRY {
 extern NEIGHBOR_CACHE_TABLE NeighborCache[NB_HASHMASK + 1];
 
 
+VOID NBFastTimeout(VOID);
+
 VOID NBTimeout(
     VOID);
 
@@ -67,6 +72,12 @@ VOID NBShutdown(
     VOID);
 
 VOID NBSendSolicit(
+    PNEIGHBOR_CACHE_ENTRY NCE);
+
+VOID NBReferenceNeighbor(
+    PNEIGHBOR_CACHE_ENTRY NCE);
+
+VOID NBDereferenceNeighbor(
     PNEIGHBOR_CACHE_ENTRY NCE);
 
 PNEIGHBOR_CACHE_ENTRY NBAddNeighbor(
@@ -102,11 +113,16 @@ VOID NBRemoveNeighbor(
 
 ULONG NBCopyNeighbors(
     PIP_INTERFACE Interface,
-    PIPARP_ENTRY ArpTable);
+    PIPARP_ENTRY ArpTable,
+    ULONG Capacity);
 
 VOID NBResetNeighborTimeout(
     PIP_ADDRESS Address);
 
 VOID NBDestroyNeighborsForInterface(PIP_INTERFACE Interface);
+
+VOID NBInvalidateNeighborsForInterface(PIP_INTERFACE Interface);
+
+VOID NBSolicitIncomplete(PIP_INTERFACE Interface);
 
 /* EOF */

@@ -17,8 +17,21 @@ UefiConsKbHit(VOID);
 int
 UefiConsGetCh(void);
 
+BOOLEAN
+UefiGetPointerState(ULONG Width, ULONG Height, PMACH_POINTER_STATE State);
+
+BOOLEAN
+UefiSetInputTimer(ULONG Milliseconds);
+
+BOOLEAN
+UefiInputTimerExpired(VOID);
+
 EFI_STATUS
 UefiInitializeVideo(VOID);
+
+BOOLEAN
+UefiVideoGetEdid(
+    _Out_writes_bytes_(128) PUCHAR Edid);
 
 VOID
 UefiVideoClearScreen(UCHAR Attr);
@@ -68,7 +81,45 @@ VOID
 UefiVideoSync(VOID);
 
 VOID
+UefiVideoScrollUp(UCHAR Attr, ULONG Lines);
+
+VOID
+UefiVideoPrepareForExitBootServices(VOID);
+
+VOID
+UefiVideoExitBootServices(VOID);
+
+VOID
 UefiPcBeep(VOID);
+
+#if defined(_M_ARM64) || defined(_M_RISCV64)
+BOOLEAN
+UefiSerialInitialize(VOID);
+
+VOID
+UefiSerialPutChar(
+    _In_ UCHAR Character);
+
+BOOLEAN
+UefiArchSerialPutChar(
+    _In_ UCHAR Character);
+#endif
+
+VOID
+UefiSerialDisableFirmware(VOID);
+
+VOID
+UefiLogInitialize(VOID);
+
+VOID
+UefiLogPutChar(
+    _In_ UCHAR Character);
+
+VOID
+UefiLogClose(VOID);
+
+VOID
+UefiStopFirmwareWatchdogs(VOID);
 
 PFREELDR_MEMORY_DESCRIPTOR
 UefiMemGetMemoryMap(ULONG *MemoryMapSize);
@@ -76,6 +127,9 @@ UefiMemGetMemoryMap(ULONG *MemoryMapSize);
 VOID
 UefiGetExtendedBIOSData(PULONG ExtendedBIOSDataArea,
                         PULONG ExtendedBIOSDataSize);
+
+PVOID
+UefiGetSmbiosEpsPointer(VOID);
 
 UCHAR
 UefiGetFloppyCount(VOID);
@@ -112,3 +166,11 @@ UefiHwIdle(VOID);
 VOID
 UefiInitializeFileSystemSupport(_In_ EFI_HANDLE ImageHandle,
                                 _In_ EFI_SYSTEM_TABLE *SystemTable);
+
+#ifdef FREELDR_HTTP_BOOT
+BOOLEAN
+UefiHttpBootDownload(
+    _In_ PCSTR Url,
+    _In_opt_ PCSTR StaticIp,
+    _Out_opt_ PBOOLEAN Cancelled);
+#endif

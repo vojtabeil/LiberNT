@@ -25,6 +25,16 @@ typedef struct _AFD_CREATE_PACKET {
     WCHAR				TransportName[1];
 } AFD_CREATE_PACKET, *PAFD_CREATE_PACKET;
 
+typedef struct _AFD_CREATE_PACKET_NT6 {
+    DWORD				EndpointFlags;
+    DWORD				GroupID;
+    DWORD				AddressFamily;
+    DWORD				SocketType;
+    DWORD				Protocol;
+    DWORD				SizeOfTransportName;
+    WCHAR				TransportName[1];
+} AFD_CREATE_PACKET_NT6, *PAFD_CREATE_PACKET_NT6;
+
 typedef struct _AFD_INFO {
     ULONG			        InformationClass;
     union {
@@ -55,7 +65,7 @@ typedef struct _AFD_HANDLE_ {
 typedef struct _AFD_POLL_INFO {
     LARGE_INTEGER		        Timeout;
     ULONG				HandleCount;
-    ULONG_PTR                               Exclusive;
+    ULONG				Exclusive;
     AFD_HANDLE			        Handles[1];
 } AFD_POLL_INFO, *PAFD_POLL_INFO;
 
@@ -97,6 +107,13 @@ typedef struct _AFD_RECV_INFO_UDP {
     PINT				AddressLength;
 } AFD_RECV_INFO_UDP, *PAFD_RECV_INFO_UDP;
 
+typedef struct _AFD_RECV_MSG_INFO {
+    AFD_RECV_INFO_UDP			Datagram;
+    PVOID				ControlBuffer;
+    PULONG				ControlLength;
+    PULONG				MsgFlags;
+} AFD_RECV_MSG_INFO, *PAFD_RECV_MSG_INFO;
+
 typedef struct  _AFD_SEND_INFO {
     PAFD_WSABUF				BufferArray;
     ULONG				BufferCount;
@@ -126,6 +143,14 @@ typedef struct _AFD_SUPER_CONNECT_INFO
     BOOLEAN SanActive;
     TRANSPORT_ADDRESS RemoteAddress;
 } AFD_SUPER_CONNECT_INFO, *PAFD_SUPER_CONNECT_INFO;
+
+typedef struct _AFD_SUPER_ACCEPT_INFO
+{
+    HANDLE AcceptHandle;
+    ULONG ReceiveDataLength;
+    ULONG LocalAddressLength;
+    ULONG RemoteAddressLength;
+} AFD_SUPER_ACCEPT_INFO, *PAFD_SUPER_ACCEPT_INFO;
 
 typedef struct _AFD_EVENT_SELECT_INFO {
     HANDLE				EventObject;
@@ -267,6 +292,8 @@ typedef struct _AFD_TDI_HANDLE_DATA
 #define AFD_DEFER_ACCEPT		35
 #define AFD_GET_PENDING_CONNECT_DATA	41
 #define AFD_VALIDATE_GROUP		42
+#define AFD_ADDRESS_LIST_CHANGE		45
+#define AFD_SUPER_ACCEPT                32
 #define AFD_SUPER_CONNECT 49
 
 /* AFD IOCTLs */
@@ -343,8 +370,12 @@ typedef struct _AFD_TDI_HANDLE_DATA
   _AFD_CONTROL_CODE(AFD_ENUM_NETWORK_EVENTS, METHOD_NEITHER)
 #define IOCTL_AFD_VALIDATE_GROUP \
   _AFD_CONTROL_CODE(AFD_VALIDATE_GROUP, METHOD_NEITHER)
+#define IOCTL_AFD_ADDRESS_LIST_CHANGE \
+  _AFD_CONTROL_CODE(AFD_ADDRESS_LIST_CHANGE, METHOD_BUFFERED)
 #define IOCTL_AFD_SUPER_CONNECT \
   _AFD_CONTROL_CODE(AFD_SUPER_CONNECT, METHOD_NEITHER)
+#define IOCTL_AFD_SUPER_ACCEPT \
+  _AFD_CONTROL_CODE(AFD_SUPER_ACCEPT, METHOD_NEITHER)
 
 typedef struct _AFD_SOCKET_INFORMATION {
     BOOL CommandChannel;
@@ -407,8 +438,9 @@ typedef struct _SOCK_SHARED_INFO {
     UINT						wMsg;
     LONG						AsyncEvents;
     LONG						AsyncDisabledEvents;
-    SOCKADDR					WSLocalAddress;
-    SOCKADDR					WSRemoteAddress;
+    DWORD						CatalogEntryId;
+    SOCKADDR_STORAGE				WSLocalAddress;
+    SOCKADDR_STORAGE				WSRemoteAddress;
 } SOCK_SHARED_INFO, *PSOCK_SHARED_INFO;
 
 typedef struct _FILE_REQUEST_BIND {

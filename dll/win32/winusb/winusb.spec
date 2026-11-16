@@ -1,22 +1,36 @@
-@ stub WinUsb_AbortPipe
-@ stub WinUsb_ControlTransfer
-@ stub WinUsb_FlushPipe
+@ stdcall WinUsb_AbortPipe(ptr long)
+@ stdcall WinUsb_ControlTransfer(ptr int64 ptr long ptr ptr)
+@ stdcall WinUsb_FlushPipe(ptr long)
 @ stdcall WinUsb_Free(ptr)
-@ stub WinUsb_GetAssociatedInterface
-@ stub WinUsb_GetCurrentAlternateSetting
-@ stub WinUsb_GetDescriptor
-@ stub WinUsb_GetOverlappedResult
-@ stub WinUsb_GetPipePolicy
-@ stub WinUsb_GetPowerPolicy
-@ stub WinUsb_Initialize
-@ stub WinUsb_ParseConfigurationDescriptor
-@ stub WinUsb_ParseDescriptors
-@ stub WinUsb_QueryDeviceInformation
-@ stub WinUsb_QueryInterfaceSettings
-@ stub WinUsb_QueryPipe
-@ stub WinUsb_ReadPipe
-@ stub WinUsb_ResetPipe
-@ stub WinUsb_SetCurrentAlternateSetting
-@ stub WinUsb_SetPipePolicy
-@ stub WinUsb_SetPowerPolicy
-@ stub WinUsb_WritePipe
+@ stdcall WinUsb_GetAssociatedInterface(ptr long ptr)
+@ stdcall WinUsb_GetCurrentAlternateSetting(ptr ptr)
+@ stdcall WinUsb_GetDescriptor(ptr long long long ptr long ptr)
+@ stdcall WinUsb_GetOverlappedResult(ptr ptr ptr long)
+@ stdcall WinUsb_GetPipePolicy(ptr long long ptr ptr)
+@ stdcall WinUsb_GetPowerPolicy(ptr long ptr ptr)
+@ stdcall WinUsb_Initialize(ptr ptr)
+@ stdcall WinUsb_ParseConfigurationDescriptor(ptr ptr long long long long long)
+@ stdcall WinUsb_ParseDescriptors(ptr long ptr long)
+@ stdcall WinUsb_QueryDeviceInformation(ptr long ptr ptr)
+@ stdcall WinUsb_QueryInterfaceSettings(ptr long ptr)
+@ stdcall WinUsb_QueryPipe(ptr long long ptr)
+@ stdcall WinUsb_ReadPipe(ptr long ptr long ptr ptr)
+@ stdcall WinUsb_ResetPipe(ptr long)
+@ stdcall WinUsb_SetCurrentAlternateSetting(ptr long)
+@ stdcall WinUsb_SetPipePolicy(ptr long long long ptr)
+@ stdcall WinUsb_SetPowerPolicy(ptr long long ptr)
+@ stdcall WinUsb_WritePipe(ptr long ptr long ptr ptr)
+
+# LiberNT exports the documented winusb.h functions that the Wine spec lacks.
+@ stdcall WinUsb_QueryPipeEx(ptr long long ptr)
+@ stdcall WinUsb_GetCurrentFrameNumber(ptr ptr ptr)
+@ stdcall WinUsb_GetAdjustedFrameNumber(ptr int64)
+@ stdcall WinUsb_RegisterIsochBuffer(ptr long ptr long ptr)
+@ stdcall WinUsb_UnregisterIsochBuffer(ptr)
+@ stdcall WinUsb_WriteIsochPipe(ptr long long ptr ptr)
+@ stdcall WinUsb_ReadIsochPipe(ptr long long ptr long ptr ptr)
+@ stdcall WinUsb_WriteIsochPipeAsap(ptr long long long ptr)
+@ stdcall WinUsb_ReadIsochPipeAsap(ptr long long long long ptr ptr)
+@ stdcall WinUsb_StartTrackingForTimeSync(ptr ptr)
+@ stdcall WinUsb_GetCurrentFrameNumberAndQpc(ptr ptr)
+@ stdcall WinUsb_StopTrackingForTimeSync(ptr ptr)

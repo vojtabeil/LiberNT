@@ -218,7 +218,12 @@ PdoHandleQueryDeviceText(
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
 
-            RtlAnsiStringToUnicodeString(&DeviceDescription, &AnsiString, FALSE);
+            if (!NT_SUCCESS(RtlAnsiStringToUnicodeString(&DeviceDescription, &AnsiString, FALSE)))
+            {
+                ExFreePoolWithTag(DeviceDescription.Buffer, TAG_SCSIPORT);
+                Irp->IoStatus.Information = 0;
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
 
             Irp->IoStatus.Information = (ULONG_PTR)DeviceDescription.Buffer;
             return STATUS_SUCCESS;
@@ -244,7 +249,12 @@ PdoHandleQueryDeviceText(
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
 
-            RtlAnsiStringToUnicodeString(&DeviceDescription, &AnsiString, FALSE);
+            if (!NT_SUCCESS(RtlAnsiStringToUnicodeString(&DeviceDescription, &AnsiString, FALSE)))
+            {
+                ExFreePoolWithTag(DeviceDescription.Buffer, TAG_SCSIPORT);
+                Irp->IoStatus.Information = 0;
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
 
             Irp->IoStatus.Information = (ULONG_PTR)DeviceDescription.Buffer;
             return STATUS_SUCCESS;
@@ -280,7 +290,7 @@ PdoHandleQueryDeviceId(
 
     // lets create device string
     Offset = sprintf(&Buffer[Offset], "SCSI\\");
-    Offset += sprintf(&Buffer[Offset], DeviceType);
+    Offset += sprintf(&Buffer[Offset], "%s", DeviceType);
     Offset += sprintf(&Buffer[Offset], "&Ven_");
     Offset += CopyField(InquiryData->VendorId, &Buffer[Offset], 8, '_', TRUE);
     Offset += sprintf(&Buffer[Offset], "&Prod_");
@@ -367,7 +377,7 @@ PdoHandleQueryHardwareId(
     RtlZeroMemory(Id1, sizeof(Id1));
     Offset = 0;
     Offset = sprintf(&Id1[Offset], "SCSI\\");
-    Offset += sprintf(&Id1[Offset], DeviceType);
+    Offset += sprintf(&Id1[Offset], "%s", DeviceType);
     Offset += CopyField(InquiryData->VendorId, &Id1[Offset], 8, '_', FALSE);
     Offset += CopyField(InquiryData->ProductId, &Id1[Offset], 16, '_', FALSE);
     Offset += CopyField(InquiryData->ProductRevisionLevel, &Id1[Offset], 4, '_', FALSE);
@@ -379,7 +389,7 @@ PdoHandleQueryHardwareId(
     RtlZeroMemory(Id2, sizeof(Id2));
     Offset = 0;
     Offset = sprintf(&Id2[Offset], "SCSI\\");
-    Offset += sprintf(&Id2[Offset], DeviceType);
+    Offset += sprintf(&Id2[Offset], "%s", DeviceType);
     Offset += CopyField(InquiryData->VendorId, &Id2[Offset], 8, '_', FALSE);
     Offset += CopyField(InquiryData->ProductId, &Id2[Offset], 16, '_', FALSE);
     Id2Length = strlen(Id2) + 1;
@@ -390,7 +400,7 @@ PdoHandleQueryHardwareId(
     RtlZeroMemory(Id3, sizeof(Id3));
     Offset = 0;
     Offset = sprintf(&Id3[Offset], "SCSI\\");
-    Offset += sprintf(&Id3[Offset], DeviceType);
+    Offset += sprintf(&Id3[Offset], "%s", DeviceType);
     Offset += CopyField(InquiryData->VendorId, &Id3[Offset], 8, '_', FALSE);
     Id3Length = strlen(Id3) + 1;
     DPRINT("PdoHandleQueryHardwareId HardwareId3 %s\n", Id3);
@@ -420,7 +430,7 @@ PdoHandleQueryHardwareId(
     // SCSIType
     RtlZeroMemory(Id6, sizeof(Id6));
     Offset = 0;
-    Offset = sprintf(&Id6[Offset], GenericType);
+    Offset = sprintf(&Id6[Offset], "%s", GenericType);
     Id6Length = strlen(Id6) + 1;
     DPRINT("PdoHandleQueryHardwareId HardwareId6 %s\n", Id6);
 
@@ -572,6 +582,12 @@ PdoDispatchPnp(
             break;
         }
         case IRP_MN_REMOVE_DEVICE:
+        {
+            SpiFreeDumpContext(lunExt->DumpContext);
+            lunExt->DumpContext = NULL;
+            status = STATUS_SUCCESS;
+            break;
+        }
         case IRP_MN_QUERY_CAPABILITIES:
         case IRP_MN_QUERY_REMOVE_DEVICE:
         case IRP_MN_QUERY_STOP_DEVICE:
@@ -588,6 +604,28 @@ PdoDispatchPnp(
         case IRP_MN_QUERY_DEVICE_TEXT:
         {
             status = PdoHandleQueryDeviceText(DeviceObject, Irp);
+            break;
+        }
+        case IRP_MN_DEVICE_USAGE_NOTIFICATION:
+        {
+            status = SpiSendDeviceUsageNotification(lunExt->Common.LowerDevice,
+                                                    ioStack->Parameters.UsageNotification.Type,
+                                                    ioStack->Parameters.UsageNotification.InPath);
+            if (NT_SUCCESS(status))
+            {
+                SpiAdjustUsageCount(&lunExt->Usage, ioStack);
+                IoInvalidateDeviceState(DeviceObject);
+            }
+            break;
+        }
+        case IRP_MN_QUERY_PNP_DEVICE_STATE:
+        {
+            status = Irp->IoStatus.Status;
+            if (SpiIsInUsagePath(&lunExt->Usage))
+            {
+                Irp->IoStatus.Information |= PNP_DEVICE_NOT_DISABLEABLE;
+                status = STATUS_SUCCESS;
+            }
             break;
         }
         case IRP_MN_QUERY_ID:

@@ -82,6 +82,7 @@ HidClassAddDevice(
     RtlZeroMemory(FDODeviceExtension, sizeof(HIDCLASS_FDO_EXTENSION));
 
     /* initialize device extension */
+    HidClassFDO_InitializeRead(NewDeviceObject);
     FDODeviceExtension->Common.IsFDO = TRUE;
     FDODeviceExtension->Common.DriverExtension = DriverExtension;
     FDODeviceExtension->Common.HidDeviceExtension.PhysicalDeviceObject = PhysicalDeviceObject;
@@ -126,7 +127,32 @@ NTAPI
 HidClassDriverUnload(
     IN PDRIVER_OBJECT DriverObject)
 {
-    UNIMPLEMENTED;
+    PHIDCLASS_DRIVER_EXTENSION DriverExtension;
+
+    DriverExtension = IoGetDriverObjectExtension(DriverObject, ClientIdentificationAddress);
+    if (DriverExtension && DriverExtension->DriverUnload)
+        DriverExtension->DriverUnload(DriverObject);
+}
+
+static
+BOOLEAN
+HidClass_IsSystemExclusive(
+    IN PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension)
+{
+    PHIDP_COLLECTION_DESC CollectionDescription;
+
+    ASSERT(PDODeviceExtension->Common.IsFDO == FALSE);
+
+    CollectionDescription = HidClassPDO_GetCollectionDescription(&PDODeviceExtension->Common.DeviceDescription,
+                                                                 PDODeviceExtension->CollectionNumber);
+    ASSERT(CollectionDescription);
+    if (!CollectionDescription || CollectionDescription->UsagePage != HID_USAGE_PAGE_GENERIC)
+        return FALSE;
+
+    return CollectionDescription->Usage == HID_USAGE_GENERIC_POINTER ||
+           CollectionDescription->Usage == HID_USAGE_GENERIC_MOUSE ||
+           CollectionDescription->Usage == HID_USAGE_GENERIC_KEYBOARD ||
+           CollectionDescription->Usage == HID_USAGE_GENERIC_KEYPAD;
 }
 
 NTSTATUS
@@ -139,6 +165,8 @@ HidClass_Create(
     PHIDCLASS_COMMON_DEVICE_EXTENSION CommonDeviceExtension;
     PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension;
     PHIDCLASS_FILEOP_CONTEXT Context;
+    PHIDP_COLLECTION_DESC CollectionDescription;
+    KIRQL OldLevel;
 
     //
     // get device extension
@@ -173,6 +201,18 @@ HidClass_Create(
     DPRINT("Options %x\n", IoStack->Parameters.Create.Options);
     DPRINT("DesiredAccess %x\n", IoStack->Parameters.Create.SecurityContext->DesiredAccess);
 
+    ASSERT(IoStack->Parameters.Create.SecurityContext);
+    ASSERT(IoStack->Parameters.Create.SecurityContext->AccessState);
+    if (Irp->RequestorMode != KernelMode &&
+        ((IoStack->Parameters.Create.SecurityContext->AccessState->PreviouslyGrantedAccess |
+          IoStack->Parameters.Create.SecurityContext->AccessState->RemainingDesiredAccess) & FILE_READ_DATA) &&
+        HidClass_IsSystemExclusive(PDODeviceExtension))
+    {
+        Irp->IoStatus.Status = STATUS_ACCESS_DENIED;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_ACCESS_DENIED;
+    }
+
     //
     // allocate context
     //
@@ -192,10 +232,29 @@ HidClass_Create(
     //
     RtlZeroMemory(Context, sizeof(HIDCLASS_FILEOP_CONTEXT));
     Context->DeviceExtension = PDODeviceExtension;
-    KeInitializeSpinLock(&Context->Lock);
-    InitializeListHead(&Context->ReadPendingIrpListHead);
-    InitializeListHead(&Context->IrpCompletedListHead);
-    KeInitializeEvent(&Context->IrpReadComplete, NotificationEvent, FALSE);
+    Context->ReportQueueCapacity = HIDCLASS_QUEUED_REPORTS;
+    InitializeListHead(&Context->PendingReads);
+
+    CollectionDescription = HidClassPDO_GetCollectionDescription(&PDODeviceExtension->Common.DeviceDescription,
+                                                                 PDODeviceExtension->CollectionNumber);
+    if (CollectionDescription && CollectionDescription->InputLength)
+    {
+        Context->ReportSlotLength = sizeof(USHORT) + CollectionDescription->InputLength;
+        Context->ReportQueue = ExAllocatePoolWithTag(NonPagedPool,
+                                                     Context->ReportSlotLength * Context->ReportQueueCapacity,
+                                                     HIDCLASS_TAG);
+        if (!Context->ReportQueue)
+        {
+            ExFreePoolWithTag(Context, HIDCLASS_TAG);
+            Irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+    }
+
+    KeAcquireSpinLock(&PDODeviceExtension->FDODeviceExtension->ReadLock, &OldLevel);
+    InsertTailList(&PDODeviceExtension->FDODeviceExtension->OpenFileList, &Context->FdoListEntry);
+    KeReleaseSpinLock(&PDODeviceExtension->FDODeviceExtension->ReadLock, OldLevel);
 
     //
     // store context
@@ -203,11 +262,571 @@ HidClass_Create(
     ASSERT(IoStack->FileObject);
     IoStack->FileObject->FsContext = Context;
 
+    HidClassFDO_KickRead(PDODeviceExtension->FDODeviceObject);
+
     //
     // done
     //
     Irp->IoStatus.Status = STATUS_SUCCESS;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+static PUCHAR
+HidClass_GetReadBuffer(
+    IN PIRP Irp)
+{
+    if (Irp->MdlAddress)
+        return MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+
+    return Irp->AssociatedIrp.SystemBuffer;
+}
+
+static VOID
+HidClass_CopyReport(
+    IN PHIDCLASS_FDO_EXTENSION FDODeviceExtension,
+    IN PIRP Irp,
+    IN const UCHAR *Report,
+    IN ULONG ReportLength)
+{
+    PIO_STACK_LOCATION IoStack = IoGetCurrentIrpStackLocation(Irp);
+    PHIDCLASS_FILEOP_CONTEXT Context = IoStack->FileObject ? IoStack->FileObject->FsContext : NULL;
+    ULONG ReadLength = IoStack->Parameters.Read.Length;
+    ULONG Offset = FDODeviceExtension->Common.DeviceDescription.ReportIDs[0].ReportID ? 0 : 1;
+    PUCHAR Address = HidClass_GetReadBuffer(Irp);
+    PHIDP_COLLECTION_DESC CollectionDescription = NULL;
+    ULONG CopyLength, TotalLength;
+
+    Irp->IoStatus.Information = 0;
+    if (!Address)
+    {
+        Irp->IoStatus.Status = STATUS_INVALID_USER_BUFFER;
+        return;
+    }
+
+    if (Offset >= ReadLength)
+    {
+        Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+        return;
+    }
+
+    if (Offset)
+        Address[0] = 0;
+
+    if (Context)
+        CollectionDescription = HidClassPDO_GetCollectionDescription(&FDODeviceExtension->Common.DeviceDescription,
+                                                                     Context->DeviceExtension->CollectionNumber);
+    TotalLength = ReadLength;
+    if (CollectionDescription && CollectionDescription->InputLength && CollectionDescription->InputLength < TotalLength)
+        TotalLength = CollectionDescription->InputLength;
+
+    CopyLength = min(ReportLength, TotalLength - Offset);
+    RtlCopyMemory(&Address[Offset], Report, CopyLength);
+    if (FDODeviceExtension->Common.DriverExtension->DevicesArePolled)
+        TotalLength = Offset + CopyLength;
+    else if (Offset + CopyLength < TotalLength)
+        RtlZeroMemory(&Address[Offset + CopyLength], TotalLength - Offset - CopyLength);
+    Irp->IoStatus.Information = TotalLength;
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+}
+
+static PIRP
+HidClass_RemovePendingRead(
+    IN PHIDCLASS_FDO_EXTENSION FDODeviceExtension,
+    IN PHIDCLASS_FILEOP_CONTEXT Context)
+{
+    while (!IsListEmpty(&Context->PendingReads))
+    {
+        PLIST_ENTRY Entry = RemoveHeadList(&Context->PendingReads);
+        PIRP Irp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+
+        FDODeviceExtension->WaitingReads--;
+        if (IoSetCancelRoutine(Irp, NULL))
+            return Irp;
+
+        InitializeListHead(&Irp->Tail.Overlay.ListEntry);
+    }
+
+    return NULL;
+}
+
+static VOID
+HidClass_CompleteReadList(
+    IN PLIST_ENTRY CompleteList)
+{
+    while (!IsListEmpty(CompleteList))
+    {
+        PLIST_ENTRY Entry = RemoveHeadList(CompleteList);
+        PIRP Irp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
+
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    }
+}
+
+static VOID
+NTAPI
+HidClass_ReadCancel(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN PIRP Irp)
+{
+    PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension = DeviceObject->DeviceExtension;
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = PDODeviceExtension->FDODeviceExtension;
+    KIRQL OldLevel;
+
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+
+    KeAcquireSpinLock(&FDODeviceExtension->ReadLock, &OldLevel);
+    if (!IsListEmpty(&Irp->Tail.Overlay.ListEntry))
+    {
+        RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
+        FDODeviceExtension->WaitingReads--;
+    }
+    KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
+
+    Irp->IoStatus.Status = STATUS_CANCELLED;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
+static VOID
+HidClass_StopPendingReads(
+    IN PHIDCLASS_FILEOP_CONTEXT Context)
+{
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = Context->DeviceExtension->FDODeviceExtension;
+    LIST_ENTRY CompleteList;
+    KIRQL OldLevel;
+    PIRP Irp;
+
+    InitializeListHead(&CompleteList);
+
+    KeAcquireSpinLock(&FDODeviceExtension->ReadLock, &OldLevel);
+    Context->StopInProgress = TRUE;
+    Context->ReportQueueCount = 0;
+    while ((Irp = HidClass_RemovePendingRead(FDODeviceExtension, Context)) != NULL)
+    {
+        Irp->IoStatus.Status = STATUS_CANCELLED;
+        Irp->IoStatus.Information = 0;
+        InsertTailList(&CompleteList, &Irp->Tail.Overlay.ListEntry);
+    }
+    KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
+
+    HidClass_CompleteReadList(&CompleteList);
+}
+
+static VOID
+HidClassFDO_RouteReport(
+    IN PHIDCLASS_FDO_EXTENSION FDODeviceExtension,
+    IN const UCHAR *Report,
+    IN ULONG ReportLength,
+    IN OUT PLIST_ENTRY CompleteList)
+{
+    PHIDP_DEVICE_DESC DeviceDescription = &FDODeviceExtension->Common.DeviceDescription;
+    PLIST_ENTRY Entry;
+    ULONG CollectionNumber = 0;
+    ULONG ExpectedLength = 0;
+    ULONG Index;
+
+    if (!ReportLength || !DeviceDescription->ReportIDsLength)
+        return;
+
+    if (DeviceDescription->ReportIDs[0].ReportID == 0)
+    {
+        CollectionNumber = DeviceDescription->ReportIDs[0].CollectionNumber;
+        ExpectedLength = DeviceDescription->ReportIDs[0].InputLength;
+    }
+    else
+    {
+        for (Index = 0; Index < DeviceDescription->ReportIDsLength; Index++)
+        {
+            if (DeviceDescription->ReportIDs[Index].ReportID == Report[0] &&
+                DeviceDescription->ReportIDs[Index].InputLength)
+            {
+                CollectionNumber = DeviceDescription->ReportIDs[Index].CollectionNumber;
+                ExpectedLength = DeviceDescription->ReportIDs[Index].InputLength;
+                break;
+            }
+        }
+    }
+
+    if (!CollectionNumber)
+        return;
+
+    if (FDODeviceExtension->Common.DriverExtension->DevicesArePolled)
+    {
+        for (Entry = FDODeviceExtension->OpenFileList.Flink;
+             Entry != &FDODeviceExtension->OpenFileList;
+             Entry = Entry->Flink)
+        {
+            PHIDCLASS_FILEOP_CONTEXT Context = CONTAINING_RECORD(Entry, HIDCLASS_FILEOP_CONTEXT, FdoListEntry);
+            PIRP Irp;
+
+            if (Context->StopInProgress || Context->DeviceExtension->CollectionNumber != CollectionNumber)
+                continue;
+
+            while ((Irp = HidClass_RemovePendingRead(FDODeviceExtension, Context)) != NULL)
+            {
+                HidClass_CopyReport(FDODeviceExtension, Irp, Report, ReportLength);
+                InsertTailList(CompleteList, &Irp->Tail.Overlay.ListEntry);
+            }
+        }
+        return;
+    }
+
+    if (ReportLength < ExpectedLength)
+        return;
+
+    for (Entry = FDODeviceExtension->OpenFileList.Flink;
+         Entry != &FDODeviceExtension->OpenFileList;
+         Entry = Entry->Flink)
+    {
+        PHIDCLASS_FILEOP_CONTEXT Context = CONTAINING_RECORD(Entry, HIDCLASS_FILEOP_CONTEXT, FdoListEntry);
+        PUCHAR Slot;
+        ULONG SlotIndex;
+        PIRP Irp;
+
+        if (Context->StopInProgress || Context->DeviceExtension->CollectionNumber != CollectionNumber)
+            continue;
+
+        Irp = HidClass_RemovePendingRead(FDODeviceExtension, Context);
+        if (Irp)
+        {
+            HidClass_CopyReport(FDODeviceExtension, Irp, Report, ReportLength);
+            InsertTailList(CompleteList, &Irp->Tail.Overlay.ListEntry);
+            continue;
+        }
+
+        if (!Context->ReportQueue || ReportLength > Context->ReportSlotLength - sizeof(USHORT))
+            continue;
+
+        if (Context->ReportQueueCount == Context->ReportQueueCapacity)
+        {
+            Context->ReportQueueHead = (Context->ReportQueueHead + 1) % Context->ReportQueueCapacity;
+            Context->ReportQueueCount--;
+        }
+
+        SlotIndex = (Context->ReportQueueHead + Context->ReportQueueCount) % Context->ReportQueueCapacity;
+        Slot = Context->ReportQueue + SlotIndex * Context->ReportSlotLength;
+        Slot[0] = (UCHAR)ReportLength;
+        Slot[1] = (UCHAR)(ReportLength >> 8);
+        RtlCopyMemory(Slot + sizeof(USHORT), Report, ReportLength);
+        Context->ReportQueueCount++;
+    }
+}
+
+static IO_COMPLETION_ROUTINE HidClassFDO_ReadCompletion;
+
+static BOOLEAN
+HidClassFDO_WantsRead(
+    IN PHIDCLASS_FDO_EXTENSION FDODeviceExtension)
+{
+    if (FDODeviceExtension->ReadStopped)
+        return FALSE;
+    if (FDODeviceExtension->WaitingReads)
+        return TRUE;
+    return !FDODeviceExtension->Common.DriverExtension->DevicesArePolled &&
+           !IsListEmpty(&FDODeviceExtension->OpenFileList);
+}
+
+static VOID
+HidClassFDO_SubmitRead(
+    IN PDEVICE_OBJECT FDODeviceObject)
+{
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = FDODeviceObject->DeviceExtension;
+    PIRP Irp = FDODeviceExtension->ReadIrp;
+    PIO_STACK_LOCATION IoStack;
+
+    IoReuseIrp(Irp, STATUS_SUCCESS);
+    Irp->UserBuffer = FDODeviceExtension->ReadBuffer;
+
+    IoStack = IoGetNextIrpStackLocation(Irp);
+    IoStack->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
+    IoStack->Parameters.DeviceIoControl.IoControlCode = IOCTL_HID_READ_REPORT;
+    IoStack->Parameters.DeviceIoControl.OutputBufferLength = FDODeviceExtension->ReadBufferLength;
+    IoStack->DeviceObject = FDODeviceObject;
+
+    IoSetCompletionRoutine(Irp, HidClassFDO_ReadCompletion, FDODeviceObject, TRUE, TRUE, TRUE);
+    IoSetNextIrpStackLocation(Irp);
+    FDODeviceExtension->Common.DriverExtension->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL](FDODeviceObject, Irp);
+}
+
+static VOID
+NTAPI
+HidClassFDO_ReadDpc(
+    IN PKDPC Dpc,
+    IN PVOID DeferredContext,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2)
+{
+    PDEVICE_OBJECT FDODeviceObject = DeferredContext;
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = FDODeviceObject->DeviceExtension;
+    KIRQL OldLevel;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    ASSERT(KeGetCurrentIrql() == DISPATCH_LEVEL);
+
+    KeAcquireSpinLock(&FDODeviceExtension->ReadLock, &OldLevel);
+    if (!HidClassFDO_WantsRead(FDODeviceExtension))
+    {
+        FDODeviceExtension->ReadActive = FALSE;
+        KeSetEvent(&FDODeviceExtension->ReadIdleEvent, IO_NO_INCREMENT, FALSE);
+        KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
+        return;
+    }
+    KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
+
+    HidClassFDO_SubmitRead(FDODeviceObject);
+}
+
+static NTSTATUS
+NTAPI
+HidClassFDO_ReadCompletion(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN PIRP Irp,
+    IN PVOID Context)
+{
+    PDEVICE_OBJECT FDODeviceObject = Context;
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = FDODeviceObject->DeviceExtension;
+    LIST_ENTRY CompleteList;
+    PLIST_ENTRY Entry;
+    KIRQL OldLevel;
+    NTSTATUS Status = Irp->IoStatus.Status;
+    ULONG Length = (ULONG)Irp->IoStatus.Information;
+    BOOLEAN Continue;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    InitializeListHead(&CompleteList);
+
+    KeAcquireSpinLock(&FDODeviceExtension->ReadLock, &OldLevel);
+    if (NT_SUCCESS(Status))
+    {
+        HidClassFDO_RouteReport(FDODeviceExtension,
+                                FDODeviceExtension->ReadBuffer,
+                                min(Length, FDODeviceExtension->ReadBufferLength),
+                                &CompleteList);
+    }
+    else
+    {
+        for (Entry = FDODeviceExtension->OpenFileList.Flink;
+             Entry != &FDODeviceExtension->OpenFileList;
+             Entry = Entry->Flink)
+        {
+            PHIDCLASS_FILEOP_CONTEXT FileContext = CONTAINING_RECORD(Entry, HIDCLASS_FILEOP_CONTEXT, FdoListEntry);
+            PIRP PendingIrp;
+
+            while ((PendingIrp = HidClass_RemovePendingRead(FDODeviceExtension, FileContext)) != NULL)
+            {
+                PendingIrp->IoStatus.Status = Status;
+                PendingIrp->IoStatus.Information = 0;
+                InsertTailList(&CompleteList, &PendingIrp->Tail.Overlay.ListEntry);
+            }
+        }
+    }
+    KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
+
+    HidClass_CompleteReadList(&CompleteList);
+
+    KeAcquireSpinLock(&FDODeviceExtension->ReadLock, &OldLevel);
+    Continue = NT_SUCCESS(Status) && HidClassFDO_WantsRead(FDODeviceExtension);
+    if (!Continue)
+    {
+        FDODeviceExtension->ReadActive = FALSE;
+        KeSetEvent(&FDODeviceExtension->ReadIdleEvent, IO_NO_INCREMENT, FALSE);
+    }
+    KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
+
+    if (Continue && FDODeviceExtension->Common.DriverExtension->DevicesArePolled)
+    {
+        LARGE_INTEGER DueTime;
+
+        DueTime.QuadPart = -(LONGLONG)FDODeviceExtension->PollInterval * 10000;
+        KeSetTimer(&FDODeviceExtension->PollTimer, DueTime, &FDODeviceExtension->ReadDpc);
+    }
+    else if (Continue)
+    {
+        KeInsertQueueDpc(&FDODeviceExtension->ReadDpc, NULL, NULL);
+    }
+
+    return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+VOID
+HidClassFDO_InitializeRead(
+    IN PDEVICE_OBJECT FDODeviceObject)
+{
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = FDODeviceObject->DeviceExtension;
+
+    KeInitializeSpinLock(&FDODeviceExtension->ReadLock);
+    KeInitializeSpinLock(&FDODeviceExtension->WakeLock);
+    KeInitializeEvent(&FDODeviceExtension->WakeDone, NotificationEvent, FALSE);
+    InitializeListHead(&FDODeviceExtension->OpenFileList);
+    KeInitializeEvent(&FDODeviceExtension->ReadIdleEvent, NotificationEvent, TRUE);
+    KeInitializeDpc(&FDODeviceExtension->ReadDpc, HidClassFDO_ReadDpc, FDODeviceObject);
+    KeInitializeTimer(&FDODeviceExtension->PollTimer);
+    FDODeviceExtension->PollInterval = HIDCLASS_DEFAULT_POLL_INTERVAL;
+}
+
+VOID
+HidClassFDO_StopRead(
+    IN PDEVICE_OBJECT FDODeviceObject,
+    IN BOOLEAN Wait)
+{
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = FDODeviceObject->DeviceExtension;
+    LIST_ENTRY CompleteList;
+    PLIST_ENTRY Entry;
+    KIRQL OldLevel;
+    BOOLEAN Active;
+
+    InitializeListHead(&CompleteList);
+
+    KeAcquireSpinLock(&FDODeviceExtension->ReadLock, &OldLevel);
+    FDODeviceExtension->ReadStopped = TRUE;
+    Active = FDODeviceExtension->ReadActive;
+    for (Entry = FDODeviceExtension->OpenFileList.Flink;
+         Entry != &FDODeviceExtension->OpenFileList;
+         Entry = Entry->Flink)
+    {
+        PHIDCLASS_FILEOP_CONTEXT FileContext = CONTAINING_RECORD(Entry, HIDCLASS_FILEOP_CONTEXT, FdoListEntry);
+        PIRP PendingIrp;
+
+        while ((PendingIrp = HidClass_RemovePendingRead(FDODeviceExtension, FileContext)) != NULL)
+        {
+            PendingIrp->IoStatus.Status = STATUS_DEVICE_NOT_CONNECTED;
+            PendingIrp->IoStatus.Information = 0;
+            InsertTailList(&CompleteList, &PendingIrp->Tail.Overlay.ListEntry);
+        }
+    }
+    KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
+
+    HidClass_CompleteReadList(&CompleteList);
+
+    if (KeCancelTimer(&FDODeviceExtension->PollTimer))
+    {
+        KeAcquireSpinLock(&FDODeviceExtension->ReadLock, &OldLevel);
+        FDODeviceExtension->ReadActive = FALSE;
+        KeSetEvent(&FDODeviceExtension->ReadIdleEvent, IO_NO_INCREMENT, FALSE);
+        KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
+    }
+    else if (Active && FDODeviceExtension->ReadIrp)
+    {
+        IoCancelIrp(FDODeviceExtension->ReadIrp);
+    }
+    if (!Wait)
+        return;
+
+    KeWaitForSingleObject(&FDODeviceExtension->ReadIdleEvent, Executive, KernelMode, FALSE, NULL);
+    KeFlushQueuedDpcs();
+
+    if (FDODeviceExtension->ReadIrp)
+    {
+        IoFreeIrp(FDODeviceExtension->ReadIrp);
+        FDODeviceExtension->ReadIrp = NULL;
+    }
+
+    if (FDODeviceExtension->ReadBuffer)
+    {
+        ExFreePoolWithTag(FDODeviceExtension->ReadBuffer, HIDCLASS_TAG);
+        FDODeviceExtension->ReadBuffer = NULL;
+    }
+}
+
+VOID
+HidClassFDO_KickRead(
+    IN PDEVICE_OBJECT FDODeviceObject)
+{
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = FDODeviceObject->DeviceExtension;
+    BOOLEAN Start = FALSE;
+    KIRQL OldLevel;
+
+    if (FDODeviceExtension->Common.DriverExtension->DevicesArePolled)
+        return;
+
+    KeAcquireSpinLock(&FDODeviceExtension->ReadLock, &OldLevel);
+    if (!FDODeviceExtension->ReadActive && FDODeviceExtension->ReadIrp && HidClassFDO_WantsRead(FDODeviceExtension))
+    {
+        FDODeviceExtension->ReadActive = TRUE;
+        KeClearEvent(&FDODeviceExtension->ReadIdleEvent);
+        Start = TRUE;
+    }
+    KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
+
+    if (Start)
+        HidClassFDO_SubmitRead(FDODeviceObject);
+}
+
+VOID
+HidClassPDO_SurpriseRemoval(
+    IN PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension)
+{
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = PDODeviceExtension->FDODeviceExtension;
+    LIST_ENTRY CompleteList;
+    PLIST_ENTRY Entry;
+    KIRQL OldLevel;
+
+    InitializeListHead(&CompleteList);
+
+    KeAcquireSpinLock(&FDODeviceExtension->ReadLock, &OldLevel);
+    PDODeviceExtension->Removed = TRUE;
+    for (Entry = FDODeviceExtension->OpenFileList.Flink;
+         Entry != &FDODeviceExtension->OpenFileList;
+         Entry = Entry->Flink)
+    {
+        PHIDCLASS_FILEOP_CONTEXT FileContext = CONTAINING_RECORD(Entry, HIDCLASS_FILEOP_CONTEXT, FdoListEntry);
+        PIRP PendingIrp;
+
+        if (FileContext->DeviceExtension != PDODeviceExtension)
+            continue;
+
+        while ((PendingIrp = HidClass_RemovePendingRead(FDODeviceExtension, FileContext)) != NULL)
+        {
+            PendingIrp->IoStatus.Status = STATUS_DEVICE_NOT_CONNECTED;
+            PendingIrp->IoStatus.Information = 0;
+            InsertTailList(&CompleteList, &PendingIrp->Tail.Overlay.ListEntry);
+        }
+    }
+    KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
+
+    HidClass_CompleteReadList(&CompleteList);
+}
+
+NTSTATUS
+HidClassFDO_StartRead(
+    IN PDEVICE_OBJECT FDODeviceObject)
+{
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = FDODeviceObject->DeviceExtension;
+    PHIDP_DEVICE_DESC DeviceDescription = &FDODeviceExtension->Common.DeviceDescription;
+    ULONG Length = 0;
+    ULONG Index;
+    KIRQL OldLevel;
+
+    if (FDODeviceExtension->ReadIrp)
+        return STATUS_SUCCESS;
+
+    for (Index = 0; Index < DeviceDescription->ReportIDsLength; Index++)
+        Length = max(Length, DeviceDescription->ReportIDs[Index].InputLength);
+
+    if (!Length)
+        return STATUS_SUCCESS;
+
+    FDODeviceExtension->ReadBuffer = ExAllocatePoolWithTag(NonPagedPool, Length, HIDCLASS_TAG);
+    if (!FDODeviceExtension->ReadBuffer)
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    FDODeviceExtension->ReadIrp = IoAllocateIrp(FDODeviceObject->StackSize, FALSE);
+    if (!FDODeviceExtension->ReadIrp)
+    {
+        ExFreePoolWithTag(FDODeviceExtension->ReadBuffer, HIDCLASS_TAG);
+        FDODeviceExtension->ReadBuffer = NULL;
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    KeAcquireSpinLock(&FDODeviceExtension->ReadLock, &OldLevel);
+    FDODeviceExtension->ReadBufferLength = Length;
+    FDODeviceExtension->ReadStopped = FALSE;
+    KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
     return STATUS_SUCCESS;
 }
 
@@ -219,128 +838,38 @@ HidClass_Close(
 {
     PIO_STACK_LOCATION IoStack;
     PHIDCLASS_COMMON_DEVICE_EXTENSION CommonDeviceExtension;
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension;
     PHIDCLASS_FILEOP_CONTEXT IrpContext;
-    BOOLEAN IsRequestPending = FALSE;
     KIRQL OldLevel;
-    PLIST_ENTRY Entry;
-    PIRP ListIrp;
 
-    //
-    // get device extension
-    //
     CommonDeviceExtension = DeviceObject->DeviceExtension;
-
-    //
-    // is it a FDO request
-    //
     if (CommonDeviceExtension->IsFDO)
     {
-        //
-        // how did the request get there
-        //
         Irp->IoStatus.Status = STATUS_INVALID_PARAMETER_1;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         return STATUS_INVALID_PARAMETER_1;
     }
 
-    //
-    // get stack location
-    //
     IoStack = IoGetCurrentIrpStackLocation(Irp);
-
-    //
-    // sanity checks
-    //
     ASSERT(IoStack->FileObject);
     ASSERT(IoStack->FileObject->FsContext);
 
-    //
-    // get irp context
-    //
     IrpContext = IoStack->FileObject->FsContext;
     ASSERT(IrpContext);
 
-    //
-    // acquire lock
-    //
-    KeAcquireSpinLock(&IrpContext->Lock, &OldLevel);
+    HidClass_StopPendingReads(IrpContext);
 
-    if (!IsListEmpty(&IrpContext->ReadPendingIrpListHead))
-    {
-        //
-        // FIXME cancel irp
-        //
-        IsRequestPending = TRUE;
-    }
+    FDODeviceExtension = IrpContext->DeviceExtension->FDODeviceExtension;
+    KeAcquireSpinLock(&FDODeviceExtension->ReadLock, &OldLevel);
+    RemoveEntryList(&IrpContext->FdoListEntry);
+    KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
 
-    //
-    // signal stop
-    //
-    IrpContext->StopInProgress = TRUE;
-
-    //
-    // release lock
-    //
-    KeReleaseSpinLock(&IrpContext->Lock, OldLevel);
-
-    if (IsRequestPending)
-    {
-        //
-        // wait for request to complete
-        //
-        DPRINT1("[HIDCLASS] Waiting for read irp completion...\n");
-        KeWaitForSingleObject(&IrpContext->IrpReadComplete, Executive, KernelMode, FALSE, NULL);
-    }
-
-    //
-    // acquire lock
-    //
-    KeAcquireSpinLock(&IrpContext->Lock, &OldLevel);
-
-    //
-    // sanity check
-    //
-    ASSERT(IsListEmpty(&IrpContext->ReadPendingIrpListHead));
-
-    //
-    // now free all irps
-    //
-    while (!IsListEmpty(&IrpContext->IrpCompletedListHead))
-    {
-        //
-        // remove head irp
-        //
-        Entry = RemoveHeadList(&IrpContext->IrpCompletedListHead);
-
-        //
-        // get irp
-        //
-        ListIrp = CONTAINING_RECORD(Entry, IRP, Tail.Overlay.ListEntry);
-
-        //
-        // free the irp
-        //
-        IoFreeIrp(ListIrp);
-    }
-
-    //
-    // release lock
-    //
-    KeReleaseSpinLock(&IrpContext->Lock, OldLevel);
-
-    //
-    // remove context
-    //
     IoStack->FileObject->FsContext = NULL;
 
-    //
-    // free context
-    //
+    if (IrpContext->ReportQueue)
+        ExFreePoolWithTag(IrpContext->ReportQueue, HIDCLASS_TAG);
     ExFreePoolWithTag(IrpContext, HIDCLASS_TAG);
 
-    //
-    // complete request
-    //
     Irp->IoStatus.Status = STATUS_SUCCESS;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
     return STATUS_SUCCESS;
@@ -348,334 +877,30 @@ HidClass_Close(
 
 NTSTATUS
 NTAPI
-HidClass_ReadCompleteIrp(
+HidClass_Cleanup(
     IN PDEVICE_OBJECT DeviceObject,
-    IN PIRP Irp,
-    IN PVOID Ctx)
+    IN PIRP Irp)
 {
-    PHIDCLASS_IRP_CONTEXT IrpContext;
-    KIRQL OldLevel;
-    PUCHAR Address;
-    ULONG Offset;
-    PHIDP_COLLECTION_DESC CollectionDescription;
-    PHIDP_REPORT_IDS ReportDescription;
-    BOOLEAN IsEmpty;
-
-    //
-    // get irp context
-    //
-    IrpContext = Ctx;
-
-    DPRINT("HidClass_ReadCompleteIrp Irql %lu\n", KeGetCurrentIrql());
-    DPRINT("HidClass_ReadCompleteIrp Status %lx\n", Irp->IoStatus.Status);
-    DPRINT("HidClass_ReadCompleteIrp Length %lu\n", Irp->IoStatus.Information);
-    DPRINT("HidClass_ReadCompleteIrp Irp %p\n", Irp);
-    DPRINT("HidClass_ReadCompleteIrp InputReportBuffer %p\n", IrpContext->InputReportBuffer);
-    DPRINT("HidClass_ReadCompleteIrp InputReportBufferLength %li\n", IrpContext->InputReportBufferLength);
-    DPRINT("HidClass_ReadCompleteIrp OriginalIrp %p\n", IrpContext->OriginalIrp);
-
-    //
-    // copy result
-    //
-    if (Irp->IoStatus.Information)
-    {
-        //
-        // get address
-        //
-        Address = MmGetSystemAddressForMdlSafe(IrpContext->OriginalIrp->MdlAddress, NormalPagePriority);
-        if (Address)
-        {
-            //
-            // reports may have a report id prepended
-            //
-            Offset = 0;
-
-            //
-            // get collection description
-            //
-            CollectionDescription = HidClassPDO_GetCollectionDescription(&IrpContext->FileOp->DeviceExtension->Common.DeviceDescription,
-                                                                         IrpContext->FileOp->DeviceExtension->CollectionNumber);
-            ASSERT(CollectionDescription);
-
-            //
-            // get report description
-            //
-            ReportDescription = HidClassPDO_GetReportDescription(&IrpContext->FileOp->DeviceExtension->Common.DeviceDescription,
-                                                                 IrpContext->FileOp->DeviceExtension->CollectionNumber);
-            ASSERT(ReportDescription);
-
-            if (CollectionDescription && ReportDescription)
-            {
-                //
-                // calculate offset
-                //
-                ASSERT(CollectionDescription->InputLength >= ReportDescription->InputLength);
-                Offset = CollectionDescription->InputLength - ReportDescription->InputLength;
-            }
-
-            //
-            // copy result
-            //
-            RtlCopyMemory(&Address[Offset], IrpContext->InputReportBuffer, IrpContext->InputReportBufferLength);
-        }
-    }
-
-    //
-    // copy result status
-    //
-    IrpContext->OriginalIrp->IoStatus.Status = Irp->IoStatus.Status;
-    IrpContext->OriginalIrp->IoStatus.Information = Irp->IoStatus.Information;
-
-    //
-    // free input report buffer
-    //
-    ExFreePoolWithTag(IrpContext->InputReportBuffer, HIDCLASS_TAG);
-
-    //
-    // remove us from pending list
-    //
-    KeAcquireSpinLock(&IrpContext->FileOp->Lock, &OldLevel);
-
-    //
-    // remove from pending list
-    //
-    RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
-
-    //
-    // is list empty
-    //
-    IsEmpty = IsListEmpty(&IrpContext->FileOp->ReadPendingIrpListHead);
-
-    //
-    // insert into completed list
-    //
-    InsertTailList(&IrpContext->FileOp->IrpCompletedListHead, &Irp->Tail.Overlay.ListEntry);
-
-    //
-    // release lock
-    //
-    KeReleaseSpinLock(&IrpContext->FileOp->Lock, OldLevel);
-
-    //
-    // complete original request
-    //
-    IoCompleteRequest(IrpContext->OriginalIrp, IO_NO_INCREMENT);
-
-
-    DPRINT("StopInProgress %x IsEmpty %x\n", IrpContext->FileOp->StopInProgress, IsEmpty);
-    if (IrpContext->FileOp->StopInProgress && IsEmpty)
-    {
-        //
-        // last pending irp
-        //
-        DPRINT1("[HIDCLASS] LastPendingTransfer Signalling\n");
-        KeSetEvent(&IrpContext->FileOp->IrpReadComplete, 0, FALSE);
-    }
-
-    if (IrpContext->FileOp->StopInProgress && IsEmpty)
-    {
-        //
-        // last pending irp
-        //
-        DPRINT1("[HIDCLASS] LastPendingTransfer Signalling\n");
-        KeSetEvent(&IrpContext->FileOp->IrpReadComplete, 0, FALSE);
-    }
-
-    //
-    // free irp context
-    //
-    ExFreePoolWithTag(IrpContext, HIDCLASS_TAG);
-
-    //
-    // done
-    //
-    return STATUS_MORE_PROCESSING_REQUIRED;
-}
-
-PIRP
-HidClass_GetIrp(
-    IN PHIDCLASS_FILEOP_CONTEXT Context)
-{
-   KIRQL OldLevel;
-   PIRP Irp = NULL;
-   PLIST_ENTRY ListEntry;
-
-    //
-    // acquire lock
-    //
-    KeAcquireSpinLock(&Context->Lock, &OldLevel);
-
-    //
-    // is list empty?
-    //
-    if (!IsListEmpty(&Context->IrpCompletedListHead))
-    {
-        //
-        // grab first entry
-        //
-        ListEntry = RemoveHeadList(&Context->IrpCompletedListHead);
-
-        //
-        // get irp
-        //
-        Irp = CONTAINING_RECORD(ListEntry, IRP, Tail.Overlay.ListEntry);
-    }
-
-    //
-    // release lock
-    //
-    KeReleaseSpinLock(&Context->Lock, OldLevel);
-
-    //
-    // done
-    //
-    return Irp;
-}
-
-NTSTATUS
-HidClass_BuildIrp(
-    IN PDEVICE_OBJECT DeviceObject,
-    IN PIRP RequestIrp,
-    IN PHIDCLASS_FILEOP_CONTEXT Context,
-    IN ULONG DeviceIoControlCode,
-    IN ULONG BufferLength,
-    OUT PIRP *OutIrp,
-    OUT PHIDCLASS_IRP_CONTEXT *OutIrpContext)
-{
-    PIRP Irp;
     PIO_STACK_LOCATION IoStack;
-    PHIDCLASS_IRP_CONTEXT IrpContext;
-    PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension;
-    PHIDP_COLLECTION_DESC CollectionDescription;
-    PHIDP_REPORT_IDS ReportDescription;
+    PHIDCLASS_COMMON_DEVICE_EXTENSION CommonDeviceExtension;
+    PHIDCLASS_FILEOP_CONTEXT IrpContext;
 
-    //
-    // get an irp from fresh list
-    //
-    Irp = HidClass_GetIrp(Context);
-    if (!Irp)
+    CommonDeviceExtension = DeviceObject->DeviceExtension;
+    if (CommonDeviceExtension->IsFDO)
     {
-        //
-        // build new irp
-        //
-        Irp = IoAllocateIrp(DeviceObject->StackSize, FALSE);
-        if (!Irp)
-        {
-            //
-            // no memory
-            //
-            return STATUS_INSUFFICIENT_RESOURCES;
-        }
-    }
-    else
-    {
-        //
-        // re-use irp
-        //
-        IoReuseIrp(Irp, STATUS_SUCCESS);
+        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER_1;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_INVALID_PARAMETER_1;
     }
 
-    //
-    // allocate completion context
-    //
-    IrpContext = ExAllocatePoolWithTag(NonPagedPool, sizeof(HIDCLASS_IRP_CONTEXT), HIDCLASS_TAG);
-    if (!IrpContext)
-    {
-        //
-        // no memory
-        //
-        IoFreeIrp(Irp);
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
+    IoStack = IoGetCurrentIrpStackLocation(Irp);
+    IrpContext = IoStack->FileObject ? IoStack->FileObject->FsContext : NULL;
 
-    //
-    // get device extension
-    //
-    PDODeviceExtension = DeviceObject->DeviceExtension;
-    ASSERT(PDODeviceExtension->Common.IsFDO == FALSE);
+    if (IrpContext)
+        HidClass_StopPendingReads(IrpContext);
 
-    //
-    // init irp context
-    //
-    RtlZeroMemory(IrpContext, sizeof(HIDCLASS_IRP_CONTEXT));
-    IrpContext->OriginalIrp = RequestIrp;
-    IrpContext->FileOp = Context;
-
-    //
-    // get collection description
-    //
-    CollectionDescription = HidClassPDO_GetCollectionDescription(&IrpContext->FileOp->DeviceExtension->Common.DeviceDescription,
-                                                                 IrpContext->FileOp->DeviceExtension->CollectionNumber);
-    ASSERT(CollectionDescription);
-
-    //
-    // get report description
-    //
-    ReportDescription = HidClassPDO_GetReportDescription(&IrpContext->FileOp->DeviceExtension->Common.DeviceDescription,
-                                                         IrpContext->FileOp->DeviceExtension->CollectionNumber);
-    ASSERT(ReportDescription);
-
-    //
-    // sanity check
-    //
-    ASSERT(CollectionDescription->InputLength >= ReportDescription->InputLength);
-
-    if (Context->StopInProgress)
-    {
-         //
-         // stop in progress
-         //
-         DPRINT1("[HIDCLASS] Stop In Progress\n");
-         Irp->IoStatus.Status = STATUS_CANCELLED;
-         IoCompleteRequest(Irp, IO_NO_INCREMENT);
-         return STATUS_CANCELLED;
-
-    }
-
-    //
-    // store report length
-    //
-    IrpContext->InputReportBufferLength = ReportDescription->InputLength;
-
-    //
-    // allocate buffer
-    //
-    IrpContext->InputReportBuffer = ExAllocatePoolWithTag(NonPagedPool, IrpContext->InputReportBufferLength, HIDCLASS_TAG);
-    if (!IrpContext->InputReportBuffer)
-    {
-        //
-        // no memory
-        //
-        IoFreeIrp(Irp);
-        ExFreePoolWithTag(IrpContext, HIDCLASS_TAG);
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    //
-    // get stack location
-    //
-    IoStack = IoGetNextIrpStackLocation(Irp);
-
-    //
-    // init stack location
-    //
-    IoStack->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
-    IoStack->Parameters.DeviceIoControl.IoControlCode = DeviceIoControlCode;
-    IoStack->Parameters.DeviceIoControl.OutputBufferLength = IrpContext->InputReportBufferLength;
-    IoStack->Parameters.DeviceIoControl.InputBufferLength = 0;
-    IoStack->Parameters.DeviceIoControl.Type3InputBuffer = NULL;
-    Irp->UserBuffer = IrpContext->InputReportBuffer;
-    IoStack->DeviceObject = DeviceObject;
-
-    //
-    // store result
-    //
-    *OutIrp = Irp;
-    *OutIrpContext = IrpContext;
-
-    //
-    // done
-    //
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
     return STATUS_SUCCESS;
 }
 
@@ -687,112 +912,410 @@ HidClass_Read(
 {
     PIO_STACK_LOCATION IoStack;
     PHIDCLASS_FILEOP_CONTEXT Context;
+    PHIDCLASS_COMMON_DEVICE_EXTENSION CommonDeviceExtension;
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension;
+    PHIDP_COLLECTION_DESC CollectionDescription;
+    PDEVICE_OBJECT FDODeviceObject;
     KIRQL OldLevel;
     NTSTATUS Status;
-    PIRP NewIrp;
-    PHIDCLASS_IRP_CONTEXT NewIrpContext;
-    PHIDCLASS_COMMON_DEVICE_EXTENSION CommonDeviceExtension;
+    BOOLEAN Start = FALSE;
 
-    //
-    // get current stack location
-    //
     IoStack = IoGetCurrentIrpStackLocation(Irp);
 
-    //
-    // get device extension
-    //
     CommonDeviceExtension = DeviceObject->DeviceExtension;
     ASSERT(CommonDeviceExtension->IsFDO == FALSE);
-
-    //
-    // sanity check
-    //
     ASSERT(IoStack->FileObject);
     ASSERT(IoStack->FileObject->FsContext);
 
-    //
-    // get context
-    //
     Context = IoStack->FileObject->FsContext;
     ASSERT(Context);
+    ASSERT(Context->DeviceExtension);
 
-    //
-    // FIXME support polled devices
-    //
-    ASSERT(Context->DeviceExtension->Common.DriverExtension->DevicesArePolled == FALSE);
-
-    if (Context->StopInProgress)
+    CollectionDescription = HidClassPDO_GetCollectionDescription(&Context->DeviceExtension->Common.DeviceDescription,
+                                                                 Context->DeviceExtension->CollectionNumber);
+    if (!IoStack->Parameters.Read.Length || !CollectionDescription ||
+        IoStack->Parameters.Read.Length < CollectionDescription->InputLength)
     {
-        //
-        // stop in progress
-        //
-        DPRINT1("[HIDCLASS] Stop In Progress\n");
+        Irp->IoStatus.Status = STATUS_INVALID_USER_BUFFER;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_INVALID_USER_BUFFER;
+    }
+
+    FDODeviceObject = Context->DeviceExtension->FDODeviceObject;
+    FDODeviceExtension = Context->DeviceExtension->FDODeviceExtension;
+
+    KeAcquireSpinLock(&FDODeviceExtension->ReadLock, &OldLevel);
+
+    if (Context->DeviceExtension->Removed)
+    {
+        KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
+        Irp->IoStatus.Status = STATUS_DEVICE_NOT_CONNECTED;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_DEVICE_NOT_CONNECTED;
+    }
+
+    if (Context->StopInProgress || FDODeviceExtension->ReadStopped)
+    {
+        KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
         Irp->IoStatus.Status = STATUS_CANCELLED;
+        Irp->IoStatus.Information = 0;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         return STATUS_CANCELLED;
     }
 
-    //
-    // build irp request
-    //
-    Status = HidClass_BuildIrp(DeviceObject,
-                               Irp,
-                               Context,
-                               IOCTL_HID_READ_REPORT,
-                               IoStack->Parameters.Read.Length,
-                               &NewIrp,
-                               &NewIrpContext);
-    if (!NT_SUCCESS(Status))
+    if (Context->ReportQueueCount)
     {
-        //
-        // failed
-        //
-        DPRINT1("HidClass_BuildIrp failed with %x\n", Status);
-        Irp->IoStatus.Status = Status;
+        PUCHAR Slot = Context->ReportQueue + Context->ReportQueueHead * Context->ReportSlotLength;
+
+        HidClass_CopyReport(FDODeviceExtension, Irp, Slot + sizeof(USHORT), Slot[0] | ((ULONG)Slot[1] << 8));
+        Context->ReportQueueHead = (Context->ReportQueueHead + 1) % Context->ReportQueueCapacity;
+        Context->ReportQueueCount--;
+        KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
+
+        Status = Irp->IoStatus.Status;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         return Status;
     }
 
-    //
-    // acquire lock
-    //
-    KeAcquireSpinLock(&Context->Lock, &OldLevel);
-
-    //
-    // insert irp into pending list
-    //
-    InsertTailList(&Context->ReadPendingIrpListHead, &NewIrp->Tail.Overlay.ListEntry);
-
-    //
-    // set completion routine
-    //
-    IoSetCompletionRoutine(NewIrp, HidClass_ReadCompleteIrp, NewIrpContext, TRUE, TRUE, TRUE);
-
-    //
-    // make next location current
-    //
-    IoSetNextIrpStackLocation(NewIrp);
-
-    //
-    // release spin lock
-    //
-    KeReleaseSpinLock(&Context->Lock, OldLevel);
-
-    //
-    // mark irp pending
-    //
     IoMarkIrpPending(Irp);
+    InsertTailList(&Context->PendingReads, &Irp->Tail.Overlay.ListEntry);
+    FDODeviceExtension->WaitingReads++;
+    IoSetCancelRoutine(Irp, HidClass_ReadCancel);
+    if (Irp->Cancel && IoSetCancelRoutine(Irp, NULL))
+    {
+        RemoveEntryList(&Irp->Tail.Overlay.ListEntry);
+        FDODeviceExtension->WaitingReads--;
+        KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
 
-    //
-    // let's dispatch the request
-    //
-    ASSERT(Context->DeviceExtension);
-    Status = Context->DeviceExtension->Common.DriverExtension->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL](Context->DeviceExtension->FDODeviceObject, NewIrp);
+        Irp->IoStatus.Status = STATUS_CANCELLED;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_PENDING;
+    }
 
-    //
-    // complete
-    //
+    if (!FDODeviceExtension->ReadActive && FDODeviceExtension->ReadIrp)
+    {
+        FDODeviceExtension->ReadActive = TRUE;
+        KeClearEvent(&FDODeviceExtension->ReadIdleEvent);
+        Start = TRUE;
+    }
+
+    KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
+
+    if (Start && FDODeviceExtension->Common.DriverExtension->DevicesArePolled)
+    {
+        LARGE_INTEGER DueTime;
+
+        DueTime.QuadPart = -(LONGLONG)FDODeviceExtension->PollInterval * 10000;
+        KeSetTimer(&FDODeviceExtension->PollTimer, DueTime, &FDODeviceExtension->ReadDpc);
+    }
+    else if (Start)
+    {
+        HidClassFDO_SubmitRead(FDODeviceObject);
+    }
+
     return STATUS_PENDING;
+}
+
+typedef struct _HIDCLASS_SYNC_IRP_CONTEXT
+{
+    KEVENT Event;
+    BOOLEAN Completed;
+} HIDCLASS_SYNC_IRP_CONTEXT, *PHIDCLASS_SYNC_IRP_CONTEXT;
+
+static NTSTATUS
+NTAPI
+HidClass_SyncIrpCompletion(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN PIRP Irp,
+    IN PVOID Context)
+{
+    PHIDCLASS_SYNC_IRP_CONTEXT SyncContext = Context;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(Irp);
+
+    SyncContext->Completed = TRUE;
+    KeSetEvent(&SyncContext->Event, IO_NO_INCREMENT, FALSE);
+
+    return STATUS_MORE_PROCESSING_REQUIRED;
+}
+
+static NTSTATUS
+HidClass_DispatchMiniDriverRequest(
+    IN PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension,
+    IN ULONG IoControlCode,
+    IN PHID_XFER_PACKET XferPacket,
+    OUT PULONG_PTR Information)
+{
+    PDEVICE_OBJECT FDODeviceObject;
+    PHIDCLASS_COMMON_DEVICE_EXTENSION FDOCommonExtension;
+    HIDCLASS_SYNC_IRP_CONTEXT SyncContext;
+    PIO_STACK_LOCATION IoStack;
+    PIRP SubIrp;
+    NTSTATUS Status;
+
+    ASSERT(PDODeviceExtension);
+    ASSERT(PDODeviceExtension->Common.IsFDO == FALSE);
+    ASSERT(PDODeviceExtension->FDODeviceObject);
+
+    FDODeviceObject = PDODeviceExtension->FDODeviceObject;
+    FDOCommonExtension = FDODeviceObject->DeviceExtension;
+
+    ASSERT(FDOCommonExtension->IsFDO);
+    ASSERT(FDOCommonExtension->DriverExtension);
+    ASSERT(FDOCommonExtension->DriverExtension->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL]);
+
+    SubIrp = IoAllocateIrp(FDODeviceObject->StackSize, FALSE);
+    if (!SubIrp)
+        return STATUS_NO_MEMORY;
+
+    RtlZeroMemory(&SyncContext, sizeof(SyncContext));
+    KeInitializeEvent(&SyncContext.Event, NotificationEvent, FALSE);
+
+    SubIrp->UserBuffer = XferPacket;
+
+    IoStack = IoGetNextIrpStackLocation(SubIrp);
+    RtlZeroMemory(IoStack, sizeof(*IoStack));
+    IoStack->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
+    IoStack->Parameters.DeviceIoControl.IoControlCode = IoControlCode;
+    if (IoControlCode == IOCTL_HID_GET_FEATURE || IoControlCode == IOCTL_HID_GET_INPUT_REPORT)
+        IoStack->Parameters.DeviceIoControl.OutputBufferLength = sizeof(HID_XFER_PACKET);
+    else
+        IoStack->Parameters.DeviceIoControl.InputBufferLength = sizeof(HID_XFER_PACKET);
+    IoStack->DeviceObject = FDODeviceObject;
+
+    IoSetCompletionRoutine(SubIrp,
+                           HidClass_SyncIrpCompletion,
+                           &SyncContext,
+                           TRUE,
+                           TRUE,
+                           TRUE);
+
+    IoSetNextIrpStackLocation(SubIrp);
+    Status = FDOCommonExtension->DriverExtension->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL](FDODeviceObject, SubIrp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&SyncContext.Event, Executive, KernelMode, FALSE, NULL);
+    }
+
+    *Information = 0;
+    if (SyncContext.Completed)
+    {
+        Status = SubIrp->IoStatus.Status;
+        *Information = SubIrp->IoStatus.Information;
+    }
+
+    IoFreeIrp(SubIrp);
+    return Status;
+}
+
+static NTSTATUS
+HidClass_DispatchMiniDriverMdlRequest(
+    IN PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension,
+    IN ULONG IoControlCode,
+    IN PIRP Irp,
+    OUT PULONG_PTR Information)
+{
+    PIO_STACK_LOCATION OriginalStack = IoGetCurrentIrpStackLocation(Irp);
+    PDEVICE_OBJECT FDODeviceObject = PDODeviceExtension->FDODeviceObject;
+    PHIDCLASS_COMMON_DEVICE_EXTENSION FDOCommonExtension = FDODeviceObject->DeviceExtension;
+    HIDCLASS_SYNC_IRP_CONTEXT SyncContext;
+    PIO_STACK_LOCATION IoStack;
+    PIRP SubIrp;
+    NTSTATUS Status;
+
+    *Information = 0;
+    if (!Irp->MdlAddress)
+        return STATUS_INVALID_USER_BUFFER;
+
+    SubIrp = IoAllocateIrp(FDODeviceObject->StackSize, FALSE);
+    if (!SubIrp)
+        return STATUS_NO_MEMORY;
+
+    RtlZeroMemory(&SyncContext, sizeof(SyncContext));
+    KeInitializeEvent(&SyncContext.Event, NotificationEvent, FALSE);
+
+    SubIrp->MdlAddress = Irp->MdlAddress;
+    SubIrp->UserBuffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+
+    IoStack = IoGetNextIrpStackLocation(SubIrp);
+    RtlZeroMemory(IoStack, sizeof(*IoStack));
+    IoStack->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
+    IoStack->Parameters.DeviceIoControl.IoControlCode = IoControlCode;
+    IoStack->Parameters.DeviceIoControl.OutputBufferLength = OriginalStack->Parameters.DeviceIoControl.OutputBufferLength;
+    IoStack->DeviceObject = FDODeviceObject;
+
+    IoSetCompletionRoutine(SubIrp,
+                           HidClass_SyncIrpCompletion,
+                           &SyncContext,
+                           TRUE,
+                           TRUE,
+                           TRUE);
+
+    IoSetNextIrpStackLocation(SubIrp);
+    Status = FDOCommonExtension->DriverExtension->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL](FDODeviceObject, SubIrp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&SyncContext.Event, Executive, KernelMode, FALSE, NULL);
+    }
+
+    if (SyncContext.Completed)
+    {
+        Status = SubIrp->IoStatus.Status;
+        *Information = SubIrp->IoStatus.Information;
+    }
+
+    SubIrp->MdlAddress = NULL;
+    IoFreeIrp(SubIrp);
+    return Status;
+}
+
+static NTSTATUS
+HidClass_TransferReport(
+    IN PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension,
+    IN ULONG IoControlCode,
+    IN HIDP_REPORT_TYPE ReportType,
+    IN PUCHAR Buffer,
+    IN ULONG BufferLength,
+    IN BOOLEAN WholeBuffer,
+    OUT PULONG ReportLength,
+    OUT PULONG_PTR Information)
+{
+    PHIDP_DEVICE_DESC DeviceDescription = &PDODeviceExtension->Common.DeviceDescription;
+    PHIDP_COLLECTION_DESC CollectionDescription;
+    HID_XFER_PACKET XferPacket;
+    BOOLEAN UsesReportIds = FALSE, Found = FALSE;
+    ULONG Index, FoundLength = 0;
+
+    *ReportLength = 0;
+    *Information = 0;
+    if (!Buffer || !BufferLength)
+        return STATUS_INVALID_USER_BUFFER;
+
+    CollectionDescription = HidClassPDO_GetCollectionDescription(DeviceDescription, PDODeviceExtension->CollectionNumber);
+    if (!CollectionDescription)
+        return STATUS_INVALID_PARAMETER;
+
+    if (ReportType == HidP_Input)
+        *ReportLength = CollectionDescription->InputLength;
+    else if (ReportType == HidP_Output)
+        *ReportLength = CollectionDescription->OutputLength;
+    else
+        *ReportLength = CollectionDescription->FeatureLength;
+    if (!*ReportLength || BufferLength < *ReportLength)
+        return STATUS_INVALID_PARAMETER;
+
+    for (Index = 0; Index < DeviceDescription->ReportIDsLength; Index++)
+    {
+        PHIDP_REPORT_IDS Report = &DeviceDescription->ReportIDs[Index];
+        USHORT Length = ReportType == HidP_Input ? Report->InputLength :
+                        ReportType == HidP_Output ? Report->OutputLength : Report->FeatureLength;
+
+        if (Report->CollectionNumber != PDODeviceExtension->CollectionNumber)
+            continue;
+        if (Report->ReportID)
+            UsesReportIds = TRUE;
+        if (Report->ReportID == Buffer[0] && Length)
+        {
+            Found = TRUE;
+            FoundLength = Length;
+        }
+    }
+    if (UsesReportIds && !Found)
+        return STATUS_INVALID_PARAMETER;
+
+    RtlZeroMemory(&XferPacket, sizeof(XferPacket));
+    XferPacket.reportBuffer = Buffer;
+    XferPacket.reportBufferLen = WholeBuffer ? BufferLength : *ReportLength;
+    XferPacket.reportId = Buffer[0];
+    if (!UsesReportIds)
+    {
+        XferPacket.reportId = 0;
+        XferPacket.reportBuffer++;
+        XferPacket.reportBufferLen--;
+    }
+    else if (!WholeBuffer && FoundLength)
+    {
+        XferPacket.reportBufferLen = FoundLength;
+    }
+
+    return HidClass_DispatchMiniDriverRequest(PDODeviceExtension, IoControlCode, &XferPacket, Information);
+}
+
+static NTSTATUS
+HidClass_DispatchMiniDriverStringRequest(
+    IN PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension,
+    IN ULONG IoControlCode,
+    IN ULONG StringId,
+    OUT PVOID StringBuffer,
+    IN ULONG StringBufferLength,
+    OUT PULONG_PTR Information)
+{
+    PDEVICE_OBJECT FDODeviceObject;
+    PHIDCLASS_COMMON_DEVICE_EXTENSION FDOCommonExtension;
+    HIDCLASS_SYNC_IRP_CONTEXT SyncContext;
+    PIO_STACK_LOCATION IoStack;
+    PIRP SubIrp;
+    NTSTATUS Status;
+
+    ASSERT(PDODeviceExtension);
+    ASSERT(PDODeviceExtension->Common.IsFDO == FALSE);
+    ASSERT(PDODeviceExtension->FDODeviceObject);
+
+    if (Information)
+        *Information = 0;
+
+    FDODeviceObject = PDODeviceExtension->FDODeviceObject;
+    FDOCommonExtension = FDODeviceObject->DeviceExtension;
+
+    ASSERT(FDOCommonExtension->IsFDO);
+    ASSERT(FDOCommonExtension->DriverExtension);
+    ASSERT(FDOCommonExtension->DriverExtension->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL]);
+
+    SubIrp = IoAllocateIrp(FDODeviceObject->StackSize, FALSE);
+    if (!SubIrp)
+        return STATUS_NO_MEMORY;
+
+    RtlZeroMemory(&SyncContext, sizeof(SyncContext));
+    KeInitializeEvent(&SyncContext.Event, NotificationEvent, FALSE);
+
+    SubIrp->UserBuffer = StringBuffer;
+
+    IoStack = IoGetNextIrpStackLocation(SubIrp);
+    RtlZeroMemory(IoStack, sizeof(*IoStack));
+    IoStack->MajorFunction = IRP_MJ_INTERNAL_DEVICE_CONTROL;
+    IoStack->Parameters.DeviceIoControl.IoControlCode = IoControlCode;
+    IoStack->Parameters.DeviceIoControl.InputBufferLength = sizeof(ULONG);
+    IoStack->Parameters.DeviceIoControl.OutputBufferLength = StringBufferLength;
+    IoStack->Parameters.DeviceIoControl.Type3InputBuffer = UlongToPtr(StringId);
+    IoStack->DeviceObject = FDODeviceObject;
+
+    IoSetCompletionRoutine(SubIrp,
+                           HidClass_SyncIrpCompletion,
+                           &SyncContext,
+                           TRUE,
+                           TRUE,
+                           TRUE);
+
+    IoSetNextIrpStackLocation(SubIrp);
+    Status = FDOCommonExtension->DriverExtension->MajorFunction[IRP_MJ_INTERNAL_DEVICE_CONTROL](FDODeviceObject, SubIrp);
+    if (Status == STATUS_PENDING)
+    {
+        KeWaitForSingleObject(&SyncContext.Event, Executive, KernelMode, FALSE, NULL);
+    }
+
+    if (SyncContext.Completed)
+    {
+        Status = SubIrp->IoStatus.Status;
+        if (Information)
+            *Information = SubIrp->IoStatus.Information;
+    }
+
+    IoFreeIrp(SubIrp);
+    return Status;
 }
 
 NTSTATUS
@@ -803,53 +1326,75 @@ HidClass_Write(
 {
     PIO_STACK_LOCATION IoStack;
     PHIDCLASS_COMMON_DEVICE_EXTENSION CommonDeviceExtension;
-    PIRP SubIrp;
-    KEVENT Event;
-    IO_STATUS_BLOCK IoStatusBlock;
-    HID_XFER_PACKET XferPacket;
     NTSTATUS Status;
-    ULONG Length;
+    ULONG Length, ReportLength;
+    ULONG_PTR Information;
+    PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension;
 
     IoStack = IoGetCurrentIrpStackLocation(Irp);
     Length = IoStack->Parameters.Write.Length;
-    if (Length < 1)
-    {
-        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-        IoCompleteRequest(Irp, IO_NO_INCREMENT);
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    RtlZeroMemory(&XferPacket, sizeof(XferPacket));
-    XferPacket.reportBufferLen = Length;
-    XferPacket.reportBuffer = Irp->UserBuffer;
-    XferPacket.reportId = XferPacket.reportBuffer[0];
 
     CommonDeviceExtension = DeviceObject->DeviceExtension;
-    SubIrp = IoBuildDeviceIoControlRequest(
-        IOCTL_HID_WRITE_REPORT,
-        CommonDeviceExtension->HidDeviceExtension.NextDeviceObject,
-        NULL, 0,
-        NULL, 0,
-        TRUE,
-        &Event,
-        &IoStatusBlock);
-    if (!SubIrp)
+    if (CommonDeviceExtension->IsFDO)
     {
-        Irp->IoStatus.Status = STATUS_NO_MEMORY;
+        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER_1;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
-        return STATUS_NOT_IMPLEMENTED;
+        return STATUS_INVALID_PARAMETER_1;
     }
-    SubIrp->UserBuffer = &XferPacket;
-    KeInitializeEvent(&Event, SynchronizationEvent, FALSE);
-    Status = IoCallDriver(CommonDeviceExtension->HidDeviceExtension.NextDeviceObject, SubIrp);
-    if (Status == STATUS_PENDING)
-    {
-        KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
-        Status = IoStatusBlock.Status;
-    }
+
+    PDODeviceExtension = DeviceObject->DeviceExtension;
+    Status = HidClass_TransferReport(PDODeviceExtension,
+                                     IOCTL_HID_WRITE_REPORT,
+                                     HidP_Output,
+                                     Irp->AssociatedIrp.SystemBuffer,
+                                     Length,
+                                     FALSE,
+                                     &ReportLength,
+                                     &Information);
     Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = NT_SUCCESS(Status) ? ReportLength : 0;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
     return Status;
+}
+
+static
+NTSTATUS
+HidClass_SetReportQueueCapacity(
+    IN PHIDCLASS_FILEOP_CONTEXT Context,
+    IN ULONG Capacity)
+{
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = Context->DeviceExtension->FDODeviceExtension;
+    PUCHAR NewQueue = NULL, OldQueue;
+    ULONG Index, Count, Skip;
+    KIRQL OldLevel;
+
+    if (Context->ReportSlotLength)
+    {
+        NewQueue = ExAllocatePoolWithTag(NonPagedPool, Context->ReportSlotLength * Capacity, HIDCLASS_TAG);
+        if (!NewQueue)
+            return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    KeAcquireSpinLock(&FDODeviceExtension->ReadLock, &OldLevel);
+    OldQueue = Context->ReportQueue;
+    Count = OldQueue ? min(Context->ReportQueueCount, Capacity) : 0;
+    Skip = Context->ReportQueueCount - Count;
+    for (Index = 0; Index < Count; Index++)
+    {
+        ULONG Slot = (Context->ReportQueueHead + Skip + Index) % Context->ReportQueueCapacity;
+        RtlCopyMemory(NewQueue + Index * Context->ReportSlotLength,
+                      OldQueue + Slot * Context->ReportSlotLength,
+                      Context->ReportSlotLength);
+    }
+    Context->ReportQueue = NewQueue;
+    Context->ReportQueueHead = 0;
+    Context->ReportQueueCount = Count;
+    Context->ReportQueueCapacity = Capacity;
+    KeReleaseSpinLock(&FDODeviceExtension->ReadLock, OldLevel);
+
+    if (OldQueue)
+        ExFreePoolWithTag(OldQueue, HIDCLASS_TAG);
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
@@ -863,6 +1408,7 @@ HidClass_DeviceControl(
     PHID_COLLECTION_INFORMATION CollectionInformation;
     PHIDP_COLLECTION_DESC CollectionDescription;
     PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension;
+    NTSTATUS Status;
 
     //
     // get device extension
@@ -895,8 +1441,55 @@ HidClass_DeviceControl(
     //
     IoStack = IoGetCurrentIrpStackLocation(Irp);
 
+    if (Irp->RequestorMode != KernelMode &&
+        (IoStack->Parameters.DeviceIoControl.IoControlCode == IOCTL_HID_GET_FEATURE ||
+         IoStack->Parameters.DeviceIoControl.IoControlCode == IOCTL_HID_SET_FEATURE ||
+         IoStack->Parameters.DeviceIoControl.IoControlCode == IOCTL_HID_GET_INPUT_REPORT ||
+         IoStack->Parameters.DeviceIoControl.IoControlCode == IOCTL_HID_SET_OUTPUT_REPORT) &&
+        HidClass_IsSystemExclusive(PDODeviceExtension))
+    {
+        Irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_INVALID_DEVICE_REQUEST;
+    }
+
     switch (IoStack->Parameters.DeviceIoControl.IoControlCode)
     {
+        case IOCTL_HID_GET_POLL_FREQUENCY_MSEC:
+        {
+            if (IoStack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(ULONG))
+            {
+                Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+
+            *(PULONG)Irp->AssociatedIrp.SystemBuffer =
+                CommonDeviceExtension->DriverExtension->DevicesArePolled ? PDODeviceExtension->FDODeviceExtension->PollInterval : 0;
+            Irp->IoStatus.Information = sizeof(ULONG);
+            Irp->IoStatus.Status = STATUS_SUCCESS;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_SUCCESS;
+        }
+        case IOCTL_HID_SET_POLL_FREQUENCY_MSEC:
+        {
+            ULONG Interval;
+
+            if (IoStack->Parameters.DeviceIoControl.InputBufferLength < sizeof(ULONG))
+            {
+                Irp->IoStatus.Status = STATUS_BUFFER_TOO_SMALL;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+
+            Interval = *(PULONG)Irp->AssociatedIrp.SystemBuffer;
+            if (Interval && CommonDeviceExtension->DriverExtension->DevicesArePolled)
+                PDODeviceExtension->FDODeviceExtension->PollInterval = min(Interval, HIDCLASS_MAX_POLL_INTERVAL);
+            Irp->IoStatus.Information = 0;
+            Irp->IoStatus.Status = STATUS_SUCCESS;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_SUCCESS;
+        }
         case IOCTL_HID_GET_COLLECTION_INFORMATION:
         {
             //
@@ -942,6 +1535,46 @@ HidClass_DeviceControl(
             IoCompleteRequest(Irp, IO_NO_INCREMENT);
             return STATUS_SUCCESS;
         }
+        case IOCTL_GET_NUM_DEVICE_INPUT_BUFFERS:
+        {
+            PHIDCLASS_FILEOP_CONTEXT Context = IoStack->FileObject ? IoStack->FileObject->FsContext : NULL;
+
+            if (!Context || IoStack->Parameters.DeviceIoControl.OutputBufferLength < sizeof(ULONG))
+            {
+                Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            *(PULONG)Irp->AssociatedIrp.SystemBuffer = Context->ReportQueueCapacity;
+            Irp->IoStatus.Information = sizeof(ULONG);
+            Irp->IoStatus.Status = STATUS_SUCCESS;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return STATUS_SUCCESS;
+        }
+        case IOCTL_SET_NUM_DEVICE_INPUT_BUFFERS:
+        {
+            PHIDCLASS_FILEOP_CONTEXT Context = IoStack->FileObject ? IoStack->FileObject->FsContext : NULL;
+            ULONG Capacity;
+
+            if (!Context || IoStack->Parameters.DeviceIoControl.InputBufferLength < sizeof(ULONG))
+            {
+                Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return STATUS_INVALID_PARAMETER;
+            }
+
+            Capacity = *(PULONG)Irp->AssociatedIrp.SystemBuffer;
+            if (Capacity < HIDCLASS_MIN_QUEUED_REPORTS || Capacity > HIDCLASS_MAX_QUEUED_REPORTS)
+                Status = STATUS_INVALID_PARAMETER;
+            else
+                Status = HidClass_SetReportQueueCapacity(Context, Capacity);
+
+            Irp->IoStatus.Information = 0;
+            Irp->IoStatus.Status = Status;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return Status;
+        }
         case IOCTL_HID_GET_COLLECTION_DESCRIPTOR:
         {
             //
@@ -968,7 +1601,33 @@ HidClass_DeviceControl(
             // copy result
             //
             ASSERT(Irp->UserBuffer);
-            RtlCopyMemory(Irp->UserBuffer, CollectionDescription->PreparsedData, CollectionDescription->PreparsedDataLength);
+            Status = STATUS_SUCCESS;
+
+            if (Irp->RequestorMode != KernelMode)
+            {
+                _SEH2_TRY
+                {
+                    ProbeForWrite(Irp->UserBuffer,
+                                  CollectionDescription->PreparsedDataLength,
+                                  sizeof(UCHAR));
+                }
+                _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+                {
+                    Status = _SEH2_GetExceptionCode();
+                }
+                _SEH2_END;
+            }
+
+            if (!NT_SUCCESS(Status))
+            {
+                Irp->IoStatus.Status = Status;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return Status;
+            }
+
+            RtlCopyMemory(Irp->UserBuffer,
+                          CollectionDescription->PreparsedData,
+                          CollectionDescription->PreparsedDataLength);
 
             //
             // complete request
@@ -980,115 +1639,188 @@ HidClass_DeviceControl(
         }
         case IOCTL_HID_GET_FEATURE:
         {
-            PIRP SubIrp;
-            KEVENT Event;
-            IO_STATUS_BLOCK IoStatusBlock;
-            HID_XFER_PACKET XferPacket;
             NTSTATUS Status;
-            PHIDP_REPORT_IDS ReportDescription;
+            PUCHAR ReportBuffer;
+            ULONG ReportLength;
+            ULONG_PTR Information;
 
-            if (IoStack->Parameters.DeviceIoControl.InputBufferLength < 1)
+            if (!Irp->MdlAddress)
             {
-                Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+                Irp->IoStatus.Status = STATUS_INVALID_USER_BUFFER;
                 IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                return STATUS_INVALID_PARAMETER;
-            }
-            ReportDescription = HidClassPDO_GetReportDescriptionByReportID(&PDODeviceExtension->Common.DeviceDescription, ((PUCHAR)Irp->AssociatedIrp.SystemBuffer)[0]);
-            if (!ReportDescription || IoStack->Parameters.DeviceIoControl.OutputBufferLength < ReportDescription->FeatureLength)
-            {
-                Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-                IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                return STATUS_INVALID_PARAMETER;
+                return STATUS_INVALID_USER_BUFFER;
             }
 
-            RtlZeroMemory(&XferPacket, sizeof(XferPacket));
-            XferPacket.reportBufferLen = ReportDescription->FeatureLength;
-            XferPacket.reportBuffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
-            XferPacket.reportId = ((PUCHAR)Irp->AssociatedIrp.SystemBuffer)[0];
-            if (!XferPacket.reportBuffer)
+            ReportBuffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+            if (!ReportBuffer)
             {
                 Irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
                 IoCompleteRequest(Irp, IO_NO_INCREMENT);
                 return STATUS_INSUFFICIENT_RESOURCES;
             }
 
-            SubIrp = IoBuildDeviceIoControlRequest(
-                IOCTL_HID_GET_FEATURE,
-                CommonDeviceExtension->HidDeviceExtension.NextDeviceObject,
-                NULL, 0,
-                NULL, 0,
-                TRUE,
-                &Event,
-                &IoStatusBlock);
-            if (!SubIrp)
-            {
-                Irp->IoStatus.Status = STATUS_NO_MEMORY;
-                IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                return STATUS_NOT_IMPLEMENTED;
-            }
-            SubIrp->UserBuffer = &XferPacket;
-            KeInitializeEvent(&Event, SynchronizationEvent, FALSE);
-            Status = IoCallDriver(CommonDeviceExtension->HidDeviceExtension.NextDeviceObject, SubIrp);
-            if (Status == STATUS_PENDING)
-            {
-                KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
-                Status = IoStatusBlock.Status;
-            }
+            Status = HidClass_TransferReport(PDODeviceExtension,
+                                             IOCTL_HID_GET_FEATURE,
+                                             HidP_Feature,
+                                             ReportBuffer,
+                                             IoStack->Parameters.DeviceIoControl.OutputBufferLength,
+                                             TRUE,
+                                             &ReportLength,
+                                             &Information);
             Irp->IoStatus.Status = Status;
+            Irp->IoStatus.Information = NT_SUCCESS(Status) ? Information : 0;
             IoCompleteRequest(Irp, IO_NO_INCREMENT);
             return Status;
         }
         case IOCTL_HID_SET_FEATURE:
         {
-            PIRP SubIrp;
-            KEVENT Event;
-            IO_STATUS_BLOCK IoStatusBlock;
-            HID_XFER_PACKET XferPacket;
             NTSTATUS Status;
-            PHIDP_REPORT_IDS ReportDescription;
+            ULONG ReportLength;
+            ULONG_PTR Information;
 
-            if (IoStack->Parameters.DeviceIoControl.InputBufferLength < 1)
-            {
-                Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-                IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                return STATUS_INVALID_PARAMETER;
-            }
-            ReportDescription = HidClassPDO_GetReportDescriptionByReportID(&PDODeviceExtension->Common.DeviceDescription, ((PUCHAR)Irp->AssociatedIrp.SystemBuffer)[0]);
-            if (!ReportDescription || IoStack->Parameters.DeviceIoControl.InputBufferLength < ReportDescription->FeatureLength)
-            {
-                Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
-                IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                return STATUS_INVALID_PARAMETER;
-            }
-
-            RtlZeroMemory(&XferPacket, sizeof(XferPacket));
-            XferPacket.reportBufferLen = ReportDescription->FeatureLength;
-            XferPacket.reportBuffer = Irp->AssociatedIrp.SystemBuffer;
-            XferPacket.reportId = XferPacket.reportBuffer[0];
-
-            SubIrp = IoBuildDeviceIoControlRequest(
-                IOCTL_HID_SET_FEATURE,
-                CommonDeviceExtension->HidDeviceExtension.NextDeviceObject,
-                NULL, 0,
-                NULL, 0,
-                TRUE,
-                &Event,
-                &IoStatusBlock);
-            if (!SubIrp)
-            {
-                Irp->IoStatus.Status = STATUS_NO_MEMORY;
-                IoCompleteRequest(Irp, IO_NO_INCREMENT);
-                return STATUS_NOT_IMPLEMENTED;
-            }
-            SubIrp->UserBuffer = &XferPacket;
-            KeInitializeEvent(&Event, SynchronizationEvent, FALSE);
-            Status = IoCallDriver(CommonDeviceExtension->HidDeviceExtension.NextDeviceObject, SubIrp);
-            if (Status == STATUS_PENDING)
-            {
-                KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
-                Status = IoStatusBlock.Status;
-            }
+            Status = HidClass_TransferReport(PDODeviceExtension,
+                                             IOCTL_HID_SET_FEATURE,
+                                             HidP_Feature,
+                                             Irp->AssociatedIrp.SystemBuffer,
+                                             IoStack->Parameters.DeviceIoControl.InputBufferLength,
+                                             FALSE,
+                                             &ReportLength,
+                                             &Information);
             Irp->IoStatus.Status = Status;
+            Irp->IoStatus.Information = NT_SUCCESS(Status) ? Information : 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return Status;
+        }
+        case IOCTL_HID_GET_INPUT_REPORT:
+        {
+            NTSTATUS Status;
+            PUCHAR ReportBuffer;
+            ULONG ReportLength;
+            ULONG_PTR Information;
+
+            if (!Irp->MdlAddress)
+            {
+                Irp->IoStatus.Status = STATUS_INVALID_USER_BUFFER;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return STATUS_INVALID_USER_BUFFER;
+            }
+
+            ReportBuffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+            if (!ReportBuffer)
+            {
+                Irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            Status = HidClass_TransferReport(PDODeviceExtension,
+                                             IOCTL_HID_GET_INPUT_REPORT,
+                                             HidP_Input,
+                                             ReportBuffer,
+                                             IoStack->Parameters.DeviceIoControl.OutputBufferLength,
+                                             TRUE,
+                                             &ReportLength,
+                                             &Information);
+            Irp->IoStatus.Status = Status;
+            Irp->IoStatus.Information = NT_SUCCESS(Status) ? Information : 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return Status;
+        }
+        case IOCTL_HID_SET_OUTPUT_REPORT:
+        {
+            NTSTATUS Status;
+            ULONG ReportLength;
+            ULONG_PTR Information;
+
+            Status = HidClass_TransferReport(PDODeviceExtension,
+                                             IOCTL_HID_SET_OUTPUT_REPORT,
+                                             HidP_Output,
+                                             Irp->AssociatedIrp.SystemBuffer,
+                                             IoStack->Parameters.DeviceIoControl.InputBufferLength,
+                                             FALSE,
+                                             &ReportLength,
+                                             &Information);
+            Irp->IoStatus.Status = Status;
+            Irp->IoStatus.Information = NT_SUCCESS(Status) ? Information : 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return Status;
+        }
+        case IOCTL_GET_PHYSICAL_DESCRIPTOR:
+        {
+            NTSTATUS Status;
+            ULONG_PTR Information;
+
+            Status = HidClass_DispatchMiniDriverMdlRequest(PDODeviceExtension,
+                                                           IOCTL_GET_PHYSICAL_DESCRIPTOR,
+                                                           Irp,
+                                                           &Information);
+            Irp->IoStatus.Status = Status;
+            Irp->IoStatus.Information = NT_SUCCESS(Status) ? Information : 0;
+            IoCompleteRequest(Irp, IO_NO_INCREMENT);
+            return Status;
+        }
+        case IOCTL_HID_GET_MANUFACTURER_STRING:
+        case IOCTL_HID_GET_PRODUCT_STRING:
+        case IOCTL_HID_GET_SERIALNUMBER_STRING:
+        case IOCTL_HID_GET_INDEXED_STRING:
+        {
+            ULONG StringId;
+            ULONG MiniDriverIoControlCode = IOCTL_HID_GET_STRING;
+            PVOID StringBuffer;
+            ULONG_PTR Information = 0;
+
+            if (IoStack->Parameters.DeviceIoControl.OutputBufferLength == 0)
+            {
+                Irp->IoStatus.Status = STATUS_INVALID_BUFFER_SIZE;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return STATUS_INVALID_BUFFER_SIZE;
+            }
+
+            StringBuffer = MmGetSystemAddressForMdlSafe(Irp->MdlAddress, NormalPagePriority);
+            if (!StringBuffer)
+            {
+                Irp->IoStatus.Status = STATUS_INSUFFICIENT_RESOURCES;
+                IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            switch (IoStack->Parameters.DeviceIoControl.IoControlCode)
+            {
+                case IOCTL_HID_GET_MANUFACTURER_STRING:
+                    StringId = HID_STRING_ID_IMANUFACTURER;
+                    break;
+
+                case IOCTL_HID_GET_PRODUCT_STRING:
+                    StringId = HID_STRING_ID_IPRODUCT;
+                    break;
+
+                case IOCTL_HID_GET_SERIALNUMBER_STRING:
+                    StringId = HID_STRING_ID_ISERIALNUMBER;
+                    break;
+
+                default:
+                    if (IoStack->Parameters.DeviceIoControl.InputBufferLength < sizeof(ULONG) ||
+                        !Irp->AssociatedIrp.SystemBuffer)
+                    {
+                        Irp->IoStatus.Status = STATUS_INVALID_PARAMETER;
+                        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+                        return STATUS_INVALID_PARAMETER;
+                    }
+
+                    StringId = *(PULONG)Irp->AssociatedIrp.SystemBuffer;
+                    MiniDriverIoControlCode = IOCTL_HID_GET_INDEXED_STRING;
+                    break;
+            }
+
+            Status = HidClass_DispatchMiniDriverStringRequest(PDODeviceExtension,
+                                                              MiniDriverIoControlCode,
+                                                              StringId,
+                                                              StringBuffer,
+                                                              IoStack->Parameters.DeviceIoControl.OutputBufferLength,
+                                                              &Information);
+            Irp->IoStatus.Status = Status;
+            if (NT_SUCCESS(Status))
+                Irp->IoStatus.Information = Information;
             IoCompleteRequest(Irp, IO_NO_INCREMENT);
             return Status;
         }
@@ -1108,11 +1840,183 @@ HidClass_InternalDeviceControl(
     IN PDEVICE_OBJECT DeviceObject,
     IN PIRP Irp)
 {
-    UNIMPLEMENTED;
-    ASSERT(FALSE);
-    Irp->IoStatus.Status = STATUS_NOT_IMPLEMENTED;
+    PIO_STACK_LOCATION IoStack = IoGetCurrentIrpStackLocation(Irp);
+
+    DPRINT1("[HIDCLASS] InternalDeviceControl IoControlCode 0x%x not supported\n", IoStack->Parameters.DeviceIoControl.IoControlCode);
+    Irp->IoStatus.Status = STATUS_INVALID_DEVICE_REQUEST;
+    Irp->IoStatus.Information = 0;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
-    return STATUS_NOT_IMPLEMENTED;
+    return STATUS_INVALID_DEVICE_REQUEST;
+}
+
+static REQUEST_POWER_COMPLETE HidClassFDO_WakeComplete;
+static DRIVER_CANCEL HidClassPDO_WaitWakeCancel;
+
+static
+VOID
+HidClassFDO_ArmWake(
+    IN PHIDCLASS_FDO_EXTENSION FDODeviceExtension)
+{
+    POWER_STATE PowerState;
+
+    if (InterlockedCompareExchange(&FDODeviceExtension->WakeState, HIDCLASS_WAKE_ARMED, HIDCLASS_WAKE_IDLE) != HIDCLASS_WAKE_IDLE)
+        return;
+
+    PowerState.SystemState = FDODeviceExtension->Capabilities.SystemWake;
+    PoRequestPowerIrp(FDODeviceExtension->Common.HidDeviceExtension.PhysicalDeviceObject,
+                      IRP_MN_WAIT_WAKE,
+                      PowerState,
+                      HidClassFDO_WakeComplete,
+                      FDODeviceExtension,
+                      &FDODeviceExtension->WakeIrp);
+}
+
+VOID
+HidClassPDO_CompleteWake(
+    IN PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension,
+    IN NTSTATUS Status)
+{
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = PDODeviceExtension->FDODeviceExtension;
+    KIRQL OldLevel;
+    PIRP Irp;
+
+    KeAcquireSpinLock(&FDODeviceExtension->WakeLock, &OldLevel);
+    Irp = PDODeviceExtension->WaitWakeIrp;
+    if (Irp != NULL && IoSetCancelRoutine(Irp, NULL) != NULL)
+        PDODeviceExtension->WaitWakeIrp = NULL;
+    else
+        Irp = NULL;
+    KeReleaseSpinLock(&FDODeviceExtension->WakeLock, OldLevel);
+
+    if (Irp == NULL)
+        return;
+
+    Irp->IoStatus.Status = Status;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
+static
+VOID
+NTAPI
+HidClassFDO_WakeComplete(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN UCHAR MinorFunction,
+    IN POWER_STATE PowerState,
+    IN PVOID Context,
+    IN PIO_STATUS_BLOCK IoStatus)
+{
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = Context;
+    PDEVICE_RELATIONS Relations;
+    LONG PreviousState;
+    ULONG Index;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+    UNREFERENCED_PARAMETER(MinorFunction);
+    UNREFERENCED_PARAMETER(PowerState);
+
+    PreviousState = InterlockedExchange(&FDODeviceExtension->WakeState, HIDCLASS_WAKE_IDLE);
+
+    Relations = FDODeviceExtension->DeviceRelations;
+    for (Index = 0; Relations != NULL && Index < Relations->Count; Index++)
+        HidClassPDO_CompleteWake(Relations->Objects[Index]->DeviceExtension, IoStatus->Status);
+
+    if (PreviousState == HIDCLASS_WAKE_CANCELLING)
+        KeSetEvent(&FDODeviceExtension->WakeDone, IO_NO_INCREMENT, FALSE);
+}
+
+VOID
+HidClassFDO_DisarmWake(
+    IN PHIDCLASS_FDO_EXTENSION FDODeviceExtension)
+{
+    KeClearEvent(&FDODeviceExtension->WakeDone);
+    if (InterlockedCompareExchange(&FDODeviceExtension->WakeState, HIDCLASS_WAKE_CANCELLING, HIDCLASS_WAKE_ARMED) == HIDCLASS_WAKE_ARMED)
+    {
+        IoCancelIrp(FDODeviceExtension->WakeIrp);
+        KeWaitForSingleObject(&FDODeviceExtension->WakeDone, Executive, KernelMode, FALSE, NULL);
+    }
+}
+
+static
+VOID
+NTAPI
+HidClassPDO_WaitWakeCancel(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN PIRP Irp)
+{
+    PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension = DeviceObject->DeviceExtension;
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = PDODeviceExtension->FDODeviceExtension;
+    KIRQL OldLevel;
+
+    IoReleaseCancelSpinLock(Irp->CancelIrql);
+
+    KeAcquireSpinLock(&FDODeviceExtension->WakeLock, &OldLevel);
+    if (PDODeviceExtension->WaitWakeIrp == Irp)
+        PDODeviceExtension->WaitWakeIrp = NULL;
+    KeReleaseSpinLock(&FDODeviceExtension->WakeLock, OldLevel);
+
+    Irp->IoStatus.Status = STATUS_CANCELLED;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+}
+
+static
+NTSTATUS
+HidClassPDO_WaitWake(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN PIRP Irp)
+{
+    PHIDCLASS_PDO_DEVICE_EXTENSION PDODeviceExtension = DeviceObject->DeviceExtension;
+    PHIDCLASS_FDO_EXTENSION FDODeviceExtension = PDODeviceExtension->FDODeviceExtension;
+    PIO_STACK_LOCATION IoStack = IoGetCurrentIrpStackLocation(Irp);
+    NTSTATUS Status;
+    KIRQL OldLevel;
+
+    if (FDODeviceExtension->Capabilities.SystemWake <= PowerSystemWorking ||
+        FDODeviceExtension->Capabilities.DeviceWake == PowerDeviceUnspecified)
+    {
+        Status = STATUS_NOT_SUPPORTED;
+        goto Complete;
+    }
+
+    if (IoStack->Parameters.WaitWake.PowerState > FDODeviceExtension->Capabilities.SystemWake)
+    {
+        Status = STATUS_INVALID_DEVICE_STATE;
+        goto Complete;
+    }
+
+    KeAcquireSpinLock(&FDODeviceExtension->WakeLock, &OldLevel);
+    if (PDODeviceExtension->WaitWakeIrp != NULL)
+    {
+        KeReleaseSpinLock(&FDODeviceExtension->WakeLock, OldLevel);
+        Status = STATUS_DEVICE_BUSY;
+        goto Complete;
+    }
+
+    IoMarkIrpPending(Irp);
+    PDODeviceExtension->WaitWakeIrp = Irp;
+    IoSetCancelRoutine(Irp, HidClassPDO_WaitWakeCancel);
+    if (Irp->Cancel && IoSetCancelRoutine(Irp, NULL) != NULL)
+    {
+        PDODeviceExtension->WaitWakeIrp = NULL;
+        KeReleaseSpinLock(&FDODeviceExtension->WakeLock, OldLevel);
+        Irp->IoStatus.Status = STATUS_CANCELLED;
+        Irp->IoStatus.Information = 0;
+        PoStartNextPowerIrp(Irp);
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_PENDING;
+    }
+    KeReleaseSpinLock(&FDODeviceExtension->WakeLock, OldLevel);
+
+    PoStartNextPowerIrp(Irp);
+    HidClassFDO_ArmWake(FDODeviceExtension);
+    return STATUS_PENDING;
+
+Complete:
+    Irp->IoStatus.Status = Status;
+    PoStartNextPowerIrp(Irp);
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return Status;
 }
 
 NTSTATUS
@@ -1128,6 +2032,10 @@ HidClass_Power(
     {
         IoCopyCurrentIrpStackLocationToNext(Irp);
         return HidClassFDO_DispatchRequest(DeviceObject, Irp);
+    }
+    else if (IoGetCurrentIrpStackLocation(Irp)->MinorFunction == IRP_MN_WAIT_WAKE)
+    {
+        return HidClassPDO_WaitWake(DeviceObject, Irp);
     }
     else
     {
@@ -1205,6 +2113,7 @@ HidClassDispatch(
     IN PDEVICE_OBJECT DeviceObject,
     IN PIRP Irp)
 {
+    PHIDCLASS_COMMON_DEVICE_EXTENSION CommonDeviceExtension;
     PIO_STACK_LOCATION IoStack;
 
     //
@@ -1213,6 +2122,21 @@ HidClassDispatch(
     IoStack = IoGetCurrentIrpStackLocation(Irp);
     DPRINT("[HIDCLASS] Dispatch Major %x Minor %x\n", IoStack->MajorFunction, IoStack->MinorFunction);
 
+    CommonDeviceExtension = DeviceObject->DeviceExtension;
+    if (!CommonDeviceExtension->IsFDO &&
+        ((PHIDCLASS_PDO_DEVICE_EXTENSION)CommonDeviceExtension)->Removed &&
+        (IoStack->MajorFunction == IRP_MJ_CREATE ||
+         IoStack->MajorFunction == IRP_MJ_READ ||
+         IoStack->MajorFunction == IRP_MJ_WRITE ||
+         IoStack->MajorFunction == IRP_MJ_DEVICE_CONTROL ||
+         IoStack->MajorFunction == IRP_MJ_INTERNAL_DEVICE_CONTROL))
+    {
+        Irp->IoStatus.Status = STATUS_DEVICE_NOT_CONNECTED;
+        Irp->IoStatus.Information = 0;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_DEVICE_NOT_CONNECTED;
+    }
+
     //
     // dispatch request based on major function
     //
@@ -1220,6 +2144,8 @@ HidClassDispatch(
     {
         case IRP_MJ_CREATE:
             return HidClass_Create(DeviceObject, Irp);
+        case IRP_MJ_CLEANUP:
+            return HidClass_Cleanup(DeviceObject, Irp);
         case IRP_MJ_CLOSE:
             return HidClass_Close(DeviceObject, Irp);
         case IRP_MJ_READ:
@@ -1289,6 +2215,7 @@ HidRegisterMinidriver(
     DriverExtension->DriverObject->DriverExtension->AddDevice = HidClassAddDevice;
     DriverExtension->DriverObject->DriverUnload = HidClassDriverUnload;
     DriverExtension->DriverObject->MajorFunction[IRP_MJ_CREATE] = HidClassDispatch;
+    DriverExtension->DriverObject->MajorFunction[IRP_MJ_CLEANUP] = HidClassDispatch;
     DriverExtension->DriverObject->MajorFunction[IRP_MJ_CLOSE] = HidClassDispatch;
     DriverExtension->DriverObject->MajorFunction[IRP_MJ_READ] = HidClassDispatch;
     DriverExtension->DriverObject->MajorFunction[IRP_MJ_WRITE] = HidClassDispatch;

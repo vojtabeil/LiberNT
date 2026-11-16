@@ -77,6 +77,7 @@
 #endif
 #include "halp.h"
 #include "mps.h"
-#include "halacpi.h"
+#include <halacpi.h>
+#include <halefi.h>
 
 #endif /* _HAL_PCH_ */

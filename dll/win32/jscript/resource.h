@@ -49,6 +49,7 @@
 #define IDS_DISABLED_CC                     0x0406
 #define IDS_EXPECTED_AT                     0x0408
 #define IDS_NOT_FUNC                        0x138A
+#define IDS_NOT_STRING                      0x138D
 #define IDS_NOT_DATE                        0x138E
 #define IDS_NOT_NUM                         0x1389
 #define IDS_OBJECT_EXPECTED                 0x138F
@@ -67,6 +68,7 @@
 #define IDS_URI_INVALID_CODING              0x13A1
 #define IDS_FRACTION_DIGITS_OUT_OF_RANGE    0x13A2
 #define IDS_PRECISION_OUT_OF_RANGE          0x13A3
+#define IDS_ARRAY_OR_ARGS_EXPECTED          0x13A4
 #define IDS_INVALID_LENGTH                  0x13A5
 #define IDS_ARRAY_EXPECTED                  0x13A7
 #define IDS_INVALID_WRITABLE_PROP_DESC      0x13AC
@@ -75,6 +77,11 @@
 #define IDS_OBJECT_NONEXTENSIBLE            0x13D5
 #define IDS_NONCONFIGURABLE_REDEFINED       0x13D6
 #define IDS_NONWRITABLE_MODIFIED            0x13D7
+#define IDS_TYPEDARRAY_BAD_CTOR_ARG         0x13DA
+#define IDS_NOT_TYPEDARRAY                  0x13DB
+#define IDS_TYPEDARRAY_INVALID_OFFSLEN      0x13DC
+#define IDS_TYPEDARRAY_INVALID_SUBARRAY     0x13DD
+#define IDS_TYPEDARRAY_INVALID_SOURCE       0x13DE
 #define IDS_NOT_DATAVIEW                    0x13DF
 #define IDS_DATAVIEW_NO_ARGUMENT            0x13E0
 #define IDS_DATAVIEW_INVALID_ACCESS         0x13E1
@@ -85,6 +92,23 @@
 /* FIXME: This is not compatible with native, but we would
  * conflict with IDS_UNSUPPORTED_ACTION otherwise */
 #define IDS_PROP_DESC_MISMATCH              0x1F00
+
+#ifdef __REACTOS__
+#define IDS_OVERFLOW                        0x0006
+#define IDS_OUT_OF_MEMORY                   0x0007
+#define IDS_ARRAY_LOCKED                    0x000A
+#define IDS_TYPE_MISMATCH                   0x000D
+#define IDS_DISK_FULL                       0x003D
+#define IDS_PERMISSION_DENIED               0x0046
+#define IDS_PATH_NOT_FOUND                  0x004C
+#define IDS_NO_AUTOMATION                   0x01AE
+#define IDS_AUTOMATION_FILE_NOT_FOUND       0x01B0
+#define IDS_NO_NAMED_ARGS                   0x01BE
+#define IDS_NO_LOCALE                       0x01BF
+#define IDS_NAMED_ARG_NOT_FOUND             0x01C0
+#define IDS_WRONG_ARG_COUNT                 0x01C2
+#define IDS_UNSUPPORTED_AUTOMATION_TYPE     0x01CA
+#endif
 
 #define IDS_COMPILATION_ERROR               0x1000
 #define IDS_RUNTIME_ERROR                   0x1001

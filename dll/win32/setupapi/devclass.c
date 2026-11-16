@@ -26,8 +26,6 @@
 #include <strsafe.h>
 
 /* Unicode constants */
-static const WCHAR BackSlash[] = {'\\',0};
-static const WCHAR ClassGUID[]  = {'C','l','a','s','s','G','U','I','D',0};
 static const WCHAR ClassInstall32[]  = {'C','l','a','s','s','I','n','s','t','a','l','l','3','2',0};
 static const WCHAR DotServices[]  = {'.','S','e','r','v','i','c','e','s',0};
 static const WCHAR InterfaceInstall32[]  = {'I','n','t','e','r','f','a','c','e','I','n','s','t','a','l','l','3','2',0};
@@ -59,6 +57,20 @@ SETUP_PropertyAddPropertyAdvancedHandler(
     IN PSP_CLASSINSTALL_HEADER ClassInstallParams OPTIONAL,
     IN DWORD ClassInstallParamsSize);
 
+static BOOL
+SETUP_DetectDeviceHandler(
+    IN HDEVINFO DeviceInfoSet,
+    IN PSP_DEVINFO_DATA DeviceInfoData OPTIONAL,
+    IN PSP_CLASSINSTALL_HEADER ClassInstallParams OPTIONAL,
+    IN DWORD ClassInstallParamsSize);
+
+static BOOL
+SETUP_RemoveDeviceHandler(
+    IN HDEVINFO DeviceInfoSet,
+    IN PSP_DEVINFO_DATA DeviceInfoData OPTIONAL,
+    IN PSP_CLASSINSTALL_HEADER ClassInstallParams OPTIONAL,
+    IN DWORD ClassInstallParamsSize);
+
 typedef struct _INSTALL_PARAMS_DATA
 {
     DI_FUNCTION Function;
@@ -73,6 +85,8 @@ typedef struct _INSTALL_PARAMS_DATA
 static const INSTALL_PARAMS_DATA InstallParamsData[] = {
     ADD_PARAM_HANDLER(DIF_PROPERTYCHANGE, SETUP_PropertyChangeHandler, SP_PROPCHANGE_PARAMS, PropChangeParams)
     ADD_PARAM_HANDLER(DIF_ADDPROPERTYPAGE_ADVANCED, SETUP_PropertyAddPropertyAdvancedHandler, SP_ADDPROPERTYPAGE_DATA, AddPropertyPageData)
+    ADD_PARAM_HANDLER(DIF_DETECT, SETUP_DetectDeviceHandler, SP_DETECTDEVICE_PARAMS, DetectDeviceParams)
+    ADD_PARAM_HANDLER(DIF_REMOVE, SETUP_RemoveDeviceHandler, SP_REMOVEDEVICE_PARAMS, RemoveDeviceParams)
 };
 #undef ADD_PARAM_HANDLER
 
@@ -122,7 +136,8 @@ SETUP_CreateDevicesList(
     IN OUT struct DeviceInfoSet *list,
     IN PCWSTR MachineName OPTIONAL,
     IN CONST GUID *Class OPTIONAL,
-    IN PCWSTR Enumerator OPTIONAL)
+    IN PCWSTR Enumerator OPTIONAL,
+    IN BOOL OnlyPresent)
 {
     PWCHAR Buffer = NULL;
     DWORD BufferLength = 4096;
@@ -133,6 +148,16 @@ SETUP_CreateDevicesList(
     GUID ClassGuid;
     DEVINST dnDevInst;
     CONFIGRET cr;
+    WCHAR ClassFilter[MAX_GUID_STRING_LEN];
+    PCWSTR Filter = Enumerator;
+    ULONG ulFilterFlags = Enumerator ? CM_GETIDLIST_FILTER_ENUMERATOR : CM_GETIDLIST_FILTER_NONE;
+
+    if (Class && !Enumerator &&
+        pSetupStringFromGuid((LPGUID)Class, ClassFilter, ARRAYSIZE(ClassFilter)) == ERROR_SUCCESS)
+    {
+        Filter = ClassFilter;
+        ulFilterFlags = CM_GETIDLIST_FILTER_CLASS;
+    }
 
     Buffer = HeapAlloc(GetProcessHeap(), 0, BufferLength);
     if (!Buffer)
@@ -140,10 +165,10 @@ SETUP_CreateDevicesList(
 
     do
     {
-        cr = CM_Get_Device_ID_List_ExW(Enumerator,
+        cr = CM_Get_Device_ID_List_ExW(Filter,
                                        Buffer,
                                        BufferLength / sizeof(WCHAR),
-                                       Enumerator ? CM_GETIDLIST_FILTER_ENUMERATOR : CM_GETIDLIST_FILTER_NONE,
+                                       ulFilterFlags,
                                        list->hMachine);
         if (cr == CR_BUFFER_SMALL)
         {
@@ -170,8 +195,13 @@ SETUP_CreateDevicesList(
         TRACE("Checking %S\n", InstancePath);
         cr = CM_Locate_DevNode_Ex(&dnDevInst,
                                   (DEVINSTID_W)InstancePath,
-                                  CM_LOCATE_DEVNODE_NORMAL,
+                                  OnlyPresent ? CM_LOCATE_DEVNODE_NORMAL : CM_LOCATE_DEVNODE_PHANTOM,
                                   list->hMachine);
+        if (cr == CR_NO_SUCH_DEVNODE && OnlyPresent)
+        {
+            TRACE("Skipping non-present device %S\n", InstancePath);
+            continue;
+        }
         if (cr != CR_SUCCESS)
         {
             ERR("CM_Locate_DevNode_ExW('%S') failed with status 0x%x\n", InstancePath, cr);
@@ -351,6 +381,74 @@ SetupDiGetClassImageListExA(
     return ret;
 }
 
+static LPCWSTR
+SETUP_FileName(IN LPCWSTR Path)
+{
+    LPCWSTR Name = strrchrW(Path, '\\');
+
+    return Name ? Name + 1 : Path;
+}
+
+static BOOL
+SETUP_GetIconPath(
+    IN HKEY hClassKey,
+    OUT PINT OutIndex,
+    OUT LPWSTR *OutDllName)
+{
+    WCHAR Module[MAX_PATH];
+    LPWSTR Value, Path, Comma;
+    DWORD dwRegType, dwLength, cchPath;
+    LONG rc;
+
+    rc = RegQueryValueExW(hClassKey, L"IconPath", NULL, &dwRegType, NULL, &dwLength);
+    if (rc != ERROR_SUCCESS ||
+        (dwRegType != REG_MULTI_SZ && dwRegType != REG_SZ && dwRegType != REG_EXPAND_SZ) ||
+        dwLength < sizeof(WCHAR))
+    {
+        return FALSE;
+    }
+    Value = MyMalloc(dwLength + 2 * sizeof(WCHAR));
+    if (!Value)
+        return FALSE;
+    rc = RegQueryValueExW(hClassKey, L"IconPath", NULL, NULL, (LPBYTE)Value, &dwLength);
+    if (rc != ERROR_SUCCESS)
+    {
+        MyFree(Value);
+        return FALSE;
+    }
+    Value[dwLength / sizeof(WCHAR)] = UNICODE_NULL;
+
+    Comma = strrchrW(Value, ',');
+    if (!Comma || Comma == Value)
+    {
+        MyFree(Value);
+        return FALSE;
+    }
+    *Comma = UNICODE_NULL;
+
+    cchPath = ExpandEnvironmentStringsW(Value, NULL, 0);
+    Path = cchPath ? MyMalloc(cchPath * sizeof(WCHAR)) : NULL;
+    if (!Path || ExpandEnvironmentStringsW(Value, Path, cchPath) != cchPath)
+    {
+        MyFree(Path);
+        MyFree(Value);
+        return FALSE;
+    }
+
+    *OutIndex = -atoiW(Comma + 1);
+    *OutDllName = Path;
+    MyFree(Value);
+
+    /* ExtractIconExW(-1) counts icons, so load this module's own icons by resource id */
+    if (*OutIndex > 0 && GetModuleFileNameW(hInstance, Module, ARRAYSIZE(Module)) &&
+        !strcmpiW(SETUP_FileName(Path), SETUP_FileName(Module)))
+    {
+        MyFree(Path);
+        *OutDllName = NULL;
+    }
+    return TRUE;
+}
+
 static BOOL WINAPI
 SETUP_GetClassIconInfo(IN CONST GUID *ClassGuid, OUT PINT OutIndex, OUT LPWSTR *OutDllName)
 {
@@ -364,6 +462,11 @@ SETUP_GetClassIconInfo(IN CONST GUID *ClassGuid, OUT PINT OutIndex, OUT LPWSTR *
         hKey = SetupDiOpenClassRegKey(ClassGuid, KEY_QUERY_VALUE);
         if (hKey != INVALID_HANDLE_VALUE)
         {
+            if (SETUP_GetIconPath(hKey, OutIndex, OutDllName))
+            {
+                RegCloseKey(hKey);
+                return TRUE;
+            }
             SETUP_GetIconIndex(hKey, &iconIndex);
         }
     }
@@ -646,9 +749,77 @@ SetupDiGetClassInstallParamsW(
     IN DWORD ClassInstallParamsSize,
     OUT PDWORD RequiredSize OPTIONAL)
 {
-    FIXME("SetupDiGetClassInstallParamsW(%p %p %p %lu %p) Stub\n",
-        DeviceInfoSet, DeviceInfoData, ClassInstallParams, ClassInstallParamsSize, RequiredSize);
-    return FALSE;
+    struct DeviceInfoSet *list;
+    struct ClassInstallParams *Params;
+    PSP_CLASSINSTALL_HEADER Stored = NULL;
+    SP_DEVINSTALL_PARAMS_W InstallParams;
+    DWORD Size = 0;
+    DWORD i;
+    BOOL ret = FALSE;
+
+    TRACE("%p %p %p %lu %p\n", DeviceInfoSet, DeviceInfoData,
+        ClassInstallParams, ClassInstallParamsSize, RequiredSize);
+
+    if (!DeviceInfoSet)
+        SetLastError(ERROR_INVALID_PARAMETER);
+    else if (DeviceInfoSet == (HDEVINFO)INVALID_HANDLE_VALUE)
+        SetLastError(ERROR_INVALID_HANDLE);
+    else if ((list = (struct DeviceInfoSet *)DeviceInfoSet)->magic != SETUP_DEVICE_INFO_SET_MAGIC)
+        SetLastError(ERROR_INVALID_HANDLE);
+    else if (DeviceInfoData && DeviceInfoData->cbSize != sizeof(SP_DEVINFO_DATA))
+        SetLastError(ERROR_INVALID_USER_BUFFER);
+    else if (ClassInstallParams && ClassInstallParams->cbSize != sizeof(SP_CLASSINSTALL_HEADER))
+        SetLastError(ERROR_INVALID_USER_BUFFER);
+    else if (ClassInstallParams && ClassInstallParamsSize < sizeof(SP_CLASSINSTALL_HEADER))
+        SetLastError(ERROR_INVALID_PARAMETER);
+    else if (!ClassInstallParams && ClassInstallParamsSize != 0)
+        SetLastError(ERROR_INVALID_PARAMETER);
+    else
+    {
+        InstallParams.cbSize = sizeof(SP_DEVINSTALL_PARAMS_W);
+        if (!SetupDiGetDeviceInstallParamsW(DeviceInfoSet, DeviceInfoData, &InstallParams))
+            goto done;
+
+        if (DeviceInfoData)
+            Params = &((struct DeviceInfo *)DeviceInfoData->Reserved)->ClassInstallParams;
+        else
+            Params = &list->ClassInstallParams;
+
+        if (InstallParams.Flags & DI_CLASSINSTALLPARAMS)
+        {
+            for (i = 0; i < sizeof(InstallParamsData) / sizeof(InstallParamsData[0]); i++)
+            {
+                if (InstallParamsData[i].Function == Params->InstallFunction)
+                {
+                    Stored = *(PSP_CLASSINSTALL_HEADER *)((ULONG_PTR)Params + InstallParamsData[i].FieldOffset);
+                    Size = InstallParamsData[i].ParamsSize;
+                    break;
+                }
+            }
+        }
+
+        if (!Stored)
+        {
+            SetLastError(ERROR_NO_CLASSINSTALL_PARAMS);
+            goto done;
+        }
+
+        if (RequiredSize)
+            *RequiredSize = Size;
+
+        if (ClassInstallParamsSize < Size)
+        {
+            SetLastError(ERROR_INSUFFICIENT_BUFFER);
+            goto done;
+        }
+
+        memcpy(ClassInstallParams, Stored, Size);
+        ret = TRUE;
+    }
+
+done:
+    TRACE("Returning %d\n", ret);
+    return ret;
 }
 
 /***********************************************************************
@@ -812,11 +983,18 @@ SetupDiInstallClassExW(
             if (!ret)
                 goto cleanup;
 
+            if (SetupGetLineCountW(hInf, SectionName) == -1)
+            {
+                SetLastError(ERROR_SECTION_NOT_FOUND);
+                ret = FALSE;
+                goto cleanup;
+            }
+
             callback_context = SetupInitDefaultQueueCallback(hwndParent);
             if (!callback_context)
                 goto cleanup;
 
-            ret = SetupInstallFromInfSectionW(
+            ret = SETUPAPI_InstallFromInfSectionWithIncludes(
                 hwndParent,
                 hInf,
                 SectionName,
@@ -833,7 +1011,7 @@ SetupDiInstallClassExW(
 
             /* OPTIONAL: Install .Services section */
             lstrcatW(SectionName, DotServices);
-            SetupInstallServicesFromInfSectionExW(
+            ret = SetupInstallServicesFromInfSectionExW(
                 hInf,
                 SectionName,
                 0,
@@ -841,12 +1019,19 @@ SetupDiInstallClassExW(
                 NULL,
                 NULL,
                 NULL);
+            if (!ret && GetLastError() != ERROR_SECTION_NOT_FOUND)
+                goto cleanup;
+            SetLastError(ERROR_SUCCESS);
             ret = TRUE;
         }
 
 cleanup:
         if (hDeviceInfo != INVALID_HANDLE_VALUE)
+        {
+            DWORD dwError = GetLastError();
             SetupDiDestroyDeviceInfoList(hDeviceInfo);
+            SetLastError(dwError);
+        }
         if (hInf != INVALID_HANDLE_VALUE)
             SetupCloseInfFile(hInf);
         if (hRootKey != INVALID_HANDLE_VALUE)
@@ -965,6 +1150,43 @@ done:
     return ret;
 }
 
+static BOOL
+SETUP_DetectDeviceHandler(
+    IN HDEVINFO DeviceInfoSet,
+    IN PSP_DEVINFO_DATA DeviceInfoData OPTIONAL,
+    IN PSP_CLASSINSTALL_HEADER ClassInstallParams OPTIONAL,
+    IN DWORD ClassInstallParamsSize)
+{
+    PSP_DETECTDEVICE_PARAMS *CurrentDetectDeviceParams;
+
+    if (ClassInstallParamsSize != sizeof(SP_DETECTDEVICE_PARAMS))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if (DeviceInfoData)
+        CurrentDetectDeviceParams = &((struct DeviceInfo *)DeviceInfoData->Reserved)->ClassInstallParams.DetectDeviceParams;
+    else
+        CurrentDetectDeviceParams = &((struct DeviceInfoSet *)DeviceInfoSet)->ClassInstallParams.DetectDeviceParams;
+
+    if (*CurrentDetectDeviceParams)
+    {
+        MyFree(*CurrentDetectDeviceParams);
+        *CurrentDetectDeviceParams = NULL;
+    }
+
+    *CurrentDetectDeviceParams = MyMalloc(ClassInstallParamsSize);
+    if (!*CurrentDetectDeviceParams)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    memcpy(*CurrentDetectDeviceParams, ClassInstallParams, ClassInstallParamsSize);
+
+    return TRUE;
+}
+
 /***********************************************************************
  *		SetupDiSetClassInstallParamsW (SETUPAPI.@)
  */
@@ -1020,6 +1242,10 @@ SetupDiSetClassInstallParamsW(
                         ClassInstallParamsSize);
                     if (ret)
                     {
+                        if (DeviceInfoData)
+                            ((struct DeviceInfo *)DeviceInfoData->Reserved)->ClassInstallParams.InstallFunction = ClassInstallParams->InstallFunction;
+                        else
+                            list->ClassInstallParams.InstallFunction = ClassInstallParams->InstallFunction;
                         InstallParams.Flags |= DI_CLASSINSTALLPARAMS;
                         ret = SetupDiSetDeviceInstallParamsW(DeviceInfoSet, DeviceInfoData, &InstallParams);
                     }
@@ -1210,7 +1436,10 @@ SETUP_CallInstaller(
                                     DeviceInfoData);
     if (ret == FALSE)
     {
-        ERR("SetupDiCallClassInstaller failed\n");
+        if (GetLastError() == ERROR_DI_DO_DEFAULT)
+            ret = TRUE;
+        else
+            ERR("SetupDiCallClassInstaller failed\n");
         goto done;
     }
 
@@ -1261,7 +1490,7 @@ SetupDiGetClassDevPropertySheetsW(
         PropertySheetHeader, PropertySheetHeaderPageListSize,
         RequiredSize, PropertySheetType);
 
-    if (!DeviceInfoSet)
+    if (!DeviceInfoSet || DeviceInfoSet == INVALID_HANDLE_VALUE)
         SetLastError(ERROR_INVALID_HANDLE);
     else if (((struct DeviceInfoSet *)DeviceInfoSet)->magic != SETUP_DEVICE_INFO_SET_MAGIC)
         SetLastError(ERROR_INVALID_HANDLE);
@@ -1305,7 +1534,7 @@ SetupDiGetClassDevPropertySheetsW(
                 rc = SETUP_GetValueString(hKey, REGSTR_VAL_ENUMPROPPAGES_32, &PropPageProvider);
                 if (rc == ERROR_SUCCESS)
                 {
-                    rc = GetFunctionPointer(PropPageProvider, &hModule, (PVOID*)&pPropPageProvider);
+                    rc = GetFunctionPointer(PropPageProvider, NULL, &hModule, (PVOID*)&pPropPageProvider);
                     if (rc != ERROR_SUCCESS)
                     {
                         SetLastError(ERROR_INVALID_PROPPAGE_PROVIDER);
@@ -1333,7 +1562,7 @@ SetupDiGetClassDevPropertySheetsW(
                 rc = SETUP_GetValueString(hKey, REGSTR_VAL_ENUMPROPPAGES_32, &PropPageProvider);
                 if (rc == ERROR_SUCCESS)
                 {
-                    rc = GetFunctionPointer(PropPageProvider, &hModule, (PVOID*)&pPropPageProvider);
+                    rc = GetFunctionPointer(PropPageProvider, NULL, &hModule, (PVOID*)&pPropPageProvider);
                     if (rc != ERROR_SUCCESS)
                     {
                         SetLastError(ERROR_INVALID_PROPPAGE_PROVIDER);
@@ -1739,3 +1968,34 @@ done:
     SetLastError(Error);
     return (cr == CR_SUCCESS);
 }
+
+static BOOL
+SETUP_RemoveDeviceHandler(
+    IN HDEVINFO DeviceInfoSet,
+    IN PSP_DEVINFO_DATA DeviceInfoData OPTIONAL,
+    IN PSP_CLASSINSTALL_HEADER ClassInstallParams OPTIONAL,
+    IN DWORD ClassInstallParamsSize)
+{
+    PSP_REMOVEDEVICE_PARAMS *Current;
+
+    /* FIXME: the default DIF_REMOVE handler removes the device globally whatever the stored Scope */
+    if (ClassInstallParamsSize != sizeof(SP_REMOVEDEVICE_PARAMS))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+    if (DeviceInfoData)
+        Current = &((struct DeviceInfo *)DeviceInfoData->Reserved)->ClassInstallParams.RemoveDeviceParams;
+    else
+        Current = &((struct DeviceInfoSet *)DeviceInfoSet)->ClassInstallParams.RemoveDeviceParams;
+    MyFree(*Current);
+    *Current = MyMalloc(ClassInstallParamsSize);
+    if (!*Current)
+    {
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return FALSE;
+    }
+    memcpy(*Current, ClassInstallParams, ClassInstallParamsSize);
+    return TRUE;
+}
+

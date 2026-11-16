@@ -43,9 +43,9 @@ extern BOOLEAN UiShowTime;              // Whether to draw the time
 extern BOOLEAN UiMenuBox;               // Whether to draw a box around the menu
 extern BOOLEAN UiCenterMenu;            // Whether to use a centered or left-aligned menu
 extern BOOLEAN UiUseSpecialEffects;     // Whether to use fade effects
+extern FLDRAPI BOOLEAN UiKeepFirmwareScreen;
 
 extern CHAR UiTitleBoxTitleText[260];   // Title box's title text
-extern CHAR UiTimeText[260];
 
 extern const PCSTR UiMonthNames[12];
 
@@ -53,6 +53,7 @@ extern const PCSTR UiMonthNames[12];
 
 BOOLEAN    UiInitialize(BOOLEAN ShowUi);                                // Initialize User-Interface
 VOID    UiUnInitialize(PCSTR BootText);                        // Un-initialize User-Interface
+VOID    UiDiscardFirmwareScreen(VOID);
 VOID    UiDrawBackdrop(ULONG DrawHeight);                      // Fills the entire screen with a backdrop
 VOID    UiFillArea(ULONG Left, ULONG Top, ULONG Right, ULONG Bottom, CHAR FillChar, UCHAR Attr /* Color Attributes */);    // Fills the area specified with FillChar and Attr
 VOID    UiDrawShadow(ULONG Left, ULONG Top, ULONG Right, ULONG Bottom);    // Draws a shadow on the bottom and right sides of the area specified
@@ -207,14 +208,20 @@ VOID    UiFadeOut(VOID);                                        // Fades the scr
 
 /* Menu Functions ************************************************************/
 
+typedef enum
+{
+    UiMenuIconNone,
+    UiMenuIconLiberNT
+} UI_MENU_ICON;
+
 typedef struct tagUI_MENU_INFO
 {
     PCSTR   MenuHeader;
     PCSTR   MenuFooter;
 
     PCSTR*  MenuItemList;
+    const UI_MENU_ICON* MenuItemIcons;
     ULONG   MenuItemCount;
-    LONG    MenuTimeRemaining;
     ULONG   SelectedMenuItem;
     PVOID   Context;
 
@@ -241,6 +248,20 @@ UiDisplayMenu(
     IN LONG MenuTimeOut,
     OUT PULONG SelectedMenuItem,
     IN BOOLEAN CanEscape,
+    IN UiMenuKeyPressFilterCallback KeyPressFilter OPTIONAL,
+    IN PVOID Context OPTIONAL);
+
+BOOLEAN
+UiDisplayMenuWithIcons(
+    IN PCSTR MenuHeader,
+    IN PCSTR MenuFooter OPTIONAL,
+    IN PCSTR MenuItemList[],
+    IN ULONG MenuItemCount,
+    IN ULONG DefaultMenuItem,
+    IN LONG MenuTimeOut,
+    OUT PULONG SelectedMenuItem,
+    IN BOOLEAN CanEscape,
+    IN const UI_MENU_ICON* MenuItemIcons OPTIONAL,
     IN UiMenuKeyPressFilterCallback KeyPressFilter OPTIONAL,
     IN PVOID Context OPTIONAL);
 
@@ -297,6 +318,7 @@ typedef struct tagUIVTBL
         IN LONG MenuTimeOut,
         OUT PULONG SelectedMenuItem,
         IN BOOLEAN CanEscape,
+        IN const UI_MENU_ICON* MenuItemIcons OPTIONAL,
         IN UiMenuKeyPressFilterCallback KeyPressFilter OPTIONAL,
         IN PVOID Context OPTIONAL);
 
@@ -356,7 +378,6 @@ extern UIVTBL UiVtbl;
 
 
 /* THEME HEADERS *************************************************************/
-
 // #include <ui/gui.h>
 #include <ui/minitui.h>
 #include <ui/noui.h>

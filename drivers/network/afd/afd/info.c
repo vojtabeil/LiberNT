@@ -10,6 +10,42 @@
 
 #include "afd.h"
 
+BOOLEAN
+AfdTryApplyPendingReceiveWindow(PAFD_FCB FCB)
+{
+    UINT BytesAvailable;
+
+    if (!FCB->PendingReceiveWindowSize)
+        return TRUE;
+
+    ASSERT(!FCB->ReceiveIrp.InFlightRequest);
+
+    if (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)
+    {
+        FCB->Recv.Size = FCB->PendingReceiveWindowSize;
+        FCB->PendingReceiveWindowSize = 0;
+        return TRUE;
+    }
+
+    BytesAvailable = FCB->Recv.Content - FCB->Recv.BytesUsed;
+    if (BytesAvailable > FCB->PendingReceiveWindowSize)
+        return FALSE;
+
+    if (BytesAvailable && FCB->Recv.BytesUsed)
+    {
+        RtlMoveMemory(FCB->Recv.Window,
+                      FCB->Recv.Window + FCB->Recv.BytesUsed,
+                      BytesAvailable);
+    }
+
+    FCB->Recv.Size = FCB->PendingReceiveWindowSize;
+    FCB->Recv.Content = BytesAvailable;
+    FCB->Recv.BytesUsed = 0;
+    FCB->PendingReceiveWindowSize = 0;
+
+    return TRUE;
+}
+
 NTSTATUS NTAPI
 AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
             PIO_STACK_LOCATION IrpSp ) {
@@ -32,7 +68,7 @@ AfdGetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     _SEH2_TRY {
         switch( InfoReq->InformationClass ) {
         case AFD_INFO_RECEIVE_WINDOW_SIZE:
-            InfoReq->Information.Ulong = FCB->Recv.Size;
+            InfoReq->Information.Ulong = FCB->ReportedReceiveWindowSize;
             break;
 
         case AFD_INFO_SEND_WINDOW_SIZE:
@@ -124,39 +160,48 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 FCB->OobInline = InfoReq->Information.Boolean;
                 break;
             case AFD_INFO_RECEIVE_WINDOW_SIZE:
-                if (FCB->SharedData.State == SOCKET_STATE_CONNECTED ||
-                    FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)
+                if (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS)
+                {
+                    {
+                        UINT PreviousSize = FCB->Recv.Size;
+                        UINT PreviousReportedSize = FCB->ReportedReceiveWindowSize;
+
+                        FCB->Recv.Size = InfoReq->Information.Ulong;
+                        if (InfoReq->Information.Ulong > 0 && InfoReq->Information.Ulong < 0xFFFF)
+                            FCB->ReportedReceiveWindowSize = InfoReq->Information.Ulong;
+                        Status = AfdRearmDatagram(FCB);
+                        if (!NT_SUCCESS(Status))
+                        {
+                            FCB->Recv.Size = PreviousSize;
+                            FCB->ReportedReceiveWindowSize = PreviousReportedSize;
+                        }
+                    }
+                }
+                else if (FCB->SharedData.State == SOCKET_STATE_CONNECTED)
                 {
                     /* FIXME: likely not right, check tcpip.sys for TDI_QUERY_MAX_DATAGRAM_INFO */
                     if (InfoReq->Information.Ulong > 0 && InfoReq->Information.Ulong < 0xFFFF &&
-                        InfoReq->Information.Ulong != FCB->Recv.Size)
+                        InfoReq->Information.Ulong != FCB->ReportedReceiveWindowSize)
                     {
-                        NewBuffer = ExAllocatePoolWithTag(PagedPool,
-                                                          InfoReq->Information.Ulong,
-                                                          TAG_AFD_DATA_BUFFER);
-
-                        if (NewBuffer)
+                        if (InfoReq->Information.Ulong == FCB->Recv.Size)
                         {
-                            if (FCB->Recv.Content > InfoReq->Information.Ulong)
-                                FCB->Recv.Content = InfoReq->Information.Ulong;
+                            FCB->PendingReceiveWindowSize = 0;
+                            FCB->ReportedReceiveWindowSize = InfoReq->Information.Ulong;
+                            break;
+                        }
 
-                            if (FCB->Recv.Window)
-                            {
-                                RtlCopyMemory(NewBuffer,
-                                              FCB->Recv.Window,
-                                              FCB->Recv.Content);
-
-                                ExFreePoolWithTag(FCB->Recv.Window, TAG_AFD_DATA_BUFFER);
-                            }
-
-                            FCB->Recv.Size = InfoReq->Information.Ulong;
-                            FCB->Recv.Window = NewBuffer;
-
-                            Status = STATUS_SUCCESS;
+                        if (FCB->Recv.Window &&
+                            InfoReq->Information.Ulong > FCB->ReceiveWindowAllocationSize)
+                        {
+                            Status = STATUS_INVALID_PARAMETER;
                         }
                         else
                         {
-                            Status = STATUS_NO_MEMORY;
+                            FCB->PendingReceiveWindowSize = InfoReq->Information.Ulong;
+                            FCB->ReportedReceiveWindowSize = InfoReq->Information.Ulong;
+
+                            if (!FCB->ReceiveIrp.InFlightRequest)
+                                AfdTryApplyPendingReceiveWindow(FCB);
                         }
                     }
                     else
@@ -166,7 +211,13 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 }
                 else
                 {
-                    Status = STATUS_INVALID_PARAMETER;
+                    if (InfoReq->Information.Ulong > 0 && InfoReq->Information.Ulong < 0xFFFF &&
+                        !FCB->Recv.Window)
+                    {
+                        FCB->Recv.Size = InfoReq->Information.Ulong;
+                        FCB->ReportedReceiveWindowSize = InfoReq->Information.Ulong;
+                    }
+                    Status = STATUS_SUCCESS;
                 }
                 break;
             case AFD_INFO_SEND_WINDOW_SIZE:
@@ -177,13 +228,13 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                         InfoReq->Information.Ulong != FCB->Send.Size)
                     {
                         NewBuffer = ExAllocatePoolWithTag(PagedPool,
-                                                          InfoReq->Information.Ulong,
+                                                          InfoReq->Information.Ulong * 2,
                                                           TAG_AFD_DATA_BUFFER);
 
                         if (NewBuffer)
                         {
-                            if (FCB->Send.BytesUsed > InfoReq->Information.Ulong)
-                                FCB->Send.BytesUsed = InfoReq->Information.Ulong;
+                            if (FCB->Send.BytesUsed > InfoReq->Information.Ulong * 2)
+                                FCB->Send.BytesUsed = InfoReq->Information.Ulong * 2;
 
                             if (FCB->Send.Window)
                             {
@@ -211,7 +262,7 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 }
                 else
                 {
-                    Status = STATUS_INVALID_PARAMETER;
+                    Status = STATUS_SUCCESS;
                 }
                 break;
             default:
@@ -228,13 +279,92 @@ AfdSetInfo( PDEVICE_OBJECT DeviceObject, PIRP Irp,
     return UnlockAndMaybeComplete(FCB, Status, Irp, 0);
 }
 
+static
+VOID
+AfdReportConnectedSource(
+    _In_ PAFD_FCB FCB,
+    _In_ PIRP Irp,
+    _In_ PIO_STACK_LOCATION IrpSp)
+{
+    static const USHORT Zero[8];
+    PTDI_ADDRESS_INFO Info = Irp->UserBuffer;
+    ULONG Length = IrpSp->Parameters.DeviceIoControl.OutputBufferLength;
+    PTDI_ADDRESS_IP Ip;
+    PTDI_ADDRESS_IP6 Ip6;
+
+    if (Length < FIELD_OFFSET(TDI_ADDRESS_INFO, Address.Address[0].Address) + sizeof(TDI_ADDRESS_IP))
+        return;
+
+    _SEH2_TRY
+    {
+        if (Irp->RequestorMode != KernelMode)
+            ProbeForWrite(Info, Length, 1);
+        if (Info->Address.TAAddressCount != 0 &&
+            Info->Address.Address[0].AddressType == TDI_ADDRESS_TYPE_IP &&
+            Info->Address.Address[0].AddressLength >= sizeof(TDI_ADDRESS_IP))
+        {
+            Ip = (PTDI_ADDRESS_IP)Info->Address.Address[0].Address;
+            if (Ip->in_addr == 0)
+                Ip->in_addr = FCB->ConnectedSourceAddress;
+        }
+        else if (Length >= FIELD_OFFSET(TDI_ADDRESS_INFO, Address.Address[0].Address) + sizeof(TDI_ADDRESS_IP6) &&
+                 Info->Address.TAAddressCount != 0 &&
+                 Info->Address.Address[0].AddressType == TDI_ADDRESS_TYPE_IP6 &&
+                 Info->Address.Address[0].AddressLength >= sizeof(TDI_ADDRESS_IP6))
+        {
+            Ip6 = (PTDI_ADDRESS_IP6)Info->Address.Address[0].Address;
+            if (RtlCompareMemory(Ip6->sin6_addr, Zero, sizeof(Zero)) == sizeof(Zero))
+            {
+                RtlCopyMemory(Ip6->sin6_addr, FCB->ConnectedSource6, sizeof(Ip6->sin6_addr));
+                Ip6->sin6_scope_id = FCB->ConnectedSourceScope;
+            }
+        }
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+    }
+    _SEH2_END;
+}
+
+static
+NTSTATUS
+AfdQuerySockName(
+    _In_ PFILE_OBJECT FileObject,
+    _In_ PIRP Irp,
+    _In_ PIO_STACK_LOCATION IrpSp)
+{
+    NTSTATUS Status = STATUS_SUCCESS;
+    PMDL Mdl;
+
+    Mdl = IoAllocateMdl( Irp->UserBuffer,
+                         IrpSp->Parameters.DeviceIoControl.OutputBufferLength,
+                         FALSE,
+                         FALSE,
+                         NULL );
+    if( Mdl == NULL )
+        return STATUS_INSUFFICIENT_RESOURCES;
+
+    _SEH2_TRY {
+        MmProbeAndLockPages( Mdl, Irp->RequestorMode, IoModifyAccess );
+    } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
+        AFD_DbgPrint(MIN_TRACE, ("MmProbeAndLockPages() failed.\n"));
+        Status = _SEH2_GetExceptionCode();
+    } _SEH2_END;
+
+    if( !NT_SUCCESS(Status) ) {
+        IoFreeMdl( Mdl );
+        return Status;
+    }
+
+    return TdiQueryInformation( FileObject, TDI_QUERY_ADDRESS_INFO, Mdl );
+}
+
 NTSTATUS NTAPI
 AfdGetSockName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
                 PIO_STACK_LOCATION IrpSp ) {
-    NTSTATUS Status = STATUS_SUCCESS;
+    NTSTATUS Status;
     PFILE_OBJECT FileObject = IrpSp->FileObject;
     PAFD_FCB FCB = FileObject->FsContext;
-    PMDL Mdl = NULL;
 
     UNREFERENCED_PARAMETER(DeviceObject);
     ASSERT(Irp->MdlAddress == NULL);
@@ -245,34 +375,21 @@ AfdGetSockName( PDEVICE_OBJECT DeviceObject, PIRP Irp,
          return UnlockAndMaybeComplete( FCB, STATUS_INVALID_PARAMETER, Irp, 0 );
     }
 
-    Mdl = IoAllocateMdl( Irp->UserBuffer,
-                         IrpSp->Parameters.DeviceIoControl.OutputBufferLength,
-                         FALSE,
-                         FALSE,
-                         NULL );
+    Status = AfdQuerySockName( FCB->Connection.Object
+                                 ? FCB->Connection.Object
+                                 : FCB->AddressFile.Object,
+                               Irp,
+                               IrpSp );
 
-    if( Mdl != NULL ) {
-        _SEH2_TRY {
-            MmProbeAndLockPages( Mdl, Irp->RequestorMode, IoModifyAccess );
-        } _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER) {
-            AFD_DbgPrint(MIN_TRACE, ("MmProbeAndLockPages() failed.\n"));
-            Status = _SEH2_GetExceptionCode();
-        } _SEH2_END;
+    if( !NT_SUCCESS(Status) && FCB->Connection.Object && FCB->AddressFile.Object ) {
+        Status = AfdQuerySockName( FCB->AddressFile.Object, Irp, IrpSp );
+    }
 
-        if( NT_SUCCESS(Status) ) {
-                Status = TdiQueryInformation( FCB->Connection.Object
-                                                ? FCB->Connection.Object
-                                                : FCB->AddressFile.Object,
-                                              TDI_QUERY_ADDRESS_INFO,
-                                              Mdl );
-        }
-
-        /* Check if MmProbeAndLockPages or TdiQueryInformation failed and
-         * clean up Mdl */
-        if (!NT_SUCCESS(Status) && Irp->MdlAddress != Mdl)
-            IoFreeMdl(Mdl);
-    } else
-        Status = STATUS_INSUFFICIENT_RESOURCES;
+    if (NT_SUCCESS(Status) && (FCB->Flags & AFD_ENDPOINT_CONNECTIONLESS) && FCB->RemoteAddress &&
+        (FCB->ConnectedSourceAddress || FCB->ConnectedSource6[0] || FCB->ConnectedSource6[7]))
+    {
+        AfdReportConnectedSource(FCB, Irp, IrpSp);
+    }
 
     return UnlockAndMaybeComplete( FCB, Status, Irp, 0 );
 }

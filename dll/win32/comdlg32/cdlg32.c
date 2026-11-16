@@ -32,7 +32,6 @@
 #include "commdlg.h"
 #include "cderr.h"
 #include "wine/debug.h"
-#include "wine/heap.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(commdlg);
 
@@ -40,10 +39,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(commdlg);
 
 
 HINSTANCE COMDLG32_hInstance = 0;
+HANDLE	COMDLG32_hActCtx = INVALID_HANDLE_VALUE;
 #ifdef __REACTOS__
 CRITICAL_SECTION COMDLG32_OpenFileLock;
 #endif
-HANDLE	COMDLG32_hActCtx = INVALID_HANDLE_VALUE;
 
 static DWORD COMDLG32_TlsIndex = TLS_OUT_OF_INDEXES;
 
@@ -69,9 +68,6 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD Reason, LPVOID Reserved)
 		COMDLG32_hInstance = hInstance;
 		DisableThreadLibraryCalls(hInstance);
 
-#ifdef __REACTOS__
-		InitializeCriticalSection(&COMDLG32_OpenFileLock);
-#endif
 		actctx.cbSize = sizeof(actctx);
 		actctx.hModule = COMDLG32_hInstance;
 		actctx.lpResourceName = MAKEINTRESOURCEW(123);
@@ -79,42 +75,24 @@ BOOL WINAPI DllMain(HINSTANCE hInstance, DWORD Reason, LPVOID Reserved)
 		COMDLG32_hActCtx = CreateActCtxW(&actctx);
 		if (COMDLG32_hActCtx == INVALID_HANDLE_VALUE)
 			ERR("failed to create activation context, last error %lu\n", GetLastError());
+#ifdef __REACTOS__
+		InitializeCriticalSection(&COMDLG32_OpenFileLock);
+#endif
 
 		break;
 	}
 	case DLL_PROCESS_DETACH:
             if (Reserved) break;
             if (COMDLG32_TlsIndex != TLS_OUT_OF_INDEXES) TlsFree(COMDLG32_TlsIndex);
-            if (COMDLG32_hActCtx != INVALID_HANDLE_VALUE) ReleaseActCtx(COMDLG32_hActCtx);
 #ifdef __REACTOS__
             DeleteCriticalSection(&COMDLG32_OpenFileLock);
 #endif
+            if (COMDLG32_hActCtx != INVALID_HANDLE_VALUE) ReleaseActCtx(COMDLG32_hActCtx);
             break;
 	}
 	return TRUE;
 }
 #undef GPA
-
-/***********************************************************************
- *	COMDLG32_AllocMem 			(internal)
- * Get memory for internal datastructure plus stringspace etc.
- *	RETURNS
- *		Success: Pointer to a heap block
- *		Failure: null
- */
-void *COMDLG32_AllocMem(int size)
-{
-    void *ptr = heap_alloc_zero(size);
-
-    if (!ptr)
-    {
-        COMDLG32_SetCommDlgExtendedError(CDERR_MEMALLOCFAILURE);
-        return NULL;
-    }
-
-    return ptr;
-}
-
 
 /***********************************************************************
  *	COMDLG32_SetCommDlgExtendedError	(internal)
@@ -239,7 +217,6 @@ static const IClassFactoryVtbl CDLGCF_Vtbl =
  */
 HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void **ppv)
 {
-#if (DLL_EXPORT_VERSION >= _WIN32_WINNT_VISTA)
     static IClassFactoryImpl FileOpenDlgClassFactory = {{&CDLGCF_Vtbl}, FileOpenDialog_Constructor};
     static IClassFactoryImpl FileSaveDlgClassFactory = {{&CDLGCF_Vtbl}, FileSaveDialog_Constructor};
 
@@ -250,7 +227,6 @@ HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void **ppv)
 
     if(IsEqualGUID(&CLSID_FileSaveDialog, rclsid))
         return IClassFactory_QueryInterface(&FileSaveDlgClassFactory.IClassFactory_iface, riid, ppv);
-#endif
 
     return CLASS_E_CLASSNOTAVAILABLE;
 }

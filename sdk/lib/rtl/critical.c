@@ -13,7 +13,6 @@
 
 #define NDEBUG
 #include <debug.h>
-#include <reactos/verifier.h>
 
 #define MAX_STATIC_CS_DEBUG_OBJECTS 64
 
@@ -25,12 +24,17 @@ static BOOLEAN RtlpDebugInfoFreeList[MAX_STATIC_CS_DEBUG_OBJECTS];
 
 LARGE_INTEGER RtlpTimeout;
 BOOLEAN RtlpTimeoutDisable;
-BOOLEAN RtlpCriticalSectionVerifier = FALSE;
 
 extern BOOLEAN LdrpShutdownInProgress;
 extern HANDLE LdrpShutdownThreadId;
 
 /* FUNCTIONS *****************************************************************/
+
+#define RTLP_DEFAULT_CRITICAL_SECTION_SPIN_COUNT 2000
+
+#define CS_LOCK_BIT          0x1
+#define CS_WAKE_BIT          0x2
+#define CS_WAITER_INCREMENT  0x4
 
 #define CRITSECT_HAS_DEBUG_INFO(CriticalSection) \
     (((CriticalSection)->DebugInfo != NULL) && \
@@ -39,13 +43,13 @@ extern HANDLE LdrpShutdownThreadId;
 /*++
  * RtlpCreateCriticalSectionSem
  *
- *     Checks if an Event has been created for the critical section.
+ *     Selects the global keyed event for the waits of the critical section.
  *
  * Params:
  *     None
  *
  * Returns:
- *     None. Raises an exception if the system call failed.
+ *     None.
  *
  * Remarks:
  *     None
@@ -56,47 +60,9 @@ VOID
 NTAPI
 RtlpCreateCriticalSectionSem(PRTL_CRITICAL_SECTION CriticalSection)
 {
-    HANDLE hEvent = CriticalSection->LockSemaphore;
-    HANDLE hNewEvent;
-    NTSTATUS Status;
-
-    /* Check if we have an event */
-    if (!hEvent)
-    {
-        /* No, so create it */
-        Status = NtCreateEvent(&hNewEvent,
-                               EVENT_ALL_ACCESS,
-                               NULL,
-                               SynchronizationEvent,
-                               FALSE);
-        if (!NT_SUCCESS(Status))
-        {
-            DPRINT1("Failed to Create Event!\n");
-
-            /*
-             * Use INVALID_HANDLE_VALUE (-1) to signal that
-             * the global keyed event must be used.
-             */
-            hNewEvent = INVALID_HANDLE_VALUE;
-        }
-
-        DPRINT("Created Event: %p\n", hNewEvent);
-
-        /* Exchange the LockSemaphore field with the new handle, if it is still 0 */
-        if (InterlockedCompareExchangePointer((PVOID*)&CriticalSection->LockSemaphore,
-                                              (PVOID)hNewEvent,
-                                               NULL) != NULL)
-        {
-            /* Someone else just created an event */
-            if (hNewEvent != INVALID_HANDLE_VALUE)
-            {
-                DPRINT("Closing already created event: %p\n", hNewEvent);
-                NtClose(hNewEvent);
-            }
-        }
-    }
-
-    return;
+    InterlockedCompareExchangePointer((PVOID*)&CriticalSection->LockSemaphore,
+                                      INVALID_HANDLE_VALUE,
+                                      NULL);
 }
 
 /*++
@@ -137,6 +103,9 @@ RtlpWaitForCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
     if (LdrpShutdownInProgress &&
         LdrpShutdownThreadId == NtCurrentTeb()->RealClientId.UniqueThread)
     {
+        if (CriticalSection->OwningThread)
+            NtTerminateProcess(NtCurrentProcess(), STATUS_THREAD_IS_TERMINATING);
+
         DPRINT("Forcing ownership of critical section %p\n", CriticalSection);
         return STATUS_SUCCESS;
     }
@@ -190,6 +159,10 @@ RtlpWaitForCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
 
             /* One more try */
             LastChance = TRUE;
+        }
+        else if (!NT_SUCCESS(Status))
+        {
+            return Status;
         }
         else
         {
@@ -378,6 +351,28 @@ RtlpFreeDebugInfo(PRTL_CRITICAL_SECTION_DEBUG DebugInfo)
     }
 }
 
+static
+BOOLEAN
+RtlpCriticalSectionOwnsDebugInfo(PRTL_CRITICAL_SECTION CriticalSection)
+{
+    BOOLEAN OwnsDebugInfo = FALSE;
+
+    if (!CRITSECT_HAS_DEBUG_INFO(CriticalSection))
+        return FALSE;
+
+    _SEH2_TRY
+    {
+        OwnsDebugInfo = (CriticalSection->DebugInfo->CriticalSection == CriticalSection);
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        OwnsDebugInfo = FALSE;
+    }
+    _SEH2_END;
+
+    return OwnsDebugInfo;
+}
+
 /*++
  * RtlDeleteCriticalSection
  * @implemented NT4
@@ -399,11 +394,13 @@ NTAPI
 RtlDeleteCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
 {
     NTSTATUS Status = STATUS_SUCCESS;
+    BOOLEAN OwnsDebugInfo;
 
     DPRINT("Deleting Critical Section: %p\n", CriticalSection);
 
     /* Close the Event Object Handle if it exists */
-    if (CriticalSection->LockSemaphore)
+    if (CriticalSection->LockSemaphore &&
+        CriticalSection->LockSemaphore != INVALID_HANDLE_VALUE)
     {
         /* In case NtClose fails, return the status */
         Status = NtClose(CriticalSection->LockSemaphore);
@@ -412,7 +409,8 @@ RtlDeleteCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
     /* Protect List */
     RtlEnterCriticalSection(&RtlCriticalSectionLock);
 
-    if (CRITSECT_HAS_DEBUG_INFO(CriticalSection))
+    OwnsDebugInfo = RtlpCriticalSectionOwnsDebugInfo(CriticalSection);
+    if (OwnsDebugInfo)
     {
         /* Remove it from the list */
         RemoveEntryList(&CriticalSection->DebugInfo->ProcessLocksList);
@@ -425,7 +423,7 @@ RtlDeleteCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
     /* Unprotect */
     RtlLeaveCriticalSection(&RtlCriticalSectionLock);
 
-    if (CRITSECT_HAS_DEBUG_INFO(CriticalSection))
+    if (OwnsDebugInfo)
     {
         /* Free it */
         RtlpFreeDebugInfo(CriticalSection->DebugInfo);
@@ -450,7 +448,7 @@ RtlDeleteCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
  *     SpinCount - Spin count for the critical section.
  *
  * Returns:
- *     STATUS_SUCCESS.
+ *     The previous spin count.
  *
  * Remarks:
  *     SpinCount is ignored on single-processor systems.
@@ -461,11 +459,12 @@ NTAPI
 RtlSetCriticalSectionSpinCount(PRTL_CRITICAL_SECTION CriticalSection,
                                ULONG SpinCount)
 {
-    ULONG OldCount = (ULONG)CriticalSection->SpinCount;
+    ULONG_PTR OldValue = CriticalSection->SpinCount;
+    ULONG_PTR Flags = OldValue & RTL_CRITICAL_SECTION_ALL_FLAG_BITS;
 
-    /* Set to parameter if MP, or to 0 if this is Uniprocessor */
-    CriticalSection->SpinCount = (NtCurrentPeb()->NumberOfProcessors > 1) ? SpinCount : 0;
-    return OldCount;
+    /* Preserve the internal flag byte and replace only the low 24-bit count. */
+    CriticalSection->SpinCount = Flags | ((NtCurrentPeb()->NumberOfProcessors > 1) ? (SpinCount & ~RTL_CRITICAL_SECTION_ALL_FLAG_BITS) : 0);
+    return (ULONG)(OldValue & ~RTL_CRITICAL_SECTION_ALL_FLAG_BITS);
 }
 
 /*++
@@ -489,38 +488,81 @@ NTAPI
 RtlEnterCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
 {
     HANDLE Thread = (HANDLE)NtCurrentTeb()->ClientId.UniqueThread;
+    ULONG SpinCount;
+    LONG OldValue;
+    LONG NewValue;
+    NTSTATUS Status;
+    BOOLEAN Woken = FALSE;
 
-    /* Try to lock it */
-    if (InterlockedIncrement(&CriticalSection->LockCount) != 0)
+    if (CriticalSection->OwningThread == Thread)
     {
-        /* We've failed to lock it! Does this thread actually own it? */
-        if (Thread == CriticalSection->OwningThread)
-        {
-            /*
-             * You own it, so you'll get it when you're done with it! No need to
-             * use the interlocked functions as only the thread who already owns
-             * the lock can modify this data.
-             */
-            CriticalSection->RecursionCount++;
-            return STATUS_SUCCESS;
-        }
-
-        /* NOTE - CriticalSection->OwningThread can be NULL here because changing
-                  this information is not serialized. This happens when thread a
-                  acquires the lock (LockCount == 0) and thread b tries to
-                  acquire it as well (LockCount == 1) but thread a hasn't had a
-                  chance to set the OwningThread! So it's not an error when
-                  OwningThread is NULL here! */
-
-        /* We don't own it, so we must wait for it */
-        RtlpWaitForCriticalSection(CriticalSection);
+        CriticalSection->RecursionCount++;
+        return STATUS_SUCCESS;
     }
 
-    /*
-     * Lock successful. Changing this information has not to be serialized
-     * because only one thread at a time can actually change it (the one who
-     * acquired the lock)!
-     */
+    SpinCount = (ULONG)(CriticalSection->SpinCount & ~RTL_CRITICAL_SECTION_ALL_FLAG_BITS);
+    for (;;)
+    {
+        OldValue = CriticalSection->LockCount;
+        if (OldValue & CS_LOCK_BIT)
+        {
+            if (InterlockedCompareExchange(&CriticalSection->LockCount, OldValue - CS_LOCK_BIT, OldValue) == OldValue)
+                goto Acquired;
+            continue;
+        }
+
+        if (SpinCount == 0)
+            break;
+
+        SpinCount--;
+        YieldProcessor();
+    }
+
+    for (;;)
+    {
+        OldValue = CriticalSection->LockCount;
+        if (OldValue & CS_LOCK_BIT)
+        {
+            NewValue = OldValue - CS_LOCK_BIT;
+            if (Woken)
+                NewValue |= CS_WAKE_BIT;
+
+            if (InterlockedCompareExchange(&CriticalSection->LockCount, NewValue, OldValue) == OldValue)
+                break;
+
+            continue;
+        }
+
+        if (LdrpShutdownInProgress &&
+            LdrpShutdownThreadId == NtCurrentTeb()->RealClientId.UniqueThread)
+        {
+            if (CriticalSection->OwningThread)
+                NtTerminateProcess(NtCurrentProcess(), STATUS_THREAD_IS_TERMINATING);
+
+            break;
+        }
+
+        NewValue = OldValue - CS_WAITER_INCREMENT;
+        if (Woken)
+            NewValue |= CS_WAKE_BIT;
+
+        if (InterlockedCompareExchange(&CriticalSection->LockCount, NewValue, OldValue) != OldValue)
+            continue;
+
+        Status = RtlpWaitForCriticalSection(CriticalSection);
+        if (!NT_SUCCESS(Status))
+            RtlRaiseStatus(Status);
+        Woken = TRUE;
+    }
+
+    if (Woken &&
+        (CriticalSection->SpinCount & RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN) &&
+        (CriticalSection->SpinCount & ~RTL_CRITICAL_SECTION_ALL_FLAG_BITS))
+    {
+        CriticalSection->SpinCount--;
+    }
+
+Acquired:
     CriticalSection->OwningThread = Thread;
     CriticalSection->RecursionCount = 1;
     NtCurrentTeb()->CountOfOwnedCriticalSections++;
@@ -614,10 +656,17 @@ RtlInitializeCriticalSectionEx(
     CriticalSection->LockCount = -1;
     CriticalSection->RecursionCount = 0;
     CriticalSection->OwningThread = 0;
-    CriticalSection->SpinCount = (NtCurrentPeb()->NumberOfProcessors > 1) ? SpinCount : 0;
+    if (NtCurrentPeb()->NumberOfProcessors <= 1)
+        SpinCount = 0;
+    else if (SpinCount == 0)
+        SpinCount = RTLP_DEFAULT_CRITICAL_SECTION_SPIN_COUNT | RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN;
+    CriticalSection->SpinCount = SpinCount |
+                                 (Flags & (RTL_CRITICAL_SECTION_FLAG_NO_DEBUG_INFO |
+                                           RTL_CRITICAL_SECTION_FLAG_DYNAMIC_SPIN |
+                                           RTL_CRITICAL_SECTION_FLAG_RESOURCE_TYPE));
     CriticalSection->LockSemaphore = 0;
 
-    if (Flags & RTL_CRITICAL_SECTION_FLAG_NO_DEBUG_INFO)
+    if (!(Flags & RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO))
     {
         CriticalSection->DebugInfo = LongToPtr(-1);
     }
@@ -637,6 +686,7 @@ RtlInitializeCriticalSectionEx(
         }
 
         /* Set it up */
+        RtlZeroMemory(CritcalSectionDebugData, sizeof(*CritcalSectionDebugData));
         CritcalSectionDebugData->Type = RTL_CRITSECT_TYPE;
         CritcalSectionDebugData->ContentionCount = 0;
         CritcalSectionDebugData->EntryCount = 0;
@@ -767,20 +817,6 @@ NTSTATUS
 NTAPI
 RtlLeaveCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
 {
-#if DBG
-    HANDLE Thread = (HANDLE)NtCurrentTeb()->ClientId.UniqueThread;
-
-    /*
-     * In win this case isn't checked. However it's a valid check so it should
-     * only be performed in debug builds!
-     */
-    if (Thread != CriticalSection->OwningThread)
-    {
-       DPRINT1("Releasing critical section not owned!\n");
-       return STATUS_INVALID_PARAMETER;
-    }
-#endif
-
     /*
      * Decrease the Recursion Count. No need to do this atomically because only
      * the thread who holds the lock can call this function (unless the program
@@ -791,10 +827,8 @@ RtlLeaveCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
         if (CriticalSection->RecursionCount < 0)
         {
             DPRINT1("CRITICAL SECTION MESS: Section %p is not acquired!\n", CriticalSection);
-            return STATUS_UNSUCCESSFUL;
+            return STATUS_SUCCESS;
         }
-        /* Someone still owns us, but we are free. This needs to be done atomically. */
-        InterlockedDecrement(&CriticalSection->LockCount);
     }
     else
     {
@@ -805,11 +839,26 @@ RtlLeaveCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
         CriticalSection->OwningThread = 0;
         NtCurrentTeb()->CountOfOwnedCriticalSections--;
 
-        /* Was someone wanting us? This needs to be done atomically. */
-        if (-1 != InterlockedDecrement(&CriticalSection->LockCount))
+        for (;;)
         {
-            /* Let him have us */
-            RtlpUnWaitCriticalSection(CriticalSection);
+            LONG OldValue = CriticalSection->LockCount;
+
+            if (((ULONG)~OldValue >> 2) != 0 && (OldValue & CS_WAKE_BIT))
+            {
+                if (InterlockedCompareExchange(&CriticalSection->LockCount,
+                                               OldValue + CS_LOCK_BIT - CS_WAKE_BIT + CS_WAITER_INCREMENT,
+                                               OldValue) == OldValue)
+                {
+                    RtlpUnWaitCriticalSection(CriticalSection);
+                    break;
+                }
+            }
+            else if (InterlockedCompareExchange(&CriticalSection->LockCount,
+                                                OldValue + CS_LOCK_BIT,
+                                                OldValue) == OldValue)
+            {
+                break;
+            }
         }
     }
 
@@ -837,8 +886,11 @@ LOGICAL
 NTAPI
 RtlTryEnterCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
 {
+    LONG OldValue = CriticalSection->LockCount;
+
     /* Try to take control */
-    if (InterlockedCompareExchange(&CriticalSection->LockCount, 0, -1) == -1)
+    if ((OldValue & CS_LOCK_BIT) &&
+        InterlockedCompareExchange(&CriticalSection->LockCount, OldValue - CS_LOCK_BIT, OldValue) == OldValue)
     {
         /* It's ours */
         CriticalSection->OwningThread = NtCurrentTeb()->ClientId.UniqueThread;
@@ -849,7 +901,6 @@ RtlTryEnterCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
     else if (CriticalSection->OwningThread == NtCurrentTeb()->ClientId.UniqueThread)
     {
         /* It's already ours */
-        InterlockedIncrement(&CriticalSection->LockCount);
         CriticalSection->RecursionCount++;
         return TRUE;
     }
@@ -858,102 +909,11 @@ RtlTryEnterCriticalSection(PRTL_CRITICAL_SECTION CriticalSection)
     return FALSE;
 }
 
-/**
- * @brief
- * RtlCheckForOrphanedCriticalSections
- *
- * Checks if the given thread owns any critical sections at the time
- * of its exit, and emits a debug message for each orphaned section found.
- *
- * @param[in] ThreadHandle
- * Handle to the thread to check.
- *
- * @return
- * Nothing
- *
- * @remarks
- * This function is typically called by the loader during thread exit.
- **/
 VOID
 NTAPI
-RtlCheckForOrphanedCriticalSections(
-    _In_ HANDLE ThreadHandle)
+RtlCheckForOrphanedCriticalSections(HANDLE ThreadHandle)
 {
-    THREAD_BASIC_INFORMATION ThreadInfo;
-    NTSTATUS Status;
-    PLIST_ENTRY ListEntry;
-
-    /* Early exit if verifier is not active */
-    if (!RtlpCriticalSectionVerifier)
-        return;
-
-    /* Get current thread ID first */
-    if (ThreadHandle == NtCurrentThread())
-    {
-        /* Using current thread */
-        ThreadInfo.ClientId.UniqueThread = NtCurrentTeb()->ClientId.UniqueThread;
-    }
-    else
-    {
-        /* Query thread info from the handle */
-        Status = NtQueryInformationThread(
-            ThreadHandle,
-            ThreadBasicInformation,
-            &ThreadInfo,
-            sizeof(ThreadInfo),
-            NULL);
-
-        if (!NT_SUCCESS(Status))
-            return;
-    }
-
-    /* Lock the critical section list */
-    RtlEnterCriticalSection(&RtlCriticalSectionLock);
-
-    /* Walk the global critical section list */
-    ListEntry = RtlCriticalSectionList.Flink;
-    while (ListEntry != &RtlCriticalSectionList)
-    {
-        PRTL_CRITICAL_SECTION_DEBUG DebugInfo;
-        PRTL_CRITICAL_SECTION CriticalSection;
-
-        /* Get the debug info from the list entry */
-        DebugInfo = CONTAINING_RECORD(
-            ListEntry,
-            RTL_CRITICAL_SECTION_DEBUG,
-            ProcessLocksList);
-        CriticalSection = DebugInfo->CriticalSection;
-
-        /* Skip our own lock since we own it right now */
-        if (CriticalSection == &RtlCriticalSectionLock)
-        {
-            ListEntry = ListEntry->Flink;
-            continue;
-        }
-
-        /* Check if this critical section is owned by the target thread */
-        if (CriticalSection &&
-            CriticalSection->OwningThread == ThreadInfo.ClientId.UniqueThread)
-        {
-            /* Thread is exiting while owning a critical section! */
-            VERIFIER_STOP(
-                APPLICATION_VERIFIER_EXIT_THREAD_OWNS_LOCK,
-                "Thread is exiting while owning a critical section",
-                CriticalSection,
-                "Critical section object",
-                ThreadInfo.ClientId.UniqueThread,
-                "Thread ID",
-                DebugInfo,
-                "Critical section debug info",
-                NULL,
-                NULL);
-            /* TODO: Add stack trace information here (CORE-16870) */
-        }
-
-        ListEntry = ListEntry->Flink;
-    }
-
-    RtlLeaveCriticalSection(&RtlCriticalSectionLock);
+    UNIMPLEMENTED;
 }
 
 LOGICAL

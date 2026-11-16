@@ -16,8 +16,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(ntlm);
 
 PVOID
 NtlmAllocate(
-    _In_ size_t Size,
-    _In_ bool UsePrivateLsaHeap)
+    _In_ size_t Size)
 {
     PVOID buffer = NULL;
 
@@ -33,10 +32,7 @@ NtlmAllocate(
     {
         case NtlmLsaMode:
         {
-            if (UsePrivateLsaHeap)
-                buffer = LsaFunctions->AllocatePrivateHeap(Size);
-            else
-                buffer = LsaFunctions->AllocateLsaHeap(Size);
+            buffer = DispatchTable.AllocateLsaHeap(Size);
 
             if (buffer != NULL)
                 RtlZeroMemory(buffer, Size);
@@ -54,6 +50,9 @@ NtlmAllocate(
         }
     }
 
+    if (buffer == NULL)
+        return NULL;
+
     memcpy(buffer, NTLM_ALLOC_TAG, NTLM_ALLOC_TAG_SIZE);
     buffer = (PBYTE)buffer + NTLM_ALLOC_TAG_SIZE;
 
@@ -62,8 +61,7 @@ NtlmAllocate(
 
 VOID
 NtlmFree(
-    _In_ PVOID Buffer,
-    _In_ bool FromPrivateLsaHeap)
+    _In_ PVOID Buffer)
 {
     if (Buffer)
     {
@@ -75,10 +73,7 @@ NtlmFree(
         {
             case NtlmLsaMode:
             {
-                if (FromPrivateLsaHeap)
-                    LsaFunctions->FreePrivateHeap(Buffer);
-                else
-                    LsaFunctions->FreeLsaHeap(Buffer);
+                DispatchTable.FreeLsaHeap(Buffer);
                 break;
             }
             case NtlmUserMode:
@@ -107,7 +102,7 @@ NtlmUStrAlloc(
 {
     Dst->Length = InitLength;
     Dst->MaximumLength = SizeInBytes;
-    Dst->Buffer = NtlmAllocate(SizeInBytes, false);
+    Dst->Buffer = NtlmAllocate(SizeInBytes);
     return (Dst->Buffer != NULL);
 }
 
@@ -118,7 +113,7 @@ NtlmUStrFree(
     if (String == NULL || String->Buffer == NULL || String->MaximumLength == 0)
         return;
 
-    NtlmFree(String->Buffer, false);
+    NtlmFree(String->Buffer);
     String->Buffer = NULL;
     String->MaximumLength = 0;
 }
@@ -271,7 +266,7 @@ NtlmAllocateClientBuffer(
     if (!Buffer)
         return STATUS_NO_MEMORY;
 
-    Buffer->LocalBuffer = NtlmAllocate(BufferLength, false);
+    Buffer->LocalBuffer = NtlmAllocate(BufferLength);
     if (!Buffer->LocalBuffer)
         return STATUS_NO_MEMORY;
 
@@ -288,7 +283,7 @@ NtlmAllocateClientBuffer(
                                                     &Buffer->ClientBaseAddress);
         if (!NT_SUCCESS(Status))
         {
-            NtlmFree(Buffer->LocalBuffer, false);
+            NtlmFree(Buffer->LocalBuffer);
             Buffer->LocalBuffer = NULL;
         }
         //FIXME: Maybe we have to free ClientBaseAddress if something
@@ -352,13 +347,13 @@ NtlmFreeClientBuffer(
         Buffer->LocalBuffer = NULL;
         if (FreeClientBuffer)
         {
-            NtlmFree(Buffer->ClientBaseAddress, false);
+            NtlmFree(Buffer->ClientBaseAddress);
             Buffer->ClientBaseAddress = NULL;
         }
     }
     else
     {
-        NtlmFree(Buffer->LocalBuffer, false);
+        NtlmFree(Buffer->LocalBuffer);
         Buffer->LocalBuffer = NULL;
         if (FreeClientBuffer)
             DispatchTable.FreeClientBuffer(ClientRequest, Buffer->ClientBaseAddress);

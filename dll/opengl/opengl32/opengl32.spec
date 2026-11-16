@@ -367,3 +367,6 @@
 @ stdcall wglUseFontBitmapsW(long long long long)
 @ stdcall wglUseFontOutlinesA(long long long long long long long ptr)
 @ stdcall wglUseFontOutlinesW(long long long long long long long ptr)
+
+@ stdcall -private RosOpenGLIsDriverInitializing()
+@ stdcall -private RosOpenGLGetAdapterLuid(ptr ptr)

@@ -147,8 +147,9 @@ ScmGetDriverStatus(PSERVICE lpService,
     DWORD dwError = ERROR_SUCCESS;
     BOOLEAN bFound = FALSE;
     DWORD dwPreviousState;
+    DWORD dwInitialState = lpService->Status.dwCurrentState;
 
-    DPRINT1("ScmGetDriverStatus() called\n");
+    DPRINT("ScmGetDriverStatus() called\n");
 
     /* Zero output buffer if any */
     if (lpServiceStatus != NULL)
@@ -218,8 +219,8 @@ ScmGetDriverStatus(PSERVICE lpService,
         if (_wcsicmp(lpService->lpServiceName, DirInfo->Name.Buffer) == 0)
         {
             /* That's our driver, bail out! */
-            DPRINT1("Found: '%S'  '%wZ'\n",
-                    lpService->lpServiceName, &DirInfo->Name);
+            DPRINT("Found: '%S'  '%wZ'\n",
+                   lpService->lpServiceName, &DirInfo->Name);
             bFound = TRUE;
 
             break;
@@ -253,8 +254,18 @@ ScmGetDriverStatus(PSERVICE lpService,
 
         dwPreviousState = lpService->Status.dwCurrentState;
 
-        /* It is running */
-        lpService->Status.dwCurrentState = SERVICE_RUNNING;
+        /*
+         * A driver that was told to stop while its devices are still open
+         * stays loaded until the last of them is closed: the unload is only
+         * pending, and the service stays in STOP_PENDING as on Windows.
+         * Reporting it as running again would keep it "running" in the
+         * database after it is gone, and a later start would be refused.
+         */
+        if (dwPreviousState != SERVICE_STOP_PENDING)
+        {
+            /* It is running */
+            lpService->Status.dwCurrentState = SERVICE_RUNNING;
+        }
 
         if (dwPreviousState == SERVICE_STOPPED)
         {
@@ -296,6 +307,9 @@ ScmGetDriverStatus(PSERVICE lpService,
         }
     }
 
+    if (lpService->Status.dwCurrentState != dwInitialState)
+        ScmNotifyServiceStatus(lpService);
+
     /* Copy service status if required */
     if (lpServiceStatus != NULL)
     {
@@ -304,7 +318,7 @@ ScmGetDriverStatus(PSERVICE lpService,
                       sizeof(SERVICE_STATUS));
     }
 
-    DPRINT1("ScmGetDriverStatus() done (Error: %lu)\n", dwError);
+    DPRINT("ScmGetDriverStatus() done (Error: %lu)\n", dwError);
 
     return ERROR_SUCCESS;
 }
@@ -318,11 +332,12 @@ ScmStartDriver(PSERVICE pService)
     DPRINT("ScmStartDriver(%p)\n", pService);
 
     dwError = ScmLoadDriver(pService);
-    if (dwError == ERROR_SUCCESS)
+    if (dwError == ERROR_SUCCESS || dwError == ERROR_SERVICE_ALREADY_RUNNING)
     {
         pService->Status.dwCurrentState = SERVICE_RUNNING;
         pService->Status.dwControlsAccepted = SERVICE_ACCEPT_STOP;
         pService->Status.dwWin32ExitCode = ERROR_SUCCESS;
+        ScmNotifyServiceStatus(pService);
     }
 
     DPRINT("ScmStartDriver returns %lu\n", dwError);
@@ -367,6 +382,7 @@ ScmControlDriver(PSERVICE lpService,
 
             /* Make the driver 'stop pending' */
             lpService->Status.dwCurrentState = SERVICE_STOP_PENDING;
+            ScmNotifyServiceStatus(lpService);
 
             /* Check the drivers status again */
             dwError = ScmGetDriverStatus(lpService,

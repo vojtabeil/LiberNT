@@ -13,6 +13,23 @@
 
 static
 VOID
+AtaAhciQueuePollingTimer(
+    _In_ PCHANNEL_DATA_AHCI ChanData)
+{
+    LARGE_INTEGER DueTime;
+
+    if (KeGetCurrentIrql() > DISPATCH_LEVEL)
+    {
+        KeInsertQueueDpc(&ChanData->PollingTimerDpc, NULL, NULL);
+        return;
+    }
+
+    DueTime.QuadPart = -10 * 1000LL;
+    KeSetTimer(&ChanData->PollingTimer, DueTime, &ChanData->PollingTimerDpc);
+}
+
+static
+VOID
 AtaAhciBeginHostToDeviceFis(
     _In_ ATA_DEVICE_REQUEST* __restrict Request,
     _Out_ AHCI_FIS_HOST_TO_DEVICE* __restrict Fis)
@@ -161,7 +178,17 @@ AtaAhciStartIo(
         AHCI_PORT_WRITE(IoBase, PxFisSwitchingControl, Control);
     }
 
+    /*
+     * The HBA fetches the command header/table from system memory after PxCI
+     * is written. On weakly ordered architectures the normal-memory writes in
+     * AtaAhciPrepareIo() must be ordered before the MMIO doorbell.
+     */
+    KeMemoryBarrier();
+
     AHCI_PORT_WRITE(IoBase, PxCommandIssue, IssueSlot);
+
+    AtaAhciQueuePollingTimer(ChanData);
+
     return FALSE;
 }
 
@@ -399,6 +426,51 @@ AtaAhciPortHandleInterrupt(
     {
         AtaAhciHandleFatalError(ChanData);
     }
+}
+
+VOID
+NTAPI
+AtaAhciPollingTimerDpc(
+    _In_ PKDPC Dpc,
+    _In_opt_ PVOID DeferredContext,
+    _In_opt_ PVOID SystemArgument1,
+    _In_opt_ PVOID SystemArgument2)
+{
+    PCHANNEL_DATA_AHCI ChanData = DeferredContext;
+    ULONG ActiveSlots;
+    KIRQL OldIrql;
+    BOOLEAN Requeue = FALSE;
+
+    UNREFERENCED_PARAMETER(Dpc);
+    UNREFERENCED_PARAMETER(SystemArgument1);
+    UNREFERENCED_PARAMETER(SystemArgument2);
+
+    OldIrql = KeAcquireInterruptSpinLock(ChanData->Controller->InterruptObject);
+
+    ActiveSlots = ChanData->ActiveSlotsBitmap;
+
+    ASSERT(KeGetCurrentIrql() >= DISPATCH_LEVEL);
+
+    if (ActiveSlots != 0)
+    {
+        ULONG PortIS = AHCI_PORT_READ(ChanData->IoBase, PxInterruptStatus);
+        ULONG HbaIS = AHCI_HBA_READ(ChanData->Controller->IoBase, HbaInterruptStatus);
+
+        if (PortIS != 0 || (HbaIS & (1UL << ChanData->Channel)) != 0)
+        {
+            AtaAhciPortHandleInterrupt(ChanData);
+            AHCI_HBA_WRITE(ChanData->Controller->IoBase,
+                           HbaInterruptStatus,
+                           1UL << ChanData->Channel);
+        }
+
+        Requeue = (ChanData->ActiveSlotsBitmap != 0);
+    }
+
+    KeReleaseInterruptSpinLock(ChanData->Controller->InterruptObject, OldIrql);
+
+    if (Requeue)
+        AtaAhciQueuePollingTimer(ChanData);
 }
 
 BOOLEAN

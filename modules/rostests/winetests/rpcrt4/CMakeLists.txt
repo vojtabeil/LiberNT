@@ -1,5 +1,5 @@
 
-remove_definitions(-DWINVER=0x502 -D_WIN32_IE=0x600 -D_WIN32_WINNT=0x502)
+remove_definitions(-DWINVER=${REACTOS_TARGET_NT} -D_WIN32_WINNT=${REACTOS_TARGET_NT})
 
 add_definitions(
     -DCONST_VTABLE
@@ -48,13 +48,14 @@ if(MSVC)
 endif()
 
 add_executable(rpcrt4_winetest ${SOURCE})
-
-if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    target_compile_options(rpcrt4_winetest PRIVATE "-Wno-format")
-endif()
+target_compile_definitions(rpcrt4_winetest PRIVATE WINETEST_WAIT_CHILD_PROCESS_INFO)
 
 if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
     target_compile_options(rpcrt4_winetest PRIVATE "-Wno-cast-calling-convention")
+endif()
+
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+    target_compile_options(rpcrt4_winetest PRIVATE -Wno-maybe-uninitialized)
 endif()
 
 target_link_libraries(rpcrt4_winetest uuid wine ${PSEH_LIB})

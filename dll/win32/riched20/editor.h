@@ -18,7 +18,9 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#ifdef __REACTOS__
 #pragma once
+#endif
 
 #include "editstr.h"
 
@@ -279,6 +281,8 @@ LRESULT editor_handle_message( ME_TextEditor *editor, UINT msg, WPARAM wParam,
                                LPARAM lParam, HRESULT* phresult );
 int ME_GetTextW(ME_TextEditor *editor, WCHAR *buffer, int buflen,
                 const ME_Cursor *start, int srcChars, BOOL bCRLF, BOOL bEOP);
+int ME_GetTextWObj(ME_TextEditor *editor, WCHAR *buffer, int buflen,
+                   const ME_Cursor *start, int srcChars, BOOL bCRLF, BOOL bEOP, BOOL obj_char);
 void ME_RTFCharAttrHook(struct _RTF_Info *info);
 void ME_RTFParAttrHook(struct _RTF_Info *info);
 void ME_RTFTblAttrHook(struct _RTF_Info *info);
@@ -438,4 +442,3 @@ LRESULT ME_StreamOut(ME_TextEditor *editor, DWORD dwFormat, EDITSTREAM *stream);
 HRESULT ME_GetDataObject(ME_TextEditor *editor, const ME_Cursor *start, int nChars, LPDATAOBJECT *lplpdataobj);
 
 void release_typelib(void);
-

@@ -134,77 +134,10 @@ QueryFullProcessImageNameA(
  */
 HRESULT
 WINAPI
-GetApplicationRecoveryCallback(IN HANDLE hProcess,
-                               OUT APPLICATION_RECOVERY_CALLBACK* pRecoveryCallback,
-                               OUT PVOID* ppvParameter,
-                               PDWORD dwPingInterval,
-                               PDWORD dwFlags)
-{
-    UNIMPLEMENTED;
-    return E_FAIL;
-}
-
-
-/*
- * @unimplemented
- */
-HRESULT
-WINAPI
 GetApplicationRestart(IN HANDLE hProcess,
                       OUT PWSTR pwzCommandline  OPTIONAL,
                       IN OUT PDWORD pcchSize,
                       OUT PDWORD pdwFlags  OPTIONAL)
-{
-    UNIMPLEMENTED;
-    return E_FAIL;
-}
-
-
-/*
- * @unimplemented
- */
-VOID
-WINAPI
-ApplicationRecoveryFinished(IN BOOL bSuccess)
-{
-    UNIMPLEMENTED;
-}
-
-
-/*
- * @unimplemented
- */
-HRESULT
-WINAPI
-ApplicationRecoveryInProgress(OUT PBOOL pbCancelled)
-{
-    UNIMPLEMENTED;
-    return E_FAIL;
-}
-
-
-/*
- * @unimplemented
- */
-HRESULT
-WINAPI
-RegisterApplicationRecoveryCallback(IN APPLICATION_RECOVERY_CALLBACK pRecoveryCallback,
-                                    IN PVOID pvParameter  OPTIONAL,
-                                    DWORD dwPingInterval,
-                                    DWORD dwFlags)
-{
-    UNIMPLEMENTED;
-    return E_FAIL;
-}
-
-
-/*
- * @unimplemented
- */
-HRESULT
-WINAPI
-RegisterApplicationRestart(IN PCWSTR pwzCommandline  OPTIONAL,
-                           IN DWORD dwFlags)
 {
     UNIMPLEMENTED;
     return E_FAIL;
@@ -234,10 +167,19 @@ CreateSymbolicLinkW(IN LPCWSTR lpSymlinkFileName,
     NTSTATUS Status;
     ULONG dwCreateOptions;
     DWORD dwErr;
+    ULONG Privilege = SE_CREATE_SYMBOLIC_LINK_PRIVILEGE;
+    PVOID PrivilegeState = NULL;
 
     if(!lpSymlinkFileName || !lpTargetFileName || (dwFlags | SYMBOLIC_LINK_FLAG_DIRECTORY) != SYMBOLIC_LINK_FLAG_DIRECTORY)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    Status = RtlAcquirePrivilege(&Privilege, 1, 0, &PrivilegeState);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
         return FALSE;
     }
 
@@ -390,6 +332,7 @@ Cleanup:
     if(hSymlink)
         NtClose(hSymlink);
 
+    RtlReleasePrivilege(PrivilegeState);
     RtlFreeUnicodeString(&SymlinkFileName);
     if (bAllocatedTarget)
     {
@@ -432,11 +375,14 @@ CreateSymbolicLinkA(IN LPCSTR lpSymlinkFileName,
         return FALSE;
     }
 
-    if (!(SymlinkW = FilenameA2W(lpSymlinkFileName, FALSE)))
+    if (!(SymlinkW = FilenameA2W(lpSymlinkFileName, TRUE)))
         return FALSE;
 
     if (!(TargetW = FilenameA2W(lpTargetFileName, TRUE)))
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, SymlinkW);
         return FALSE;
+    }
 
     Ret = CreateSymbolicLinkW(SymlinkW,
                               TargetW,
@@ -459,61 +405,56 @@ GetFinalPathNameByHandleA(IN HANDLE hFile,
                           IN DWORD cchFilePath,
                           IN DWORD dwFlags)
 {
-    WCHAR FilePathW[MAX_PATH];
     UNICODE_STRING FilePathU;
-    DWORD PrevLastError;
-    DWORD Ret = 0;
+    ANSI_STRING FilePathA;
+    DWORD Length, Result;
+    NTSTATUS Status;
 
-    if (cchFilePath != 0 &&
-        cchFilePath > sizeof(FilePathW) / sizeof(FilePathW[0]))
+    Length = GetFinalPathNameByHandleW(hFile, NULL, 0, dwFlags);
+    if (Length == 0)
+        return 0;
+
+    FilePathU.Buffer = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length * sizeof(WCHAR));
+    if (FilePathU.Buffer == NULL)
     {
-        FilePathU.Length = 0;
-        FilePathU.MaximumLength = (USHORT)cchFilePath * sizeof(WCHAR);
-        FilePathU.Buffer = RtlAllocateHeap(RtlGetProcessHeap(),
-                                           0,
-                                           FilePathU.MaximumLength);
-        if (FilePathU.Buffer == NULL)
-        {
-            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-            return 0;
-        }
+        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+        return 0;
     }
+
+    Result = GetFinalPathNameByHandleW(hFile, FilePathU.Buffer, Length, dwFlags);
+    if (Result != Length - 1)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, FilePathU.Buffer);
+        return 0;
+    }
+
+    FilePathU.Length = (USHORT)(Result * sizeof(WCHAR));
+    FilePathU.MaximumLength = (USHORT)(Length * sizeof(WCHAR));
+
+    Length = AreFileApisANSI() ? RtlUnicodeStringToAnsiSize(&FilePathU) : RtlUnicodeStringToOemSize(&FilePathU);
+    if (cchFilePath < Length)
+    {
+        RtlFreeHeap(RtlGetProcessHeap(), 0, FilePathU.Buffer);
+        return Length - 1;
+    }
+
+    FilePathA.Buffer = lpszFilePath;
+    FilePathA.Length = 0;
+    FilePathA.MaximumLength = (USHORT)min(cchFilePath, MAXUSHORT);
+    if (AreFileApisANSI())
+        Status = RtlUnicodeStringToAnsiString(&FilePathA, &FilePathU, FALSE);
     else
+        Status = RtlUnicodeStringToOemString(&FilePathA, &FilePathU, FALSE);
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, FilePathU.Buffer);
+
+    if (!NT_SUCCESS(Status))
     {
-        FilePathU.Length = 0;
-        FilePathU.MaximumLength = sizeof(FilePathW);
-        FilePathU.Buffer = FilePathW;
+        BaseSetLastNTError(Status);
+        return 0;
     }
 
-    /* save the last error code */
-    PrevLastError = GetLastError();
-    SetLastError(ERROR_SUCCESS);
-
-    /* call the unicode version that does all the work */
-    Ret = GetFinalPathNameByHandleW(hFile,
-                                    FilePathU.Buffer,
-                                    cchFilePath,
-                                    dwFlags);
-
-    if (GetLastError() == ERROR_SUCCESS)
-    {
-        /* no error, restore the last error code and convert the string */
-        SetLastError(PrevLastError);
-
-        Ret = FilenameU2A_FitOrFail(lpszFilePath,
-                                    cchFilePath,
-                                    &FilePathU);
-    }
-
-    /* free allocated memory if necessary */
-    if (FilePathU.Buffer != FilePathW)
-    {
-        RtlFreeHeap(RtlGetProcessHeap(),
-                    0,
-                    FilePathU.Buffer);
-    }
-
-    return Ret;
+    return Length - 1;
 }
 
 /*
@@ -551,7 +492,7 @@ GetFileBandwidthReservation(IN HANDLE hFile,
 
 
 /*
- * @unimplemented
+ * @implemented
  */
 HANDLE
 WINAPI
@@ -562,8 +503,71 @@ OpenFileById(IN HANDLE hFile,
              IN LPSECURITY_ATTRIBUTES lpSecurityAttributes  OPTIONAL,
              IN DWORD dwFlags)
 {
-    UNIMPLEMENTED;
-    return INVALID_HANDLE_VALUE;
+    OBJECT_ATTRIBUTES ObjectAttributes;
+    IO_STATUS_BLOCK IoStatusBlock;
+    UNICODE_STRING FileId;
+    HANDLE FileHandle;
+    ULONG Options;
+    NTSTATUS Status;
+
+    if (!lpFileID || lpFileID->dwSize < sizeof(*lpFileID))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    if (lpFileID->Type == FileIdType)
+    {
+        FileId.Length = sizeof(lpFileID->FileId);
+    }
+    else if (lpFileID->Type == ObjectIdType || lpFileID->Type == ExtendedFileIdType)
+    {
+        FileId.Length = sizeof(lpFileID->ObjectId);
+    }
+    else
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return INVALID_HANDLE_VALUE;
+    }
+    FileId.MaximumLength = FileId.Length;
+    FileId.Buffer = (PWSTR)&lpFileID->FileId;
+
+    Options = FILE_OPEN_BY_FILE_ID;
+    if (dwFlags & FILE_FLAG_BACKUP_SEMANTICS)
+        Options |= FILE_OPEN_FOR_BACKUP_INTENT;
+    if (dwFlags & FILE_FLAG_NO_BUFFERING)
+        Options |= FILE_NO_INTERMEDIATE_BUFFERING;
+    if (!(dwFlags & FILE_FLAG_OVERLAPPED))
+        Options |= FILE_SYNCHRONOUS_IO_NONALERT;
+    if (dwFlags & FILE_FLAG_RANDOM_ACCESS)
+        Options |= FILE_RANDOM_ACCESS;
+    if (dwFlags & FILE_FLAG_SEQUENTIAL_SCAN)
+        Options |= FILE_SEQUENTIAL_ONLY;
+
+    InitializeObjectAttributes(&ObjectAttributes,
+                               &FileId,
+                               (lpSecurityAttributes && lpSecurityAttributes->bInheritHandle) ? OBJ_INHERIT : 0,
+                               hFile,
+                               lpSecurityAttributes ? lpSecurityAttributes->lpSecurityDescriptor : NULL);
+
+    Status = NtCreateFile(&FileHandle,
+                          dwDesiredAccess | SYNCHRONIZE,
+                          &ObjectAttributes,
+                          &IoStatusBlock,
+                          NULL,
+                          dwFlags & FILE_ATTRIBUTE_VALID_FLAGS,
+                          dwShareMode,
+                          FILE_OPEN,
+                          Options,
+                          NULL,
+                          0);
+    if (!NT_SUCCESS(Status))
+    {
+        BaseSetLastNTError(Status);
+        return INVALID_HANDLE_VALUE;
+    }
+
+    return FileHandle;
 }
 
 
@@ -596,28 +600,8 @@ GetFileMUIInfo(
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
-BOOL
-WINAPI
-GetFileMUIPath(
-    DWORD dwFlags,
-    PCWSTR pcwszFilePath,
-    PWSTR pwszLanguage,
-    PULONG pcchLanguage,
-    PWSTR pwszFileMUIPath,
-    PULONG pcchFileMUIPath,
-    PULONGLONG pululEnumerator)
-{
-    DPRINT1("%x %p %p %p %p %p\n", dwFlags, pcwszFilePath, pwszLanguage, pwszFileMUIPath, pcchFileMUIPath, pululEnumerator);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
-}
-
-/*
- * @unimplemented
- */
-#if 0 // This is Windows 7+
 BOOL
 WINAPI
 GetProcessPreferredUILanguages(
@@ -626,15 +610,84 @@ GetProcessPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    NTSTATUS Status = RtlGetProcessPreferredUILanguages(dwFlags,
+                                                        pulNumLanguages,
+                                                        pwszLanguagesBuffer,
+                                                        pcchLanguagesBuffer);
+
+    if (NT_SUCCESS(Status)) return TRUE;
+    BaseSetLastNTError(Status);
     return FALSE;
 }
-#endif
 
 /*
-* @unimplemented
-*/
+ * The preferred-UI-language APIs all return the same shape: a double-null
+ * terminated list plus its element count, queried first with a NULL buffer to
+ * learn the required size. Callers treat a failure here as fatal (Chromium
+ * aborts outright), so report the one language this system actually has rather
+ * than failing the call.
+ */
+static
+BOOL
+K32GetPreferredUILanguages(
+    _In_ DWORD dwFlags,
+    _In_ DWORD AllowedFlags,
+    _In_ LCID Locale,
+    _Out_ PULONG pulNumLanguages,
+    _Out_writes_opt_(*pcchLanguagesBuffer) PZZWSTR pwszLanguagesBuffer,
+    _Inout_ PULONG pcchLanguagesBuffer)
+{
+    WCHAR Language[LOCALE_NAME_MAX_LENGTH];
+    LCTYPE LocaleType;
+    ULONG Length;
+
+    if (!pulNumLanguages || !pcchLanguagesBuffer)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    if ((dwFlags & ~AllowedFlags) || ((dwFlags & MUI_LANGUAGE_ID) && (dwFlags & MUI_LANGUAGE_NAME)))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    LocaleType = (dwFlags & MUI_LANGUAGE_ID) ? LOCALE_ILANGUAGE : LOCALE_SNAME;
+
+    if (!GetLocaleInfoW(Locale, LocaleType, Language, RTL_NUMBER_OF(Language))) return FALSE;
+
+    Length = (ULONG)wcslen(Language) + 2;
+    *pulNumLanguages = 1;
+
+    if (!pwszLanguagesBuffer)
+    {
+        if (*pcchLanguagesBuffer != 0)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+
+        *pcchLanguagesBuffer = Length;
+        return TRUE;
+    }
+
+    if (*pcchLanguagesBuffer < Length)
+    {
+        *pcchLanguagesBuffer = Length;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    RtlCopyMemory(pwszLanguagesBuffer, Language, (Length - 1) * sizeof(WCHAR));
+    pwszLanguagesBuffer[Length - 1] = UNICODE_NULL;
+    *pcchLanguagesBuffer = Length;
+    return TRUE;
+}
+
+/*
+ * @implemented
+ */
 BOOL
 WINAPI
 GetSystemPreferredUILanguages(
@@ -643,13 +696,11 @@ GetSystemPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    return K32GetPreferredUILanguages(dwFlags, MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | MUI_MACHINE_LANGUAGE_SETTINGS, LOCALE_SYSTEM_DEFAULT, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -659,25 +710,139 @@ GetThreadPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    return K32GetPreferredUILanguages(dwFlags, MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | MUI_UI_FALLBACK, LOCALE_USER_DEFAULT, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 LANGID
 WINAPI
 GetThreadUILanguage(VOID)
 {
-    UNIMPLEMENTED;
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return 0;
+    static const DWORD Flags = MUI_MERGE_SYSTEM_FALLBACK | MUI_MERGE_USER_FALLBACK | MUI_LANGUAGE_ID;
+    UNICODE_STRING String;
+    PWSTR Languages;
+    ULONG Count, Size = 0, Value;
+    LANGID LanguageId = 0;
+
+    if (NT_SUCCESS(RtlGetThreadPreferredUILanguages(Flags, &Count, NULL, &Size)) && Size)
+    {
+        Languages = RtlAllocateHeap(RtlGetProcessHeap(), 0, Size * sizeof(WCHAR));
+        if (Languages)
+        {
+            if (NT_SUCCESS(RtlGetThreadPreferredUILanguages(Flags, &Count, Languages, &Size)) && Languages[0])
+            {
+                RtlInitUnicodeString(&String, Languages);
+                if (NT_SUCCESS(RtlUnicodeStringToInteger(&String, 16, &Value)))
+                    LanguageId = (LANGID)Value;
+            }
+            RtlFreeHeap(RtlGetProcessHeap(), 0, Languages);
+        }
+    }
+
+    return LanguageId ? LanguageId : GetUserDefaultUILanguage();
+}
+
+typedef struct _K32_UI_LANGUAGE_SEARCH
+{
+    LANGID LanguageId;
+    BOOL Found;
+} K32_UI_LANGUAGE_SEARCH, *PK32_UI_LANGUAGE_SEARCH;
+
+static
+BOOL
+CALLBACK
+K32FindUILanguage(
+    _In_ LPWSTR Language,
+    _In_ LONG_PTR Param)
+{
+    PK32_UI_LANGUAGE_SEARCH Search = (PK32_UI_LANGUAGE_SEARCH)Param;
+
+    if ((LANGID)wcstoul(Language, NULL, 16) != Search->LanguageId)
+        return TRUE;
+
+    Search->Found = TRUE;
+    return FALSE;
+}
+
+static
+BOOL
+K32IsInstalledUILanguage(
+    _In_ LANGID LanguageId)
+{
+    K32_UI_LANGUAGE_SEARCH Search = { LanguageId, FALSE };
+    DWORD Error = GetLastError();
+
+    EnumUILanguagesW(K32FindUILanguage, 0, (LONG_PTR)&Search);
+    SetLastError(Error);
+    return Search.Found;
+}
+
+static
+BOOL
+K32ParseUILanguageId(
+    _In_ PCWSTR Language,
+    _Out_ PULONG Value)
+{
+    ULONG Index;
+
+    *Value = 0;
+    if (wcslen(Language) != 4)
+        return FALSE;
+
+    for (Index = 0; Index < 4; Index++)
+    {
+        WCHAR Character = Language[Index];
+
+        if (Character >= L'0' && Character <= L'9')
+            *Value = (*Value << 4) | (Character - L'0');
+        else if (Character >= L'A' && Character <= L'F')
+            *Value = (*Value << 4) | (Character - L'A' + 10);
+        else if (Character >= L'a' && Character <= L'f')
+            *Value = (*Value << 4) | (Character - L'a' + 10);
+        else
+            return FALSE;
+    }
+
+    return *Value != LANGIDFROMLCID(LOCALE_CUSTOM_UNSPECIFIED);
+}
+
+static
+BOOL
+K32GetUILanguageId(
+    _In_ DWORD Flags,
+    _In_ PCWSTR Language,
+    _Out_ LANGID *LanguageId)
+{
+    WCHAR NameBuffer[LOCALE_NAME_MAX_LENGTH];
+    UNICODE_STRING Name;
+    ULONG Value;
+    LCID Lcid;
+
+    if (Flags & MUI_LANGUAGE_ID)
+    {
+        Name.Buffer = NameBuffer;
+        Name.Length = 0;
+        Name.MaximumLength = sizeof(NameBuffer);
+        if (!K32ParseUILanguageId(Language, &Value) ||
+            !NT_SUCCESS(RtlLcidToLocaleName(MAKELCID(Value, SORT_DEFAULT), &Name, RTL_LOCALE_ALLOW_NEUTRAL_NAMES, FALSE)))
+        {
+            return FALSE;
+        }
+        *LanguageId = (LANGID)Value;
+        return TRUE;
+    }
+
+    if (!NT_SUCCESS(RtlLocaleNameToLcid(Language, &Lcid, RTL_LOCALE_ALLOW_NEUTRAL_NAMES)))
+        return FALSE;
+
+    *LanguageId = LANGIDFROMLCID(Lcid);
+    return TRUE;
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 BOOL
 WINAPI
@@ -688,9 +853,66 @@ GetUILanguageInfo(
     PDWORD pcchFallbackLanguages,
     PDWORD pdwAttributes)
 {
-    DPRINT1("%x %p %p %p %p\n", dwFlags, pwmszLanguage, pwszFallbackLanguages, pcchFallbackLanguages, pdwAttributes);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
-    return FALSE;
+    PCWSTR Language;
+    LANGID LanguageId;
+    ULONG Count = 0, Value;
+
+    if ((dwFlags & ~(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME)) ||
+        ((dwFlags & MUI_LANGUAGE_ID) && (dwFlags & MUI_LANGUAGE_NAME)) ||
+        !pwmszLanguage || !pwmszLanguage[0] || !pdwAttributes ||
+        (pcchFallbackLanguages && *pcchFallbackLanguages && !pwszFallbackLanguages))
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    for (Language = pwmszLanguage; *Language; Language += wcslen(Language) + 1)
+    {
+        if ((dwFlags & MUI_LANGUAGE_ID) ? !K32ParseUILanguageId(Language, &Value)
+                                        : wcslen(Language) >= LOCALE_NAME_MAX_LENGTH)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            return FALSE;
+        }
+        Count++;
+    }
+
+    for (Language = pwmszLanguage; *Language; Language += wcslen(Language) + 1)
+    {
+        if (!K32GetUILanguageId(dwFlags, Language, &LanguageId) ||
+            (Language == pwmszLanguage && !K32IsInstalledUILanguage(LanguageId)))
+        {
+            /* FIXME: the documented ERROR_OBJECT_NAME_NOT_FOUND is not defined by the SDK; reported through STATUS_OBJECT_NAME_NOT_FOUND */
+            BaseSetLastNTError(STATUS_OBJECT_NAME_NOT_FOUND);
+            return FALSE;
+        }
+    }
+
+    /* TODO: partially localized and LIP languages, their fallback languages and the relation lists that name them */
+    if (Count > 1)
+    {
+        BaseSetLastNTError(STATUS_OBJECT_NAME_NOT_FOUND);
+        return FALSE;
+    }
+
+    *pdwAttributes = MUI_FULL_LANGUAGE | MUI_LANGUAGE_INSTALLED | MUI_LANGUAGE_LICENSED;
+    if (!pcchFallbackLanguages)
+        return TRUE;
+
+    if (pwszFallbackLanguages && *pcchFallbackLanguages < 2)
+    {
+        *pcchFallbackLanguages = 2;
+        SetLastError(ERROR_INSUFFICIENT_BUFFER);
+        return FALSE;
+    }
+
+    if (pwszFallbackLanguages)
+    {
+        pwszFallbackLanguages[0] = UNICODE_NULL;
+        pwszFallbackLanguages[1] = UNICODE_NULL;
+    }
+    *pcchFallbackLanguages = 2;
+    return TRUE;
 }
 
 
@@ -705,15 +927,16 @@ GetUserPreferredUILanguages(
     PZZWSTR pwszLanguagesBuffer,
     PULONG pcchLanguagesBuffer)
 {
-    DPRINT1("%x %p %p %p\n", dwFlags, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    NTSTATUS Status = RtlGetUserPreferredUILanguages(dwFlags, 0, pulNumLanguages, pwszLanguagesBuffer, pcchLanguagesBuffer);
+
+    if (NT_SUCCESS(Status)) return TRUE;
+    BaseSetLastNTError(Status);
     return FALSE;
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
-#if 0 // Tis is Windows 7+
 BOOL
 WINAPI
 SetProcessPreferredUILanguages(
@@ -721,11 +944,14 @@ SetProcessPreferredUILanguages(
     PCZZWSTR pwszLanguagesBuffer,
     PULONG pulNumLanguages)
 {
-    DPRINT1("%x %p %p\n", dwFlags, pwszLanguagesBuffer, pulNumLanguages);
-    SetLastError(ERROR_CALL_NOT_IMPLEMENTED);
+    NTSTATUS Status = RtlSetProcessPreferredUILanguages(dwFlags,
+                                                        pwszLanguagesBuffer,
+                                                        pulNumLanguages);
+
+    if (NT_SUCCESS(Status)) return TRUE;
+    BaseSetLastNTError(Status);
     return FALSE;
 }
-#endif
 
 /*
  * @unimplemented

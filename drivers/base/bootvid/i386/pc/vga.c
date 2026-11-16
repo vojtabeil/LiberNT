@@ -318,6 +318,28 @@ PreserveRow(
 
 /* PUBLIC FUNCTIONS **********************************************************/
 
+BOOLEAN
+NTAPI
+VidRenderStatusText(
+    _In_ PCSTR String,
+    _Out_writes_bytes_(Width * Height) PUCHAR Coverage,
+    _In_ ULONG Width,
+    _In_ ULONG Height)
+{
+    UNREFERENCED_PARAMETER(String);
+    UNREFERENCED_PARAMETER(Coverage);
+    UNREFERENCED_PARAMETER(Width);
+    UNREFERENCED_PARAMETER(Height);
+    return FALSE;
+}
+
+BOOLEAN
+NTAPI
+VidUseCompactFont(VOID)
+{
+    return FALSE;
+}
+
 VOID
 NTAPI
 VidCleanUp(VOID)

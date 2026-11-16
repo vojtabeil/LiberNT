@@ -10,6 +10,8 @@
  */
 
 #include <afd.h>
+#include <reactos/tdiunix.h>
+#include <reactos/tdibth.h>
 
 #ifdef UNIMPLEMENTED
 #undef UNIMPLEMENTED
@@ -22,8 +24,14 @@
 
 UINT TdiAddressSizeFromType( UINT AddressType ) {
     switch( AddressType ) {
+    case TDI_ADDRESS_TYPE_UNIX:
+        return TDI_ADDRESS_LENGTH_UNIX;
+    case TDI_ADDRESS_TYPE_BTH:
+        return TDI_ADDRESS_LENGTH_BTH;
     case TDI_ADDRESS_TYPE_IP:
         return TDI_ADDRESS_LENGTH_IP;
+    case TDI_ADDRESS_TYPE_IP6:
+        return TDI_ADDRESS_LENGTH_IP6;
     case TDI_ADDRESS_TYPE_APPLETALK:
         return TDI_ADDRESS_LENGTH_APPLETALK;
     case TDI_ADDRESS_TYPE_NETBIOS:
@@ -43,9 +51,6 @@ UINT TaLengthOfAddress( PTA_ADDRESS Addr )
 {
     UINT AddrLen = Addr->AddressLength;
 
-    if (!AddrLen)
-        return 0;
-
     AddrLen += 2 * sizeof( USHORT );
 
     DPRINT("AddrLen %x\n", AddrLen);
@@ -56,9 +61,13 @@ UINT TaLengthOfAddress( PTA_ADDRESS Addr )
 UINT TaLengthOfTransportAddress( PTRANSPORT_ADDRESS Addr )
 {
     UINT AddrLen = TaLengthOfAddress(&Addr->Address[0]);
+    UINT NextLen;
 
-    if (!AddrLen)
-        return 0;
+    if (Addr->TAAddressCount == 2)
+    {
+        NextLen = TaLengthOfAddress((PTA_ADDRESS)((PUCHAR)&Addr->Address[0] + AddrLen));
+        AddrLen += NextLen;
+    }
 
     AddrLen += sizeof(ULONG);
 

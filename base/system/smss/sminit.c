@@ -35,6 +35,7 @@ PVOID SmpInitLastCall;
 
 SECURITY_DESCRIPTOR SmpPrimarySDBody, SmpLiberalSDBody, SmpKnownDllsSDBody;
 SECURITY_DESCRIPTOR SmpApiPortSDBody;
+PACL SmpApiPortSacl;
 PISECURITY_DESCRIPTOR SmpPrimarySecurityDescriptor, SmpLiberalSecurityDescriptor;
 PISECURITY_DESCRIPTOR SmpKnownDllsSecurityDescriptor, SmpApiPortSecurityDescriptor;
 
@@ -827,6 +828,92 @@ SmpRegistryConfigurationTable[] =
 
 /* FUNCTIONS ******************************************************************/
 
+static
+NTSTATUS
+SmpQueryDirectoryObjectEntry(
+    _In_ HANDLE DirectoryHandle,
+    _Inout_ POBJECT_DIRECTORY_INFORMATION *DirInfo,
+    _Inout_ PULONG DirInfoLength,
+    _In_ BOOLEAN RestartScan,
+    _Inout_ PULONG Context)
+{
+    NTSTATUS Status;
+    ULONG Length;
+    POBJECT_DIRECTORY_INFORMATION NewDirInfo;
+
+    for (;;)
+    {
+        Length = 0;
+        Status = NtQueryDirectoryObject(DirectoryHandle,
+                                        *DirInfo,
+                                        *DirInfoLength,
+                                        TRUE,
+                                        RestartScan,
+                                        Context,
+                                        &Length);
+        if (Status != STATUS_BUFFER_TOO_SMALL)
+            return Status;
+
+        if (Length <= *DirInfoLength)
+            return Status;
+
+        NewDirInfo = RtlAllocateHeap(RtlGetProcessHeap(), 0, Length);
+        if (NewDirInfo == NULL)
+            return STATUS_NO_MEMORY;
+
+        RtlFreeHeap(RtlGetProcessHeap(), 0, *DirInfo);
+        *DirInfo = NewDirInfo;
+        *DirInfoLength = Length;
+    }
+}
+
+static
+VOID
+SmpLoadBootConfigurationStore(
+    _In_ PUNICODE_STRING SystemPartition)
+{
+    static const PCWSTR StorePaths[] = { L"\\EFI\\LiberNT\\Boot\\BCD", L"\\Boot\\BCD" };
+    static BOOLEAN Attempted;
+    UNICODE_STRING KeyName = RTL_CONSTANT_STRING(L"\\Registry\\Machine\\BCD00000000");
+    OBJECT_ATTRIBUTES KeyAttributes, FileAttributes;
+    FILE_BASIC_INFORMATION BasicInfo;
+    UNICODE_STRING FileName;
+    WCHAR Buffer[MAX_PATH];
+    BOOLEAN OldState;
+    NTSTATUS Status;
+    ULONG i;
+
+    if (Attempted)
+        return;
+    Attempted = TRUE;
+
+    InitializeObjectAttributes(&KeyAttributes, &KeyName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    for (i = 0; i < RTL_NUMBER_OF(StorePaths); i++)
+    {
+        RtlInitEmptyUnicodeString(&FileName, Buffer, sizeof(Buffer));
+        if (!NT_SUCCESS(RtlAppendUnicodeStringToString(&FileName, SystemPartition)) ||
+            !NT_SUCCESS(RtlAppendUnicodeToString(&FileName, StorePaths[i])))
+        {
+            continue;
+        }
+
+        InitializeObjectAttributes(&FileAttributes, &FileName, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        if (!NT_SUCCESS(NtQueryAttributesFile(&FileAttributes, &BasicInfo)))
+            continue;
+
+        Status = RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, TRUE, FALSE, &OldState);
+        if (NT_SUCCESS(Status))
+        {
+            Status = NtLoadKey(&KeyAttributes, &FileAttributes);
+            RtlAdjustPrivilege(SE_RESTORE_PRIVILEGE, OldState, FALSE, &OldState);
+        }
+
+        if (!NT_SUCCESS(Status))
+            DPRINT1("SMSS: Cannot load the boot configuration store %wZ: 0x%x\n", &FileName, Status);
+        return;
+    }
+}
+
 VOID
 NTAPI
 SmpTranslateSystemPartitionInformation(VOID)
@@ -835,13 +922,13 @@ SmpTranslateSystemPartitionInformation(VOID)
     UNICODE_STRING UnicodeString, LinkTarget, SymLinkU, SystemPartition;
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE KeyHandle, LinkHandle;
-    ULONG Length, Context;
+    ULONG Length, Context, DirInfoLength;
     size_t StrLength;
+    WCHAR BootDrivePrefix[2] = {0};
     WCHAR LinkBuffer[MAX_PATH];
     struct { KEY_VALUE_PARTIAL_INFORMATION; CHAR Buffer[512]; } ValueBuffer;
-    struct { OBJECT_DIRECTORY_INFORMATION; WCHAR Buffer[256]; } DirInfoBuffer;
     PKEY_VALUE_PARTIAL_INFORMATION PartialInfo = (PVOID)&ValueBuffer;
-    POBJECT_DIRECTORY_INFORMATION DirInfo = (PVOID)&DirInfoBuffer;
+    POBJECT_DIRECTORY_INFORMATION DirInfo;
 
     /* Open the setup key */
     RtlInitUnicodeString(&UnicodeString, L"\\Registry\\Machine\\System\\Setup");
@@ -870,7 +957,7 @@ SmpTranslateSystemPartitionInformation(VOID)
         ((PartialInfo->Type != REG_SZ) && (PartialInfo->Type != REG_EXPAND_SZ)))
     {
         DPRINT1("SMSS: Cannot query SystemPartition value (Type %lu, Status 0x%x)\n",
-                (NT_SUCCESS(Status) ? PartialInfo->Type : REG_NONE), Status);
+                PartialInfo->Type, Status);
         return;
     }
 
@@ -883,16 +970,26 @@ SmpTranslateSystemPartitionInformation(VOID)
                        &StrLength);
     SystemPartition.Length = (USHORT)StrLength;
 
+    SmpLoadBootConfigurationStore(&SystemPartition);
+
     /* Enumerate the directory looking for the symbolic link string */
     RtlInitUnicodeString(&SymLinkU, L"SymbolicLink");
     RtlInitEmptyUnicodeString(&LinkTarget, LinkBuffer, sizeof(LinkBuffer));
-    Status = NtQueryDirectoryObject(SmpDosDevicesObjectDirectory,
-                                    &DirInfoBuffer,
-                                    sizeof(DirInfoBuffer),
-                                    TRUE,
-                                    TRUE,
-                                    &Context,
-                                    NULL);
+    DirInfoLength = sizeof(OBJECT_DIRECTORY_INFORMATION) + 256 * sizeof(WCHAR);
+    DirInfo = RtlAllocateHeap(RtlGetProcessHeap(), 0, DirInfoLength);
+    if (DirInfo == NULL)
+    {
+        DPRINT1("SMSS: Cannot allocate DOS device directory buffer (%lu bytes)\n",
+                DirInfoLength);
+        return;
+    }
+
+    Context = 0;
+    Status = SmpQueryDirectoryObjectEntry(SmpDosDevicesObjectDirectory,
+                                          &DirInfo,
+                                          &DirInfoLength,
+                                          TRUE,
+                                          &Context);
     /* Keep searching until we find it */
     while (NT_SUCCESS(Status))
     {
@@ -924,6 +1021,9 @@ SmpTranslateSystemPartitionInformation(VOID)
                     (RtlPrefixUnicodeString(&SystemPartition, &LinkTarget, TRUE) &&
                      (LinkTarget.Buffer[SystemPartition.Length / sizeof(WCHAR)] == L'\\'))))
                 {
+                    BootDrivePrefix[0] = DirInfo->Name.Buffer[0];
+                    BootDrivePrefix[1] = DirInfo->Name.Buffer[1];
+
                     /* All done */
                     break;
                 }
@@ -931,31 +1031,35 @@ SmpTranslateSystemPartitionInformation(VOID)
         }
 
         /* Couldn't find it, try again */
-        Status = NtQueryDirectoryObject(SmpDosDevicesObjectDirectory,
-                                        &DirInfoBuffer,
-                                        sizeof(DirInfoBuffer),
-                                        TRUE,
-                                        FALSE,
-                                        &Context,
-                                        NULL);
+        Status = SmpQueryDirectoryObjectEntry(SmpDosDevicesObjectDirectory,
+                                              &DirInfo,
+                                              &DirInfoLength,
+                                              FALSE,
+                                              &Context);
     }
     if (!NT_SUCCESS(Status))
     {
-        DPRINT1("SMSS: Cannot find drive letter for system partition: 0x%x\n", Status);
 #if (NTDDI_VERSION > NTDDI_WIN7SP1) || defined(__REACTOS__)
         /* If we failed because no drive letter associated to the system
          * volume was found (none was assigned to it), fall back to using
          * the OS boot drive letter instead. Otherwise, fail altogether.
          * NOTE: This has been introduced in a post-SP1 Windows 7 update. */
         if (Status != STATUS_NO_MORE_ENTRIES)
+        {
+            DPRINT1("SMSS: Cannot find drive letter for system partition: 0x%x\n", Status);
+            RtlFreeHeap(RtlGetProcessHeap(), 0, DirInfo);
             return;
-        DirInfo->Name.Buffer = DirInfoBuffer.Buffer;
-        DirInfo->Name.Buffer[0] = SharedUserData->NtSystemRoot[0];
-        DirInfo->Name.Buffer[1] = SharedUserData->NtSystemRoot[1]; // == L':';
+        }
+        BootDrivePrefix[0] = SharedUserData->NtSystemRoot[0];
+        BootDrivePrefix[1] = SharedUserData->NtSystemRoot[1]; // == L':';
 #else
+        DPRINT1("SMSS: Cannot find drive letter for system partition: 0x%x\n", Status);
+        RtlFreeHeap(RtlGetProcessHeap(), 0, DirInfo);
         return;
 #endif
     }
+
+    RtlFreeHeap(RtlGetProcessHeap(), 0, DirInfo);
 
     /* Open the setup key again, for full access this time */
     RtlInitUnicodeString(&UnicodeString,
@@ -973,8 +1077,8 @@ SmpTranslateSystemPartitionInformation(VOID)
     }
 
     /* Wrap up the end of the link buffer */
-    LinkBuffer[0] = DirInfo->Name.Buffer[0];
-    LinkBuffer[1] = DirInfo->Name.Buffer[1]; // == L':';
+    LinkBuffer[0] = BootDrivePrefix[0];
+    LinkBuffer[1] = BootDrivePrefix[1]; // == L':';
     LinkBuffer[2] = L'\\';
     LinkBuffer[3] = UNICODE_NULL;
 
@@ -999,7 +1103,8 @@ SmpCreateSecurityDescriptors(IN BOOLEAN InitialCall)
 {
     NTSTATUS Status;
     PSID WorldSid = NULL, AdminSid = NULL, SystemSid = NULL;
-    PSID RestrictedSid = NULL, OwnerSid = NULL;
+    PSID RestrictedSid = NULL, OwnerSid = NULL, PackageSid = NULL, RestrictedPackageSid = NULL;
+    SID_IDENTIFIER_AUTHORITY PackageAuthority = {SECURITY_APP_PACKAGE_AUTHORITY};
     SID_IDENTIFIER_AUTHORITY WorldAuthority = {SECURITY_WORLD_SID_AUTHORITY};
     SID_IDENTIFIER_AUTHORITY NtAuthority = {SECURITY_NT_AUTHORITY};
     SID_IDENTIFIER_AUTHORITY CreatorAuthority = {SECURITY_CREATOR_SID_AUTHORITY};
@@ -1054,6 +1159,23 @@ SmpCreateSecurityDescriptors(IN BOOLEAN InitialCall)
                                               NULL,
                                               FALSE);
         ASSERT(NT_SUCCESS(Status));
+        {
+            SID_IDENTIFIER_AUTHORITY LabelAuthority = {SECURITY_MANDATORY_LABEL_AUTHORITY};
+            PSID UntrustedSid = NULL;
+            ULONG SaclSize;
+
+            Status = RtlAllocateAndInitializeSid(&LabelAuthority, 1, SECURITY_MANDATORY_UNTRUSTED_RID,
+                                                 0, 0, 0, 0, 0, 0, 0, &UntrustedSid);
+            ASSERT(NT_SUCCESS(Status));
+            SaclSize = sizeof(ACL) + sizeof(SYSTEM_MANDATORY_LABEL_ACE) + RtlLengthSid(UntrustedSid);
+            SmpApiPortSacl = RtlAllocateHeap(SmpHeap, 0, SaclSize);
+            ASSERT(SmpApiPortSacl);
+            RtlCreateAcl(SmpApiPortSacl, SaclSize, ACL_REVISION);
+            RtlAddMandatoryAce(SmpApiPortSacl, ACL_REVISION, 0, SYSTEM_MANDATORY_LABEL_NO_WRITE_UP,
+                               SYSTEM_MANDATORY_LABEL_ACE_TYPE, UntrustedSid);
+            Status = RtlSetSaclSecurityDescriptor(SmpApiPortSecurityDescriptor, TRUE, SmpApiPortSacl, FALSE);
+            ASSERT(NT_SUCCESS(Status));
+        }
     }
 
     /* Check if protection was requested in the registry (on by default) */
@@ -1118,6 +1240,28 @@ SmpCreateSecurityDescriptors(IN BOOLEAN InitialCall)
         goto Quickie;
     }
 
+    Status = RtlAllocateAndInitializeSid(&PackageAuthority, 2,
+                                         SECURITY_APP_PACKAGE_BASE_RID,
+                                         SECURITY_BUILTIN_PACKAGE_ANY_PACKAGE,
+                                         0, 0, 0, 0, 0, 0,
+                                         &PackageSid);
+    if (!NT_SUCCESS(Status))
+    {
+        PackageSid = NULL;
+        goto Quickie;
+    }
+
+    Status = RtlAllocateAndInitializeSid(&PackageAuthority, 2,
+                                         SECURITY_APP_PACKAGE_BASE_RID,
+                                         SECURITY_BUILTIN_PACKAGE_ANY_RESTRICTED_PACKAGE,
+                                         0, 0, 0, 0, 0, 0,
+                                         &RestrictedPackageSid);
+    if (!NT_SUCCESS(Status))
+    {
+        RestrictedPackageSid = NULL;
+        goto Quickie;
+    }
+
     /* Now check if we're creating the core descriptors */
     if (!InitialCall)
     {
@@ -1153,7 +1297,7 @@ NextAcl:
     /* Allocate an ACL with 6 ACEs, two ACEs per SID */
     SidLength = RtlLengthSid(WorldSid) + RtlLengthSid(RestrictedSid) + RtlLengthSid(AdminSid);
     SidLength *= 2;
-    AclLength = sizeof(ACL) + 6 * sizeof(ACCESS_ALLOWED_ACE) + SidLength;
+    AclLength = sizeof(ACL) + 10 * sizeof(ACCESS_ALLOWED_ACE) + SidLength + 2 * RtlLengthSid(PackageSid) + 2 * RtlLengthSid(RestrictedPackageSid);
     Acl = RtlAllocateHeap(RtlGetProcessHeap(), 0, AclLength);
     if (!Acl) Status = STATUS_NO_MEMORY;
     if (!NT_SUCCESS(Status)) goto NotInitial;
@@ -1173,6 +1317,14 @@ NextAcl:
     ASSERT(NT_SUCCESS(Status));
     Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_ALL, AdminSid);
     ASSERT(NT_SUCCESS(Status));
+    Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_EXECUTE, PackageSid);
+    ASSERT(NT_SUCCESS(Status));
+    Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_EXECUTE, RestrictedPackageSid);
+    ASSERT(NT_SUCCESS(Status));
+    Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_EXECUTE | GENERIC_READ, PackageSid);
+    ASSERT(NT_SUCCESS(Status));
+    Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_EXECUTE | GENERIC_READ, RestrictedPackageSid);
+    ASSERT(NT_SUCCESS(Status));
 
     /* Now edit the last three ACEs and make them inheritable */
     Status = RtlGetAce(Acl, 3, (PVOID)&Ace);
@@ -1182,6 +1334,12 @@ NextAcl:
     ASSERT(NT_SUCCESS(Status));
     Ace->AceFlags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
     Status = RtlGetAce(Acl, 5, (PVOID)&Ace);
+    ASSERT(NT_SUCCESS(Status));
+    Ace->AceFlags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
+    Status = RtlGetAce(Acl, 8, (PVOID)&Ace);
+    ASSERT(NT_SUCCESS(Status));
+    Ace->AceFlags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
+    Status = RtlGetAce(Acl, 9, (PVOID)&Ace);
     ASSERT(NT_SUCCESS(Status));
     Ace->AceFlags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
 
@@ -1198,7 +1356,7 @@ NotInitial:
 
     /* Allocate an ACL with 7 ACEs, two ACEs per SID, and one final owner ACE */
     SidLength += RtlLengthSid(OwnerSid);
-    AclLength = sizeof(ACL) + 7 * sizeof (ACCESS_ALLOWED_ACE) + 2 * SidLength;
+    AclLength = sizeof(ACL) + 11 * sizeof (ACCESS_ALLOWED_ACE) + 2 * SidLength + 2 * RtlLengthSid(PackageSid) + 2 * RtlLengthSid(RestrictedPackageSid);
     Acl = RtlAllocateHeap(RtlGetProcessHeap(), 0, AclLength);
     if (!Acl) Status = STATUS_NO_MEMORY;
     if (!NT_SUCCESS(Status)) goto Quickie;
@@ -1220,6 +1378,14 @@ NotInitial:
     ASSERT(NT_SUCCESS(Status));
     Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_ALL, OwnerSid);
     ASSERT(NT_SUCCESS(Status));
+    Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_EXECUTE | GENERIC_READ, PackageSid);
+    ASSERT(NT_SUCCESS(Status));
+    Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_EXECUTE | GENERIC_READ, RestrictedPackageSid);
+    ASSERT(NT_SUCCESS(Status));
+    Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_EXECUTE | GENERIC_READ, PackageSid);
+    ASSERT(NT_SUCCESS(Status));
+    Status = RtlAddAccessAllowedAce(Acl, ACL_REVISION2, GENERIC_EXECUTE | GENERIC_READ, RestrictedPackageSid);
+    ASSERT(NT_SUCCESS(Status));
 
     /* Edit the last 4 ACEs to make then inheritable */
     Status = RtlGetAce(Acl, 3, (PVOID)&Ace);
@@ -1232,6 +1398,12 @@ NotInitial:
     ASSERT(NT_SUCCESS(Status));
     Ace->AceFlags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
     Status = RtlGetAce(Acl, 6, (PVOID)&Ace);
+    ASSERT(NT_SUCCESS(Status));
+    Ace->AceFlags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
+    Status = RtlGetAce(Acl, 9, (PVOID)&Ace);
+    ASSERT(NT_SUCCESS(Status));
+    Ace->AceFlags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
+    Status = RtlGetAce(Acl, 10, (PVOID)&Ace);
     ASSERT(NT_SUCCESS(Status));
     Ace->AceFlags = OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE | INHERIT_ONLY_ACE;
 
@@ -1294,6 +1466,8 @@ Quickie:
     if (WorldSid) RtlFreeHeap(RtlGetProcessHeap(), 0, WorldSid);
     if (SystemSid) RtlFreeHeap(RtlGetProcessHeap(), 0, SystemSid);
     if (RestrictedSid) RtlFreeHeap(RtlGetProcessHeap(), 0, RestrictedSid);
+    if (PackageSid) RtlFreeHeap(RtlGetProcessHeap(), 0, PackageSid);
+    if (RestrictedPackageSid) RtlFreeHeap(RtlGetProcessHeap(), 0, RestrictedPackageSid);
     return Status;
 }
 
@@ -1401,6 +1575,22 @@ SmpInitializeDosDevices(VOID)
     return Status;
 }
 
+static
+BOOLEAN
+SmpIsKnownDllFile(IN PCUNICODE_STRING FileName)
+{
+    PLIST_ENTRY NextEntry;
+    PSMP_REGISTRY_VALUE RegEntry;
+
+    for (NextEntry = SmpKnownDllsList.Flink; NextEntry != &SmpKnownDllsList; NextEntry = NextEntry->Flink)
+    {
+        RegEntry = CONTAINING_RECORD(NextEntry, SMP_REGISTRY_VALUE, Entry);
+        if (RtlEqualUnicodeString(&RegEntry->Value, FileName, TRUE)) return TRUE;
+    }
+
+    return FALSE;
+}
+
 VOID
 NTAPI
 SmpProcessModuleImports(IN PVOID Unused,
@@ -1438,6 +1628,8 @@ SmpProcessModuleImports(IN PVOID Unused,
     RtlStringCbCopyNW(DllName,
                       ImportUnicodeString.MaximumLength - (ImportUnicodeString.Length + sizeof(UNICODE_NULL)),
                       ImportUnicodeString.Buffer, Length);
+
+    if (SmpIsKnownDllFile(&ImportUnicodeString)) return;
 
     /* Add the DLL to the list */
     SmpSaveRegistryValue(&SmpKnownDllsList, DllName, DllValue, TRUE);
@@ -1551,12 +1743,10 @@ SmpInitializeKnownDllsInternal(IN PUNICODE_STRING Directory,
     ASSERT(NT_SUCCESS(Status1));
 
     /* Now loop the known DLLs */
-    NextEntry = SmpKnownDllsList.Flink;
-    while (NextEntry != &SmpKnownDllsList)
+    for (NextEntry = SmpKnownDllsList.Flink; NextEntry != &SmpKnownDllsList; NextEntry = NextEntry->Flink)
     {
-        /* Get the entry and move on */
+        /* Get the entry */
         RegEntry = CONTAINING_RECORD(NextEntry, SMP_REGISTRY_VALUE, Entry);
-        NextEntry = NextEntry->Flink;
 
         DPRINT("Processing known DLL: %wZ-%wZ\n", &RegEntry->Name, &RegEntry->Value);
 
@@ -1670,32 +1860,63 @@ Quickie:
     return Status;
 }
 
-NTSTATUS
-NTAPI
-SmpInitializeKnownDlls(VOID)
+static
+VOID
+SmpFreeKnownDllsAfter(IN PLIST_ENTRY LastKept)
 {
-    NTSTATUS Status;
     PSMP_REGISTRY_VALUE RegEntry;
-    UNICODE_STRING KnownDllsName;
-    PLIST_ENTRY Head, NextEntry;
+    PLIST_ENTRY NextEntry;
 
-    /* Call the internal function */
-    RtlInitUnicodeString(&KnownDllsName, L"\\KnownDlls");
-    Status = SmpInitializeKnownDllsInternal(&KnownDllsName, &SmpKnownDllPath);
-
-    /* Wipe out the list regardless of success */
-    Head = &SmpKnownDllsList;
-    while (!IsListEmpty(Head))
+    while (LastKept->Flink != &SmpKnownDllsList)
     {
-        /* Remove this entry */
-        NextEntry = RemoveHeadList(Head);
-
-        /* Free it */
+        NextEntry = RemoveHeadList(LastKept);
         RegEntry = CONTAINING_RECORD(NextEntry, SMP_REGISTRY_VALUE, Entry);
         RtlFreeHeap(RtlGetProcessHeap(), 0, RegEntry->AnsiValue);
         RtlFreeHeap(RtlGetProcessHeap(), 0, RegEntry->Value.Buffer);
         RtlFreeHeap(RtlGetProcessHeap(), 0, RegEntry);
     }
+}
+
+static
+VOID
+SmpInitializeKnownDlls32(VOID)
+{
+    WCHAR PathBuffer[MAX_PATH];
+    UNICODE_STRING KnownDllsName, Path;
+    NTSTATUS Status;
+
+    Status = RtlStringCbCopyW(PathBuffer, sizeof(PathBuffer), SharedUserData->NtSystemRoot);
+    if (NT_SUCCESS(Status)) Status = RtlStringCbCatW(PathBuffer, sizeof(PathBuffer), L"\\SysWOW64");
+    if (!NT_SUCCESS(Status)) return;
+
+    RtlInitUnicodeString(&Path, PathBuffer);
+    RtlInitUnicodeString(&KnownDllsName, L"\\KnownDlls32");
+    Status = SmpInitializeKnownDllsInternal(&KnownDllsName, &Path);
+    if (!NT_SUCCESS(Status)) DPRINT1("SMSS: Unable to initialize %wZ - Status == %lx\n", &KnownDllsName, Status);
+}
+
+NTSTATUS
+NTAPI
+SmpInitializeKnownDlls(VOID)
+{
+    NTSTATUS Status;
+    UNICODE_STRING KnownDllsName;
+    PLIST_ENTRY LastRegistryEntry;
+
+    LastRegistryEntry = SmpKnownDllsList.Blink;
+
+    /* Call the internal function */
+    RtlInitUnicodeString(&KnownDllsName, L"\\KnownDlls");
+    Status = SmpInitializeKnownDllsInternal(&KnownDllsName, &SmpKnownDllPath);
+
+    if (sizeof(PVOID) == sizeof(ULONGLONG))
+    {
+        SmpFreeKnownDllsAfter(LastRegistryEntry);
+        SmpInitializeKnownDlls32();
+    }
+
+    /* Wipe out the list regardless of success */
+    SmpFreeKnownDllsAfter(&SmpKnownDllsList);
 
     /* All done */
     return Status;
@@ -1795,6 +2016,14 @@ SmpCreateDynamicEnvironmentVariables(VOID)
             ValueData = L"IA64";
             break;
 
+        case PROCESSOR_ARCHITECTURE_ARM64:
+            ValueData = L"ARM64";
+            break;
+
+        case PROCESSOR_ARCHITECTURE_RISCV64:
+            ValueData = L"RISCV64";
+            break;
+
         default:
             ValueData = L"Unknown";
             break;
@@ -1856,7 +2085,7 @@ SmpCreateDynamicEnvironmentVariables(VOID)
     Status = NtQueryValueKey(KeyHandle2,
                              &ValueName,
                              KeyValuePartialInformation,
-                             ValueBuffer,
+                             PartialInfo,
                              sizeof(ValueBuffer),
                              &ResultLength);
     if (!NT_SUCCESS(Status) ||
@@ -1865,8 +2094,7 @@ SmpCreateDynamicEnvironmentVariables(VOID)
         NtClose(KeyHandle2);
         NtClose(KeyHandle);
         DPRINT1("SMSS: Unable to read %wZ\\%wZ (Type %lu, Status 0x%x)\n",
-                &DestinationString, &ValueName,
-                (NT_SUCCESS(Status) ? PartialInfo->Type : REG_NONE), Status);
+                &DestinationString, &ValueName, PartialInfo->Type, Status);
         return Status;
     }
 
@@ -1886,7 +2114,7 @@ SmpCreateDynamicEnvironmentVariables(VOID)
     Status = NtQueryValueKey(KeyHandle2,
                              &ValueName,
                              KeyValuePartialInformation,
-                             ValueBuffer2,
+                             PartialInfo2,
                              sizeof(ValueBuffer2),
                              &ResultLength);
     NtClose(KeyHandle2);
@@ -1996,7 +2224,7 @@ SmpCreateDynamicEnvironmentVariables(VOID)
         Status = NtQueryValueKey(KeyHandle2,
                                  &ValueName,
                                  KeyValuePartialInformation,
-                                 ValueBuffer,
+                                 PartialInfo,
                                  sizeof(ValueBuffer),
                                  &ResultLength);
         NtClose(KeyHandle2);
@@ -2038,7 +2266,7 @@ SmpCreateDynamicEnvironmentVariables(VOID)
         else
         {
             DPRINT1("SMSS: Failed to query SAFEBOOT option (Type %lu, Status 0x%x)\n",
-                    (NT_SUCCESS(Status) ? PartialInfo->Type : REG_NONE), Status);
+                    PartialInfo->Type, Status);
         }
     }
 
@@ -2459,11 +2687,17 @@ SmpLoadDataFromRegistry(OUT PUNICODE_STRING InitialCommand)
         return Status;
     }
 
+    Status = SmpLoadSubSystemsForSystemSession(&SmpWindowsSubSysProcessId);
+    if (!NT_SUCCESS(Status))
+    {
+        SMSS_CHECKPOINT(SmpLoadSubSystemsForSystemSession, Status);
+        return Status;
+    }
+
     /* And finally load all the subsystems for our first session! */
     Status = SmpLoadSubSystemsForMuSession(&MuSessionId,
                                            &SmpWindowsSubSysProcessId,
                                            InitialCommand);
-    ASSERT(MuSessionId == 0);
     if (!NT_SUCCESS(Status)) SMSS_CHECKPOINT(SmpLoadSubSystemsForMuSession, Status);
     return Status;
 }
@@ -2478,6 +2712,7 @@ SmpInit(IN PUNICODE_STRING InitialCommand,
     UNICODE_STRING PortName, EventName;
     HANDLE EventHandle, PortHandle;
     ULONG HardErrorMode;
+    ALPC_PORT_ATTRIBUTES PortAttributes;
 
     /* Create the SMSS Heap */
     SmBaseTag = RtlCreateTagHeap(RtlGetProcessHeap(),
@@ -2524,11 +2759,14 @@ SmpInit(IN PUNICODE_STRING InitialCommand,
     /* Create the SM API Port */
     RtlInitUnicodeString(&PortName, L"\\SmApiPort");
     InitializeObjectAttributes(&ObjectAttributes, &PortName, 0, NULL, SmpApiPortSecurityDescriptor);
-    Status = NtCreatePort(&PortHandle,
-                          &ObjectAttributes,
-                          sizeof(SB_CONNECTION_INFO),
-                          sizeof(SM_API_MSG),
-                          sizeof(SB_API_MSG) * 32);
+    C_ASSERT(sizeof(SM_API_MSG) >= sizeof(PORT_MESSAGE) + sizeof(SB_CONNECTION_INFO));
+    RtlZeroMemory(&PortAttributes, sizeof(PortAttributes));
+    PortAttributes.MaxMessageLength = sizeof(SM_API_MSG);
+    PortAttributes.MaxPoolUsage = sizeof(SB_API_MSG) * 32;
+    PortAttributes.SecurityQos.Length = sizeof(PortAttributes.SecurityQos);
+    PortAttributes.SecurityQos.ImpersonationLevel = SecurityIdentification;
+    PortAttributes.SecurityQos.ContextTrackingMode = SECURITY_DYNAMIC_TRACKING;
+    Status = NtAlpcCreatePort(&PortHandle, &ObjectAttributes, &PortAttributes);
     ASSERT(NT_SUCCESS(Status));
     SmpDebugPort = PortHandle;
 

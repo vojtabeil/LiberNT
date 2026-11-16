@@ -40,6 +40,20 @@ MsfsCreate(PDEVICE_OBJECT DeviceObject,
 
     DPRINT("Mailslot name: %wZ\n", &FileObject->FileName);
 
+    if (FileObject->FileName.Length == 0 ||
+        (FileObject->FileName.Length == sizeof(WCHAR) && FileObject->FileName.Buffer[0] == L'\\'))
+    {
+        FileObject->FsContext = NULL;
+        FileObject->FsContext2 = NULL;
+
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = FILE_OPENED;
+
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+        return STATUS_SUCCESS;
+    }
+
     Ccb = ExAllocatePoolWithTag(NonPagedPool, sizeof(MSFS_CCB), 'cFsM');
     if (Ccb == NULL)
     {
@@ -69,12 +83,12 @@ MsfsCreate(PDEVICE_OBJECT DeviceObject,
         ExFreePoolWithTag(Ccb, 'cFsM');
         KeUnlockMutex(&DeviceExtension->FcbListLock);
 
-        Irp->IoStatus.Status = STATUS_UNSUCCESSFUL;
+        Irp->IoStatus.Status = STATUS_OBJECT_NAME_NOT_FOUND;
         Irp->IoStatus.Information = 0;
 
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
-        return STATUS_UNSUCCESSFUL;
+        return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
     Fcb = current;
@@ -171,25 +185,30 @@ MsfsCreateMailslot(PDEVICE_OBJECT DeviceObject,
     }
 
     Fcb->ReferenceCount = 0;
+    Fcb->MemoryReferences = 1;
     InitializeListHead(&Fcb->CcbListHead);
     KeInitializeSpinLock(&Fcb->CcbListLock);
 
     Fcb->MaxMessageSize = Buffer->MaximumMessageSize;
+    Fcb->MailslotQuota = Buffer->MailslotQuota;
     Fcb->MessageCount = 0;
-    Fcb->TimeOut = Buffer->ReadTimeout;
+    if (Buffer->TimeoutSpecified)
+        Fcb->TimeOut = Buffer->ReadTimeout;
+    else
+        Fcb->TimeOut.QuadPart = -1;
 
     InitializeListHead(&Fcb->MessageListHead);
     KeInitializeSpinLock(&Fcb->MessageListLock);
 
-    KeInitializeSpinLock(&Fcb->QueueLock);
     InitializeListHead(&Fcb->PendingIrpQueue);
-    IoCsqInitialize(&Fcb->CancelSafeQueue,
-                    MsfsInsertIrp,
-                    MsfsRemoveIrp,
-                    MsfsPeekNextIrp,
-                    MsfsAcquireLock,
-                    MsfsReleaseLock,
-                    MsfsCompleteCanceledIrp);
+    ExInitializeFastMutex(&Fcb->IoLock);
+    IoCsqInitializeEx(&Fcb->CancelSafeQueue,
+                      MsfsInsertIrpEx,
+                      MsfsRemoveIrp,
+                      MsfsPeekNextIrp,
+                      MsfsAcquireLock,
+                      MsfsReleaseLock,
+                      MsfsCompleteCanceledIrp);
 
     KeLockMutex(&DeviceExtension->FcbListLock);
     current_entry = DeviceExtension->FcbListHead.Flink;
@@ -213,12 +232,12 @@ MsfsCreateMailslot(PDEVICE_OBJECT DeviceObject,
 
         KeUnlockMutex(&DeviceExtension->FcbListLock);
 
-        Irp->IoStatus.Status = STATUS_UNSUCCESSFUL;
+        Irp->IoStatus.Status = STATUS_OBJECT_NAME_COLLISION;
         Irp->IoStatus.Information = 0;
 
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
-        return STATUS_UNSUCCESSFUL;
+        return STATUS_OBJECT_NAME_COLLISION;
     }
     else
     {
@@ -243,6 +262,40 @@ MsfsCreateMailslot(PDEVICE_OBJECT DeviceObject,
     Irp->IoStatus.Status = STATUS_SUCCESS;
     Irp->IoStatus.Information = 0;
 
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+    return STATUS_SUCCESS;
+}
+
+
+NTSTATUS DEFAULTAPI
+MsfsCleanup(PDEVICE_OBJECT DeviceObject,
+            PIRP Irp)
+{
+    PIO_STACK_LOCATION IoStack;
+    PFILE_OBJECT FileObject;
+    PMSFS_FCB Fcb;
+    PIRP ReadIrp;
+
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    IoStack = IoGetCurrentIrpStackLocation(Irp);
+    FileObject = IoStack->FileObject;
+    Fcb = FileObject->FsContext;
+
+    if (Fcb)
+    {
+        while ((ReadIrp = IoCsqRemoveNextIrp(&Fcb->CancelSafeQueue, FileObject)) != NULL)
+        {
+            MsfsReleaseIrpContext(ReadIrp);
+            ReadIrp->IoStatus.Status = STATUS_CANCELLED;
+            ReadIrp->IoStatus.Information = 0;
+            IoCompleteRequest(ReadIrp, IO_NO_INCREMENT);
+        }
+    }
+
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
 
     return STATUS_SUCCESS;
@@ -284,6 +337,18 @@ MsfsClose(PDEVICE_OBJECT DeviceObject,
     Fcb = FileObject->FsContext;
     Ccb = FileObject->FsContext2;
 
+    if (!Fcb)
+    {
+        KeUnlockMutex(&DeviceExtension->FcbListLock);
+
+        Irp->IoStatus.Status = STATUS_SUCCESS;
+        Irp->IoStatus.Information = 0;
+
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+
+        return STATUS_SUCCESS;
+    }
+
     DPRINT("Mailslot name: %wZ\n", &Fcb->Name);
 
     Fcb->ReferenceCount--;
@@ -318,7 +383,7 @@ MsfsClose(PDEVICE_OBJECT DeviceObject,
         DPRINT("ReferenceCount == 0: Deleting mailslot data\n");
         RemoveEntryList(&Fcb->FcbListEntry);
         ExFreePoolWithTag(Fcb->Name.Buffer, 'NFsM');
-        ExFreePoolWithTag(Fcb, 'fFsM');
+        MsfsDereferenceFcb(Fcb);
     }
 
     KeUnlockMutex(&DeviceExtension->FcbListLock);

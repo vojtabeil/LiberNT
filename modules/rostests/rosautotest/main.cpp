@@ -14,6 +14,15 @@ WCHAR TestName[MAX_PATH];
 
 CConfiguration Configuration;
 
+static void
+AppendFixedTime(stringstream& Stream, DWORD Milliseconds, DWORD Unit)
+{
+    char Buffer[32];
+
+    snprintf(Buffer, sizeof(Buffer), "%lu.%02lu", Milliseconds / Unit, ((Milliseconds % Unit) * 100) / Unit);
+    Stream << Buffer;
+}
+
 /**
  * Prints the application usage.
  */
@@ -27,6 +36,9 @@ IntPrintUsage()
          << "    /c <comment> - Specifies the comment to be submitted to the Web Service." << endl
          << "                   Skips the comment set in the configuration file (if any)." << endl
          << "                   Only has an effect when /w is also used." << endl
+         << "    /g <names>   - Run only the given test categories, separated by commas." << endl
+         << "                   A name is a category (\"graphics\") or one of its" << endl
+         << "                   sub-categories (\"core:exceptions\"). \"/g ?\" lists them." << endl
          << "    /n           - Do not print test output to console" << endl
          << "    /r           - Maintain information to resume from ReactOS crashes" << endl
          << "                   Can only be run under ReactOS and relies on sysreg2," << endl
@@ -44,7 +56,14 @@ IntPrintUsage()
          << "    all tests of the specified module are run." << endl
          << endl
          << "  test:" << endl
-         << "    The test to be run. Needs to be a test of the specified module." << endl;
+         << "    The test to be run. Needs to be a test of the specified module." << endl
+         << endl
+         << "  environment:" << endl
+         << "    ROSAUTOTEST_TIMEOUT     - Seconds a test may print nothing while using" << endl
+         << "                              less than one second of CPU time before it is" << endl
+         << "                              ended (1-3600, 30 when not set)." << endl
+         << "    ROSAUTOTEST_RUN_TIMEOUT - Seconds a test may run before it is ended" << endl
+         << "                              (1-3600, 170 when not set)." << endl;
 }
 
 static
@@ -106,14 +125,20 @@ wmain(int argc, wchar_t* argv[])
 
         /* Set up the configuration */
         Configuration.ParseParameters(argc, argv);
+        if (Configuration.ListCategoriesOnly())
+        {
+            StringOut(CCategories::Describe());
+            return 0;
+        }
         Configuration.GetSystemInformation();
         Configuration.GetConfigurationFromFile();
 
         TestStartTime = GetTickCount();
         ss << endl
            << endl
-           << "[ROSAUTOTEST] System uptime " << setprecision(2) << fixed;
-        ss << (float)TestStartTime / 1000 << " seconds" << endl;
+           << "[ROSAUTOTEST] System uptime ";
+        AppendFixedTime(ss, TestStartTime, 1000);
+        ss << " seconds" << endl;
         StringOut(ss.str());
 
         /* Report tests startup */
@@ -155,15 +180,18 @@ wmain(int argc, wchar_t* argv[])
         ss.clear();
 
         /* Show the beginning time again */
-        ss << "[ROSAUTOTEST] System uptime at start was " << setprecision(2) << fixed;
-        ss << (float)TestStartTime / 1000 << " seconds" << endl;
+        ss << "[ROSAUTOTEST] System uptime at start was ";
+        AppendFixedTime(ss, TestStartTime, 1000);
+        ss << " seconds" << endl;
 
         /* Show the time now so that we can see how long the tests took */
         TestEndTime = GetTickCount();
         ss << endl
-           << "[ROSAUTOTEST] System uptime at end was " << setprecision(2) << fixed;
-        ss << ((float)TestEndTime / 1000) << " seconds" << endl;
-        ss << "[ROSAUTOTEST] Duration was " << (float)(TestEndTime - TestStartTime) / (60 * 1000);
+           << "[ROSAUTOTEST] System uptime at end was ";
+        AppendFixedTime(ss, TestEndTime, 1000);
+        ss << " seconds" << endl;
+        ss << "[ROSAUTOTEST] Duration was ";
+        AppendFixedTime(ss, TestEndTime - TestStartTime, 60 * 1000);
         ss << " minutes" << endl;
         StringOut(ss.str());
 

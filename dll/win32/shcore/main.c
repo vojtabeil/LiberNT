@@ -32,6 +32,9 @@
 #include "shcore.h"
 #define WINSHLWAPI
 #include "shlwapi.h"
+#ifdef __REACTOS__
+#include "ntsecapi.h"
+#endif
 
 #include "wine/debug.h"
 
@@ -39,6 +42,24 @@ WINE_DEFAULT_DEBUG_CHANNEL(shcore);
 
 static DWORD shcore_tls;
 static IUnknown *process_ref;
+static SRWLOCK explicit_appid_lock = SRWLOCK_INIT;
+static WCHAR *explicit_appid;
+
+#if (NTDDI_VERSION < NTDDI_WINTHRESHOLD)
+typedef enum
+{
+    SHELL_UI_COMPONENT_TASKBARS,
+    SHELL_UI_COMPONENT_NOTIFICATIONAREA,
+    SHELL_UI_COMPONENT_DESKBAND,
+} SHELL_UI_COMPONENT;
+#endif
+
+static FARPROC get_user32_proc(const char *name)
+{
+    HMODULE module = GetModuleHandleW(L"user32.dll");
+
+    return module ? GetProcAddress(module, name) : NULL;
+}
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
 {
@@ -60,39 +81,144 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, void *reserved)
     return TRUE;
 }
 
-#ifndef __REACTOS__
 HRESULT WINAPI GetProcessDpiAwareness(HANDLE process, PROCESS_DPI_AWARENESS *value)
 {
-    if (GetProcessDpiAwarenessInternal( process, (DPI_AWARENESS *)value )) return S_OK;
+    BOOL (WINAPI *get_process_dpi_awareness)(HANDLE, DPI_AWARENESS *);
+
+    if (!value) return E_INVALIDARG;
+    get_process_dpi_awareness = (void *)get_user32_proc("GetProcessDpiAwarenessInternal");
+    if (!get_process_dpi_awareness) return HRESULT_FROM_WIN32(ERROR_CALL_NOT_IMPLEMENTED);
+    if (get_process_dpi_awareness( process, (DPI_AWARENESS *)value )) return S_OK;
     return HRESULT_FROM_WIN32( GetLastError() );
 }
 
 HRESULT WINAPI SetProcessDpiAwareness(PROCESS_DPI_AWARENESS value)
 {
-    if (SetProcessDpiAwarenessInternal( (DPI_AWARENESS)value )) return S_OK;
+    BOOL (WINAPI *set_process_dpi_awareness)(DPI_AWARENESS);
+
+    set_process_dpi_awareness = (void *)get_user32_proc("SetProcessDpiAwarenessInternal");
+    if (!set_process_dpi_awareness) return HRESULT_FROM_WIN32(ERROR_CALL_NOT_IMPLEMENTED);
+    if (set_process_dpi_awareness( (DPI_AWARENESS)value )) return S_OK;
     return HRESULT_FROM_WIN32( GetLastError() );
 }
 
 HRESULT WINAPI GetDpiForMonitor(HMONITOR monitor, MONITOR_DPI_TYPE type, UINT *x, UINT *y)
 {
-    if (GetDpiForMonitorInternal( monitor, type, x, y )) return S_OK;
-    return HRESULT_FROM_WIN32( GetLastError() );
+    BOOL (WINAPI *get_dpi_for_monitor)(HMONITOR, UINT, UINT *, UINT *);
+    DWORD error;
+
+    if (!x || !y || type < MDT_EFFECTIVE_DPI || type > MDT_RAW_DPI)
+        return E_INVALIDARG;
+    get_dpi_for_monitor = (void *)get_user32_proc("GetDpiForMonitorInternal");
+    if (!get_dpi_for_monitor) return HRESULT_FROM_WIN32(ERROR_CALL_NOT_IMPLEMENTED);
+    if (get_dpi_for_monitor( monitor, type, x, y )) return S_OK;
+
+    error = GetLastError();
+    if (error == ERROR_BAD_ARGUMENTS || error == ERROR_INVALID_ADDRESS ||
+        error == ERROR_INVALID_MONITOR_HANDLE || error == ERROR_INVALID_HANDLE)
+    {
+        return E_INVALIDARG;
+    }
+    return HRESULT_FROM_WIN32( error );
 }
-#endif /* __REACTOS__ */
+
+static DEVICE_SCALE_FACTOR
+ScaleFactorFromDpi(UINT dpi)
+{
+    static const DEVICE_SCALE_FACTOR Factors[] =
+    {
+        SCALE_100_PERCENT,
+        SCALE_120_PERCENT,
+        SCALE_125_PERCENT,
+        SCALE_140_PERCENT,
+        SCALE_150_PERCENT,
+        SCALE_160_PERCENT,
+        SCALE_175_PERCENT,
+        SCALE_180_PERCENT,
+        SCALE_200_PERCENT,
+        SCALE_225_PERCENT,
+        SCALE_250_PERCENT,
+        SCALE_300_PERCENT,
+        SCALE_350_PERCENT,
+        SCALE_400_PERCENT,
+        SCALE_450_PERCENT,
+        SCALE_500_PERCENT
+    };
+    UINT percent;
+    UINT best_delta = ~0u;
+    DEVICE_SCALE_FACTOR best = SCALE_100_PERCENT;
+    unsigned int i;
+
+    if (!dpi)
+        return DEVICE_SCALE_FACTOR_INVALID;
+
+    percent = (UINT)(((ULONGLONG)dpi * 100 + USER_DEFAULT_SCREEN_DPI / 2) / USER_DEFAULT_SCREEN_DPI);
+
+    for (i = 0; i < sizeof(Factors) / sizeof(Factors[0]); ++i)
+    {
+        UINT factor = Factors[i];
+        UINT delta = (factor > percent) ? factor - percent : percent - factor;
+
+        if (delta < best_delta)
+        {
+            best_delta = delta;
+            best = Factors[i];
+        }
+    }
+
+    return best;
+}
 
 HRESULT WINAPI GetScaleFactorForMonitor(HMONITOR monitor, DEVICE_SCALE_FACTOR *scale)
 {
-    FIXME("(%p %p): stub\n", monitor, scale);
+    UINT dpi_x, dpi_y;
+    HRESULT hr;
+
+    if (!scale)
+        return E_INVALIDARG;
 
     *scale = SCALE_100_PERCENT;
+    hr = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpi_x, &dpi_y);
+    if (FAILED(hr))
+        return hr;
+
+    *scale = ScaleFactorFromDpi(dpi_y);
     return S_OK;
 }
 
 DEVICE_SCALE_FACTOR WINAPI GetScaleFactorForDevice(DISPLAY_DEVICE_TYPE device_type)
 {
-    FIXME("%d\n", device_type);
+    POINT origin = { 0, 0 };
+    HMONITOR monitor;
+    DEVICE_SCALE_FACTOR scale;
 
-    return SCALE_100_PERCENT;
+    if (device_type != DEVICE_PRIMARY && device_type != DEVICE_IMMERSIVE)
+        return SCALE_100_PERCENT;
+
+    monitor = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
+    if (FAILED(GetScaleFactorForMonitor(monitor, &scale)))
+        return SCALE_100_PERCENT;
+
+    return scale;
+}
+
+UINT WINAPI GetDpiForShellUIComponent(SHELL_UI_COMPONENT component)
+{
+    POINT origin = { 0, 0 };
+    HMONITOR monitor;
+    UINT dpi_x, dpi_y;
+
+    if (component < SHELL_UI_COMPONENT_TASKBARS || component > SHELL_UI_COMPONENT_DESKBAND)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+
+    monitor = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
+    if (FAILED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpi_x, &dpi_y)))
+        return USER_DEFAULT_SCREEN_DPI;
+
+    return dpi_y;
 }
 
 HRESULT WINAPI _IStream_Read(IStream *stream, void *dest, ULONG size)
@@ -253,15 +379,58 @@ HRESULT WINAPI IUnknown_SetSite(IUnknown *obj, IUnknown *site)
 
 HRESULT WINAPI SetCurrentProcessExplicitAppUserModelID(const WCHAR *appid)
 {
-    FIXME("%s: stub\n", debugstr_w(appid));
+    WCHAR *copy;
+    WCHAR *previous;
+    SIZE_T size;
+
+    TRACE("%s\n", debugstr_w(appid));
+
+    if (!appid) return E_INVALIDARG;
+
+    size = (lstrlenW(appid) + 1) * sizeof(*appid);
+    if (!(copy = CoTaskMemAlloc(size))) return E_OUTOFMEMORY;
+    memcpy(copy, appid, size);
+
+    AcquireSRWLockExclusive(&explicit_appid_lock);
+    previous = explicit_appid;
+    explicit_appid = copy;
+    ReleaseSRWLockExclusive(&explicit_appid_lock);
+
+    CoTaskMemFree(previous);
     return S_OK;
 }
 
-HRESULT WINAPI GetCurrentProcessExplicitAppUserModelID(const WCHAR **appid)
+HRESULT WINAPI GetCurrentProcessExplicitAppUserModelID(WCHAR **appid)
 {
-    FIXME("%p: stub\n", appid);
+    SIZE_T size;
+    HRESULT hr;
+
+    TRACE("%p\n", appid);
+
+    if (!appid) return E_INVALIDARG;
     *appid = NULL;
-    return E_NOTIMPL;
+
+    AcquireSRWLockShared(&explicit_appid_lock);
+    if (explicit_appid)
+    {
+        size = (lstrlenW(explicit_appid) + 1) * sizeof(*explicit_appid);
+        if ((*appid = CoTaskMemAlloc(size)))
+        {
+            memcpy(*appid, explicit_appid, size);
+            hr = S_OK;
+        }
+        else
+        {
+            hr = E_OUTOFMEMORY;
+        }
+    }
+    else
+    {
+        hr = E_FAIL;
+    }
+    ReleaseSRWLockShared(&explicit_appid_lock);
+
+    return hr;
 }
 
 /*************************************************************************
@@ -839,6 +1008,10 @@ static struct shstream *shstream_create(const IStreamVtbl *vtbl, const BYTE *dat
         data_len = 0;
 
     stream = malloc(sizeof(*stream));
+#ifdef __REACTOS__
+    if (!stream)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     stream->IStream_iface.lpVtbl = vtbl;
     stream->refcount = 1;
     stream->u.mem.buffer = malloc(data_len);
@@ -1160,6 +1333,10 @@ HRESULT WINAPI SHCreateStreamOnFileEx(const WCHAR *path, DWORD mode, DWORD attri
         return HRESULT_FROM_WIN32(GetLastError());
 
     stream = malloc(sizeof(*stream));
+#ifdef __REACTOS__
+    if (!stream)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     stream->IStream_iface.lpVtbl = &filestreamvtbl;
     stream->refcount = 1;
     stream->u.file.handle = hFile;
@@ -2128,6 +2305,10 @@ DWORD WINAPI SHQueryValueExW(HKEY hkey, const WCHAR *name, DWORD *reserved, DWOR
         {
             length = (lstrlenW(buff) + 1) * sizeof(WCHAR);
             value = malloc(length);
+#ifdef __REACTOS__
+            if (!value)
+                RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
             memcpy(value, buff, length);
             length = ExpandEnvironmentStringsW(value, buff, *buff_len / sizeof(WCHAR));
             if (length > *buff_len) ret = ERROR_MORE_DATA;
@@ -2176,6 +2357,10 @@ DWORD WINAPI SHQueryValueExA(HKEY hkey, const char *name, DWORD *reserved, DWORD
         {
             length = strlen(buff) + 1;
             value = malloc(length);
+#ifdef __REACTOS__
+            if (!value)
+                RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
             memcpy(value, buff, length);
             length = ExpandEnvironmentStringsA(value, buff, *buff_len);
             if (length > *buff_len) ret = ERROR_MORE_DATA;
@@ -2389,6 +2574,26 @@ LONG WINAPI SHQueryInfoKeyW(HKEY hkey, DWORD *subkeys, DWORD *subkey_max, DWORD 
 /*************************************************************************
  * IsOS        [SHCORE.@]
  */
+#ifdef __REACTOS__
+static BOOL is_domain_member(void)
+{
+    LSA_OBJECT_ATTRIBUTES attributes = { sizeof(attributes) };
+    POLICY_PRIMARY_DOMAIN_INFO *info;
+    LSA_HANDLE policy;
+    BOOL member = FALSE;
+
+    if (LsaOpenPolicy(NULL, &attributes, POLICY_VIEW_LOCAL_INFORMATION, &policy))
+        return FALSE;
+    if (!LsaQueryInformationPolicy(policy, PolicyPrimaryDomainInformation, (void **)&info))
+    {
+        member = info->Sid != NULL;
+        LsaFreeMemory(info);
+    }
+    LsaClose(policy);
+    return member;
+}
+
+#endif
 BOOL WINAPI IsOS(DWORD feature)
 {
     DWORD platform, majorv, minorv;
@@ -2490,8 +2695,12 @@ BOOL WINAPI IsOS(DWORD feature)
         FIXME("(OS_WELCOMELOGONUI) What should we return here?\n");
         return FALSE;
     case OS_DOMAINMEMBER:
+#ifdef __REACTOS__
+        ISOS_RETURN(is_domain_member());
+#else
         FIXME("(OS_DOMAINMEMBER) What should we return here?\n");
         return TRUE;
+#endif
     case OS_ANYSERVER:
 #ifdef __REACTOS__
         ISOS_RETURN(osvi.wProductType > VER_NT_WORKSTATION);
@@ -2558,7 +2767,9 @@ BOOL WINAPI IsOS(DWORD feature)
 void WINAPI SubscribeFeatureStateChangeNotification(FEATURE_STATE_CHANGE_SUBSCRIPTION *subscription,
                                                     FEATURE_STATE_CHANGE_CALLBACK *callback, void *context)
 {
-    FIXME("(%p, %p, %p) stub\n", subscription, callback, context);
+    TRACE("(%p, %p, %p)\n", subscription, callback, context);
+    /* There are no feature overrides or state transitions to subscribe to. */
+    if (subscription) *subscription = NULL;
 }
 
 /*************************************************************************
@@ -2566,8 +2777,34 @@ void WINAPI SubscribeFeatureStateChangeNotification(FEATURE_STATE_CHANGE_SUBSCRI
  */
 FEATURE_ENABLED_STATE WINAPI GetFeatureEnabledState(UINT32 feature, FEATURE_CHANGE_TIME change_time)
 {
-    FIXME("(%u, %u) stub\n", feature, change_time);
+    TRACE("(%u, %u)\n", feature, change_time);
     return FEATURE_ENABLED_STATE_DEFAULT;
+}
+
+/* Feature staging has no overrides in ReactOS. Leave feature selection to
+ * each caller's compiled defaults, and never report a pending notification. */
+UINT32 WINAPI GetFeatureVariant(UINT32 feature, FEATURE_CHANGE_TIME change_time,
+                               UINT32 *payload, BOOL *notification)
+{
+    TRACE("(%u, %u, %p, %p)\n", feature, change_time, payload, notification);
+    if (payload) *payload = 0;
+    if (notification) *notification = FALSE;
+    return 0;
+}
+
+void WINAPI UnsubscribeFeatureStateChangeNotification(FEATURE_STATE_CHANGE_SUBSCRIPTION subscription)
+{
+    TRACE("(%p)\n", subscription);
+}
+
+void WINAPI RecordFeatureError(UINT32 feature, const FEATURE_ERROR *error)
+{
+    TRACE("(%u, %p)\n", feature, error);
+}
+
+void WINAPI RecordFeatureUsage(UINT32 feature, UINT32 kind, UINT32 addend, const char *origin)
+{
+    TRACE("(%u, %u, %u, %s)\n", feature, kind, addend, debugstr_a(origin));
 }
 
 /*************************************************************************
@@ -2598,4 +2835,66 @@ HRESULT WINAPI CreateRandomAccessStreamOverStream(IStream *stream, BSOS_OPTIONS 
 {
     FIXME("(%p, %d, %s, %p) stub\n", stream, options, debugstr_guid(riid), ppv);
     return E_NOTIMPL;
+}
+
+LSTATUS WINAPI SHRegGetValueFromHKCUHKLM(PCWSTR path, PCWSTR value, SRRF flags,
+                                         DWORD *type, void *data, DWORD *size)
+{
+    DWORD initial = size ? *size : 0;
+    LSTATUS status;
+
+    TRACE("%s %s %#lx %p %p %p\n", debugstr_w(path), debugstr_w(value), flags,
+          type, data, size);
+
+    status = RegGetValueW(HKEY_CURRENT_USER, path, value, flags, type, data, size);
+    if (status != ERROR_FILE_NOT_FOUND)
+        return status;
+
+    if (size)
+        *size = initial;
+
+    return RegGetValueW(HKEY_LOCAL_MACHINE, path, value, flags, type, data, size);
+}
+
+BOOL WINAPI SHRegGetBoolValueFromHKCUHKLM(PCWSTR path, PCWSTR value, BOOL default_value)
+{
+    DWORD type, data, size = sizeof(data);
+
+    TRACE("%s %s %d\n", debugstr_w(path), debugstr_w(value), default_value);
+
+    if (SHRegGetValueFromHKCUHKLM(path, value, SRRF_RT_DWORD, &type, &data, &size) != ERROR_SUCCESS)
+        return default_value;
+
+    if (type != REG_DWORD)
+        return default_value;
+
+    return data != 0;
+}
+
+HRESULT WINAPI SHRegGetCLSIDKey(REFGUID guid, const WCHAR *subkey, BOOL user, BOOL create, HKEY *retkey)
+{
+    FIXME("%s %s %d %d %p: stub\n", debugstr_guid(guid), debugstr_w(subkey), user, create, retkey);
+
+    if (retkey)
+        *retkey = NULL;
+    return E_NOTIMPL;
+}
+
+LSTATUS WINAPI SHRegSetValue(HKEY hkey, const WCHAR *subkey, const WCHAR *value, DWORD flags,
+                             DWORD type, const void *data, DWORD size)
+{
+    FIXME("%p %s %s %#lx %#lx %p %lu: stub\n", hkey, debugstr_w(subkey), debugstr_w(value),
+          flags, type, data, size);
+    return ERROR_CALL_NOT_IMPLEMENTED;
+}
+
+void WINAPI IUnknown_RemoveBackReferences(IUnknown *unk)
+{
+    FIXME("%p: stub\n", unk);
+}
+
+BOOL WINAPI SHWindowsPolicy(int policy)
+{
+    FIXME("%d: stub\n", policy);
+    return FALSE;
 }

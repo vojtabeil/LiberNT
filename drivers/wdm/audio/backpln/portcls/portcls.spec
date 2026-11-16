@@ -30,6 +30,7 @@
 @ stdcall PcForwardIrpSynchronous(ptr ptr)
 
 ; Misc
+@ stdcall PcGetPhysicalDeviceObject(ptr ptr)
 @ stdcall PcGetTimeInterval(long long)
 @ stdcall PcRegisterSubdevice(ptr wstr ptr)
 
@@ -50,3 +51,6 @@
 ; Timeouts
 @ stdcall PcRegisterIoTimeout(ptr ptr ptr)
 @ stdcall PcUnregisterIoTimeout(ptr ptr ptr)
+
+@ stdcall PcAddStreamResource(ptr ptr ptr ptr)
+@ stdcall PcRemoveStreamResource(ptr)

@@ -1,43 +1,101 @@
 add_subdirectory(makeimg)
 
 list(APPEND SOURCE
+    AltTabHook.c
+    AnimatedCursor.c
     AttachThreadInput.c
     ../include/msgtrace.c
+    CalculatePopupWindowPosition.c
+    CallWindowProc.c
+    CallbackNesting.c
     CharFuncs.c
     CloseWindow.c
+    ClipboardAccess.c
+    ClipboardData.c
+    FrameMetrics.c
+    ComboBox.c
     CopyImage.c
+    CopyImage_Icon.c
+    CursorPresentation.c
     CreateDialog.c
     CreateIconFromResourceEx.c
+    CoveredWindow.c
     CreateWindowEx.c
+    CrossThreadWindowPos.c
     DeferWindowPos.c
+    DefFrameProc.c
+    DeskWallpaper.c
     DestroyCursorIcon.c
+    DestroyActiveWindow.c
+    DestroyWindow.c
+    DialogAccelerator.c
+    DialogDpiChangeBehavior.c
     DM_REPOSITION.c
+    Dpi.c
+    DpiHostingBehavior.c
+    DpiAwareness.c
+    DpiScaling.c
+    DpiVirtualization.c
     DrawIconEx.c
     DrawText.c
     desktop.c
     EmptyClipboard.c
+    EnableScrollBar.c
     EnumDisplaySettings.c
+    ForegroundAfterHide.c
+    ForegroundRetake.c
+    ForegroundRight.c
+    ForegroundStartup.c
     GetClassInfo.c
     GetDCEx.c
+    GetProp.c
+    WindowRegionDC.c
     GetIconInfo.c
     GetKeyState.c
     GetMessageTime.c
     GetPeekMessage.c
+    GetPointerDevices.c
     GetSetWindowInt.c
     GetSystemMetrics.c
+    GetTitleBarInfoEx.c
     GetUserObjectInformation.c
     GetWindowPlacement.c
+    GhostWindow.c
     GW_ENABLEDPOPUP.c
+    HiddenChildWindowPos.c
+    ImeWindow.c
+    ImeWindowZOrder.c
     InitializeLpkHooks.c
+    InputMessageSource.c
+    InvalidHandles.c
+    IsTopLevelWindow.c
     IsServerSideWindow.c
+    JobUiWindowAccess.c
     KbdLayout.c
+    LargeMessageBuffers.c
     keybd_event.c
     LoadImage.c
     LoadImageGCC.c
     LookupIconIdFromDirectoryEx.c
+    MaximizedCaptionClick.c
     MenuUI.c
+    MenuItemData.c
+    MenuBarBackground.c
     MessageStateAnalyzer.c
+    MinimizedPosition.c
+    ModernUser32.c
+    NestedActivation.c
+    NestedWindowPos.c
+    NcPaintRgn.c
     NextDlgItem.c
+    NonClientPaint.c
+    NonClientUpdate.c
+    OwnedZOrder.c
+    OwnerDestroy.c
+    PersianLayout.c
+    PhysicalPoint.c
+    PhysicalToLogicalPoint.c
+    LogicalToPhysicalPoint.c
     PrivateExtractIcons.c
     RealGetWindowClass.c
     RedrawWindow.c
@@ -47,7 +105,10 @@ list(APPEND SOURCE
     ScrollBarWndExtra.c
     ScrollDC.c
     ScrollWindowEx.c
+    UnhookWinEvent.c
     SendMessageTimeout.c
+    ServiceAccountDesktop.c
+    SendMessageTimeoutHung.c
     SetActiveWindow.c
     SetCursorPos.c
     SetFocus.c
@@ -56,18 +117,33 @@ list(APPEND SOURCE
     SetScrollInfo.c
     SetScrollRange.c
     SetWindowPlacement.c
+    SetWindowPosOwnerTree.c
+    SetWindowPosZOrder.c
+    WindowDisplayAffinity.c
+    WindowRegionFrame.c
+    ShellWindowQueries.c
+    ShellWindowZOrder.c
     ShowWindow.c
     SwitchToThisWindow.c
     SystemMenu.c
+    TopmostBand.c
     SystemParametersInfo.c
     TrackMouseEvent.c
     TrackPopupMenuEx.c
+    UncoveredWindow.c
+    UpdateRegion.c
     UserHandleGrantAccess.c
     VirtualKey.c
+    WaitForInputIdle.c
+    WindowBand.c
+    WindowStationErrors.c
+    WindowStationSecurity.c
+    WindowPosInsertAfter.c
     WndProc.c
     wsprintf.c)
 
 list(APPEND PCH_SKIP_SOURCE
+    RegisterTouchWindow.c
     testlist.c)
 
 add_executable(user32_apitest
@@ -78,7 +154,7 @@ add_executable(user32_apitest
 
 target_link_libraries(user32_apitest wine ${PSEH_LIB})
 set_module_type(user32_apitest win32cui)
-add_importlibs(user32_apitest advapi32 imm32 gdi32 user32 msvcrt kernel32 ntdll)
+add_importlibs(user32_apitest advapi32 imm32 gdi32 gdiplus user32 msvcrt kernel32 ntdll)
 add_pch(user32_apitest precomp.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET user32_apitest)
 
@@ -87,6 +163,12 @@ set_module_type(user32_apitest_menuui win32gui UNICODE)
 add_importlibs(user32_apitest_menuui user32 msvcrt kernel32)
 add_rostests_file(TARGET user32_apitest_menuui)
 add_dependencies(user32_apitest user32_apitest_menuui)
+
+add_executable(user32_apitest_fghide user32_apitest_fghide.c)
+set_module_type(user32_apitest_fghide win32gui UNICODE)
+add_importlibs(user32_apitest_fghide user32 msvcrt kernel32)
+add_rostests_file(TARGET user32_apitest_fghide)
+add_dependencies(user32_apitest user32_apitest_fghide)
 
 add_rostests_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/verclasstest1.manifest")
 add_rostests_file(FILE "${CMAKE_CURRENT_SOURCE_DIR}/verclasstest2.manifest")

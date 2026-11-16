@@ -54,7 +54,7 @@ double erf(double x)
     sign = 1;
     if (x < 0)
         sign = -1;
-    x = abs(x);
+    x = fabs(x);
 
     /* A & S 7.1.26 */
     t = 1.0/(1.0 + p*x);
@@ -1089,9 +1089,9 @@ GpStatus WINGDIPAPI GdipGetPathGradientBlend(GpPathGradient *brush, REAL *blend,
     if(count < brush->blendcount)
         return InsufficientBuffer;
 
-    memcpy(blend, brush->blendfac, count*sizeof(REAL));
+    memcpy(blend, brush->blendfac, brush->blendcount*sizeof(REAL));
     if(brush->blendcount > 1){
-        memcpy(positions, brush->blendpos, count*sizeof(REAL));
+        memcpy(positions, brush->blendpos, brush->blendcount*sizeof(REAL));
     }
 
     return Ok;

@@ -9,8 +9,8 @@
 #ifndef _FENV // include guard for 3rd party interop
 #define _FENV
 
-#include <corecrt.h>
-#include <float.h>
+#include "corecrt.h"
+#include "float.h"
 
 #pragma warning(push)
 #pragma warning(disable: _UCRT_DISABLED_WARNINGS)
@@ -99,14 +99,22 @@ _ACRTIMP int __cdecl fesetround(_In_ int _Round);
                 __pragma(optimize("", on))
         #endif
         _BEGIN_PRAGMA_OPTIMIZE_DISABLE("", MSFT:4499495, "If optimizations are on, the floating-point exception might not get triggered (because the compiler optimizes it out), breaking the function.")
+        #if defined(__GNUC__)
+        static __inline int __CRTDECL feraiseexcept(_In_ int _Except)
+        #else
         __inline int __CRTDECL feraiseexcept(_In_ int _Except)
+        #endif
         {
             static struct
             {
                 int    _Except_Val;
                 double _Num;
                 double _Denom;
-            } const _Table[] =
+            } const
+            #if defined(__GNUC__)
+            volatile
+            #endif
+            _Table[] =
             {  // Raise exception by evaluating num / denom:
                 {FE_INVALID,   0.0,    0.0    },
                 {FE_DIVBYZERO, 1.0,    0.0    },
@@ -115,6 +123,9 @@ _ACRTIMP int __cdecl fesetround(_In_ int _Round);
                 {FE_INEXACT,   2.0,    3.0    }
             };
 
+            #if defined(__GNUC__)
+            volatile
+            #endif
             double _Ans = 0.0;
             (void) _Ans; // Suppress set-but-not-used warnings. _Ans is not "used" in the traditional static-analysis sense, but it is needed to trigger a floating point exception below.
             size_t _Index;
@@ -148,7 +159,11 @@ _ACRTIMP int __cdecl fesetround(_In_ int _Round);
         }
         _END_PRAGMA_OPTIMIZE()
 
+        #if defined(__GNUC__)
+        static __inline int __CRTDECL feupdateenv(_In_ const fenv_t *_Penv)
+        #else
         __inline int __CRTDECL feupdateenv(_In_ const fenv_t *_Penv)
+        #endif
         {
             int _Except = fetestexcept(FE_ALL_EXCEPT);
 

@@ -48,6 +48,73 @@ typedef enum _EX_POOL_PRIORITY {
   HighPoolPrioritySpecialPoolUnderrun = 41
 } EX_POOL_PRIORITY;
 
+#if (NTDDI_VERSION >= NTDDI_WIN10_VB) || defined(_NTOSKRNL_)
+
+typedef enum POOL_EXTENDED_PARAMETER_TYPE {
+  PoolExtendedParameterInvalidType = 0,
+  PoolExtendedParameterPriority,
+  PoolExtendedParameterSecurePool,
+  PoolExtendedParameterNumaNode,
+  PoolExtendedParameterMax
+} POOL_EXTENDED_PARAMETER_TYPE, *PPOOL_EXTENDED_PARAMETER_TYPE;
+
+#define POOL_EXTENDED_PARAMETER_TYPE_BITS 8
+#define POOL_EXTENDED_PARAMETER_REQUIRED_FIELD_BITS 1
+#define POOL_EXTENDED_PARAMETER_RESERVED_BITS (64 - POOL_EXTENDED_PARAMETER_TYPE_BITS - POOL_EXTENDED_PARAMETER_REQUIRED_FIELD_BITS)
+
+#define SECURE_POOL_FLAGS_NONE       0x0
+#define SECURE_POOL_FLAGS_FREEABLE   0x1
+#define SECURE_POOL_FLAGS_MODIFIABLE 0x2
+
+typedef struct _POOL_EXTENDED_PARAMS_SECURE_POOL {
+  HANDLE SecurePoolHandle;
+  PVOID Buffer;
+  ULONG_PTR Cookie;
+  ULONG SecurePoolFlags;
+} POOL_EXTENDED_PARAMS_SECURE_POOL;
+
+typedef ULONG POOL_NODE_REQUIREMENT;
+
+typedef struct _POOL_EXTENDED_PARAMETER {
+  struct {
+    ULONG64 Type : POOL_EXTENDED_PARAMETER_TYPE_BITS;
+    ULONG64 Optional : POOL_EXTENDED_PARAMETER_REQUIRED_FIELD_BITS;
+    ULONG64 Reserved : POOL_EXTENDED_PARAMETER_RESERVED_BITS;
+  } DUMMYSTRUCTNAME;
+  union {
+    ULONG64 Reserved2;
+    PVOID Reserved3;
+    EX_POOL_PRIORITY Priority;
+    POOL_EXTENDED_PARAMS_SECURE_POOL *SecurePoolParams;
+    POOL_NODE_REQUIREMENT PreferredNode;
+  } DUMMYUNIONNAME;
+} POOL_EXTENDED_PARAMETER, *PPOOL_EXTENDED_PARAMETER;
+typedef CONST POOL_EXTENDED_PARAMETER *PCPOOL_EXTENDED_PARAMETER;
+
+typedef ULONG64 POOL_FLAGS;
+
+#define POOL_FLAG_REQUIRED_START      0x0000000000000001ULL
+#define POOL_FLAG_USE_QUOTA           0x0000000000000001ULL
+#define POOL_FLAG_UNINITIALIZED       0x0000000000000002ULL
+#define POOL_FLAG_SESSION             0x0000000000000004ULL
+#define POOL_FLAG_CACHE_ALIGNED       0x0000000000000008ULL
+#define POOL_FLAG_RESERVED1           0x0000000000000010ULL
+#define POOL_FLAG_RAISE_ON_FAILURE    0x0000000000000020ULL
+#define POOL_FLAG_NON_PAGED           0x0000000000000040ULL
+#define POOL_FLAG_NON_PAGED_EXECUTE   0x0000000000000080ULL
+#define POOL_FLAG_PAGED               0x0000000000000100ULL
+#define POOL_FLAG_RESERVED2           0x0000000000000200ULL
+#define POOL_FLAG_RESERVED3           0x0000000000000400ULL
+#define POOL_FLAG_RESERVED4           0x0000000000000800ULL
+#define POOL_FLAG_LAST_KNOWN_REQUIRED POOL_FLAG_RESERVED4
+#define POOL_FLAG_REQUIRED_END        0x0000000080000000ULL
+#define POOL_FLAG_OPTIONAL_START      0x0000000100000000ULL
+#define POOL_FLAG_SPECIAL_POOL        0x0000000100000000ULL
+#define POOL_FLAG_OPTIONAL_END        0x8000000000000000ULL
+#define POOL_FLAG_REQUIRED_MASK       0x00000000FFFFFFFFULL
+
+#endif /* (NTDDI_VERSION >= NTDDI_WIN10_VB) || defined(_NTOSKRNL_) */
+
 #if !defined(_WIN64) && (defined(_NTDDK_) || defined(_NTIFS_) || defined(_NDIS_))
 #define LOOKASIDE_ALIGN
 #else
@@ -59,32 +126,36 @@ typedef struct _LOOKASIDE_LIST_EX *PLOOKASIDE_LIST_EX;
 _IRQL_requires_same_
 _Function_class_(ALLOCATE_FUNCTION)
 typedef PVOID
-(NTAPI *PALLOCATE_FUNCTION)(
+(NTAPI ALLOCATE_FUNCTION)(
     _In_ POOL_TYPE PoolType,
     _In_ SIZE_T NumberOfBytes,
     _In_ ULONG Tag);
+typedef ALLOCATE_FUNCTION *PALLOCATE_FUNCTION;
 
 _IRQL_requires_same_
 _Function_class_(ALLOCATE_FUNCTION_EX)
 typedef PVOID
-(NTAPI *PALLOCATE_FUNCTION_EX)(
+(NTAPI ALLOCATE_FUNCTION_EX)(
     _In_ POOL_TYPE PoolType,
     _In_ SIZE_T NumberOfBytes,
     _In_ ULONG Tag,
     _Inout_ PLOOKASIDE_LIST_EX Lookaside);
+typedef ALLOCATE_FUNCTION_EX *PALLOCATE_FUNCTION_EX;
 
 _IRQL_requires_same_
 _Function_class_(FREE_FUNCTION)
 typedef VOID
-(NTAPI *PFREE_FUNCTION)(
+(NTAPI FREE_FUNCTION)(
     _In_ PVOID Buffer);
+typedef FREE_FUNCTION *PFREE_FUNCTION;
 
 _IRQL_requires_same_
 _Function_class_(FREE_FUNCTION_EX)
 typedef VOID
-(NTAPI *PFREE_FUNCTION_EX)(
+(NTAPI FREE_FUNCTION_EX)(
     _In_ PVOID Buffer,
     _Inout_ PLOOKASIDE_LIST_EX Lookaside);
+typedef FREE_FUNCTION_EX *PFREE_FUNCTION_EX;
 
 _IRQL_requires_same_
 _Function_class_(CALLBACK_FUNCTION)
@@ -148,14 +219,14 @@ LOOKASIDE_CHECK(Future);
 
 typedef struct LOOKASIDE_ALIGN _PAGED_LOOKASIDE_LIST {
   GENERAL_LOOKASIDE L;
-#if !defined(_AMD64_) && !defined(_IA64_)
+#if defined(_X86_)
   FAST_MUTEX Lock__ObsoleteButDoNotDelete;
 #endif
 } PAGED_LOOKASIDE_LIST, *PPAGED_LOOKASIDE_LIST;
 
 typedef struct LOOKASIDE_ALIGN _NPAGED_LOOKASIDE_LIST {
   GENERAL_LOOKASIDE L;
-#if !defined(_AMD64_) && !defined(_IA64_)
+#if defined(_X86_)
   KSPIN_LOCK Lock__ObsoleteButDoNotDelete;
 #endif
 } NPAGED_LOOKASIDE_LIST, *PNPAGED_LOOKASIDE_LIST;
@@ -222,7 +293,8 @@ typedef struct _OWNER_ENTRY {
     _ANONYMOUS_STRUCT struct {
       ULONG IoPriorityBoosted:1;
       ULONG OwnerReferenced:1;
-      ULONG OwnerCount:30;
+      ULONG IoQoSPriorityBoosted:1;
+      ULONG OwnerCount:29;
     } DUMMYSTRUCTNAME;
     ULONG TableSize;
   } DUMMYUNIONNAME;
@@ -232,7 +304,13 @@ typedef struct _ERESOURCE {
   LIST_ENTRY SystemResourcesList;
   POWNER_ENTRY OwnerTable;
   SHORT ActiveCount;
-  USHORT Flag;
+  _ANONYMOUS_UNION union {
+    USHORT Flag;
+    _ANONYMOUS_STRUCT struct {
+      UCHAR ReservedLowFlags;
+      UCHAR WaiterPriority;
+    } DUMMYSTRUCTNAME;
+  } DUMMYUNIONNAME;
   volatile PKSEMAPHORE SharedWaiters;
   volatile PKEVENT ExclusiveWaiters;
   OWNER_ENTRY OwnerEntry;
@@ -241,7 +319,9 @@ typedef struct _ERESOURCE {
   ULONG NumberOfSharedWaiters;
   ULONG NumberOfExclusiveWaiters;
 #if defined(_WIN64)
-  PVOID Reserved2;
+  volatile CHAR MiscFlags;
+  UCHAR Reserved1[3];
+  ULONG ResourceTimeoutCount;
 #endif
   _ANONYMOUS_UNION union {
     PVOID Address;
@@ -352,17 +432,34 @@ $endif (_NTDDK_)
 $if (_NTIFS_)
 #define INVALID_PROCESSOR_INDEX     0xffffffff
 
+$endif (_NTIFS_)
+$if (_WDMDDK_)
 #define EX_PUSH_LOCK ULONG_PTR
 #define PEX_PUSH_LOCK PULONG_PTR
-$endif (_NTIFS_)
+
+#ifndef EX_NO_PUSH_LOCKS
+#if (NTDDI_VERSION < NTDDI_WINBLUE)
+#ifndef EX_LEGACY_PUSH_LOCKS
+#define EX_LEGACY_PUSH_LOCKS
+#endif
+#endif
+#endif
+
+$endif (_WDMDDK_)
+
+$if (_NTIFS_ || _WDMDDK_)
+typedef volatile LONG EX_SPIN_LOCK, *PEX_SPIN_LOCK;
+#define ALIGNED_EX_SPINLOCK DECLSPEC_CACHEALIGN EX_SPIN_LOCK
+$endif (_NTIFS_ || _WDMDDK_)
 
 $if (_WINNT_ || _WDMDDK_)
-#if (NTDDI_VERSION >= NTDDI_VISTA)
+#ifndef _FIRMWARE_TYPE_DEFINED
+#define _FIRMWARE_TYPE_DEFINED
 typedef enum _FIRMWARE_TYPE {
     FirmwareTypeUnknown,
     FirmwareTypeBios,
     FirmwareTypeUefi,
     FirmwareTypeMax
 } FIRMWARE_TYPE, *PFIRMWARE_TYPE;
-#endif /* (NTDDI_VERSION >= NTDDI_VISTA) */
+#endif /* _FIRMWARE_TYPE_DEFINED */
 $endif (_WINNT_ || _WDMDDK_)

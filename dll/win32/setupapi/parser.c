@@ -26,11 +26,8 @@
 #include <ndk/obfuncs.h>
 
 /* Unicode constants */
-static const WCHAR BackSlash[] = {'\\',0};
 static const WCHAR Class[]  = {'C','l','a','s','s',0};
 static const WCHAR ClassGUID[]  = {'C','l','a','s','s','G','U','I','D',0};
-static const WCHAR InfDirectory[] = {'i','n','f','\\',0};
-static const WCHAR InfFileSpecification[] = {'*','.','i','n','f',0};
 
 #define CONTROL_Z  '\x1a'
 #define MAX_SECTION_NAME_LEN  255
@@ -68,11 +65,18 @@ struct inf_file
     unsigned int     nb_sections;     /* number of used sections */
     unsigned int     alloc_sections;  /* total number of allocated section pointers */
     struct section **sections;        /* section pointers array */
+#ifdef __REACTOS__
+    unsigned int    *section_hash;
+    unsigned int     hash_size;
+#endif
     unsigned int     nb_fields;
     unsigned int     alloc_fields;
     struct field    *fields;
     int              strings_section; /* index of [Strings] section or -1 if none */
     WCHAR           *filename;        /* filename of the INF */
+    WCHAR           *driver_store_dir;
+    BOOL             driver_store_checked;
+    unsigned int     broken_line;
 };
 
 /* parser definitions */
@@ -173,6 +177,54 @@ static const WCHAR *get_inf_dir( const struct inf_file *file, unsigned int *len 
 }
 
 
+#ifdef __REACTOS__
+static unsigned int section_name_hash( const WCHAR *name )
+{
+    unsigned int hash = 2166136261u;
+
+    for (; *name; name++) hash = (hash ^ towlower( *name )) * 16777619u;
+    return hash;
+}
+
+static void section_hash_insert( unsigned int *table, unsigned int size, const WCHAR *name, unsigned int index )
+{
+    unsigned int slot = section_name_hash( name ) & (size - 1);
+
+    while (table[slot]) slot = (slot + 1) & (size - 1);
+    table[slot] = index + 1;
+}
+
+static BOOL section_hash_reserve( struct inf_file *file, unsigned int count )
+{
+    unsigned int size = file->hash_size ? file->hash_size : 64;
+    unsigned int *table;
+    unsigned int i;
+
+    while (count * 2 > size) size *= 2;
+    if (size == file->hash_size) return TRUE;
+    if (!(table = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, size * sizeof(*table) ))) return FALSE;
+    for (i = 0; i < file->nb_sections; i++)
+        section_hash_insert( table, size, file->sections[i]->name, i );
+    HeapFree( GetProcessHeap(), 0, file->section_hash );
+    file->section_hash = table;
+    file->hash_size = size;
+    return TRUE;
+}
+
+static int find_section( const struct inf_file *file, const WCHAR *name )
+{
+    unsigned int slot, index;
+
+    if (!file->hash_size) return -1;
+    slot = section_name_hash( name ) & (file->hash_size - 1);
+    while ((index = file->section_hash[slot]))
+    {
+        if (!strcmpiW( name, file->sections[index - 1]->name )) return index - 1;
+        slot = (slot + 1) & (file->hash_size - 1);
+    }
+    return -1;
+}
+#else
 /* find a section by name */
 static int find_section( const struct inf_file *file, const WCHAR *name )
 {
@@ -182,6 +234,7 @@ static int find_section( const struct inf_file *file, const WCHAR *name )
         if (!strcmpiW( name, file->sections[i]->name )) return i;
     return -1;
 }
+#endif
 
 
 /* find a line by name */
@@ -212,11 +265,17 @@ static int add_section( struct inf_file *file, const WCHAR *name )
         if (!(file->sections = grow_array( file->sections, &file->alloc_sections,
                                            sizeof(file->sections[0]) ))) return -1;
     }
+#ifdef __REACTOS__
+    if (!section_hash_reserve( file, file->nb_sections + 1 )) return -1;
+#endif
     if (!(section = HeapAlloc( GetProcessHeap(), 0, sizeof(*section) ))) return -1;
     section->name        = name;
     section->nb_lines    = 0;
     section->alloc_lines = sizeof(section->lines)/sizeof(section->lines[0]);
     file->sections[file->nb_sections] = section;
+#ifdef __REACTOS__
+    section_hash_insert( file->section_hash, file->hash_size, name, file->nb_sections );
+#endif
     return file->nb_sections++;
 }
 
@@ -292,12 +351,34 @@ static struct field *add_field( struct inf_file *file, const WCHAR *text )
 }
 
 
+static const WCHAR *get_driver_store_dir( const struct inf_file *file, unsigned int *len )
+{
+    struct inf_file *inf = (struct inf_file *)file;
+    WCHAR store_inf[MAX_PATH], *p;
+
+    if (!inf->driver_store_checked)
+    {
+        inf->driver_store_checked = TRUE;
+        if (inf->filename && SETUPAPI_FindDriverStoreInf( inf->filename, store_inf ) &&
+            (p = strrchrW( store_inf, '\\' )))
+        {
+            *p = 0;
+            if ((inf->driver_store_dir = HeapAlloc( GetProcessHeap(), 0, (p - store_inf + 1) * sizeof(WCHAR) )))
+                strcpyW( inf->driver_store_dir, store_inf );
+        }
+    }
+    if (!inf->driver_store_dir) return NULL;
+    *len = strlenW( inf->driver_store_dir );
+    return inf->driver_store_dir;
+}
+
 /* retrieve the string substitution for a directory id */
 static const WCHAR *get_dirid_subst( const struct inf_file *file, int dirid, unsigned int *len )
 {
     const WCHAR *ret;
 
     if (dirid == DIRID_SRCPATH) return get_inf_dir( file, len );
+    if (dirid == DIRID_DRIVER_STORE && (ret = get_driver_store_dir( file, len ))) return ret;
     ret = DIRID_get_string( dirid );
     if (ret) *len = strlenW(ret);
     return ret;
@@ -314,8 +395,8 @@ static const WCHAR *get_string_subst( const struct inf_file *file, const WCHAR *
     struct section *strings_section;
     struct line *line;
     struct field *field;
-    unsigned int i, j;
-    int dirid;
+    unsigned int j;
+    int dirid, section_index;
     WCHAR *dirid_str, *end;
     const WCHAR *ret = NULL;
     WCHAR StringLangId[13] = {'S','t','r','i','n','g','s','.',0};
@@ -340,40 +421,34 @@ static const WCHAR *get_string_subst( const struct inf_file *file, const WCHAR *
 
     strcpyW(StringLangId + 8, Lang + 2);
     // now you have e.g. Strings.07 for german neutral translations
-    for (i = 0; i < file->nb_sections; i++) // search in all sections
+    if ((section_index = find_section( file, StringLangId )) != -1)
     {
-        if (!strcmpiW(file->sections[i]->name,StringLangId)) // if the section is a Strings.* section
+        strings_section = file->sections[section_index]; // select this section for further use
+        for (j = 0, line = strings_section->lines; j < strings_section->nb_lines; j++, line++) // process all lines in this section
         {
-            strings_section = file->sections[i]; // select this section for further use
-            for (j = 0, line = strings_section->lines; j < strings_section->nb_lines; j++, line++) // process all lines in this section
+            if (line->key_field == -1) continue; // if no key then skip
+            if (strncmpiW( str, file->fields[line->key_field].text, *len )) continue; // if wrong key name, then skip
+            if (!file->fields[line->key_field].text[*len]) // if value exist
             {
-                if (line->key_field == -1) continue; // if no key then skip
-                if (strncmpiW( str, file->fields[line->key_field].text, *len )) continue; // if wrong key name, then skip
-                if (!file->fields[line->key_field].text[*len]) // if value exist
-                {
-                    field = &file->fields[line->first_field]; // then extract value and
-                    break; // no more search necessary
-                }
+                field = &file->fields[line->first_field]; // then extract value and
+                break; // no more search necessary
             }
         }
     }
 
     strcpyW(StringLangId + 8, Lang); // append the Language identifier from GetLocaleInfo
     // now you have e.g. Strings.0407 for german translations
-    for (i = 0; i < file->nb_sections; i++) // search in all sections
+    if ((section_index = find_section( file, StringLangId )) != -1)
     {
-        if (!strcmpiW(file->sections[i]->name,StringLangId)) // if the section is a Strings.* section
+        strings_section = file->sections[section_index]; // select this section for further use
+        for (j = 0, line = strings_section->lines; j < strings_section->nb_lines; j++, line++) // process all lines in this section
         {
-            strings_section = file->sections[i]; // select this section for further use
-            for (j = 0, line = strings_section->lines; j < strings_section->nb_lines; j++, line++) // process all lines in this section
+            if (line->key_field == -1) continue; // if no key then skip
+            if (strncmpiW( str, file->fields[line->key_field].text, *len )) continue; // if wrong key name, then skip
+            if (!file->fields[line->key_field].text[*len]) // if value exist
             {
-                if (line->key_field == -1) continue; // if no key then skip
-                if (strncmpiW( str, file->fields[line->key_field].text, *len )) continue; // if wrong key name, then skip
-                if (!file->fields[line->key_field].text[*len]) // if value exist
-                {
-                    field = &file->fields[line->first_field]; // then extract value and
-                    break; // no more search necessary
-                }
+                field = &file->fields[line->first_field]; // then extract value and
+                break; // no more search necessary
             }
         }
     }
@@ -762,7 +837,7 @@ static const WCHAR *value_name_state( struct parser *parser, const WCHAR *pos )
             set_state( parser, EOL_BACKSLASH );
             return p;
         default:
-            if (!isspaceW(*p)) token_end = p + 1;
+            if (*p && !isspaceW(*p)) token_end = p + 1;
             else
             {
                 push_token( parser, p );
@@ -876,7 +951,7 @@ static const WCHAR *trailing_spaces_state( struct parser *parser, const WCHAR *p
             set_state( parser, EOL_BACKSLASH );
             return p;
         }
-        if (!isspaceW(*p)) break;
+        if (*p && !isspaceW(*p)) break;
     }
     pop_state( parser );
     return p;
@@ -900,10 +975,74 @@ static void free_inf_file( struct inf_file *file )
 
     for (i = 0; i < file->nb_sections; i++) HeapFree( GetProcessHeap(), 0, file->sections[i] );
     HeapFree( GetProcessHeap(), 0, file->filename );
+    HeapFree( GetProcessHeap(), 0, file->driver_store_dir );
     HeapFree( GetProcessHeap(), 0, file->sections );
+#ifdef __REACTOS__
+    HeapFree( GetProcessHeap(), 0, file->section_hash );
+#endif
     HeapFree( GetProcessHeap(), 0, file->fields );
     HeapFree( GetProcessHeap(), 0, file->strings );
     HeapFree( GetProcessHeap(), 0, file );
+}
+
+
+/* Clone only the immutable root parse. Appended Include/Needs files belong to
+ * the consumer's HINF graph and must never escape into the cached template. */
+HINF PARSER_clone_inf(HINF hinf)
+{
+    const struct inf_file *source = hinf;
+    struct inf_file *copy;
+    SIZE_T chars = source->string_pos - source->strings;
+    unsigned int i;
+
+    copy = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*copy));
+    if (!copy) goto failed;
+    copy->strings_section = source->strings_section;
+    copy->strings = HeapAlloc(GetProcessHeap(), 0, (chars ? chars : 1) * sizeof(WCHAR));
+    if (!copy->strings) goto failed;
+    memcpy(copy->strings, source->strings, chars * sizeof(WCHAR));
+    copy->string_pos = copy->strings + chars;
+
+    if (source->filename)
+    {
+        copy->filename = HeapAlloc(GetProcessHeap(), 0, (strlenW(source->filename) + 1) * sizeof(WCHAR));
+        if (!copy->filename) goto failed;
+        strcpyW(copy->filename, source->filename);
+    }
+    if (source->nb_fields)
+    {
+        copy->fields = HeapAlloc(GetProcessHeap(), 0, source->nb_fields * sizeof(*copy->fields));
+        if (!copy->fields) goto failed;
+        copy->nb_fields = copy->alloc_fields = source->nb_fields;
+        for (i = 0; i < source->nb_fields; ++i)
+            copy->fields[i].text = copy->strings + (source->fields[i].text - source->strings);
+    }
+    if (source->nb_sections)
+    {
+        copy->sections = HeapAlloc(GetProcessHeap(), 0, source->nb_sections * sizeof(*copy->sections));
+        if (!copy->sections) goto failed;
+        copy->alloc_sections = source->nb_sections;
+        for (i = 0; i < source->nb_sections; ++i)
+        {
+            const struct section *section = source->sections[i];
+            SIZE_T size = FIELD_OFFSET(struct section, lines) + section->nb_lines * sizeof(struct line);
+            struct section *new_section = HeapAlloc(GetProcessHeap(), 0, size);
+            if (!new_section) goto failed;
+            memcpy(new_section, section, size);
+            new_section->name = copy->strings + (section->name - source->strings);
+            new_section->alloc_lines = new_section->nb_lines;
+            copy->sections[copy->nb_sections++] = new_section;
+        }
+#ifdef __REACTOS__
+        if (!section_hash_reserve( copy, copy->nb_sections )) goto failed;
+#endif
+    }
+    return copy;
+
+failed:
+    if (copy) free_inf_file(copy);
+    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+    return INVALID_HANDLE_VALUE;
 }
 
 
@@ -944,8 +1083,16 @@ static DWORD parse_buffer( struct inf_file *file, const WCHAR *buffer, const WCH
                                     file->nb_fields * sizeof(file->fields[0]) );
         file->alloc_fields = file->nb_fields;
     }
+#ifdef __REACTOS__
+    {
+        WCHAR *strings = HeapReAlloc( GetProcessHeap(), HEAP_REALLOC_IN_PLACE_ONLY, file->strings,
+                                      (file->string_pos - file->strings) * sizeof(WCHAR) );
+        if (strings) file->strings = strings;
+    }
+#else
     file->strings = HeapReAlloc( GetProcessHeap(), HEAP_REALLOC_IN_PLACE_ONLY, file->strings,
                                  (file->string_pos - file->strings) * sizeof(WCHAR) );
+#endif
 
     if (parser.error)
     {
@@ -956,11 +1103,15 @@ static DWORD parse_buffer( struct inf_file *file, const WCHAR *buffer, const WCH
     /* find the [strings] section */
     file->strings_section = find_section( file, Strings );
 
+#ifdef __REACTOS__
+    file->broken_line = parser.broken_line;
+#else
     if (file->strings_section == -1 && parser.broken_line)
     {
         if (error_line) *error_line = parser.broken_line;
         return ERROR_EXPECTED_SECTION_NAME;
     }
+#endif
 
     return 0;
 }
@@ -993,7 +1144,19 @@ static struct inf_file *parse_file( HANDLE handle, UINT *error_line, DWORD style
     struct inf_file *file;
 
     DWORD size = GetFileSize( handle, NULL );
+#ifdef __REACTOS__
+    HANDLE mapping;
+
+    if (!size)
+    {
+        if (error_line) *error_line = 0;
+        SetLastError( ERROR_GENERAL_SYNTAX );
+        return NULL;
+    }
+    mapping = CreateFileMappingW( handle, NULL, PAGE_READONLY, 0, size, NULL );
+#else
     HANDLE mapping = CreateFileMappingW( handle, NULL, PAGE_READONLY, 0, size, NULL );
+#endif
     if (!mapping) return NULL;
     buffer = MapViewOfFile( mapping, FILE_MAP_READ, 0, 0, size );
     NtClose( mapping );
@@ -1046,6 +1209,39 @@ static struct inf_file *parse_file( HANDLE handle, UINT *error_line, DWORD style
         err = parse_buffer( file, new_buff, (WCHAR *)((char *)buffer + size), error_line );
     }
 
+#ifdef __REACTOS__
+    if (err != ERROR_NOT_ENOUGH_MEMORY)
+    {
+        BOOL win4 = FALSE;
+        int version_index = find_section( file, Version );
+        if (version_index != -1)
+        {
+            struct line *line = find_line( file, version_index, Signature );
+            if (line && line->nb_fields > 0)
+            {
+                struct field *field = file->fields + line->first_field;
+                if (!strcmpiW( field->text, Chicago ) ||
+                    !strcmpiW( field->text, WindowsNT ) ||
+                    !strcmpiW( field->text, Windows95 ))
+                    win4 = TRUE;
+            }
+        }
+        if (!(style & (win4 ? INF_STYLE_WIN4 : INF_STYLE_OLDNT)))
+        {
+            if (error_line) *error_line = 0;
+            err = ERROR_WRONG_INF_STYLE;
+        }
+        else if (!err)
+        {
+            if (file->broken_line && (!win4 || file->strings_section == -1))
+            {
+                if (error_line) *error_line = file->broken_line;
+                err = ERROR_EXPECTED_SECTION_NAME;
+            }
+            else if (error_line) *error_line = 0;
+        }
+    }
+#else
     if (!err)  /* now check signature */
     {
         int version_index = find_section( file, Version );
@@ -1063,6 +1259,7 @@ static struct inf_file *parse_file( HANDLE handle, UINT *error_line, DWORD style
         if (error_line) *error_line = 0;
         if (style & INF_STYLE_WIN4) err = ERROR_WRONG_INF_STYLE;
     }
+#endif
 
  done:
     UnmapViewOfFile( buffer );
@@ -1166,15 +1363,35 @@ PARSER_GetInfClassW(
     OUT PDWORD RequiredSize OPTIONAL)
 {
     DWORD requiredSize;
-    WCHAR guidW[MAX_GUID_STRING_LEN + 1];
+    WCHAR guidW[MAX_PATH];
+    INFCONTEXT Context;
+    BOOL HaveGuid;
+    DWORD Length;
     BOOL ret = FALSE;
 
     /* Read class Guid */
-    if (!SetupGetLineTextW(NULL, hInf, Version, ClassGUID, guidW, sizeof(guidW), NULL))
-        goto cleanup;
-    guidW[37] = '\0'; /* Replace the } by a NULL character */
-    if (UuidFromStringW(&guidW[1], ClassGuid) != RPC_S_OK)
-        goto cleanup;
+    HaveGuid = SetupFindFirstLineW(hInf, Version, ClassGUID, &Context);
+    if (HaveGuid)
+    {
+        if (!SetupGetStringFieldW(&Context, 1, guidW, sizeof(guidW) / sizeof(guidW[0]), NULL))
+            goto cleanup;
+        Length = strlenW(guidW);
+        if (Length < 2)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            goto cleanup;
+        }
+        guidW[Length - 1] = UNICODE_NULL;
+        if (UuidFromStringW(&guidW[1], ClassGuid) != RPC_S_OK)
+        {
+            SetLastError(ERROR_INVALID_PARAMETER);
+            goto cleanup;
+        }
+    }
+    else
+    {
+        *ClassGuid = GUID_NULL;
+    }
 
     /* Read class name */
     ret = SetupGetLineTextW(NULL, hInf, Version, Class, ClassName, ClassNameSize, &requiredSize);
@@ -1186,7 +1403,12 @@ PARSER_GetInfClassW(
         ret = FALSE;
         goto cleanup;
     }
-    if (!ret)
+    if (ret)
+    {
+        if (RequiredSize)
+            *RequiredSize = requiredSize;
+    }
+    else
     {
         if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
         {
@@ -1194,7 +1416,16 @@ PARSER_GetInfClassW(
                 *RequiredSize = requiredSize;
             goto cleanup;
         }
-        else if (!SetupDiClassNameFromGuidW(ClassGuid, ClassName, ClassNameSize, &requiredSize))
+        else if (!HaveGuid)
+        {
+            goto cleanup;
+        }
+        else if (SetupDiClassNameFromGuidW(ClassGuid, ClassName, ClassNameSize, &requiredSize))
+        {
+            if (RequiredSize)
+                *RequiredSize = requiredSize;
+        }
+        else
         {
             if (GetLastError() == ERROR_INSUFFICIENT_BUFFER)
             {
@@ -1410,7 +1641,11 @@ void WINAPI SetupCloseInfFile( HINF hinf )
 /***********************************************************************
  *            SetupEnumInfSectionsA   (SETUPAPI.@)
  */
+#ifdef __REACTOS__
+BOOL WINAPI SetupEnumInfSectionsA( HINF hinf, UINT index, PSTR buffer, UINT size, UINT *need )
+#else
 BOOL WINAPI SetupEnumInfSectionsA( HINF hinf, UINT index, PSTR buffer, DWORD size, DWORD *need )
+#endif
 {
     struct inf_file *file = hinf;
 
@@ -1445,7 +1680,11 @@ BOOL WINAPI SetupEnumInfSectionsA( HINF hinf, UINT index, PSTR buffer, DWORD siz
 /***********************************************************************
  *            SetupEnumInfSectionsW   (SETUPAPI.@)
  */
+#ifdef __REACTOS__
+BOOL WINAPI SetupEnumInfSectionsW( HINF hinf, UINT index, PWSTR buffer, UINT size, UINT *need )
+#else
 BOOL WINAPI SetupEnumInfSectionsW( HINF hinf, UINT index, PWSTR buffer, DWORD size, DWORD *need )
+#endif
 {
     struct inf_file *file = hinf;
 
@@ -1702,6 +1941,7 @@ BOOL WINAPI SetupFindNextMatchLineW( PINFCONTEXT context_in, PCWSTR key,
                                      PINFCONTEXT context_out )
 {
     struct inf_file *file = context_in->CurrentInf;
+    WCHAR buffer[MAX_STRING_LEN + 1];
     struct section *section;
     struct line *line;
     unsigned int i;
@@ -1715,7 +1955,8 @@ BOOL WINAPI SetupFindNextMatchLineW( PINFCONTEXT context_in, PCWSTR key,
     for (i = context_in->Line+1, line = &section->lines[i]; i < section->nb_lines; i++, line++)
     {
         if (line->key_field == -1) continue;
-        if (!strcmpiW( key, file->fields[line->key_field].text ))
+        PARSER_string_substW( file, file->fields[line->key_field].text, buffer, ARRAY_SIZE(buffer) );
+        if (!strcmpiW( key, buffer ))
         {
             if (context_out != context_in) *context_out = *context_in;
             context_out->Line = i;
@@ -1934,6 +2175,17 @@ BOOL WINAPI SetupGetStringFieldW( PINFCONTEXT context, DWORD index, PWSTR buffer
 }
 
 
+BOOL SETUPAPI_GetRawStringField( PINFCONTEXT context, DWORD index, PWSTR buffer, DWORD size )
+{
+    struct inf_file *file = context->CurrentInf;
+    struct field *field = get_field( file, context->Section, context->Line, index );
+
+    if (!field || strlenW( field->text ) >= size) return FALSE;
+    strcpyW( buffer, field->text );
+    return TRUE;
+}
+
+
 /***********************************************************************
  *		SetupGetIntField    (SETUPAPI.@)
  */
@@ -1970,6 +2222,15 @@ BOOL WINAPI SetupGetIntField( PINFCONTEXT context, DWORD index, PINT result )
 }
 
 
+static int xdigit_to_int(WCHAR c)
+{
+    if ('0' <= c && c <= '9') return c - '0';
+    if ('a' <= c && c <= 'f') return c - 'a' + 10;
+    if ('A' <= c && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+
 /***********************************************************************
  *		SetupGetBinaryField    (SETUPAPI.@)
  */
@@ -1979,7 +2240,7 @@ BOOL WINAPI SetupGetBinaryField( PINFCONTEXT context, DWORD index, BYTE *buffer,
     struct inf_file *file = context->CurrentInf;
     struct line *line = get_line( file, context->Section, context->Line );
     struct field *field;
-    int i;
+    int i, pass;
 
     if (!line)
     {
@@ -1992,40 +2253,42 @@ BOOL WINAPI SetupGetBinaryField( PINFCONTEXT context, DWORD index, BYTE *buffer,
         return FALSE;
     }
     index--;  /* fields start at 0 */
-    if (required) *required = line->nb_fields - index;
-    if (!buffer) return TRUE;
-    if (size < line->nb_fields - index)
+    for (pass = 0; pass < 2; pass++)
     {
-        SetLastError( ERROR_INSUFFICIENT_BUFFER );
-        return FALSE;
-    }
-    field = &file->fields[line->first_field + index];
-    for (i = index; i < line->nb_fields; i++, field++)
-    {
-#ifdef __REACTOS__ /* The HEX parser from Wine is broken */
-        errno = 0;
-        ULONG value = wcstoul(field->text, NULL, 16);
-        if (value > 255 || errno != 0)
+        field = &file->fields[line->first_field + index];
+        for (i = index; i < line->nb_fields; i++, field++)
         {
-            SetLastError( ERROR_INVALID_DATA );
+            const WCHAR *p = field->text;
+            DWORD value = 0;
+            int d;
+
+            if (*p == '0')
+            {
+                ++p;
+                if (*p == 'X' || *p == 'x')
+                    ++p;
+            }
+            for (; *p && (d = xdigit_to_int(*p)) != -1; p++)
+            {
+                if ((value <<= 4) > 255)
+                {
+                    SetLastError( ERROR_INVALID_DATA );
+                    return FALSE;
+                }
+                value |= d;
+            }
+            if (pass)
+                buffer[i - index] = value;
+        }
+        if (pass)
+            break;
+        if (required) *required = line->nb_fields - index;
+        if (!buffer) return TRUE;
+        if (size < line->nb_fields - index)
+        {
+            SetLastError( ERROR_INSUFFICIENT_BUFFER );
             return FALSE;
         }
-        buffer[i - index] = (BYTE)value;
-#else
-        const WCHAR *p;
-        DWORD value = 0;
-        for (p = field->text; *p && isxdigitW(*p); p++)
-        {
-            if ((value <<= 4) > 255)
-            {
-                SetLastError( ERROR_INVALID_DATA );
-                return FALSE;
-            }
-            if (*p <= '9') value |= (*p - '0');
-            else value |= (tolowerW(*p) - 'a' + 10);
-        }
-        buffer[i - index] = value;
-#endif
     }
     if (TRACE_ON(setupapi))
     {
@@ -2033,6 +2296,7 @@ BOOL WINAPI SetupGetBinaryField( PINFCONTEXT context, DWORD index, BYTE *buffer,
                context->Inf, context->CurrentInf, context->Section, context->Line, index );
         for (i = index; i < line->nb_fields; i++) TRACE( " %02x\n", buffer[i - index] );
     }
+    SetLastError( ERROR_SUCCESS );
     return TRUE;
 }
 
@@ -2161,126 +2425,120 @@ SetupGetInfFileListW(
     IN DWORD ReturnBufferSize OPTIONAL,
     OUT PDWORD RequiredSize OPTIONAL)
 {
-    HANDLE hSearch;
-    LPWSTR pFullFileName = NULL;
-    LPWSTR pFileName; /* Pointer into pFullFileName buffer */
-    LPWSTR pBuffer = ReturnBuffer;
-    WIN32_FIND_DATAW wfdFileInfo;
-    size_t len;
-    DWORD requiredSize = 0;
-    BOOL ret = FALSE;
+    WCHAR *filter, *fullname = NULL, *ptr = ReturnBuffer;
+    DWORD dir_len, name_len = 20, size;
+    WIN32_FIND_DATAW finddata;
+    HANDLE hdl;
 
     TRACE("%s %lx %p %ld %p\n", debugstr_w(DirectoryPath), InfStyle,
         ReturnBuffer, ReturnBufferSize, RequiredSize);
 
-    if (InfStyle & ~(INF_STYLE_OLDNT | INF_STYLE_WIN4))
+    if (InfStyle & ~(INF_STYLE_OLDNT | INF_STYLE_WIN4 | INF_STYLE_CACHE_ENABLE | INF_STYLE_CACHE_DISABLE))
     {
-        TRACE("Unknown flags: 0x%08lx\n", InfStyle & ~(INF_STYLE_OLDNT  | INF_STYLE_WIN4));
-        SetLastError(ERROR_INVALID_PARAMETER);
-        goto cleanup;
+        if (RequiredSize) *RequiredSize = 1;
+        return TRUE;
     }
-    else if (ReturnBufferSize == 0 && ReturnBuffer != NULL)
+    if ((InfStyle & (INF_STYLE_OLDNT | INF_STYLE_WIN4)) == INF_STYLE_NONE)
     {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        goto cleanup;
+        if (RequiredSize) *RequiredSize = 1;
+        return TRUE;
     }
-    else if (ReturnBufferSize > 0 && ReturnBuffer == NULL)
-    {
-        SetLastError(ERROR_INVALID_PARAMETER);
-        goto cleanup;
-    }
-
-    /* Allocate memory for file filter */
-    if (DirectoryPath != NULL)
-        /* "DirectoryPath\" form */
-        len = strlenW(DirectoryPath) + 1 + 1;
-    else
-        /* "%SYSTEMROOT%\Inf\" form */
-        len = MAX_PATH + 1 + strlenW(InfDirectory) + 1;
-    len += MAX_PATH; /* To contain file name or "*.inf" string */
-    pFullFileName = MyMalloc(len * sizeof(WCHAR));
-    if (pFullFileName == NULL)
-    {
-        SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-        goto cleanup;
-    }
-
-    /* Fill file filter buffer */
     if (DirectoryPath)
     {
-        strcpyW(pFullFileName, DirectoryPath);
-        if (*pFullFileName && pFullFileName[strlenW(pFullFileName) - 1] != '\\')
-            strcatW(pFullFileName, BackSlash);
+        DWORD att;
+
+        dir_len = strlenW(DirectoryPath);
+        if (!dir_len) return FALSE;
+        filter = MyMalloc((7 + dir_len) * sizeof(WCHAR));
+        if (!filter)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        strcpyW(filter, DirectoryPath);
+        if (filter[dir_len - 1] == '\\')
+            filter[--dir_len] = 0;
+
+        att = GetFileAttributesW(filter);
+        if (att != INVALID_FILE_ATTRIBUTES && !(att & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            MyFree(filter);
+            SetLastError(ERROR_DIRECTORY);
+            return FALSE;
+        }
     }
     else
     {
-        len = GetSystemWindowsDirectoryW(pFullFileName, MAX_PATH);
-        if (len == 0 || len > MAX_PATH)
-            goto cleanup;
-        if (pFullFileName[strlenW(pFullFileName) - 1] != '\\')
-            strcatW(pFullFileName, BackSlash);
-        strcatW(pFullFileName, InfDirectory);
-    }
-    pFileName = &pFullFileName[strlenW(pFullFileName)];
+        DWORD msize;
 
-    /* Search for the first file */
-    strcpyW(pFileName, InfFileSpecification);
-    hSearch = FindFirstFileW(pFullFileName, &wfdFileInfo);
-    if (hSearch == INVALID_HANDLE_VALUE)
+        dir_len = GetWindowsDirectoryW(NULL, 0);
+        msize = (7 + 4 + dir_len) * sizeof(WCHAR);
+        filter = MyMalloc(msize);
+        if (!filter)
+        {
+            SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+            return FALSE;
+        }
+        GetWindowsDirectoryW(filter, msize / sizeof(WCHAR));
+        strcatW(filter, L"\\inf");
+        dir_len = strlenW(filter);
+    }
+    strcatW(filter, L"\\*.inf");
+
+    hdl = FindFirstFileW(filter, &finddata);
+    if (hdl == INVALID_HANDLE_VALUE)
     {
-        TRACE("No file returned by %s\n", debugstr_w(pFullFileName));
-        goto cleanup;
+        if (RequiredSize) *RequiredSize = 1;
+        MyFree(filter);
+        return TRUE;
     }
-
+    size = 1;
     do
     {
-        HINF hInf;
+        WCHAR signature[MAX_PATH];
+        BOOL valid = FALSE;
+        DWORD len = strlenW(finddata.cFileName);
 
-        strcpyW(pFileName, wfdFileInfo.cFileName);
-        hInf = SetupOpenInfFileW(
-            pFullFileName,
-            NULL, /* Inf class */
-            InfStyle,
-            NULL /* Error line */);
-        if (hInf == INVALID_HANDLE_VALUE)
+        if (!fullname || name_len < len)
         {
-            if (GetLastError() == ERROR_CLASS_MISMATCH)
+            name_len = (name_len < len) ? len : name_len;
+            MyFree(fullname);
+            fullname = MyMalloc((2 + dir_len + name_len) * sizeof(WCHAR));
+            if (!fullname)
             {
-                /* InfStyle was not correct. Skip this file */
-                continue;
+                FindClose(hdl);
+                MyFree(filter);
+                SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+                return FALSE;
             }
-            TRACE("Invalid .inf file %s\n", debugstr_w(pFullFileName));
-            continue;
+            strcpyW(fullname, filter);
         }
-
-        len = strlenW(wfdFileInfo.cFileName) + 1;
-        requiredSize += (DWORD)len;
-        if (requiredSize <= ReturnBufferSize)
+        fullname[dir_len + 1] = 0;
+        strcatW(fullname, finddata.cFileName);
+        if (!GetPrivateProfileStringW(L"Version", L"Signature", NULL, signature, MAX_PATH, fullname))
+            signature[0] = 0;
+        if (InfStyle & INF_STYLE_OLDNT)
+            valid = strcmpiW(L"$Chicago$", signature) && strcmpiW(L"$WINDOWS NT$", signature);
+        if (InfStyle & INF_STYLE_WIN4)
+            valid = valid || !strcmpiW(L"$Chicago$", signature) || !strcmpiW(L"$WINDOWS NT$", signature);
+        if (valid)
         {
-            strcpyW(pBuffer, wfdFileInfo.cFileName);
-            pBuffer = &pBuffer[len];
+            size += 1 + strlenW(finddata.cFileName);
+            if (ptr && ReturnBufferSize >= size)
+            {
+                strcpyW(ptr, finddata.cFileName);
+                ptr += 1 + strlenW(finddata.cFileName);
+                *ptr = 0;
+            }
         }
-        SetupCloseInfFile(hInf);
-    } while (FindNextFileW(hSearch, &wfdFileInfo));
-    FindClose(hSearch);
-
-    requiredSize += 1; /* Final NULL char */
-    if (requiredSize <= ReturnBufferSize)
-    {
-        *pBuffer = '\0';
-        ret = TRUE;
     }
-    else
-    {
-        SetLastError(ERROR_INSUFFICIENT_BUFFER);
-        ret = FALSE;
-    }
-    if (RequiredSize)
-        *RequiredSize = requiredSize;
+    while (FindNextFileW(hdl, &finddata));
+    FindClose(hdl);
 
-cleanup:
-    MyFree(pFullFileName);
-    return ret;
+    MyFree(fullname);
+    MyFree(filter);
+    if (RequiredSize) *RequiredSize = size;
+    return TRUE;
 }
 
 /***********************************************************************
@@ -2344,7 +2602,7 @@ SetupDiGetINFClassW(
     TRACE("%s %p %p %ld %p\n", debugstr_w(InfName), ClassGuid,
         ClassName, ClassNameSize, RequiredSize);
 
-    if (!InfName || !ClassGuid || !ClassName || ClassNameSize == 0)
+    if (!InfName)
     {
         SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
@@ -2353,7 +2611,19 @@ SetupDiGetINFClassW(
     /* Open .inf file */
     hInf = SetupOpenInfFileW(InfName, NULL, INF_STYLE_WIN4, NULL);
     if (hInf == INVALID_HANDLE_VALUE)
+    {
+        if (GetLastError() == ERROR_PATH_NOT_FOUND)
+            SetLastError(ERROR_FILE_NOT_FOUND);
+        else if (GetLastError() != ERROR_FILE_NOT_FOUND && (!ClassGuid || !ClassName || ClassNameSize == 0))
+            SetLastError(ERROR_INVALID_PARAMETER);
         goto cleanup;
+    }
+
+    if (!ClassGuid || !ClassName || ClassNameSize == 0)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        goto cleanup;
+    }
 
     ret = PARSER_GetInfClassW(hInf, ClassGuid, ClassName, ClassNameSize, RequiredSize);
 

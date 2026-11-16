@@ -62,6 +62,21 @@ RtlpCreateUserStack(IN HANDLE ProcessHandle,
     }
     else
     {
+        SECTION_IMAGE_INFORMATION ImageInformation;
+
+        if ((StackReserve == 0 || StackCommit == 0) &&
+            NT_SUCCESS(ZwQueryInformationProcess(ProcessHandle,
+                                                 ProcessImageInformation,
+                                                 &ImageInformation,
+                                                 sizeof(ImageInformation),
+                                                 NULL)))
+        {
+            if (StackReserve == 0)
+                StackReserve = ImageInformation.MaximumStackSize;
+            if (StackCommit == 0)
+                StackCommit = ImageInformation.CommittedStackSize;
+        }
+
         /* Use the System Settings if needed */
         if (StackReserve == 0)
             StackReserve = SystemBasicInfo.AllocationGranularity;
@@ -99,11 +114,12 @@ RtlpCreateUserStack(IN HANDLE ProcessHandle,
     /* Update the stack position */
     Stack += StackReserve - StackCommit;
 
-    /* Check if we can add a guard page */
-    if (StackReserve >= StackCommit + SystemBasicInfo.PageSize)
+    /* Reserve the complete guard region below the committed stack. */
+    GuardPageSize = MM_USER_STACK_GUARD_PAGES * SystemBasicInfo.PageSize;
+    if (StackReserve >= StackCommit + GuardPageSize)
     {
-        Stack -= SystemBasicInfo.PageSize;
-        StackCommit += SystemBasicInfo.PageSize;
+        Stack -= GuardPageSize;
+        StackCommit += GuardPageSize;
         UseGuard = TRUE;
     }
     else
@@ -131,7 +147,6 @@ RtlpCreateUserStack(IN HANDLE ProcessHandle,
     /* Create a guard page if needed */
     if (UseGuard)
     {
-        GuardPageSize = SystemBasicInfo.PageSize;
         Status = ZwProtectVirtualMemory(ProcessHandle,
                                         (PVOID*)&Stack,
                                         &GuardPageSize,
@@ -166,6 +181,53 @@ RtlpFreeUserStack(IN HANDLE ProcessHandle,
 }
 
 /* FUNCTIONS ***************************************************************/
+
+NTSTATUS
+NTAPI
+RtlCreateUserStack(
+    _In_opt_ SIZE_T CommittedStackSize,
+    _In_opt_ SIZE_T MaximumStackSize,
+    _In_opt_ ULONG ZeroBits,
+    _In_ SIZE_T CommitAlignment,
+    _In_ SIZE_T ReserveAlignment,
+    _Out_ PINITIAL_TEB InitialTeb)
+{
+    PIMAGE_NT_HEADERS Headers;
+
+    if (!CommitAlignment || !ReserveAlignment)
+        return STATUS_INVALID_PARAMETER;
+
+    if (!CommittedStackSize || !MaximumStackSize)
+    {
+        Headers = RtlImageNtHeader(NtCurrentPeb()->ImageBaseAddress);
+        if (!Headers)
+            return STATUS_INVALID_IMAGE_FORMAT;
+
+        if (!MaximumStackSize)
+            MaximumStackSize = Headers->OptionalHeader.SizeOfStackReserve;
+        if (!CommittedStackSize)
+            CommittedStackSize = Headers->OptionalHeader.SizeOfStackCommit;
+    }
+
+    MaximumStackSize = ROUND_UP(MaximumStackSize, ReserveAlignment);
+    CommittedStackSize = ROUND_UP(CommittedStackSize, CommitAlignment);
+    if (MaximumStackSize < CommittedStackSize)
+        MaximumStackSize = CommittedStackSize;
+    if (MaximumStackSize < 0x100000)
+        MaximumStackSize = 0x100000;
+
+    return RtlpCreateUserStack(NtCurrentProcess(), MaximumStackSize, CommittedStackSize, ZeroBits, InitialTeb);
+}
+
+VOID
+NTAPI
+RtlFreeUserStack(
+    _In_ PVOID AllocationBase)
+{
+    SIZE_T Size = 0;
+
+    ZwFreeVirtualMemory(NtCurrentProcess(), &AllocationBase, &Size, MEM_RELEASE);
+}
 
 
 /*
@@ -227,57 +289,43 @@ RtlCreateUserThread(IN HANDLE ProcessHandle,
 {
     NTSTATUS Status;
     HANDLE Handle;
-    CLIENT_ID ThreadCid;
-    INITIAL_TEB InitialTeb;
     OBJECT_ATTRIBUTES ObjectAttributes;
-    CONTEXT Context;
+    THREAD_BASIC_INFORMATION BasicInformation;
 
-    /* First, we'll create the Stack */
-    Status = RtlpCreateUserStack(ProcessHandle,
-                                 StackReserve,
-                                 StackCommit,
-                                 StackZeroBits,
-                                 &InitialTeb);
-    if (!NT_SUCCESS(Status)) return Status;
-
-    /* Next, we'll set up the Initial Context */
-    RtlInitializeContext(ProcessHandle,
-                         &Context,
-                         Parameter,
-                         StartAddress,
-                         InitialTeb.StackBase);
-
-    /* We are now ready to create the Kernel Thread Object */
     InitializeObjectAttributes(&ObjectAttributes,
                                NULL,
                                0,
                                NULL,
                                SecurityDescriptor);
-    Status = ZwCreateThread(&Handle,
-                            THREAD_ALL_ACCESS,
-                            &ObjectAttributes,
-                            ProcessHandle,
-                            &ThreadCid,
-                            &Context,
-                            &InitialTeb,
-                            CreateSuspended);
-    if (!NT_SUCCESS(Status))
+    Status = ZwCreateThreadEx(&Handle,
+                              THREAD_ALL_ACCESS,
+                              &ObjectAttributes,
+                              ProcessHandle,
+                              StartAddress,
+                              Parameter,
+                              CreateSuspended ? THREAD_CREATE_FLAGS_CREATE_SUSPENDED : 0,
+                              StackZeroBits,
+                              StackCommit,
+                              StackReserve,
+                              NULL);
+    if (!NT_SUCCESS(Status)) return Status;
+
+    if (ClientId)
     {
-        /* Free the stack */
-        RtlpFreeUserStack(ProcessHandle, &InitialTeb);
-    }
-    else
-    {
-        /* Return thread data */
-        if (ThreadHandle)
-            *ThreadHandle = Handle;
-        else
-            NtClose(Handle);
-        if (ClientId) *ClientId = ThreadCid;
+        Status = ZwQueryInformationThread(Handle,
+                                          ThreadBasicInformation,
+                                          &BasicInformation,
+                                          sizeof(BasicInformation),
+                                          NULL);
+        if (NT_SUCCESS(Status)) *ClientId = BasicInformation.ClientId;
     }
 
-    /* Return success or the previous failure */
-    return Status;
+    if (ThreadHandle)
+        *ThreadHandle = Handle;
+    else
+        ZwClose(Handle);
+
+    return STATUS_SUCCESS;
 }
 
 /*
@@ -291,7 +339,13 @@ RtlExitUserThread(NTSTATUS Status)
     LdrShutdownThread();
 
     /* Shut us down */
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+    NtCurrentTeb()->ReservedPad1 = TRUE;
+#elif (NTDDI_VERSION >= NTDDI_LONGHORN)
+    NtCurrentTeb()->SpareBool1 = TRUE;
+#else
     NtCurrentTeb()->FreeStackOnTermination = TRUE;
+#endif
     NtTerminateThread(NtCurrentThread(), Status);
 }
 

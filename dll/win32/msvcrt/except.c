@@ -21,18 +21,20 @@
  * FIXME: Incomplete support for nested exceptions/try block cleanup.
  */
 
-#include <float.h>
+#include "include/float.h"
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
 
+#define COBJMACROS
+
 #include "ntstatus.h"
-#define WIN32_NO_STATUS
 #include "windef.h"
 #include "winbase.h"
 #include "winternl.h"
 #include "msvcrt.h"
 #include "excpt.h"
+#include "unknwn.h"
 #include "wincon.h"
 #include "wine/exception.h"
 #include "wine/debug.h"
@@ -40,6 +42,9 @@
 #include "cppexcept.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(seh);
+#ifndef __i386__
+WINE_DECLARE_DEBUG_CHANNEL(unwind);
+#endif
 
 #if _MSVCR_VER>=70 && _MSVCR_VER<=71
 static MSVCRT_security_error_handler security_error_handler;
@@ -49,9 +54,9 @@ static __sighandler_t sighandlers[NSIG] = { SIG_DFL };
 
 void dump_function_descr( const cxx_function_descr *descr, uintptr_t base )
 {
-    unwind_info *unwind_table = rtti_rva( descr->unwind_table, base );
-    tryblock_info *tryblock = rtti_rva( descr->tryblock, base );
-    ipmap_info *ipmap = rtti_rva( descr->ipmap, base );
+    unwind_info *unwind_table = cxx_rva( descr->unwind_table, base );
+    tryblock_info *tryblock = cxx_rva( descr->tryblock, base );
+    ipmap_info *ipmap = cxx_rva( descr->ipmap, base );
     UINT i, j;
 
     TRACE( "magic %x\n", descr->magic );
@@ -59,22 +64,22 @@ void dump_function_descr( const cxx_function_descr *descr, uintptr_t base )
     for (i = 0; i < descr->unwind_count; i++)
     {
         TRACE("    %d: prev %d func %p\n", i, unwind_table[i].prev,
-              unwind_table[i].handler ? rtti_rva( unwind_table[i].handler, base ) : NULL );
+              unwind_table[i].handler ? cxx_rva( unwind_table[i].handler, base ) : NULL );
     }
     TRACE( "try table: %p %d\n", tryblock, descr->tryblock_count );
     for (i = 0; i < descr->tryblock_count; i++)
     {
-        catchblock_info *catchblock = rtti_rva( tryblock[i].catchblock, base );
+        catchblock_info *catchblock = cxx_rva( tryblock[i].catchblock, base );
 
         TRACE( "    %d: start %d end %d catchlevel %d catch %p %d\n", i,
                tryblock[i].start_level, tryblock[i].end_level,
                tryblock[i].catch_level, catchblock, tryblock[i].catchblock_count);
         for (j = 0; j < tryblock[i].catchblock_count; j++)
         {
-            type_info *type_info = catchblock[j].type_info ? rtti_rva( catchblock[j].type_info, base ) : NULL;
+            type_info *type_info = catchblock[j].type_info ? cxx_rva( catchblock[j].type_info, base ) : NULL;
             TRACE( "        %d: flags %x offset %d handler %p",
                    j, catchblock[j].flags, catchblock[j].offset,
-                   catchblock[j].handler ? rtti_rva(catchblock[j].handler, base) : NULL );
+                   catchblock[j].handler ? cxx_rva(catchblock[j].handler, base) : NULL );
 #ifdef _WIN64
             TRACE( " frame %x", catchblock[j].frame );
 #endif
@@ -84,11 +89,11 @@ void dump_function_descr( const cxx_function_descr *descr, uintptr_t base )
     TRACE( "ipmap: %p %d\n", ipmap, descr->ipmap_count );
     for (i = 0; i < descr->ipmap_count; i++)
         TRACE( "    %d: ip %x state %d\n", i, ipmap[i].ip, ipmap[i].state );
-#ifdef RTTI_USE_RVA
+#ifdef CXX_USE_RVA
     TRACE( "unwind_help %+d\n", descr->unwind_help );
 #endif
     if (descr->magic <= CXX_FRAME_MAGIC_VC6) return;
-    TRACE( "expect list: %p\n", rtti_rva( descr->expect_list, base ) );
+    TRACE( "expect list: %p\n", cxx_rva( descr->expect_list, base ) );
     if (descr->magic <= CXX_FRAME_MAGIC_VC7) return;
     TRACE( "flags: %08x\n", descr->flags );
 }
@@ -98,7 +103,7 @@ void *find_catch_handler( void *object, uintptr_t frame, uintptr_t exc_base,
                           cxx_exception_type *exc_type, uintptr_t image_base )
 {
     unsigned int i;
-    const catchblock_info *catchblock = rtti_rva( tryblock->catchblock, image_base );
+    const catchblock_info *catchblock = cxx_rva( tryblock->catchblock, image_base );
     const cxx_type_info *type;
     const type_info *catch_ti;
 
@@ -106,7 +111,7 @@ void *find_catch_handler( void *object, uintptr_t frame, uintptr_t exc_base,
     {
         if (exc_type)
         {
-            catch_ti = catchblock[i].type_info ? rtti_rva( catchblock[i].type_info, image_base ) : NULL;
+            catch_ti = catchblock[i].type_info ? cxx_rva( catchblock[i].type_info, image_base ) : NULL;
             type = find_caught_type( exc_type, exc_base, catch_ti, catchblock[i].flags );
             if (!type) continue;
 
@@ -125,12 +130,36 @@ void *find_catch_handler( void *object, uintptr_t frame, uintptr_t exc_base,
             if (catchblock[i].type_info) continue;
             TRACE( "found catch(...) block\n" );
         }
-        return rtti_rva( catchblock[i].handler, image_base );
+        return cxx_rva( catchblock[i].handler, image_base );
     }
     return NULL;
 }
 
 #ifndef __i386__  /* i386 implementation is in except_i386.c */
+
+static inline uintptr_t dispatch_image_base(const DISPATCHER_CONTEXT *dispatch)
+{
+#ifdef _PPC_
+    void *base = NULL;
+    RtlPcToFileHeader((void *)dispatch->ControlPc, &base);
+    return (uintptr_t)base;
+#elif defined(CXX_USE_RVA)
+    return dispatch->ImageBase;
+#else
+    /* Legacy descriptors already contain absolute addresses. */
+    UNREFERENCED_PARAMETER(dispatch);
+    return 0;
+#endif
+}
+
+static inline void *dispatch_handler_data(const DISPATCHER_CONTEXT *dispatch)
+{
+#ifdef _PPC_
+    return dispatch->FunctionEntry->HandlerData;
+#else
+    return dispatch->HandlerData;
+#endif
+}
 
 typedef struct
 {
@@ -150,7 +179,7 @@ typedef struct
 
 static inline int ip_to_state( const cxx_function_descr *descr, uintptr_t ip, uintptr_t base )
 {
-    const ipmap_info *ipmap = rtti_rva( descr->ipmap, base );
+    const ipmap_info *ipmap = cxx_rva( descr->ipmap, base );
     unsigned int i;
     int ret;
 
@@ -163,11 +192,11 @@ static inline int ip_to_state( const cxx_function_descr *descr, uintptr_t ip, ui
 static void cxx_local_unwind(ULONG_PTR frame, DISPATCHER_CONTEXT *dispatch,
                              const cxx_function_descr *descr, int last_level)
 {
-    const unwind_info *unwind_table = rtti_rva(descr->unwind_table, dispatch->ImageBase);
+    const unwind_info *unwind_table = cxx_rva(descr->unwind_table, dispatch_image_base(dispatch));
     int *unwind_help = (int *)(frame + descr->unwind_help);
     int trylevel = unwind_help[0];
 
-    if (trylevel == -2) trylevel = ip_to_state( descr, get_exception_pc(dispatch), dispatch->ImageBase );
+    if (trylevel == -2) trylevel = ip_to_state( descr, get_exception_pc(dispatch), dispatch_image_base(dispatch) );
 
     TRACE("current level: %d, last level: %d\n", trylevel, last_level);
     while (trylevel > last_level)
@@ -179,7 +208,7 @@ static void cxx_local_unwind(ULONG_PTR frame, DISPATCHER_CONTEXT *dispatch,
         }
         if (unwind_table[trylevel].handler)
         {
-            void *handler = rtti_rva( unwind_table[trylevel].handler, dispatch->ImageBase );
+            void *handler = cxx_rva( unwind_table[trylevel].handler, dispatch_image_base(dispatch) );
             call_unwind_handler( handler, frame, dispatch );
         }
         trylevel = unwind_table[trylevel].prev;
@@ -270,7 +299,7 @@ static inline void find_catch_block(EXCEPTION_RECORD *rec, CONTEXT *context,
 {
     ULONG_PTR exc_base = (rec->NumberParameters == 4 ? rec->ExceptionInformation[3] : 0);
     void *handler, *object = (void *)rec->ExceptionInformation[1];
-    int trylevel = ip_to_state( descr, get_exception_pc(dispatch), dispatch->ImageBase );
+    int trylevel = ip_to_state( descr, get_exception_pc(dispatch), dispatch_image_base(dispatch) );
     thread_data_t *data = msvcrt_get_thread_data();
     const tryblock_info *in_catch;
     EXCEPTION_RECORD catch_record;
@@ -281,7 +310,7 @@ static inline void find_catch_block(EXCEPTION_RECORD *rec, CONTEXT *context,
     data->processing_throw++;
     for (i=descr->tryblock_count; i>0; i--)
     {
-        in_catch = rtti_rva(descr->tryblock, dispatch->ImageBase);
+        in_catch = cxx_rva(descr->tryblock, dispatch_image_base(dispatch));
         in_catch = &in_catch[i-1];
 
         if (trylevel>in_catch->end_level && trylevel<=in_catch->catch_level)
@@ -299,7 +328,7 @@ static inline void find_catch_block(EXCEPTION_RECORD *rec, CONTEXT *context,
 
     for (i=0; i<descr->tryblock_count; i++)
     {
-        const tryblock_info *tryblock = rtti_rva(descr->tryblock, dispatch->ImageBase);
+        const tryblock_info *tryblock = cxx_rva(descr->tryblock, dispatch_image_base(dispatch));
         tryblock = &tryblock[i];
 
         if (trylevel < tryblock->start_level) continue;
@@ -311,7 +340,7 @@ static inline void find_catch_block(EXCEPTION_RECORD *rec, CONTEXT *context,
             if(tryblock->end_level > in_catch->catch_level) continue;
         }
 
-        handler = find_catch_handler( object, orig_frame, exc_base, tryblock, info, dispatch->ImageBase );
+        handler = find_catch_handler( object, orig_frame, exc_base, tryblock, info, dispatch_image_base(dispatch) );
         if (!handler) continue;
 
         /* unwind stack and call catch */
@@ -372,11 +401,9 @@ static DWORD cxx_frame_handler(EXCEPTION_RECORD *rec, ULONG_PTR frame,
                                CONTEXT *context, DISPATCHER_CONTEXT *dispatch,
                                const cxx_function_descr *descr)
 {
-    int trylevel = ip_to_state( descr, get_exception_pc(dispatch), dispatch->ImageBase );
+    int trylevel = ip_to_state( descr, get_exception_pc(dispatch), dispatch_image_base(dispatch) );
     cxx_exception_type *exc_type;
     ULONG_PTR orig_frame = frame;
-    ULONG_PTR throw_base;
-    DWORD throw_func_off;
     void *throw_func;
     UINT i, j;
     int unwindlevel = -1;
@@ -395,22 +422,21 @@ static DWORD cxx_frame_handler(EXCEPTION_RECORD *rec, ULONG_PTR frame,
         return ExceptionContinueSearch;  /* handle only c++ exceptions */
 
     /* update orig_frame if it's a nested exception */
-    throw_func_off = RtlLookupFunctionEntry(dispatch->ControlPc, &throw_base, NULL)->BeginAddress;
-    throw_func = rtti_rva(throw_func_off, throw_base);
+    throw_func = lookup_function_start(dispatch->ControlPc);
     TRACE("reconstructed handler pointer: %p\n", throw_func);
     for (i=descr->tryblock_count; i>0; i--)
     {
-        const tryblock_info *tryblock = rtti_rva(descr->tryblock, dispatch->ImageBase);
+        const tryblock_info *tryblock = cxx_rva(descr->tryblock, dispatch_image_base(dispatch));
         tryblock = &tryblock[i-1];
 
         if (trylevel>tryblock->end_level && trylevel<=tryblock->catch_level)
         {
             for (j=0; j<tryblock->catchblock_count; j++)
             {
-                const catchblock_info *catchblock = rtti_rva(tryblock->catchblock, dispatch->ImageBase);
+                const catchblock_info *catchblock = cxx_rva(tryblock->catchblock, dispatch_image_base(dispatch));
                 catchblock = &catchblock[j];
 
-                if (rtti_rva(catchblock->handler, dispatch->ImageBase) == throw_func)
+                if (cxx_rva(catchblock->handler, dispatch_image_base(dispatch)) == throw_func)
                 {
                     unwindlevel = tryblock->end_level;
 #ifdef _WIN64
@@ -453,7 +479,7 @@ static DWORD cxx_frame_handler(EXCEPTION_RECORD *rec, ULONG_PTR frame,
         {
             TRACE("handling C++ exception rec %p frame %Ix descr %p\n", rec, frame,  descr);
             TRACE_EXCEPTION_TYPE(exc_type, rec->ExceptionInformation[3]);
-            dump_function_descr(descr, dispatch->ImageBase);
+            dump_function_descr(descr, dispatch_image_base(dispatch));
         }
     }
     else
@@ -499,7 +525,7 @@ EXCEPTION_DISPOSITION CDECL __CxxFrameHandler( EXCEPTION_RECORD *rec, ULONG_PTR 
 {
     TRACE( "%p %Ix %p %p\n", rec, frame, context, dispatch );
     return cxx_frame_handler( rec, frame, context, dispatch,
-                              rtti_rva(*(UINT *)dispatch->HandlerData, dispatch->ImageBase) );
+                              cxx_rva(*(UINT *)dispatch_handler_data(dispatch), dispatch_image_base(dispatch)) );
 }
 
 #endif  /* __i386__ */
@@ -953,17 +979,20 @@ BOOL __cdecl _IsExceptionObjectToBeDestroyed(const void *obj)
  */
 void CDECL __DestructExceptionObject(EXCEPTION_RECORD *rec)
 {
-    cxx_exception_type *info = (cxx_exception_type*) rec->ExceptionInformation[2];
-    void *object = (void*)rec->ExceptionInformation[1];
+    cxx_exception_type *info;
+    void *object;
 
     TRACE("(%p)\n", rec);
 
-    if (!is_cxx_exception( rec )) return;
+    if (!rec || !is_cxx_exception( rec )) return;
+    info = (cxx_exception_type*)rec->ExceptionInformation[2];
+    if (!info) return;
+    object = (void*)rec->ExceptionInformation[1];
 
-    if (!info || !info->destructor)
-        return;
-
-    call_dtor( rtti_rva( info->destructor, rec->ExceptionInformation[3] ), object );
+    if (info->destructor)
+        call_dtor( cxx_rva( info->destructor, rec->ExceptionInformation[3] ), object );
+    else if (info->flags & TYPE_FLAG_WINRT && *(IUnknown**)object)
+        IUnknown_Release( *(IUnknown**)object );
 }
 
 /*********************************************************************
@@ -1075,3 +1104,340 @@ int* CDECL __processing_throw(void)
 }
 
 #endif /* _MSVCR_VER>=140 */
+
+#ifndef __i386__
+#define DUMP_SCOPE_TABLE(base,table) do { \
+    for (unsigned int i = 0; i < table->Count; i++) \
+        TRACE_(unwind)( "  %u: %p-%p handler %p target %p\n", i, \
+               (char *)base + table->ScopeRecord[i].BeginAddress,   \
+               (char *)base + table->ScopeRecord[i].EndAddress,     \
+               (char *)base + table->ScopeRecord[i].HandlerAddress, \
+               (char *)base + table->ScopeRecord[i].JumpTarget );   \
+} while(0)
+
+LONG __C_ExecuteExceptionFilter( EXCEPTION_POINTERS *ptrs, void *frame, PEXCEPTION_FILTER filter, BYTE *nonvolatile );
+
+#ifdef __REACTOS__
+static inline BOOL is_unwind_target_in_scope( const SCOPE_TABLE *table, unsigned int scope,
+                                              ULONG_PTR base, ULONG_PTR target )
+{
+    unsigned int i;
+
+    if (table->ScopeRecord[scope].JumpTarget &&
+        target == base + table->ScopeRecord[scope].JumpTarget)
+        return TRUE;
+
+    for (i = 0; i < table->Count; i++)
+    {
+        if (target < base + table->ScopeRecord[i].BeginAddress) continue;
+        if (target >= base + table->ScopeRecord[i].EndAddress) continue;
+        if (table->ScopeRecord[i].HandlerAddress != table->ScopeRecord[scope].HandlerAddress) continue;
+        if (table->ScopeRecord[i].JumpTarget != table->ScopeRecord[scope].JumpTarget) continue;
+        return TRUE;
+    }
+    return FALSE;
+}
+#endif
+#endif
+
+#if defined(__aarch64__)  || defined(__arm64ec__)
+
+#ifdef __arm64ec__
+#define __C_specific_handler __C_specific_handler_arm64
+#endif
+
+#if defined(__REACTOS__) && !defined(__arm64ec__)
+EXCEPTION_DISPOSITION __cdecl __C_specific_handler( EXCEPTION_RECORD *rec, void *frame,
+                                                    CONTEXT *context, DISPATCHER_CONTEXT *dispatch )
+#else
+EXCEPTION_DISPOSITION WINAPI __C_specific_handler( EXCEPTION_RECORD *rec, void *frame,
+                                                   ARM64_NT_CONTEXT *context,
+                                                   DISPATCHER_CONTEXT_ARM64 *dispatch )
+#endif
+{
+    const SCOPE_TABLE *table = dispatch->HandlerData;
+    ULONG_PTR base = dispatch->ImageBase;
+    ULONG_PTR pc = dispatch->ControlPc;
+    unsigned int i;
+    void *handler;
+
+    TRACE_(unwind)( "%p %p %p %p pc %Ix\n", rec, frame, context, dispatch, pc );
+    if (TRACE_ON(unwind)) DUMP_SCOPE_TABLE( base, table );
+
+    if (dispatch->ControlPcIsUnwound) pc -= 4;
+
+    if (rec->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND))
+    {
+        for (i = dispatch->ScopeIndex; i < table->Count; i++)
+        {
+            if (pc < base + table->ScopeRecord[i].BeginAddress) continue;
+            if (pc >= base + table->ScopeRecord[i].EndAddress) continue;
+#ifdef __REACTOS__
+            if (rec->ExceptionFlags & EXCEPTION_TARGET_UNWIND &&
+                is_unwind_target_in_scope( table, i, base, dispatch->TargetPc ))
+            {
+                break;
+            }
+            if (table->ScopeRecord[i].JumpTarget) continue;
+#else
+            if (table->ScopeRecord[i].JumpTarget) continue;
+
+            if (rec->ExceptionFlags & EXCEPTION_TARGET_UNWIND &&
+                dispatch->TargetPc >= base + table->ScopeRecord[i].BeginAddress &&
+                dispatch->TargetPc < base + table->ScopeRecord[i].EndAddress)
+            {
+                break;
+            }
+#endif
+            handler = (void *)(base + table->ScopeRecord[i].HandlerAddress);
+            dispatch->ScopeIndex = i + 1;
+            TRACE_(unwind)( "scope %u calling __finally %p frame %p\n", i, handler, frame );
+            __C_ExecuteExceptionFilter( ULongToPtr(TRUE), frame, handler, dispatch->NonVolatileRegisters );
+        }
+    }
+    else
+    {
+        for (i = dispatch->ScopeIndex; i < table->Count; i++)
+        {
+            if (pc < base + table->ScopeRecord[i].BeginAddress) continue;
+            if (pc >= base + table->ScopeRecord[i].EndAddress) continue;
+            if (!table->ScopeRecord[i].JumpTarget) continue;
+
+            if (table->ScopeRecord[i].HandlerAddress != EXCEPTION_EXECUTE_HANDLER)
+            {
+                EXCEPTION_POINTERS ptrs = { rec, (CONTEXT *)context };
+
+                handler = (void *)(base + table->ScopeRecord[i].HandlerAddress);
+                TRACE_(unwind)( "scope %u calling filter %p ptrs %p frame %p\n", i, handler, &ptrs, frame );
+#ifdef __REACTOS__
+                {
+                    LONG filter_result = __C_ExecuteExceptionFilter( &ptrs, frame, handler, dispatch->NonVolatileRegisters );
+
+                    if (filter_result < 0)
+                        return ExceptionContinueExecution;
+                    if (!filter_result)
+                        continue;
+                }
+#else
+                switch (__C_ExecuteExceptionFilter( &ptrs, frame, handler, dispatch->NonVolatileRegisters ))
+                {
+                case EXCEPTION_EXECUTE_HANDLER:
+                    break;
+                case EXCEPTION_CONTINUE_SEARCH:
+                    continue;
+                case EXCEPTION_CONTINUE_EXECUTION:
+                    return ExceptionContinueExecution;
+                }
+#endif
+            }
+            /* Call the destructor if we're handling a C++ exception. */
+            if (is_cxx_exception(rec)) __DestructExceptionObject( rec );
+
+            TRACE_(unwind)( "unwinding to target %Ix\n", base + table->ScopeRecord[i].JumpTarget );
+            RtlUnwindEx( frame, (char *)base + table->ScopeRecord[i].JumpTarget,
+                         rec, ULongToPtr(rec->ExceptionCode), (CONTEXT *)dispatch->ContextRecord,
+                         dispatch->HistoryTable );
+        }
+    }
+    return ExceptionContinueSearch;
+}
+
+#ifdef __arm64ec__
+#undef __C_specific_handler
+#endif
+
+#endif /* __aarch64__ || __arm64ec__ */
+
+#ifdef __arm__
+
+EXCEPTION_DISPOSITION WINAPI __C_specific_handler( EXCEPTION_RECORD *rec, void *frame,
+                                                   CONTEXT *context, DISPATCHER_CONTEXT *dispatch )
+{
+    const SCOPE_TABLE *table = dispatch->HandlerData;
+    ULONG_PTR base = dispatch->ImageBase;
+    ULONG_PTR pc = dispatch->ControlPc;
+    unsigned int i;
+    void *handler;
+
+    TRACE_(unwind)( "%p %p %p %p pc %Ix\n", rec, frame, context, dispatch, pc );
+    if (TRACE_ON(unwind)) DUMP_SCOPE_TABLE( base, table );
+
+    if (dispatch->ControlPcIsUnwound) pc -= 2;
+
+    if (rec->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND))
+    {
+        for (i = dispatch->ScopeIndex; i < table->Count; i++)
+        {
+            if (pc < base + table->ScopeRecord[i].BeginAddress) continue;
+            if (pc >= base + table->ScopeRecord[i].EndAddress) continue;
+#ifdef __REACTOS__
+            if (rec->ExceptionFlags & EXCEPTION_TARGET_UNWIND &&
+                is_unwind_target_in_scope( table, i, base, dispatch->TargetPc ))
+            {
+                break;
+            }
+            if (table->ScopeRecord[i].JumpTarget) continue;
+#else
+            if (table->ScopeRecord[i].JumpTarget) continue;
+
+            if (rec->ExceptionFlags & EXCEPTION_TARGET_UNWIND &&
+                dispatch->TargetPc >= base + table->ScopeRecord[i].BeginAddress &&
+                dispatch->TargetPc < base + table->ScopeRecord[i].EndAddress)
+            {
+                break;
+            }
+#endif
+            handler = (void *)(base + table->ScopeRecord[i].HandlerAddress);
+            dispatch->ScopeIndex = i + 1;
+            TRACE_(unwind)( "scope %u calling __finally %p frame %p\n", i, handler, frame );
+            __C_ExecuteExceptionFilter( ULongToPtr(TRUE), frame, handler, dispatch->NonVolatileRegisters );
+        }
+    }
+    else
+    {
+        for (i = dispatch->ScopeIndex; i < table->Count; i++)
+        {
+            if (pc < base + table->ScopeRecord[i].BeginAddress) continue;
+            if (pc >= base + table->ScopeRecord[i].EndAddress) continue;
+            if (!table->ScopeRecord[i].JumpTarget) continue;
+
+            if (table->ScopeRecord[i].HandlerAddress != EXCEPTION_EXECUTE_HANDLER)
+            {
+                EXCEPTION_POINTERS ptrs = { rec, context };
+
+                handler = (void *)(base + table->ScopeRecord[i].HandlerAddress);
+                TRACE_(unwind)( "scope %u calling filter %p ptrs %p frame %p\n", i, handler, &ptrs, frame );
+#ifdef __REACTOS__
+                {
+                    LONG filter_result = __C_ExecuteExceptionFilter( &ptrs, frame, handler, dispatch->NonVolatileRegisters );
+
+                    if (filter_result < 0)
+                        return ExceptionContinueExecution;
+                    if (!filter_result)
+                        continue;
+                }
+#else
+                switch (__C_ExecuteExceptionFilter( &ptrs, frame, handler, dispatch->NonVolatileRegisters ))
+                {
+                case EXCEPTION_EXECUTE_HANDLER:
+                    break;
+                case EXCEPTION_CONTINUE_SEARCH:
+                    continue;
+                case EXCEPTION_CONTINUE_EXECUTION:
+                    return ExceptionContinueExecution;
+                }
+#endif
+            }
+            /* Call the destructor if we're handling a C++ exception. */
+            if (is_cxx_exception( rec )) __DestructExceptionObject( rec );
+
+            TRACE_(unwind)( "unwinding to target %lx\n", base + table->ScopeRecord[i].JumpTarget );
+            RtlUnwindEx( frame, (char *)base + table->ScopeRecord[i].JumpTarget,
+                         rec, ULongToPtr(rec->ExceptionCode), dispatch->ContextRecord,
+                         dispatch->HistoryTable );
+        }
+    }
+    return ExceptionContinueSearch;
+}
+
+#endif /* __arm__ */
+
+#ifdef __x86_64__
+
+EXCEPTION_DISPOSITION WINAPI __C_specific_handler( EXCEPTION_RECORD *rec, void *frame, CONTEXT *context,
+                                                   DISPATCHER_CONTEXT *dispatch )
+{
+    const SCOPE_TABLE *table = dispatch->HandlerData;
+    ULONG_PTR base = dispatch->ImageBase;
+    ULONG_PTR pc = dispatch->ControlPc;
+    unsigned int i;
+
+#ifdef __arm64ec__
+    if (RtlIsEcCode( pc ))
+        return __C_specific_handler_arm64( rec, frame, (ARM64_NT_CONTEXT *)context,
+                                           (DISPATCHER_CONTEXT_ARM64 *)dispatch );
+#endif
+
+    TRACE_(unwind)( "%p %p %p %p pc %Ix\n", rec, frame, context, dispatch, pc );
+    if (TRACE_ON(unwind)) DUMP_SCOPE_TABLE( base, table );
+
+    if (rec->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND))
+    {
+        for (i = dispatch->ScopeIndex; i < table->Count; i++)
+        {
+            if (pc < base + table->ScopeRecord[i].BeginAddress) continue;
+            if (pc >= base + table->ScopeRecord[i].EndAddress) continue;
+#ifdef __REACTOS__
+            if (rec->ExceptionFlags & EXCEPTION_TARGET_UNWIND &&
+                is_unwind_target_in_scope( table, i, base, dispatch->TargetIp ))
+            {
+                break;
+            }
+            if (table->ScopeRecord[i].JumpTarget) continue;
+#else
+            if (table->ScopeRecord[i].JumpTarget) continue;
+
+            if (rec->ExceptionFlags & EXCEPTION_TARGET_UNWIND &&
+                dispatch->TargetIp >= base + table->ScopeRecord[i].BeginAddress &&
+                dispatch->TargetIp < base + table->ScopeRecord[i].EndAddress)
+            {
+                break;
+            }
+            else
+#endif
+            {
+                PTERMINATION_HANDLER handler = (void *)(base + table->ScopeRecord[i].HandlerAddress);
+                dispatch->ScopeIndex = i + 1;
+                TRACE_(unwind)( "scope %u calling __finally %p frame %p\n", i, handler, frame );
+                handler( TRUE, frame );
+            }
+        }
+    }
+    else
+    {
+        for (i = dispatch->ScopeIndex; i < table->Count; i++)
+        {
+            if (pc < base + table->ScopeRecord[i].BeginAddress) continue;
+            if (pc >= base + table->ScopeRecord[i].EndAddress) continue;
+            if (!table->ScopeRecord[i].JumpTarget) continue;
+
+            if (table->ScopeRecord[i].HandlerAddress != EXCEPTION_EXECUTE_HANDLER)
+            {
+                EXCEPTION_POINTERS ptrs = { rec, context };
+                PEXCEPTION_FILTER filter = (void *)(base + table->ScopeRecord[i].HandlerAddress);
+
+                TRACE_(unwind)( "scope %u calling filter %p ptrs %p frame %p\n", i, filter, &ptrs, frame );
+#ifdef __REACTOS__
+                {
+                    LONG filter_result = filter( &ptrs, frame );
+
+                    if (filter_result < 0)
+                        return ExceptionContinueExecution;
+                    if (!filter_result)
+                        continue;
+                }
+#else
+                switch (filter( &ptrs, frame ))
+                {
+                case EXCEPTION_EXECUTE_HANDLER:
+                    break;
+                case EXCEPTION_CONTINUE_SEARCH:
+                    continue;
+                case EXCEPTION_CONTINUE_EXECUTION:
+                    return ExceptionContinueExecution;
+                }
+#endif
+            }
+            /* Call the destructor if we're handling a C++ exception. */
+            if (is_cxx_exception( rec )) __DestructExceptionObject( rec );
+
+            TRACE_(unwind)( "unwinding to target %Ix\n", base + table->ScopeRecord[i].JumpTarget );
+            RtlUnwindEx( frame, (char *)base + table->ScopeRecord[i].JumpTarget,
+                         rec, ULongToPtr(rec->ExceptionCode), dispatch->ContextRecord,
+                         dispatch->HistoryTable );
+        }
+    }
+    return ExceptionContinueSearch;
+}
+
+#endif /* __x86_64__ */

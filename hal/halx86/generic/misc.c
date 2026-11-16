@@ -99,46 +99,6 @@ HalpMarkAcpiHal(VOID)
     return Status;
 }
 
-NTSTATUS
-NTAPI
-HalpOpenRegistryKey(IN PHANDLE KeyHandle,
-                    IN HANDLE RootKey,
-                    IN PUNICODE_STRING KeyName,
-                    IN ACCESS_MASK DesiredAccess,
-                    IN BOOLEAN Create)
-{
-    NTSTATUS Status;
-    ULONG Disposition;
-    OBJECT_ATTRIBUTES ObjectAttributes;
-
-    /* Setup the attributes we received */
-    InitializeObjectAttributes(&ObjectAttributes,
-                               KeyName,
-                               OBJ_CASE_INSENSITIVE,
-                               RootKey,
-                               NULL);
-
-    /* What to do? */
-    if ( Create )
-    {
-        /* Create the key */
-        Status = ZwCreateKey(KeyHandle,
-                             DesiredAccess,
-                             &ObjectAttributes,
-                             0,
-                             NULL,
-                             REG_OPTION_VOLATILE,
-                             &Disposition);
-    }
-    else
-    {
-        /* Open the key */
-        Status = ZwOpenKey(KeyHandle, DesiredAccess, &ObjectAttributes);
-    }
-
-    /* We're done */
-    return Status;
-}
 #endif /* !_MINIHAL_ */
 
 VOID
@@ -217,18 +177,6 @@ HalpFlushTLB(VOID)
 /*
  * @implemented
  */
-UCHAR
-FASTCALL
-HalSystemVectorDispatchEntry(IN ULONG Vector,
-                             OUT PKINTERRUPT_ROUTINE **FlatDispatch,
-                             OUT PKINTERRUPT_ROUTINE *NoConnection)
-{
-    //
-    // Not implemented on x86
-    //
-    return 0;
-}
-
 /*
  * @implemented
  */
@@ -241,6 +189,176 @@ KeFlushWriteBuffer(VOID)
     //
     return;
 }
+
+#ifndef _M_AMD64
+KIRQL
+NTAPI
+HalConvertDeviceIdtToIrql(
+    _In_ ULONG Vector)
+{
+    return HalpVectorToIrql((UCHAR)Vector);
+}
+
+NTSTATUS
+NTAPI
+HalGetInterruptTargetInformation(
+    _Inout_ PHAL_INTERRUPT_TARGET_INFORMATION TargetInformation)
+{
+    KAFFINITY Mask;
+    ULONG ProcessorNumber;
+
+    if (TargetInformation == NULL ||
+        TargetInformation->Version != HAL_INTERRUPT_TARGET_INFORMATION_VERSION)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Mask = TargetInformation->TargetProcessors;
+    if (Mask == 0)
+        Mask = KeQueryActiveProcessors();
+
+    ProcessorNumber = 0;
+    while ((Mask & 1) == 0)
+    {
+        Mask >>= 1;
+        ProcessorNumber++;
+    }
+
+    TargetInformation->ProcessorNumber = ProcessorNumber;
+    TargetInformation->TargetProcessors = ((KAFFINITY)1 << ProcessorNumber);
+    TargetInformation->DestinationId = ProcessorNumber;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+HalGetMessageRoutingInfo(
+    _Inout_ PHAL_MESSAGE_ROUTING_INFO RoutingInfo)
+{
+    HAL_INTERRUPT_TARGET_INFORMATION TargetInfo;
+    NTSTATUS Status;
+
+    if (RoutingInfo == NULL ||
+        RoutingInfo->Version != HAL_MESSAGE_ROUTING_INFO_VERSION)
+    {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (RoutingInfo->Flags & HAL_MSI_ROUTING_ALLOCATE_VECTOR)
+        return STATUS_NOT_SUPPORTED;
+
+    if (RoutingInfo->Vector == 0)
+        return STATUS_INVALID_PARAMETER;
+
+    TargetInfo.Version = HAL_INTERRUPT_TARGET_INFORMATION_VERSION;
+    TargetInfo.TargetProcessors = RoutingInfo->TargetProcessors;
+    TargetInfo.ProcessorNumber = 0;
+    TargetInfo.DestinationId = 0;
+    Status = HalGetInterruptTargetInformation(&TargetInfo);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    RoutingInfo->TargetProcessors = TargetInfo.TargetProcessors;
+    RoutingInfo->DestinationId = TargetInfo.DestinationId;
+    if (RoutingInfo->Irql == 0)
+        RoutingInfo->Irql = HalConvertDeviceIdtToIrql(RoutingInfo->Vector);
+    RoutingInfo->MessageAddress.QuadPart = 0xFEE00000ULL |
+                                           ((ULONGLONG)TargetInfo.DestinationId << 12);
+    RoutingInfo->MessageData = (USHORT)(RoutingInfo->Vector & 0xFF);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+HalpGetMessageRoutingInfo(
+    _Inout_ PHAL_MESSAGE_ROUTING_INFO RoutingInfo)
+{
+    return HalGetMessageRoutingInfo(RoutingInfo);
+}
+#endif
+
+NTSTATUS
+NTAPI
+HalGetProcessorIdByNtNumber(
+    _In_ ULONG ProcessorNumber,
+    _Out_ PULONG ProcessorId)
+{
+    if (ProcessorId == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    if (ProcessorNumber >= MAXIMUM_PROCESSORS)
+        return STATUS_INVALID_PARAMETER;
+
+    *ProcessorId = ProcessorNumber;
+    return STATUS_SUCCESS;
+}
+
+#ifdef _M_AMD64
+#undef KeGetCurrentIrql
+#undef KeRaiseIrqlToSynchLevel
+#undef KfLowerIrql
+#undef KeRaiseIrql
+#undef KeAcquireSpinLock
+#undef KfAcquireSpinLock
+#undef KfReleaseSpinLock
+
+KIRQL
+NTAPI
+KeGetCurrentIrql(VOID)
+{
+    return (KIRQL)__readcr8();
+}
+
+VOID
+FASTCALL
+KfLowerIrql(
+    _In_ KIRQL OldIrql)
+{
+    KeLowerIrql(OldIrql);
+}
+
+VOID
+NTAPI
+KeRaiseIrql(
+    _In_ KIRQL NewIrql,
+    _Out_ PKIRQL OldIrql)
+{
+    *OldIrql = KfRaiseIrql(NewIrql);
+}
+
+KIRQL
+NTAPI
+KeRaiseIrqlToSynchLevel(VOID)
+{
+    return KfRaiseIrql(SYNCH_LEVEL);
+}
+
+VOID
+NTAPI
+KeAcquireSpinLock(
+    _Inout_ PKSPIN_LOCK SpinLock,
+    _Out_ PKIRQL OldIrql)
+{
+    *OldIrql = KeAcquireSpinLockRaiseToDpc(SpinLock);
+}
+
+KIRQL
+FASTCALL
+KfAcquireSpinLock(
+    _Inout_ PKSPIN_LOCK SpinLock)
+{
+    return KeAcquireSpinLockRaiseToDpc(SpinLock);
+}
+
+VOID
+FASTCALL
+KfReleaseSpinLock(
+    _Inout_ PKSPIN_LOCK SpinLock,
+    _In_ KIRQL OldIrql)
+{
+    KeReleaseSpinLock(SpinLock, OldIrql);
+}
+#endif /* _M_AMD64 */
 
 #ifdef _M_IX86
 /* x86 fastcall wrappers */

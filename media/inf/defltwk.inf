@@ -21,7 +21,7 @@ LockoutBadCount = 0
 
 ; Account Options
 LSAAnonymousNameLookup = 0
-;EnableAdminAccount = 0
+EnableAdminAccount = 0
 EnableGuestAccount = 0
 ;NewAdministratorName =
 ;NewGuestName =
@@ -63,6 +63,7 @@ SeChangeNotifyPrivilege = *S-1-1-0, *S-1-5-32-544, *S-1-5-32-545, *S-1-5-32-551
 SeCreateGlobalPrivilege = *S-1-5-4, *S-1-5-6, *S-1-5-32-544
 SeCreatePagefilePrivilege = *S-1-5-32-544
 SeCreatePermanentPrivilege =
+SeCreateSymbolicLinkPrivilege = *S-1-5-32-544
 SeCreateTokenPrivilege =
 SeDebugPrivilege = *S-1-5-32-544
 SeDenyBatchLogonRight =
@@ -90,9 +91,10 @@ SeShutdownPrivilege = *S-1-5-32-544, *S-1-5-32-545, *S-1-5-32-551
 SeSyncAgentPrivilege =
 SeSystemEnvironmentPrivilege = *S-1-5-32-544
 SeSystemProfilePrivilege = *S-1-5-32-544
-SeSystemTimePrivilege = *S-1-5-32-544
+SeSystemTimePrivilege = *S-1-5-19, *S-1-5-32-544
 SeTakeOwnershipPrivilege = *S-1-5-32-544
 SeTcbPrivilege =
+SeTimeZonePrivilege = *S-1-5-19, *S-1-5-32-544, *S-1-5-32-545
 SeUndockPrivilege = *S-1-5-32-544, *S-1-5-32-545
 
 [Group Membership]

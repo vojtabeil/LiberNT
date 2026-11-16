@@ -48,7 +48,12 @@ FxUsbPipeContinuousReader::FxUsbPipeContinuousReader(
 
     m_TargetDevice = m_Pipe->GetTargetDevice();
 
-    RtlZeroMemory(&m_Readers[0], m_NumReaders * sizeof(FxUsbPipeRepeatReader));
+    for (UCHAR i = 0; i < m_NumReaders; i++)
+    {
+        m_Readers[i].Request = NULL;
+        m_Readers[i].RequestIrp = NULL;
+        m_Readers[i].Parent = this;
+    }
 }
 
 FxUsbPipeContinuousReader::~FxUsbPipeContinuousReader()
@@ -708,7 +713,7 @@ FxUsbPipeContinuousReader::FormatRepeater(
 
     WDF_REQUEST_REUSE_PARAMS_INIT(&params, 0, STATUS_NOT_SUPPORTED);
 
-    pRequest->Reuse(&params);
+    (VOID)!pRequest->Reuse(&params);
 
     //
     // pMemory will be deleted when either

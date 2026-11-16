@@ -65,7 +65,7 @@ static	DWORD	PCM_drvOpen(LPCSTR str, PACMDRVOPENDESCW adod)
  */
 static	DWORD	PCM_drvClose(DWORD dwDevID)
 {
-    TRACE("(%d)\n", dwDevID);
+    TRACE("(%ld)\n", dwDevID);
 
     return 1;
 }
@@ -121,6 +121,20 @@ static DWORD PCM_GetFormatIndex(LPWAVEFORMATEX wfx)
     return 0xFFFFFFFF;
 }
 
+#ifdef __REACTOS__
+static BOOL PCM_IsSuggestableFormat(LPWAVEFORMATEX wfx)
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(PCM_Formats); i++) {
+        if (wfx->nChannels == PCM_Formats[i].nChannels &&
+            wfx->wBitsPerSample == PCM_Formats[i].nBits)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+#endif
 /* PCM Conversions:
  *
  * parameters:
@@ -543,10 +557,23 @@ static const PCM_CONVERT_KEEP_RATE PCM_ConvertKeepRate[] = {
  *
  */
 
+#ifdef __REACTOS__
+static DWORD PCM_ResampleErrorInit(DWORD srcRate, DWORD dstRate)
+{
+    if (dstRate > srcRate)
+        return dstRate / 2 + srcRate + 1 - dstRate;
+    return srcRate / 2;
+}
+
+#endif
 static void cvtSS88C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                      const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -567,7 +594,11 @@ static void cvtSS88C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
 static void cvtSM88C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                      const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -587,7 +618,11 @@ static void cvtSM88C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
 static void cvtMS88C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                      const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -608,7 +643,11 @@ static void cvtMS88C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
 static void cvtMM88C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                      const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -628,7 +667,11 @@ static void cvtMM88C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
 static void cvtSS816C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                       const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -649,7 +692,11 @@ static void cvtSS816C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc
 static void cvtSM816C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                       const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -669,7 +716,11 @@ static void cvtSM816C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc
 static void cvtMS816C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                       const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -690,7 +741,11 @@ static void cvtMS816C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc
 static void cvtMM816C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                       const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -710,7 +765,11 @@ static void cvtMM816C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc
 static void cvtSS168C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                       const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -731,7 +790,11 @@ static void cvtSS168C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc
 static void cvtSM168C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                       const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -751,7 +814,11 @@ static void cvtSM168C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc
 static void cvtMS168C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                       const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -772,7 +839,11 @@ static void cvtMS168C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc
 static void cvtMM168C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                       const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -792,7 +863,11 @@ static void cvtMM168C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc
 static void cvtSS1616C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                        const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -813,7 +888,11 @@ static void cvtSS1616C(const DWORD srcRate, const unsigned char *src, DWORD *nsr
 static void cvtSM1616C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                        const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -833,7 +912,11 @@ static void cvtSM1616C(const DWORD srcRate, const unsigned char *src, DWORD *nsr
 static void cvtMS1616C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                        const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -854,7 +937,11 @@ static void cvtMS1616C(const DWORD srcRate, const unsigned char *src, DWORD *nsr
 static void cvtMM1616C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                        const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -874,7 +961,11 @@ static void cvtMM1616C(const DWORD srcRate, const unsigned char *src, DWORD *nsr
 static void cvtSS2424C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                        const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -895,7 +986,11 @@ static void cvtSS2424C(const DWORD srcRate, const unsigned char *src, DWORD *nsr
 static void cvtSM2424C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                        const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -915,7 +1010,11 @@ static void cvtSM2424C(const DWORD srcRate, const unsigned char *src, DWORD *nsr
 static void cvtMS2424C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                        const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -936,7 +1035,11 @@ static void cvtMS2424C(const DWORD srcRate, const unsigned char *src, DWORD *nsr
 static void cvtMM2424C(const DWORD srcRate, const unsigned char *src, DWORD *nsrc,
                        const DWORD dstRate, unsigned char *dst, DWORD *ndst)
 {
+#ifdef __REACTOS__
+    DWORD error = PCM_ResampleErrorInit(srcRate, dstRate);
+#else
     DWORD error = srcRate / 2;
+#endif
     DWORD maxSrc = *nsrc, maxDst = *ndst;
     *ndst = 0;
     for (*nsrc = 0; *nsrc < maxSrc; (*nsrc)++) {
@@ -1001,7 +1104,7 @@ static	LRESULT PCM_DriverDetails(PACMDRIVERDETAILSW add)
  */
 static	LRESULT	PCM_FormatTagDetails(PACMFORMATTAGDETAILSW aftd, DWORD dwQuery)
 {
-    TRACE("(%p, %08x)\n", aftd, dwQuery);
+    TRACE("(%p, %08lx)\n", aftd, dwQuery);
 
     switch (dwQuery) {
     case ACM_FORMATTAGDETAILSF_INDEX:
@@ -1024,7 +1127,7 @@ static	LRESULT	PCM_FormatTagDetails(PACMFORMATTAGDETAILSW aftd, DWORD dwQuery)
         }
 	break;
     default:
-	WARN("Unsupported query %08x\n", dwQuery);
+	WARN("Unsupported query %08lx\n", dwQuery);
 	return MMSYSERR_NOTSUPPORTED;
     }
 
@@ -1044,7 +1147,7 @@ static	LRESULT	PCM_FormatTagDetails(PACMFORMATTAGDETAILSW aftd, DWORD dwQuery)
  */
 static	LRESULT	PCM_FormatDetails(PACMFORMATDETAILSW afd, DWORD dwQuery)
 {
-    TRACE("(%p, %08x)\n", afd, dwQuery);
+    TRACE("(%p, %08lx)\n", afd, dwQuery);
 
     switch (dwQuery) {
     case ACM_FORMATDETAILSF_FORMAT:
@@ -1068,7 +1171,7 @@ static	LRESULT	PCM_FormatDetails(PACMFORMATDETAILSW afd, DWORD dwQuery)
 	    afd->pwfx->nSamplesPerSec * afd->pwfx->nBlockAlign;
 	break;
     default:
-	WARN("Unsupported query %08x\n", dwQuery);
+	WARN("Unsupported query %08lx\n", dwQuery);
 	return MMSYSERR_NOTSUPPORTED;
     }
 
@@ -1091,7 +1194,11 @@ static	LRESULT	PCM_FormatSuggest(PACMDRVFORMATSUGGEST adfs)
     /* some tests ... */
     if (adfs->cbwfxSrc < sizeof(PCMWAVEFORMAT) ||
         adfs->cbwfxDst < sizeof(PCMWAVEFORMAT) ||
+#ifdef __REACTOS__
+        !PCM_IsSuggestableFormat(adfs->pwfxSrc)) {
+#else
         PCM_GetFormatIndex(adfs->pwfxSrc) == 0xFFFFFFFF) {
+#endif
             WARN("not possible\n");
             return ACMERR_NOTPOSSIBLE;
     }
@@ -1119,7 +1226,11 @@ static	LRESULT	PCM_FormatSuggest(PACMDRVFORMATSUGGEST adfs)
         }
     }
     /* check if result is ok */
+#ifdef __REACTOS__
+    if (!PCM_IsSuggestableFormat(adfs->pwfxDst)) {
+#else
     if (PCM_GetFormatIndex(adfs->pwfxDst) == 0xFFFFFFFF) {
+#endif
         WARN("not possible\n");
         return ACMERR_NOTPOSSIBLE;
     }
@@ -1260,7 +1371,7 @@ static	LRESULT PCM_StreamSize(PACMDRVSTREAMINSTANCE adsi, PACMDRVSTREAMSIZE adss
 				       adsi->pwfxSrc->nAvgBytesPerSec) & dstMask;
 	break;
     default:
-	WARN("Unsupported query %08x\n", adss->fdwSize);
+	WARN("Unsupported query %08lx\n", adss->fdwSize);
 	return MMSYSERR_NOTSUPPORTED;
     }
     return MMSYSERR_NOERROR;
@@ -1278,12 +1389,12 @@ static LRESULT PCM_StreamConvert(PACMDRVSTREAMINSTANCE adsi, PACMDRVSTREAMHEADER
 
     TRACE("(%p, %p)\n", adsi, adsh);
 
-    TRACE("nsrc=%d,adsh->cbSrcLength=%d\n", nsrc, adsh->cbSrcLength);
-    TRACE("ndst=%d,adsh->cbDstLength=%d\n", ndst, adsh->cbDstLength);
-    TRACE("src [wFormatTag=%u, nChannels=%u, nSamplesPerSec=%u, nAvgBytesPerSec=%u, nBlockAlign=%u, wBitsPerSample=%u, cbSize=%u]\n",
+    TRACE("nsrc=%ld,adsh->cbSrcLength=%ld\n", nsrc, adsh->cbSrcLength);
+    TRACE("ndst=%ld,adsh->cbDstLength=%ld\n", ndst, adsh->cbDstLength);
+    TRACE("src [wFormatTag=%u, nChannels=%u, nSamplesPerSec=%lu, nAvgBytesPerSec=%lu, nBlockAlign=%u, wBitsPerSample=%u, cbSize=%u]\n",
           adsi->pwfxSrc->wFormatTag, adsi->pwfxSrc->nChannels, adsi->pwfxSrc->nSamplesPerSec, adsi->pwfxSrc->nAvgBytesPerSec,
           adsi->pwfxSrc->nBlockAlign, adsi->pwfxSrc->wBitsPerSample, adsi->pwfxSrc->cbSize);
-    TRACE("dst [wFormatTag=%u, nChannels=%u, nSamplesPerSec=%u, nAvgBytesPerSec=%u, nBlockAlign=%u, wBitsPerSample=%u, cbSize=%u]\n",
+    TRACE("dst [wFormatTag=%u, nChannels=%u, nSamplesPerSec=%lu, nAvgBytesPerSec=%lu, nBlockAlign=%u, wBitsPerSample=%u, cbSize=%u]\n",
           adsi->pwfxDst->wFormatTag, adsi->pwfxDst->nChannels, adsi->pwfxDst->nSamplesPerSec, adsi->pwfxDst->nAvgBytesPerSec,
           adsi->pwfxDst->nBlockAlign, adsi->pwfxDst->wBitsPerSample, adsi->pwfxDst->cbSize);
 
@@ -1291,7 +1402,7 @@ static LRESULT PCM_StreamConvert(PACMDRVSTREAMINSTANCE adsi, PACMDRVSTREAMHEADER
 	~(ACM_STREAMCONVERTF_BLOCKALIGN|
 	  ACM_STREAMCONVERTF_END|
 	  ACM_STREAMCONVERTF_START)) {
-	FIXME("Unsupported fdwConvert (%08x), ignoring it\n", adsh->fdwConvert);
+	FIXME("Unsupported fdwConvert (%08lx), ignoring it\n", adsh->fdwConvert);
     }
     /* ACM_STREAMCONVERTF_BLOCKALIGN
      *	currently all conversions are block aligned, so do nothing for this flag
@@ -1325,7 +1436,7 @@ static LRESULT PCM_StreamConvert(PACMDRVSTREAMINSTANCE adsi, PACMDRVSTREAMHEADER
 LRESULT CALLBACK PCM_DriverProc(DWORD_PTR dwDevID, HDRVR hDriv, UINT wMsg,
 				       LPARAM dwParam1, LPARAM dwParam2)
 {
-    TRACE("(%08lx %p %u %08lx %08lx);\n",
+    TRACE("(%08Ix %p %u %08Ix %08Ix);\n",
           dwDevID, hDriv, wMsg, dwParam1, dwParam2);
 
     switch (wMsg) {

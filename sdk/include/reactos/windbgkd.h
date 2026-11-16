@@ -230,7 +230,7 @@ typedef struct _KD_CONTEXT
 //
 // Control Sets for Supported Architectures
 //
-#include <pshpack4.h>
+#pragma pack(push, 4)
 typedef struct _X86_DBGKD_CONTROL_SET
 {
     ULONG TraceFlag;
@@ -273,6 +273,22 @@ typedef struct _ARM64_DBGKD_CONTROL_SET
     ULONG CurrentSymbolEnd;
 } ARM64_DBGKD_CONTROL_SET, *PARM64_DBGKD_CONTROL_SET;
 
+/* ReactOS-private RISC-V layout; no Microsoft KD wire format exists. */
+typedef struct _RISCV64_DBGKD_CONTROL_SET
+{
+    ULONG Continue;
+    ULONG64 CurrentSymbolStart;
+    ULONG64 CurrentSymbolEnd;
+} RISCV64_DBGKD_CONTROL_SET, *PRISCV64_DBGKD_CONTROL_SET;
+
+/* ReactOS PowerPC layout. */
+typedef struct _PPC_DBGKD_CONTROL_SET
+{
+    ULONG Continue;
+    ULONG CurrentSymbolStart;
+    ULONG CurrentSymbolEnd;
+} PPC_DBGKD_CONTROL_SET, *PPPC_DBGKD_CONTROL_SET;
+
 typedef struct _DBGKD_ANY_CONTROL_SET
 {
     union
@@ -282,9 +298,11 @@ typedef struct _DBGKD_ANY_CONTROL_SET
         IA64_DBGKD_CONTROL_SET IA64ControlSet;
         AMD64_DBGKD_CONTROL_SET Amd64ControlSet;
         ARM_DBGKD_CONTROL_SET ARMControlSet;
+        RISCV64_DBGKD_CONTROL_SET Riscv64ControlSet;
+        PPC_DBGKD_CONTROL_SET PpcControlSet;
     };
 } DBGKD_ANY_CONTROL_SET, *PDBGKD_ANY_CONTROL_SET;
-#include <poppack.h>
+#pragma pack(pop)
 
 #if defined(_M_IX86)
 typedef X86_DBGKD_CONTROL_SET DBGKD_CONTROL_SET, *PDBGKD_CONTROL_SET;
@@ -294,6 +312,10 @@ typedef AMD64_DBGKD_CONTROL_SET DBGKD_CONTROL_SET, *PDBGKD_CONTROL_SET;
 typedef ARM_DBGKD_CONTROL_SET DBGKD_CONTROL_SET, *PDBGKD_CONTROL_SET;
 #elif defined(_M_ARM64)
 typedef ARM64_DBGKD_CONTROL_SET DBGKD_CONTROL_SET, *PDBGKD_CONTROL_SET;
+#elif defined(_M_RISCV64)
+typedef RISCV64_DBGKD_CONTROL_SET DBGKD_CONTROL_SET, *PDBGKD_CONTROL_SET;
+#elif defined(_M_PPC)
+typedef PPC_DBGKD_CONTROL_SET DBGKD_CONTROL_SET, *PDBGKD_CONTROL_SET;
 #else
 #error Unsupported Architecture
 #endif
@@ -371,6 +393,27 @@ typedef struct _ARM64_DBGKD_CONTROL_REPORT
     UCHAR InstructionStream[DBGKD_MAXSTREAM];
 } ARM64_DBGKD_CONTROL_REPORT, *PARM64_DBGKD_CONTROL_REPORT;
 
+/* ReactOS-private RISC-V layout: Pc/Sp/Ra plus an instruction window. */
+typedef struct _RISCV64_DBGKD_CONTROL_REPORT
+{
+    ULONG64 Pc;
+    ULONG64 Sp;
+    ULONG64 Ra;
+    ULONG InstructionCount;
+    UCHAR InstructionStream[DBGKD_MAXSTREAM];
+} RISCV64_DBGKD_CONTROL_REPORT, *PRISCV64_DBGKD_CONTROL_REPORT;
+
+/* ReactOS PowerPC layout: Iar/Sp/Lr plus an instruction window. */
+typedef struct _PPC_DBGKD_CONTROL_REPORT
+{
+    ULONG Iar;
+    ULONG Sp;
+    ULONG Lr;
+    ULONG Msr;
+    ULONG InstructionCount;
+    UCHAR InstructionStream[DBGKD_MAXSTREAM];
+} PPC_DBGKD_CONTROL_REPORT, *PPPC_DBGKD_CONTROL_REPORT;
+
 typedef struct _DBGKD_ANY_CONTROL_REPORT
 {
     union
@@ -381,6 +424,8 @@ typedef struct _DBGKD_ANY_CONTROL_REPORT
         AMD64_DBGKD_CONTROL_REPORT Amd64ControlReport;
         ARM_DBGKD_CONTROL_REPORT ARMControlReport;
         ARM64_DBGKD_CONTROL_REPORT ARM64ControlReport;
+        RISCV64_DBGKD_CONTROL_REPORT Riscv64ControlReport;
+        PPC_DBGKD_CONTROL_REPORT PpcControlReport;
     };
 } DBGKD_ANY_CONTROL_REPORT, *PDBGKD_ANY_CONTROL_REPORT;
 
@@ -392,6 +437,10 @@ typedef AMD64_DBGKD_CONTROL_REPORT DBGKD_CONTROL_REPORT, *PDBGKD_CONTROL_REPORT;
 typedef ARM_DBGKD_CONTROL_REPORT DBGKD_CONTROL_REPORT, *PDBGKD_CONTROL_REPORT;
 #elif defined(_M_ARM64)
 typedef ARM64_DBGKD_CONTROL_REPORT DBGKD_CONTROL_REPORT, *PDBGKD_CONTROL_REPORT;
+#elif defined(_M_RISCV64)
+typedef RISCV64_DBGKD_CONTROL_REPORT DBGKD_CONTROL_REPORT, *PDBGKD_CONTROL_REPORT;
+#elif defined(_M_PPC)
+typedef PPC_DBGKD_CONTROL_REPORT DBGKD_CONTROL_REPORT, *PDBGKD_CONTROL_REPORT;
 #else
 #error Unsupported Architecture
 #endif
@@ -579,7 +628,7 @@ typedef struct _DBGKD_CONTINUE
     NTSTATUS ContinueStatus;
 } DBGKD_CONTINUE, *PDBGKD_CONTINUE;
 
-#include <pshpack4.h>
+#pragma pack(push, 4)
 typedef struct _DBGKD_CONTINUE2
 {
     NTSTATUS ContinueStatus;
@@ -589,7 +638,7 @@ typedef struct _DBGKD_CONTINUE2
         DBGKD_ANY_CONTROL_SET AnyControlSet;
     };
 } DBGKD_CONTINUE2, *PDBGKD_CONTINUE2;
-#include <poppack.h>
+#pragma pack(pop)
 
 typedef struct _DBGKD_READ_WRITE_IO32
 {

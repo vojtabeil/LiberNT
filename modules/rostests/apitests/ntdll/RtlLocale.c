@@ -744,8 +744,8 @@ static void Test_RtlLCIDToCultureName(void)
         if (Result)
         {
             Equal = RtlEqualUnicodeString(&CultureName, &ExpectedCultureName, FALSE);
-            ok(Equal, "Line %lu, Lcid 0x%lx: CultureName = '%wZ', expected '%wZ'\n",
-               Tests[i].Line, Tests[i].Lcid, &CultureName, &ExpectedCultureName);
+            ok(Equal, "Line %lu, Lcid 0x%lx: CultureName = '%.*ls', expected '%.*ls'\n",
+               Tests[i].Line, Tests[i].Lcid, (int)(CultureName.Length / sizeof(WCHAR)), CultureName.Buffer, (int)(ExpectedCultureName.Length / sizeof(WCHAR)), ExpectedCultureName.Buffer);
         }
     }
 }
@@ -852,7 +852,7 @@ static void Test_RtlLocaleNameToLcid(void)
            "Line %lu: Status == 0x%lx, expected 0x%lx\n",
            Tests[i].Line, Status, ExpectedStatus);
         ok(Lcid == ExpectedLcid,
-           "Line %lu: Lcid == 0x%08X, expected 0x%08X\n",
+           "Line %lu: Lcid == 0x%08lX, expected 0x%08lX\n",
            Tests[i].Line, Lcid, ExpectedLcid);
 
         // Flags = 0x2
@@ -864,7 +864,7 @@ static void Test_RtlLocaleNameToLcid(void)
            "Line %lu: Status == 0x%lx, expected 0x%lx\n",
            Tests[i].Line, Status, ExpectedStatus);
         ok(Lcid == ExpectedLcid,
-           "Line %lu: Lcid == 0x%08X, expected 0x%08X\n",
+           "Line %lu: Lcid == 0x%08lX, expected 0x%08lX\n",
            Tests[i].Line, Lcid, ExpectedLcid);
     }
 }
@@ -881,7 +881,7 @@ static void Test_RtlLcidToLocaleName(void)
     RtlInitEmptyUnicodeString(&LocaleName, Buffer, sizeof(Buffer));
     Status = pRtlLcidToLocaleName(0x0409, &LocaleName, 0, FALSE);
     ok_ntstatus(Status, STATUS_SUCCESS);
-    ok(memcmp(Buffer, L"en-US", 12) == 0, "Expected null-terminated 'en-US', got %wZ\n", &LocaleName);
+    ok(memcmp(Buffer, L"en-US", 12) == 0, "Expected null-terminated 'en-US', got %.*ls\n", (int)(LocaleName.Length / sizeof(WCHAR)), LocaleName.Buffer);
 
     // Test invalid LCIDs
     Status = pRtlLcidToLocaleName(0xF2EE, &LocaleName, 0, FALSE);
@@ -1011,8 +1011,8 @@ static void Test_RtlLcidToLocaleName(void)
         if (NT_SUCCESS(Status))
         {
             Equal = RtlEqualUnicodeString(&LocaleName, &ExpectedLocaleName, TRUE);
-            ok(Equal, "Line %lu, Lcid 0x%lx: LocaleName == '%wZ', expected '%wZ'\n",
-               Tests[i].Line, Tests[i].Lcid, &LocaleName, &ExpectedLocaleName);
+            ok(Equal, "Line %lu, Lcid 0x%lx: LocaleName == '%.*ls', expected '%.*ls'\n",
+               Tests[i].Line, Tests[i].Lcid, (int)(LocaleName.Length / sizeof(WCHAR)), LocaleName.Buffer, (int)(ExpectedLocaleName.Length / sizeof(WCHAR)), ExpectedLocaleName.Buffer);
         }
 
         /* Test with Flags == 2 */
@@ -1024,8 +1024,8 @@ static void Test_RtlLcidToLocaleName(void)
         if (NT_SUCCESS(Status))
         {
             Equal = RtlEqualUnicodeString(&LocaleName, &ExpectedLocaleName, FALSE);
-            ok(Equal, "Line %lu, Lcid 0x%lx: LocaleName == '%wZ', expected '%wZ'\n",
-               Tests[i].Line, Tests[i].Lcid, &LocaleName, &ExpectedLocaleName);
+            ok(Equal, "Line %lu, Lcid 0x%lx: LocaleName == '%.*ls', expected '%.*ls'\n",
+               Tests[i].Line, Tests[i].Lcid, (int)(LocaleName.Length / sizeof(WCHAR)), LocaleName.Buffer, (int)(ExpectedLocaleName.Length / sizeof(WCHAR)), ExpectedLocaleName.Buffer);
         }
     }
 }

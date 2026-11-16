@@ -23,6 +23,8 @@ if(NOT DEFINED MINGW_TOOLCHAIN_PREFIX)
         set(MINGW_TOOLCHAIN_PREFIX "x86_64-w64-mingw32-" CACHE STRING "MinGW Toolchain Prefix")
     elseif(ARCH STREQUAL "arm")
         set(MINGW_TOOLCHAIN_PREFIX "arm-mingw32ce-" CACHE STRING "MinGW Toolchain Prefix")
+    elseif(ARCH STREQUAL "arm64")
+        set(MINGW_TOOLCHAIN_PREFIX "aarch64-w64-mingw32-" CACHE STRING "MinGW Toolchain Prefix")
     endif()
 endif()
 
@@ -32,20 +34,35 @@ endif()
 
 # The name of the target operating system
 set(CMAKE_SYSTEM_NAME Windows)
-set(CMAKE_SYSTEM_PROCESSOR i686)
+if(ARCH STREQUAL "i386")
+    set(CMAKE_SYSTEM_PROCESSOR i686)
+elseif(ARCH STREQUAL "amd64")
+    set(CMAKE_SYSTEM_PROCESSOR x86_64)
+elseif(ARCH STREQUAL "arm")
+    set(CMAKE_SYSTEM_PROCESSOR arm)
+elseif(ARCH STREQUAL "arm64")
+    set(CMAKE_SYSTEM_PROCESSOR aarch64)
+endif()
 
 # Which tools to use
 require_program(CMAKE_C_COMPILER ${MINGW_TOOLCHAIN_PREFIX}gcc${MINGW_TOOLCHAIN_SUFFIX})
 require_program(CMAKE_CXX_COMPILER ${MINGW_TOOLCHAIN_PREFIX}g++${MINGW_TOOLCHAIN_SUFFIX})
 require_program(CMAKE_ASM_COMPILER ${MINGW_TOOLCHAIN_PREFIX}gcc${MINGW_TOOLCHAIN_SUFFIX})
 set(CMAKE_ASM_COMPILER_ID "GNU")
-require_program(CMAKE_MC_COMPILER ${MINGW_TOOLCHAIN_PREFIX}windmc)
+set(CMAKE_MC_COMPILER native-windmc)
 require_program(CMAKE_RC_COMPILER ${MINGW_TOOLCHAIN_PREFIX}windres)
 require_program(CMAKE_DLLTOOL ${MINGW_TOOLCHAIN_PREFIX}dlltool)
 #set(CMAKE_AR ${MINGW_TOOLCHAIN_PREFIX}gcc-ar${MINGW_TOOLCHAIN_SUFFIX})
 require_program(CMAKE_OBJCOPY ${MINGW_TOOLCHAIN_PREFIX}objcopy)
 
-set(CMAKE_C_CREATE_STATIC_LIBRARY "<CMAKE_AR> crT <TARGET> <LINK_FLAGS> <OBJECTS>")
+# ar just puts stuff into the archive, without looking twice: if a member
+# has been removed from the source list, 'ar crT' on a pre-existing archive
+# will happily keep the stale object file inside. Delete the archive first
+# so that every link starts from a clean state (same pattern as used for
+# import libs in sdk/cmake/gcc.cmake).
+set(CMAKE_C_CREATE_STATIC_LIBRARY
+    "<CMAKE_COMMAND> -E rm -f <TARGET>"
+    "<CMAKE_AR> crT <TARGET> <LINK_FLAGS> <OBJECTS>")
 set(CMAKE_CXX_CREATE_STATIC_LIBRARY ${CMAKE_C_CREATE_STATIC_LIBRARY})
 set(CMAKE_ASM_CREATE_STATIC_LIBRARY ${CMAKE_C_CREATE_STATIC_LIBRARY})
 

@@ -23,6 +23,9 @@
 #include "shlguid.h"
 #include "isguids.h"
 #include "ieautomation.h"
+#ifdef __REACTOS__
+#include "shlguid_undoc.h"
+#endif
 
 #include "wine/debug.h"
 
@@ -49,7 +52,7 @@ static HRESULT load_typelib(void)
 
     hres = LoadRegTypeLib(&LIBID_SHDocVw, 1, 1, LOCALE_SYSTEM_DEFAULT, &tl);
     if(FAILED(hres)) {
-        ERR("LoadRegTypeLib failed: %08x\n", hres);
+        ERR("LoadRegTypeLib failed: %08lx\n", hres);
         return hres;
     }
 
@@ -72,7 +75,7 @@ HRESULT get_typeinfo(tid_t tid, ITypeInfo **typeinfo)
 
         hres = ITypeLib_GetTypeInfoOfGuid(typelib, tid_ids[tid], &ti);
         if(FAILED(hres)) {
-            ERR("GetTypeInfoOfGuid(%s) failed: %08x\n", debugstr_guid(tid_ids[tid]), hres);
+            ERR("GetTypeInfoOfGuid(%s) failed: %08lx\n", debugstr_guid(tid_ids[tid]), hres);
             return hres;
         }
 
@@ -179,17 +182,30 @@ static const IClassFactoryVtbl CUrlHistoryFactoryVtbl = {
 static IClassFactory CUrlHistoryFactory = { &CUrlHistoryFactoryVtbl };
 
 #ifdef __REACTOS__
-extern HRESULT WINAPI CInternetFolder_CreateInstance(IClassFactory *iface, IUnknown *outer, REFIID riid, void **ppv);
-
-static const IClassFactoryVtbl CInternetFolderFactoryVtbl = {
+static const IClassFactoryVtbl ShellUIHelperFactoryVtbl = {
     ClassFactory_QueryInterface,
     ClassFactory_AddRef,
     ClassFactory_Release,
-    CInternetFolder_CreateInstance,
+    ShellUIHelper_Create,
     ClassFactory_LockServer
 };
 
-static IClassFactory CInternetFolderFactory = { &CInternetFolderFactoryVtbl };
+static IClassFactory ShellUIHelperFactory = { &ShellUIHelperFactoryVtbl };
+
+static const IClassFactoryVtbl URLSearchHookFactoryVtbl = {
+    ClassFactory_QueryInterface,
+    ClassFactory_AddRef,
+    ClassFactory_Release,
+    URLSearchHook_Create,
+    ClassFactory_LockServer
+};
+
+static IClassFactory URLSearchHookFactory = { &URLSearchHookFactoryVtbl };
+
+VOID IEFRAME_InitObjects(HINSTANCE hInstance);
+VOID IEFRAME_TermObjects(VOID);
+HRESULT IEFRAME_GetObjectsClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppv);
+BOOL IEFRAME_ObjectsInUse(VOID);
 #endif
 
 /******************************************************************
@@ -197,17 +213,23 @@ static IClassFactory CInternetFolderFactory = { &CInternetFolderFactoryVtbl };
  */
 BOOL WINAPI DllMain(HINSTANCE hInstDLL, DWORD fdwReason, LPVOID lpv)
 {
-    TRACE("(%p %d %p)\n", hInstDLL, fdwReason, lpv);
+    TRACE("(%p %ld %p)\n", hInstDLL, fdwReason, lpv);
 
     switch(fdwReason)
     {
     case DLL_PROCESS_ATTACH:
         ieframe_instance = hInstDLL;
         register_iewindow_class();
+#ifdef __REACTOS__
+        IEFRAME_InitObjects(hInstDLL);
+#endif
         DisableThreadLibraryCalls(ieframe_instance);
         break;
     case DLL_PROCESS_DETACH:
         if (lpv) break;
+#ifdef __REACTOS__
+        IEFRAME_TermObjects();
+#endif
         unregister_iewindow_class();
         release_typelib();
     }
@@ -235,17 +257,21 @@ HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppv)
         return IClassFactory_QueryInterface(&InternetShortcutFactory, riid, ppv);
     }
 
+#ifdef __REACTOS__
+    if(IsEqualGUID(&CLSID_ShellUIHelper, rclsid))
+        return IClassFactory_QueryInterface(&ShellUIHelperFactory, riid, ppv);
+
+    if(IsEqualGUID(&CLSID_CURLSearchHook, rclsid))
+        return IClassFactory_QueryInterface(&URLSearchHookFactory, riid, ppv);
+
+    if(IsEqualGUID(&CLSID_CommBand, rclsid) || IsEqualGUID(&CLSID_ShellNameSpace, rclsid))
+        return IEFRAME_GetObjectsClassObject(rclsid, riid, ppv);
+#endif
+
     if(IsEqualGUID(&CLSID_CUrlHistory, rclsid)) {
         TRACE("(CLSID_CUrlHistory %s %p)\n", debugstr_guid(riid), ppv);
         return IClassFactory_QueryInterface(&CUrlHistoryFactory, riid, ppv);
     }
-
-#ifdef __REACTOS__
-    if(IsEqualGUID(&CLSID_Internet, rclsid)) {
-        TRACE("(CLSID_Internet %s %p)\n", debugstr_guid(riid), ppv);
-        return IClassFactory_QueryInterface(&CInternetFolderFactory, riid, ppv);
-    }
-#endif
 
     FIXME("%s %s %p\n", debugstr_guid(rclsid), debugstr_guid(riid), ppv);
     return CLASS_E_CLASSNOTAVAILABLE;
@@ -277,25 +303,11 @@ IClassFactory InternetExplorerManagerFactory = { &InternetExplorerManagerFactory
 HRESULT WINAPI DllCanUnloadNow(void)
 {
     TRACE("()\n");
+#ifdef __REACTOS__
+    if(IEFRAME_ObjectsInUse())
+        return S_FALSE;
+#endif
     return module_ref ? S_FALSE : S_OK;
-}
-
-/***********************************************************************
- *          DllRegisterServer (ieframe.@)
- */
-HRESULT WINAPI DllRegisterServer(void)
-{
-    TRACE("()\n");
-    return __wine_register_resources(ieframe_instance);
-}
-
-/***********************************************************************
- *          DllUnregisterServer (ieframe.@)
- */
-HRESULT WINAPI DllUnregisterServer(void)
-{
-    TRACE("()\n");
-    return __wine_unregister_resources(ieframe_instance);
 }
 
 /***********************************************************************
@@ -305,4 +317,26 @@ HRESULT WINAPI IEGetWriteableHKCU(HKEY *pkey)
 {
     FIXME("(%p) stub\n", pkey);
     return E_NOTIMPL;
+}
+
+/***********************************************************************
+ *          SetQueryNetSessionCount (ieframe.@)
+ */
+LONG WINAPI SetQueryNetSessionCount(DWORD session_op)
+{
+    static LONG session_count;
+
+    TRACE("(%lx)\n", session_op);
+
+    switch(session_op)
+    {
+    case SESSION_QUERY:
+        return session_count;
+    case SESSION_INCREMENT:
+        return InterlockedIncrement(&session_count);
+    case SESSION_DECREMENT:
+        return InterlockedDecrement(&session_count);
+    };
+
+    return 0;
 }

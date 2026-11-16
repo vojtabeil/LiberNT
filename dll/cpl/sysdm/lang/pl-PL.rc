@@ -20,8 +20,10 @@ BEGIN
     LTEXT REACTOS_STR_PRODUCT_NAME, IDC_STATIC, 10, 128, 116, 9
     LTEXT "Wersja", IDC_ROSVERSION, 10, 137, 116, 9
     LTEXT KERNEL_VERSION_REVISION_RC, IDC_STATIC, 10, 146, 110, 9
-    LTEXT "Czas pracy systemu:", IDC_STATIC, 4, 161, 100, 9
-    LTEXT "", IDC_UPTIME, 10, 173, 116, 9
+    LTEXT "Target: Windows 11", IDC_ROSTARGET, 10, 155, 116, 9, SS_LEFTNOWORDWRAP
+    LTEXT "Build", IDC_ROSBUILD, 10, 164, 116, 9, SS_LEFTNOWORDWRAP
+    LTEXT "Czas pracy systemu:", IDC_STATIC, 4, 178, 100, 9
+    LTEXT "", IDC_UPTIME, 10, 189, 116, 9
     LTEXT "Komputer:", IDC_STATIC, 124, 116, 100, 9
     LTEXT "", IDC_MACHINELINE1, 130, 128, 118, 9
     LTEXT "", IDC_MACHINELINE2, 130, 137, 118, 9
@@ -29,7 +31,7 @@ BEGIN
     LTEXT "", IDC_MACHINELINE4, 130, 155, 118, 9
     LTEXT "", IDC_MACHINELINE5, 130, 164, 118, 9
     LTEXT "", IDC_MACHINELINE6, 130, 173, 118, 9
-    CONTROL "Odwiedź <A HREF=""https://reactos.org/"">Stronę domową ReactOS</A>", IDC_ROSHOMEPAGE_LINK, "SysLink", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 10, 200, 140, 10
+    CONTROL "Odwiedź <A HREF=""https://libernt.com/"">Stronę domową LiberNT</A>", IDC_ROSHOMEPAGE_LINK, "SysLink", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 10, 200, 140, 10
     PUSHBUTTON "Wyświetl &licencję...", IDC_LICENCE, 170, 198, 78, 15
 END
 
@@ -69,7 +71,6 @@ BEGIN
     PUSHBUTTON "Us&tawienia", IDC_STAREC, 194, 172, 50, 15
     PUSHBUTTON "Ustawienia systemowe", IDC_SYSSETTINGS, 6, 202, 80, 15
     PUSHBUTTON "Z&mienne środowiskowe", IDC_ENVVAR, 88, 202, 80, 15
-    PUSHBUTTON "&Raportowanie błędów", IDC_ERRORREPORT, 170, 202, 80, 15
 END
 
 IDD_SYSSETTINGS DIALOGEX 0, 0, 221, 106
@@ -78,7 +79,7 @@ CAPTION "Ustawienia systemowe"
 FONT 8, "MS Shell Dlg", 0, 0, 0x1
 BEGIN
     GROUPBOX "Informowanie o wersji", IDC_STATIC, 6, 3, 210, 73
-    LTEXT "ReactOS jest zbudowany w oparciu o wersję serwerową. Zaznacz pole, aby ReactOS zgłaszał się aplikacjom jako stacja robocza.", IDC_STATIC, 15, 15, 183, 41
+    LTEXT "LiberNT jest zbudowany w oparciu o wersję serwerową. Zaznacz pole, aby LiberNT zgłaszał się aplikacjom jako stacja robocza.", IDC_STATIC, 15, 15, 183, 41
     CONTROL "Zgłaszaj jako stację roboczą", IDC_REPORTASWORKSTATION, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 16, 57, 190, 10
     PUSHBUTTON "OK", IDOK, 166, 83, 50, 14
 END
@@ -99,7 +100,7 @@ BEGIN
     PUSHBUTTON "Z&mień nazwę", IDC_HRDPROFRENAME, 118, 106, 50, 14, WS_DISABLED
     PUSHBUTTON "&Usuń", IDC_HRDPROFDEL, 173, 106, 50, 14, WS_DISABLED
     GROUPBOX "Wybór profili sprzętu", IDC_STATIC, 7, 130, 240, 80
-    LTEXT "Podczas uruchamiania ReactOS:", IDC_STATIC, 14, 142, 210, 8
+    LTEXT "Podczas uruchamiania LiberNT:", IDC_STATIC, 14, 142, 210, 8
     AUTORADIOBUTTON "&Czekaj na wybór profilu sprzętu przez użytkownika", IDC_HRDPROFWAIT, 14, 158, 175, 8, WS_GROUP
     AUTORADIOBUTTON "&Wybierz &pierwszy profil na liście, jeżeli użytkownik nie wybierze\nprofilu w ciągu", IDC_HRDPROFSELECT, 14, 173, 215, 17, BS_MULTILINE
     LTEXT "s", IDC_STATIC, 65, 195, 35, 8
@@ -250,9 +251,9 @@ BEGIN
     LTEXT "%s", IDC_SPACEAVAIL, 102, 92, 104, 8
     LTEXT "R&ozmiar początkowy (MB):", -1, 22, 118, 96, 8
     LTEXT "Rozmiar &maksymalny (MB):", -1, 22, 131, 96, 8
-    AUTORADIOBUTTON "&Rozmiar niestandardowy:", IDC_CUSTOM, 20, 105, 132, 8, WS_GROUP
-    AUTORADIOBUTTON "Rozmiar &kontrolowany przez system", IDC_SYSMANSIZE, 20, 145, 132, 8
-    AUTORADIOBUTTON "&Bez pliku stronicowania", IDC_NOPAGEFILE, 20, 158, 132, 8
+    AUTORADIOBUTTON "&Rozmiar niestandardowy:", IDC_CUSTOM, 20, 103, 132, 12, WS_GROUP
+    AUTORADIOBUTTON "Rozmiar &kontrolowany przez system", IDC_SYSMANSIZE, 20, 143, 132, 12
+    AUTORADIOBUTTON "&Bez pliku stronicowania", IDC_NOPAGEFILE, 20, 156, 132, 12
     EDITTEXT IDC_INITIALSIZE, 126, 114, 44, 13, NOT WS_BORDER, WS_EX_CLIENTEDGE
     EDITTEXT IDC_MAXSIZE, 126, 129, 44, 13, NOT WS_BORDER, WS_EX_CLIENTEDGE
     PUSHBUTTON "Ustaw", IDC_SET, 158, 154, 50, 15
@@ -338,7 +339,7 @@ CAPTION "Efekty wizualne"
 FONT 8, "MS Shell Dlg"
 STYLE DS_SHELLFONT | DS_MODALFRAME | WS_POPUP | WS_VISIBLE | WS_CAPTION | WS_SYSMENU
 BEGIN
-   LTEXT "Wybierz ustawienia wyglądu i wydajności systemu ReactOS, których chcesz używać na tym komputerze.", IDC_STATIC, 7, 6, 208, 18
+   LTEXT "Wybierz ustawienia wyglądu i wydajności systemu LiberNT, których chcesz używać na tym komputerze.", IDC_STATIC, 7, 6, 208, 18
    CONTROL "", IDC_TREE, "SysTreeView32", TVS_LINESATROOT | TVS_DISABLEDRAGDROP | WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP, 7, 32, 213, 168
 END
 
@@ -352,7 +353,7 @@ BEGIN
    AUTORADIOBUTTON "&Programy", IDC_CPUCLIENT, 14, 36, 75, 12
    AUTORADIOBUTTON "&Usługi działające w tle", IDC_CPUSERVER, 96, 36, 85, 12
    GROUPBOX "Pamięć wirtualna", IDC_STATIC, 7, 60, 213, 57
-   LTEXT "Plik stronicowania to obszar twardego dysku używany przez system ReactOS tak, jakby była to pamięć RAM.", IDC_STATIC, 14, 74, 199, 16
+   LTEXT "Plik stronicowania to obszar twardego dysku używany przez system LiberNT tak, jakby była to pamięć RAM.", IDC_STATIC, 14, 74, 199, 16
    PUSHBUTTON "Z&mień...", IDC_CHANGESWAP, 163, 97, 50, 14
 END
 

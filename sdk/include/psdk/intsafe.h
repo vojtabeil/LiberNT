@@ -461,6 +461,7 @@ DEFINE_SAFE_CONVERT_STOS(LongPtrToChar, LONG_PTR, _INTSAFE_CHAR)
 #define RtlULongLongToSizeT RtlULongLongToUIntPtr
 #define RtlULongLongToSSIZET RtlULongLongToLongPtr
 #define RtlULongLongToSIZET RtlULongLongToULongPtr
+#define RtlSizeTToULong RtlULongPtrToULong
 #define RtlSIZETToULong RtlULongPtrToULong
 #define RtlSSIZETToULongLong RtlLongPtrToULongLong
 #define RtlSSIZETToULong RtlLongPtrToULong
@@ -501,6 +502,7 @@ DEFINE_SAFE_CONVERT_STOS(LongPtrToChar, LONG_PTR, _INTSAFE_CHAR)
 #define ULongLongToSizeT ULongLongToUIntPtr
 #define ULongLongToSSIZET ULongLongToLongPtr
 #define ULongLongToSIZET ULongLongToULongPtr
+#define SizeTToULong ULongPtrToULong
 #define SIZETToULong ULongPtrToULong
 #define SSIZETToULongLong LongPtrToULongLong
 #define SSIZETToULong LongPtrToULong
@@ -594,7 +596,7 @@ INTSAFE_NAME(LongLongAdd)(
     _In_ LONGLONG Addend,
     _Out_ _Deref_out_range_(==, Augend + Addend) LONGLONG* pResult)
 {
-    LONGLONG Result = Augend + Addend;
+    LONGLONG Result = (LONGLONG)((ULONGLONG)Augend + (ULONGLONG)Addend);
 
     /* The only way the result can overflow, is when the sign of the augend
        and the addend are the same. In that case the result is expected to
@@ -643,7 +645,7 @@ INTSAFE_NAME(LongLongSub)(
     _In_ LONGLONG Subtrahend,
     _Out_ _Deref_out_range_(==, Minuend - Subtrahend) LONGLONG* pResult)
 {
-    LONGLONG Result = Minuend - Subtrahend;
+    LONGLONG Result = (LONGLONG)((ULONGLONG)Minuend - (ULONGLONG)Subtrahend);
 
     /* The only way the result can overflow, is when the sign of the minuend
        and the subtrahend differ. In that case the result is expected to
@@ -752,6 +754,7 @@ INTSAFE_NAME(_Name)( \
     return INTSAFE_NAME(_Convert)(Result, pOutput); \
 }
 
+DEFINE_SAFE_MULT_U32(UIntMult, UINT, ULongLongToUInt)
 DEFINE_SAFE_MULT_U32(ULongMult, ULONG, ULongLongToULong)
 #ifndef _WIN64
 DEFINE_SAFE_MULT_U32(SizeTMult, size_t, ULongLongToSizeT)
@@ -824,6 +827,9 @@ DEFINE_SAFE_MULT_U16(UShortMult, USHORT, ULongToUShort)
 #define UInt64Sub ULongLongSub
 #define UInt16Mult UShortMult
 #define WordMult UShortMult
+#define UInt32Mult UIntMult
+#define Int32ToUInt32 IntToUInt
+#define SizeTToInt UIntPtrToInt
 #ifdef _WIN64
 #define IntPtrAdd LongLongAdd
 #define LongPtrAdd LongLongAdd

@@ -1,0 +1,550 @@
+/*
+ * PROJECT:     ReactOS host-native tests
+ * FILE:        submodules/host-tests/mmcc/nvs/amd64/t_tlb.c
+ * PURPOSE:     AMD64 translation lookaside buffer regression tests
+ *
+ * SPDX-FileCopyrightText: 2026 Ahmed ARIF
+ * SPDX-License-Identifier: GPL-3.0-only
+ */
+
+#include "tlbshim.h"
+#include <mm/arch/amd64/tlb.h>
+#include <mm/arch/amd64/hardware.h>
+#include <pthread.h>
+#include <setjmp.h>
+
+typedef struct _TEST_CPU
+{
+    ULONG64 Cr3, Cr4;
+    ULONG64 PageFlushes, FullFlushes, NonGlobalFlushes, Cr3Writes, Cr4Writes, Invpcids, NonGlobalInvpcids, CpuidCalls;
+    ULONG64 Pages[8];
+    ULONG64 Pending;
+    BOOLEAN Enabled;
+    KIRQL Irql;
+} TEST_CPU;
+
+static TEST_CPU Cpus[MAXIMUM_PROCESSORS];
+static _Thread_local ULONG CurrentCpu;
+static ULONG64 ActiveCpus;
+static ULONG Checks, Failures, Finished;
+static ULONG64 Ipis;
+static ULONG DelayWait, DelayPolls, DelayReturned;
+static ULONG WatchdogMode, WatchdogPolls, WatchdogBugchecks, WatchdogInjected, WatchdogEpochReads;
+static ULONG64 WatchdogTime, WatchdogEpoch, WatchdogFrequency, WatchdogNow, WatchdogBaseline;
+static jmp_buf WatchdogJump;
+
+BOOLEAN MiAmd64TlbWatchdogEnabled(VOID) { return WatchdogMode != 0 && WatchdogMode != 5; }
+BOOLEAN MiAmd64TlbWatchdogFreezeActive(VOID) { return WatchdogMode == 2 && WatchdogPolls < 16000; }
+ULONG64 MiAmd64TlbWatchdogEpoch(VOID)
+{
+    if (WatchdogMode == 8 && WatchdogPolls >= 10240 && ++WatchdogEpochReads == 3)
+        WatchdogEpoch++;
+    return WatchdogEpoch;
+}
+ULONG64 MiAmd64TlbWatchdogNow(PULONG64 Frequency)
+{
+    *Frequency = 1;
+    if (WatchdogMode == 7 && WatchdogPolls >= 10240 && !WatchdogInjected)
+    {
+        WatchdogInjected = 1;
+        CurrentCpu = 1;
+        MiAmd64ProcessTlbRequest(0);
+        CurrentCpu = 0;
+    }
+    if (WatchdogMode == 6 && WatchdogPolls >= 1024 && WatchdogEpoch == 0)
+    {
+        WatchdogEpoch++;
+        WatchdogTime += 100;
+    }
+    return WatchdogTime;
+}
+VOID MiAmd64TlbWatchdogBugcheck(ULONG64 Frequency, ULONG64 Now, ULONG64 Baseline)
+{
+    WatchdogFrequency = Frequency;
+    WatchdogNow = Now;
+    WatchdogBaseline = Baseline;
+    WatchdogBugchecks++;
+    longjmp(WatchdogJump, 1);
+}
+
+#define CHECK(e) do { __atomic_fetch_add(&Checks, 1, __ATOMIC_RELAXED); if (!(e)) { if (__atomic_fetch_add(&Failures, 1, __ATOMIC_RELAXED) < 20) fprintf(stderr, "cpu%u %u: %s\n", CurrentCpu, __LINE__, #e); } } while (0)
+
+ULONG MiAmd64TlbCpu(VOID) { return CurrentCpu; }
+ULONG64 MiAmd64TlbActiveCpus(VOID) { return ActiveCpus; }
+ULONG64 MiAmd64TlbReadCr3(VOID) { return Cpus[CurrentCpu].Cr3; }
+ULONG64 MiAmd64TlbReadCr4(VOID) { return Cpus[CurrentCpu].Cr4; }
+
+static VOID FlushAll(VOID)
+{
+    TEST_CPU *Cpu = &Cpus[CurrentCpu];
+    ULONG Index;
+    Cpu->FullFlushes++;
+    for (Index = 0; Index < RTL_NUMBER_OF(Cpu->Pages); Index++)
+        Cpu->Pages[Index] = 0;
+}
+
+static VOID FlushNonGlobal(VOID)
+{
+    TEST_CPU *Cpu = &Cpus[CurrentCpu];
+    ULONG Index;
+    Cpu->NonGlobalFlushes++;
+    for (Index = 0; Index < RTL_NUMBER_OF(Cpu->Pages); Index++)
+        if (Cpu->Pages[Index] < MI_AMD64_USER_END)
+            Cpu->Pages[Index] = 0;
+}
+
+VOID MiAmd64TlbWriteCr3(ULONG64 Value)
+{
+    TEST_CPU *Cpu = &Cpus[CurrentCpu];
+    CHECK(!Cpu->Enabled);
+    CHECK(!(Value & (1ULL << 63)));
+    CHECK((Cpu->Cr4 & (1ULL << 17)) == 0);
+    Cpu->Cr3 = Value;
+    Cpu->Cr3Writes++;
+    if (Cpu->Cr4 & (1ULL << 7))
+        FlushNonGlobal();
+    else
+        FlushAll();
+}
+
+VOID MiAmd64TlbWriteCr4(ULONG64 Value)
+{
+    TEST_CPU *Cpu = &Cpus[CurrentCpu];
+    CHECK(!Cpu->Enabled);
+    CHECK((Value ^ Cpu->Cr4) == (1ULL << 7));
+    Cpu->Cr4 = Value;
+    Cpu->Cr4Writes++;
+    FlushAll();
+}
+
+VOID MiAmd64TlbPage(ULONG64 Address)
+{
+    TEST_CPU *Cpu = &Cpus[CurrentCpu];
+    ULONG Index;
+    CHECK(!Cpu->Enabled);
+    CHECK((Address & (PAGE_SIZE - 1)) == 0);
+    CHECK(MiAmd64CanonicalAddress(Address));
+    for (Index = 0; Index < RTL_NUMBER_OF(Cpu->Pages); Index++)
+        if (Cpu->Pages[Index] == Address)
+            Cpu->Pages[Index] = 0;
+    Cpu->PageFlushes++;
+}
+
+VOID MiAmd64TlbCpuid(int Registers[4], int Leaf)
+{
+    TEST_CPU *Cpu = &Cpus[CurrentCpu];
+    CHECK(!Cpu->Enabled);
+    Cpu->CpuidCalls++;
+    memset(Registers, 0, 4 * sizeof(int));
+    if (Leaf == 0)
+        Registers[0] = CurrentCpu % 4 == 1 ? 1 : 7;
+    else
+    {
+        CHECK(Leaf == 7 && CurrentCpu % 4 != 1);
+        Registers[1] = CurrentCpu % 4 == 0 ? (1 << 10) : 0;
+    }
+}
+
+VOID MiAmd64TlbInvpcid(VOID)
+{
+    CHECK(!Cpus[CurrentCpu].Enabled);
+    CHECK(CurrentCpu % 4 == 0);
+    Cpus[CurrentCpu].Invpcids++;
+    FlushAll();
+}
+
+VOID MiAmd64TlbInvpcidNonGlobal(VOID)
+{
+    CHECK(!Cpus[CurrentCpu].Enabled);
+    CHECK(CurrentCpu % 4 == 0);
+    Cpus[CurrentCpu].NonGlobalInvpcids++;
+    FlushNonGlobal();
+}
+
+BOOLEAN MiAmd64TlbDisableInterrupts(VOID)
+{
+    BOOLEAN Previous = Cpus[CurrentCpu].Enabled;
+    Cpus[CurrentCpu].Enabled = FALSE;
+    return Previous;
+}
+
+VOID MiAmd64TlbRestoreInterrupts(BOOLEAN Enabled)
+{
+    CHECK(!Cpus[CurrentCpu].Enabled);
+    Cpus[CurrentCpu].Enabled = Enabled;
+}
+
+KIRQL MiAmd64TlbRaiseIrql(VOID)
+{
+    KIRQL Previous = Cpus[CurrentCpu].Irql;
+    if (Previous < 12)
+        Cpus[CurrentCpu].Irql = 12;
+    return Previous;
+}
+
+VOID MiAmd64TlbLowerIrql(KIRQL Previous)
+{
+    CHECK(Previous <= Cpus[CurrentCpu].Irql);
+    Cpus[CurrentCpu].Irql = Previous;
+}
+
+VOID MiAmd64TlbPause(VOID)
+{
+    if (__atomic_load_n(&DelayWait, __ATOMIC_RELAXED))
+        __atomic_fetch_add(&DelayPolls, 1, __ATOMIC_RELEASE);
+    sched_yield();
+}
+
+VOID KiSendMemoryIpi(ULONG64 Targets)
+{
+    ULONG Target;
+    CHECK((Targets & (1ULL << CurrentCpu)) == 0);
+    CHECK((Targets & ~ActiveCpus) == 0);
+    __atomic_fetch_add(&Ipis, 1, __ATOMIC_RELAXED);
+    while (Targets)
+    {
+        Target = (ULONG)__builtin_ctzll(Targets);
+        __atomic_fetch_or(&Cpus[Target].Pending, 1ULL << CurrentCpu, __ATOMIC_RELEASE);
+        Targets &= Targets - 1;
+    }
+}
+
+VOID MiAmd64TlbPoll(VOID)
+{
+    ULONG64 Sources;
+
+    if (WatchdogMode != 0)
+    {
+        WatchdogPolls++;
+        WatchdogTime = WatchdogPolls / 1024 + (WatchdogEpoch ? 100 : 0);
+        if (WatchdogMode == 3 && WatchdogPolls == 4000)
+            WatchdogEpoch++;
+        if (WatchdogMode == 7 && WatchdogPolls == 12000)
+        {
+            CurrentCpu = 2;
+            MiAmd64ProcessTlbRequest(0);
+            CurrentCpu = 0;
+        }
+        if ((WatchdogMode == 2 && WatchdogPolls == 17000) ||
+            (WatchdogMode == 3 && WatchdogPolls == 8000) ||
+            (WatchdogMode == 4 && WatchdogPolls == 2000) ||
+            (WatchdogMode == 5 && WatchdogPolls == 17000) ||
+            (WatchdogMode == 6 && WatchdogPolls == 8000) ||
+            (WatchdogMode == 8 && WatchdogPolls == 12000))
+        {
+            if (WatchdogMode == 4)
+                WatchdogTime += 100;
+            CurrentCpu = 1;
+            MiAmd64ProcessTlbRequest(0);
+            CurrentCpu = 0;
+        }
+    }
+    Sources = __atomic_exchange_n(&Cpus[CurrentCpu].Pending, 0, __ATOMIC_ACQUIRE);
+    while (Sources)
+    {
+        MiAmd64ProcessTlbRequest((ULONG)__builtin_ctzll(Sources));
+        Sources &= Sources - 1;
+    }
+}
+
+static VOID SeedCpu(ULONG Cpu)
+{
+    Cpus[Cpu].Cr3 = 0x12345000;
+    Cpus[Cpu].Cr4 = (1ULL << 20) | (1ULL << 21) | (1ULL << 5);
+    if (Cpu % 4 == 0 || Cpu % 4 == 2)
+        Cpus[Cpu].Cr4 |= 1ULL << 7;
+    if (Cpu % 4 == 3)
+    {
+        Cpus[Cpu].Cr4 |= 1ULL << 17;
+        Cpus[Cpu].Cr3 |= 42;
+    }
+    Cpus[Cpu].Enabled = TRUE;
+    Cpus[Cpu].Irql = 0;
+}
+
+static VOID LocalCases(VOID)
+{
+    ULONG CpuIndex, Index;
+    for (CpuIndex = 0; CpuIndex < 4; CpuIndex++)
+    {
+        TEST_CPU *Cpu = &Cpus[CpuIndex];
+        ULONG64 Cr4, Cr3, Full, Pages, Cpuid;
+        CurrentCpu = CpuIndex;
+        ActiveCpus = 1ULL << CpuIndex;
+        SeedCpu(CpuIndex);
+        Cr4 = Cpu->Cr4;
+        Cr3 = Cpu->Cr3;
+        for (Index = 0; Index < RTL_NUMBER_OF(Cpu->Pages); Index++)
+            Cpu->Pages[Index] = 0xffff800000000000ULL + (Index + 1) * PAGE_SIZE;
+        MiArchInvalidateTlbRange((PVOID)(ULONG_PTR)0xffff800000001001ULL, PAGE_SIZE, MiTlbLocal);
+        CHECK(Cpu->PageFlushes == 2 && Cpu->FullFlushes == 0);
+        CHECK(Cpu->Pages[0] == 0 && Cpu->Pages[1] == 0 && Cpu->Pages[2] != 0);
+        CHECK(Cpu->Enabled && Cpu->Irql == 0);
+        MiArchInvalidateTlbRange(NULL, 0, MiTlbAllProcessors);
+        CHECK(Cpu->PageFlushes == 2 && Cpu->FullFlushes == 0);
+        KeFlushEntireTb(FALSE, FALSE);
+        for (Index = 0; Index < RTL_NUMBER_OF(Cpu->Pages); Index++)
+            CHECK(Cpu->Pages[Index] == 0);
+        CHECK(Cpu->Cr4 == Cr4 && Cpu->Cr3 == Cr3);
+        CHECK(Cpu->Enabled && Cpu->Irql == 0);
+        CHECK(Cpu->Invpcids == (CpuIndex == 0 ? 1u : 0u));
+        CHECK(Cpu->Cr3Writes == (CpuIndex == 1 ? 1u : 0u));
+        CHECK(Cpu->Cr4Writes == (CpuIndex >= 2 ? 2u : 0u));
+        Cpuid = Cpu->CpuidCalls;
+        Full = Cpu->FullFlushes;
+        Cpu->Enabled = FALSE;
+        Cpu->Irql = 15;
+        KeFlushCurrentTb();
+        CHECK(!Cpu->Enabled && Cpu->Irql == 15);
+        CHECK(Cpu->FullFlushes > Full);
+        CHECK(Cpu->CpuidCalls == Cpuid);
+        CHECK(Cpu->Cr4 == Cr4 && Cpu->Cr3 == Cr3);
+        Cpu->Enabled = TRUE;
+        Cpu->Irql = 0;
+        Pages = Cpu->PageFlushes;
+        Full = Cpu->FullFlushes;
+        MiArchInvalidateTlbRange((PVOID)(ULONG_PTR)0xffffffffffffffffULL, 2, MiTlbLocal);
+        MiArchInvalidateTlbRange((PVOID)(ULONG_PTR)0x7fffffffffffULL, 2, MiTlbLocal);
+        MiArchInvalidateTlbRange((PVOID)(ULONG_PTR)0x800000000000ULL, 1, MiTlbLocal);
+        MiArchInvalidateTlbRange((PVOID)(ULONG_PTR)0x1000, (SIZE_T)-1, MiTlbLocal);
+        CHECK(Cpu->PageFlushes == Pages && Cpu->FullFlushes >= Full + 4);
+        Full = Cpu->FullFlushes;
+        MiAmd64FlushTargets(~ActiveCpus, 0, 0);
+        CHECK(Cpu->FullFlushes == Full);
+        MiArchInvalidateTlbRange((PVOID)(ULONG_PTR)0xffff800000001000ULL, 64 * PAGE_SIZE, MiTlbLocal);
+        CHECK(Cpu->PageFlushes == Pages + 64 && Cpu->FullFlushes == Full);
+        MiArchInvalidateTlbRange((PVOID)(ULONG_PTR)0x1000, 31 * PAGE_SIZE, MiTlbLocal);
+        CHECK(Cpu->PageFlushes == Pages + 95 && Cpu->FullFlushes == Full && Cpu->NonGlobalFlushes == 0);
+        Cpu->Pages[0] = 0x2000;
+        Cpu->Pages[1] = 0xffff800000005000ULL;
+        MiArchInvalidateTlbRange((PVOID)(ULONG_PTR)0x1000, 32 * PAGE_SIZE, MiTlbLocal);
+        CHECK(Cpu->PageFlushes == Pages + 95 && Cpu->Pages[0] == 0);
+        CHECK(Cpu->NonGlobalInvpcids == (CpuIndex == 0 ? 1u : 0u));
+        if (CpuIndex == 0 || CpuIndex == 2)
+            CHECK(Cpu->NonGlobalFlushes == 1 && Cpu->FullFlushes == Full && Cpu->Pages[1] != 0);
+        else
+            CHECK(Cpu->NonGlobalFlushes == 0 && Cpu->FullFlushes == Full + (CpuIndex == 1 ? 1u : 2u));
+        CHECK(Cpu->Cr4 == Cr4 && Cpu->Enabled && Cpu->Irql == 0);
+        Full = Cpu->FullFlushes;
+        Cpu->NonGlobalFlushes = 0;
+        MiArchInvalidateTlbRange((PVOID)(ULONG_PTR)(MI_AMD64_USER_END - 32 * PAGE_SIZE), 32 * PAGE_SIZE, MiTlbLocal);
+        CHECK(Cpu->PageFlushes == Pages + 95);
+        CHECK(Cpu->NonGlobalFlushes + Cpu->FullFlushes - Full != 0);
+        MiArchInvalidateTlbRange((PVOID)(ULONG_PTR)(MI_AMD64_USER_END - 31 * PAGE_SIZE), 32 * PAGE_SIZE, MiTlbLocal);
+        CHECK(Cpu->PageFlushes == Pages + 95);
+        Full = Cpu->FullFlushes;
+        MiArchInvalidateTlbRange((PVOID)(ULONG_PTR)0xffff800000001000ULL, 65 * PAGE_SIZE, MiTlbLocal);
+        CHECK(Cpu->FullFlushes > Full && Cpu->PageFlushes == Pages + 95);
+    }
+    CHECK(KiTbFlushTimeStamp == 4);
+    CHECK(Ipis == 0);
+}
+
+static VOID *Worker(PVOID Argument)
+{
+    ULONG Round, CpuCount = (ULONG)__builtin_popcountll(ActiveCpus);
+    TEST_CPU *Cpu;
+    ULONG64 Cr3, Cr4;
+    CurrentCpu = (ULONG)(ULONG_PTR)Argument;
+    Cpu = &Cpus[CurrentCpu];
+    Cr3 = Cpu->Cr3;
+    Cr4 = Cpu->Cr4;
+    for (Round = 0; Round < 500; Round++)
+    {
+        Cpu->Enabled = (Round & 1) != 0;
+        Cpu->Irql = Round % 3;
+        MiArchInvalidateTlbRange((PVOID)(ULONG_PTR)(0xffff800000000000ULL + Round * PAGE_SIZE),
+                                (Round % 7 + 1) * PAGE_SIZE, MiTlbAllProcessors);
+        CHECK(Cpu->Enabled == ((Round & 1) != 0) && Cpu->Irql == Round % 3);
+        if (Round % 13 == 0)
+            KeFlushEntireTb(TRUE, TRUE);
+        if (Round % 17 == 0)
+            MiAmd64FlushTargets(1ULL << ((CurrentCpu + 1) % CpuCount), 0x12345000, 1);
+        MiAmd64TlbPoll();
+    }
+    __atomic_fetch_add(&Finished, 1, __ATOMIC_RELEASE);
+    while (__atomic_load_n(&Finished, __ATOMIC_ACQUIRE) != CpuCount)
+    {
+        MiAmd64TlbPoll();
+        sched_yield();
+    }
+    MiAmd64TlbPoll();
+    CHECK(Cpu->Cr3 == Cr3 && Cpu->Cr4 == Cr4);
+    return NULL;
+}
+
+static VOID SmpCase(ULONG Count)
+{
+    pthread_t Threads[16];
+    ULONG64 BeforePages[16], BeforeFull[16];
+    ULONG Cpu, Before = KiTbFlushTimeStamp;
+    ActiveCpus = (1ULL << Count) - 1;
+    Finished = 0;
+    for (Cpu = 0; Cpu < Count; Cpu++)
+    {
+        SeedCpu(Cpu);
+        BeforePages[Cpu] = Cpus[Cpu].PageFlushes;
+        BeforeFull[Cpu] = Cpus[Cpu].FullFlushes;
+    }
+    for (Cpu = 0; Cpu < Count; Cpu++)
+        CHECK(pthread_create(&Threads[Cpu], NULL, Worker, (PVOID)(ULONG_PTR)Cpu) == 0);
+    for (Cpu = 0; Cpu < Count; Cpu++)
+        CHECK(pthread_join(Threads[Cpu], NULL) == 0);
+    CHECK((ULONG)KiTbFlushTimeStamp == Before + Count * 39);
+    for (Cpu = 0; Cpu < Count; Cpu++)
+    {
+        ULONG Source;
+        ULONG64 Pages = Cpus[Cpu].PageFlushes, Full = Cpus[Cpu].FullFlushes;
+        CurrentCpu = Cpu;
+        CHECK(Pages == BeforePages[Cpu] + Count * 1994 + 30);
+        CHECK(Full == BeforeFull[Cpu] + Count * 39 * (Cpu % 4 >= 2 ? 2 : 1));
+        CHECK(Cpus[Cpu].Pending == 0);
+        for (Source = 0; Source < Count; Source++)
+            MiAmd64ProcessTlbRequest(Source);
+        CHECK(Cpus[Cpu].PageFlushes == Pages && Cpus[Cpu].FullFlushes == Full);
+    }
+}
+
+static VOID *TargetPoller(PVOID Argument)
+{
+    CurrentCpu = (ULONG)(ULONG_PTR)Argument;
+    while (__atomic_load_n(&Finished, __ATOMIC_ACQUIRE) == 0)
+    {
+        MiAmd64TlbPoll();
+        sched_yield();
+    }
+    MiAmd64TlbPoll();
+    return NULL;
+}
+
+static VOID TargetCase(VOID)
+{
+    pthread_t Thread;
+    ULONG64 Pages[4], Full[4], Before = Ipis;
+    ULONG Cpu;
+
+    ActiveCpus = 0xf;
+    Finished = 0;
+    for (Cpu = 0; Cpu < 4; Cpu++)
+    {
+        SeedCpu(Cpu);
+        Cpus[Cpu].Pending = 0;
+        Pages[Cpu] = Cpus[Cpu].PageFlushes;
+        Full[Cpu] = Cpus[Cpu].FullFlushes;
+    }
+    CHECK(pthread_create(&Thread, NULL, TargetPoller, (PVOID)(ULONG_PTR)2) == 0);
+    CurrentCpu = 0;
+    MiArchTlbInvalidateProcessors(0x7ff00000ULL, 2, 1ULL << 2);
+    CHECK(Ipis == Before + 1);
+    CHECK(Cpus[0].PageFlushes == Pages[0] + 2);
+    CHECK(Cpus[1].Pending == 0 && Cpus[3].Pending == 0);
+    MiArchTlbInvalidateProcessors(0x7ff00000ULL, 0, 1ULL << 2);
+    CHECK(Ipis == Before + 1);
+    MiArchTlbInvalidateProcessors(0x7ff00000ULL, 1, 1ULL << 0);
+    CHECK(Ipis == Before + 1 && Cpus[0].PageFlushes == Pages[0] + 3);
+    MiArchTlbInvalidateProcessors(0x7ff00000ULL, 1, 1ULL << 6);
+    CHECK(Ipis == Before + 1 && Cpus[0].PageFlushes == Pages[0] + 4);
+    __atomic_store_n(&Finished, 1, __ATOMIC_RELEASE);
+    CHECK(pthread_join(Thread, NULL) == 0);
+    CHECK(Cpus[2].PageFlushes == Pages[2] + 2 && Cpus[2].FullFlushes == Full[2]);
+    CHECK(Cpus[1].PageFlushes == Pages[1] && Cpus[1].FullFlushes == Full[1]);
+    CHECK(Cpus[3].PageFlushes == Pages[3] && Cpus[3].FullFlushes == Full[3]);
+}
+
+static VOID *DelayedFlush(PVOID Argument)
+{
+    (void)Argument;
+    CurrentCpu = 0;
+    MiAmd64FlushTargets(2, 0x12345000, 1);
+    __atomic_store_n(&DelayReturned, 1, __ATOMIC_RELEASE);
+    return NULL;
+}
+
+static VOID DelayedTargetCase(VOID)
+{
+    pthread_t Thread;
+    ULONG64 BeforePages;
+    int Error;
+
+    ActiveCpus = 3;
+    SeedCpu(0);
+    SeedCpu(1);
+    Cpus[0].Pending = Cpus[1].Pending = 0;
+    BeforePages = Cpus[1].PageFlushes;
+    DelayPolls = DelayReturned = 0;
+    __atomic_store_n(&DelayWait, 1, __ATOMIC_RELEASE);
+    Error = pthread_create(&Thread, NULL, DelayedFlush, NULL);
+    CHECK(Error == 0);
+    if (Error != 0)
+    {
+        __atomic_store_n(&DelayWait, 0, __ATOMIC_RELEASE);
+        return;
+    }
+    while (__atomic_load_n(&DelayPolls, __ATOMIC_ACQUIRE) < 128 &&
+           !__atomic_load_n(&DelayReturned, __ATOMIC_ACQUIRE))
+        sched_yield();
+    CHECK(!__atomic_load_n(&DelayReturned, __ATOMIC_ACQUIRE));
+    CurrentCpu = 1;
+    MiAmd64TlbPoll();
+    CHECK(pthread_join(Thread, NULL) == 0);
+    __atomic_store_n(&DelayWait, 0, __ATOMIC_RELEASE);
+    CHECK(Cpus[1].PageFlushes == BeforePages + 1);
+    CHECK(DelayReturned == 1);
+}
+
+static VOID WatchdogCases(VOID)
+{
+    ULONG Mode;
+    ActiveCpus = 7;
+    SeedCpu(0);
+    SeedCpu(1);
+    SeedCpu(2);
+    for (Mode = 1; Mode <= 8; Mode++)
+    {
+        WatchdogMode = Mode;
+        WatchdogPolls = WatchdogBugchecks = WatchdogInjected = WatchdogEpochReads = 0;
+        WatchdogTime = WatchdogEpoch = 0;
+        WatchdogFrequency = WatchdogNow = WatchdogBaseline = 0;
+        Cpus[0].Pending = Cpus[1].Pending = Cpus[2].Pending = 0;
+        CurrentCpu = 0;
+        if (setjmp(WatchdogJump) == 0)
+        {
+            MiAmd64FlushTargets(Mode == 7 ? 6 : 2, 0x12345000, 1);
+            CHECK(Mode != 1);
+        }
+        else
+        {
+            CHECK(Mode == 1);
+            CHECK(WatchdogBugchecks == 1);
+            CHECK(WatchdogFrequency == 1);
+            CHECK(WatchdogNow - WatchdogBaseline >= 10);
+            CurrentCpu = 1;
+            MiAmd64TlbPoll();
+            CHECK(Cpus[0].Irql == 12);
+            Cpus[0].Irql = 0;
+        }
+        if (Mode == 8)
+            CHECK(WatchdogEpoch == 1);
+        if (Mode == 7)
+            CHECK(WatchdogInjected == 1);
+        if (Mode != 1)
+            CHECK(WatchdogBugchecks == 0);
+        WatchdogMode = 0;
+    }
+}
+int main(void)
+{
+    CHECK(MiAmd64SelfMapSlotAddress(0, 0) == 0xfffff68000000000ULL);
+    CHECK(MiAmd64SelfMapSlotAddress(0, 1) == 0xfffff6fb40000000ULL);
+    CHECK(MiAmd64SelfMapSlotAddress(0, 2) == 0xfffff6fb7da00000ULL);
+    CHECK(MiAmd64SelfMapSlotAddress(0, 3) == 0xfffff6fb7dbed000ULL);
+    LocalCases();
+    TargetCase();
+    DelayedTargetCase();
+    WatchdogCases();
+    SmpCase(2);
+    SmpCase(4);
+    SmpCase(8);
+    printf("AMD64 TLB: %u checks, %u failures, %llu IPI batches\n", Checks, Failures, Ipis);
+    return Failures != 0;
+}

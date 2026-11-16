@@ -11,7 +11,7 @@ typedef VOID
 (*PTCP_COMPLETION_ROUTINE)( PVOID Context, NTSTATUS Status, ULONG Count );
 
 /* TCPv4 header structure */
-#include <pshpack1.h>
+#pragma pack(push, 1)
 typedef struct TCPv4_HEADER {
   USHORT SourcePort;        /* Source port */
   USHORT DestinationPort;   /* Destination port */
@@ -42,7 +42,7 @@ typedef struct TCPv4_PSEUDO_HEADER {
   UCHAR Protocol;           /* Protocol */
   USHORT TCPLength;         /* Size of TCP segment */
 } TCPv4_PSEUDO_HEADER, *PTCPv4_PSEUDO_HEADER;
-#include <poppack.h>
+#pragma pack(pop)
 
 typedef struct _SLEEPING_THREAD {
     LIST_ENTRY Entry;
@@ -107,7 +107,9 @@ NTSTATUS TCPAccept
   PCONNECTION_ENDPOINT Listener,
   PCONNECTION_ENDPOINT Connection,
   PTCP_COMPLETION_ROUTINE Complete,
-  PVOID Context );
+  PVOID Context,
+  PCONNECTION_ENDPOINT *DrainListener );
+VOID TCPDrainPendingAccept( PCONNECTION_ENDPOINT Listener );
 
 /* tcp.c */
 PCONNECTION_ENDPOINT TCPAllocateConnectionEndpoint( PVOID ClientContext );
@@ -173,10 +175,22 @@ UINT TCPAllocatePort( const UINT HintPort );
 
 VOID TCPFreePort( const UINT Port );
 
+UINT TCPAllocatePortForAddress( const IP_ADDRESS *Address, const UINT HintPort );
+
+VOID TCPFreePortForAddress( const IP_ADDRESS *Address, const UINT Port );
+
+VOID TCPMapToDualStack(
+    PIP_ADDRESS Address);
+
 NTSTATUS TCPGetSockAddress
 ( PCONNECTION_ENDPOINT Connection,
   PTRANSPORT_ADDRESS TransportAddress,
+  ULONG TransportAddressLength,
   BOOLEAN RemoteAddress );
+
+NTSTATUS TCPGetSockPort
+( PCONNECTION_ENDPOINT Connection,
+  PUSHORT Port );
 
 NTSTATUS TCPStartup(
   VOID);
@@ -197,6 +211,12 @@ TCPUpdateInterfaceLinkStatus(PIP_INTERFACE IF);
 
 VOID
 TCPUpdateInterfaceIPInformation(PIP_INTERFACE IF);
+
+VOID
+TCPAddInterfaceAddress(PIP_NTE Nte);
+
+VOID
+TCPRemoveInterfaceAddress(PIP_NTE Nte);
 
 VOID
 FlushListenQueue(PCONNECTION_ENDPOINT Connection, const NTSTATUS Status);

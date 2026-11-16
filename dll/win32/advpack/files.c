@@ -308,6 +308,62 @@ done:
     return HRESULT_FROM_WIN32(dwLastError);
 }
 
+#ifdef __REACTOS__
+static HRESULT DELNODE_recurse_dirtree(LPWSTR fname, DWORD flags)
+{
+    DWORD fattrs = GetFileAttributesW(fname);
+    HRESULT ret = S_OK;
+    HANDLE hFindFile;
+    WIN32_FIND_DATAW w32fd;
+    int fname_len;
+
+    if (fattrs == INVALID_FILE_ATTRIBUTES)
+        return E_FAIL;
+
+    if (!(fattrs & FILE_ATTRIBUTE_DIRECTORY))
+    {
+        if (SetFileAttributesW(fname, FILE_ATTRIBUTE_NORMAL) && DeleteFileW(fname))
+            return S_OK;
+        return E_FAIL;
+    }
+
+    if (!(flags & ADN_DEL_IF_EMPTY))
+    {
+        fname_len = lstrlenW(fname);
+        if (fname_len && fname[fname_len-1] != '\\') fname[fname_len++] = '\\';
+        lstrcpyW(fname + fname_len, L"*");
+
+        if ((hFindFile = FindFirstFileW(fname, &w32fd)) != INVALID_HANDLE_VALUE)
+        {
+            do
+            {
+                if (!lstrcmpW(L".", w32fd.cFileName) || !lstrcmpW(L"..", w32fd.cFileName))
+                    continue;
+                if ((w32fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && (flags & ADN_DONT_DEL_SUBDIRS))
+                    continue;
+                lstrcpyW(fname + fname_len, w32fd.cFileName);
+                if (DELNODE_recurse_dirtree(fname, flags & ~(ADN_DONT_DEL_DIR | ADN_DONT_DEL_SUBDIRS)) != S_OK)
+                {
+                    ret = E_FAIL;
+                    break;
+                }
+            } while (FindNextFileW(hFindFile, &w32fd));
+            FindClose(hFindFile);
+        }
+
+        fname[fname_len] = 0;
+
+        if (ret != S_OK || (flags & ADN_DONT_DEL_DIR))
+            return ret;
+    }
+
+    if (SetFileAttributesW(fname, FILE_ATTRIBUTE_NORMAL) && RemoveDirectoryW(fname))
+        return S_OK;
+    if ((flags & ADN_DONT_DEL_SUBDIRS) && !(flags & ADN_DEL_IF_EMPTY))
+        return S_OK;
+    return E_FAIL;
+}
+#else
 static HRESULT DELNODE_recurse_dirtree(LPWSTR fname, DWORD flags)
 {
     DWORD fattrs = GetFileAttributesW(fname);
@@ -319,48 +375,39 @@ static HRESULT DELNODE_recurse_dirtree(LPWSTR fname, DWORD flags)
         WIN32_FIND_DATAW w32fd;
         BOOL done = TRUE;
         int fname_len = lstrlenW(fname);
-#ifdef __REACTOS__
-        if (flags & ADN_DEL_IF_EMPTY)
-            goto deleteinitialdirectory;
-#endif
 
-        /* Generate a path with wildcard suitable for iterating */
-        if (fname_len && fname[fname_len-1] != '\\') fname[fname_len++] = '\\';
-        lstrcpyW(fname + fname_len, L"*");
-
-        if ((hFindFile = FindFirstFileW(fname, &w32fd)) != INVALID_HANDLE_VALUE)
+        if (!(flags & ADN_DEL_IF_EMPTY))
         {
-            /* Iterate through the files in the directory */
-            for (done = FALSE; !done; done = !FindNextFileW(hFindFile, &w32fd))
+            /* Generate a path with wildcard suitable for iterating */
+            if (fname_len && fname[fname_len-1] != '\\') fname[fname_len++] = '\\';
+            lstrcpyW(fname + fname_len, L"*");
+
+            if ((hFindFile = FindFirstFileW(fname, &w32fd)) != INVALID_HANDLE_VALUE)
             {
-                TRACE("%s\n", debugstr_w(w32fd.cFileName));
-                if (lstrcmpW(L".", w32fd.cFileName) != 0 && lstrcmpW(L"..", w32fd.cFileName) != 0)
+                /* Iterate through the files in the directory */
+                for (done = FALSE; !done; done = !FindNextFileW(hFindFile, &w32fd))
                 {
-                    lstrcpyW(fname + fname_len, w32fd.cFileName);
-                    if (DELNODE_recurse_dirtree(fname, flags) != S_OK)
+                    TRACE("%s\n", debugstr_w(w32fd.cFileName));
+                    if (lstrcmpW(L".", w32fd.cFileName) != 0 && lstrcmpW(L"..", w32fd.cFileName) != 0)
                     {
-                        break; /* Failure */
+                        lstrcpyW(fname + fname_len, w32fd.cFileName);
+                        if (DELNODE_recurse_dirtree(fname, flags) != S_OK)
+                        {
+                            break; /* Failure */
+                        }
                     }
                 }
+                FindClose(hFindFile);
             }
-            FindClose(hFindFile);
-        }
 
-        /* We're done with this directory, so restore the old path without wildcard */
-        *(fname + fname_len) = '\0';
+            /* We're done with this directory, so restore the old path without wildcard */
+            *(fname + fname_len) = '\0';
+        }
 
         if (done)
         {
-#ifdef __REACTOS__
-deleteinitialdirectory:
-#endif
             TRACE("%s: directory\n", debugstr_w(fname));
-#ifdef __REACTOS__
-            SetFileAttributesW(fname, FILE_ATTRIBUTE_NORMAL);
-            if (RemoveDirectoryW(fname))
-#else
             if (SetFileAttributesW(fname, FILE_ATTRIBUTE_NORMAL) && RemoveDirectoryW(fname))
-#endif
             {
                 ret = S_OK;
             }
@@ -369,12 +416,7 @@ deleteinitialdirectory:
     else
     {
         TRACE("%s: file\n", debugstr_w(fname));
-#ifdef __REACTOS__
-        SetFileAttributesW(fname, FILE_ATTRIBUTE_NORMAL);
-        if (DeleteFileW(fname))
-#else
         if (SetFileAttributesW(fname, FILE_ATTRIBUTE_NORMAL) && DeleteFileW(fname))
-#endif
         {
             ret = S_OK;
         }
@@ -382,6 +424,7 @@ deleteinitialdirectory:
     
     return ret;
 }
+#endif
 
 /***********************************************************************
  *              DelNodeA   (ADVPACK.@)
@@ -429,10 +472,7 @@ HRESULT WINAPI DelNodeW(LPCWSTR pszFileOrDirName, DWORD dwFlags)
     
     TRACE("(%s, %ld)\n", debugstr_w(pszFileOrDirName), dwFlags);
     
-#ifdef __REACTOS__
-    if (dwFlags & ~ADN_DEL_IF_EMPTY)
-        FIXME("Flags %#x ignored!\n", dwFlags & ~ADN_DEL_IF_EMPTY);
-#else
+#ifndef __REACTOS__
     if (dwFlags)
         FIXME("Flags ignored!\n");
 #endif
@@ -560,6 +600,10 @@ static LPSTR convert_file_list(LPCSTR FileList, DWORD *dwNumFiles)
 
     dwLen = last - first + 3; /* room for double-null termination */
     szConvertedList = malloc(dwLen);
+#ifdef __REACTOS__
+    if (!szConvertedList)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     lstrcpynA(szConvertedList, first, dwLen - 1);
     szConvertedList[dwLen - 1] = '\0';
 
@@ -590,8 +634,8 @@ static LPSTR convert_file_list(LPCSTR FileList, DWORD *dwNumFiles)
 
 static void free_file_node(struct FILELIST *pNode)
 {
-    free(pNode->FileName);
-    free(pNode);
+    HeapFree(GetProcessHeap(), 0, pNode->FileName);
+    HeapFree(GetProcessHeap(), 0, pNode);
 }
 
 /* determines whether szFile is in the NULL-separated szFileList */

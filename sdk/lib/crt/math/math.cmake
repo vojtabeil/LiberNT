@@ -17,6 +17,9 @@ list(APPEND LIBCNTPR_MATH_SOURCE
     math/abs.c
     math/div.c
     math/exp2f.c
+    math/fdim.c
+    math/fmax.c
+    math/fmin.c
     math/labs.c
     math/nextafter.c
     math/nextafterf.c
@@ -40,7 +43,33 @@ if(ARCH STREQUAL "i386")
         math/i386/cisqrt.c
         math/i386/ldexp.c
         math/i386/libm_sse2.c
+        math/amd64/_set_statfp.c
+        math/libm_sse2/_handle_error.c
+        math/libm_sse2/acos.c
+        math/libm_sse2/asin.c
+        math/libm_sse2/atan.c
+        math/libm_sse2/remainder_piby2.c
+        math/exp.c
+        math/log.c
+        math/log10.c
+        math/pow.c
+        math/trig.c
     )
+    set_source_files_properties(math/libm_sse2/acos.c PROPERTIES COMPILE_DEFINITIONS acos=__libm_sse2_core_acos)
+    set_source_files_properties(math/libm_sse2/asin.c PROPERTIES COMPILE_DEFINITIONS asin=__libm_sse2_core_asin)
+    set_source_files_properties(math/libm_sse2/atan.c PROPERTIES COMPILE_DEFINITIONS atan=__libm_sse2_core_atan)
+    set_source_files_properties(math/exp.c PROPERTIES COMPILE_DEFINITIONS exp=__libm_sse2_core_exp)
+    set_source_files_properties(math/log.c PROPERTIES COMPILE_DEFINITIONS log=__libm_sse2_core_log)
+    set_source_files_properties(math/log10.c PROPERTIES COMPILE_DEFINITIONS log10=__libm_sse2_core_log10)
+    set_source_files_properties(math/pow.c PROPERTIES COMPILE_DEFINITIONS pow=__libm_sse2_core_pow)
+    set_source_files_properties(math/trig.c PROPERTIES COMPILE_DEFINITIONS "sin=__libm_sse2_core_sin;cos=__libm_sse2_core_cos;tan=__libm_sse2_core_tan")
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        set_source_files_properties(
+            math/amd64/_set_statfp.c math/libm_sse2/_handle_error.c math/libm_sse2/acos.c
+            math/libm_sse2/asin.c math/libm_sse2/atan.c math/libm_sse2/remainder_piby2.c
+            math/exp.c math/log.c math/log10.c math/pow.c math/trig.c
+            PROPERTIES COMPILE_OPTIONS "-msse2;-mfpmath=sse")
+    endif()
     list(APPEND LIBCNTPR_MATH_ASM_SOURCE
         math/i386/alldiv_asm.s
         math/i386/alldvrm_asm.s
@@ -60,6 +89,7 @@ if(ARCH STREQUAL "i386")
         math/i386/floor_asm.s
         math/i386/ftol_asm.s
         math/i386/ftol2_asm.s
+        math/i386/ftol2_sse_asm.s
         math/i386/ftoul2_legacy_asm.s
         math/i386/log_asm.s
         math/i386/log10_asm.s
@@ -71,16 +101,28 @@ if(ARCH STREQUAL "i386")
     list(APPEND CRT_MATH_ASM_SOURCE
         math/i386/ceilf.S
         math/i386/floorf.S
-        math/i386/exp_asm.s
         math/i386/fmod_asm.s
         math/i386/fmodf_asm.s
     )
     list(APPEND CRT_MATH_SOURCE
         math/_hypotf.c
+        math/i386/libm_crt.c
+        math/ldexp.c
+        math/logb.c
     )
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        set_source_files_properties(
+            math/i386/libm_crt.c math/ldexp.c
+            math/ieee754/j0_y0.c math/ieee754/j1_y1.c math/ieee754/jn_yn.c
+            math/j0_y0.c math/j1_y1.c math/jn_yn.c
+            PROPERTIES COMPILE_OPTIONS "-msse2;-mfpmath=sse")
+    endif()
 elseif(ARCH STREQUAL "amd64")
+    list(REMOVE_ITEM LIBCNTPR_MATH_SOURCE math/round.c math/roundf.c)
     list(APPEND LIBCNTPR_MATH_SOURCE
         math/amd64/_set_statfp.c
+        math/amd64/round.c
+        math/amd64/roundf.c
         # math/libm_sse2/_chgsign.c
         # math/libm_sse2/_chgsignf.c
         # math/libm_sse2/_copysign.c
@@ -126,6 +168,7 @@ elseif(ARCH STREQUAL "amd64")
         math/libm_sse2/modf.c
         math/libm_sse2/modff.c
         math/libm_sse2/pow_special.c
+        math/powf.c
         # math/libm_sse2/remainder.c
         math/libm_sse2/remainder_piby2.c
         # math/libm_sse2/remainder_piby2f.c
@@ -194,13 +237,17 @@ elseif(ARCH STREQUAL "arm")
         math/asinf.c
         math/atan2f.c
         math/atanf.c
+        math/ceilf.c
         math/coshf.c
         math/expf.c
         math/fabsf.c
+        math/floorf.c
         math/fmodf.c
+        math/ldexp.c
         math/modff.c
         math/sinf.c
         math/sinhf.c
+        math/sqrtf.c
         math/tanf.c
         math/tanhf.c
     )
@@ -222,6 +269,48 @@ elseif(ARCH STREQUAL "arm")
     )
     list(APPEND CRT_MATH_ASM_SOURCE
         math/arm/_logb.s
+    )
+else()
+    # Portable C math is the fallback; only FP status access depends on the ISA.
+    list(APPEND LIBCNTPR_MATH_SOURCE
+        math/atan.c
+        math/${ARCH}/_set_statfp.c
+        math/libm_sse2/_handle_error.c
+        math/libm_sse2/atan2.c
+        math/ceil.c
+        math/exp.c
+        math/fabs.c
+        math/floor.c
+        math/fmod.c
+        math/logb.c
+        math/log.c
+        math/log10.c
+        math/pow.c
+        math/libm_sse2/remainder_piby2.c
+        math/sqrt.c
+        math/trig.c
+        math/cosf.c
+        math/powf.c
+        math/sinf.c
+        math/sqrtf.c
+    )
+    list(APPEND CRT_MATH_SOURCE
+        math/_hypotf.c
+        math/acosf.c
+        math/asinf.c
+        math/atan2f.c
+        math/atanf.c
+        math/ceilf.c
+        math/coshf.c
+        math/expf.c
+        math/fabsf.c
+        math/floorf.c
+        math/fmodf.c
+        math/ldexp.c
+        math/modff.c
+        math/sinhf.c
+        math/tanf.c
+        math/tanhf.c
     )
 endif()
 
@@ -253,6 +342,8 @@ list(APPEND CRT_MATH_SOURCE
     math/adjust.c
     math/cabs.c
     math/fdivbug.c
+    math/fma.c
+    math/fmaf.c
     math/frexp.c
     math/huge_val.c
     math/ieee754/j0_y0.c
@@ -264,11 +355,30 @@ list(APPEND CRT_MATH_SOURCE
     math/ldiv.c
     math/logf.c
     math/powf.c
+    math/trunc.c
+    math/truncf.c
 )
+list(REMOVE_DUPLICATES CRT_MATH_SOURCE)
 
 list(APPEND CRT_MATH_ASM_SOURCE
     ${LIBCNTPR_MATH_ASM_SOURCE}
 )
+
+if(ARCH STREQUAL "i386")
+    list(REMOVE_ITEM CRT_MATH_SOURCE
+        math/acos.c
+        math/i386/ldexp.c
+    )
+    list(REMOVE_ITEM CRT_MATH_ASM_SOURCE
+        math/i386/cos_asm.s
+        math/i386/log_asm.s
+        math/i386/log10_asm.s
+        math/i386/pow_asm.s
+        math/i386/sin_asm.s
+        math/i386/sqrt_asm.s
+        math/i386/tan_asm.s
+    )
+endif()
 
 if(ARCH STREQUAL "i386")
     list(APPEND ATAN2_ASM_SOURCE math/i386/atan2_asm.s)
@@ -276,8 +386,13 @@ elseif(ARCH STREQUAL "amd64")
     list(APPEND ATAN2_SOURCE math/_invoke_matherr.c math/amd64/_set_statfp.c math/libm_sse2/_handle_error.c math/libm_sse2/atan2.c)
 elseif(ARCH STREQUAL "arm")
     list(APPEND ATAN2_ASM_SOURCE math/arm/atan2.s)
-elseif(ARCH STREQUAL "arm64")
-    list(APPEND ATAN2_ASM_SOURCE math/arm64/atan2.s)
+else()
+    # Portable C math is the fallback; only FP status access depends on the ISA.
+    list(APPEND ATAN2_SOURCE
+        math/_invoke_matherr.c
+        math/${ARCH}/_set_statfp.c
+        math/libm_sse2/_handle_error.c
+        math/libm_sse2/atan2.c)
 endif()
 
 add_asm_files(atan2_asm ${ATAN2_ASM_SOURCE})

@@ -8,8 +8,85 @@ EVT_WDF_DEVICE_D0_ENTRY Fdo_EvtDeviceD0Entry;
 EVT_WDF_DEVICE_D0_ENTRY_POST_INTERRUPTS_ENABLED Fdo_EvtDeviceD0EntryPostInterrupts;
 EVT_WDF_DEVICE_D0_EXIT Fdo_EvtDeviceD0Exit;
 EVT_WDF_DEVICE_SELF_MANAGED_IO_INIT Fdo_EvtDeviceSelfManagedIoInit;
+EVT_WDF_INTERRUPT_ENABLE Fdo_EvtInterruptEnable;
+EVT_WDF_INTERRUPT_DISABLE Fdo_EvtInterruptDisable;
 
 void CheckHDAGraphicsRegistryKeys(PFDO_CONTEXT fdoCtx);
+
+static
+VOID
+Fdo_LogResources(
+    _In_z_ PCSTR ListName,
+    _In_ WDFCMRESLIST Resources
+)
+{
+    ULONG resourceCount;
+
+    if (Resources == NULL)
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "%s resource list is NULL\n", ListName);
+        return;
+    }
+
+    resourceCount = WdfCmResourceListGetCount(Resources);
+
+    SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_PNP,
+        "%s resource count: %lu\n", ListName, resourceCount);
+
+    for (ULONG i = 0; i < resourceCount; i++)
+    {
+        PCM_PARTIAL_RESOURCE_DESCRIPTOR descriptor;
+
+        descriptor = WdfCmResourceListGetDescriptor(Resources, i);
+        if (descriptor == NULL)
+        {
+            SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+                "%s resource[%lu]: descriptor is NULL\n", ListName, i);
+            continue;
+        }
+
+        switch (descriptor->Type)
+        {
+        case CmResourceTypeMemory:
+            SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_PNP,
+                "%s resource[%lu]: memory start=0x%I64x length=0x%lx "
+                "flags=0x%hx share=%u\n",
+                ListName,
+                i,
+                descriptor->u.Memory.Start.QuadPart,
+                descriptor->u.Memory.Length,
+                descriptor->Flags,
+                descriptor->ShareDisposition);
+            break;
+
+        case CmResourceTypeInterrupt:
+            SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_PNP,
+                "%s resource[%lu]: %s interrupt vector=0x%lx level=0x%lx "
+                "affinity=0x%I64x flags=0x%hx share=%u\n",
+                ListName,
+                i,
+                (descriptor->Flags & CM_RESOURCE_INTERRUPT_MESSAGE) ?
+                    "message-signaled" : "line-based",
+                descriptor->u.Interrupt.Vector,
+                descriptor->u.Interrupt.Level,
+                (ULONGLONG)descriptor->u.Interrupt.Affinity,
+                descriptor->Flags,
+                descriptor->ShareDisposition);
+            break;
+
+        default:
+            SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_PNP,
+                "%s resource[%lu]: type=%u flags=0x%hx share=%u\n",
+                ListName,
+                i,
+                descriptor->Type,
+                descriptor->Flags,
+                descriptor->ShareDisposition);
+            break;
+        }
+    }
+}
 
 NTSTATUS
 NTAPI
@@ -129,6 +206,9 @@ Fdo_Create(
 
     fdoCtx = Fdo_GetContext(wdfDevice);
     fdoCtx->WdfDevice = wdfDevice;
+    for (UINT8 addr = 0; addr < HDA_MAX_CODECS; addr++) {
+        KeInitializeEvent(&fdoCtx->verbLock[addr], SynchronizationEvent, TRUE);
+    }
 
     status = Fdo_Initialize(fdoCtx);
     if (!NT_SUCCESS(status))
@@ -164,6 +244,8 @@ Fdo_Initialize(
         &interruptConfig,
         hda_interrupt,
         hda_dpc);
+    interruptConfig.EvtInterruptEnable = Fdo_EvtInterruptEnable;
+    interruptConfig.EvtInterruptDisable = Fdo_EvtInterruptDisable;
 
     status = WdfInterruptCreate(
         device,
@@ -207,30 +289,211 @@ Fdo_Initialize(
 
 NTSTATUS
 NTAPI
+Fdo_EvtInterruptEnable(
+    _In_ WDFINTERRUPT Interrupt,
+    _In_ WDFDEVICE AssociatedDevice
+)
+{
+    PFDO_CONTEXT fdoCtx = Fdo_GetContext(AssociatedDevice);
+    UINT32 interruptControl;
+
+    if (Interrupt != fdoCtx->Interrupt ||
+        !fdoCtx->InterruptResourcePresent ||
+        !fdoCtx->ControllerEnabled ||
+        fdoCtx->m_BAR0.Base.Base == NULL)
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "%s: refusing interrupt enable (handle=%p expected=%p resource=%u controller=%u BAR0=%p)\n",
+            __func__,
+            Interrupt,
+            fdoCtx->Interrupt,
+            fdoCtx->InterruptResourcePresent,
+            fdoCtx->ControllerEnabled,
+            fdoCtx->m_BAR0.Base.Base);
+        fdoCtx->InterruptConnected = FALSE;
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    hda_write32(fdoCtx,
+                INTCTL,
+                hda_read32(fdoCtx, INTCTL) |
+                    HDA_INT_CTRL_EN |
+                    HDA_INT_GLOBAL_EN);
+    interruptControl = hda_read32(fdoCtx, INTCTL);
+    if (interruptControl == 0xffffffff ||
+        (interruptControl & (HDA_INT_CTRL_EN | HDA_INT_GLOBAL_EN)) !=
+            (HDA_INT_CTRL_EN | HDA_INT_GLOBAL_EN))
+    {
+        hda_write32(fdoCtx, INTCTL, 0);
+        fdoCtx->InterruptConnected = FALSE;
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "%s: INTCTL enable did not latch (read 0x%08lx)\n",
+            __func__,
+            interruptControl);
+        return STATUS_DEVICE_HARDWARE_ERROR;
+    }
+
+    fdoCtx->InterruptConnected = TRUE;
+
+    SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_PNP,
+        "%s: controller interrupt enabled, INTCTL=0x%08lx\n",
+        __func__,
+        interruptControl);
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
+Fdo_EvtInterruptDisable(
+    _In_ WDFINTERRUPT Interrupt,
+    _In_ WDFDEVICE AssociatedDevice
+)
+{
+    PFDO_CONTEXT fdoCtx = Fdo_GetContext(AssociatedDevice);
+
+    if (Interrupt != fdoCtx->Interrupt)
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "%s: unexpected interrupt handle %p (expected %p)\n",
+            __func__,
+            Interrupt,
+            fdoCtx->Interrupt);
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (fdoCtx->m_BAR0.Base.Base != NULL)
+        hda_write32(fdoCtx, INTCTL, 0);
+
+    fdoCtx->InterruptConnected = FALSE;
+    SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_PNP,
+        "%s: controller interrupt disabled\n", __func__);
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+NTAPI
 Fdo_EvtDevicePrepareHardware(
     _In_ WDFDEVICE Device,
     _In_ WDFCMRESLIST ResourcesRaw,
     _In_ WDFCMRESLIST ResourcesTranslated
 )
 {
-    UNREFERENCED_PARAMETER(ResourcesRaw);
-
-    BOOLEAN fBar0Found = FALSE;
-    BOOLEAN fBar4Found = FALSE;
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR bar0Descriptor = NULL;
+    PCM_PARTIAL_RESOURCE_DESCRIPTOR bar4Descriptor = NULL;
+    WDF_INTERRUPT_INFO interruptInfo;
     NTSTATUS status;
     PFDO_CONTEXT fdoCtx;
     ULONG resourceCount;
+    ULONG rawResourceCount;
+    ULONG bytesRead;
 
     fdoCtx = Fdo_GetContext(Device);
     resourceCount = WdfCmResourceListGetCount(ResourcesTranslated);
+    rawResourceCount = WdfCmResourceListGetCount(ResourcesRaw);
+    fdoCtx->InterruptResourcePresent = FALSE;
+    fdoCtx->InterruptConnected = FALSE;
 
     SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_INIT,
         "%s\n", __func__);
 
+    Fdo_LogResources("raw", ResourcesRaw);
+    Fdo_LogResources("translated", ResourcesTranslated);
+
+    if (rawResourceCount != resourceCount)
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "Resource-list count mismatch: raw=%lu translated=%lu\n",
+            rawResourceCount,
+            resourceCount);
+    }
+
     status = WdfFdoQueryForInterface(Device, &GUID_BUS_INTERFACE_STANDARD, (PINTERFACE)&fdoCtx->BusInterface, sizeof(BUS_INTERFACE_STANDARD), 1, NULL);
-    if (!NT_SUCCESS(status)) {
+    if (!NT_SUCCESS(status))
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "Failed to query PCI bus interface: 0x%08lx\n", status);
         return status;
     }
+
+    if (fdoCtx->BusInterface.GetBusData == NULL)
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "PCI bus interface has no GetBusData callback\n");
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+
+    bytesRead = fdoCtx->BusInterface.GetBusData(
+        fdoCtx->BusInterface.Context,
+        PCI_WHICHSPACE_CONFIG,
+        &fdoCtx->venId,
+        FIELD_OFFSET(PCI_COMMON_HEADER, VendorID),
+        sizeof(fdoCtx->venId));
+    if (bytesRead != sizeof(fdoCtx->venId))
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "Failed to read PCI vendor ID: read %lu of %Iu bytes\n",
+            bytesRead,
+            sizeof(fdoCtx->venId));
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+
+    bytesRead = fdoCtx->BusInterface.GetBusData(
+        fdoCtx->BusInterface.Context,
+        PCI_WHICHSPACE_CONFIG,
+        &fdoCtx->devId,
+        FIELD_OFFSET(PCI_COMMON_HEADER, DeviceID),
+        sizeof(fdoCtx->devId));
+    if (bytesRead != sizeof(fdoCtx->devId))
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "Failed to read PCI device ID for vendor 0x%04x: read %lu of %Iu bytes\n",
+            fdoCtx->venId,
+            bytesRead,
+            sizeof(fdoCtx->devId));
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+
+    bytesRead = fdoCtx->BusInterface.GetBusData(
+        fdoCtx->BusInterface.Context,
+        PCI_WHICHSPACE_CONFIG,
+        &fdoCtx->revId,
+        FIELD_OFFSET(PCI_COMMON_HEADER, RevisionID),
+        sizeof(fdoCtx->revId));
+    if (bytesRead != sizeof(fdoCtx->revId))
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "Failed to read PCI revision for %04x:%04x: read %lu of %Iu bytes\n",
+            fdoCtx->venId,
+            fdoCtx->devId,
+            bytesRead,
+            sizeof(fdoCtx->revId));
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+
+    bytesRead = fdoCtx->BusInterface.GetBusData(
+        fdoCtx->BusInterface.Context,
+        PCI_WHICHSPACE_CONFIG,
+        &fdoCtx->subClass,
+        FIELD_OFFSET(PCI_COMMON_HEADER, SubClass),
+        sizeof(fdoCtx->subClass));
+    if (bytesRead != sizeof(fdoCtx->subClass))
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "Failed to read PCI subclass for %04x:%04x: read %lu of %Iu bytes\n",
+            fdoCtx->venId,
+            fdoCtx->devId,
+            bytesRead,
+            sizeof(fdoCtx->subClass));
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+
+    SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_PNP,
+        "PCI HDA controller: vendor=0x%04x device=0x%04x revision=0x%02x\n",
+        fdoCtx->venId,
+        fdoCtx->devId,
+        fdoCtx->revId);
 
     for (ULONG i = 0; i < resourceCount; i++)
     {
@@ -239,45 +502,142 @@ Fdo_EvtDevicePrepareHardware(
         pDescriptor = WdfCmResourceListGetDescriptor(
             ResourcesTranslated, i);
 
+        if (pDescriptor == NULL)
+        {
+            SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+                "Translated resource[%lu] is NULL\n", i);
+            continue;
+        }
+
         switch (pDescriptor->Type)
         {
         case CmResourceTypeMemory:
-            //Look for BAR0 and BAR4
-            if (fBar0Found == FALSE) {
-                SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_INIT,
-                    "Found BAR0: 0x%llx (size 0x%lx)\n", pDescriptor->u.Memory.Start.QuadPart, pDescriptor->u.Memory.Length);
-
-                fdoCtx->m_BAR0.Base.Base = MmMapIoSpace(pDescriptor->u.Memory.Start, pDescriptor->u.Memory.Length, MmNonCached);
-                fdoCtx->m_BAR0.Len = pDescriptor->u.Memory.Length;
-
-                SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_INIT,
-                    "Mapped to %p\n", fdoCtx->m_BAR0.Base.baseptr);
-                fBar0Found = TRUE;
+            if (pDescriptor->u.Memory.Length == 0)
+            {
+                SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+                    "Ignoring zero-length memory resource[%lu]\n", i);
             }
-            else if (fBar4Found == FALSE) {
-                SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_INIT,
-                    "Found BAR4: 0x%llx (size 0x%lx)\n", pDescriptor->u.Memory.Start.QuadPart, pDescriptor->u.Memory.Length);
+            else if (bar0Descriptor == NULL)
+            {
+                bar0Descriptor = pDescriptor;
+            }
+            else if (bar4Descriptor == NULL)
+            {
+                bar4Descriptor = pDescriptor;
+            }
+            else
+            {
+                SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+                    "Ignoring unexpected extra memory resource[%lu]\n", i);
+            }
+            break;
 
-                //BAR4 is an optional ADSP memory mapping
-                fdoCtx->m_BAR4.Base.Base = MmMapIoSpace(pDescriptor->u.Memory.Start, pDescriptor->u.Memory.Length, MmNonCached);
-                fdoCtx->m_BAR4.Len = pDescriptor->u.Memory.Length;
-
-                SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_INIT,
-                    "Mapped to %p\n", fdoCtx->m_BAR4.Base.baseptr);
-                fBar4Found = TRUE;
+        case CmResourceTypeInterrupt:
+            if (pDescriptor->u.Interrupt.Vector == 0)
+            {
+                SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+                    "Ignoring unusable %s interrupt resource[%lu] with vector 0\n",
+                    (pDescriptor->Flags & CM_RESOURCE_INTERRUPT_MESSAGE) ?
+                        "message-signaled" : "line-based",
+                    i);
+            }
+            else if (!fdoCtx->InterruptResourcePresent)
+            {
+                fdoCtx->InterruptResourcePresent = TRUE;
+            }
+            else
+            {
+                SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+                    "Additional interrupt resource[%lu] will not be used by the single WDF interrupt object\n",
+                    i);
             }
             break;
         }
     }
 
-    if (fdoCtx->m_BAR0.Base.Base == NULL) {
-        status = STATUS_NOT_FOUND; //BAR0 is required
-        return status;
+    if (bar0Descriptor == NULL)
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "Cannot start PCI %04x:%04x: no usable BAR0 memory resource\n",
+            fdoCtx->venId,
+            fdoCtx->devId);
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
     }
 
-    fdoCtx->BusInterface.GetBusData(fdoCtx->BusInterface.Context, PCI_WHICHSPACE_CONFIG, &fdoCtx->venId, FIELD_OFFSET(PCI_COMMON_HEADER, VendorID), sizeof(UINT16));
-    fdoCtx->BusInterface.GetBusData(fdoCtx->BusInterface.Context, PCI_WHICHSPACE_CONFIG, &fdoCtx->devId, FIELD_OFFSET(PCI_COMMON_HEADER, DeviceID), sizeof(UINT16));
-    fdoCtx->BusInterface.GetBusData(fdoCtx->BusInterface.Context, PCI_WHICHSPACE_CONFIG, &fdoCtx->revId, FIELD_OFFSET(PCI_COMMON_HEADER, RevisionID), sizeof(UINT8));
+    if (!fdoCtx->InterruptResourcePresent)
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "Cannot start PCI %04x:%04x: PnP assigned no usable IRQ/MSI resource; "
+            "check PCI MSI policy, _OSC ownership, and legacy INTx routing\n",
+            fdoCtx->venId,
+            fdoCtx->devId);
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+
+    WDF_INTERRUPT_INFO_INIT(&interruptInfo);
+    WdfInterruptGetInfo(fdoCtx->Interrupt, &interruptInfo);
+    SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_PNP,
+        "WDF interrupt assignment: %s vector=0x%lx irql=0x%x group=%hu "
+        "affinity=0x%I64x share=%u\n",
+        interruptInfo.MessageSignaled ? "message-signaled" : "line-based",
+        interruptInfo.Vector,
+        interruptInfo.Irql,
+        interruptInfo.Group,
+        (ULONGLONG)interruptInfo.TargetProcessorSet,
+        interruptInfo.ShareDisposition);
+
+    if (interruptInfo.Vector == 0)
+    {
+        fdoCtx->InterruptResourcePresent = FALSE;
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "Cannot start PCI %04x:%04x: translated interrupt exists but WDF did not assign it to the interrupt object\n",
+            fdoCtx->venId,
+            fdoCtx->devId);
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+
+    fdoCtx->m_BAR0.Base.Base = MmMapIoSpace(
+        bar0Descriptor->u.Memory.Start,
+        bar0Descriptor->u.Memory.Length,
+        MmNonCached);
+    if (fdoCtx->m_BAR0.Base.Base == NULL)
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "Failed to map BAR0 at 0x%I64x (length 0x%lx)\n",
+            bar0Descriptor->u.Memory.Start.QuadPart,
+            bar0Descriptor->u.Memory.Length);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    fdoCtx->m_BAR0.Len = bar0Descriptor->u.Memory.Length;
+    SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_INIT,
+        "Mapped BAR0 0x%I64x (length 0x%lx) to %p\n",
+        bar0Descriptor->u.Memory.Start.QuadPart,
+        fdoCtx->m_BAR0.Len,
+        fdoCtx->m_BAR0.Base.Base);
+
+    if (bar4Descriptor != NULL)
+    {
+        fdoCtx->m_BAR4.Base.Base = MmMapIoSpace(
+            bar4Descriptor->u.Memory.Start,
+            bar4Descriptor->u.Memory.Length,
+            MmNonCached);
+        if (fdoCtx->m_BAR4.Base.Base != NULL)
+        {
+            fdoCtx->m_BAR4.Len = bar4Descriptor->u.Memory.Length;
+            SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_INIT,
+                "Mapped optional BAR4 0x%I64x (length 0x%lx) to %p\n",
+                bar4Descriptor->u.Memory.Start.QuadPart,
+                fdoCtx->m_BAR4.Len,
+                fdoCtx->m_BAR4.Base.Base);
+        }
+        else
+        {
+            SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+                "Could not map optional BAR4 at 0x%I64x (length 0x%lx); continuing without the ADSP mapping\n",
+                bar4Descriptor->u.Memory.Start.QuadPart,
+                bar4Descriptor->u.Memory.Length);
+        }
+    }
 
     //mlcap & lctl (hda_intel_init_chip)
     if (fdoCtx->venId == VEN_INTEL) {
@@ -292,7 +652,7 @@ Fdo_EvtDevicePrepareHardware(
 #define HDAC_MAX_CAPS 10
 
         /* Lets walk the linked capabilities list */
-        do {
+        while (offset) {
             cur_cap = read32(fdoCtx->m_BAR0.Base.baseptr + offset);
 
             SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_INIT,
@@ -357,7 +717,7 @@ Fdo_EvtDevicePrepareHardware(
             /* read the offset of next capability */
             offset = cur_cap & HDA_CAP_HDR_NXT_PTR_MASK;
 
-        } while (offset);
+        }
     }
 
     status = GetHDACapabilities(fdoCtx);
@@ -519,12 +879,22 @@ Fdo_EvtDeviceReleaseHardware(
     }
 
     if (fdoCtx->sofTplg)
+    {
         ExFreePoolWithTag(fdoCtx->sofTplg, SKLHDAUDBUS_POOL_TAG);
+        fdoCtx->sofTplg = NULL;
+        fdoCtx->sofTplgSz = 0;
+    }
 
     if (fdoCtx->posbuf)
+    {
         MmFreeContiguousMemory(fdoCtx->posbuf);
+        fdoCtx->posbuf = NULL;
+    }
     if (fdoCtx->rb)
+    {
         MmFreeContiguousMemory(fdoCtx->rb);
+        fdoCtx->rb = NULL;
+    }
 
     if (fdoCtx->streams) {
         for (UINT32 i = 0; i < fdoCtx->numStreams; i++) {
@@ -536,16 +906,26 @@ Fdo_EvtDeviceReleaseHardware(
         }
 
         ExFreePoolWithTag(fdoCtx->streams, SKLHDAUDBUS_POOL_TAG);
+        fdoCtx->streams = NULL;
     }
 
     if (fdoCtx->m_BAR0.Base.Base) {
         MmUnmapIoSpace(fdoCtx->m_BAR0.Base.Base, fdoCtx->m_BAR0.Len);
         fdoCtx->m_BAR0.Base.Base = NULL;
+        fdoCtx->m_BAR0.Len = 0;
     }
     if (fdoCtx->m_BAR4.Base.Base) {
         MmUnmapIoSpace(fdoCtx->m_BAR4.Base.Base, fdoCtx->m_BAR4.Len);
         fdoCtx->m_BAR4.Base.Base = NULL;
+        fdoCtx->m_BAR4.Len = 0;
     }
+
+    fdoCtx->mlcap = NULL;
+    fdoCtx->ppcap = NULL;
+    fdoCtx->spbcap = NULL;
+    fdoCtx->InterruptConnected = FALSE;
+    fdoCtx->InterruptResourcePresent = FALSE;
+    fdoCtx->ControllerEnabled = FALSE;
 
     return STATUS_SUCCESS;
 }
@@ -570,9 +950,21 @@ Fdo_EvtDeviceD0Entry(
         "%s\n", __func__);
 
     status = STATUS_SUCCESS;
+    fdoCtx->InterruptConnected = FALSE;
+
+    if (!fdoCtx->InterruptResourcePresent)
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "%s: refusing to start PCI %04x:%04x without an interrupt resource\n",
+            __func__,
+            fdoCtx->venId,
+            fdoCtx->devId);
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
 
     if (fdoCtx->venId == VEN_INTEL) {
         UINT32 val;
+        update_pci_byte(&fdoCtx->BusInterface, HDA_PCIREG_TCSEL, 0x07, 0);
         pci_read_cfg_dword(&fdoCtx->BusInterface, INTEL_HDA_CGCTL, &val);
         val = val & ~INTEL_HDA_CGCTL_MISCBDCGE;
         pci_write_cfg_dword(&fdoCtx->BusInterface, INTEL_HDA_CGCTL, val);
@@ -599,10 +991,19 @@ Fdo_EvtDeviceD0Entry(
         val = val | INTEL_HDA_CGCTL_MISCBDCGE;
         pci_write_cfg_dword(&fdoCtx->BusInterface, INTEL_HDA_CGCTL, val);
 
+#ifdef __REACTOS__
+        if (fdoCtx->mlcap)
+            hda_update32(fdoCtx, VS_EM2, HDA_VS_EM2_DUM, HDA_VS_EM2_DUM);
+#else
         hda_update32(fdoCtx, VS_EM2, HDA_VS_EM2_DUM, HDA_VS_EM2_DUM);
+#endif
     }
 
     if (!NT_SUCCESS(status)) {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_INIT,
+            "%s: failed to start HDA controller: 0x%08lx\n",
+            __func__,
+            status);
         return status;
     }
 
@@ -621,11 +1022,42 @@ Fdo_EvtDeviceD0EntryPostInterrupts(
 {
     UNREFERENCED_PARAMETER(PreviousState);
 
+    WDF_INTERRUPT_INFO interruptInfo;
+    PKINTERRUPT wdmInterrupt;
     NTSTATUS status;
     PFDO_CONTEXT fdoCtx;
 
     status = STATUS_SUCCESS;
     fdoCtx = Fdo_GetContext(Device);
+
+    WDF_INTERRUPT_INFO_INIT(&interruptInfo);
+    WdfInterruptGetInfo(fdoCtx->Interrupt, &interruptInfo);
+    wdmInterrupt = WdfInterruptWdmGetInterrupt(fdoCtx->Interrupt);
+
+    SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_PNP,
+        "%s: %s vector=0x%lx irql=0x%x affinity=0x%I64x WDM=%p enabled=%u\n",
+        __func__,
+        interruptInfo.MessageSignaled ? "message-signaled" : "line-based",
+        interruptInfo.Vector,
+        interruptInfo.Irql,
+        (ULONGLONG)interruptInfo.TargetProcessorSet,
+        wdmInterrupt,
+        fdoCtx->InterruptConnected);
+
+    if (!fdoCtx->InterruptResourcePresent ||
+        !fdoCtx->InterruptConnected ||
+        interruptInfo.Vector == 0 ||
+        wdmInterrupt == NULL)
+    {
+        if (fdoCtx->m_BAR0.Base.Base != NULL)
+            hda_write32(fdoCtx, INTCTL, 0);
+
+        fdoCtx->InterruptConnected = FALSE;
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP,
+            "%s: KMDF did not connect a usable interrupt; codec I/O is disabled to avoid a system crash\n",
+            __func__);
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
 
 #if ENABLE_HDA
     for (UINT8 addr = 0; addr < HDA_MAX_CODECS; addr++) {
@@ -640,11 +1072,22 @@ Fdo_EvtDeviceD0EntryPostInterrupts(
             (AC_VERB_PARAMETERS << 8);
 
         ULONG vendorDevice;
-        if (!NT_SUCCESS(RunSingleHDACmd(fdoCtx, cmdTmpl | AC_PAR_VENDOR_ID, &vendorDevice))) { //Some codecs might need a kickstart
+        NTSTATUS commandStatus = RunSingleHDACmd(
+            fdoCtx,
+            cmdTmpl | AC_PAR_VENDOR_ID,
+            &vendorDevice);
+        if (!NT_SUCCESS(commandStatus)) { //Some codecs might need a kickstart
+            SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_INIT,
+                "Codec %u vendor query failed on first attempt: 0x%08lx; retrying\n",
+                addr,
+                commandStatus);
             //First attempt failed. Retry
             NTSTATUS status2 = RunSingleHDACmd(fdoCtx, cmdTmpl | AC_PAR_VENDOR_ID, &vendorDevice); //If this fails, something is wrong.
             if (!NT_SUCCESS(status2)) {
-                SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_INIT, "Warning: Failed to wake up codec %d: 0x%x", addr, status2);
+                SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_INIT,
+                    "Warning: failed to wake codec %u: 0x%08lx\n",
+                    addr,
+                    status2);
             }
         }
     }
@@ -667,7 +1110,16 @@ Fdo_EvtDeviceD0Exit(
 
     fdoCtx = Fdo_GetContext(Device);
 
+    fdoCtx->InterruptConnected = FALSE;
     status = StopHDAController(fdoCtx);
+
+    if (!NT_SUCCESS(status))
+    {
+        SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_INIT,
+            "%s: failed to stop HDA controller: 0x%08lx\n",
+            __func__,
+            status);
+    }
 
     SklHdAudBusPrint(DEBUG_LEVEL_INFO, DBG_INIT,
         "%s\n", __func__);
@@ -700,72 +1152,71 @@ Fdo_EnumerateCodec(
     UINT8 startID = (nodeCount >> 16) & 0xFF;
     nodeCount = (nodeCount & 0x7FFF);
 
-    UINT16 mainFuncGrp = 0;
-    {
-        UINT16 nid = startID;
-        for (UINT32 i = 0; i < nodeCount; i++, nid++) {
-            UINT32 cmd = (addr << 28) | (nid << 20) |
-                (AC_VERB_PARAMETERS << 8) | AC_PAR_FUNCTION_TYPE;
-            if (!NT_SUCCESS(RunSingleHDACmd(fdoCtx, cmd, &funcType))) {
-                continue;
-            }
-            switch (funcType & 0xFF) {
-            case AC_GRP_AUDIO_FUNCTION:
-            case AC_GRP_MODEM_FUNCTION:
-                mainFuncGrp = nid;
-                break;
-            }
+    UINT16 nid = startID;
+    for (UINT32 i = 0; i < nodeCount; i++, nid++) {
+        UINT32 cmd = (addr << 28) | (nid << 20) |
+            (AC_VERB_PARAMETERS << 8) | AC_PAR_FUNCTION_TYPE;
+        if (!NT_SUCCESS(RunSingleHDACmd(fdoCtx, cmd, &funcType))) {
+            continue;
+        }
+        if ((funcType & 0xFF) != AC_GRP_AUDIO_FUNCTION &&
+            (funcType & 0xFF) != AC_GRP_MODEM_FUNCTION) {
+            continue;
+        }
+
+        subsysId = 0;
+        cmd = (addr << 28) | (nid << 20) |
+            (AC_VERB_GET_SUBSYSTEM_ID << 8);
+        RunSingleHDACmd(fdoCtx, cmd, &subsysId);
+
+        PDO_IDENTIFICATION_DESCRIPTION description;
+        RtlZeroMemory(&description, sizeof(description));
+        //
+        // Initialize the description with the information about the detected codec.
+        //
+        WDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER_INIT(
+            &description.Header,
+            sizeof(description)
+        );
+
+        description.FdoContext = fdoCtx;
+
+        description.CodecIds.CtlrDevId = fdoCtx->devId;
+        description.CodecIds.CtlrVenId = fdoCtx->venId;
+
+        description.CodecIds.CodecAddress = addr;
+        if (fdoCtx->UseSGPCCodec && addr == fdoCtx->GraphicsCodecAddress)
+            description.CodecIds.IsGraphicsCodec = TRUE;
+        else
+            description.CodecIds.IsGraphicsCodec = FALSE;
+
+        description.CodecIds.FunctionGroupStartNode = (UINT8)nid;
+
+        description.CodecIds.IsDSP = FALSE;
+
+        description.CodecIds.FuncId = funcType & 0xFF;
+        description.CodecIds.VenId = (vendorDevice >> 16) & 0xFFFF;
+        description.CodecIds.DevId = vendorDevice & 0xFFFF;
+        description.CodecIds.SubsysId = subsysId;
+        description.CodecIds.RevId = (revId >> 8) & 0xFFFF;
+
+        //
+        // Call the framework to add this child to the childlist. This call
+        // will internaly call our DescriptionCompare callback to check
+        // whether this device is a new device or existing device. If
+        // it's a new device, the framework will call DescriptionDuplicate to create
+        // a copy of this description in nonpaged pool.
+        // The actual creation of the child device will happen when the framework
+        // receives QUERY_DEVICE_RELATION request from the PNP manager in
+        // response to InvalidateDeviceRelations call made as part of adding
+        // a new child.
+        //
+        if (!NT_SUCCESS(WdfChildListAddOrUpdateChildDescriptionAsPresent(
+            WdfFdoGetDefaultChildList(fdoCtx->WdfDevice), &description.Header,
+            NULL))) { // AddressDescription
+            SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP, "WdfChildListAddOrUpdateChildDescriptionAsPresent failed\n");
         }
     }
-
-    UINT32 cmd = (addr << 28) | (mainFuncGrp << 20) |
-        (AC_VERB_GET_SUBSYSTEM_ID << 8);
-    RunSingleHDACmd(fdoCtx, cmd, &subsysId);
-
-    PDO_IDENTIFICATION_DESCRIPTION description;
-    //
-    // Initialize the description with the information about the detected codec.
-    //
-    WDF_CHILD_IDENTIFICATION_DESCRIPTION_HEADER_INIT(
-        &description.Header,
-        sizeof(description)
-    );
-
-    description.FdoContext = fdoCtx;
-
-    description.CodecIds.CtlrDevId = fdoCtx->devId;
-    description.CodecIds.CtlrVenId = fdoCtx->venId;
-
-    description.CodecIds.CodecAddress = addr;
-    if (fdoCtx->UseSGPCCodec && addr == fdoCtx->GraphicsCodecAddress)
-        description.CodecIds.IsGraphicsCodec = TRUE;
-    else
-        description.CodecIds.IsGraphicsCodec = FALSE;
-
-    description.CodecIds.FunctionGroupStartNode = startID;
-
-    description.CodecIds.IsDSP = FALSE;
-
-    description.CodecIds.FuncId = funcType & 0xFF;
-    description.CodecIds.VenId = (vendorDevice >> 16) & 0xFFFF;
-    description.CodecIds.DevId = vendorDevice & 0xFFFF;
-    description.CodecIds.SubsysId = subsysId;
-    description.CodecIds.RevId = (revId >> 8) & 0xFFFF;
-
-    //
-    // Call the framework to add this child to the childlist. This call
-    // will internaly call our DescriptionCompare callback to check
-    // whether this device is a new device or existing device. If
-    // it's a new device, the framework will call DescriptionDuplicate to create
-    // a copy of this description in nonpaged pool.
-    // The actual creation of the child device will happen when the framework
-    // receives QUERY_DEVICE_RELATION request from the PNP manager in
-    // response to InvalidateDeviceRelations call made as part of adding
-    // a new child.
-    //
-    WdfChildListAddOrUpdateChildDescriptionAsPresent(
-        WdfFdoGetDefaultChildList(fdoCtx->WdfDevice), &description.Header,
-        NULL); // AddressDescription
 }
 
 NTSTATUS
@@ -795,7 +1246,7 @@ Fdo_EvtDeviceSelfManagedIoInit(
     }
 
     if (fdoCtx->mlcap) {
-        IoRegisterPlugPlayNotification(
+        if (!NT_SUCCESS(IoRegisterPlugPlayNotification(
             EventCategoryDeviceInterfaceChange,
             PNPNOTIFY_DEVICE_INTERFACE_INCLUDE_EXISTING_INTERFACES,
             (PVOID)&GUID_DEVINTERFACE_GRAPHICSPOWER,
@@ -803,13 +1254,16 @@ Fdo_EvtDeviceSelfManagedIoInit(
             HDAGraphicsPowerInterfaceCallback,
             (PVOID)fdoCtx,
             &fdoCtx->GraphicsNotificationHandle
-        );
+        ))) {
+            fdoCtx->GraphicsNotificationHandle = NULL;
+            SklHdAudBusPrint(DEBUG_LEVEL_ERROR, DBG_PNP, "IoRegisterPlugPlayNotification failed\n");
+        }
 
     }
 #endif
 
     fdoCtx->dspInterruptCallback = NULL;
-    if (fdoCtx->m_BAR4.Base.Base) { //Populate ADSP if present
+    if (fdoCtx->m_BAR4.Base.Base && fdoCtx->subClass == PCI_SUBCLASS_MM_AUDIO_DEV) { //Populate ADSP if present
         PDO_IDENTIFICATION_DESCRIPTION description;
         //
         // Initialize the description with the information about the detected codec.

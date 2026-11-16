@@ -16,7 +16,7 @@
 
 // Some definitions
 
-#include <pshpack1.h>
+#pragma pack(push, 1)
 typedef struct  /* Root System Descriptor Pointer */
 {
     CHAR             signature [8];          /* contains "RSD PTR " */
@@ -29,7 +29,7 @@ typedef struct  /* Root System Descriptor Pointer */
     UCHAR            extended_checksum;      /* Checksum of entire table */
     CHAR             reserved [3];           /* reserved field must be 0 */
 } RSDP_DESCRIPTOR, *PRSDP_DESCRIPTOR;
-#include <poppack.h>
+#pragma pack(pop)
 
 typedef struct _ARC_DISK_SIGNATURE_EX
 {
@@ -74,10 +74,16 @@ MenuNTOptions(
     _Inout_ OperatingSystemItem* OperatingSystem);
 
 VOID
+PrepareBootOptions(OperatingSystemItem* OperatingSystem);
+
+VOID
 AppendBootTimeOptions(
     _Inout_z_bytecount_(BootOptionsSize)
          PSTR BootOptions,
     _In_ SIZE_T BootOptionsSize);
+
+BOOLEAN
+StartupSkipsRamDisk(VOID);
 
 
 ARC_STATUS

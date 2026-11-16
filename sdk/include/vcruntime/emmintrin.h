@@ -11,7 +11,15 @@
 #ifndef _INCLUDED_EMM
 #define _INCLUDED_EMM
 
-#include <vcruntime.h>
+#include "intrin_target.h"
+
+/* When building with Clang, use Clang's own intrinsics headers instead. */
+#if _VCRT_USE_CLANG_X86_INTRINSICS
+#include_next <emmintrin.h>
+#elif _VCRT_ARM64_CODEGEN
+/* ARM64: no x86 intrinsics */
+#else
+
 #include <xmmintrin.h>
 
 #if defined(_MSC_VER) && !defined(__clang__)
@@ -66,6 +74,8 @@ typedef signed char __v16qs __attribute__((__vector_size__(16)));
 #ifdef __clang__
 #define __ATTRIBUTE_SSE2__ __attribute__((__target__("sse2"),__min_vector_width__(128)))
 #define __ATTRIBUTE_MMXSSE2__ __attribute__((__target__("mmx,sse2"),__min_vector_width__(128)))
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
 #define __ATTRIBUTE_SSE2__ __attribute__((__target__("sse2")))
 #define __ATTRIBUTE_MMXSSE2__ __attribute__((__target__("mmx,sse2")))
@@ -861,6 +871,8 @@ __INTRIN_INLINE_SSE2 __m128d _mm_cvtps_pd(__m128 a)
 {
 #if HAS_BUILTIN(__builtin_convertvector)
     return (__m128d)__builtin_convertvector(__builtin_shufflevector((__v4sf)a, (__v4sf)a, 0, 1), __v2df);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return __builtin_ia32_cvtps2pd(a);
 #endif
@@ -870,6 +882,8 @@ __INTRIN_INLINE_SSE2 __m128d _mm_cvtepi32_pd(__m128i a)
 {
 #if HAS_BUILTIN(__builtin_convertvector)
     return (__m128d)__builtin_convertvector(__builtin_shufflevector((__v4si)a, (__v4si)a, 0, 1), __v2df);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return __builtin_ia32_cvtdq2pd((__v4si)a);
 #endif
@@ -957,6 +971,8 @@ __INTRIN_INLINE_SSE2 __m128d _mm_loadr_pd(double const *dp)
 #if HAS_BUILTIN(__builtin_shufflevector)
     __m128d u = *(const __m128d *)dp;
     return __builtin_shufflevector((__v2df)u, (__v2df)u, 1, 0);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128d){ dp[1], dp[0] };
 #endif
@@ -1028,6 +1044,8 @@ __INTRIN_INLINE_SSE2 __m128d _mm_undefined_pd(void)
 {
 #if HAS_BUILTIN(__builtin_ia32_undef128)
     return (__m128d)__builtin_ia32_undef128();
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     __m128d undef = undef;
     return undef;
@@ -1083,6 +1101,8 @@ __INTRIN_INLINE_SSE2 void _mm_store1_pd(double *dp, __m128d a)
 #if HAS_BUILTIN(__builtin_shufflevector)
     a = __builtin_shufflevector((__v2df)a, (__v2df)a, 0, 0);
     _mm_store_pd(dp, a);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     dp[0] = a[0];
     dp[1] = a[0];
@@ -1102,6 +1122,8 @@ __INTRIN_INLINE_SSE2 void _mm_storer_pd(double *dp, __m128d a)
 #if HAS_BUILTIN(__builtin_shufflevector)
     a = __builtin_shufflevector((__v2df)a, (__v2df)a, 1, 0);
     *(__m128d *)dp = a;
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     dp[0] = a[1];
     dp[1] = a[0];
@@ -1153,6 +1175,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_adds_epi8(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_elementwise_add_sat)
     return (__m128i)__builtin_elementwise_add_sat((__v16qs)a, (__v16qs)b);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_paddsb128((__v16qi)a, (__v16qi)b);
 #endif
@@ -1162,6 +1186,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_adds_epi16(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_elementwise_add_sat)
     return (__m128i)__builtin_elementwise_add_sat((__v8hi)a, (__v8hi)b);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_paddsw128((__v8hi)a, (__v8hi)b);
 #endif
@@ -1171,6 +1197,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_adds_epu8(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_elementwise_add_sat)
     return (__m128i)__builtin_elementwise_add_sat((__v16qu)a, (__v16qu)b);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_paddusb128((__v16qi)a, (__v16qi)b);
 #endif
@@ -1180,6 +1208,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_adds_epu16(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_elementwise_add_sat)
     return (__m128i)__builtin_elementwise_add_sat((__v8hu)a, (__v8hu)b);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_paddusw128((__v8hi)a, (__v8hi)b);
 #endif
@@ -1204,6 +1234,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_max_epi16(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_elementwise_max)
     return (__m128i)__builtin_elementwise_max((__v8hi)a, (__v8hi)b);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_pmaxsw128((__v8hi)a, (__v8hi)b);
 #endif
@@ -1213,6 +1245,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_max_epu8(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_elementwise_max)
     return (__m128i)__builtin_elementwise_max((__v16qu)a, (__v16qu)b);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_pmaxub128((__v16qi)a, (__v16qi)b);
 #endif
@@ -1222,6 +1256,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_min_epi16(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_elementwise_min)
     return (__m128i)__builtin_elementwise_min((__v8hi)a, (__v8hi)b);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_pminsw128((__v8hi)a, (__v8hi)b);
 #endif
@@ -1231,6 +1267,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_min_epu8(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_elementwise_min)
     return (__m128i)__builtin_elementwise_min((__v16qu)a, (__v16qu)b);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_pminub128((__v16qi)a, (__v16qi)b);
 #endif
@@ -1295,6 +1333,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_subs_epi8(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_elementwise_sub_sat)
     return (__m128i)__builtin_elementwise_sub_sat((__v16qs)a, (__v16qs)b);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_psubsb128((__v16qi)a, (__v16qi)b);
 #endif
@@ -1304,6 +1344,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_subs_epi16(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_elementwise_sub_sat)
     return (__m128i)__builtin_elementwise_sub_sat((__v8hi)a, (__v8hi)b);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_psubsw128((__v8hi)a, (__v8hi)b);
 #endif
@@ -1313,6 +1355,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_subs_epu8(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_elementwise_sub_sat)
     return (__m128i)__builtin_elementwise_sub_sat((__v16qu)a, (__v16qu)b);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_psubusb128((__v16qi)a, (__v16qi)b);
 #endif
@@ -1322,6 +1366,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_subs_epu16(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_elementwise_sub_sat)
     return (__m128i)__builtin_elementwise_sub_sat((__v8hu)a, (__v8hu)b);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_psubusw128((__v8hi)a, (__v8hi)b);
 #endif
@@ -1350,11 +1396,11 @@ __INTRIN_INLINE_SSE2 __m128i _mm_xor_si128(__m128i a, __m128i b)
 #ifdef __clang__
 #define _mm_slli_si128(a, imm) \
     ((__m128i)__builtin_ia32_pslldqi128_byteshift((__v2di)(__m128i)(a), (int)(imm)))
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
-__INTRIN_INLINE_SSE2 __m128i _mm_slli_si128(__m128i a, const int imm)
-{
-  return (__m128i)__builtin_ia32_pslldqi128(a, imm * 8);
-}
+#define _mm_slli_si128(a, imm) \
+    ((__m128i)__builtin_ia32_pslldqi128((__m128i)(a), (int)(imm) * 8))
 #endif
 
 __INTRIN_INLINE_SSE2 __m128i _mm_slli_epi16(__m128i a, int count)
@@ -1410,11 +1456,11 @@ __INTRIN_INLINE_SSE2 __m128i _mm_sra_epi32(__m128i a, __m128i count)
 #ifdef __clang__
 #define _mm_srli_si128(a, imm) \
     ((__m128i)__builtin_ia32_psrldqi128_byteshift((__v2di)(__m128i)(a), (int)(imm)))
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
-__INTRIN_INLINE_SSE2 __m128i _mm_srli_si128(__m128i a, const int imm)
-{
-    return (__m128i)__builtin_ia32_psrldqi128(a, imm * 8);
-}
+#define _mm_srli_si128(a, imm) \
+    ((__m128i)__builtin_ia32_psrldqi128((__m128i)(a), (int)(imm) * 8))
 #endif
 
 __INTRIN_INLINE_SSE2 __m128i _mm_srli_epi16(__m128i a, int count)
@@ -1517,6 +1563,8 @@ __INTRIN_INLINE_SSE2 __m128 _mm_cvtepi32_ps(__m128i a)
 {
 #if HAS_BUILTIN(__builtin_convertvector)
     return (__m128)__builtin_convertvector((__v4si)a, __v4sf);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return __builtin_ia32_cvtdq2ps((__v4si)a);
 #endif
@@ -1579,6 +1627,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_undefined_si128(void)
 {
 #if HAS_BUILTIN(__builtin_ia32_undef128)
     return (__m128i)__builtin_ia32_undef128();
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     __m128i undef = undef;
     return undef;
@@ -1730,6 +1780,8 @@ __INTRIN_INLINE_SSE2 void _mm_stream_pd(double *p, __m128d a)
 {
 #if HAS_BUILTIN(__builtin_nontemporal_store)
     __builtin_nontemporal_store((__v2df)a, (__v2df *)p);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     __builtin_ia32_movntpd(p, a);
 #endif
@@ -1739,6 +1791,8 @@ __INTRIN_INLINE_SSE2 void _mm_stream_si128(__m128i *p, __m128i a)
 {
 #if HAS_BUILTIN(__builtin_nontemporal_store)
     __builtin_nontemporal_store((__v2di)a, (__v2di*)p);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     __builtin_ia32_movntdq(p, a);
 #endif
@@ -1756,7 +1810,17 @@ __INTRIN_INLINE_SSE2 void _mm_stream_si64(long long *p, long long a)
 }
 #endif
 
-void _mm_clflush(void const *p);
+#ifdef _M_IX86
+__INTRIN_INLINE void _mm_clflush(void const *p)
+{
+    __asm__ __volatile__("clflush %0" : : "m" (*(const char *)p));
+}
+#else
+__INTRIN_INLINE_SSE2 void _mm_clflush(void const *p)
+{
+    __builtin_ia32_clflush(p);
+}
+#endif
 
 void _mm_lfence(void);
 
@@ -1805,6 +1869,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_unpackhi_epi8(__m128i a, __m128i b)
     return (__m128i)__builtin_shufflevector(
         (__v16qi)a, (__v16qi)b, 8, 16 + 8, 9, 16 + 9, 10, 16 + 10, 11,
         16 + 11, 12, 16 + 12, 13, 16 + 13, 14, 16 + 14, 15, 16 + 15);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_punpckhbw128((__v16qi)a, (__v16qi)b);
 #endif
@@ -1815,6 +1881,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_unpackhi_epi16(__m128i a, __m128i b)
 #if HAS_BUILTIN(__builtin_shufflevector)
     return (__m128i)__builtin_shufflevector((__v8hi)a, (__v8hi)b, 4, 8 + 4, 5,
                                             8 + 5, 6, 8 + 6, 7, 8 + 7);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_punpckhwd128((__v8hi)a, (__v8hi)b);
 #endif
@@ -1825,6 +1893,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_unpackhi_epi32(__m128i a, __m128i b)
 #if HAS_BUILTIN(__builtin_shufflevector)
     return (__m128i)__builtin_shufflevector((__v4si)a, (__v4si)b, 2, 4 + 2, 3,
                                             4 + 3);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_punpckhdq128((__v4si)a, (__v4si)b);
 #endif
@@ -1834,6 +1904,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_unpackhi_epi64(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_shufflevector)
     return (__m128i)__builtin_shufflevector((__v2di)a, (__v2di)b, 1, 2 + 1);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_punpckhqdq128((__v2di)a, (__v2di)b);
 #endif
@@ -1845,6 +1917,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_unpacklo_epi8(__m128i a, __m128i b)
     return (__m128i)__builtin_shufflevector(
         (__v16qi)a, (__v16qi)b, 0, 16 + 0, 1, 16 + 1, 2, 16 + 2, 3, 16 + 3, 4,
         16 + 4, 5, 16 + 5, 6, 16 + 6, 7, 16 + 7);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_punpcklbw128((__v16qi)a, (__v16qi)b);
 #endif
@@ -1855,6 +1929,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_unpacklo_epi16(__m128i a, __m128i b)
 #if HAS_BUILTIN(__builtin_shufflevector)
     return (__m128i)__builtin_shufflevector((__v8hi)a, (__v8hi)b, 0, 8 + 0, 1,
                                             8 + 1, 2, 8 + 2, 3, 8 + 3);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_punpcklwd128((__v8hi)a, (__v8hi)b);
 #endif
@@ -1865,6 +1941,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_unpacklo_epi32(__m128i a, __m128i b)
 #if HAS_BUILTIN(__builtin_shufflevector)
     return (__m128i)__builtin_shufflevector((__v4si)a, (__v4si)b, 0, 4 + 0, 1,
                                             4 + 1);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_punpckldq128((__v4si)a, (__v4si)b);
 #endif
@@ -1874,6 +1952,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_unpacklo_epi64(__m128i a, __m128i b)
 {
 #if HAS_BUILTIN(__builtin_shufflevector)
     return (__m128i)__builtin_shufflevector((__v2di)a, (__v2di)b, 0, 2 + 0);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_punpcklqdq128((__v2di)a, (__v2di)b);
 #endif
@@ -1893,6 +1973,8 @@ __INTRIN_INLINE_SSE2 __m128i _mm_move_epi64(__m128i a)
 {
 #if HAS_BUILTIN(__builtin_shufflevector)
     return __builtin_shufflevector((__v2di)a, _mm_setzero_si128(), 0, 2);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128i)__builtin_ia32_movq128((__v2di)a);
 #endif
@@ -1902,6 +1984,8 @@ __INTRIN_INLINE_SSE2 __m128d _mm_unpackhi_pd(__m128d a, __m128d b)
 {
 #if HAS_BUILTIN(__builtin_shufflevector)
     return __builtin_shufflevector((__v2df)a, (__v2df)b, 1, 2 + 1);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128d)__builtin_ia32_unpckhpd((__v2df)a, (__v2df)b);
 #endif
@@ -1911,6 +1995,8 @@ __INTRIN_INLINE_SSE2 __m128d _mm_unpacklo_pd(__m128d a, __m128d b)
 {
 #if HAS_BUILTIN(__builtin_shufflevector)
     return __builtin_shufflevector((__v2df)a, (__v2df)b, 0, 2 + 0);
+#elif defined(_M_ARM64) || defined(__aarch64__)
+/* ARM64: no x86 intrinsics available */
 #else
     return (__m128d)__builtin_ia32_unpcklpd((__v2df)a, (__v2df)b);
 #endif
@@ -1963,4 +2049,5 @@ void _mm_pause(void);
 } // extern "C"
 #endif
 
+#endif /* !(__clang__ && !_MSC_VER) */
 #endif /* _INCLUDED_EMM */

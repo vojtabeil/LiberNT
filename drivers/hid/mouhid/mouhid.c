@@ -30,6 +30,29 @@ static USHORT MouHid_ButtonDownFlags[] =
     MOUSE_BUTTON_5_UP
 };
 
+static
+BOOLEAN
+MouHid_ScaleAbsoluteCoordinate(
+    IN ULONG Value,
+    IN PHIDP_VALUE_CAPS ValueCaps,
+    IN ULONG VirtualScreenSize,
+    OUT PLONG Last)
+{
+    if (ValueCaps->LogicalMax <= 0 ||
+        ValueCaps->LogicalMax <= ValueCaps->LogicalMin)
+    {
+        DPRINT1("MouHid_ScaleAbsoluteCoordinate: invalid logical range %ld..%ld\n",
+                ValueCaps->LogicalMin,
+                ValueCaps->LogicalMax);
+        return FALSE;
+    }
+
+    if (Value > (ULONG)ValueCaps->LogicalMax)
+        Value = ValueCaps->LogicalMax;
+
+    *Last = (LONG)(((ULONGLONG)Value * VirtualScreenSize) / ValueCaps->LogicalMax);
+    return TRUE;
+}
 
 VOID
 MouHid_GetButtonMove(
@@ -74,15 +97,18 @@ MouHid_GetButtonMove(
                                         DeviceExtension->Report,
                                         DeviceExtension->ReportLength);
 
-                /* FIXME handle error */
-                ASSERT(Status == HIDP_STATUS_SUCCESS);
-
-                /* absolute pointing devices values need be in range 0 - 0xffff */
-                ASSERT(DeviceExtension->ValueCapsX.LogicalMax > 0);
-                ASSERT(DeviceExtension->ValueCapsX.LogicalMax > DeviceExtension->ValueCapsX.LogicalMin);
-
-                /* convert to logical range */
-                *LastX = (ValueX * VIRTUAL_SCREEN_SIZE_X) / DeviceExtension->ValueCapsX.LogicalMax;
+                if (Status == HIDP_STATUS_SUCCESS)
+                {
+                    MouHid_ScaleAbsoluteCoordinate(ValueX,
+                                                   &DeviceExtension->ValueCapsX,
+                                                   VIRTUAL_SCREEN_SIZE_X,
+                                                   LastX);
+                }
+                else
+                {
+                    DPRINT1("MouHid_GetButtonMove: failed to get absolute X %x\n",
+                            Status);
+                }
             }
         }
     }
@@ -98,15 +124,18 @@ MouHid_GetButtonMove(
                                     DeviceExtension->Report,
                                     DeviceExtension->ReportLength);
 
-        /* FIXME handle error */
-        ASSERT(Status == HIDP_STATUS_SUCCESS);
-
-        /* absolute pointing devices values need be in range 0 - 0xffff */
-        ASSERT(DeviceExtension->ValueCapsX.LogicalMax > 0);
-        ASSERT(DeviceExtension->ValueCapsX.LogicalMax > DeviceExtension->ValueCapsX.LogicalMin);
-
-        /* convert to logical range */
-        *LastX = (ValueX * VIRTUAL_SCREEN_SIZE_X) / DeviceExtension->ValueCapsX.LogicalMax;
+        if (Status == HIDP_STATUS_SUCCESS)
+        {
+            MouHid_ScaleAbsoluteCoordinate(ValueX,
+                                           &DeviceExtension->ValueCapsX,
+                                           VIRTUAL_SCREEN_SIZE_X,
+                                           LastX);
+        }
+        else
+        {
+            DPRINT1("MouHid_GetButtonMove: failed to get absolute X %x\n",
+                    Status);
+        }
     }
 
     if (!DeviceExtension->MouseAbsolute)
@@ -139,15 +168,18 @@ MouHid_GetButtonMove(
                                         DeviceExtension->Report,
                                         DeviceExtension->ReportLength);
 
-                /* FIXME handle error */
-                ASSERT(Status == HIDP_STATUS_SUCCESS);
-
-                /* absolute pointing devices values need be in range 0 - 0xffff */
-                ASSERT(DeviceExtension->ValueCapsY.LogicalMax > 0);
-                ASSERT(DeviceExtension->ValueCapsY.LogicalMax > DeviceExtension->ValueCapsY.LogicalMin);
-
-                /* convert to logical range */
-                *LastY = (ValueY * VIRTUAL_SCREEN_SIZE_Y) / DeviceExtension->ValueCapsY.LogicalMax;
+                if (Status == HIDP_STATUS_SUCCESS)
+                {
+                    MouHid_ScaleAbsoluteCoordinate(ValueY,
+                                                   &DeviceExtension->ValueCapsY,
+                                                   VIRTUAL_SCREEN_SIZE_Y,
+                                                   LastY);
+                }
+                else
+                {
+                    DPRINT1("MouHid_GetButtonMove: failed to get absolute Y %x\n",
+                            Status);
+                }
             }
         }
     }
@@ -163,15 +195,18 @@ MouHid_GetButtonMove(
                                 DeviceExtension->Report,
                                 DeviceExtension->ReportLength);
 
-        /* FIXME handle error */
-        ASSERT(Status == HIDP_STATUS_SUCCESS);
-
-        /* absolute pointing devices values need be in range 0 - 0xffff */
-        ASSERT(DeviceExtension->ValueCapsY.LogicalMax > 0);
-        ASSERT(DeviceExtension->ValueCapsY.LogicalMax > DeviceExtension->ValueCapsY.LogicalMin);
-
-        /* convert to logical range */
-        *LastY = (ValueY * VIRTUAL_SCREEN_SIZE_Y) / DeviceExtension->ValueCapsY.LogicalMax;
+        if (Status == HIDP_STATUS_SUCCESS)
+        {
+            MouHid_ScaleAbsoluteCoordinate(ValueY,
+                                           &DeviceExtension->ValueCapsY,
+                                           VIRTUAL_SCREEN_SIZE_Y,
+                                           LastY);
+        }
+        else
+        {
+            DPRINT1("MouHid_GetButtonMove: failed to get absolute Y %x\n",
+                    Status);
+        }
     }
 }
 
@@ -279,7 +314,7 @@ MouHid_DispatchInputData(
     IN PMOUSE_INPUT_DATA InputData)
 {
     KIRQL OldIrql;
-    ULONG InputDataConsumed;
+    ULONG InputDataConsumed = 0;
 
     if (!DeviceExtension->ClassService)
         return;
@@ -322,7 +357,7 @@ MouHid_ReadCompletion(
         DeviceExtension->StopReadReport)
     {
         /* failed to read or should be stopped*/
-        DPRINT1("[MOUHID] ReadCompletion terminating read Status %x\n", Irp->IoStatus.Status);
+        DPRINT("[MOUHID] ReadCompletion terminating read Status %x\n", Irp->IoStatus.Status);
 
         /* report no longer active */
         DeviceExtension->ReadReportActive = FALSE;
@@ -367,6 +402,7 @@ MouHid_ReadCompletion(
         {
             /* store wheel status */
             MouseInputData.ButtonFlags |= MOUSE_WHEEL;
+            if (DeviceExtension->FlipFlopWheel) UsageValue = -UsageValue;
             MouseInputData.ButtonData = (USHORT)(UsageValue * WHEEL_DELTA);
         }
         else
@@ -383,8 +419,13 @@ MouHid_ReadCompletion(
 
     DPRINT("[MOUHID] LastX %ld LastY %ld Flags %x ButtonFlags %x ButtonData %x\n", MouseInputData.LastX, MouseInputData.LastY, MouseInputData.Flags, MouseInputData.ButtonFlags, MouseInputData.ButtonData);
 
-    /* dispatch mouse action */
-    MouHid_DispatchInputData(DeviceExtension, &MouseInputData);
+    /* Do not burden mouclass and the raw-input thread with empty reports. */
+    if (MouseInputData.Flags ||
+        MouseInputData.ButtonFlags ||
+        MouseInputData.ButtonData ||
+        MouseInputData.LastX ||
+        MouseInputData.LastY)
+        MouHid_DispatchInputData(DeviceExtension, &MouseInputData);
 
     /* re-init read */
     MouHid_InitiateRead(DeviceExtension);
@@ -440,6 +481,23 @@ MouHid_CreateCompletion(
     return STATUS_MORE_PROCESSING_REQUIRED;
 }
 
+static
+VOID
+MouHid_StopRead(
+    IN PMOUHID_DEVICE_EXTENSION DeviceExtension)
+{
+    if (!DeviceExtension->ReadReportActive)
+        return;
+
+    /* request stopping of the report cycle */
+    DeviceExtension->StopReadReport = TRUE;
+
+    /* cancel irp */
+    IoCancelIrp(DeviceExtension->Irp);
+
+    /* wait until the read completion routine has stopped the report cycle */
+    KeWaitForSingleObject(&DeviceExtension->ReadCompletionEvent, Executive, KernelMode, FALSE, NULL);
+}
 
 NTSTATUS
 NTAPI
@@ -523,29 +581,24 @@ MouHid_Close(
     IN PDEVICE_OBJECT DeviceObject,
     IN PIRP Irp)
 {
+    PIO_STACK_LOCATION IoStack;
     PMOUHID_DEVICE_EXTENSION DeviceExtension;
 
     /* get device extension */
     DeviceExtension = DeviceObject->DeviceExtension;
+    IoStack = IoGetCurrentIrpStackLocation(Irp);
 
     DPRINT("[MOUHID] IRP_MJ_CLOSE ReadReportActive %x\n", DeviceExtension->ReadReportActive);
 
-    if (DeviceExtension->ReadReportActive)
+    if (IoStack->FileObject == DeviceExtension->FileObject)
     {
-        /* request stopping of the report cycle */
-        DeviceExtension->StopReadReport = TRUE;
+        MouHid_StopRead(DeviceExtension);
 
-        /* wait until the reports have been read */
-        KeWaitForSingleObject(&DeviceExtension->ReadCompletionEvent, Executive, KernelMode, FALSE, NULL);
-
-        /* cancel irp */
-        IoCancelIrp(DeviceExtension->Irp);
+        /* remove file object */
+        DeviceExtension->FileObject = NULL;
     }
 
     DPRINT("[MOUHID] IRP_MJ_CLOSE ReadReportActive %x\n", DeviceExtension->ReadReportActive);
-
-    /* remove file object */
-    DeviceExtension->FileObject = NULL;
 
     /* skip location */
     IoSkipCurrentIrpStackLocation(Irp);
@@ -843,7 +896,12 @@ MouHid_StartDevice(
 
     /* init input report */
     DeviceExtension->ReportLength = Capabilities.InputReportByteLength;
-    ASSERT(DeviceExtension->ReportLength);
+    if (!DeviceExtension->ReportLength)
+    {
+        ExFreePoolWithTag(PreparsedData, MOUHID_TAG);
+        return STATUS_UNSUCCESSFUL;
+    }
+
     DeviceExtension->Report = ExAllocatePoolWithTag(NonPagedPool, DeviceExtension->ReportLength, MOUHID_TAG);
     ASSERT(DeviceExtension->Report);
     RtlZeroMemory(DeviceExtension->Report, DeviceExtension->ReportLength);
@@ -893,22 +951,28 @@ MouHid_StartDevice(
     DeviceExtension->PreparsedData = PreparsedData;
 
     ValueCapsLength = 1;
-    HidP_GetSpecificValueCaps(HidP_Input,
-                              HID_USAGE_PAGE_GENERIC,
-                              HIDP_LINK_COLLECTION_UNSPECIFIED,
-                              HID_USAGE_GENERIC_X,
-                              &DeviceExtension->ValueCapsX,
-                              &ValueCapsLength,
-                              PreparsedData);
+    if (HidP_GetSpecificValueCaps(HidP_Input,
+                                  HID_USAGE_PAGE_GENERIC,
+                                  HIDP_LINK_COLLECTION_UNSPECIFIED,
+                                  HID_USAGE_GENERIC_X,
+                                  &DeviceExtension->ValueCapsX,
+                                  &ValueCapsLength,
+                                  PreparsedData) != HIDP_STATUS_SUCCESS)
+    {
+        RtlZeroMemory(&DeviceExtension->ValueCapsX, sizeof(DeviceExtension->ValueCapsX));
+    }
 
     ValueCapsLength = 1;
-    HidP_GetSpecificValueCaps(HidP_Input,
-                              HID_USAGE_PAGE_GENERIC,
-                              HIDP_LINK_COLLECTION_UNSPECIFIED,
-                              HID_USAGE_GENERIC_Y,
-                              &DeviceExtension->ValueCapsY,
-                              &ValueCapsLength,
-                              PreparsedData);
+    if (HidP_GetSpecificValueCaps(HidP_Input,
+                                  HID_USAGE_PAGE_GENERIC,
+                                  HIDP_LINK_COLLECTION_UNSPECIFIED,
+                                  HID_USAGE_GENERIC_Y,
+                                  &DeviceExtension->ValueCapsY,
+                                  &ValueCapsLength,
+                                  PreparsedData) != HIDP_STATUS_SUCCESS)
+    {
+        RtlZeroMemory(&DeviceExtension->ValueCapsY, sizeof(DeviceExtension->ValueCapsY));
+    }
 
     /* now check for wheel mouse support */
     ValueCapsLength = 1;
@@ -1059,6 +1123,9 @@ MouHid_Pnp(
     {
     case IRP_MN_STOP_DEVICE:
     case IRP_MN_SURPRISE_REMOVAL:
+        /* stop pending reads before freeing report buffers */
+        MouHid_StopRead(DeviceExtension);
+
         /* free resources */
         MouHid_FreeResources(DeviceObject);
     case IRP_MN_CANCEL_REMOVE_DEVICE:
@@ -1077,11 +1144,8 @@ MouHid_Pnp(
     case IRP_MN_REMOVE_DEVICE:
         /* FIXME synchronization */
 
-        /* request stop */
-        DeviceExtension->StopReadReport = TRUE;
-
-        /* cancel irp */
-        IoCancelIrp(DeviceExtension->Irp);
+        /* stop pending reads before freeing report buffers */
+        MouHid_StopRead(DeviceExtension);
 
         /* free resources */
         MouHid_FreeResources(DeviceObject);
@@ -1094,9 +1158,6 @@ MouHid_Pnp(
 
         /* dispatch to lower device */
         Status = IoCallDriver(DeviceExtension->NextDeviceObject, Irp);
-
-        /* wait for completion of stop event */
-        KeWaitForSingleObject(&DeviceExtension->ReadCompletionEvent, Executive, KernelMode, FALSE, NULL);
 
         /* free irp */
         IoFreeIrp(DeviceExtension->Irp);
@@ -1157,6 +1218,29 @@ MouHid_Pnp(
     }
 }
 
+static
+VOID
+MouHid_QueryDeviceParameters(
+    IN PDEVICE_OBJECT PhysicalDeviceObject,
+    IN PMOUHID_DEVICE_EXTENSION DeviceExtension)
+{
+    UNICODE_STRING ValueName = RTL_CONSTANT_STRING(L"FlipFlopWheel");
+    UCHAR Buffer[FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + sizeof(ULONG)];
+    PKEY_VALUE_PARTIAL_INFORMATION Value = (PKEY_VALUE_PARTIAL_INFORMATION)Buffer;
+    HANDLE KeyHandle;
+    ULONG Length;
+    NTSTATUS Status;
+
+    Status = IoOpenDeviceRegistryKey(PhysicalDeviceObject, PLUGPLAY_REGKEY_DEVICE, KEY_READ, &KeyHandle);
+    if (!NT_SUCCESS(Status)) return;
+
+    Status = ZwQueryValueKey(KeyHandle, &ValueName, KeyValuePartialInformation, Value, sizeof(Buffer), &Length);
+    if (NT_SUCCESS(Status) && Value->Type == REG_DWORD && Value->DataLength == sizeof(ULONG))
+        DeviceExtension->FlipFlopWheel = (*(PULONG)Value->Data != 0);
+
+    ZwClose(KeyHandle);
+}
+
 NTSTATUS
 NTAPI
 MouHid_AddDevice(
@@ -1207,7 +1291,8 @@ MouHid_AddDevice(
     /* FIXME handle allocation error */
     ASSERT(DeviceExtension->Irp);
 
-    /* FIXME query parameter 'FlipFlopWheel', 'WheelScalingFactor' */
+    MouHid_QueryDeviceParameters(PhysicalDeviceObject, DeviceExtension);
+    /* TODO: query the 'WheelScalingFactor' device parameter */
 
     /* set power state to D0 */
     State.DeviceState =  PowerDeviceD0;
@@ -1226,7 +1311,7 @@ NTAPI
 MouHid_Unload(
     IN PDRIVER_OBJECT DriverObject)
 {
-    UNIMPLEMENTED;
+    UNREFERENCED_PARAMETER(DriverObject);
 }
 
 

@@ -1,53 +1,16 @@
 /*
-	Compatibility <intrin_arm64.h> header providing GCC/Clang equivalents
-	of intrinsic Microsoft Visual C++ functions.
-
-	Copyright (c) 2026 Ahmed Arif <arif.ing@outlook.com>
-
-	Permission is hereby granted, free of charge, to any person obtaining a
-	copy of this software and associated documentation files (the "Software"),
-	to deal in the Software without restriction, including without limitation
-	the rights to use, copy, modify, merge, publish, distribute, sublicense,
-	and/or sell copies of the Software, and to permit persons to whom the
-	Software is furnished to do so, subject to the following conditions:
-
-	The above copyright notice and this permission notice shall be included in
-	all copies or substantial portions of the Software.
-
-	THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-	IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-	FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-	AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-	LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
-	FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
-	DEALINGS IN THE SOFTWARE.
+    Compatibility <intrin.h> header for GCC/Clang on ARM64 Windows.
 */
 
 #ifndef KJK_INTRIN_ARM64_H_
 #define KJK_INTRIN_ARM64_H_
 
-#if !defined(__GNUC__) && !defined(__clang__)
+#ifndef __GNUC__
 #error Unsupported compiler
 #endif
 
-#ifndef HAS_BUILTIN
-#  ifdef __has_builtin
-#    define HAS_BUILTIN(x) __has_builtin(x)
-#  else
-#    define HAS_BUILTIN(x) 0
-#  endif
-#endif
-
-/* Fallback for tools that analyze this header in isolation; the real
-   definition lives in sdk/include/vcruntime/_mingw.h and wins via the
-   umbrella intrin.h. */
-#ifndef __INTRIN_INLINE
-#  define __INTRIN_INLINE extern __inline__ __attribute__((__always_inline__, __gnu_inline__))
-#endif
-
 #define _ReturnAddress() (__builtin_return_address(0))
-/* AAPCS64 prologue stores LR at [fp, #8]. Requires -fno-omit-frame-pointer. */
-#define _AddressOfReturnAddress() ((void *)((unsigned char *)__builtin_frame_address(0) + 8))
+#define _AddressOfReturnAddress() (__builtin_frame_address(0))
 
 #if !HAS_BUILTIN(__break)
 __INTRIN_INLINE void __break(int value)
@@ -65,6 +28,203 @@ __INTRIN_INLINE void _ReadWriteBarrier(void)
 
 #define _ReadBarrier _ReadWriteBarrier
 #define _WriteBarrier _ReadWriteBarrier
+
+#if defined(__GNUC__) && !defined(__clang__) && !defined(__REACTOS_GNU_ARM64_SEH_MACROS)
+#define __REACTOS_GNU_ARM64_SEH_MACROS
+/* GNU as does not implement the ARM64-specific Windows unwind directives.
+ * Accept them as no-ops so GCC inline assembly remains buildable; .seh_proc,
+ * .seh_stackalloc, .seh_endprologue and .seh_endproc are still emitted. */
+__asm__(
+    ".macro .seh_add_fp offset\n"
+    ".endm\n"
+    ".macro .seh_context\n"
+    ".endm\n"
+    ".macro .seh_nop\n"
+    ".endm\n"
+    ".macro .seh_save_any_reg reg, offset\n"
+    ".endm\n"
+    ".macro .seh_save_fplr offset\n"
+    ".endm\n"
+    ".macro .seh_save_fplr_x offset\n"
+    ".endm\n"
+    ".macro .seh_save_fregp reg, offset\n"
+    ".endm\n"
+    ".macro .seh_save_reg reg, offset\n"
+    ".endm\n"
+    ".macro .seh_save_regp reg, offset\n"
+    ".endm\n"
+    ".macro .seh_save_regp_x reg, offset\n"
+    ".endm\n"
+    ".macro .seh_set_fp\n"
+    ".endm\n");
+#endif
+
+#if !HAS_BUILTIN(__debugbreak)
+__INTRIN_INLINE void __debugbreak(void)
+{
+    __asm__ __volatile__("brk #0xf000");
+}
+#endif
+
+#if !HAS_BUILTIN(__yield)
+__INTRIN_INLINE void __yield(void)
+{
+    __asm__ __volatile__("yield");
+}
+#endif
+
+#if !HAS_BUILTIN(__builtin_readcyclecounter)
+__INTRIN_INLINE unsigned long long __builtin_readcyclecounter(void)
+{
+    unsigned long long Value;
+
+    __asm__ __volatile__("mrs %0, cntvct_el0" : "=r"(Value));
+    return Value;
+}
+#endif
+
+#if !HAS_BUILTIN(__getReg)
+__INTRIN_INLINE unsigned __int64 __getReg(int Register)
+{
+    unsigned __int64 Value;
+
+    if (Register != 18)
+        return 0;
+
+    __asm__ __volatile__("mov %0, x18" : "=r"(Value));
+    return Value;
+}
+#endif
+
+#if !HAS_BUILTIN(__iso_volatile_load8)
+__INTRIN_INLINE __int8 __iso_volatile_load8(const volatile __int8 *Source)
+{
+    return *Source;
+}
+#endif
+
+#if !HAS_BUILTIN(__iso_volatile_load16)
+__INTRIN_INLINE __int16 __iso_volatile_load16(const volatile __int16 *Source)
+{
+    return *Source;
+}
+#endif
+
+#if !HAS_BUILTIN(__iso_volatile_load32)
+__INTRIN_INLINE __int32 __iso_volatile_load32(const volatile __int32 *Source)
+{
+    return *Source;
+}
+#endif
+
+#if !HAS_BUILTIN(__iso_volatile_load64)
+__INTRIN_INLINE __int64 __iso_volatile_load64(const volatile __int64 *Source)
+{
+    return *Source;
+}
+#endif
+
+#if !HAS_BUILTIN(__iso_volatile_store8)
+__INTRIN_INLINE void __iso_volatile_store8(volatile __int8 *Destination, __int8 Value)
+{
+    *Destination = Value;
+}
+#endif
+
+#if !HAS_BUILTIN(__iso_volatile_store16)
+__INTRIN_INLINE void __iso_volatile_store16(volatile __int16 *Destination, __int16 Value)
+{
+    *Destination = Value;
+}
+#endif
+
+#if !HAS_BUILTIN(__iso_volatile_store32)
+__INTRIN_INLINE void __iso_volatile_store32(volatile __int32 *Destination, __int32 Value)
+{
+    *Destination = Value;
+}
+#endif
+
+#if !HAS_BUILTIN(__iso_volatile_store64)
+__INTRIN_INLINE void __iso_volatile_store64(volatile __int64 *Destination, __int64 Value)
+{
+    *Destination = Value;
+}
+#endif
+
+#if !HAS_BUILTIN(__dmb)
+__INTRIN_INLINE void __dmb(unsigned int Type)
+{
+    switch (Type)
+    {
+        case 0xE: __asm__ __volatile__("dmb st" ::: "memory"); break;
+        case 0xD: __asm__ __volatile__("dmb ld" ::: "memory"); break;
+        case 0xB: __asm__ __volatile__("dmb ish" ::: "memory"); break;
+        case 0xA: __asm__ __volatile__("dmb ishst" ::: "memory"); break;
+        case 0x9: __asm__ __volatile__("dmb ishld" ::: "memory"); break;
+        case 0x7: __asm__ __volatile__("dmb nsh" ::: "memory"); break;
+        case 0x6: __asm__ __volatile__("dmb nshst" ::: "memory"); break;
+        case 0x5: __asm__ __volatile__("dmb nshld" ::: "memory"); break;
+        case 0x3: __asm__ __volatile__("dmb osh" ::: "memory"); break;
+        case 0x2: __asm__ __volatile__("dmb oshst" ::: "memory"); break;
+        case 0x1: __asm__ __volatile__("dmb oshld" ::: "memory"); break;
+        default: __asm__ __volatile__("dmb sy" ::: "memory"); break;
+    }
+}
+#endif
+
+#if !HAS_BUILTIN(__dsb)
+__INTRIN_INLINE void __dsb(unsigned int Type)
+{
+    switch (Type)
+    {
+        case 0xE: __asm__ __volatile__("dsb st" ::: "memory"); break;
+        case 0xD: __asm__ __volatile__("dsb ld" ::: "memory"); break;
+        case 0xB: __asm__ __volatile__("dsb ish" ::: "memory"); break;
+        case 0xA: __asm__ __volatile__("dsb ishst" ::: "memory"); break;
+        case 0x9: __asm__ __volatile__("dsb ishld" ::: "memory"); break;
+        case 0x7: __asm__ __volatile__("dsb nsh" ::: "memory"); break;
+        case 0x6: __asm__ __volatile__("dsb nshst" ::: "memory"); break;
+        case 0x5: __asm__ __volatile__("dsb nshld" ::: "memory"); break;
+        case 0x3: __asm__ __volatile__("dsb osh" ::: "memory"); break;
+        case 0x2: __asm__ __volatile__("dsb oshst" ::: "memory"); break;
+        case 0x1: __asm__ __volatile__("dsb oshld" ::: "memory"); break;
+        default: __asm__ __volatile__("dsb sy" ::: "memory"); break;
+    }
+}
+#endif
+
+#if !HAS_BUILTIN(__isb)
+__INTRIN_INLINE void __isb(unsigned int Type)
+{
+    (void)Type;
+    __asm__ __volatile__("isb" ::: "memory");
+}
+#endif
+
+#if !HAS_BUILTIN(__fastfail)
+__declspec(noreturn)
+__INTRIN_INLINE void __fastfail(unsigned int Code)
+{
+    register unsigned int FastFailCode __asm__("w0") = Code;
+    __asm__ __volatile__("brk #0xf003" : : "r"(FastFailCode) : "memory");
+    __builtin_unreachable();
+}
+#endif
+
+#if !HAS_BUILTIN(_disable)
+__INTRIN_INLINE void _disable(void)
+{
+    __asm__ __volatile__("msr daifset, #0x3\n\tisb" : : : "memory");
+}
+#endif
+
+#if !HAS_BUILTIN(_enable)
+__INTRIN_INLINE void _enable(void)
+{
+    __asm__ __volatile__("msr daifclr, #0x3\n\tisb" : : : "memory");
+}
+#endif
 
 #if !HAS_BUILTIN(_byteswap_ushort)
 __INTRIN_INLINE unsigned short _byteswap_ushort(unsigned short value)
@@ -104,7 +264,7 @@ __INTRIN_INLINE unsigned char _BitScanReverse(unsigned long *Index, unsigned lon
     if (!Mask)
         return 0;
 
-    *Index = 31 - __builtin_clzl(Mask);
+    *Index = (sizeof(Mask) * 8 - 1) - __builtin_clzl(Mask);
     return 1;
 }
 #endif
@@ -169,36 +329,35 @@ __INTRIN_INLINE void *_InterlockedCompareExchangePointer(void *volatile *Destina
 #if !HAS_BUILTIN(_InterlockedExchange)
 __INTRIN_INLINE long _InterlockedExchange(volatile long *Target, long Value)
 {
-    /* MS _InterlockedExchange is a full barrier; __sync_lock_test_and_set is acquire-only. */
-    return __atomic_exchange_n(Target, Value, __ATOMIC_SEQ_CST);
+    return __sync_lock_test_and_set(Target, Value);
 }
 #endif
 
 #if !HAS_BUILTIN(_InterlockedExchange16)
 __INTRIN_INLINE short _InterlockedExchange16(volatile short *Target, short Value)
 {
-    return __atomic_exchange_n(Target, Value, __ATOMIC_SEQ_CST);
+    return __sync_lock_test_and_set(Target, Value);
 }
 #endif
 
 #if !HAS_BUILTIN(_InterlockedExchange8)
 __INTRIN_INLINE char _InterlockedExchange8(volatile char *Target, char Value)
 {
-    return __atomic_exchange_n(Target, Value, __ATOMIC_SEQ_CST);
+    return __sync_lock_test_and_set(Target, Value);
 }
 #endif
 
 #if !HAS_BUILTIN(_InterlockedExchange64)
 __INTRIN_INLINE long long _InterlockedExchange64(volatile long long *Target, long long Value)
 {
-    return __atomic_exchange_n(Target, Value, __ATOMIC_SEQ_CST);
+    return __sync_lock_test_and_set(Target, Value);
 }
 #endif
 
 #if !HAS_BUILTIN(_InterlockedExchangePointer)
 __INTRIN_INLINE void *_InterlockedExchangePointer(void *volatile *Target, void *Value)
 {
-    return __atomic_exchange_n(Target, Value, __ATOMIC_SEQ_CST);
+    return __sync_lock_test_and_set(Target, Value);
 }
 #endif
 
@@ -227,6 +386,34 @@ __INTRIN_INLINE char _InterlockedExchangeAdd8(volatile char *Addend, char Value)
 __INTRIN_INLINE long long _InterlockedExchangeAdd64(volatile long long *Addend, long long Value)
 {
     return __sync_fetch_and_add(Addend, Value);
+}
+#endif
+
+#if !HAS_BUILTIN(_InterlockedExchangeAdd_nf)
+__INTRIN_INLINE long _InterlockedExchangeAdd_nf(volatile long *Addend, long Value)
+{
+    return __atomic_fetch_add(Addend, Value, __ATOMIC_RELAXED);
+}
+#endif
+
+#if !HAS_BUILTIN(_InterlockedAdd)
+__INTRIN_INLINE long _InterlockedAdd(volatile long *Addend, long Value)
+{
+    return __sync_add_and_fetch(Addend, Value);
+}
+#endif
+
+#if !HAS_BUILTIN(_InterlockedAdd64)
+__INTRIN_INLINE long long _InterlockedAdd64(volatile long long *Addend, long long Value)
+{
+    return __sync_add_and_fetch(Addend, Value);
+}
+#endif
+
+#if !HAS_BUILTIN(_InterlockedAdd64_nf)
+__INTRIN_INLINE long long _InterlockedAdd64_nf(volatile long long *Addend, long long Value)
+{
+    return __atomic_add_fetch(Addend, Value, __ATOMIC_RELAXED);
 }
 #endif
 
@@ -283,6 +470,13 @@ __INTRIN_INLINE char _InterlockedOr8(volatile char *Value, char Mask)
 __INTRIN_INLINE long long _InterlockedOr64(volatile long long *Value, long long Mask)
 {
     return __sync_fetch_and_or(Value, Mask);
+}
+#endif
+
+#if !HAS_BUILTIN(_InterlockedOr_nf)
+__INTRIN_INLINE long _InterlockedOr_nf(volatile long *Value, long Mask)
+{
+    return __atomic_fetch_or(Value, Mask, __ATOMIC_RELAXED);
 }
 #endif
 
@@ -357,42 +551,23 @@ __INTRIN_INLINE long long _InterlockedDecrement64(volatile long long *Addend)
 #endif
 
 #if !HAS_BUILTIN(_InterlockedCompareExchange128)
-/* may_alias avoids strict-aliasing UB on the (__int64*) / __int128 pair. */
-typedef __int128 __attribute__((may_alias)) __ms_int128_t;
-__INTRIN_INLINE unsigned char _InterlockedCompareExchange128(
-    volatile __int64 *Destination, __int64 ExchangeHigh,
-    __int64 ExchangeLow, __int64 *ComparandResult)
+__INTRIN_INLINE unsigned char _InterlockedCompareExchange128(volatile __int64 *Destination, __int64 ExchangeHigh, __int64 ExchangeLow, __int64 *ComparandResult)
 {
-    /* Baseline armv8-a LL/SC; matches MS full-barrier contract. */
-    unsigned __int64 cmp_lo = (unsigned __int64)ComparandResult[0];
-    unsigned __int64 cmp_hi = (unsigned __int64)ComparandResult[1];
-    unsigned __int64 old_lo, old_hi;
-    unsigned int status;
-    __asm__ __volatile__(
-        "1: ldaxp   %[ol], %[oh], %[mem]      \n"
-        "   cmp     %[ol], %[cl]              \n"
-        "   ccmp    %[oh], %[ch], #0, eq      \n"
-        "   b.ne    2f                        \n"
-        "   stlxp   %w[st], %[xl], %[xh], %[mem] \n"
-        "   cbnz    %w[st], 1b                \n"
-        "   mov     %w[st], #0                \n"
-        "   b       3f                        \n"
-        "2: clrex                             \n"
-        "   mov     %w[st], #1                \n"
-        "3:                                   \n"
-        : [ol] "=&r"(old_lo), [oh] "=&r"(old_hi),
-          [st] "=&r"(status),
-          [mem] "+Q"(*(volatile __ms_int128_t *)Destination)
-        : [cl] "r"(cmp_lo), [ch] "r"(cmp_hi),
-          [xl] "r"((unsigned __int64)ExchangeLow),
-          [xh] "r"((unsigned __int64)ExchangeHigh)
-        : "cc", "memory");
-    __asm__ __volatile__("dmb ish" ::: "memory");
-    if (status == 0)
+    __int64 xchg[2] = { ExchangeLow, ExchangeHigh };
+    __uint128_t expected = *(__uint128_t *)ComparandResult;
+    __uint128_t desired = *(__uint128_t *)xchg;
+    __uint128_t old = __sync_val_compare_and_swap((__uint128_t *)Destination, expected, desired);
+    if (old == expected)
         return 1;
-    ComparandResult[0] = (__int64)old_lo;
-    ComparandResult[1] = (__int64)old_hi;
+    *(__uint128_t *)ComparandResult = old;
     return 0;
+}
+#endif
+
+#if !HAS_BUILTIN(_mm_pause)
+__INTRIN_INLINE void _mm_pause(void)
+{
+    __asm__ __volatile__("yield" : : : "memory");
 }
 #endif
 
@@ -407,16 +582,16 @@ __INTRIN_INLINE void __nop(void)
 #if !HAS_BUILTIN(_bittest)
 __INTRIN_INLINE unsigned char _bittest(const long *a, long b)
 {
-    return (a[b / 32] >> (b % 32)) & 1;
+    return (a[b / (sizeof(long) * 8)] >> (b % (sizeof(long) * 8))) & 1;
 }
 #endif
 
 #if !HAS_BUILTIN(_bittestandset)
 __INTRIN_INLINE unsigned char _bittestandset(long *a, long b)
 {
-    long bit = 1L << (b % 32);
-    long *ptr = &a[b / 32];
-    unsigned char retval = (*ptr >> (b % 32)) & 1;
+    long bit = 1L << (b % (sizeof(long) * 8));
+    long *ptr = &a[b / (sizeof(long) * 8)];
+    unsigned char retval = (*ptr >> (b % (sizeof(long) * 8))) & 1;
     *ptr |= bit;
     return retval;
 }
@@ -425,9 +600,9 @@ __INTRIN_INLINE unsigned char _bittestandset(long *a, long b)
 #if !HAS_BUILTIN(_bittestandreset)
 __INTRIN_INLINE unsigned char _bittestandreset(long *a, long b)
 {
-    long bit = 1L << (b % 32);
-    long *ptr = &a[b / 32];
-    unsigned char retval = (*ptr >> (b % 32)) & 1;
+    long bit = 1L << (b % (sizeof(long) * 8));
+    long *ptr = &a[b / (sizeof(long) * 8)];
+    unsigned char retval = (*ptr >> (b % (sizeof(long) * 8))) & 1;
     *ptr &= ~bit;
     return retval;
 }
@@ -436,9 +611,9 @@ __INTRIN_INLINE unsigned char _bittestandreset(long *a, long b)
 #if !HAS_BUILTIN(_bittestandcomplement)
 __INTRIN_INLINE unsigned char _bittestandcomplement(long *a, long b)
 {
-    long bit = 1L << (b % 32);
-    long *ptr = &a[b / 32];
-    unsigned char retval = (*ptr >> (b % 32)) & 1;
+    long bit = 1L << (b % (sizeof(long) * 8));
+    long *ptr = &a[b / (sizeof(long) * 8)];
+    unsigned char retval = (*ptr >> (b % (sizeof(long) * 8))) & 1;
     *ptr ^= bit;
     return retval;
 }
@@ -626,18 +801,49 @@ __INTRIN_INLINE unsigned long __cdecl _lrotr(unsigned long value, int shift)
 }
 #endif
 
-/*** Bit count ***/
-#if !HAS_BUILTIN(_CountLeadingZeros)
-__INTRIN_INLINE unsigned int _CountLeadingZeros(unsigned long value)
+/*** 64-bit shifts ***/
+#if !HAS_BUILTIN(__ll_lshift)
+__INTRIN_INLINE unsigned long long __ll_lshift(unsigned long long Mask, int Bit)
 {
-    if (!value)
-        return sizeof(value) * 8;
-    return __builtin_clzl(value);
+    return Mask << (Bit & 0x3F);
 }
 #endif
 
-#if !HAS_BUILTIN(_CountLeadingZeros64)
-__INTRIN_INLINE unsigned int _CountLeadingZeros64(unsigned __int64 value)
+#if !HAS_BUILTIN(__ll_rshift)
+__INTRIN_INLINE long long __ll_rshift(long long Mask, int Bit)
+{
+    return Mask >> (Bit & 0x3F);
+}
+#endif
+
+#if !HAS_BUILTIN(__ull_rshift)
+__INTRIN_INLINE unsigned long long __ull_rshift(unsigned long long Mask, int Bit)
+{
+    return Mask >> (Bit & 0x3F);
+}
+#endif
+
+/*** Leading zero count and population count ***/
+#if !HAS_BUILTIN(__lzcnt)
+__INTRIN_INLINE unsigned int __lzcnt(unsigned int value)
+{
+    if (!value)
+        return 32;
+    return __builtin_clz(value);
+}
+#endif
+
+#if !HAS_BUILTIN(__lzcnt16)
+__INTRIN_INLINE unsigned short __lzcnt16(unsigned short value)
+{
+    if (!value)
+        return 16;
+    return (unsigned short)(__builtin_clz((unsigned int)value) - 16);
+}
+#endif
+
+#if !HAS_BUILTIN(__lzcnt64)
+__INTRIN_INLINE unsigned long long __lzcnt64(unsigned long long value)
 {
     if (!value)
         return 64;
@@ -645,15 +851,22 @@ __INTRIN_INLINE unsigned int _CountLeadingZeros64(unsigned __int64 value)
 }
 #endif
 
-#if !HAS_BUILTIN(_CountOneBits)
-__INTRIN_INLINE unsigned int _CountOneBits(unsigned long value)
+#if !HAS_BUILTIN(__popcnt)
+__INTRIN_INLINE unsigned int __popcnt(unsigned int value)
 {
-    return __builtin_popcountl(value);
+    return __builtin_popcount(value);
 }
 #endif
 
-#if !HAS_BUILTIN(_CountOneBits64)
-__INTRIN_INLINE unsigned int _CountOneBits64(unsigned __int64 value)
+#if !HAS_BUILTIN(__popcnt16)
+__INTRIN_INLINE unsigned short __popcnt16(unsigned short value)
+{
+    return __builtin_popcount(value);
+}
+#endif
+
+#if !HAS_BUILTIN(__popcnt64)
+__INTRIN_INLINE unsigned long long __popcnt64(unsigned long long value)
 {
     return __builtin_popcountll(value);
 }
@@ -678,167 +891,6 @@ __INTRIN_INLINE unsigned long long __umulh(unsigned long long a, unsigned long l
 __INTRIN_INLINE long long __cdecl _abs64(long long value)
 {
     return (value >= 0) ? value : -value;
-}
-#endif
-
-/*** ARM64 hints and barriers ***/
-#if !HAS_BUILTIN(__yield)
-/* YIELD is a pure scheduling hint; no memory ordering per MS docs. */
-__INTRIN_INLINE void __yield(void)
-{
-    __asm__ __volatile__("yield");
-}
-#endif
-
-#if !HAS_BUILTIN(__dmb)
-__INTRIN_INLINE void __dmb(unsigned int type)
-{
-    /* MS _ARM64_BARRIER_* constants: OSHLD=1 OSHST=2 OSH=3 NSHLD=5 NSHST=6
-       NSH=7 ISHLD=9 ISHST=10 ISH=11 LD=13 ST=14 SY=15. The dmb option must
-       be an assembler literal, so we dispatch on the runtime value. */
-    switch (type)
-    {
-    case 1:  __asm__ __volatile__("dmb oshld" ::: "memory"); break;
-    case 2:  __asm__ __volatile__("dmb oshst" ::: "memory"); break;
-    case 3:  __asm__ __volatile__("dmb osh"   ::: "memory"); break;
-    case 5:  __asm__ __volatile__("dmb nshld" ::: "memory"); break;
-    case 6:  __asm__ __volatile__("dmb nshst" ::: "memory"); break;
-    case 7:  __asm__ __volatile__("dmb nsh"   ::: "memory"); break;
-    case 9:  __asm__ __volatile__("dmb ishld" ::: "memory"); break;
-    case 10: __asm__ __volatile__("dmb ishst" ::: "memory"); break;
-    case 11: __asm__ __volatile__("dmb ish"   ::: "memory"); break;
-    case 13: __asm__ __volatile__("dmb ld"    ::: "memory"); break;
-    case 14: __asm__ __volatile__("dmb st"    ::: "memory"); break;
-    default: __asm__ __volatile__("dmb sy"    ::: "memory"); break;
-    }
-}
-#endif
-
-#if !HAS_BUILTIN(__dsb)
-__INTRIN_INLINE void __dsb(unsigned int type)
-{
-    switch (type)
-    {
-    case 1:  __asm__ __volatile__("dsb oshld" ::: "memory"); break;
-    case 2:  __asm__ __volatile__("dsb oshst" ::: "memory"); break;
-    case 3:  __asm__ __volatile__("dsb osh"   ::: "memory"); break;
-    case 5:  __asm__ __volatile__("dsb nshld" ::: "memory"); break;
-    case 6:  __asm__ __volatile__("dsb nshst" ::: "memory"); break;
-    case 7:  __asm__ __volatile__("dsb nsh"   ::: "memory"); break;
-    case 9:  __asm__ __volatile__("dsb ishld" ::: "memory"); break;
-    case 10: __asm__ __volatile__("dsb ishst" ::: "memory"); break;
-    case 11: __asm__ __volatile__("dsb ish"   ::: "memory"); break;
-    case 13: __asm__ __volatile__("dsb ld"    ::: "memory"); break;
-    case 14: __asm__ __volatile__("dsb st"    ::: "memory"); break;
-    default: __asm__ __volatile__("dsb sy"    ::: "memory"); break;
-    }
-}
-#endif
-
-#if !HAS_BUILTIN(__isb)
-__INTRIN_INLINE void __isb(unsigned int type)
-{
-    /* ISB on ARM64 only supports the 'sy' option; accept the type arg
-       for API compatibility with MS docs and ignore it. */
-    (void)type;
-    __asm__ __volatile__("isb" ::: "memory");
-}
-#endif
-
-/* _ReadStatusReg/_WriteStatusReg and __setReg intentionally omitted: they take
-   a 15-bit encoded sysreg op0:op1:CRn:CRm:op2 immediate. Callers in HAL/KE
-   should use named MSR/MRS asm wrappers instead. */
-
-#if !HAS_BUILTIN(__getReg)
-#define __getReg(reg) \
-    __extension__({ \
-        _Static_assert((unsigned long long)(reg) <= 31ULL, \
-                       "__getReg: register index out of range"); \
-        unsigned __int64 _value; \
-        __asm__ __volatile__("mov %0, x%c1" : "=r"(_value) : "i"(reg)); \
-        _value; \
-    })
-#endif
-
-/*** _InterlockedAdd (returns the new, post-add value) ***/
-#if !HAS_BUILTIN(_InterlockedAdd)
-__INTRIN_INLINE long _InterlockedAdd(volatile long *Addend, long Value)
-{
-    return __atomic_add_fetch(Addend, Value, __ATOMIC_SEQ_CST);
-}
-#endif
-
-#if !HAS_BUILTIN(_InterlockedAdd64)
-__INTRIN_INLINE long long _InterlockedAdd64(volatile long long *Addend, long long Value)
-{
-    return __atomic_add_fetch(Addend, Value, __ATOMIC_SEQ_CST);
-}
-#endif
-
-/*** TEB access via x18 (Windows ARM64 ABI dedicates x18 to the TEB).
- *** Requires the toolchain to reserve x18 (default for aarch64-w64-mingw32;
- *** add -ffixed-x18 on bare aarch64 targets if ever building elsewhere). ***/
-#if !HAS_BUILTIN(__readx18byte)
-__INTRIN_INLINE unsigned char __readx18byte(unsigned long offset)
-{
-    unsigned char value;
-    __asm__ __volatile__("ldrb %w0, [x18, %1]" : "=r"(value) : "r"((unsigned long long)offset));
-    return value;
-}
-#endif
-
-#if !HAS_BUILTIN(__readx18word)
-__INTRIN_INLINE unsigned short __readx18word(unsigned long offset)
-{
-    unsigned short value;
-    __asm__ __volatile__("ldrh %w0, [x18, %1]" : "=r"(value) : "r"((unsigned long long)offset));
-    return value;
-}
-#endif
-
-#if !HAS_BUILTIN(__readx18dword)
-__INTRIN_INLINE unsigned long __readx18dword(unsigned long offset)
-{
-    unsigned long value;
-    __asm__ __volatile__("ldr %w0, [x18, %1]" : "=r"(value) : "r"((unsigned long long)offset));
-    return value;
-}
-#endif
-
-#if !HAS_BUILTIN(__readx18qword)
-__INTRIN_INLINE unsigned __int64 __readx18qword(unsigned long offset)
-{
-    unsigned __int64 value;
-    __asm__ __volatile__("ldr %0, [x18, %1]" : "=r"(value) : "r"((unsigned long long)offset));
-    return value;
-}
-#endif
-
-#if !HAS_BUILTIN(__writex18byte)
-__INTRIN_INLINE void __writex18byte(unsigned long offset, unsigned char value)
-{
-    __asm__ __volatile__("strb %w1, [x18, %0]" : : "r"((unsigned long long)offset), "r"(value) : "memory");
-}
-#endif
-
-#if !HAS_BUILTIN(__writex18word)
-__INTRIN_INLINE void __writex18word(unsigned long offset, unsigned short value)
-{
-    __asm__ __volatile__("strh %w1, [x18, %0]" : : "r"((unsigned long long)offset), "r"(value) : "memory");
-}
-#endif
-
-#if !HAS_BUILTIN(__writex18dword)
-__INTRIN_INLINE void __writex18dword(unsigned long offset, unsigned long value)
-{
-    __asm__ __volatile__("str %w1, [x18, %0]" : : "r"((unsigned long long)offset), "r"(value) : "memory");
-}
-#endif
-
-#if !HAS_BUILTIN(__writex18qword)
-__INTRIN_INLINE void __writex18qword(unsigned long offset, unsigned __int64 value)
-{
-    __asm__ __volatile__("str %1, [x18, %0]" : : "r"((unsigned long long)offset), "r"(value) : "memory");
 }
 #endif
 

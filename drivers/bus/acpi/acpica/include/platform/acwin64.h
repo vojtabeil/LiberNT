@@ -4,42 +4,12 @@
  *
  *****************************************************************************/
 
-/*
- * Copyright (C) 2000 - 2022, Intel Corp.
- * All rights reserved.
+/******************************************************************************
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions, and the following disclaimer,
- *    without modification.
- * 2. Redistributions in binary form must reproduce at minimum a disclaimer
- *    substantially similar to the "NO WARRANTY" disclaimer below
- *    ("Disclaimer") and any redistribution must be conditioned upon
- *    including a substantially similar Disclaimer requirement for further
- *    binary redistribution.
- * 3. Neither the names of the above-listed copyright holders nor the names
- *    of any contributors may be used to endorse or promote products derived
- *    from this software without specific prior written permission.
+ * Copyright (c) 1999 - 2026, Intel Corp.
+ * SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0-only
  *
- * Alternatively, this software may be distributed under the terms of the
- * GNU General Public License ("GPL") version 2 as published by the Free
- * Software Foundation.
- *
- * NO WARRANTY
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
- * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
- * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
- * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
- * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGES.
- */
+ *****************************************************************************/
 
 #ifndef __ACWIN64_H__
 #define __ACWIN64_H__
@@ -70,6 +40,10 @@
 
 
 #define ACPI_MACHINE_WIDTH          64
+
+#if defined(_M_ARM64)
+#define ACPI_MISALIGNMENT_NOT_SUPPORTED
+#endif
 
 /*
  * Map low I/O functions for MS. This allows us to disable MS language
@@ -124,7 +98,7 @@
 
 #else /* __REACTOS__ */
 
-#ifdef ACPI_APPLICATION
+#if defined(ACPI_APPLICATION) || !defined(_M_AMD64)
 #define ACPI_FLUSH_CPU_CACHE()
 #else
 #define ACPI_FLUSH_CPU_CACHE()  __wbinvd()
@@ -137,12 +111,12 @@
     if ((FacsPtr) != 0) \
     { \
         UINT32 compare, prev, newval; \
-        UINT32* lock = &((FacsPtr)->GlobalLock); \
+        volatile LONG *lock = (volatile LONG *)((UINT8 *)(FacsPtr) + 16); \
         do \
         { \
-            compare = *lock; \
+            compare = (UINT32)*lock; \
             newval = (compare & ~1) | ((compare >> 1) & 1) | 2; \
-            prev = InterlockedCompareExchange(lock, newval, compare); \
+            prev = (UINT32)InterlockedCompareExchange(lock, (LONG)newval, (LONG)compare); \
         } while (prev != compare); \
         acquired = ((newval & 0xFF) < 3) ? 0xFF : 0x00; \
     } \
@@ -155,7 +129,7 @@
 \
     if ((FacsPtr) != 0) \
     { \
-        pending = InterlockedAnd(&(FacsPtr)->GlobalLock, ~3) & 1; \
+        pending = (BOOLEAN)(InterlockedAnd((volatile LONG *)((UINT8 *)(FacsPtr) + 16), (LONG)~3) & 1); \
     } \
     (Pnd) = pending; \
 }

@@ -8,7 +8,16 @@
 #include <uefildr.h>
 
 #include <debug.h>
+#if defined(_M_ARM64)
+#include <reactos/arm64/early_uart.h>
+#endif
 DBG_DEFAULT_CHANNEL(WARNING);
+#if DBG
+static void __attribute__((unused)) UefiSetupKeepDebugChannel(void)
+{
+    (void)DbgDefaultChannel;
+}
+#endif
 
 /* GLOBALS ********************************************************************/
 
@@ -21,6 +30,16 @@ VOID
 MachInit(const char *CmdLine)
 {
     RtlZeroMemory(&MachVtbl, sizeof(MachVtbl));
+
+#if defined(_M_ARM64) || defined(_M_RISCV64)
+    UefiSerialInitialize();
+#endif
+#if defined(_M_ARM64)
+    EarlyUartInitialize(0);
+#endif
+#if defined(_M_RISCV64)
+    UefiStopFirmwareWatchdogs();
+#endif
 
     MachVtbl.ConsPutChar = UefiConsPutChar;
     MachVtbl.ConsKbHit = UefiConsKbHit;
@@ -50,8 +69,11 @@ MachInit(const char *CmdLine)
     MachVtbl.InitializeBootDevices = UefiInitializeBootDevices;
     MachVtbl.HwDetect = UefiHwDetect;
     MachVtbl.HwIdle = UefiHwIdle;
+    MachVtbl.GetPointerState = UefiGetPointerState;
+    MachVtbl.SetInputTimer = UefiSetInputTimer;
+    MachVtbl.InputTimerExpired = UefiInputTimerExpired;
 
-    /* Setup GOP */
+    /* Setup GOP (common to all UEFI architectures) */
     if (UefiInitializeVideo() != EFI_SUCCESS)
     {
         ERR("Failed to setup GOP\n");

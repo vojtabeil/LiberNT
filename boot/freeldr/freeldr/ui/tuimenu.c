@@ -22,10 +22,6 @@ TuiProcessMenuKeyboardEvent(
     _In_ PUI_MENU_INFO MenuInfo,
     _In_ UiMenuKeyPressFilterCallback KeyPressFilter);
 
-static VOID
-TuiDrawMenuTimeout(
-    _In_ PUI_MENU_INFO MenuInfo);
-
 BOOLEAN
 TuiDisplayMenu(
     IN PCSTR MenuHeader,
@@ -36,6 +32,7 @@ TuiDisplayMenu(
     IN LONG MenuTimeOut,
     OUT PULONG SelectedMenuItem,
     IN BOOLEAN CanEscape,
+    IN const UI_MENU_ICON* MenuItemIcons OPTIONAL,
     IN UiMenuKeyPressFilterCallback KeyPressFilter OPTIONAL,
     IN PVOID Context OPTIONAL)
 {
@@ -80,8 +77,8 @@ TuiDisplayMenu(
     MenuInformation.MenuHeader = MenuHeader;
     MenuInformation.MenuFooter = MenuFooter;
     MenuInformation.MenuItemList = MenuItemList;
+    MenuInformation.MenuItemIcons = MenuItemIcons;
     MenuInformation.MenuItemCount = MenuItemCount;
-    MenuInformation.MenuTimeRemaining = MenuTimeOut;
     MenuInformation.SelectedMenuItem = DefaultMenuItem;
     MenuInformation.Context = Context;
 
@@ -98,6 +95,8 @@ TuiDisplayMenu(
     while (TRUE)
     {
         /* Process key presses */
+        if (MachConsKbHit())
+            MenuTimeOut = -1;
         KeyPress = TuiProcessMenuKeyboardEvent(&MenuInformation, KeyPressFilter);
 
         /* Check for ENTER or ESC */
@@ -110,23 +109,13 @@ TuiDisplayMenu(
         {
             /* Update the time information */
             LastClockSecond = CurrentClockSecond;
+            if (MenuTimeOut > 0 && --MenuTimeOut == 0)
+                break;
 
             // FIXME: Theme-specific
             /* Update the date & time */
             TuiUpdateDateTime();
 
-            /* If there is a countdown, update it */
-            if (MenuInformation.MenuTimeRemaining > 0)
-            {
-                MenuInformation.MenuTimeRemaining--;
-                TuiDrawMenuTimeout(&MenuInformation);
-            }
-            else if (MenuInformation.MenuTimeRemaining == 0)
-            {
-                /* A timeout occurred, exit this loop and return selection */
-                VideoCopyOffScreenBufferToVRAM();
-                break;
-            }
             VideoCopyOffScreenBufferToVRAM();
         }
 
@@ -220,125 +209,6 @@ TuiDrawMenu(
     VideoCopyOffScreenBufferToVRAM();
 }
 
-static VOID
-TuiDrawMenuTimeout(
-    _In_ PUI_MENU_INFO MenuInfo)
-{
-    ULONG Length;
-    CHAR MenuLineText[80];
-
-    /* If there is a timeout, draw the time remaining */
-    if (MenuInfo->MenuTimeRemaining >= 0)
-    {
-        /* Find whether the time text string is escaped
-         * with %d for specific countdown insertion. */
-        PCHAR ptr = UiTimeText;
-        while ((ptr = strchr(ptr, '%')) && (ptr[1] != 'd'))
-        {
-            /* Ignore any following character (including a following
-             * '%' that would be escaped), thus skip two characters.
-             * If this is the last character, ignore it and stop. */
-            if (*++ptr)
-                ++ptr;
-        }
-        ASSERT(!ptr || (ptr[0] == '%' && ptr[1] == 'd'));
-
-        if (ptr)
-        {
-            /* Copy the time text string up to the '%d' insertion point and
-             * skip it, add the remaining time and the rest of the string. */
-            RtlStringCbPrintfA(MenuLineText, sizeof(MenuLineText),
-                               "%.*s%d%s",
-                               ptr - UiTimeText, UiTimeText,
-                               MenuInfo->MenuTimeRemaining,
-                               ptr + 2);
-        }
-        else
-        {
-            /* Copy the time text string, append a separating blank,
-             * and add the remaining time. */
-            RtlStringCbPrintfA(MenuLineText, sizeof(MenuLineText),
-                               "%s %d",
-                               UiTimeText,
-                               MenuInfo->MenuTimeRemaining);
-        }
-
-        Length = (ULONG)strlen(MenuLineText);
-    }
-    else
-    {
-        /* Erase the timeout with blanks */
-        Length = 0;
-    }
-
-    /**
-     * How to pad/fill:
-     *
-     *  Center  Box     What to do:
-     *  0       0 or 1  Pad on the right with blanks.
-     *  1       0       Pad on the left with blanks.
-     *  1       1       Pad on the left with blanks + box bottom border.
-     **/
-
-    if (UiCenterMenu)
-    {
-        /* In boxed menu mode, pad on the left with blanks and box border,
-         * otherwise, pad over all the box length until its right edge. */
-        TuiFillArea(0,
-                    MenuInfo->Bottom,
-                    UiMenuBox
-                        ? MenuInfo->Left - 1 /* Left side of the box bottom */
-                        : MenuInfo->Right,   /* Left side + all box length  */
-                    MenuInfo->Bottom,
-                    UiBackdropFillStyle,
-                    ATTR(UiBackdropFgColor, UiBackdropBgColor));
-
-        if (UiMenuBox)
-        {
-            /* Fill with box bottom border */
-            TuiDrawBoxBottomLine(MenuInfo->Left,
-                                 MenuInfo->Bottom,
-                                 MenuInfo->Right,
-                                 D_VERT,
-                                 D_HORZ,
-                                 ATTR(UiMenuFgColor, UiMenuBgColor));
-
-            /* In centered boxed menu mode, the timeout string
-             * does not go past the right border, in principle... */
-        }
-
-        if (Length > 0)
-        {
-            /* Display the timeout at the bottom-right part of the menu */
-            UiDrawText(MenuInfo->Right - Length - 1,
-                       MenuInfo->Bottom,
-                       MenuLineText,
-                       ATTR(UiMenuFgColor, UiMenuBgColor));
-        }
-    }
-    else
-    {
-        if (Length > 0)
-        {
-            /* Display the timeout under the menu directly */
-            UiDrawText(0,
-                       MenuInfo->Bottom + 4,
-                       MenuLineText,
-                       ATTR(UiMenuFgColor, UiMenuBgColor));
-        }
-
-        /* Pad on the right with blanks, to erase
-         * characters when the string length decreases. */
-        TuiFillArea(Length,
-                    MenuInfo->Bottom + 4,
-                    Length ? (Length + 1) : (UiScreenWidth - 1),
-                    MenuInfo->Bottom + 4,
-                    UiBackdropFillStyle,
-                    ATTR(UiBackdropFgColor, UiBackdropBgColor)
-                    );
-    }
-}
-
 VOID
 TuiDrawMenuBox(
     _In_ PUI_MENU_INFO MenuInfo)
@@ -360,7 +230,6 @@ TuiDrawMenuBox(
 
     /* Update the date & time */
     TuiUpdateDateTime();
-    TuiDrawMenuTimeout(MenuInfo);
 }
 
 VOID
@@ -471,14 +340,6 @@ TuiProcessMenuKeyboardEvent(
     /* Check for a keypress */
     if (!MachConsKbHit())
         return 0; // None, bail out
-
-    /* Check if the timeout is not already complete */
-    if (MenuInfo->MenuTimeRemaining != -1)
-    {
-        /* Cancel it and remove it */
-        MenuInfo->MenuTimeRemaining = -1;
-        TuiDrawMenuTimeout(MenuInfo);
-    }
 
     /* Get the key (get the extended key if needed) */
     KeyEvent = MachConsGetCh();

@@ -102,13 +102,10 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
         -Wno-pointer-sign -Wno-unused-function -Wno-unused-variable -Wno-missing-braces -Wno-unused-but-set-variable)
 endif()
 
-if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
-    target_compile_options(ext2fs PRIVATE -Wno-address-of-packed-member)
-elseif(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
     target_compile_options(ext2fs PRIVATE
         -Wno-parentheses-equality
-        -Wno-incompatible-pointer-types-discards-qualifiers
-        "-Wno-#pragma-messages;-Wno-cast-calling-convention")
+        "-Wno-#pragma-messages")
 endif()
 
 target_link_libraries(ext2fs memcmp ${PSEH_LIB})
@@ -119,3 +116,7 @@ add_pch(ext2fs inc/ext2fs.h SOURCE)
 
 add_cd_file(TARGET ext2fs DESTINATION reactos/system32/drivers FOR all)
 add_registry_inf(ext2fs_reg.inf)
+
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(ext2fs PRIVATE -Wno-unused-value)
+endif()

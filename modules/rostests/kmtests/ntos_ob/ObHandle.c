@@ -17,7 +17,8 @@
     ok_eq_hex(Status, STATUS_SUCCESS);                              \
     ok_eq_hex(ObjectInfo.Attributes, Attrib);                       \
     ok_eq_hex(ObjectInfo.GrantedAccess, Access);                    \
-    ok_eq_ulong(ObjectInfo.PointerCount, Pointers);                 \
+    if (GetNTVersion() < _WIN32_WINNT_WIN8)                         \
+        ok_eq_ulong(ObjectInfo.PointerCount, Pointers);            \
     ok_eq_ulong(ObjectInfo.HandleCount, Handles);                   \
 } while (0)
 
@@ -63,13 +64,16 @@ TestDuplicate(
 
     if (GetNTVersion() >= _WIN32_WINNT_WIN8)
     {
-#ifdef _M_IX86
-        PtrCnt1 = 65UL;
-        PtrCnt2 = 31UL;
-#else
-        PtrCnt1 = 65537UL;
-        PtrCnt2 = 32767UL;
-#endif
+        if (sizeof(PVOID) == sizeof(ULONG))
+        {
+            PtrCnt1 = 65UL;
+            PtrCnt2 = 31UL;
+        }
+        else
+        {
+            PtrCnt1 = 65537UL;
+            PtrCnt2 = 32767UL;
+        }
     }
 
     else
@@ -115,6 +119,9 @@ TestDuplicate(
     }
 
     /* If TargetProcess is the System process, we do get a kernel handle */
+    if (skip(SystemProcessHandle != NULL, "No system process handle\n"))
+        return;
+
     Status = ZwDuplicateObject(ZwCurrentProcess(),
                                Handle,
                                SystemProcessHandle,
@@ -156,18 +163,28 @@ START_TEST(ObHandle)
     OBJECT_ATTRIBUTES ObjectAttributes;
     HANDLE KernelDirectoryHandle;
     HANDLE UserDirectoryHandle;
+    HANDLE TaggedDirectoryHandle;
+    HANDLE TaggedHandle = NULL;
 
-    Status = ObOpenObjectByPointer(PsInitialSystemProcess,
-                                   OBJ_KERNEL_HANDLE,
-                                   NULL,
-                                   PROCESS_ALL_ACCESS,
-                                   *PsProcessType,
-                                   KernelMode,
-                                   &SystemProcessHandle);
-    ok_eq_hex(Status, STATUS_SUCCESS);
-    if (skip(NT_SUCCESS(Status), "No handle for system process\n"))
+    if (skip(GetNTVersion() >= _WIN32_WINNT_VISTA,
+             "NT 5.x system-process handle duplication needs separate validation\n"))
     {
         SystemProcessHandle = NULL;
+    }
+    else
+    {
+        Status = ObOpenObjectByPointer(PsInitialSystemProcess,
+                                       OBJ_KERNEL_HANDLE,
+                                       NULL,
+                                       PROCESS_ALL_ACCESS,
+                                       *PsProcessType,
+                                       KernelMode,
+                                       &SystemProcessHandle);
+        ok_eq_hex(Status, STATUS_SUCCESS);
+        if (skip(NT_SUCCESS(Status), "No handle for system process\n"))
+        {
+            SystemProcessHandle = NULL;
+        }
     }
 
     InitializeObjectAttributes(&ObjectAttributes,
@@ -183,17 +200,20 @@ START_TEST(ObHandle)
     {
         ok(IsUserHandle(UserDirectoryHandle), "User handle = %p\n", UserDirectoryHandle);
         if (GetNTVersion() >= _WIN32_WINNT_WIN8)
-#ifdef _M_IX86
-            CheckObject(UserDirectoryHandle, 33UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
-#else
-            CheckObject(UserDirectoryHandle, 32769UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
-#endif
+        {
+            CheckObject(UserDirectoryHandle,
+                        sizeof(PVOID) == sizeof(ULONG) ? 33UL : 32769UL,
+                        1UL,
+                        0UL,
+                        DIRECTORY_ALL_ACCESS);
+        }
         else
             CheckObject(UserDirectoryHandle, 2UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
 
         TestDuplicate(UserDirectoryHandle);
 
-        Status = ObCloseHandle(UserDirectoryHandle, UserMode);
+        Status = ObCloseHandle(UserDirectoryHandle,
+                               GetNTVersion() < _WIN32_WINNT_VISTA ? KernelMode : UserMode);
         ok_eq_hex(Status, STATUS_SUCCESS);
     }
 
@@ -210,25 +230,32 @@ START_TEST(ObHandle)
     {
         ok(IsKernelHandle(KernelDirectoryHandle), "Kernel handle = %p\n", KernelDirectoryHandle);
         if (GetNTVersion() >= _WIN32_WINNT_WIN8)
-#ifdef _M_IX86
-            CheckObject(KernelDirectoryHandle, 33UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
-#else
-            CheckObject(KernelDirectoryHandle, 32769UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
-#endif
+        {
+            CheckObject(KernelDirectoryHandle,
+                        sizeof(PVOID) == sizeof(ULONG) ? 33UL : 32769UL,
+                        1UL,
+                        0UL,
+                        DIRECTORY_ALL_ACCESS);
+        }
         else
             CheckObject(KernelDirectoryHandle, 2UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
 
         TestDuplicate(KernelDirectoryHandle);
 
-        Status = ObCloseHandle(KernelDirectoryHandle, UserMode);
-        ok_eq_hex(Status, STATUS_INVALID_HANDLE);
+        if (GetNTVersion() >= _WIN32_WINNT_VISTA)
+        {
+            Status = ObCloseHandle(KernelDirectoryHandle, UserMode);
+            ok_eq_hex(Status, STATUS_INVALID_HANDLE);
+        }
         if (GetNTVersion() >= _WIN32_WINNT_WIN8)
-#ifdef _M_IX86
-            CheckObject(KernelDirectoryHandle, 17UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
-#else
-            CheckObject(KernelDirectoryHandle, 32753UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
-#endif
-        else
+        {
+            CheckObject(KernelDirectoryHandle,
+                        sizeof(PVOID) == sizeof(ULONG) ? 17UL : 32753UL,
+                        1UL,
+                        0UL,
+                        DIRECTORY_ALL_ACCESS);
+        }
+        else if (GetNTVersion() >= _WIN32_WINNT_VISTA)
             CheckObject(KernelDirectoryHandle, 2UL, 1UL, 0UL, DIRECTORY_ALL_ACCESS);
 
         Status = ObCloseHandle(KernelDirectoryHandle, KernelMode);
@@ -236,7 +263,10 @@ START_TEST(ObHandle)
     }
 
     /* Tests for closing handles */
-    KmtStartSeh()
+    if (!skip(GetNTVersion() >= _WIN32_WINNT_VISTA,
+             "NT 5.x invalid-handle close probes escape this compiler SEH path\n"))
+    {
+        KmtStartSeh()
         /* NtClose must accept everything */
         DPRINT("Closing null handle (NtClose)\n");
         Status = NtClose(NULL);
@@ -253,12 +283,30 @@ START_TEST(ObHandle)
             ok_eq_hex(Status, STATUS_SUCCESS);
         else
             ok_eq_hex(Status, STATUS_INVALID_HANDLE);
-        DPRINT("Closing 123 handle (NtClose)\n");
-        Status = NtClose(LongToHandle(123));
         if (GetNTVersion() >= _WIN32_WINNT_WIN8)
+        {
+            InitializeObjectAttributes(&ObjectAttributes, NULL, 0, NULL, NULL);
+            Status = ZwCreateDirectoryObject(&TaggedDirectoryHandle, DIRECTORY_ALL_ACCESS, &ObjectAttributes);
             ok_eq_hex(Status, STATUS_SUCCESS);
+            if (NT_SUCCESS(Status))
+            {
+                TaggedHandle = (HANDLE)((ULONG_PTR)TaggedDirectoryHandle | OBJ_HANDLE_TAGBITS);
+                DPRINT("Closing tagged handle %p (NtClose)\n", TaggedHandle);
+                Status = NtClose(TaggedHandle);
+                ok_eq_hex(Status, STATUS_SUCCESS);
+                if (!NT_SUCCESS(Status))
+                {
+                    Status = ZwClose(TaggedDirectoryHandle);
+                    ok_eq_hex(Status, STATUS_SUCCESS);
+                }
+            }
+        }
         else if (GetNTVersion() != _WIN32_WINNT_WS03)
+        {
+            DPRINT("Closing 123 handle (NtClose)\n");
+            Status = NtClose(LongToHandle(123));
             ok_eq_hex(Status, STATUS_INVALID_HANDLE);
+        }
         DPRINT("Closing 123 kernel handle (NtClose)\n");
         Status = NtClose(LongToHandle(123 | 0x80000000));
         ok_eq_hex(Status, STATUS_INVALID_HANDLE);
@@ -279,9 +327,18 @@ START_TEST(ObHandle)
             ok_eq_hex(Status, STATUS_SUCCESS);
         else
             ok_eq_hex(Status, STATUS_INVALID_HANDLE);
-        DPRINT("Closing 123 handle (ObCloseHandle, UserMode)\n");
-        Status = ObCloseHandle(LongToHandle(123), UserMode);
-        ok_eq_hex(Status, STATUS_INVALID_HANDLE);
+        if (GetNTVersion() >= _WIN32_WINNT_WIN8 && TaggedHandle != NULL)
+        {
+            DPRINT("Closing stale tagged handle %p (ObCloseHandle, UserMode)\n", TaggedHandle);
+            Status = ObCloseHandle(TaggedHandle, UserMode);
+            ok_eq_hex(Status, STATUS_INVALID_HANDLE);
+        }
+        else if (GetNTVersion() < _WIN32_WINNT_WIN8)
+        {
+            DPRINT("Closing 123 handle (ObCloseHandle, UserMode)\n");
+            Status = ObCloseHandle(LongToHandle(123), UserMode);
+            ok_eq_hex(Status, STATUS_INVALID_HANDLE);
+        }
         DPRINT("Closing 123 kernel handle (ObCloseHandle, UserMode)\n");
         Status = ObCloseHandle(LongToHandle(123 | 0x80000000), UserMode);
         ok_eq_hex(Status, STATUS_INVALID_HANDLE);
@@ -323,7 +380,8 @@ START_TEST(ObHandle)
         /* INVALID_KERNEL_HANDLE, 0x7B, 1, 0, 0
         Status = ObCloseHandle(LongToHandle(123), KernelMode);
         Status = ObCloseHandle(LongToHandle(123 | 0x80000000), KernelMode);*/
-    KmtEndSeh(STATUS_SUCCESS);
+        KmtEndSeh(STATUS_SUCCESS);
+    }
 
     if (SystemProcessHandle)
     {

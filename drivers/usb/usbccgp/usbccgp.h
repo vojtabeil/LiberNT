@@ -6,6 +6,9 @@
 #include <usbbusif.h>
 #include <usb100.h>
 #include <usbdlib.h>
+#include <reactos/drivers/dumpstor.h>
+#include <reactos/drivers/usbcapability.h>
+#include <reactos/drivers/usbmsos20.h>
 
 #include <stdio.h>
 
@@ -27,14 +30,23 @@ typedef struct
     ULONG InterfaceListCount;                                // interface list count
     USBD_CONFIGURATION_HANDLE ConfigurationHandle;           // configuration handle
     USBC_DEVICE_CONFIGURATION_INTERFACE_V1 BusInterface;     // bus custom enumeration interface
+    BOOLEAN BusInterfaceReferenced;                          // interface reference acquired
+    BOOLEAN FunctionDescriptorOwned;                          // function descriptor buffer owned by usbccgp
     PUSBC_FUNCTION_DESCRIPTOR FunctionDescriptor;            // usb function descriptor
     ULONG FunctionDescriptorCount;                           // number of function descriptor
     PDEVICE_OBJECT * ChildPDO;                               // child pdos
+    ULONG ChildPDOCount;                                     // child pdo array count
+    BOOLEAN Removing;                                        // remove/surprise removal in progress
+    BOOLEAN ResourcesReleased;                               // fdo-owned resources released
     LIST_ENTRY ResetPortListHead;                            // reset port list head
     LIST_ENTRY CyclePortListHead;                            // cycle port list head
     UCHAR ResetPortActive;                                   // reset port active
     UCHAR CyclePortActive;                                   // cycle port active
     KSPIN_LOCK Lock;                                         // reset / cycle port list lock
+    PUCHAR MsCompatDescriptor;
+    ULONG MsCompatDescriptorLength;
+    PUCHAR MsOs20DescriptorSet;
+    ULONG MsOs20DescriptorSetLength;
 }FDO_DEVICE_EXTENSION, *PFDO_DEVICE_EXTENSION;
 
 #define USBCCPG_TAG 'cbsu'
@@ -52,6 +64,8 @@ typedef struct
     PUSBD_INTERFACE_LIST_ENTRY InterfaceList;                // interface list
     ULONG InterfaceListCount;                                // interface list count
     PFDO_DEVICE_EXTENSION FDODeviceExtension;                // pointer to fdo's pdo list
+    BOOLEAN Present;                                         // reported in bus relations
+    BOOLEAN Removed;                                         // remove irp processed
 }PDO_DEVICE_EXTENSION, *PPDO_DEVICE_EXTENSION;
 
 /* descriptor.c */
@@ -97,6 +111,11 @@ AllocateInterfaceDescriptorsArray(
     IN PUSB_CONFIGURATION_DESCRIPTOR ConfigurationDescriptor,
     OUT PUSB_INTERFACE_DESCRIPTOR **OutArray);
 
+VOID
+USBCCGP_ApplyMsOs20Properties(
+    IN PDEVICE_OBJECT DeviceObject,
+    IN PPDO_DEVICE_EXTENSION PDODeviceExtension);
+
 /* misc.c */
 
 NTSTATUS
@@ -113,6 +132,12 @@ VOID
 FreeItem(
     IN PVOID Item);
 
+PURB
+USBCCGP_CreateConfigurationRequest(
+    IN PUSB_CONFIGURATION_DESCRIPTOR ConfigurationDescriptor,
+    IN PUSBD_INTERFACE_LIST_ENTRY InterfaceList,
+    IN ULONG InterfaceListCount);
+
 VOID
 DumpFunctionDescriptor(
     IN PUSBC_FUNCTION_DESCRIPTOR FunctionDescriptor,
@@ -124,6 +149,11 @@ NTSTATUS
 FDO_Dispatch(
     PDEVICE_OBJECT DeviceObject,
     PIRP Irp);
+
+VOID
+USBCCGP_FdoReleaseResources(
+    IN OUT PFDO_DEVICE_EXTENSION FDODeviceExtension,
+    IN BOOLEAN Force);
 
 /* pdo.c */
 

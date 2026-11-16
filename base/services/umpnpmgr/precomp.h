@@ -33,6 +33,8 @@
 #include <shlwapi.h>
 #include <winsvc_undoc.h>
 #include <pnp_s.h>
+#include <plugplay_s.h>
+#include <dll/newdevp.h>
 
 
 #define LOGCONF_NAME_BUFFER_SIZE 32
@@ -40,6 +42,7 @@
 typedef struct
 {
     LIST_ENTRY ListEntry;
+    BOOL Arrival;
     WCHAR DeviceIds[ANYSIZE_ARRAY];
 } DeviceInstallParams;
 
@@ -68,16 +71,53 @@ PnpEventThread(
     LPVOID lpParameter);
 
 
+/* listener.c */
+
+VOID
+InitializeListeners(VOID);
+
+VOID
+BroadcastListenerEvent(
+    _In_ DWORD Code,
+    _In_ PCWSTR Path,
+    _In_reads_bytes_(Size) const BYTE *Data,
+    _In_ UINT Size);
+
+BOOL
+GetPhysicalDeviceObjectName(
+    _In_ PCWSTR DeviceInstance,
+    _Out_writes_bytes_(BufferSize) PWSTR Buffer,
+    _In_ ULONG BufferSize);
+
+BOOL
+QueryListeners(
+    _In_ DWORD Code,
+    _In_ PCWSTR Path,
+    _In_reads_bytes_(Size) const BYTE *Data,
+    _In_ UINT Size);
+
+
 /* install.c */
 
 extern HANDLE hUserToken;
 extern HANDLE hInstallEvent;
 extern HANDLE hNoPendingInstalls;
+extern HANDLE hBootInstallComplete;
 
 /* Device-install event list */
 extern HANDLE hDeviceInstallListMutex;
 extern LIST_ENTRY DeviceInstallListHead;
 extern HANDLE hDeviceInstallListNotEmpty;
+extern LIST_ENTRY DoNotInstallListHead;
+
+VOID
+SetDeviceDoNotInstall(
+    _In_ PCWSTR DeviceId,
+    _In_ BOOL DoNotInstall);
+
+BOOL
+IsDeviceDoNotInstall(
+    _In_ PCWSTR DeviceId);
 
 BOOL
 SetupIsActive(VOID);
@@ -98,16 +138,16 @@ WINAPI
 RpcServerThread(
     LPVOID lpParameter);
 
+BOOL
+IsRootDeviceInstanceID(
+    _In_ PWSTR pszDeviceInstanceID);
+
 
 /* umpnpmgr.c */
 
 extern HKEY hEnumKey;
 extern HKEY hClassKey;
-extern BOOL g_IsUISuppressed;
 extern BOOL g_ShuttingDown;
 extern BOOL g_IsMiniNT;
-
-BOOL
-GetSuppressNewUIValue(VOID);
 
 #endif /* _UMPNPMGR_PCH_ */

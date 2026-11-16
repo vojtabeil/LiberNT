@@ -27,6 +27,39 @@
 #include "winternl.h"
 #include "wine/test.h"
 
+#ifdef __REACTOS__
+/* Two clock ticks still tell each timing outcome apart, where Wine waits tens of milliseconds */
+#define RTL_WAIT_SETTLE_MS 16
+#define RTL_WAIT_TIMEOUT_MS 64
+#define RTL_WAIT_EARLY_MS 32
+#define TP_SHORT_CALLBACK_MS 16
+#define TP_CALLBACK_MS 32
+#define TP_SCHEDULER_SETTLE_MS 160
+#define TP_RELEASE_HOLD_MS 64
+#define TP_TIMER_MS 64
+#define TP_TIMER_EARLY_MS 32
+#define TP_PERIOD_MS 100
+#define TP_WAIT_MS 64
+#define TP_WAIT_QUIET_MS 32
+#define TP_WAIT_SETTLE_MS 32
+#define TP_STILL_BLOCKED_MS 32
+#else
+#define RTL_WAIT_SETTLE_MS 50
+#define RTL_WAIT_TIMEOUT_MS 200
+#define RTL_WAIT_EARLY_MS 100
+#define TP_SHORT_CALLBACK_MS 50
+#define TP_CALLBACK_MS 100
+#define TP_SCHEDULER_SETTLE_MS 500
+#define TP_RELEASE_HOLD_MS 200
+#define TP_TIMER_MS 200
+#define TP_TIMER_EARLY_MS 100
+#define TP_PERIOD_MS 200
+#define TP_WAIT_MS 200
+#define TP_WAIT_QUIET_MS 100
+#define TP_WAIT_SETTLE_MS 50
+#define TP_STILL_BLOCKED_MS 100
+#endif
+
 static NTSTATUS (WINAPI *pTpAllocCleanupGroup)(TP_CLEANUP_GROUP **);
 static NTSTATUS (WINAPI *pTpAllocIoCompletion)(TP_IO **,HANDLE,PTP_IO_CALLBACK,void *,TP_CALLBACK_ENVIRON *);
 static NTSTATUS (WINAPI *pTpAllocPool)(TP_POOL **,PVOID);
@@ -248,7 +281,7 @@ static void test_RtlRegisterWait(void)
     ok(info.userdata == 2, "expected info.userdata = 2, got %lu\n", info.userdata);
     result = WaitForSingleObject(semaphores[1], 0);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
-    Sleep(50);
+    Sleep(RTL_WAIT_SETTLE_MS);
     status = RtlDeregisterWait(wait1);
     ok(!status, "RtlDeregisterWait failed with status %lx\n", status);
 
@@ -266,15 +299,15 @@ static void test_RtlRegisterWait(void)
     ok(info.userdata == 1, "expected info.userdata = 1, got %lu\n", info.userdata);
     result = WaitForSingleObject(semaphores[1], 0);
     ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
-    Sleep(50);
+    Sleep(RTL_WAIT_SETTLE_MS);
     status = RtlDeregisterWait(wait1);
     ok(!status, "RtlDeregisterWait failed with status %lx\n", status);
 
     /* finite timeout, no event */
     info.userdata = 0;
-    status = RtlRegisterWait(&wait1, semaphores[1], rtl_wait_cb, &info, 200, WT_EXECUTEDEFAULT);
+    status = RtlRegisterWait(&wait1, semaphores[1], rtl_wait_cb, &info, RTL_WAIT_TIMEOUT_MS, WT_EXECUTEDEFAULT);
     ok(!status, "RtlRegisterWait failed with status %lx\n", status);
-    result = WaitForSingleObject(semaphores[0], 100);
+    result = WaitForSingleObject(semaphores[0], RTL_WAIT_EARLY_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     ok(info.userdata == 0, "expected info.userdata = 0, got %lu\n", info.userdata);
     result = WaitForSingleObject(semaphores[0], 200);
@@ -282,15 +315,15 @@ static void test_RtlRegisterWait(void)
     ok(info.userdata == 0x10000, "expected info.userdata = 0x10000, got %lu\n", info.userdata);
     result = WaitForSingleObject(semaphores[1], 0);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
-    Sleep(50);
+    Sleep(RTL_WAIT_SETTLE_MS);
     status = RtlDeregisterWait(wait1);
     ok(!status, "RtlDeregisterWait failed with status %lx\n", status);
 
     /* finite timeout, with event */
     info.userdata = 0;
-    status = RtlRegisterWait(&wait1, semaphores[1], rtl_wait_cb, &info, 200, WT_EXECUTEDEFAULT);
+    status = RtlRegisterWait(&wait1, semaphores[1], rtl_wait_cb, &info, RTL_WAIT_TIMEOUT_MS, WT_EXECUTEDEFAULT);
     ok(!status, "RtlRegisterWait failed with status %lx\n", status);
-    result = WaitForSingleObject(semaphores[0], 100);
+    result = WaitForSingleObject(semaphores[0], RTL_WAIT_EARLY_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     ok(info.userdata == 0, "expected info.userdata = 0, got %lu\n", info.userdata);
     ReleaseSemaphore(semaphores[1], 1, NULL);
@@ -299,7 +332,7 @@ static void test_RtlRegisterWait(void)
     ok(info.userdata == 1, "expected info.userdata = 1, got %lu\n", info.userdata);
     result = WaitForSingleObject(semaphores[1], 0);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
-    Sleep(50);
+    Sleep(RTL_WAIT_SETTLE_MS);
     status = RtlDeregisterWait(wait1);
     ok(!status, "RtlDeregisterWait failed with status %lx\n", status);
 
@@ -316,7 +349,7 @@ static void test_RtlRegisterWait(void)
     threadid = info.threadid;
     result = WaitForSingleObject(semaphores[1], 0);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
-    Sleep(50);
+    Sleep(RTL_WAIT_SETTLE_MS);
     status = RtlDeregisterWait(wait1);
     ok(!status, "RtlDeregisterWait failed with status %lx\n", status);
 
@@ -331,7 +364,7 @@ static void test_RtlRegisterWait(void)
     ok(info.threadid == threadid, "unexpected different wait thread id %lx\n", info.threadid);
     result = WaitForSingleObject(semaphores[1], 0);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
-    Sleep(50);
+    Sleep(RTL_WAIT_SETTLE_MS);
     status = RtlDeregisterWait(wait1);
     ok(!status, "RtlDeregisterWait failed with status %lx\n", status);
 
@@ -346,7 +379,7 @@ static void test_RtlRegisterWait(void)
     ok(info.threadid == threadid, "unexpected different wait thread id %lx\n", info.threadid);
     result = WaitForSingleObject(semaphores[1], 0);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
-    Sleep(50);
+    Sleep(RTL_WAIT_SETTLE_MS);
     status = RtlDeregisterWait(wait1);
     ok(!status, "RtlDeregisterWait failed with status %lx\n", status);
 
@@ -362,7 +395,7 @@ static void test_RtlRegisterWait(void)
     ok(info.threadid == threadid, "unexpected different wait thread id %lx\n", info.threadid);
     result = WaitForSingleObject(semaphores[1], 0);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
-    Sleep(50);
+    Sleep(RTL_WAIT_SETTLE_MS);
     status = RtlDeregisterWait(wait1);
     ok(!status, "RtlDeregisterWait failed with status %lx\n", status);
 
@@ -389,7 +422,7 @@ static void test_RtlRegisterWait(void)
     result = WaitForSingleObject(semaphores[0], 100);
     ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
     ok(info.userdata == 2, "expected info.userdata = 2, got %lu\n", info.userdata);
-    Sleep(50);
+    Sleep(RTL_WAIT_SETTLE_MS);
     status = RtlDeregisterWait(wait1);
     ok(!status, "RtlDeregisterWait failed with status %lx\n", status);
 
@@ -416,7 +449,7 @@ static void test_RtlRegisterWait(void)
     result = WaitForSingleObject(semaphores[0], 100);
     ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
     ok(info.userdata == 2, "expected info.userdata = 2, got %lu\n", info.userdata);
-    Sleep(50);
+    Sleep(RTL_WAIT_SETTLE_MS);
     status = RtlDeregisterWait(wait1);
     ok(!status, "RtlDeregisterWait failed with status %lx\n", status);
 
@@ -451,7 +484,7 @@ static void test_RtlRegisterWait(void)
     result = WaitForSingleObject(semaphores[0], 100);
     ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
     ok(info.userdata == 0x10000, "expected info.userdata = 0x10000, got %lu\n", info.userdata);
-    Sleep(50);
+    Sleep(RTL_WAIT_SETTLE_MS);
     status = RtlDeregisterWaitEx(wait1, NULL);
     ok(!status, "RtlDeregisterWaitEx failed with status %lx\n", status);
     ok(info.userdata == 0x10000, "expected info.userdata = 0x10000, got %lu\n", info.userdata);
@@ -462,7 +495,7 @@ static void test_RtlRegisterWait(void)
     result = WaitForSingleObject(semaphores[0], 100);
     ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
     ok(info.userdata == 0x10000, "expected info.userdata = 0x10000, got %lu\n", info.userdata);
-    Sleep(50);
+    Sleep(RTL_WAIT_SETTLE_MS);
     status = RtlDeregisterWaitEx(wait1, INVALID_HANDLE_VALUE);
     ok(!status, "RtlDeregisterWaitEx failed with status %lx\n", status);
     ok(info.userdata == 0x10000, "expected info.userdata = 0x10000, got %lu\n", info.userdata);
@@ -473,7 +506,7 @@ static void test_RtlRegisterWait(void)
     result = WaitForSingleObject(semaphores[0], 100);
     ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
     ok(info.userdata == 0x10000, "expected info.userdata = 0x10000, got %lu\n", info.userdata);
-    Sleep(50);
+    Sleep(RTL_WAIT_SETTLE_MS);
     status = RtlDeregisterWaitEx(wait1, event);
     ok(!status, "RtlDeregisterWaitEx failed with status %lx\n", status);
     ok(info.userdata == 0x10000, "expected info.userdata = 0x10000, got %lu\n", info.userdata);
@@ -578,7 +611,7 @@ static void CALLBACK simple_cb(TP_CALLBACK_INSTANCE *instance, void *userdata)
 
 static void CALLBACK simple2_cb(TP_CALLBACK_INSTANCE *instance, void *userdata)
 {
-    Sleep(50);
+    Sleep(TP_SHORT_CALLBACK_MS);
     InterlockedIncrement((LONG *)userdata);
 }
 
@@ -587,9 +620,7 @@ static void test_tp_simple(void)
     IMAGE_NT_HEADERS *nt = RtlImageNtHeader( NtCurrentTeb()->Peb->ImageBaseAddress );
     TP_POOL_STACK_INFORMATION stack_info;
     TP_CALLBACK_ENVIRON environment;
-#if !defined(__REACTOS__) || _WIN32_WINNT >= _WIN32_WINNT_WIN7
     TP_CALLBACK_ENVIRON_V3 environment3;
-#endif
     TP_CLEANUP_GROUP *group;
     HANDLE semaphore;
     NTSTATUS status;
@@ -626,7 +657,6 @@ static void test_tp_simple(void)
     ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
 
     /* test with environment version 3 */
-#if !defined(__REACTOS__) || _WIN32_WINNT >= _WIN32_WINNT_WIN7
     memset(&environment3, 0, sizeof(environment3));
     environment3.Version = 3;
     environment3.Pool = pool;
@@ -645,7 +675,6 @@ static void test_tp_simple(void)
     status = pTpSimpleTryPost(simple_cb, semaphore, (TP_CALLBACK_ENVIRON *)&environment3);
     ok(status == STATUS_INVALID_PARAMETER || broken(!status) /* Vista does not support priorities */,
             "TpSimpleTryPost failed with status %lx\n", status);
-#endif
 
     /* test with invalid version number */
     memset(&environment, 0, sizeof(environment));
@@ -693,14 +722,6 @@ static void test_tp_simple(void)
     pTpReleaseCleanupGroupMembers(group, TRUE, NULL);
     ok(userdata < 100, "expected userdata < 100, got %lu\n", userdata);
 
-#ifdef __REACTOS__
-    if (!pTpQueryPoolStackInformation)
-    {
-        skip("TpQueryPoolStackInformation not available\n");
-    }
-    else
-    {
-#endif
     /* test querying and setting the stack size */
     status = pTpQueryPoolStackInformation(pool, &stack_info);
     ok(!status, "TpQueryPoolStackInformation failed: %lx\n", status);
@@ -716,9 +737,6 @@ static void test_tp_simple(void)
     ok(!status, "TpQueryPoolStackInformation failed: %lx\n", status);
     ok(stack_info.StackReserve == 1, "expected 1 byte StackReserve, got %ld\n", (ULONG)stack_info.StackReserve);
     ok(stack_info.StackCommit == 1, "expected 1 byte StackCommit, got %ld\n", (ULONG)stack_info.StackCommit);
-#ifdef __REACTOS__
-    }
-#endif
 
     /* cleanup */
     pTpReleaseCleanupGroup(group);
@@ -728,13 +746,13 @@ static void test_tp_simple(void)
 
 static void CALLBACK work_cb(TP_CALLBACK_INSTANCE *instance, void *userdata, TP_WORK *work)
 {
-    Sleep(100);
+    Sleep(TP_CALLBACK_MS);
     InterlockedIncrement((LONG *)userdata);
 }
 
 static void CALLBACK work2_cb(TP_CALLBACK_INSTANCE *instance, void *userdata, TP_WORK *work)
 {
-    Sleep(100);
+    Sleep(TP_CALLBACK_MS);
     InterlockedExchangeAdd((LONG *)userdata, 0x10000);
 }
 
@@ -830,7 +848,7 @@ static void test_tp_work_scheduler(void)
         pTpPostWork(work);
     for (i = 0; i < 10; i++)
         pTpPostWork(work2);
-    Sleep(500);
+    Sleep(TP_SCHEDULER_SETTLE_MS);
     pTpWaitForWork(work, TRUE);
     pTpWaitForWork(work2, TRUE);
     ok(userdata & 0xffff, "expected userdata & 0xffff != 0, got %lu\n", userdata & 0xffff);
@@ -857,14 +875,14 @@ static void CALLBACK simple_release_cb(TP_CALLBACK_INSTANCE *instance, void *use
 {
     HANDLE *semaphores = userdata;
     ReleaseSemaphore(semaphores, 1, NULL);
-    Sleep(200); /* wait until main thread is in TpReleaseCleanupGroupMembers */
+    Sleep(TP_RELEASE_HOLD_MS); /* wait until main thread is in TpReleaseCleanupGroupMembers */
 }
 
 static void CALLBACK work_release_cb(TP_CALLBACK_INSTANCE *instance, void *userdata, TP_WORK *work)
 {
     HANDLE semaphore = userdata;
     ReleaseSemaphore(semaphore, 1, NULL);
-    Sleep(200); /* wait until main thread is in TpReleaseCleanupGroupMembers */
+    Sleep(TP_RELEASE_HOLD_MS); /* wait until main thread is in TpReleaseCleanupGroupMembers */
     pTpReleaseWork(work);
 }
 
@@ -872,7 +890,7 @@ static void CALLBACK timer_release_cb(TP_CALLBACK_INSTANCE *instance, void *user
 {
     HANDLE semaphore = userdata;
     ReleaseSemaphore(semaphore, 1, NULL);
-    Sleep(200); /* wait until main thread is in TpReleaseCleanupGroupMembers */
+    Sleep(TP_RELEASE_HOLD_MS); /* wait until main thread is in TpReleaseCleanupGroupMembers */
     pTpReleaseTimer(timer);
 }
 
@@ -881,7 +899,7 @@ static void CALLBACK wait_release_cb(TP_CALLBACK_INSTANCE *instance, void *userd
 {
     HANDLE semaphore = userdata;
     ReleaseSemaphore(semaphore, 1, NULL);
-    Sleep(200); /* wait until main thread is in TpReleaseCleanupGroupMembers */
+    Sleep(TP_RELEASE_HOLD_MS); /* wait until main thread is in TpReleaseCleanupGroupMembers */
     pTpReleaseWait(wait);
 }
 
@@ -991,7 +1009,7 @@ static void CALLBACK work_group_cancel_cb(TP_CALLBACK_INSTANCE *instance, void *
     DWORD result;
 
     ReleaseSemaphore(semaphores[1], 1, NULL);
-    result = WaitForSingleObject(semaphores[0], 200);
+    result = WaitForSingleObject(semaphores[0], 2 * TP_STILL_BLOCKED_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
 }
 
@@ -1271,7 +1289,7 @@ static void CALLBACK disassociate2_cb(TP_CALLBACK_INSTANCE *instance, void *user
     DWORD result;
 
     pTpDisassociateCallback(instance);
-    result = WaitForSingleObject(semaphores[0], 100);
+    result = WaitForSingleObject(semaphores[0], TP_STILL_BLOCKED_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     ReleaseSemaphore(semaphores[1], 1, NULL);
 }
@@ -1282,7 +1300,7 @@ static void CALLBACK disassociate3_cb(TP_CALLBACK_INSTANCE *instance, void *user
     DWORD result;
 
     pTpDisassociateCallback(instance);
-    result = WaitForSingleObject(semaphores[0], 100);
+    result = WaitForSingleObject(semaphores[0], TP_STILL_BLOCKED_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     ReleaseSemaphore(semaphores[1], 1, NULL);
 }
@@ -1325,7 +1343,7 @@ static void test_tp_disassociate(void)
     pTpPostWork(work);
     pTpWaitForWork(work, FALSE);
 
-    result = WaitForSingleObject(semaphores[1], 100);
+    result = WaitForSingleObject(semaphores[1], TP_STILL_BLOCKED_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     ReleaseSemaphore(semaphores[0], 1, NULL);
     result = WaitForSingleObject(semaphores[1], 1000);
@@ -1345,7 +1363,7 @@ static void test_tp_disassociate(void)
     pTpPostWork(work);
     pTpWaitForWork(work, FALSE);
 
-    result = WaitForSingleObject(semaphores[1], 100);
+    result = WaitForSingleObject(semaphores[1], TP_STILL_BLOCKED_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     ReleaseSemaphore(semaphores[0], 1, NULL);
     result = WaitForSingleObject(semaphores[1], 1000);
@@ -1434,14 +1452,14 @@ static void test_tp_timer(void)
     ok(!success, "TpIsTimerSet returned TRUE\n");
 
     /* test timer with a relative timeout */
-    when.QuadPart = (ULONGLONG)200 * -10000;
+    when.QuadPart = (ULONGLONG)TP_TIMER_MS * -10000;
     pTpSetTimer(timer, &when, 0, 0);
     success = pTpIsTimerSet(timer);
     ok(success, "TpIsTimerSet returned FALSE\n");
 
     pTpWaitForTimer(timer, FALSE);
 
-    result = WaitForSingleObject(semaphore, 100);
+    result = WaitForSingleObject(semaphore, TP_TIMER_EARLY_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     result = WaitForSingleObject(semaphore, 200);
     ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
@@ -1450,14 +1468,14 @@ static void test_tp_timer(void)
 
     /* test timer with an absolute timeout */
     NtQuerySystemTime( &when );
-    when.QuadPart += (ULONGLONG)200 * 10000;
+    when.QuadPart += (ULONGLONG)TP_TIMER_MS * 10000;
     pTpSetTimer(timer, &when, 0, 0);
     success = pTpIsTimerSet(timer);
     ok(success, "TpIsTimerSet returned FALSE\n");
 
     pTpWaitForTimer(timer, FALSE);
 
-    result = WaitForSingleObject(semaphore, 100);
+    result = WaitForSingleObject(semaphore, TP_TIMER_EARLY_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     result = WaitForSingleObject(semaphore, 200);
     ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
@@ -1499,8 +1517,8 @@ static void test_tp_timer(void)
     ok(timer != NULL, "expected timer != NULL\n");
 
     /* test a relative timeout repeated periodically */
-    when.QuadPart = (ULONGLONG)200 * -10000;
-    pTpSetTimer(timer, &when, 200, 0);
+    when.QuadPart = (ULONGLONG)TP_PERIOD_MS * -10000;
+    pTpSetTimer(timer, &when, TP_PERIOD_MS, 0);
     success = pTpIsTimerSet(timer);
     ok(success, "TpIsTimerSet returned FALSE\n");
 
@@ -1512,8 +1530,8 @@ static void test_tp_timer(void)
         ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
     }
     ticks = GetTickCount() - ticks;
-    ok(ticks >= 500 && (ticks <= 700 || broken(ticks <= 750)) /* Win 7 */,
-       "expected approximately 600 ticks, got %lu\n", ticks);
+    ok(ticks >= 5 * TP_PERIOD_MS / 2 && (ticks <= 7 * TP_PERIOD_MS / 2 || broken(ticks <= 15 * TP_PERIOD_MS / 4)) /* Win 7 */,
+       "expected approximately %u ticks, got %lu\n", 3 * TP_PERIOD_MS, ticks);
 
     /* unset the timer */
     pTpSetTimer(timer, NULL, 0, 0);
@@ -1712,9 +1730,9 @@ static void test_tp_wait(void)
 
     /* relative timeout, no event */
     info.userdata = 0;
-    when.QuadPart = (ULONGLONG)200 * -10000;
+    when.QuadPart = (ULONGLONG)TP_WAIT_MS * -10000;
     pTpSetWait(wait1, semaphores[1], &when);
-    result = WaitForSingleObject(semaphores[0], 100);
+    result = WaitForSingleObject(semaphores[0], TP_WAIT_QUIET_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     ok(info.userdata == 0, "expected info.userdata = 0, got %lu\n", info.userdata);
     result = WaitForSingleObject(semaphores[0], 200);
@@ -1725,9 +1743,9 @@ static void test_tp_wait(void)
 
     /* repeat test with call to TpWaitForWait(..., TRUE) */
     info.userdata = 0;
-    when.QuadPart = (ULONGLONG)200 * -10000;
+    when.QuadPart = (ULONGLONG)TP_WAIT_MS * -10000;
     pTpSetWait(wait1, semaphores[1], &when);
-    result = WaitForSingleObject(semaphores[0], 100);
+    result = WaitForSingleObject(semaphores[0], TP_WAIT_QUIET_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     pTpWaitForWait(wait1, TRUE);
     ok(info.userdata == 0, "expected info.userdata = 0, got %lu\n", info.userdata);
@@ -1743,9 +1761,9 @@ static void test_tp_wait(void)
 
     /* relative timeout, with event */
     info.userdata = 0;
-    when.QuadPart = (ULONGLONG)200 * -10000;
+    when.QuadPart = (ULONGLONG)TP_WAIT_MS * -10000;
     pTpSetWait(wait1, semaphores[1], &when);
-    result = WaitForSingleObject(semaphores[0], 100);
+    result = WaitForSingleObject(semaphores[0], TP_WAIT_QUIET_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     ok(info.userdata == 0, "expected info.userdata = 0, got %lu\n", info.userdata);
     ReleaseSemaphore(semaphores[1], 1, NULL);
@@ -1757,9 +1775,9 @@ static void test_tp_wait(void)
 
     /* repeat test with call to TpWaitForWait(..., TRUE) */
     info.userdata = 0;
-    when.QuadPart = (ULONGLONG)200 * -10000;
+    when.QuadPart = (ULONGLONG)TP_WAIT_MS * -10000;
     pTpSetWait(wait1, semaphores[1], &when);
-    result = WaitForSingleObject(semaphores[0], 100);
+    result = WaitForSingleObject(semaphores[0], TP_WAIT_QUIET_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     pTpWaitForWait(wait1, TRUE);
     ok(info.userdata == 0, "expected info.userdata = 0, got %lu\n", info.userdata);
@@ -1783,9 +1801,9 @@ static void test_tp_wait(void)
     /* absolute timeout, no event */
     info.userdata = 0;
     NtQuerySystemTime( &when );
-    when.QuadPart += (ULONGLONG)200 * 10000;
+    when.QuadPart += (ULONGLONG)TP_WAIT_MS * 10000;
     pTpSetWait(wait1, semaphores[1], &when);
-    result = WaitForSingleObject(semaphores[0], 100);
+    result = WaitForSingleObject(semaphores[0], TP_WAIT_QUIET_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     ok(info.userdata == 0, "expected info.userdata = 0, got %lu\n", info.userdata);
     result = WaitForSingleObject(semaphores[0], 200);
@@ -1797,9 +1815,9 @@ static void test_tp_wait(void)
     /* absolute timeout, with event */
     info.userdata = 0;
     NtQuerySystemTime( &when );
-    when.QuadPart += (ULONGLONG)200 * 10000;
+    when.QuadPart += (ULONGLONG)TP_WAIT_MS * 10000;
     pTpSetWait(wait1, semaphores[1], &when);
-    result = WaitForSingleObject(semaphores[0], 100);
+    result = WaitForSingleObject(semaphores[0], TP_WAIT_QUIET_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     ok(info.userdata == 0, "expected info.userdata = 0, got %lu\n", info.userdata);
     ReleaseSemaphore(semaphores[1], 1, NULL);
@@ -1821,14 +1839,14 @@ static void test_tp_wait(void)
 
     /* cancel a pending wait */
     info.userdata = 0;
-    when.QuadPart = (ULONGLONG)250 * -10000;
+    when.QuadPart = (ULONGLONG)(TP_WAIT_MS * 5 / 4) * -10000;
     pTpSetWait(wait1, semaphores[1], &when);
-    result = WaitForSingleObject(semaphores[0], 100);
+    result = WaitForSingleObject(semaphores[0], TP_WAIT_QUIET_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     pTpSetWait(wait1, NULL, (void *)0xdeadbeef);
-    Sleep(50);
+    Sleep(TP_WAIT_SETTLE_MS);
     ReleaseSemaphore(semaphores[1], 1, NULL);
-    result = WaitForSingleObject(semaphores[0], 100);
+    result = WaitForSingleObject(semaphores[0], TP_WAIT_QUIET_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     ok(info.userdata == 0, "expected info.userdata = 0, got %lu\n", info.userdata);
     result = WaitForSingleObject(semaphores[1], 0);
@@ -1844,13 +1862,13 @@ static void test_tp_wait(void)
 
     /* cancel a pending wait with INVALID_HANDLE_VALUE */
     info.userdata = 0;
-    when.QuadPart = (ULONGLONG)250 * -10000;
+    when.QuadPart = (ULONGLONG)(TP_WAIT_MS * 5 / 4) * -10000;
     pTpSetWait(wait1, semaphores[1], &when);
-    result = WaitForSingleObject(semaphores[0], 100);
+    result = WaitForSingleObject(semaphores[0], TP_WAIT_QUIET_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     when.QuadPart = 0;
     pTpSetWait(wait1, INVALID_HANDLE_VALUE, &when);
-    Sleep(50);
+    Sleep(TP_WAIT_SETTLE_MS);
     ReleaseSemaphore(semaphores[1], 1, NULL);
     result = WaitForSingleObject(semaphores[0], 100);
     ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
@@ -1866,11 +1884,11 @@ static void test_tp_wait(void)
     info.userdata = 0;
     pTpSetWait(wait1, semaphores[1], NULL);
     pTpSetWait(wait2, semaphores[1], NULL);
-    Sleep(50);
+    Sleep(TP_WAIT_SETTLE_MS);
     ReleaseSemaphore(semaphores[1], 1, NULL);
     result = WaitForSingleObject(semaphores[0], 100);
     ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
-    result = WaitForSingleObject(semaphores[0], 100);
+    result = WaitForSingleObject(semaphores[0], TP_WAIT_QUIET_MS);
     ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %lu\n", result);
     ok(info.userdata == 1, "expected info.userdata = 1, got %lu\n", info.userdata);
     result = WaitForSingleObject(semaphores[1], 0);
@@ -1880,7 +1898,7 @@ static void test_tp_wait(void)
     info.userdata = 0;
     pTpSetWait(wait1, semaphores[1], NULL);
     pTpSetWait(wait2, semaphores[1], NULL);
-    Sleep(50);
+    Sleep(TP_WAIT_SETTLE_MS);
     result = ReleaseSemaphore(semaphores[1], 2, NULL);
     result = WaitForSingleObject(semaphores[0], 100);
     ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %lu\n", result);
@@ -1929,14 +1947,6 @@ static void test_tp_multi_wait(void)
     TP_POOL *pool;
     DWORD result;
     int i;
-
-#ifdef __REACTOS__
-    if (pTpSetPoolStackInformation == NULL)
-    {
-        win_skip("TpSetPoolStackInformation not available\n");
-        return;
-    }
-#endif
 
     semaphore = CreateSemaphoreW(NULL, 0, 512, NULL);
     ok(semaphore != NULL, "failed to create semaphore\n");
@@ -2061,11 +2071,11 @@ static DWORD WINAPI io_wait_thread(void *arg)
 static void test_tp_io(void)
 {
     TP_CALLBACK_ENVIRON environment = {.Version = 1};
-    OVERLAPPED ovl = {0}, ovl2 = {0};
+    OVERLAPPED ovl = {}, ovl2 = {};
     HANDLE client, server, thread;
     struct io_cb_ctx userdata;
+    const char out[1] = "";
     char in[1], in2[1];
-    const char out[1];
     NTSTATUS status;
     DWORD ret_size;
     TP_POOL *pool;
@@ -2281,11 +2291,11 @@ static void CALLBACK kernel32_io_cb(TP_CALLBACK_INSTANCE *instance, void *userda
 static void test_kernel32_tp_io(void)
 {
     TP_CALLBACK_ENVIRON environment = {.Version = 1};
-    OVERLAPPED ovl = {0}, ovl2 = {0};
+    OVERLAPPED ovl = {}, ovl2 = {};
     HANDLE client, server, thread;
     struct io_cb_ctx userdata;
+    const char out[1] = "";
     char in[1], in2[1];
-    const char out[1];
     NTSTATUS status;
     DWORD ret_size;
     TP_POOL *pool;
@@ -2410,6 +2420,92 @@ static void test_kernel32_tp_io(void)
     pTpReleasePool(pool);
 }
 
+static void test_tp_wait_early_closure(void)
+{
+    TP_CALLBACK_ENVIRON environment;
+    TP_WAIT *wait1, *wait2;
+    struct wait_info info;
+    HANDLE semaphores[2];
+    LARGE_INTEGER when;
+    HANDLE semaphore;
+    NTSTATUS status;
+    TP_POOL *pool;
+    HANDLE timer;
+    DWORD result;
+
+    semaphores[0] = CreateSemaphoreW(NULL, 0, 2, NULL);
+    ok(semaphores[0] != NULL, "failed to create semaphore\n");
+    semaphores[1] = CreateSemaphoreW(NULL, 0, 1, NULL);
+    ok(semaphores[1] != NULL, "failed to create semaphore\n");
+    semaphore = CreateSemaphoreW(NULL, 0, 1, NULL);
+    ok(semaphore != NULL, "failed to create semaphore\n");
+    timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+    ok(timer != NULL, "failed to create waitable timer\n");
+    info.semaphore = semaphore;
+
+    /* allocate new threadpool */
+    pool = NULL;
+    status = pTpAllocPool(&pool, NULL);
+    ok(!status, "TpAllocPool failed with status %lx\n", status);
+    ok(pool != NULL, "expected pool != NULL\n");
+
+    /* allocate new wait items */
+    memset(&environment, 0, sizeof(environment));
+    environment.Version = 1;
+    environment.Pool = pool;
+
+    wait1 = NULL;
+    status = pTpAllocWait(&wait1, wait_cb, &info, &environment);
+    ok(!status, "TpAllocWait failed with status %lx\n", status);
+    ok(wait1 != NULL, "expected wait1 != NULL\n");
+
+    wait2 = NULL;
+    status = pTpAllocWait(&wait2, wait_cb, &info, &environment);
+    ok(!status, "TpAllocWait failed with status %lx\n", status);
+    ok(wait2 != NULL, "expected wait2 != NULL\n");
+
+    /* waitable timer closed immediately, and a semaphore */
+    when.QuadPart = (ULONGLONG)100 * -10000;
+    status = NtSetTimer(timer, &when, NULL, NULL, FALSE, 0, NULL);
+    ok(!status, "NtSetTimer returned status %lx\n", status);
+    info.userdata = 0;
+    pTpSetWait(wait1, timer, NULL);
+    CloseHandle(timer);
+    pTpSetWait(wait2, semaphores[0], NULL);
+    result = WaitForSingleObject(semaphore, 200);
+    ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %#lx\n", result);
+    ok(info.userdata == 1, "expected info.userdata = 1, got %lu\n", info.userdata);
+    ReleaseSemaphore(semaphores[0], 1, NULL);
+    result = WaitForSingleObject(semaphore, 200);
+    ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %#lx\n", result);
+    ok(info.userdata == 2, "expected info.userdata = 2, got %lu\n", info.userdata);
+    result = WaitForSingleObject(semaphores[0], 0);
+    ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %#lx\n", result);
+
+    /* two semaphores, the first closed immediately */
+    info.userdata = 0;
+    when.QuadPart = (ULONGLONG)200 * -10000;
+    pTpSetWait(wait1, semaphores[0], &when);
+    CloseHandle(semaphores[0]);
+    pTpSetWait(wait2, semaphores[1], NULL);
+    ReleaseSemaphore(semaphores[1], 1, NULL);
+    result = WaitForSingleObject(semaphore, 100);
+    ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %#lx\n", result);
+    ok(info.userdata == 1, "expected info.userdata = 1, got %lu\n", info.userdata);
+    result = WaitForSingleObject(semaphores[1], 0);
+    ok(result == WAIT_TIMEOUT, "WaitForSingleObject returned %#lx\n", result);
+    result = WaitForSingleObject(semaphore, 300);
+    ok(result == WAIT_OBJECT_0, "WaitForSingleObject returned %#lx\n", result);
+    ok(info.userdata == 0x10001, "expected info.userdata = 0x10001, got %lu\n", info.userdata);
+
+    /* cleanup */
+    pTpReleaseWait(wait1);
+    pTpReleaseWait(wait2);
+    pTpReleasePool(pool);
+    CloseHandle(semaphores[1]);
+    CloseHandle(semaphore);
+}
+
 START_TEST(threadpool)
 {
     test_RtlQueueWorkItem();
@@ -2431,4 +2527,5 @@ START_TEST(threadpool)
     test_tp_multi_wait();
     test_tp_io();
     test_kernel32_tp_io();
+    test_tp_wait_early_closure();
 }

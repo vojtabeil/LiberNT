@@ -2,8 +2,16 @@
 spec2def(shell32_apitest.exe shell32_apitest.spec)
 
 list(APPEND SOURCE
+    WindowPropertyStore.cpp
     AddCommas.cpp
     AssocCreateElement.cpp
+    AssocCreateForClasses.cpp
+    DefaultProperties.cpp
+    ILLoadFromStreamEx.cpp
+    ItemPropertyStores.cpp
+    LocalizedName.cpp
+    SHAssocEnumHandlers.cpp
+    SHGetDriveMedia.cpp
     CFSFolder.cpp
     CheckEscapes.cpp
     CIDLData.cpp
@@ -16,21 +24,30 @@ list(APPEND SOURCE
     Control_RunDLLW.cpp
     DragDrop.cpp
     ExtractIconEx.cpp
+    FileTypeName.cpp
     FindExecutable.cpp
     GetDisplayNameOf.cpp
     GUIDFromString.cpp
+    IconPositions.cpp
     LockServer.cpp
     Int64ToString.cpp
-    IQueryAssociations.cpp
     IShellFolderViewCB.cpp
     ItemIDList.cpp
     #OpenAs_RunDLL.cpp # Test hangs on Win 2003
     PathIsEqualOrSubFolder.cpp
+    PathIsSlow.cpp
     PathIsTemporary.cpp
     PathMakeUniqueName.cpp
     PathProcessCommand.cpp
     PathResolve.cpp
+    PreviewHandler.cpp
+    ProgramFilesDir.cpp
+    SHGetFolderPathToken.cpp
     RealShellExecuteEx.cpp
+    RecentDocs.cpp
+    RegItemDisplayName.cpp
+    RegItemParse.cpp
+    SearchFolder.cpp
     SHAppBarMessage.cpp
     SHChangeNotify.cpp
     SHCreateDataObject.cpp
@@ -48,19 +65,27 @@ list(APPEND SOURCE
     #ShellExec_RunDLL.cpp # Broke on Windows
     #ShellExecCmdLine.cpp # Broke on Windows
     ShellExecuteEx.cpp
+    ShellExecuteLink.cpp
     #ShellExecuteW.cpp # Broke on Windows
     ShellHook.cpp
     ShellInfo.cpp
+    ShellItemProperties.cpp
+    Shell_NotifyIconGetRect.cpp
     ShellState.cpp
     SHGetAttributesFromDataObject.cpp
     SHGetUserDisplayName.cpp
     SHLimitInputEdit.cpp
+    SHOpenFolderAndSelectItems.cpp
     SHSetUnreadMailCountW.cpp
     StrRStr.cpp
+    Thumbnails.cpp
     menu.cpp
     shelltest.cpp)
 
 list(APPEND PCH_SKIP_SOURCE
+    ModernShell.c
+    StartMenuPin.c
+    Win81Ordinals.c
     testlist.c)
 
 add_executable(shell32_apitest
@@ -77,7 +102,7 @@ set_target_properties(shell32_apitest
 target_link_libraries(shell32_apitest wine uuid ${PSEH_LIB} cpprt atl_classes)
 set_module_type(shell32_apitest win32cui)
 target_compile_definitions(shell32_apitest PRIVATE UNICODE _UNICODE)
-add_importlibs(shell32_apitest user32 gdi32 shell32 shlwapi ole32 oleaut32 advapi32 shlwapi msvcrt kernel32 ntdll)
+add_importlibs(shell32_apitest user32 gdi32 shell32 shlwapi ole32 oleaut32 advapi32 shlwapi propsys msvcrt kernel32 ntdll)
 add_pch(shell32_apitest shelltest.h "${PCH_SKIP_SOURCE}")
 add_rostests_file(TARGET shell32_apitest)
 
@@ -88,3 +113,17 @@ set_module_type(shell32_apitest_sub win32gui UNICODE)
 add_importlibs(shell32_apitest_sub msvcrt kernel32 user32 shell32 shlwapi ole32)
 add_rostests_file(TARGET shell32_apitest_sub SUBDIR testdata)
 add_dependencies(shell32_apitest shell32_apitest_sub)
+
+add_executable(folder_execute_helper FolderExecuteHelper.c)
+set_module_type(folder_execute_helper win32cui UNICODE)
+add_importlibs(folder_execute_helper msvcrt kernel32)
+add_rostests_file(TARGET folder_execute_helper SUBDIR testdata)
+add_dependencies(shell32_apitest folder_execute_helper)
+
+add_executable(folder_execute_apitest FolderExecute.cpp FolderExecuteTestlist.c)
+target_compile_definitions(folder_execute_apitest PRIVATE HAVE_APITEST UNICODE _UNICODE)
+target_link_libraries(folder_execute_apitest wine uuid cpprt atl_classes)
+set_module_type(folder_execute_apitest win32cui)
+add_importlibs(folder_execute_apitest shell32 shlwapi ole32 advapi32 msvcrt kernel32 ntdll)
+add_rostests_file(TARGET folder_execute_apitest)
+add_dependencies(folder_execute_apitest folder_execute_helper)

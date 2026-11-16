@@ -105,6 +105,7 @@ RunSetupThreadProc(
     TRACE("Should run '%s' now\n", debugstr_w(CommandLine));
 
     SwitchDesktop(WLSession->ApplicationDesktop);
+    RemoveStatusMessage(WLSession);
 
     /* Start process */
     StartupInfo.cb = sizeof(StartupInfo);
@@ -142,6 +143,9 @@ RunSetupThreadProc(
     CloseHandle(ProcessInformation.hProcess);
 
     // SwitchDesktop(WLSession->WinlogonDesktop);
+
+    if (GetSetupType() == 0)
+        PostMessageW(WLSession->SASWindow, WL_WM_SETUP_DONE, 0, 0);
 
     TRACE ("RunSetup() done\n");
 

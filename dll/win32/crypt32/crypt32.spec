@@ -124,6 +124,7 @@
 @ stub CryptExportPKCS8
 @ stdcall CryptExportPublicKeyInfo(long long long ptr ptr)
 @ stdcall CryptExportPublicKeyInfoEx(long long long str long ptr ptr ptr)
+@ stdcall -stub CryptExportPublicKeyInfoFromBCryptKeyHandle(ptr long str long ptr ptr ptr)
 @ stdcall CryptFindCertificateKeyProvInfo(ptr long ptr)
 @ stdcall CryptFindLocalizedName(wstr)
 @ stdcall CryptFindOIDInfo(long ptr long)
@@ -137,25 +138,25 @@
 @ stdcall CryptGetOIDFunctionAddress(long long str long ptr ptr)
 @ stdcall CryptGetOIDFunctionValue(long str str wstr ptr ptr ptr)
 @ stdcall CryptHashCertificate(long long long ptr long ptr ptr)
-@ stdcall -version=0x600+ CryptHashCertificate2(wstr long ptr ptr long ptr ptr)
+@ stdcall CryptHashCertificate2(wstr long ptr ptr long ptr ptr)
 @ stdcall CryptHashMessage(ptr long long ptr ptr ptr ptr ptr ptr)
 @ stdcall CryptHashPublicKeyInfo(long long long long ptr ptr ptr)
 @ stdcall CryptHashToBeSigned(ptr long ptr long ptr ptr)
 @ stub CryptImportPKCS8
 @ stdcall CryptImportPublicKeyInfo(long long ptr ptr)
 @ stdcall CryptImportPublicKeyInfoEx(long long ptr long long ptr ptr)
-@ stdcall -version=0x600+ CryptImportPublicKeyInfoEx2(long ptr long ptr ptr)
+@ stdcall CryptImportPublicKeyInfoEx2(long ptr long ptr ptr)
 @ stdcall CryptInitOIDFunctionSet(str long)
 @ stdcall CryptInstallOIDFunctionAddress(ptr long str long ptr long)
 @ stub CryptLoadSip
 @ stdcall CryptMemAlloc(long)
 @ stdcall CryptMemFree(ptr)
 @ stdcall CryptMemRealloc(ptr long)
-@ stub CryptMsgCalculateEncodedLength
+@ stdcall CryptMsgCalculateEncodedLength(long long long ptr str long)
 @ stdcall CryptMsgClose(ptr)
 @ stdcall CryptMsgControl(ptr long long ptr)
-@ stub CryptMsgCountersign
-@ stub CryptMsgCountersignEncoded
+@ stdcall CryptMsgCountersign(ptr long long ptr)
+@ stdcall CryptMsgCountersignEncoded(long ptr long long ptr ptr ptr)
 @ stdcall CryptMsgDuplicate(ptr)
 @ stdcall CryptMsgEncodeAndSignCTL(long ptr ptr long ptr ptr)
 @ stdcall CryptMsgGetAndVerifySigner(ptr long ptr long ptr ptr)
@@ -172,8 +173,10 @@
 @ stdcall CryptRegisterDefaultOIDFunction(long str long wstr)
 @ stdcall CryptRegisterOIDFunction(long str str wstr str)
 @ stdcall CryptRegisterOIDInfo(ptr long)
+@ stdcall -stub CryptRetrieveTimeStamp(wstr long long str ptr ptr long ptr ptr ptr)
 @ stdcall CryptSIPAddProvider(ptr)
 @ stdcall CryptSIPCreateIndirectData(ptr ptr ptr)
+@ stdcall CryptSIPGetCaps(ptr ptr)
 @ stdcall CryptSIPGetSignedDataMsg(ptr ptr long ptr ptr)
 @ stdcall CryptSIPLoad(ptr long ptr)
 @ stdcall CryptSIPPutSignedDataMsg(ptr long ptr long ptr)
@@ -207,6 +210,7 @@
 @ stdcall CryptVerifyMessageSignature(ptr long ptr long ptr ptr ptr)
 @ stub CryptVerifyMessageSignatureWithKey
 @ stub CryptVerifySignatureU
+@ stdcall -stub CryptVerifyTimeStampSignature(ptr long ptr long ptr ptr ptr ptr)
 @ stdcall I_CertUpdateStore(ptr ptr long long)
 @ stdcall I_CryptAllocTls()
 @ stdcall I_CryptCreateLruCache(ptr ptr)

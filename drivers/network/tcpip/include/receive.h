@@ -16,7 +16,6 @@
 typedef struct IP_FRAGMENT {
     LIST_ENTRY ListEntry; /* Entry on list */
     PNDIS_PACKET Packet;  /* NDIS packet containing fragment data */
-    BOOLEAN ReturnPacket; /* States whether to call NdisReturnPackets */
     UINT PacketOffset;    /* Offset into NDIS packet where data is */
     UINT Offset;          /* Offset into datagram where this fragment is */
     UINT Size;            /* Size of this fragment */
@@ -33,6 +32,8 @@ typedef struct IPDATAGRAM_HOLE {
 typedef struct IPDATAGRAM_REASSEMBLY {
     LIST_ENTRY ListEntry;        /* Entry on list */
     KSPIN_LOCK Lock;             /* Protecting spin lock */
+    LONG RefCount;               /* List and active user references */
+    BOOLEAN Removed;             /* Entry is no longer discoverable */
     UINT DataSize;               /* Size of datagram data area */
     IP_ADDRESS SrcAddr;          /* Source address */
     IP_ADDRESS DstAddr;          /* Destination address */

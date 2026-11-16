@@ -8,7 +8,6 @@
 #include "objects.h"
 
 #include <wine/debug.h>
-WINE_DEFAULT_DEBUG_CHANNEL(shdocvw);
 
 CFavBand::CFavBand()
 {
@@ -71,7 +70,7 @@ BOOL CFavBand::_WantsRootItem()
 HRESULT CFavBand::_CreateToolbar(HWND hwndParent)
 {
 #define IDB_SHELL_EXPLORER_SM 216 // Borrowed from browseui.dll
-    HINSTANCE hinstBrowseUI = LoadLibraryExW(L"browseui.dll", NULL, LOAD_LIBRARY_AS_DATAFILE);
+    HINSTANCE hinstBrowseUI = LoadLibraryExW(L"explorerframe.dll", NULL, LOAD_LIBRARY_AS_DATAFILE);
     ATLASSERT(hinstBrowseUI);
     HBITMAP hbmToolbar = NULL;
     if (hinstBrowseUI)

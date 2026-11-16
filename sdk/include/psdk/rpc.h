@@ -1,5 +1,5 @@
 
-#if !defined( RPC_NO_WINDOWS_H ) && !defined( MAC ) && !defined( _MAC )
+#if !defined( RPC_NO_WINDOWS_H ) && !defined( MAC ) && !defined( _MAC ) && !defined(_KRPCENV_)
 #ifndef _INC_WINDOWS
 #include <windows.h>
 #endif /* _INC_WINDOWS */
@@ -20,7 +20,7 @@ extern "C" {
 #if defined( MAC ) || defined( _MAC ) || defined(__powerpc__) && !defined(__REACTOS__)
     #define __RPC_MAC__
     #define __RPC_WIN32__
-    #include <pshpack2.h>
+    #pragma pack(push, 2)
 
 #else
     #if defined(_M_IA64) || defined(_M_AMD64) || defined(_WIN64)
@@ -33,7 +33,7 @@ extern "C" {
 #include <basetsd.h>
 
 #if defined(__RPC_WIN64__)
-    #include <pshpack8.h>
+    #pragma pack(push, 8)
 #endif
 
 #ifndef __MIDL_USER_DEFINED
@@ -110,13 +110,15 @@ typedef int RPC_STATUS;
         #define UNALIGNED
     #endif
 
-    #include <poppack.h>
+    #pragma pack(pop)
 #else
     #include <rpcdce.h>
     /* #include <rpcnsi.h> */
     #include <rpcnterr.h>
     #include <excpt.h>
+#if !defined(_KRPCENV_)
     #include <winerror.h>
+#endif
 
     #define RpcTryExcept _SEH2_TRY
     #define RpcExcept(expr) _SEH2_EXCEPT((expr))
@@ -129,10 +131,10 @@ typedef int RPC_STATUS;
 #endif
 
 #if defined(__RPC_WIN64__)
-    #include <poppack.h>
+    #pragma pack(pop)
 #endif
 
-#ifndef RPC_NO_WINDOWS_H
+#if !defined(RPC_NO_WINDOWS_H) && !defined(_KRPCENV_)
 #include <rpcasync.h>
 #endif
 

@@ -31,6 +31,10 @@
 #include "cryptres.h"
 #include "wine/debug.h"
 
+#ifdef __REACTOS__
+#define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
+#endif
+
 WINE_DEFAULT_DEBUG_CHANNEL(cryptdlg);
 
 static HINSTANCE hInstance;

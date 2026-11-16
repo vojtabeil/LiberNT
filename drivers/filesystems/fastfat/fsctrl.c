@@ -662,7 +662,7 @@ Return Value:
 
 {
     BOOLEAN Wait;
-    NTSTATUS Status;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
     PIRP_CONTEXT IrpContext = NULL;
 
     BOOLEAN TopLevel;
@@ -902,16 +902,17 @@ Return Value:
     PDIRENT Dirent;
     ULONG ByteOffset;
 
-    BOOLEAN MountNewVolume = FALSE;
-    BOOLEAN WeClearedVerifyRequiredBit = FALSE;
-    BOOLEAN DoARemount = FALSE;
+    /* These values are changed in the try block and consumed by finally. */
+    BOOLEAN _SEH2_VOLATILE MountNewVolume = FALSE;
+    BOOLEAN _SEH2_VOLATILE WeClearedVerifyRequiredBit = FALSE;
+    BOOLEAN _SEH2_VOLATILE DoARemount = FALSE;
 
-    PVCB OldVcb = NULL;
+    PVCB _SEH2_VOLATILE OldVcb = NULL;
     PVPB OldVpb = NULL;
 
-    PDEVICE_OBJECT RealDevice = NULL;
-    PVOLUME_DEVICE_OBJECT VolDo = NULL;
-    PVCB Vcb = NULL;
+    PDEVICE_OBJECT _SEH2_VOLATILE RealDevice = NULL;
+    PVOLUME_DEVICE_OBJECT _SEH2_VOLATILE VolDo = NULL;
+    PVCB _SEH2_VOLATILE Vcb = NULL;
     PFILE_OBJECT RootDirectoryFile = NULL;
 
     PLIST_ENTRY Links;
@@ -1245,7 +1246,10 @@ Return Value:
             Vcb->VolumeGuidPath.Length = Vcb->VolumeGuidPath.MaximumLength = 0;
         }
 
-        IoVolumeDeviceToGuidPath( Vcb->TargetDeviceObject, &Vcb->VolumeGuidPath );
+        if (!NT_SUCCESS(IoVolumeDeviceToGuidPath( Vcb->TargetDeviceObject, &Vcb->VolumeGuidPath ))) {
+
+            NOTHING;
+        }
 #endif
 
         //
@@ -5039,7 +5043,7 @@ Return Value:
     ULONG EndingCluster;
     ULONG InputBufferLength;
     ULONG OutputBufferLength;
-    LARGE_INTEGER StartingLcn;
+    LARGE_INTEGER StartingLcn = {0};
     PVOLUME_BITMAP_BUFFER OutputBuffer;
 
     PAGED_CODE();
@@ -5296,7 +5300,7 @@ Return Value:
     ULONG Run;
     ULONG RunCount;
     ULONG StartingRun;
-    LARGE_INTEGER StartingVcn;
+    LARGE_INTEGER StartingVcn = {0};
 
     ULONG InputBufferLength;
     ULONG OutputBufferLength;
@@ -5373,7 +5377,7 @@ Return Value:
 
             (VOID)FatAcquireExclusiveFcb( IrpContext, FcbOrDcb );
         }
-    } else if ((TypeOfOpen == UserVolumeOpen )) {
+    } else if (TypeOfOpen == UserVolumeOpen) {
 
         if ((Ccb == NULL) || !FlagOn( Ccb->Flags, CCB_FLAG_MANAGE_VOLUME_ACCESS )) {
 
@@ -5428,7 +5432,7 @@ Return Value:
             AllocationSize = FcbOrDcb->Header.AllocationSize.LowPart;
             McbToUse = &FcbOrDcb->Mcb;
 
-        } else if ((TypeOfOpen == UserVolumeOpen )) {
+        } else if (TypeOfOpen == UserVolumeOpen) {
 
             FatQuickVerifyVcb( IrpContext, Vcb );
 
@@ -5614,7 +5618,7 @@ Return Value:
         if( (TypeOfOpen == UserFileOpen) || (TypeOfOpen == UserDirectoryOpen) ) {
 
             FatReleaseFcb( IrpContext, FcbOrDcb );
-        } else if ((TypeOfOpen == UserVolumeOpen )) {
+        } else if (TypeOfOpen == UserVolumeOpen) {
 
             FatReleaseVcb(IrpContext, Vcb);
         }
@@ -7165,7 +7169,7 @@ Return Value:
 
     RtlZeroMemory( RetrievalPointerBase, BufferLength );
 
-    try {
+    _SEH2_TRY {
 
         FatAcquireSharedVcb(IrpContext, Vcb);
         FatQuickVerifyVcb(IrpContext, Vcb);
@@ -7173,11 +7177,11 @@ Return Value:
         RetrievalPointerBase->FileAreaOffset.QuadPart = Vcb->AllocationSupport.FileAreaLbo >> Vcb->AllocationSupport.LogOfBytesPerSector;
         Irp->IoStatus.Information = sizeof( RETRIEVAL_POINTER_BASE );
 
-    } finally {
+    } _SEH2_FINALLY {
 
         FatReleaseVcb(IrpContext, Vcb);
 
-    }
+    } _SEH2_END;
 
     FatCompleteRequest( IrpContext, Irp, STATUS_SUCCESS );
 
@@ -7271,7 +7275,7 @@ Return Value:
 
     RtlZeroMemory( BootAreaInfo, BufferLength );
 
-    try {
+    _SEH2_TRY {
 
         FatAcquireSharedVcb(IrpContext, Vcb);
         FatQuickVerifyVcb(IrpContext, Vcb);
@@ -7289,10 +7293,10 @@ Return Value:
 
         Irp->IoStatus.Information = sizeof( BOOT_AREA_INFO );
 
-    } finally {
+    } _SEH2_FINALLY {
 
         FatReleaseVcb(IrpContext, Vcb);
-    }
+    } _SEH2_END;
 
     FatCompleteRequest( IrpContext, Irp, STATUS_SUCCESS );
     return STATUS_SUCCESS;
@@ -7761,7 +7765,7 @@ Return Value:
         return STATUS_INVALID_PARAMETER;
     }
 
-    try {
+    _SEH2_TRY {
 
         //
         //  Acquire the FCB exclusively to synchronize with coherency flush
@@ -7796,12 +7800,12 @@ Return Value:
 
         try_exit: NOTHING;
 
-    } finally {
+    } _SEH2_FINALLY {
 
         if (FcbAcquired) {
             FatReleaseFcb( IrpContext, Fcb );
         }
-    }
+    } _SEH2_END;
 
     //
     //  Complete the irp if we terminated normally.

@@ -57,6 +57,8 @@ THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR I
 #include <tdi_proto.h>
 #include <tdiconn.h>
 
+#include "wskname.h"
+
 #define TAG_NETIO 'OIEN'
 
 #ifndef TAG_AFD_TDI_CONNECTION_INFORMATION
@@ -341,12 +343,22 @@ DereferenceSocket(_In_ PWSK_SOCKET_INTERNAL Socket)
     DereferenceSocketSynchronous(Socket);
 }
 
+NTSTATUS
+WfpCreateDevice(
+    _In_ PDRIVER_OBJECT DriverObject);
+
 NTSTATUS NTAPI
 DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING RegistryPath)
 {
+    NTSTATUS Status;
+
     FUNCTION_TRACE;
 
-    return STATUS_SUCCESS;
+    Status = WfpCreateDevice(DriverObject);
+    if (!NT_SUCCESS(Status))
+        return Status;
+
+    return WskNameCreateDevice(DriverObject);
 }
 
 static NTSTATUS WSKAPI
@@ -489,6 +501,7 @@ ListenComplete(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp, _In_ PVOID Conte
         (PSOCKADDR)(&((PTRANSPORT_ADDRESS)ListenContext->ReturnConnectionInfo->RemoteAddress)->Address[0].AddressType);
     PVOID AcceptSocketContext;
     const WSK_CLIENT_CONNECTION_DISPATCH *AcceptSocketDispatch;
+    BOOLEAN Requeue = Irp->PendingReturned || NT_SUCCESS(Irp->IoStatus.Status);
     NTSTATUS Status;
 
     FUNCTION_TRACE;
@@ -535,7 +548,8 @@ ListenComplete(_In_ PDEVICE_OBJECT DeviceObject, _In_ PIRP Irp, _In_ PVOID Conte
      * This is done in a separate thread at IRQL = PASSIVE_LEVEL
      */
 
-    QueueListening(ListenSocket);
+    if (Requeue)
+        QueueListening(ListenSocket);
 
     return STATUS_SUCCESS;
 }
@@ -607,14 +621,15 @@ StartListening(_In_ PWSK_SOCKET_INTERNAL ListenSocket)
     /* pass the ConnectionFile from accept socket, not from ListenSocket ... */
     status = TdiListen(&tdiIrp, AcceptSocket->ConnectionFile, &lc->RequestConnectionInfo, &lc->ReturnConnectionInfo, ListenComplete, lc);
 
-    if (!NT_SUCCESS(status))
+    if (tdiIrp == NULL)
     {
         ExFreePoolWithTag(lc->ReturnConnectionInfo, TAG_NETIO);
         DereferenceSocket(ListenSocket);
         DereferenceSocket(AcceptSocket);
         goto err_out_free_lc_and_req_conn_info;
     }
-    ListenSocket->ListenIrp = tdiIrp;
+    if (status == STATUS_PENDING)
+        ListenSocket->ListenIrp = tdiIrp;
 
     return STATUS_PENDING;
 
@@ -862,6 +877,7 @@ WskBind(_In_ PWSK_SOCKET SocketParam, _In_ PSOCKADDR LocalAddress, _Reserved_ UL
     }
     if (Socket->LocalAddressHandle != NULL)
     {
+        ExFreePoolWithTag(ta, TAG_NETIO);
         status = STATUS_INVALID_PARAMETER;
         goto err_out;
     }
@@ -1458,7 +1474,10 @@ static WSK_PROVIDER_DISPATCH provider_dispatch = {
     .Reserved = 0,
     .WskSocket = WskSocket,
     .WskSocketConnect = WskSocketConnect,
-    .WskControlClient = WskControlClient
+    .WskControlClient = WskControlClient,
+    .WskGetAddressInfo = WskGetAddressInfo,
+    .WskFreeAddressInfo = WskFreeAddressInfo,
+    .WskGetNameInfo = WskGetNameInfo
 };
 
 NTSTATUS WSKAPI
@@ -1499,4 +1518,52 @@ WskDeregister(_In_ PWSK_REGISTRATION reg)
 
     reg->ReservedRegistrationState = 0;
     reg->ReservedRegistrationContext = NULL;
+}
+
+NTSTATUS
+NTAPI
+NetioSetTriageBlock(VOID)
+{
+    UNIMPLEMENTED;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS
+NTAPI
+NsiEnumerateObjectsAllParametersEx(VOID)
+{
+    UNIMPLEMENTED;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS
+NTAPI
+NsiRegisterChangeNotificationEx(VOID)
+{
+    UNIMPLEMENTED;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS
+NTAPI
+NsiSetAllParametersEx(VOID)
+{
+    UNIMPLEMENTED;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS
+NTAPI
+NsiSetObjectSecurity(VOID)
+{
+    UNIMPLEMENTED;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS
+NTAPI
+NsiSetParameterEx(VOID)
+{
+    UNIMPLEMENTED;
+    return STATUS_NOT_IMPLEMENTED;
 }

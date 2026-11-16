@@ -17,7 +17,7 @@
  * License along with this library; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
-#include <locale.h>
+#include "include/locale.h"
 #include "msvcrt.h"
 #include "winternl.h"
 
@@ -142,8 +142,9 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
 #endif
     break;
   case DLL_PROCESS_DETACH:
-    msvcrt_free_io();
+    _flushall();
     if (lpvReserved) break;
+    msvcrt_free_io();
     msvcrt_free_popen_data();
     msvcrt_free_locks();
     msvcrt_free_console();

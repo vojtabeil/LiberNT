@@ -7,6 +7,7 @@
 #define COM_NO_WINDOWS_H
 #define COBJMACROS
 #define CONST_VTABLE
+#define OEMRESOURCE
 
 #include <stdio.h>
 
@@ -19,17 +20,11 @@
 #include <objbase.h>
 #include <wine/commctrl.h>
 
-#include "msg.h"
-#include "resources.h"
-#include "v6util.h"
-
 #ifdef __REACTOS__
 #include <ole2.h>
 
 #define WM_KEYF1 0x004d
 #define WM_CTLCOLOR 0x0019
-
-#define WC_DIALOG       (MAKEINTATOM(0x8002))
 #endif
 
 #endif /* !_COMCTL32_WINETEST_PRECOMP_H_ */

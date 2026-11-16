@@ -50,6 +50,9 @@ struct registered_class
     unsigned int cookie;
     PMInterfacePointer object;
     unsigned int single_use : 1;
+#ifdef __REACTOS__
+    HANDLE process;
+#endif
 };
 
 static CRITICAL_SECTION registered_classes_cs = { NULL, -1, 0, 0, 0, 0 };
@@ -74,6 +77,18 @@ HRESULT __cdecl irpcss_server_register(handle_t h, const GUID *clsid, unsigned i
     entry->object->ulCntData = object->ulCntData;
     memcpy(&entry->object->abData, object->abData, object->ulCntData);
     *cookie = entry->cookie = InterlockedIncrement(&next_cookie);
+#ifdef __REACTOS__
+    {
+        ULONG pid;
+
+        /* RpcSs runs as Network Service, so open the server process with its own token */
+        if (I_RpcBindingInqLocalClientPID(h, &pid) == RPC_S_OK && RpcImpersonateClient(h) == RPC_S_OK)
+        {
+            entry->process = OpenProcess(SYNCHRONIZE, FALSE, pid);
+            RpcRevertToSelf();
+        }
+    }
+#endif
 
     EnterCriticalSection(&registered_classes_cs);
     list_add_tail(&registered_classes, &entry->entry);
@@ -85,6 +100,9 @@ HRESULT __cdecl irpcss_server_register(handle_t h, const GUID *clsid, unsigned i
 static void scm_revoke_class(struct registered_class *_class)
 {
     list_remove(&_class->entry);
+#ifdef __REACTOS__
+    if (_class->process) CloseHandle(_class->process);
+#endif
     free(_class->object);
     free(_class);
 }
@@ -113,10 +131,22 @@ HRESULT __cdecl irpcss_get_class_object(handle_t h, const GUID *clsid,
         PMInterfacePointer *object)
 {
     struct registered_class *cur;
+#ifdef __REACTOS__
+    struct registered_class *next;
+#endif
 
     *object = NULL;
 
     EnterCriticalSection(&registered_classes_cs);
+
+#ifdef __REACTOS__
+    LIST_FOR_EACH_ENTRY_SAFE(cur, next, &registered_classes, struct registered_class, entry)
+    {
+        if (!memcmp(clsid, &cur->clsid, sizeof(*clsid)) && cur->process &&
+            WaitForSingleObject(cur->process, 0) == WAIT_OBJECT_0)
+            scm_revoke_class(cur);
+    }
+#endif
 
     LIST_FOR_EACH_ENTRY(cur, &registered_classes, struct registered_class, entry)
     {
@@ -147,6 +177,94 @@ HRESULT __cdecl irpcss_get_thread_seq_id(handle_t h, DWORD *id)
     *id = InterlockedIncrement(&thread_seq_id);
     return S_OK;
 }
+
+#ifdef __REACTOS__
+static HKEY open_appid_key(const GUID *clsid, REGSAM view)
+{
+    WCHAR appid[39], path[MAX_PATH];
+    DWORD type, size = sizeof(appid);
+    HKEY key, result = NULL;
+
+    swprintf(path, ARRAY_SIZE(path),
+             L"Software\\Classes\\CLSID\\{%08lX-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
+             clsid->Data1, clsid->Data2, clsid->Data3, clsid->Data4[0], clsid->Data4[1], clsid->Data4[2],
+             clsid->Data4[3], clsid->Data4[4], clsid->Data4[5], clsid->Data4[6], clsid->Data4[7]);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ | view, &key))
+        return NULL;
+    if (!RegQueryValueExW(key, L"AppID", NULL, &type, (BYTE *)appid, &size) && type == REG_SZ)
+    {
+        appid[ARRAY_SIZE(appid) - 1] = 0;
+        swprintf(path, ARRAY_SIZE(path), L"Software\\Classes\\AppID\\%s", appid);
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, path, 0, KEY_READ | view, &result))
+            result = NULL;
+    }
+    RegCloseKey(key);
+    return result;
+}
+
+HRESULT __cdecl irpcss_start_local_service(handle_t h, const GUID *clsid)
+{
+    static const REGSAM views[] = { 0, KEY_WOW64_32KEY };
+    WCHAR service[257], *params = NULL;
+    SC_HANDLE manager, handle;
+    DWORD type, size, error = ERROR_SUCCESS, i;
+    HKEY key = NULL;
+
+    for (i = 0; i < ARRAY_SIZE(views) && !key; i++)
+    {
+        if (!(key = open_appid_key(clsid, views[i])))
+            continue;
+        size = sizeof(service) - sizeof(WCHAR);
+        if (RegQueryValueExW(key, L"LocalService", NULL, &type, (BYTE *)service, &size) || type != REG_SZ)
+        {
+            RegCloseKey(key);
+            key = NULL;
+        }
+    }
+    if (!key)
+        return REGDB_E_CLASSNOTREG;
+    service[size / sizeof(WCHAR)] = 0;
+
+    if (!RegQueryValueExW(key, L"ServiceParameters", NULL, &type, NULL, &size) && type == REG_SZ && size &&
+        (params = calloc(1, size + sizeof(WCHAR))))
+    {
+        if (RegQueryValueExW(key, L"ServiceParameters", NULL, &type, (BYTE *)params, &size) || !params[0])
+        {
+            free(params);
+            params = NULL;
+        }
+    }
+    RegCloseKey(key);
+
+    TRACE("starting service %s for %s\n", debugstr_w(service), debugstr_guid(clsid));
+
+    if ((manager = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT)))
+    {
+        if ((handle = OpenServiceW(manager, service, SERVICE_START)))
+        {
+            if (!StartServiceW(handle, params ? 1 : 0, params ? (const WCHAR **)&params : NULL))
+                error = GetLastError();
+            CloseServiceHandle(handle);
+        }
+        else
+        {
+            error = GetLastError();
+        }
+        CloseServiceHandle(manager);
+    }
+    else
+    {
+        error = GetLastError();
+    }
+    free(params);
+
+    if (error == ERROR_SERVICE_ALREADY_RUNNING)
+        error = ERROR_SUCCESS;
+    if (error)
+        WARN("service %s for %s failed to start, error %lu\n", debugstr_w(service), debugstr_guid(clsid), error);
+    return HRESULT_FROM_WIN32(error);
+}
+#endif
 
 static RPC_STATUS RPCSS_Initialize(void)
 {

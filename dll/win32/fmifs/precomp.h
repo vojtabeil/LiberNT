@@ -5,7 +5,7 @@
  * PURPOSE:         Win32 FMIFS API Library Header
  *
  * PROGRAMMERS:     Alex Ionescu (alex@relsoft.net)
- *                  Hervï¿½ Poussineau (hpoussin@reactos.org)
+ *                  Hervé Poussineau (hpoussin@reactos.org)
  */
 
 #ifndef _FMIFS_PCH_
@@ -33,25 +33,18 @@ typedef struct _IFS_PROVIDER
 {
     LIST_ENTRY ListEntry;
 
-    PWSTR Name;
-    PWSTR DllFile;
-
-    HMODULE hModule;
     PULIB_CHKDSK Chkdsk;
     PVOID ChkdskEx;
     PVOID Extend;
     PULIB_FORMAT Format;
     PVOID FormatEx;
 
+    WCHAR Name[1];
 } IFS_PROVIDER, *PIFS_PROVIDER;
 
 /* init.c */
 PIFS_PROVIDER
-LoadProvider(
-    _In_ PWCHAR FileSytem);
-
-BOOLEAN
-UnloadProvider(
-    _In_ PIFS_PROVIDER Provider);
+GetProvider(
+    IN PWCHAR FileSytem);
 
 #endif /* _FMIFS_PCH_ */

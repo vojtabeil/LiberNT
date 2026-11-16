@@ -577,6 +577,7 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
     FILE_REPARSE_POINT_INFORMATION ReparsePointInformation, SavedReparsePointInformation;
     PDEVICE_EXTENSION DeviceExtension = ((PRECONCILE_WORK_ITEM_CONTEXT)Parameter)->DeviceExtension;
     PDEVICE_INFORMATION DeviceInformation = ((PRECONCILE_WORK_ITEM_CONTEXT)Parameter)->DeviceInformation;
+    DEVICE_INFORMATION Snapshot;
 
     /* We're unloading, do nothing */
     if (Unloading)
@@ -597,7 +598,7 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
     }
 
     /* Find the DB to reconcile */
-    KeWaitForSingleObject(&DeviceExtension->DeviceLock, Executive, KernelMode, FALSE, NULL);
+    MmpAcquireDeviceLock(DeviceExtension);
     for (Entry = DeviceExtension->DeviceListHead.Flink;
          Entry != &DeviceExtension->DeviceListHead;
          Entry = Entry->Flink)
@@ -612,7 +613,7 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
     /* If not found, or if removable, bail out */
     if (Entry == &DeviceExtension->DeviceListHead || DeviceInformation->Removable)
     {
-        KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+        MmpReleaseDeviceLock(DeviceExtension);
         goto ReleaseRDS;
     }
 
@@ -620,7 +621,7 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
     Status = IoGetDeviceObjectPointer(&ListDeviceInfo->DeviceName, FILE_READ_ATTRIBUTES, &FileObject, &DeviceObject);
     if (!NT_SUCCESS(Status))
     {
-        KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+        MmpReleaseDeviceLock(DeviceExtension);
         goto ReleaseRDS;
     }
 
@@ -661,12 +662,27 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
         }
     }
 
+    RtlZeroMemory(&Snapshot, sizeof(Snapshot));
+    Snapshot.Migrated = DeviceInformation->Migrated;
+    Snapshot.DeviceName.Length = DeviceInformation->DeviceName.Length;
+    Snapshot.DeviceName.MaximumLength = DeviceInformation->DeviceName.Length;
+    Snapshot.DeviceName.Buffer = AllocatePool(Snapshot.DeviceName.MaximumLength);
+    if (Snapshot.DeviceName.Buffer)
+    {
+        RtlCopyMemory(Snapshot.DeviceName.Buffer, DeviceInformation->DeviceName.Buffer, Snapshot.DeviceName.Length);
+    }
+    MmpReleaseDeviceLock(DeviceExtension);
+    if (!Snapshot.DeviceName.Buffer)
+    {
+        goto ReleaseRDS;
+    }
+
     /* Open the remote database */
-    DatabaseHandle = OpenRemoteDatabase(DeviceInformation, FALSE);
+    DatabaseHandle = OpenRemoteDatabase(&Snapshot, FALSE);
 
     /* Prepare a string with reparse point index */
     ReparseFile.Length = 0;
-    ReparseFile.MaximumLength = DeviceInformation->DeviceName.Length
+    ReparseFile.MaximumLength = Snapshot.DeviceName.Length
                                 + ReparseIndex.Length
                                 + sizeof(UNICODE_NULL);
     ReparseFile.Buffer = AllocatePool(ReparseFile.MaximumLength);
@@ -676,11 +692,11 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
         {
             CloseRemoteDatabase(DatabaseHandle);
         }
-        KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+        FreePool(Snapshot.DeviceName.Buffer);
         goto ReleaseRDS;
     }
 
-    RtlAppendUnicodeStringToString(&ReparseFile, &DeviceInformation->DeviceName);
+    RtlAppendUnicodeStringToString(&ReparseFile, &Snapshot.DeviceName);
     RtlAppendUnicodeStringToString(&ReparseFile, &ReparseIndex);
     ReparseFile.Buffer[ReparseFile.Length / sizeof(WCHAR)] = UNICODE_NULL;
 
@@ -709,7 +725,7 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
             TruncateRemoteDatabase(DatabaseHandle, 0);
             CloseRemoteDatabase(DatabaseHandle);
         }
-        KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+        FreePool(Snapshot.DeviceName.Buffer);
         goto ReleaseRDS;
     }
 
@@ -740,7 +756,7 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
             TruncateRemoteDatabase(DatabaseHandle, 0);
             CloseRemoteDatabase(DatabaseHandle);
         }
-        KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+        FreePool(Snapshot.DeviceName.Buffer);
         goto ReleaseRDS;
     }
 
@@ -749,15 +765,19 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
      */
     if (DatabaseHandle == 0)
     {
-        DatabaseHandle = OpenRemoteDatabase(DeviceInformation, TRUE);
+        if (ReparsePointInformation.Tag == IO_REPARSE_TAG_MOUNT_POINT)
+        {
+            DatabaseHandle = OpenRemoteDatabase(&Snapshot, TRUE);
+        }
         if (DatabaseHandle == 0)
         {
-            KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+            ZwClose(Handle);
+            FreePool(Snapshot.DeviceName.Buffer);
             goto ReleaseRDS;
         }
     }
 
-    KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+    FreePool(Snapshot.DeviceName.Buffer);
 
     /* Reset all the references to our DB entries */
     Offset = 0;
@@ -873,7 +893,7 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
             else
             {
                 /* Query the Unique ID associated to that mount point in case it changed */
-                KeWaitForSingleObject(&DeviceExtension->DeviceLock, Executive, KernelMode, FALSE, NULL);
+                MmpAcquireDeviceLock(DeviceExtension);
                 Status = QueryUniqueIdFromMaster(DeviceExtension, &SymbolicName, &UniqueId);
                 if (!NT_SUCCESS(Status))
                 {
@@ -892,7 +912,7 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
                         goto ReleaseDeviceLock;
                     }
 
-                    KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+                    MmpReleaseDeviceLock(DeviceExtension);
                     FreePool(DatabaseEntry);
                 }
                 /* If the Unique ID didn't change */
@@ -910,7 +930,7 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
                     }
 
                     FreePool(UniqueId);
-                    KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+                    MmpReleaseDeviceLock(DeviceExtension);
                     FreePool(DatabaseEntry);
                 }
                 /* Would, by chance, the Unique ID be present elsewhere? */
@@ -932,7 +952,7 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
                     }
 
                     FreePool(UniqueId);
-                    KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+                    MmpReleaseDeviceLock(DeviceExtension);
                     FreePool(DatabaseEntry);
                 }
                 else
@@ -969,13 +989,12 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
                     Status = AddRemoteDatabaseEntry(DatabaseHandle, DatabaseEntry);
                     if (!NT_SUCCESS(Status))
                     {
-                       FreePool(DatabaseEntry);
                        goto FreeUniqueId;
                     }
 
                     FreePool(UniqueId);
                     FreePool(DatabaseEntry);
-                    KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+                    MmpReleaseDeviceLock(DeviceExtension);
                 }
             }
         }
@@ -984,10 +1003,10 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
             /* We failed finding it remotely
              * So, let's allocate a new remote DB entry
              */
-            KeWaitForSingleObject(&DeviceExtension->DeviceLock, Executive, KernelMode, FALSE, NULL);
+            MmpAcquireDeviceLock(DeviceExtension);
             /* To be able to do so, we need the device Unique ID, ask master */
             Status = QueryUniqueIdFromMaster(DeviceExtension, &SymbolicName, &UniqueId);
-            KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+            MmpReleaseDeviceLock(DeviceExtension);
             if (NT_SUCCESS(Status))
             {
                 /* Allocate a new entry big enough */
@@ -1022,7 +1041,7 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
         }
 
         /* Find info about the device associated associated with the mount point */
-        KeWaitForSingleObject(&DeviceExtension->DeviceLock, Executive, KernelMode, FALSE, NULL);
+        MmpAcquireDeviceLock(DeviceExtension);
         Status = FindDeviceInfo(DeviceExtension, &SymbolicName, FALSE, &ListDeviceInfo);
         if (!NT_SUCCESS(Status))
         {
@@ -1053,14 +1072,14 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
             }
         }
 
-        KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+        MmpReleaseDeviceLock(DeviceExtension);
     }
 
     /* We don't need mount points any longer */
     ZwClose(Handle);
 
     /* Look for the DB again */
-    KeWaitForSingleObject(&DeviceExtension->DeviceLock, Executive, KernelMode, FALSE, NULL);
+    MmpAcquireDeviceLock(DeviceExtension);
     for (Entry = DeviceExtension->DeviceListHead.Flink;
          Entry != &DeviceExtension->DeviceListHead;
          Entry = Entry->Flink)
@@ -1095,7 +1114,7 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
             if (!NT_SUCCESS(Status))
             {
                 FreePool(DatabaseEntry);
-                KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+                MmpReleaseDeviceLock(DeviceExtension);
                 goto CloseRDB;
             }
         }
@@ -1119,16 +1138,17 @@ ReconcileThisDatabaseWithMasterWorker(IN PVOID Parameter)
         DeviceInformation->NoDatabase = FALSE;
     }
 
-    KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+    MmpReleaseDeviceLock(DeviceExtension);
 
     goto CloseRDB;
 
 FreeUniqueId:
     FreePool(UniqueId);
 ReleaseDeviceLock:
-    KeReleaseSemaphore(&DeviceExtension->DeviceLock, IO_NO_INCREMENT, 1, FALSE);
+    MmpReleaseDeviceLock(DeviceExtension);
 FreeDBEntry:
-    FreePool(DatabaseEntry);
+    if (DatabaseEntry != NULL)
+        FreePool(DatabaseEntry);
 FreeVolume:
     FreePool(VolumeName.Buffer);
 CloseReparse:
@@ -1302,11 +1322,10 @@ QueryVolumeName(IN HANDLE RootDirectory,
     OBJECT_ATTRIBUTES ObjectAttributes;
     PFILE_NAME_INFORMATION FileNameInfo;
     PREPARSE_DATA_BUFFER ReparseDataBuffer;
+    UNICODE_STRING Reference;
 
     if (!FileName)
     {
-        UNICODE_STRING Reference;
-
         Reference.Length = Reference.MaximumLength = sizeof(ReparsePointInformation->FileReference);
         Reference.Buffer = (PWSTR)&(ReparsePointInformation->FileReference);
         InitializeObjectAttributes(&ObjectAttributes,
@@ -1882,13 +1901,34 @@ OpenRemoteDatabase(IN PDEVICE_INFORMATION DeviceInformation,
                           NULL,
                           FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN,
                           0,
-                          (!MigrateDatabase || DeviceInformation->Migrated == 0) ? FILE_OPEN_IF : FILE_OPEN,
+                          (MigrateDatabase && DeviceInformation->Migrated == 0) ? FILE_OPEN_IF : FILE_OPEN,
                           FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_ALERT,
                           NULL,
                           0,
                           CreateFileTypeNone,
                           NULL,
                           IO_STOP_ON_SYMLINK | IO_NO_PARAMETER_CHECKING);
+    if (Status == STATUS_OBJECT_PATH_NOT_FOUND &&
+        MigrateDatabase && DeviceInformation->Migrated == 0 &&
+        NT_SUCCESS(RtlCreateSystemVolumeInformationFolder(&DeviceInformation->DeviceName)))
+    {
+        Status = IoCreateFile(&Database,
+                              SYNCHRONIZE | READ_CONTROL | FILE_WRITE_ATTRIBUTES |
+                              FILE_READ_ATTRIBUTES | FILE_WRITE_EA | FILE_READ_EA |
+                              FILE_APPEND_DATA | FILE_WRITE_DATA | FILE_READ_DATA,
+                              &ObjectAttributes,
+                              &IoStatusBlock,
+                              NULL,
+                              FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN,
+                              0,
+                              FILE_OPEN_IF,
+                              FILE_NON_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_ALERT,
+                              NULL,
+                              0,
+                              CreateFileTypeNone,
+                              NULL,
+                              IO_STOP_ON_SYMLINK | IO_NO_PARAMETER_CHECKING);
+    }
     if (Status == STATUS_STOPPED_ON_SYMLINK)
     {
         DPRINT1("Attempt to exploit CVE-2015-1769. See CORE-10216\n");
@@ -1896,6 +1936,11 @@ OpenRemoteDatabase(IN PDEVICE_INFORMATION DeviceInformation,
 
     /* If base it to be migrated and was opened successfully, go ahead */
     if (MigrateDatabase && NT_SUCCESS(Status))
+    {
+        DeviceInformation->Migrated = 1;
+    }
+    else if (MigrateDatabase &&
+             (Status == STATUS_OBJECT_NAME_NOT_FOUND || Status == STATUS_OBJECT_PATH_NOT_FOUND))
     {
         CreateRemoteDatabase(DeviceInformation, &Database);
     }
@@ -2085,7 +2130,7 @@ DeleteNoDriveLetterEntryRoutine(IN PWSTR ValueName,
     }
 
     /* And then, if unique ID matching, delete entry */
-    if (RtlCompareMemory(UniqueId->UniqueId, ValueData, ValueLength) != ValueLength)
+    if (RtlCompareMemory(UniqueId->UniqueId, ValueData, ValueLength) == ValueLength)
     {
         RtlDeleteRegistryValue(RTL_REGISTRY_ABSOLUTE,
                                DatabasePath,

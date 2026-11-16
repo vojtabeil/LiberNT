@@ -16,6 +16,7 @@ EFI_HANDLE GlobalImageHandle;
 EFI_SYSTEM_TABLE *GlobalSystemTable;
 PVOID UefiServiceStack;
 PVOID BasicStack;
+PVOID UefiFirmwareStackFrame;
 
 void _changestack(VOID);
 
@@ -28,9 +29,13 @@ EfiEntry(
 {
     PCSTR CmdLine = ""; // FIXME: Determine a command-line from UEFI boot options
 
-    SystemTable->ConOut->OutputString(SystemTable->ConOut, L"UEFI EntryPoint: Starting freeldr from UEFI");
     GlobalImageHandle = ImageHandle;
     GlobalSystemTable = SystemTable;
+    UefiFirmwareStackFrame = &CmdLine;
+
+#if DBG
+    UefiLogInitialize();
+#endif
 
     /* Load the default settings from the command-line */
     LoadSettings(CmdLine);

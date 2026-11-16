@@ -11,6 +11,9 @@
 const char hex_chars[] = "0123456789abcdef";
 static CHAR currentChecksum = 0;
 
+/* GLOBALS ********************************************************************/
+BOOLEAN gdb_no_ack_mode = FALSE;
+
 /* PRIVATE FUNCTIONS **********************************************************/
 static
 char*
@@ -81,6 +84,20 @@ finish_gdb_packet(void)
     KdpSendByte(hex_chars[(currentChecksum >> 4) & 0xf]);
     KdpSendByte(hex_chars[currentChecksum & 0xf]);
 
+    if (gdb_no_ack_mode)
+    {
+        KD_DEBUGGER_NOT_PRESENT = FALSE;
+        return KdPacketReceived;
+    }
+
+    /*
+     * Once a receive timed out, do not restart the attach timeout for every
+     * boot message. A valid break-in or RSP packet marks the debugger present
+     * again before another acknowledgement is expected.
+     */
+    if (KD_DEBUGGER_NOT_PRESENT)
+        return KdPacketTimedOut;
+
     /* Wait for acknowledgement */
     Status = KdpReceiveByte(&ack);
 
@@ -90,9 +107,33 @@ finish_gdb_packet(void)
         return Status;
     }
 
-    if (ack != '+')
-        return KdPacketNeedsResend;
+    if (ack == 0x03)
+    {
+        gdb_breakin_pending = TRUE;
+        KD_DEBUGGER_NOT_PRESENT = FALSE;
+        return KdPacketReceived;
+    }
 
+    if (ack == '$')
+    {
+        gdb_packet_start_pending = TRUE;
+        KD_DEBUGGER_NOT_PRESENT = FALSE;
+        return KdPacketReceived;
+    }
+
+    if (ack == '-')
+    {
+        KD_DEBUGGER_NOT_PRESENT = FALSE;
+        return KdPacketNeedsResend;
+    }
+
+    if (ack != '+')
+    {
+        KD_DEBUGGER_NOT_PRESENT = TRUE;
+        return KdPacketTimedOut;
+    }
+
+    KD_DEBUGGER_NOT_PRESENT = FALSE;
     return KdPacketReceived;
 }
 
@@ -198,6 +239,8 @@ gdb_send_exception()
 {
     char gdb_out[1024];
     char* ptr = gdb_out;
+    const CHAR* WatchReason;
+    ULONG64 WatchAddress;
     PETHREAD Thread = (PETHREAD)(ULONG_PTR)CurrentStateChange.Thread;
 
     /* Report to GDB */
@@ -213,6 +256,8 @@ gdb_send_exception()
 
     if (CurrentStateChange.NewState == DbgKdLoadSymbolsStateChange)
         ptr += sprintf(ptr, "library:");
+    else if (gdb_get_watchpoint_stop(&WatchReason, &WatchAddress))
+        ptr += sprintf(ptr, "%s:%" PRIx64 ";", WatchReason, WatchAddress);
 
 #if MONOPROCESS
     ptr += sprintf(ptr, "thread:%" PRIxPTR ";",

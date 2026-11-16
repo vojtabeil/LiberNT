@@ -8,7 +8,6 @@
 #include "objects.h"
 
 #include <wine/debug.h>
-WINE_DEFAULT_DEBUG_CHANNEL(shdocvw);
 
 void *operator new(size_t size)
 {
@@ -28,6 +27,9 @@ void operator delete(void *ptr, size_t size)
 BEGIN_OBJECT_MAP(ObjectMap)
     OBJECT_ENTRY(CLSID_SH_FavBand, CFavBand)
     OBJECT_ENTRY(CLSID_ExplorerBand, CExplorerBand)
+    OBJECT_ENTRY(CLSID_ShellDocObjView, CShellDocObjView)
+    OBJECT_ENTRY(CLSID_AdminFolderShortcut, CAdminToolsFolder)
+    OBJECT_ENTRY(CLSID_AttachmentServices, CAttachmentServices)
 END_OBJECT_MAP()
 
 class SHDOCVW_Module : public CComModule
@@ -49,35 +51,10 @@ SHDOCVW_DllCanUnloadNow(VOID)
     return gModule.DllCanUnloadNow();
 }
 
-EXTERN_C HRESULT CMruLongList_CreateInstance(DWORD_PTR dwUnused1, void **ppv, DWORD_PTR dwUnused3);
-EXTERN_C HRESULT CMruPidlList_CreateInstance(DWORD_PTR dwUnused1, void **ppv, DWORD_PTR dwUnused3);
-EXTERN_C HRESULT CMruClassFactory_CreateInstance(REFIID riid, void **ppv);
-
 EXTERN_C HRESULT
 SHDOCVW_DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID *ppv)
 {
-    HRESULT hr = gModule.DllGetClassObject(rclsid, riid, ppv);
-    if (SUCCEEDED(hr))
-        return hr;
-
-    if (IsEqualGUID(riid, IID_IClassFactory) || IsEqualGUID(riid, IID_IUnknown))
-    {
-        if (IsEqualGUID(rclsid, CLSID_MruLongList) ||
-            IsEqualGUID(rclsid, CLSID_MruPidlList))
-        {
-            return CMruClassFactory_CreateInstance(riid, ppv);
-        }
-    }
-    else if (IsEqualGUID(riid, IID_IMruDataList))
-    {
-        return CMruLongList_CreateInstance(0, ppv, 0);
-    }
-    else if (IsEqualGUID(riid, IID_IMruPidlList))
-    {
-        return CMruPidlList_CreateInstance(0, ppv, 0);
-    }
-
-    return CLASS_E_CLASSNOTAVAILABLE;
+    return gModule.DllGetClassObject(rclsid, riid, ppv);
 }
 
 EXTERN_C HRESULT

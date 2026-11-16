@@ -615,6 +615,27 @@ WSKAPI
 WskDeregister(
     _In_ PWSK_REGISTRATION WskRegistration);
 
+/* ------------------------------------------------------------------ */
+/*  WSK 1.1 / Win7 extensions                                         */
+/*  Added on the dev-nt6-1 branch; core surface above is unchanged.   */
+/*  PFN_WSK_RELEASE_DATA_INDICATION_LIST is already declared near     */
+/*  line 328 so it is not repeated here.                              */
+/* ------------------------------------------------------------------ */
+
+/* WSK_BUF_LIST and PFN_WSK_SEND_MESSAGES are declared with the rest of the
+ * core surface above, under the NTDDI_WIN8 guard. */
+
+/* PFN_WSK_CONNECT_EX — Win7 addition: connect with initial send data */
+typedef
+_Must_inspect_result_
+NTSTATUS
+(WSKAPI * PFN_WSK_CONNECT_EX)(
+    _In_ PWSK_SOCKET Socket,
+    _In_ PSOCKADDR RemoteAddress,
+    _In_opt_ PWSK_BUF Buffer,
+    _In_opt_ ULONG Flags,
+    _Inout_ PIRP Irp);
+
 #ifdef __cplusplus
 }
 #endif

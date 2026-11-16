@@ -25,16 +25,16 @@ extern "C" {
 #endif
 
 #ifdef __GNUC__
+#ifndef PACKED
 #define PACKED __attribute__((packed))
+#endif
 #ifndef __declspec
 #define __declspec(e) __attribute__((e))
 #endif
 #ifndef _declspec
 #define _declspec(e) __attribute__((e))
 #endif
-#elif defined(__WATCOMC__)
-#define PACKED
-#else
+#elif !defined(PACKED)
 #define PACKED
 #endif
 
@@ -119,6 +119,11 @@ typedef struct _RECTL {
 } RECTL,*PRECTL,*LPRECTL;
 
 typedef const RECTL *LPCRECTL;
+
+typedef struct APP_LOCAL_DEVICE_ID
+{
+    BYTE value[32];
+} APP_LOCAL_DEVICE_ID;
 
 typedef struct tagPOINT {
 	LONG x;
@@ -263,4 +268,3 @@ typedef struct tagPOINTS {
 #endif
 
 #endif /* _WINDEF_ */
-

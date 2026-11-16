@@ -1,5 +1,6 @@
 #ifndef _WINUSER_H
 #define _WINUSER_H
+#define _WINUSER_
 
 #ifdef __cplusplus
 extern "C" {
@@ -251,6 +252,8 @@ extern "C" {
 #define WS_VISIBLE	0x10000000
 #define WS_VSCROLL	0x200000
 #define MDIS_ALLCHILDSTYLES	1
+
+#define WC_DIALOG MAKEINTATOM(0x8002)
 #define BS_3STATE	5
 #define BS_AUTO3STATE	6
 #define BS_AUTOCHECKBOX	3
@@ -269,6 +272,7 @@ extern "C" {
 #define BS_OWNERDRAW	0xb
 #define BS_TYPEMASK	0xFL
 #define BS_PUSHBUTTON	0
+#define BS_PUSHBOX	0xa
 #define BS_PUSHLIKE	4096
 #define BS_RADIOBUTTON 4
 #define BS_RIGHT	512
@@ -387,6 +391,9 @@ extern "C" {
 #define WS_EX_CONTROLPARENT 0x10000
 #define WS_EX_DLGMODALFRAME 1
 #define WS_EX_LAYERED 0x80000   /* w2k */
+#if (WINVER >= 0x0602)
+#define WS_EX_NOREDIRECTIONBITMAP 0x00200000L
+#endif
 #define WS_EX_LAYOUTRTL 0x400000 /* w98, w2k */
 #define WS_EX_LEFT	0
 #define WS_EX_LEFTSCROLLBAR	0x4000
@@ -715,6 +722,7 @@ extern "C" {
 #define IDI_EXCLAMATION MAKEINTRESOURCE(32515)
 #define IDI_ASTERISK MAKEINTRESOURCE(32516)
 #define IDI_WINLOGO MAKEINTRESOURCE(32517)
+#define IDI_SHIELD MAKEINTRESOURCE(32518)
 #else
 #define IDI_APPLICATION 32512
 #define IDI_HAND 32513
@@ -916,6 +924,13 @@ extern "C" {
 #define USER_TIMER_MAXIMUM  2147483647
 #define USER_TIMER_MINIMUM  10
 
+#if (WINVER >= 0x0601)
+#define TIMERV_DEFAULT_COALESCING 0
+#define TIMERV_NO_COALESCING      0xFFFFFFFF
+#define TIMERV_COALESCING_MIN     1
+#define TIMERV_COALESCING_MAX     0x7FFFFFF5
+#endif
+
 #define MWMO_WAITALL 1
 #define MWMO_ALERTABLE 2
 #define MWMO_INPUTAVAILABLE 4
@@ -1087,6 +1102,9 @@ extern "C" {
 #define ARW_HIDE 8
 #define ARW_TOPLEFT 2
 #define ARW_TOPRIGHT 3
+#define ARW_STARTMASK 3
+#define ARW_STARTRIGHT 1
+#define ARW_STARTTOP 2
 #define ARW_DOWN 4
 #define ARW_LEFT 0
 #define ARW_RIGHT 0
@@ -1201,6 +1219,9 @@ extern "C" {
 #define MOUSEEVENTF_XDOWN       0x0080
 #define MOUSEEVENTF_XUP         0x0100
 #define MOUSEEVENTF_WHEEL       0x0800
+#if (_WIN32_WINNT >= 0x0600)
+#define MOUSEEVENTF_HWHEEL      0x1000
+#endif
 #define MOUSEEVENTF_VIRTUALDESK 0x4000
 #define MOUSEEVENTF_ABSOLUTE    0x8000
 #define PM_NOREMOVE 0
@@ -1586,6 +1607,9 @@ extern "C" {
         #define FE_FONTSMOOTHINGORIENTATIONRGB 0x0001
     #endif
 #endif
+#define SPI_GETCARETTIMEOUT 0x2022
+#define SPI_SETCARETTIMEOUT 0x2023
+
 #if (NTDDI_VERSION >= NTDDI_WIN10_RS4)
 #define SPI_GETHANDEDNESS 0x2024
 #define SPI_SETHANDEDNESS 0x2025
@@ -1629,6 +1653,18 @@ typedef enum tagHANDEDNESS
 #define PBT_APMPOWERSTATUSCHANGE 0x000A
 #define PBT_APMOEMEVENT 0x000B
 #define PBT_APMRESUMEAUTOMATIC 0x0012
+#if (_WIN32_WINNT >= 0x0502)
+#ifndef PBT_POWERSETTINGCHANGE
+#define PBT_POWERSETTINGCHANGE 0x8013
+
+typedef struct {
+    GUID PowerSetting;
+    DWORD DataLength;
+    UCHAR Data[1];
+} POWERBROADCAST_SETTING, *PPOWERBROADCAST_SETTING;
+
+#endif
+#endif
 
 
 /* Window messages */
@@ -1821,7 +1857,9 @@ typedef enum tagHANDEDNESS
 #if (_WIN32_WINNT >= 0x0600)
 #define WM_MOUSEHWHEEL 526
 #endif
-#if (_WIN32_WINNT >= 0x0500)
+#if (_WIN32_WINNT >= 0x0600)
+#define WM_MOUSELAST 526
+#elif (_WIN32_WINNT >= 0x0500)
 #define WM_MOUSELAST 525
 #elif (_WIN32_WINNT >= 0x0400) || (_WIN32_WINDOWS > 0x0400)
 #define WM_MOUSELAST 522
@@ -1852,6 +1890,29 @@ typedef enum tagHANDEDNESS
 #define WM_EXITSIZEMOVE 562
 #define WM_DROPFILES 563
 #define WM_MDIREFRESHMENU 564
+
+#if (WINVER >= 0x0602)
+#define WM_POINTERDEVICECHANGE      0x0238
+#define WM_POINTERDEVICEINRANGE     0x0239
+#define WM_POINTERDEVICEOUTOFRANGE  0x023A
+#define WM_NCPOINTERUPDATE          0x0241
+#define WM_NCPOINTERDOWN            0x0242
+#define WM_NCPOINTERUP              0x0243
+#define WM_POINTERUPDATE            0x0245
+#define WM_POINTERDOWN              0x0246
+#define WM_POINTERUP                0x0247
+#define WM_POINTERENTER             0x0249
+#define WM_POINTERLEAVE             0x024A
+#define WM_POINTERACTIVATE          0x024B
+#define WM_POINTERCAPTURECHANGED    0x024C
+#define WM_TOUCHHITTESTING          0x024D
+#define WM_POINTERWHEEL             0x024E
+#define WM_POINTERHWHEEL            0x024F
+#define DM_POINTERHITTEST           0x0250
+#define WM_POINTERROUTEDTO          0x0251
+#define WM_POINTERROUTEDAWAY        0x0252
+#define WM_POINTERROUTEDRELEASED    0x0253
+#endif /* WINVER >= 0x0602 */
 
 /* Win32 4.0 messages for IME */
 #define WM_IME_SETCONTEXT           0x0281
@@ -1884,6 +1945,14 @@ typedef enum tagHANDEDNESS
 #define WTS_SESSION_CREATE 0xA
 #define WTS_SESSION_TERMINATE 0xB
 #define WM_WTSSESSION_CHANGE 0x02B1
+#endif
+#if (WINVER >= 0x0601)
+#define WM_DPICHANGED          0x02e0
+#endif
+#if (WINVER >= 0x0605)
+#define WM_DPICHANGED_BEFOREPARENT 0x02e2
+#define WM_DPICHANGED_AFTERPARENT  0x02e3
+#define WM_GETDPISCALEDSIZE    0x02e4
 #endif
 
 #define WM_CUT 768
@@ -2174,6 +2243,7 @@ typedef enum tagHANDEDNESS
 #define HCF_HOTKEYSOUND 16
 #define HCF_INDICATOR 32
 #define HCF_HOTKEYAVAILABLE 64
+#define HCF_OPTION_NOTHEMECHANGE 0x00001000
 
 #define MKF_MOUSEKEYSON     0x00000001
 #define MKF_AVAILABLE       0x00000002
@@ -2215,6 +2285,24 @@ typedef enum tagHANDEDNESS
 #define SKF_STICKYKEYSON 1
 #define SKF_TRISTATE 128
 #define SKF_TWOKEYSOFF 256
+#if (_WIN32_WINNT >= 0x0500)
+#define SKF_LALTLATCHED 0x10000000
+#define SKF_LCTLLATCHED 0x04000000
+#define SKF_LSHIFTLATCHED 0x01000000
+#define SKF_RALTLATCHED 0x20000000
+#define SKF_RCTLLATCHED 0x08000000
+#define SKF_RSHIFTLATCHED 0x02000000
+#define SKF_LWINLATCHED 0x40000000
+#define SKF_RWINLATCHED 0x80000000
+#define SKF_LALTLOCKED 0x00100000
+#define SKF_LCTLLOCKED 0x00040000
+#define SKF_LSHIFTLOCKED 0x00010000
+#define SKF_RALTLOCKED 0x00200000
+#define SKF_RCTLLOCKED 0x00080000
+#define SKF_RSHIFTLOCKED 0x00020000
+#define SKF_LWINLOCKED 0x00400000
+#define SKF_RWINLOCKED 0x00800000
+#endif
 #define TKF_AVAILABLE 2
 #define TKF_CONFIRMHOTKEY 8
 #define TKF_HOTKEYACTIVE 4
@@ -2942,6 +3030,9 @@ typedef enum tagHANDEDNESS
 #define RI_MOUSE_BUTTON_5_DOWN      0x0100
 #define RI_MOUSE_BUTTON_5_UP        0x0200
 #define RI_MOUSE_WHEEL              0x0400
+#if (WINVER >= 0x0600)
+#define RI_MOUSE_HWHEEL             0x0800
+#endif
 #define KEYBOARD_OVERRUN_MAKE_CODE 0xFF
 #define RI_KEY_MAKE            0x0000
 #define RI_KEY_BREAK           0x0001
@@ -2996,7 +3087,7 @@ typedef enum tagHANDEDNESS
 #define STATE_SYSTEM_ALERT_MEDIUM 0x08000000
 #define STATE_SYSTEM_ALERT_HIGH 0x10000000
 #define STATE_SYSTEM_PROTECTED 0x20000000
-#define STATE_SYSTEM_VALID 0x1fffffff
+#define STATE_SYSTEM_VALID 0x3fffffff
 
 #define USER_DEFAULT_SCREEN_DPI 96
 
@@ -3152,7 +3243,7 @@ typedef struct tagDELETEITEMSTRUCT {
 	ULONG_PTR itemData;
 } DELETEITEMSTRUCT,*PDELETEITEMSTRUCT,*LPDELETEITEMSTRUCT;
 
-#include <pshpack2.h>
+#pragma pack(push, 2)
 typedef struct {
 	DWORD style;
 	DWORD dwExtendedStyle;
@@ -3187,7 +3278,7 @@ typedef LPCDLGTEMPLATEW LPCDLGTEMPLATE;
 #else
 typedef LPCDLGTEMPLATEA LPCDLGTEMPLATE;
 #endif // UNICODE
-#include <poppack.h>
+#pragma pack(pop)
 
 typedef struct tagDRAWITEMSTRUCT {
 	UINT CtlType;
@@ -3870,6 +3961,15 @@ typedef struct tagTITLEBARINFO {
 	DWORD rgstate[CCHILDREN_TITLEBAR+1];
 } TITLEBARINFO,*PTITLEBARINFO,*LPTITLEBARINFO;
 
+#if (WINVER >= 0x0600)
+typedef struct tagTITLEBARINFOEX {
+	DWORD cbSize;
+	RECT  rcTitleBar;
+	DWORD rgstate[CCHILDREN_TITLEBAR+1];
+	RECT  rgrect[CCHILDREN_TITLEBAR+1];
+} TITLEBARINFOEX,*PTITLEBARINFOEX,*LPTITLEBARINFOEX;
+#endif
+
 typedef struct tagWINDOWINFO {
 	DWORD cbSize;
 	RECT  rcWindow;
@@ -4041,7 +4141,7 @@ typedef struct tagRAWKEYBOARD {
 typedef struct tagRAWHID {
 	DWORD dwSizeHid;
 	DWORD dwCount;
-	BYTE bRawData;
+	BYTE bRawData[1];
 } RAWHID,*PRAWHID,*LPRAWHID;
 
 typedef struct tagRAWINPUT {
@@ -4061,6 +4161,9 @@ typedef struct tagRAWINPUTDEVICE {
 } RAWINPUTDEVICE,*PRAWINPUTDEVICE,*LPRAWINPUTDEVICE;
 
 typedef const RAWINPUTDEVICE *PCRAWINPUTDEVICE;
+
+#define RAWINPUT_ALIGN(x) (((x) + sizeof(DWORD_PTR) - 1) & ~(sizeof(DWORD_PTR) - 1))
+#define NEXTRAWINPUTBLOCK(ptr) ((PRAWINPUT)RAWINPUT_ALIGN((ULONG_PTR)((PBYTE)(ptr) + (ptr)->header.dwSize)))
 
 typedef struct tagRAWINPUTDEVICELIST {
 	HANDLE hDevice;
@@ -4147,7 +4250,7 @@ typedef struct tagINPUT_MESSAGE_SOURCE {
 
 #endif /* WINVER >= 0x0601 */
 
-#if(WINVER >= 0x0602)
+#if (WINVER >= 0x0602) || defined(_WIN32K_)
 
 enum tagPOINTER_INPUT_TYPE {
   PT_POINTER = 1,
@@ -4158,6 +4261,30 @@ enum tagPOINTER_INPUT_TYPE {
 };
 typedef DWORD POINTER_INPUT_TYPE;
 typedef UINT32 POINTER_FLAGS;
+
+#define POINTER_FLAG_NONE               0x00000000
+#define POINTER_FLAG_NEW                0x00000001
+#define POINTER_FLAG_INRANGE            0x00000002
+#define POINTER_FLAG_INCONTACT          0x00000004
+#define POINTER_FLAG_FIRSTBUTTON        0x00000010
+#define POINTER_FLAG_SECONDBUTTON       0x00000020
+#define POINTER_FLAG_THIRDBUTTON        0x00000040
+#define POINTER_FLAG_FOURTHBUTTON       0x00000080
+#define POINTER_FLAG_FIFTHBUTTON        0x00000100
+#define POINTER_FLAG_PRIMARY            0x00002000
+#define POINTER_FLAG_CONFIDENCE         0x00004000
+#define POINTER_FLAG_CANCELED           0x00008000
+#define POINTER_FLAG_DOWN               0x00010000
+#define POINTER_FLAG_UPDATE             0x00020000
+#define POINTER_FLAG_UP                 0x00040000
+#define POINTER_FLAG_WHEEL              0x00080000
+#define POINTER_FLAG_HWHEEL             0x00100000
+#define POINTER_FLAG_CAPTURECHANGED     0x00200000
+#define POINTER_FLAG_HASTRANSFORM       0x00400000
+
+#define POINTER_MOD_SHIFT   (0x0004)
+#define POINTER_MOD_CTRL    (0x0008)
+
 typedef enum tagPOINTER_BUTTON_CHANGE_TYPE
 {
     POINTER_CHANGE_NONE,
@@ -4204,11 +4331,125 @@ typedef struct tagPOINTER_INFO
 #define POINTER_MESSAGE_FLAG_CONFIDENCE   0x00004000
 #define POINTER_MESSAGE_FLAG_CANCELED     0x00008000
 
-#endif /* WINVER >= 0x0602 */
+#define GET_POINTERID_WPARAM(wParam)                (LOWORD(wParam))
+#define IS_POINTER_FLAG_SET_WPARAM(wParam, flag)    (((DWORD)HIWORD(wParam) & (flag)) == (flag))
+#define IS_POINTER_NEW_WPARAM(wParam)               IS_POINTER_FLAG_SET_WPARAM(wParam, POINTER_MESSAGE_FLAG_NEW)
+#define IS_POINTER_INRANGE_WPARAM(wParam)           IS_POINTER_FLAG_SET_WPARAM(wParam, POINTER_MESSAGE_FLAG_INRANGE)
+#define IS_POINTER_INCONTACT_WPARAM(wParam)         IS_POINTER_FLAG_SET_WPARAM(wParam, POINTER_MESSAGE_FLAG_INCONTACT)
+#define IS_POINTER_FIRSTBUTTON_WPARAM(wParam)       IS_POINTER_FLAG_SET_WPARAM(wParam, POINTER_MESSAGE_FLAG_FIRSTBUTTON)
+#define IS_POINTER_SECONDBUTTON_WPARAM(wParam)      IS_POINTER_FLAG_SET_WPARAM(wParam, POINTER_MESSAGE_FLAG_SECONDBUTTON)
+#define IS_POINTER_THIRDBUTTON_WPARAM(wParam)       IS_POINTER_FLAG_SET_WPARAM(wParam, POINTER_MESSAGE_FLAG_THIRDBUTTON)
+#define IS_POINTER_FOURTHBUTTON_WPARAM(wParam)      IS_POINTER_FLAG_SET_WPARAM(wParam, POINTER_MESSAGE_FLAG_FOURTHBUTTON)
+#define IS_POINTER_FIFTHBUTTON_WPARAM(wParam)       IS_POINTER_FLAG_SET_WPARAM(wParam, POINTER_MESSAGE_FLAG_FIFTHBUTTON)
+#define IS_POINTER_PRIMARY_WPARAM(wParam)           IS_POINTER_FLAG_SET_WPARAM(wParam, POINTER_MESSAGE_FLAG_PRIMARY)
+#define HAS_POINTER_CONFIDENCE_WPARAM(wParam)       IS_POINTER_FLAG_SET_WPARAM(wParam, POINTER_MESSAGE_FLAG_CONFIDENCE)
+#define IS_POINTER_CANCELED_WPARAM(wParam)          IS_POINTER_FLAG_SET_WPARAM(wParam, POINTER_MESSAGE_FLAG_CANCELED)
+
+#define PA_ACTIVATE                     MA_ACTIVATE
+#define PA_NOACTIVATE                   MA_NOACTIVATE
+
+typedef struct tagTOUCH_HIT_TESTING_PROXIMITY_EVALUATION
+{
+    UINT16 score;
+    POINT adjustedPoint;
+} TOUCH_HIT_TESTING_PROXIMITY_EVALUATION, *PTOUCH_HIT_TESTING_PROXIMITY_EVALUATION;
+
+typedef struct tagTOUCH_HIT_TESTING_INPUT
+{
+    UINT32 pointerId;
+    POINT point;
+    RECT boundingBox;
+    RECT nonOccludedBoundingBox;
+    UINT32 orientation;
+} TOUCH_HIT_TESTING_INPUT, *PTOUCH_HIT_TESTING_INPUT;
+
+#define TOUCH_HIT_TESTING_PROXIMITY_CLOSEST  0x0
+#define TOUCH_HIT_TESTING_PROXIMITY_FARTHEST 0xFFF
+
+#define POINTER_DEVICE_PRODUCT_STRING_MAX 520
+
+typedef enum tagPOINTER_DEVICE_TYPE {
+    POINTER_DEVICE_TYPE_INTEGRATED_PEN = 0x00000001,
+    POINTER_DEVICE_TYPE_EXTERNAL_PEN   = 0x00000002,
+    POINTER_DEVICE_TYPE_TOUCH          = 0x00000003,
+#if(WINVER >= 0x0603)
+    POINTER_DEVICE_TYPE_TOUCH_PAD      = 0x00000004,
+#endif /* WINVER >= 0x0603 */
+    POINTER_DEVICE_TYPE_MAX            = 0xFFFFFFFF
+} POINTER_DEVICE_TYPE;
+
+typedef struct tagPOINTER_DEVICE_INFO {
+    DWORD displayOrientation;
+    HANDLE device;
+    POINTER_DEVICE_TYPE pointerDeviceType;
+    HMONITOR monitor;
+    ULONG startingCursorId;
+    USHORT maxActiveContacts;
+    WCHAR productString[POINTER_DEVICE_PRODUCT_STRING_MAX];
+} POINTER_DEVICE_INFO;
+
+typedef UINT32 TOUCH_FLAGS;
+#define TOUCH_FLAG_NONE                 0x00000000
+
+typedef UINT32 TOUCH_MASK;
+#define TOUCH_MASK_NONE                 0x00000000
+#define TOUCH_MASK_CONTACTAREA          0x00000001
+#define TOUCH_MASK_ORIENTATION          0x00000002
+#define TOUCH_MASK_PRESSURE             0x00000004
+
+typedef struct tagPOINTER_TOUCH_INFO {
+    POINTER_INFO    pointerInfo;
+    TOUCH_FLAGS     touchFlags;
+    TOUCH_MASK      touchMask;
+    RECT            rcContact;
+    RECT            rcContactRaw;
+    UINT32          orientation;
+    UINT32          pressure;
+} POINTER_TOUCH_INFO;
+
+typedef UINT32 PEN_FLAGS;
+#define PEN_FLAG_NONE                   0x00000000
+#define PEN_FLAG_BARREL                 0x00000001
+#define PEN_FLAG_INVERTED               0x00000002
+#define PEN_FLAG_ERASER                 0x00000004
+
+typedef UINT32 PEN_MASK;
+#define PEN_MASK_NONE                   0x00000000
+#define PEN_MASK_PRESSURE               0x00000001
+#define PEN_MASK_ROTATION               0x00000002
+#define PEN_MASK_TILT_X                 0x00000004
+#define PEN_MASK_TILT_Y                 0x00000008
+
+typedef struct tagPOINTER_PEN_INFO {
+    POINTER_INFO    pointerInfo;
+    PEN_FLAGS       penFlags;
+    PEN_MASK        penMask;
+    UINT32          pressure;
+    UINT32          rotation;
+    INT32           tiltX;
+    INT32           tiltY;
+} POINTER_PEN_INFO;
+
+typedef struct tagPOINTER_TYPE_INFO {
+    POINTER_INPUT_TYPE type;
+    union {
+        POINTER_TOUCH_INFO touchInfo;
+        POINTER_PEN_INFO penInfo;
+    } DUMMYUNIONNAME;
+} POINTER_TYPE_INFO, *PPOINTER_TYPE_INFO;
+
+#endif /* WINVER >= 0x0602 || _WIN32K_ */
 
 HKL WINAPI ActivateKeyboardLayout(_In_ HKL, _In_ UINT);
+#if (WINVER >= 0x0600)
+BOOL WINAPI AddClipboardFormatListener(_In_ HWND);
+#endif
 BOOL WINAPI AdjustWindowRect(_Inout_ LPRECT, _In_ DWORD, _In_ BOOL);
 BOOL WINAPI AdjustWindowRectEx(_Inout_ LPRECT, _In_ DWORD, _In_ BOOL, _In_ DWORD);
+#if (WINVER >= 0x0605)
+BOOL WINAPI AdjustWindowRectExForDpi(_Inout_ LPRECT, _In_ DWORD, _In_ BOOL, _In_ DWORD, _In_ UINT);
+BOOL WINAPI AreDpiAwarenessContextsEqual(_In_ DPI_AWARENESS_CONTEXT, _In_ DPI_AWARENESS_CONTEXT);
+#endif
 #if (_WIN32_WINNT >= 0x0500)
 BOOL WINAPI AnimateWindow(_In_ HWND, _In_ DWORD, _In_ DWORD);
 #endif /* (_WIN32_WINNT >= 0x0500) */
@@ -4269,6 +4510,9 @@ BroadcastSystemMessageExW(
 #endif /* (_WIN32_WINNT >= 0x0501) */
 
 void WINAPI CalcChildScroll(HWND, INT);
+#if (_WIN32_WINNT >= 0x0601)
+BOOL WINAPI CalculatePopupWindowPosition(_In_ const POINT*, _In_ const SIZE*, _In_ UINT, _In_opt_ RECT*, _Out_ RECT*);
+#endif
 BOOL WINAPI CallMsgFilterA(_In_ LPMSG, _In_ INT);
 BOOL WINAPI CallMsgFilterW(_In_ LPMSG, _In_ INT);
 LRESULT WINAPI CallNextHookEx(_In_opt_ HHOOK, _In_ int, _In_ WPARAM, _In_ LPARAM);
@@ -4652,8 +4896,14 @@ DrawTextExW(
 
 BOOL WINAPI EmptyClipboard(void);
 BOOL WINAPI EnableMenuItem(_In_ HMENU, _In_ UINT, _In_ UINT);
+#if (_WIN32_WINNT >= 0x0602)
+BOOL WINAPI EnableMouseInPointer(_In_ BOOL);
+#endif
 BOOL WINAPI EnableScrollBar(_In_ HWND, _In_ UINT, _In_ UINT);
 BOOL WINAPI EnableWindow(_In_ HWND, _In_ BOOL);
+#if (WINVER >= 0x0605)
+BOOL WINAPI EnableNonClientDpiScaling(_In_ HWND);
+#endif
 BOOL WINAPI EndDeferWindowPos(_In_ HDWP);
 BOOL WINAPI EndDialog(_In_ HWND, _In_ INT_PTR);
 BOOL WINAPI EndMenu(void);
@@ -4701,6 +4951,9 @@ int WINAPI FrameRect(_In_ HDC, _In_ LPCRECT, _In_ HBRUSH);
 HWND WINAPI GetActiveWindow(void);
 HWND WINAPI GetAncestor(_In_ HWND, _In_ UINT);
 SHORT WINAPI GetAsyncKeyState(_In_ int);
+#if (WINVER >= 0x0602)
+BOOL WINAPI GetAutoRotationState(_Out_ PAR_STATE);
+#endif
 HWND WINAPI GetCapture(void);
 UINT WINAPI GetCaretBlinkTime(void);
 BOOL WINAPI GetCaretPos(_Out_ LPPOINT);
@@ -4756,6 +5009,9 @@ DWORD WINAPI GetClipboardSequenceNumber(void);
 #endif
 HWND WINAPI GetClipboardViewer(void);
 BOOL WINAPI GetClipCursor(_Out_ LPRECT);
+#if (WINVER >= 0x0601)
+BOOL WINAPI GetCurrentInputMessageSource(_Out_ INPUT_MESSAGE_SOURCE*);
+#endif
 BOOL WINAPI GetCursorPos(_Out_ LPPOINT);
 HDC WINAPI GetDC(_In_opt_ HWND);
 HDC WINAPI GetDCEx(_In_opt_ HWND, _In_opt_ HRGN, _In_ DWORD);
@@ -4881,6 +5137,29 @@ HWND WINAPI GetNextDlgTabItem(_In_ HWND, _In_opt_ HWND, _In_ BOOL);
 #define GetNextWindow(h,c) GetWindow(h,c)
 HWND WINAPI GetOpenClipboardWindow(void);
 HWND WINAPI GetParent(_In_ HWND);
+#if (WINVER >= 0x0602)
+BOOL WINAPI GetPointerDevice(_In_ HANDLE, _Out_ POINTER_DEVICE_INFO*);
+BOOL WINAPI GetPointerFrameTouchInfo(_In_ UINT32 pointerId, _Inout_ UINT32 *pointerCount, _Out_writes_opt_(*pointerCount) POINTER_TOUCH_INFO *touchInfo);
+BOOL WINAPI GetPointerInfo(_In_ UINT32 pointerId, _Out_writes_(1) POINTER_INFO *pointerInfo);
+BOOL WINAPI GetPointerPenInfo(_In_ UINT32, _Out_ POINTER_PEN_INFO*);
+BOOL WINAPI GetPointerTouchInfo(_In_ UINT32 pointerId, _Out_writes_(1) POINTER_TOUCH_INFO *touchInfo);
+BOOL WINAPI GetPointerTouchInfoHistory(_In_ UINT32 pointerId, _Inout_ UINT32 *entriesCount, _Out_writes_opt_(*entriesCount) POINTER_TOUCH_INFO *touchInfo);
+BOOL WINAPI GetPointerType(_In_ UINT32, _Out_ POINTER_INPUT_TYPE*);
+
+#define MAX_TOUCH_COUNT 256
+
+#define TOUCH_FEEDBACK_DEFAULT 0x1
+#define TOUCH_FEEDBACK_INDIRECT 0x2
+#define TOUCH_FEEDBACK_NONE 0x3
+
+BOOL WINAPI InitializeTouchInjection(_In_ UINT32 maxCount, _In_ DWORD dwMode);
+BOOL WINAPI InjectTouchInput(_In_ UINT32 count, _In_reads_(count) CONST POINTER_TOUCH_INFO *contacts);
+#endif
+
+#if (WINVER >= 0x0602) && (NTDDI_VERSION >= NTDDI_WIN10_RS5)
+DECLARE_HANDLE(HSYNTHETICPOINTERDEVICE);
+BOOL WINAPI InjectSyntheticPointerInput(_In_ HSYNTHETICPOINTERDEVICE, _In_reads_(count) CONST POINTER_TYPE_INFO*, _In_ UINT32 count);
+#endif
 
 int
 WINAPI
@@ -4888,6 +5167,9 @@ GetPriorityClipboardFormat(
   _In_reads_(cFormats) UINT *paFormatPriorityList,
   _In_ int cFormats);
 
+#if (_WIN32_WINNT >= 0x0600)
+BOOL WINAPI GetPhysicalCursorPos(_Out_ LPPOINT);
+#endif
 HANDLE WINAPI GetPropA(_In_ HWND, _In_ LPCSTR);
 HANDLE WINAPI GetPropW(_In_ HWND, _In_ LPCWSTR);
 
@@ -4954,6 +5236,9 @@ HBRUSH WINAPI GetSysColorBrush(_In_ int);
 #define GetSysModalWindow() (NULL)
 HMENU WINAPI GetSystemMenu(_In_ HWND, _In_ BOOL);
 int WINAPI GetSystemMetrics(_In_ int);
+#if (WINVER >= 0x0605)
+int WINAPI GetSystemMetricsForDpi(_In_ int, _In_ UINT);
+#endif
 
 DWORD
 WINAPI
@@ -5083,12 +5368,75 @@ BOOL WINAPI GetMonitorInfoW(_In_ HMONITOR, _Inout_ LPMONITORINFO);
 
 #if (_WIN32_WINNT >= _WIN32_WINNT_VISTA)
 #define USER_DEFAULT_SCREEN_DPI 96
+BOOL WINAPI IsProcessDPIAware(VOID);
+BOOL WINAPI SetProcessDPIAware(VOID);
+
+#define MSGFLT_ADD 1
+#define MSGFLT_REMOVE 2
+BOOL WINAPI ChangeWindowMessageFilter(_In_ UINT, _In_ DWORD);
 #endif /* _WIN32_WINNT >= _WIN32_WINNT_VISTA */
 
-#if (_WIN32_WINNT >= 0x0605) /* Windows 10 pre-Threshold */
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN7)
+#define MSGFLTINFO_NONE (0)
+#define MSGFLTINFO_ALREADYALLOWED_FORWND (1)
+#define MSGFLTINFO_ALREADYDISALLOWED_FORWND (2)
+#define MSGFLTINFO_ALLOWED_HIGHER (3)
+#define MSGFLT_RESET (0)
+#define MSGFLT_ALLOW (1)
+#define MSGFLT_DISALLOW (2)
+typedef struct tagCHANGEFILTERSTRUCT {
+    DWORD cbSize;
+    DWORD ExtStatus;
+} CHANGEFILTERSTRUCT, *PCHANGEFILTERSTRUCT;
+BOOL WINAPI ChangeWindowMessageFilterEx(_In_ HWND, _In_ UINT, _In_ DWORD, _Inout_opt_ PCHANGEFILTERSTRUCT);
+BOOL WINAPI GetWindowDisplayAffinity(_In_ HWND, _Out_ DWORD*);
+BOOL WINAPI SetWindowDisplayAffinity(_In_ HWND, _In_ DWORD);
+#endif /* _WIN32_WINNT >= _WIN32_WINNT_WIN7 */
+
+#if (WINVER >= 0x0601)
+BOOL WINAPI GetDpiForMonitorInternal(_In_ HMONITOR, _In_ UINT, _Out_ UINT*, _Out_ UINT*);
+#endif
+
+#if (WINVER >= 0x0603)
+BOOL WINAPI GetProcessDpiAwarenessInternal(_In_opt_ HANDLE, _Out_ DPI_AWARENESS*);
+#endif
+
+#if (WINVER >= 0x0605) /* Windows 10 pre-Threshold */
+DPI_AWARENESS WINAPI GetAwarenessFromDpiAwarenessContext(_In_ DPI_AWARENESS_CONTEXT);
+DPI_AWARENESS_CONTEXT WINAPI GetDpiAwarenessContextForProcess(_In_opt_ HANDLE);
 UINT WINAPI GetDpiForSystem(VOID);
 UINT WINAPI GetDpiForWindow(_In_ HWND hwnd);
-#endif /* _WIN32_WINNT >= 0x0605 */
+UINT WINAPI GetDpiFromDpiAwarenessContext(_In_ DPI_AWARENESS_CONTEXT);
+INT WINAPI GetSystemMetricsForDpi(_In_ INT, _In_ UINT);
+DPI_AWARENESS_CONTEXT WINAPI GetThreadDpiAwarenessContext(VOID);
+DPI_AWARENESS_CONTEXT WINAPI GetWindowDpiAwarenessContext(_In_ HWND);
+BOOL WINAPI IsValidDpiAwarenessContext(_In_ DPI_AWARENESS_CONTEXT);
+#endif /* WINVER >= 0x0605 */
+
+#if (NTDDI_VERSION >= NTDDI_WIN10_RS2)
+typedef enum DIALOG_CONTROL_DPI_CHANGE_BEHAVIORS {
+    DCDC_DEFAULT = 0x0000,
+    DCDC_DISABLE_FONT_UPDATE = 0x0001,
+    DCDC_DISABLE_RELAYOUT = 0x0002,
+} DIALOG_CONTROL_DPI_CHANGE_BEHAVIORS;
+
+DEFINE_ENUM_FLAG_OPERATORS(DIALOG_CONTROL_DPI_CHANGE_BEHAVIORS);
+
+BOOL WINAPI SetDialogControlDpiChangeBehavior(_In_ HWND hWnd, _In_ DIALOG_CONTROL_DPI_CHANGE_BEHAVIORS mask, _In_ DIALOG_CONTROL_DPI_CHANGE_BEHAVIORS values);
+DIALOG_CONTROL_DPI_CHANGE_BEHAVIORS WINAPI GetDialogControlDpiChangeBehavior(_In_ HWND hWnd);
+
+typedef enum DIALOG_DPI_CHANGE_BEHAVIORS {
+    DDC_DEFAULT = 0x0000,
+    DDC_DISABLE_ALL = 0x0001,
+    DDC_DISABLE_RESIZE = 0x0002,
+    DDC_DISABLE_CONTROL_RELAYOUT = 0x0004,
+} DIALOG_DPI_CHANGE_BEHAVIORS;
+
+DEFINE_ENUM_FLAG_OPERATORS(DIALOG_DPI_CHANGE_BEHAVIORS);
+
+BOOL WINAPI SetDialogDpiChangeBehavior(_In_ HWND hDlg, _In_ DIALOG_DPI_CHANGE_BEHAVIORS mask, _In_ DIALOG_DPI_CHANGE_BEHAVIORS values);
+DIALOG_DPI_CHANGE_BEHAVIORS WINAPI GetDialogDpiChangeBehavior(_In_ HWND hDlg);
+#endif
 
 UINT
 WINAPI
@@ -5150,8 +5498,14 @@ BOOL WINAPI IsHungAppWindow(_In_ HWND);
 #endif
 BOOL WINAPI IsIconic(_In_ HWND);
 BOOL WINAPI IsMenu(_In_ HMENU);
+#if (_WIN32_WINNT >= 0x0602)
+BOOL WINAPI IsMouseInPointerEnabled(void);
+#endif
 BOOL WINAPI IsRectEmpty(_In_ LPCRECT);
 BOOL WINAPI IsWindow(_In_opt_ HWND);
+#if (WINVER >= 0x0604)
+BOOL WINAPI IsWindowArranged(_In_ HWND);
+#endif
 BOOL WINAPI IsWindowEnabled(_In_ HWND);
 BOOL WINAPI IsWindowUnicode(_In_ HWND);
 BOOL WINAPI IsWindowVisible(_In_ HWND);
@@ -5370,6 +5724,15 @@ UINT WINAPI RegisterClipboardFormatW(_In_ LPCWSTR);
 #if (WINVER >= 0x0500)
 HDEVNOTIFY WINAPI RegisterDeviceNotificationA(_In_ HANDLE, _In_ LPVOID, _In_ DWORD);
 HDEVNOTIFY WINAPI RegisterDeviceNotificationW(_In_ HANDLE, _In_ LPVOID, _In_ DWORD);
+#if (_WIN32_WINNT >= 0x0502)
+#if !defined(_HPOWERNOTIFY_DEF_)
+#define _HPOWERNOTIFY_DEF_
+typedef PVOID HPOWERNOTIFY;
+typedef HPOWERNOTIFY *PHPOWERNOTIFY;
+#endif
+HPOWERNOTIFY WINAPI RegisterPowerSettingNotification(_In_ HANDLE hRecipient, _In_ LPCGUID PowerSettingGuid, _In_ DWORD Flags);
+BOOL WINAPI UnregisterPowerSettingNotification(_In_ HPOWERNOTIFY Handle);
+#endif
 #endif
 BOOL WINAPI RegisterHotKey(_In_opt_ HWND, _In_ int, _In_ UINT, _In_ UINT);
 BOOL WINAPI RegisterLogonProcess(DWORD,BOOL);
@@ -5388,6 +5751,9 @@ UINT WINAPI RegisterWindowMessageA(_In_ LPCSTR);
 UINT WINAPI RegisterWindowMessageW(_In_ LPCWSTR);
 BOOL WINAPI ReleaseCapture(void);
 int WINAPI ReleaseDC(_In_opt_ HWND, _In_ HDC);
+#if (WINVER >= 0x0600)
+BOOL WINAPI RemoveClipboardFormatListener(_In_ HWND);
+#endif
 BOOL WINAPI RemoveMenu(_In_ HMENU, _In_ UINT, _In_ UINT);
 HANDLE WINAPI RemovePropA(_In_ HWND, _In_ LPCSTR);
 HANDLE WINAPI RemovePropW(_In_ HWND, _In_ LPCWSTR);
@@ -5457,6 +5823,12 @@ HWND WINAPI SetParent(_In_ HWND, _In_opt_ HWND);
 #if (_WIN32_WINNT >= 0x0500)
 BOOL WINAPI SetProcessDefaultLayout(_In_ DWORD);
 #endif /* (_WIN32_WINNT >= 0x0500) */
+#if (WINVER >= 0x0605)
+BOOL WINAPI SetProcessDpiAwarenessContext(_In_ DPI_AWARENESS_CONTEXT);
+#endif
+#if (WINVER >= 0x0603)
+BOOL WINAPI SetProcessDpiAwarenessInternal(_In_ DPI_AWARENESS);
+#endif
 BOOL WINAPI SetProcessWindowStation(_In_ HWINSTA);
 BOOL WINAPI SetPropA(_In_ HWND, _In_ LPCSTR, _In_opt_ HANDLE);
 BOOL WINAPI SetPropW(_In_ HWND, _In_ LPCWSTR, _In_opt_ HANDLE);
@@ -5478,6 +5850,9 @@ DWORD_PTR WINAPI SetSysColorsTemp(const COLORREF *, const HBRUSH *, DWORD_PTR);
 BOOL WINAPI SetSystemCursor(_In_ HCURSOR, _In_ DWORD);
 BOOL WINAPI SetSystemMenu(HWND,HMENU);
 BOOL WINAPI SetThreadDesktop(_In_ HDESK);
+#if (WINVER >= 0x0605)
+DPI_AWARENESS_CONTEXT WINAPI SetThreadDpiAwarenessContext(_In_ DPI_AWARENESS_CONTEXT);
+#endif
 UINT_PTR WINAPI SetTimer(_In_opt_ HWND, _In_ UINT_PTR, _In_ UINT, _In_opt_ TIMERPROC);
 UINT_PTR WINAPI SetSystemTimer(HWND,UINT_PTR,UINT,TIMERPROC);
 
@@ -6040,6 +6415,53 @@ typedef MONITORINFOEXA MONITORINFOEX, *LPMONITORINFOEX;
 #endif /* _WINGDI_ && !NOGDI */
 #endif /* UNICODE */
 #endif /* RC_INVOKED */
+
+#ifdef __WINESRC__
+
+/* Uxtheme hook functions and struct. */
+enum SCROLL_HITTEST
+{
+    SCROLL_NOWHERE,
+    SCROLL_TOP_ARROW,
+    SCROLL_TOP_RECT,
+    SCROLL_THUMB,
+    SCROLL_BOTTOM_RECT,
+    SCROLL_BOTTOM_ARROW
+};
+
+struct SCROLL_TRACKING_INFO
+{
+    HWND win;
+    INT bar;
+    INT thumb_pos;
+    INT thumb_val;
+    BOOL vertical;
+    enum SCROLL_HITTEST hit_test;
+};
+
+enum NONCLIENT_BUTTON_TYPE
+{
+    MENU_CLOSE_BUTTON,
+    MENU_MIN_BUTTON,
+    MENU_MAX_BUTTON,
+    MENU_RESTORE_BUTTON,
+    MENU_HELP_BUTTON,
+};
+
+struct user_api_hook
+{
+    LRESULT (WINAPI *pDefDlgProc)(HWND, UINT, WPARAM, LPARAM, BOOL);
+    void (WINAPI *pNonClientButtonDraw)(HWND, HDC, enum NONCLIENT_BUTTON_TYPE, RECT, BOOL, BOOL);
+    void (WINAPI *pScrollBarDraw)(HWND, HDC, INT, enum SCROLL_HITTEST,
+                                  const struct SCROLL_TRACKING_INFO *, BOOL, BOOL, RECT *, UINT,
+                                  INT, INT, INT, BOOL);
+    LRESULT (WINAPI *pScrollBarWndProc)(HWND, UINT, WPARAM, LPARAM, BOOL);
+};
+
+WINUSERAPI BOOL WINAPI RegisterUserApiHook(const struct user_api_hook *new_hook,
+                                            struct user_api_hook *old_hook);
+WINUSERAPI void WINAPI UnregisterUserApiHook(void);
+#endif /* __WINESRC__ */
 
 #ifdef _WINE
 #include "reactos/undocuser.h"

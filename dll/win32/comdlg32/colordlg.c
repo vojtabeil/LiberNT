@@ -37,7 +37,6 @@
 #include "cdlg.h"
 
 #include "wine/debug.h"
-#include "wine/heap.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(commdlg);
 
@@ -79,7 +78,6 @@ typedef struct CCPRIVATE
     RECT fullsize;       /* original dialog window size */
     UINT msetrgb;        /* # of SETRGBSTRING message (today not used)  */
     RECT old3angle;      /* last position of l-marker */
-    RECT oldcross;       /* last position of color/saturation marker */
     BOOL updating;       /* to prevent recursive WM_COMMAND/EN_UPDATE processing */
     int h;
     int s;
@@ -518,21 +516,20 @@ static void CC_PaintCross(CCPRIV *infoPtr)
 
  if (IsWindowVisible(hwnd))   /* if full size */
  {
+   int w, wc, width;
    HDC hDC;
-#ifdef __REACTOS__
-   int w = 8, wc = 6;
-#else
-   int w = GetDialogBaseUnits() - 1;
-   int wc = GetDialogBaseUnits() * 3 / 4;
-#endif
    RECT rect;
-   POINT point, p;
+   POINT point;
    HRGN region;
-   HPEN hPen;
-   int x, y;
 
-   x = infoPtr->h;
-   y = infoPtr->s;
+   rect.left = 6;
+   rect.right = 2;
+   rect.top = 1;
+   rect.bottom = 0;
+   MapDialogRect(infoPtr->hwndSelf, &rect);
+   w = rect.left;
+   wc = rect.right;
+   width = rect.top;
 
    GetClientRect(hwnd, &rect);
    hDC = GetDC(hwnd);
@@ -540,36 +537,28 @@ static void CC_PaintCross(CCPRIV *infoPtr)
    SelectClipRgn(hDC, region);
    DeleteObject(region);
 
-   point.x = (rect.right * x) / MAXHORI;
-   point.y = rect.bottom - (rect.bottom * y) / MAXVERT;
-   if ( infoPtr->oldcross.left != infoPtr->oldcross.right )
-     BitBlt(hDC, infoPtr->oldcross.left, infoPtr->oldcross.top,
-              infoPtr->oldcross.right - infoPtr->oldcross.left,
-              infoPtr->oldcross.bottom - infoPtr->oldcross.top,
-              infoPtr->hdcMem, infoPtr->oldcross.left, infoPtr->oldcross.top, SRCCOPY);
-#ifdef __REACTOS__
-   infoPtr->oldcross.left   = point.x - w - 3;
-   infoPtr->oldcross.right  = point.x + w + 3;
-   infoPtr->oldcross.top    = point.y - w - 3;
-   infoPtr->oldcross.bottom = point.y + w + 3;
-#else
-   infoPtr->oldcross.left   = point.x - w - 1;
-   infoPtr->oldcross.right  = point.x + w + 1;
-   infoPtr->oldcross.top    = point.y - w - 1;
-   infoPtr->oldcross.bottom = point.y + w + 1;
-#endif
+   point.x = (rect.right * infoPtr->h) / MAXHORI;
+   point.y = rect.bottom - (rect.bottom * infoPtr->s) / MAXVERT;
 
-   hPen = CreatePen(PS_SOLID, 3, RGB(0, 0, 0)); /* -black- color */
-   hPen = SelectObject(hDC, hPen);
-   MoveToEx(hDC, point.x - w, point.y, &p);
-   LineTo(hDC, point.x - wc, point.y);
-   MoveToEx(hDC, point.x + wc, point.y, &p);
-   LineTo(hDC, point.x + w, point.y);
-   MoveToEx(hDC, point.x, point.y - w, &p);
-   LineTo(hDC, point.x, point.y - wc);
-   MoveToEx(hDC, point.x, point.y + wc, &p);
-   LineTo(hDC, point.x, point.y + w);
-   DeleteObject( SelectObject(hDC, hPen));
+   rect.left = point.x - w;
+   rect.right = point.x - wc;
+   rect.top = point.y - width;
+   rect.bottom = point.y + width;
+   FillRect(hDC, &rect, GetStockObject(BLACK_BRUSH));
+
+   rect.left = point.x + wc;
+   rect.right = point.x + w;
+   FillRect(hDC, &rect, GetStockObject(BLACK_BRUSH));
+
+   rect.left = point.x - width;
+   rect.right = point.x + width;
+   rect.top = point.y - w;
+   rect.bottom = point.y - wc;
+   FillRect(hDC, &rect, GetStockObject(BLACK_BRUSH));
+
+   rect.top = point.y + wc;
+   rect.bottom = point.y + w;
+   FillRect(hDC, &rect, GetStockObject(BLACK_BRUSH));
 
    ReleaseDC(hwnd, hDC);
  }
@@ -858,7 +847,8 @@ static BOOL CC_HookCallChk( const CHOOSECOLORW *lpcc )
 static LRESULT CC_WMInitDialog( HWND hDlg, WPARAM wParam, LPARAM lParam )
 {
    CHOOSECOLORW *cc = (CHOOSECOLORW*)lParam;
-   int i, res;
+   int i;
+   LRESULT res;
    int r, g, b;
    HWND hwnd;
    RECT rect;
@@ -873,7 +863,11 @@ static LRESULT CC_WMInitDialog( HWND hDlg, WPARAM wParam, LPARAM lParam )
        return FALSE;
    }
 
-   lpp = heap_alloc_zero(sizeof(*lpp));
+   lpp = calloc(1, sizeof(*lpp));
+#ifdef __REACTOS__
+   if (!lpp)
+       RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
    lpp->lpcc = cc;
    lpp->hwndSelf = hDlg;
 
@@ -1001,9 +995,6 @@ static LRESULT CC_WMCommand(CCPRIV *lpp, WPARAM wParam, LPARAM lParam, WORD noti
 			    CC_EditSetHSL(lpp);
 			    CC_PaintCross(lpp);
 			    CC_PaintTriangle(lpp);
-#ifdef __REACTOS__
-			    CC_PaintLumBar(lpp);
-#endif
 			   }
 			 }
 		 break;
@@ -1118,6 +1109,7 @@ static LRESULT CC_WMLButtonUp( CCPRIV *infoPtr )
 #endif
        infoPtr->capturedGraph = 0;
        ReleaseCapture();
+       CC_PaintColorGraph(infoPtr);
        CC_PaintCross(infoPtr);
        return 1;
    }
@@ -1142,12 +1134,16 @@ static LRESULT CC_WMMouseMove( CCPRIV *infoPtr, LPARAM lParam )
           infoPtr->lpcc->rgbResult = CC_HSLtoRGB(infoPtr->h, infoPtr->s, infoPtr->l);
           CC_EditSetRGB(infoPtr);
           CC_EditSetHSL(infoPtr);
+          CC_PaintColorGraph(infoPtr);
           CC_PaintCross(infoPtr);
           CC_PaintTriangle(infoPtr);
           CC_PaintSelectedColor(infoPtr);
       }
       else
       {
+#ifdef __REACTOS__
+          ClipCursor(NULL);
+#endif
           ReleaseCapture();
           infoPtr->capturedGraph = 0;
       }
@@ -1183,6 +1179,13 @@ static LRESULT CC_WMLButtonDown( CCPRIV *infoPtr, LPARAM lParam )
    if ( i == 2 )
    {
       SetCapture(infoPtr->hwndSelf);
+#ifdef __REACTOS__
+      {
+         RECT rect;
+         GetWindowRect(GetDlgItem(infoPtr->hwndSelf, infoPtr->capturedGraph), &rect);
+         ClipCursor(&rect);
+      }
+#endif
       infoPtr->lpcc->rgbResult = CC_HSLtoRGB(infoPtr->h, infoPtr->s, infoPtr->l);
    }
    if ( i == 1 )
@@ -1193,16 +1196,9 @@ static LRESULT CC_WMLButtonDown( CCPRIV *infoPtr, LPARAM lParam )
    }
    if (i)
    {
-#ifdef __REACTOS__
-      if (infoPtr->capturedGraph)
-      {
-         RECT rect;
-         GetWindowRect(GetDlgItem(infoPtr->hwndSelf, infoPtr->capturedGraph), &rect);
-         ClipCursor(&rect);
-      }
-#endif
       CC_EditSetRGB(infoPtr);
       CC_EditSetHSL(infoPtr);
+      CC_PaintColorGraph(infoPtr);
       CC_PaintCross(infoPtr);
       CC_PaintTriangle(infoPtr);
       CC_PaintSelectedColor(infoPtr);
@@ -1219,7 +1215,7 @@ static INT_PTR CALLBACK ColorDlgProc( HWND hDlg, UINT message,
                                    WPARAM wParam, LPARAM lParam )
 {
 
- int res;
+ INT_PTR res;
  CCPRIV *lpp = GetPropW( hDlg, L"colourdialogprop" );
 
  if (message != WM_INITDIALOG)
@@ -1244,12 +1240,11 @@ static INT_PTR CALLBACK ColorDlgProc( HWND hDlg, UINT message,
 	                return CC_WMInitDialog(hDlg, wParam, lParam);
 	  case WM_NCDESTROY:
 #ifdef __REACTOS__
-	                // Ensure clipping is released, in case the dialog is closed before WM_LBUTTONUP is received.
-	                ClipCursor(NULL);
+                        if (lpp->capturedGraph) ClipCursor(NULL);
 #endif
 	                DeleteDC(lpp->hdcMem);
 	                DeleteObject(lpp->hbmMem);
-                        heap_free(lpp);
+                        free(lpp);
                         RemovePropW( hDlg, L"colourdialogprop" );
 	                break;
 	  case WM_COMMAND:
@@ -1269,16 +1264,18 @@ static INT_PTR CALLBACK ColorDlgProc( HWND hDlg, UINT message,
 			  return TRUE;
 			break;
 #ifdef __REACTOS__
-	  /* ReactOS: The following comment doesn't apply */
-#endif
+	  case WM_LBUTTONUP:
+#else
 	  case WM_LBUTTONUP:  /* FIXME: ClipCursor off (if in color graph)*/
+#endif
                         if (CC_WMLButtonUp(lpp))
                            return TRUE;
 			break;
 #ifdef __REACTOS__
-	  /* ReactOS: The following comment doesn't apply */
-#endif
+	  case WM_LBUTTONDOWN:
+#else
 	  case WM_LBUTTONDOWN:/* FIXME: ClipCursor on  (if in color graph)*/
+#endif
 	                if (CC_WMLButtonDown(lpp, lParam))
 	                   return TRUE;
 	                break;
@@ -1365,7 +1362,11 @@ BOOL WINAPI ChooseColorA( LPCHOOSECOLORA lpChCol )
   LPWSTR template_name = NULL;
   BOOL ret;
 
-  CHOOSECOLORW *lpcc = heap_alloc_zero(sizeof(*lpcc));
+  CHOOSECOLORW *lpcc = calloc(1, sizeof(*lpcc));
+#ifdef __REACTOS__
+  if (!lpcc)
+      RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
   lpcc->lStructSize = sizeof(*lpcc);
   lpcc->hwndOwner = lpChCol->hwndOwner;
   lpcc->hInstance = lpChCol->hInstance;
@@ -1377,7 +1378,7 @@ BOOL WINAPI ChooseColorA( LPCHOOSECOLORA lpChCol )
   if ((lpcc->Flags & CC_ENABLETEMPLATE) && (lpChCol->lpTemplateName)) {
       if (!IS_INTRESOURCE(lpChCol->lpTemplateName)) {
 	  INT len = MultiByteToWideChar( CP_ACP, 0, lpChCol->lpTemplateName, -1, NULL, 0);
-          template_name = heap_alloc( len * sizeof(WCHAR) );
+          template_name = malloc( len * sizeof(WCHAR) );
           MultiByteToWideChar( CP_ACP, 0, lpChCol->lpTemplateName, -1, template_name, len );
           lpcc->lpTemplateName = template_name;
       } else {
@@ -1390,7 +1391,7 @@ BOOL WINAPI ChooseColorA( LPCHOOSECOLORA lpChCol )
   if (ret)
       lpChCol->rgbResult = lpcc->rgbResult;
 
-  heap_free(template_name);
-  heap_free(lpcc);
+  free(template_name);
+  free(lpcc);
   return ret;
 }

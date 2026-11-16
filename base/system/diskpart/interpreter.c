@@ -55,7 +55,7 @@ COMMAND cmds[] =
     {L"EXIT",        NULL,         NULL,        NULL,                    IDS_HELP_EXIT,                      MSG_COMMAND_EXIT},
 
 //    {L"EXPAND",      NULL,         NULL,        expand_main,             IDS_HELP_EXPAND,                    MSG_COMMAND_EXPAND},
-//    {L"EXTEND",      NULL,         NULL,        extend_main,             IDS_HELP_EXTEND,                    MSG_COMMAND_EXTEND},
+    {L"EXTEND",      NULL,         NULL,        extend_main,             IDS_HELP_EXTEND,                    MSG_COMMAND_EXTEND},
     {L"FILESYSTEMS", NULL,         NULL,        filesystems_main,        IDS_HELP_FILESYSTEMS,               MSG_COMMAND_FILESYSTEMS},
     {L"FORMAT",      NULL,         NULL,        format_main,             IDS_HELP_FORMAT,                    MSG_COMMAND_FORMAT},
     {L"GPT",         NULL,         NULL,        gpt_main,                IDS_HELP_GPT,                       MSG_COMMAND_GPT},
@@ -88,7 +88,7 @@ COMMAND cmds[] =
 
     {L"SET",         NULL,         NULL,        setid_main,              IDS_HELP_SETID,                     MSG_COMMAND_SETID},
     {L"SETID",       NULL,         NULL,        setid_main,              IDS_HELP_SETID,                     MSG_COMMAND_SETID},
-//    {L"SHRINK",      NULL,         NULL,        shrink_main,             IDS_HELP_SHRINK,                    MSG_COMMAND_SHRINK},
+    {L"SHRINK",      NULL,         NULL,        shrink_main,             IDS_HELP_SHRINK,                    MSG_COMMAND_SHRINK},
 
     {L"UNIQUEID",    NULL,         NULL,        NULL,                    IDS_HELP_UNIQUEID,                  MSG_NONE},
     {L"UNIQUEID",    L"DISK",      NULL,        UniqueIdDisk,            IDS_HELP_UNIQUEID_DISK,             MSG_COMMAND_UNIQUEID_DISK},
@@ -248,7 +248,8 @@ InterpretMain(VOID)
         ConResPuts(StdOut, IDS_APP_PROMPT);
 
         /* Get input from the user. */
-        fgetws(input_line, MAX_STRING_SIZE, stdin);
+        if (fgetws(input_line, MAX_STRING_SIZE, stdin) == NULL)
+            break;
 
         bQuote = FALSE;
         ptr = input_line;

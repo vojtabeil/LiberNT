@@ -1,10 +1,15 @@
 
+spec2def(acpi.sys acpi.spec ADD_IMPORTLIB)
+
 include_directories(
     include
     acpica/include)
 
-if(ARCH STREQUAL "amd64")
+if(ARCH MATCHES "64$")
     add_definitions(-DWIN64)
+    if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+        add_compile_definitions("ACPI_UNUSED_VAR=__attribute__((unused))")
+    endif()
 endif()
 
 list(APPEND ACPICA_SOURCE
@@ -182,30 +187,57 @@ add_library(acpica
 
 add_pch(acpica acpica/include/acpi.h "${ACPICA_PCH_SKIP_SOURCE}")
 set_target_properties(acpica PROPERTIES COMPILE_DEFINITIONS "ACPI_USE_LOCAL_CACHE;ACPI_USE_SYSTEM_INTTYPES")
+if(ARCH STREQUAL "arm64")
+    target_compile_options(acpica PRIVATE -mstrict-align)
+endif()
 add_dependencies(acpica bugcodes xdk)
 
 list(APPEND ACPI_SOURCE
     busmgr/bus.c
     busmgr/button.c
+    busmgr/ec.c
+    busmgr/fan.c
+    busmgr/thermal.c
     busmgr/power.c
+    busmgr/acpi_pci_routing.c
+    busmgr/pci_root.c
     busmgr/utils.c
     busmgr/system.c
     osl.c
     acpienum.c
     eval.c
+    ged.c
     interface.c
+    opregion.c
+    cmos.c
+    cmos_core.c
     pnp.c
     power.c
+    thermal.c
+    wake.c
     buspdo.c
     main.c)
 
+# Note: acpi.sys no longer exports functions.
+# PCI uses device interface and IOCTL for ACPI method evaluation.
+
 add_library(acpi MODULE
+    gpioint.c
     ${ACPI_SOURCE}
+    ${CMAKE_CURRENT_BINARY_DIR}/acpi.def
     acpi.rc)
 
 set_module_type(acpi kernelmodedriver)
+if(ARCH STREQUAL "arm64")
+    target_compile_options(acpi PRIVATE -mstrict-align)
+endif()
 target_link_libraries(acpi wdmguid acpica memcmp strtol ${PSEH_LIB})
 add_importlibs(acpi ntoskrnl hal)
 add_pch(acpi precomp.h ACPI_SOURCE)
+set_source_files_properties(gpioint.c PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
 add_cd_file(TARGET acpi DESTINATION reactos/system32/drivers NO_CAB FOR all)
 add_driver_inf(acpi acpi.inf)
+
+if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
+    target_compile_options(acpica PRIVATE -Wno-unused-but-set-variable)
+endif()

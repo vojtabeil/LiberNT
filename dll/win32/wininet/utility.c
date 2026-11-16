@@ -1,7 +1,3 @@
-#ifdef __REACTOS__
-#include "precomp.h"
-#include "inet_ntop.c"
-#else
 /*
  * Wininet - Utility functions
  *
@@ -40,147 +36,154 @@
 
 #include "wine/debug.h"
 #include "internet.h"
-#endif /* defined(__REACTOS__) */
 
 WINE_DEFAULT_DEBUG_CHANNEL(wininet);
 
-#define TIME_STRING_LEN  30
-
-time_t ConvertTimeString(LPCWSTR asctime)
+server_addr_t *GetAddress(const WCHAR *name, INTERNET_PORT port)
 {
-    WCHAR tmpChar[TIME_STRING_LEN];
-    WCHAR *tmpChar2;
-    struct tm t;
-    int timelen = lstrlenW(asctime);
-
-    if(!timelen)
-        return 0;
-
-    /* FIXME: the atoiWs below rely on that tmpChar is \0 padded */
-    memset( tmpChar, 0, sizeof(tmpChar) );
-    lstrcpynW(tmpChar, asctime, TIME_STRING_LEN);
-
-    /* Assert that the string is the expected length */
-    if (lstrlenW(asctime) >= TIME_STRING_LEN) FIXME("\n");
-
-    /* Convert a time such as 'Mon, 15 Nov 1999 16:09:35 GMT' into a SYSTEMTIME structure
-     * We assume the time is in this format
-     * and divide it into easy to swallow chunks
-     */
-    tmpChar[3]='\0';
-    tmpChar[7]='\0';
-    tmpChar[11]='\0';
-    tmpChar[16]='\0';
-    tmpChar[19]='\0';
-    tmpChar[22]='\0';
-    tmpChar[25]='\0';
-
-    memset( &t, 0, sizeof(t) );
-    t.tm_year = wcstol(tmpChar+12, NULL, 10) - 1900;
-    t.tm_mday = wcstol(tmpChar+5, NULL, 10);
-    t.tm_hour = wcstol(tmpChar+17, NULL, 10);
-    t.tm_min = wcstol(tmpChar+20, NULL, 10);
-    t.tm_sec = wcstol(tmpChar+23, NULL, 10);
-
-    /* and month */
-    tmpChar2 = tmpChar + 8;
-    switch(tmpChar2[2])
-    {
-        case 'n':
-            if(tmpChar2[1]=='a')
-                t.tm_mon = 0;
-            else
-                t.tm_mon = 5;
-            break;
-        case 'b':
-            t.tm_mon = 1;
-            break;
-        case 'r':
-            if(tmpChar2[1]=='a')
-                t.tm_mon = 2;
-            else
-                t.tm_mon = 3;
-            break;
-        case 'y':
-            t.tm_mon = 4;
-            break;
-        case 'l':
-            t.tm_mon = 6;
-            break;
-        case 'g':
-            t.tm_mon = 7;
-            break;
-        case 'p':
-            t.tm_mon = 8;
-            break;
-        case 't':
-            t.tm_mon = 9;
-            break;
-        case 'v':
-            t.tm_mon = 10;
-            break;
-        case 'c':
-            t.tm_mon = 11;
-            break;
-        default:
-            FIXME("\n");
-    }
-
-    return mktime(&t);
-}
-
-
-BOOL GetAddress(const WCHAR *name, INTERNET_PORT port, struct sockaddr *psa, int *sa_len, char *addr_str)
-{
-    ADDRINFOW *res, hints;
-    void *addr = NULL;
+    server_addr_t *server_addr, *p;
+    struct sockaddr_storage *addr;
+    ADDRINFOW *res, *ai, hints;
+    unsigned int len, count;
     int ret;
 
     TRACE("%s\n", debugstr_w(name));
 
+#ifdef __REACTOS__
+    init_winsock();
+#endif
     memset( &hints, 0, sizeof(hints) );
-    /* Prefer IPv4 to IPv6 addresses, since some servers do not listen on
-     * their IPv6 addresses even though they have IPv6 addresses in the DNS.
-     */
-    hints.ai_family = AF_INET;
-
+    hints.ai_socktype = SOCK_STREAM;
     ret = GetAddrInfoW(name, NULL, &hints, &res);
     if (ret != 0)
     {
-        TRACE("failed to get IPv4 address of %s, retrying with IPv6\n", debugstr_w(name));
-        hints.ai_family = AF_INET6;
-        ret = GetAddrInfoW(name, NULL, &hints, &res);
-    }
-    if (ret != 0)
-    {
         TRACE("failed to get address of %s\n", debugstr_w(name));
-        return FALSE;
+        return NULL;
     }
-    if (*sa_len < res->ai_addrlen)
+    count = 0;
+    for (ai = res; ai; ai = ai->ai_next)
+        ++count;
+    p = server_addr = calloc(count, sizeof(*server_addr));
+    ai = res;
+    while (ai)
     {
-        WARN("address too small\n");
-        FreeAddrInfoW(res);
-        return FALSE;
-    }
-    *sa_len = res->ai_addrlen;
-    memcpy( psa, res->ai_addr, res->ai_addrlen );
-    /* Copy port */
-    switch (res->ai_family)
-    {
-    case AF_INET:
-        addr = &((struct sockaddr_in *)psa)->sin_addr;
-        ((struct sockaddr_in *)psa)->sin_port = htons(port);
-        break;
-    case AF_INET6:
-        addr = &((struct sockaddr_in6 *)psa)->sin6_addr;
-        ((struct sockaddr_in6 *)psa)->sin6_port = htons(port);
-        break;
+        addr = &p->addr;
+        p->addr_len = ai->ai_addrlen;
+        memcpy( addr, ai->ai_addr, ai->ai_addrlen );
+        /* Copy port */
+        switch (ai->ai_family)
+        {
+        case AF_INET:
+            ((struct sockaddr_in *)addr)->sin_port = htons(port);
+            inet_ntop(ai->ai_family, &((struct sockaddr_in *)addr)->sin_addr, p->addr_str, INET6_ADDRSTRLEN);
+            break;
+        case AF_INET6:
+            ((struct sockaddr_in6 *)addr)->sin6_port = htons(port);
+            p->addr_str[0] = '[';
+            inet_ntop(ai->ai_family, &((struct sockaddr_in6 *)addr)->sin6_addr, p->addr_str + 1, INET6_ADDRSTRLEN - 2);
+            len = strlen(p->addr_str);
+            p->addr_str[len] = ']';
+            p->addr_str[len + 1] = 0;
+            break;
+        }
+        if (!(ai = ai->ai_next))
+            break;
+        p->next = p + 1;
+        p = p->next;
     }
 
-    if(addr_str)
-        inet_ntop(res->ai_family, addr, addr_str, INET6_ADDRSTRLEN);
     FreeAddrInfoW(res);
-    return TRUE;
+    return server_addr;
+}
+
+static int try_create_connect_socket(server_addr_t *addr, int af, DWORD timeout, object_header_t *hdr,
+                                     DWORD_PTR callback_context)
+{
+    TIMEVAL timeout_timeval = {0, timeout * 1000};
+    ULONG blocking;
+    socklen_t len;
+    FD_SET set;
+    DWORD err;
+    int res;
+    int s;
+
+    if (hdr)
+        INTERNET_SendCallback(hdr, callback_context, INTERNET_STATUS_CONNECTING_TO_SERVER,
+                              addr->addr_str, strlen(addr->addr_str) + 1);
+
+    if (af != AF_UNSPEC && addr->addr.ss_family != af)
+        return -1;
+
+    if ((s = socket(addr->addr.ss_family, SOCK_STREAM, 0)) == -1)
+        return -1;
+
+    blocking = 0;
+    ioctlsocket(s, FIONBIO, &blocking);
+
+    if (!connect(s, (struct sockaddr *)&addr->addr, addr->addr_len))
+        goto done;
+
+    err = WSAGetLastError();
+    if (err != WSAEINPROGRESS && err != WSAEWOULDBLOCK)
+    {
+        closesocket(s);
+        return -1;
+    }
+
+    FD_ZERO(&set);
+    FD_SET(s, &set);
+    res = select(s + 1, NULL, &set, NULL, timeout == INFINITE ? NULL : &timeout_timeval);
+    len = sizeof(res);
+    if(!res || res == SOCKET_ERROR || getsockopt(s, SOL_SOCKET, SO_ERROR, (void *)&res, &len) || res)
+    {
+        closesocket(s);
+        return -1;
+    }
+
+done:
+    blocking = 1;
+    ioctlsocket(s, FIONBIO, &blocking);
+    if (hdr)
+        INTERNET_SendCallback(hdr, callback_context, INTERNET_STATUS_CONNECTED_TO_SERVER,
+                              addr->addr_str, strlen(addr->addr_str) + 1);
+    return s;
+}
+
+int create_connect_socket(server_addr_t *addr, int af, DWORD timeout, object_header_t *hdr, DWORD_PTR callback_context)
+{
+    LARGE_INTEGER qpf, qpc, end;
+    server_addr_t *a, tmp;
+    int s;
+
+    if (timeout != INFINITE)
+    {
+        QueryPerformanceFrequency(&qpf);
+        QueryPerformanceCounter(&end);
+        end.QuadPart += qpf.QuadPart / 1000 * timeout;
+    }
+    a = addr;
+    while (a)
+    {
+        if ((s = try_create_connect_socket(a, af, timeout, hdr, callback_context)) != -1)
+        {
+            /* try this address first next time. */
+            tmp = *addr;
+            *addr = *a;
+            *a = tmp;
+            a->next = addr->next;
+            addr->next = tmp.next;
+            return s;
+        }
+        if (timeout != INFINITE)
+        {
+            QueryPerformanceCounter(&qpc);
+            if (qpc.QuadPart >= end.QuadPart)
+                return -1;
+            timeout = (end.QuadPart - qpc.QuadPart) * 1000 / qpf.QuadPart;
+        }
+        a = a->next;
+    }
+    return -1;
 }
 
 /*
@@ -230,7 +233,7 @@ static const char *debugstr_status_info(DWORD status, void *info)
     switch(status) {
     case INTERNET_STATUS_REQUEST_COMPLETE: {
         INTERNET_ASYNC_RESULT *iar = info;
-        return wine_dbg_sprintf("{%s, %d}", wine_dbgstr_longlong(iar->dwResult), iar->dwError);
+        return wine_dbg_sprintf("{%s, %ld}", wine_dbgstr_longlong(iar->dwResult), iar->dwError);
     }
     default:
         return wine_dbg_sprintf("%p", info);
@@ -253,30 +256,41 @@ void INTERNET_SendCallback(object_header_t *hdr, DWORD_PTR context, DWORD status
     case INTERNET_STATUS_NAME_RESOLVED:
     case INTERNET_STATUS_CONNECTING_TO_SERVER:
     case INTERNET_STATUS_CONNECTED_TO_SERVER:
-        new_info = heap_alloc(info_len);
+        new_info = malloc(info_len);
+#ifdef __REACTOS__
+        if (!new_info) return;
+        memcpy(new_info, info, info_len);
+#else
         if(new_info)
             memcpy(new_info, info, info_len);
+#endif
         break;
     case INTERNET_STATUS_RESOLVING_NAME:
     case INTERNET_STATUS_REDIRECT:
         if(hdr->dwInternalFlags & INET_CALLBACKW) {
-            new_info = heap_strdupW(info);
+            new_info = wcsdup(info);
+#ifdef __REACTOS__
+            if (!new_info) return;
+#endif
             break;
         }else {
-            new_info = heap_strdupWtoA(info);
+            new_info = strdupWtoA(info);
+#ifdef __REACTOS__
+            if (!new_info) return;
+#endif
             info_len = strlen(new_info)+1;
             break;
         }
     }
-
-    TRACE(" callback(%p) (%p (%p), %08lx, %d (%s), %s, %d)\n",
+    
+    TRACE(" callback(%p) (%p (%p), %08Ix, %ld (%s), %s, %ld)\n",
 	  hdr->lpfnStatusCB, hdr->hInternet, hdr, context, status, get_callback_name(status),
 	  debugstr_status_info(status, new_info), info_len);
-
+    
     hdr->lpfnStatusCB(hdr->hInternet, context, status, new_info, info_len);
 
     TRACE(" end callback().\n");
 
     if(new_info != info)
-        heap_free(new_info);
+        free(new_info);
 }

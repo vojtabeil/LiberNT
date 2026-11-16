@@ -19,6 +19,7 @@
 /* Endpoint status */
 #define USBPORT_ENDPOINT_RUN     0
 #define USBPORT_ENDPOINT_HALT    1
+#define USBPORT_ENDPOINT_TT_BUFFER_DIRTY 2
 #define USBPORT_ENDPOINT_CONTROL 4
 
 /* Interrupt Endpoint Poll Interval */
@@ -41,6 +42,10 @@
 #define USBPORT_RESOURCES_INTERRUPT 2
 #define USBPORT_RESOURCES_MEMORY    4
 
+#ifndef _WIN64
+#pragma pack(push, 4)
+#endif
+
 typedef struct _USBPORT_RESOURCES {
   ULONG ResourcesTypes;
   USB_CONTROLLER_FLAVOR HcFlavor;
@@ -51,18 +56,51 @@ typedef struct _USBPORT_RESOURCES {
   BOOLEAN ShareVector;
   UCHAR Padded2[3];
   KINTERRUPT_MODE InterruptMode;
+  ULONG InterruptFlags;
+  ULONG InterruptMessageCount;
   ULONG_PTR Reserved;
   PVOID ResourceBase;
   ULONG IoSpaceLength;
   ULONG_PTR StartVA;
-  ULONG StartPA;
+  ULONGLONG StartPA;
   UCHAR LegacySupport;
   BOOLEAN IsChirpHandled;
   UCHAR Reserved2;
   UCHAR Reserved3;
+  /*
+   * LowerDeviceObject: The device object below the FDO in the stack.
+   * This is typically the ACPI filter (if present) or the PDO.
+   * Miniport drivers can use this to send ACPI IOCTLs for _OSC etc.
+   * Added to support USB _OSC negotiation in xHCI driver.
+   */
+  PDEVICE_OBJECT LowerDeviceObject;
+  /*
+   * PCI location information for ACPI namespace lookup.
+   * Miniport drivers can use these to find their ACPI device node
+   * for evaluating _OSC, _DSM, and other ACPI methods.
+   */
+  ULONG PciSegment;
+  ULONG PciBusNumber;
+  ULONG PciDeviceNumber;
+  ULONG PciFunctionNumber;
 } USBPORT_RESOURCES, *PUSBPORT_RESOURCES;
 
-C_ASSERT(sizeof(USBPORT_RESOURCES) == 32 + 5 * sizeof(PVOID));
+#ifndef _WIN64
+#pragma pack(pop)
+#endif
+
+C_ASSERT(sizeof(USBPORT_RESOURCES) == 56 + 7 * sizeof(PVOID));
+
+/* USBPORT_RESOURCES::Reserved flags */
+#define USBPORT_RES_DMA_ADDR_32BIT 0x00000001u
+#define USBPORT_RES_DMA_ADDR_64BIT 0x00000002u
+#define USBPORT_RES_DMA_ADDR_MASK  (USBPORT_RES_DMA_ADDR_32BIT | USBPORT_RES_DMA_ADDR_64BIT)
+#define USBPORT_RES_DMA_NONCOHERENT 0x00000004u
+
+typedef struct _USBPORT_COMPANION_PORT_INFO {
+  USHORT CompanionIndex;
+  USHORT CompanionPortNumber;
+} USBPORT_COMPANION_PORT_INFO, *PUSBPORT_COMPANION_PORT_INFO;
 
 typedef struct _USBPORT_ENDPOINT_PROPERTIES {
   USHORT DeviceAddress;
@@ -85,12 +123,32 @@ typedef struct _USBPORT_ENDPOINT_PROPERTIES {
   UCHAR InterruptScheduleMask;
   UCHAR SplitCompletionMask;
   UCHAR TransactionPerMicroframe; // 1 + additional transactions. Total: from 1 to 3)
-  UCHAR Reserved4;
+  UCHAR Reserved4; /* Raw endpoint descriptor bInterval */
   ULONG MaxPacketSize;
   ULONG Reserved6;
+  /* Bus topology of the endpoint's device, derived from the device-handle
+   * chain. HubAddr/PortNumber above keep their historical TT-split semantics
+   * for the USB2 (EHCI) schedulers; the fields below carry the full topology
+   * needed by xHCI-class controllers for devices behind external hubs. */
+  ULONG RouteString;     /* xHCI route string (20 bits), 0 = attached to a root port */
+  USHORT RootPortNumber; /* 1-based root-hub port the device chain hangs on */
+  USHORT TtHubAddr;      /* USB address of the hub whose TT translates for this
+                          * LS/FS device (nearest high-speed ancestor hub), -1 = none */
+  USHORT TtPortNumber;   /* 1-based downstream port on the TT hub for this device */
+  USHORT TopologyReserved;
+  ULONG Reserved7;
 } USBPORT_ENDPOINT_PROPERTIES, *PUSBPORT_ENDPOINT_PROPERTIES;
 
-C_ASSERT(sizeof(USBPORT_ENDPOINT_PROPERTIES) == 56 + 2 * sizeof(PVOID));
+C_ASSERT(sizeof(USBPORT_ENDPOINT_PROPERTIES) == 72 + 2 * sizeof(PVOID));
+
+/* USBPORT_ENDPOINT_PROPERTIES::Reserved3 flags for SS LPM policy */
+#define USBPORT_EP_LPM_VALID       0x80000000u
+#define USBPORT_EP_LPM_ALLOW_U1    0x40000000u
+#define USBPORT_EP_LPM_ALLOW_U2    0x20000000u
+#define USBPORT_EP_LPM_U1_SHIFT    0
+#define USBPORT_EP_LPM_U1_MASK     0x000000FFu
+#define USBPORT_EP_LPM_U2_SHIFT    8
+#define USBPORT_EP_LPM_U2_MASK     0x00FFFF00u
 
 typedef struct _USBPORT_TRANSFER_PARAMETERS {
   ULONG TransferFlags;
@@ -100,6 +158,8 @@ typedef struct _USBPORT_TRANSFER_PARAMETERS {
   ULONG Reserved2;
   USB_DEFAULT_PIPE_SETUP_PACKET SetupPacket;
 } USBPORT_TRANSFER_PARAMETERS, *PUSBPORT_TRANSFER_PARAMETERS;
+
+#define USBPORT_TRANSFER_FLAG_DUMP 0x80000000
 
 C_ASSERT(sizeof(USBPORT_TRANSFER_PARAMETERS) == 28);
 
@@ -123,6 +183,26 @@ typedef struct _USBPORT_SCATTER_GATHER_LIST {
 
 C_ASSERT(sizeof(USBPORT_SCATTER_GATHER_LIST) == 48 + 4 * sizeof(PVOID));
 
+typedef struct _USBPORT_ISO_BLOCK_PACKET {
+  ULONG Offset;
+  ULONG Length;
+  ULONG ActualLength;
+  USBD_STATUS Status;
+} USBPORT_ISO_BLOCK_PACKET, *PUSBPORT_ISO_BLOCK_PACKET;
+
+typedef struct _USBPORT_ISO_BLOCK {
+  ULONG StartFrame;
+  ULONG NumberOfPackets;
+  ULONG TransferFlags;
+  ULONG ErrorCount;
+  PUSBPORT_SCATTER_GATHER_LIST SgList;
+  USBPORT_ISO_BLOCK_PACKET Packets[1];
+} USBPORT_ISO_BLOCK, *PUSBPORT_ISO_BLOCK;
+
+#define USBPORT_ISO_BLOCK_SIZE(_Packets_) \
+  (FIELD_OFFSET(USBPORT_ISO_BLOCK, Packets[0]) + \
+   (_Packets_) * sizeof(USBPORT_ISO_BLOCK_PACKET))
+
 typedef struct _USBPORT_ENDPOINT_REQUIREMENTS {
   ULONG HeaderBufferSize;
   ULONG MaxTransferSize;
@@ -140,6 +220,8 @@ typedef ULONG RHSTATUS; // Roothub status
 #define MP_STATUS_NOT_SUPPORTED 6
 #define MP_STATUS_HW_ERROR      7
 #define MP_STATUS_UNSUCCESSFUL  8
+/* Request was not consumed; retry after the miniport invalidates the endpoint. */
+#define MP_STATUS_BUSY          9
 
 #define RH_STATUS_SUCCESS       0
 #define RH_STATUS_NO_CHANGES    1
@@ -211,7 +293,7 @@ typedef MPSTATUS
   PVOID,
   PUSBPORT_TRANSFER_PARAMETERS,
   PVOID,
-  PVOID);
+  PUSBPORT_ISO_BLOCK);
 
 typedef VOID
 (NTAPI *PHCI_ABORT_TRANSFER)(
@@ -254,6 +336,18 @@ typedef VOID
 typedef VOID
 (NTAPI *PHCI_POLL_CONTROLLER)(PVOID);
 
+typedef BOOLEAN
+(NTAPI *PHCI_QUERY_COMPANION_PORT_INFO)(
+  PVOID,
+  USHORT,
+  PUSBPORT_COMPANION_PORT_INFO);
+
+typedef BOOLEAN
+(NTAPI *PHCI_QUERY_PORT_ATTRIBUTES)(
+  PVOID,
+  USHORT,
+  PULONG);
+
 typedef VOID
 (NTAPI *PHCI_SET_ENDPOINT_DATA_TOGGLE)(
   PVOID,
@@ -273,6 +367,22 @@ typedef VOID
 
 typedef VOID
 (NTAPI *PHCI_RESET_CONTROLLER)(PVOID);
+
+typedef MPSTATUS
+(NTAPI *PHCI_RESET_DEVICE)(
+  PVOID,
+  USHORT);
+
+/* The device at this bus position is gone (removed, restored, or its
+ * enumeration failed); the controller releases any per-device state such as
+ * the xHCI device slot. DeviceAddress is 0 for never-addressed devices, in
+ * which case the position is identified by root port + route string. */
+typedef VOID
+(NTAPI *PHCI_REMOVE_USB_DEVICE)(
+  PVOID,
+  USHORT,   /* DeviceAddress */
+  USHORT,   /* RootPortNumber */
+  ULONG);   /* RouteString */
 
 /* Roothub functions */
 typedef VOID
@@ -537,9 +647,27 @@ typedef VOID
 #define USB_MINIPORT_FLAGS_POLLING      0x0080
 #define USB_MINIPORT_FLAGS_NO_DMA       0x0100
 #define USB_MINIPORT_FLAGS_WAKE_SUPPORT 0x0200
+#define USB_MINIPORT_FLAGS_USB3         0x0400
+/* Miniport requires its CloseEndpoint callback to run at PASSIVE_LEVEL
+ * without MiniportSpinLock held (e.g. xHCI frees ring/common-buffer DMA
+ * via MmFreeContiguousMemory). */
+#define USB_MINIPORT_FLAGS_CLOSE_AT_PASSIVE 0x0800
+/* Miniport can submit and poll dump transfers after a HIGH_LEVEL bugcheck. */
+#define USB_MINIPORT_FLAGS_DUMP_POLLING 0x1000
+/* USB 2.0 controller can transact directly with root-attached FS/LS devices
+ * without an EHCI companion controller or an external high-speed hub TT. */
+#define USB_MINIPORT_FLAGS_USB2_DIRECT_FSLS 0x2000
+/* GetEndpointState acknowledges control/bulk schedule retirement. */
+#define USB_MINIPORT_FLAGS_ASYNC_ENDPOINT_STATE 0x4000
 
-#define TOTAL_USB11_BUS_BANDWIDTH  12000
-#define TOTAL_USB20_BUS_BANDWIDTH  400000
+#define TOTAL_USB11_BUS_BANDWIDTH        12000
+#define TOTAL_USB20_BUS_BANDWIDTH       400000
+/* Approximate aggregate SuperSpeed/SSP bus bandwidth (5/10 Gbps), expressed
+ * in the same abstract units used by the USB 2.0 scheduler.  These are not
+ * consumed by the legacy frame-based bandwidth pool but are available for
+ * future SuperSpeed-aware accounting or diagnostics. */
+#define TOTAL_USB30_BUS_BANDWIDTH_GEN1 4000000   /* ~10x USB 2.0 */
+#define TOTAL_USB30_BUS_BANDWIDTH_GEN2 8000000   /* ~20x USB 2.0 */
 
 typedef struct _USBPORT_REGISTRATION_PACKET {
   ULONG MiniPortVersion;
@@ -605,6 +733,8 @@ typedef struct _USBPORT_REGISTRATION_PACKET {
   PHCI_START_SEND_ONE_PACKET StartSendOnePacket;
   PHCI_END_SEND_ONE_PACKET EndSendOnePacket;
   PHCI_PASS_THRU PassThru;
+  PHCI_QUERY_COMPANION_PORT_INFO QueryCompanionPortInfo;
+  PHCI_QUERY_PORT_ATTRIBUTES QueryPortAttributes;
 
   /* Port */
   PUSBPORT_DBG_PRINT UsbPortDbgPrint;
@@ -629,8 +759,14 @@ typedef struct _USBPORT_REGISTRATION_PACKET {
   PHCI_FLUSH_INTERRUPTS FlushInterrupts;
   PHCI_RH_CHIRP_ROOT_PORT RH_ChirpRootPort;
   PHCI_TAKE_PORT_CONTROL TakePortControl;
-  ULONG Reserved4;
-  ULONG Reserved5;
+  union {
+    struct {
+      ULONG Reserved4;
+      ULONG Reserved5;
+    };
+    PHCI_RESET_DEVICE ResetDevice;
+  };
+  PHCI_REMOVE_USB_DEVICE RemoveUsbDevice;
 } USBPORT_REGISTRATION_PACKET, *PUSBPORT_REGISTRATION_PACKET;
 
 #define USB10_MINIPORT_INTERFACE_VERSION  100
@@ -644,7 +780,7 @@ typedef struct _USBPORT_MINIPORT_INTERFACE {
   USBPORT_REGISTRATION_PACKET Packet;
 } USBPORT_MINIPORT_INTERFACE, *PUSBPORT_MINIPORT_INTERFACE;
 
-C_ASSERT(sizeof(USBPORT_MINIPORT_INTERFACE) == 32 + 76 * sizeof(PVOID));
+C_ASSERT(sizeof(USBPORT_MINIPORT_INTERFACE) == 32 + 79 * sizeof(PVOID));
 
 #define USBPORT_TRANSFER_DIRECTION_OUT  1 // From host to device
 #define USBPORT_MAX_DEVICE_ADDRESS      127

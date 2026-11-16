@@ -10,7 +10,28 @@
 
 #include "precomp.h"
 
+#include <icmp.h>
+
 NEIGHBOR_CACHE_TABLE NeighborCache[NB_HASHMASK + 1];
+
+VOID NBReferenceNeighbor(PNEIGHBOR_CACHE_ENTRY NCE)
+{
+    ASSERT(NCE->RefCount > 0);
+    InterlockedIncrement(&NCE->RefCount);
+}
+
+VOID NBDereferenceNeighbor(PNEIGHBOR_CACHE_ENTRY NCE)
+{
+    ASSERT(NCE->RefCount > 0);
+
+    if (InterlockedDecrement(&NCE->RefCount) == 0)
+    {
+        ASSERT(NCE->Removed);
+        ASSERT(IsListEmpty(&NCE->PacketQueue));
+        IPDereferenceInterface(NCE->Interface);
+        ExFreePoolWithTag(NCE, NCE_TAG);
+    }
+}
 
 VOID NBCompleteSend( PVOID Context,
 		     PNDIS_PACKET NdisPacket,
@@ -30,7 +51,10 @@ VOID NBSendPackets( PNEIGHBOR_CACHE_ENTRY NCE ) {
     PNEIGHBOR_PACKET Packet;
     UINT HashValue;
 
-    ASSERT(!(NCE->State & NUD_INCOMPLETE));
+    /* A media disconnect can invalidate the entry after the caller checked
+     * it. Keep the packets queued until the address resolves again. */
+    if (NCE->State & NUD_INCOMPLETE)
+        return;
 
     HashValue  = *(PULONG)(&NCE->Address.Address);
     HashValue ^= HashValue >> 16;
@@ -88,6 +112,48 @@ VOID NBFlushPacketQueue( PNEIGHBOR_CACHE_ENTRY NCE,
     }
 }
 
+static
+UINT
+NBProbeSeconds(PIP_INTERFACE Interface)
+{
+    return max((3 * Interface->RetransmitTime + 999) / 1000, 1);
+}
+
+static
+UINT
+NBReachableSeconds(PIP_INTERFACE Interface)
+{
+    return max(Interface->ReachableTime / 1000, 1);
+}
+
+static
+UINT
+NBEntryLifetime(PNEIGHBOR_CACHE_ENTRY NCE)
+{
+    if (NCE->State & NUD_INCOMPLETE)
+        return NBProbeSeconds(NCE->Interface);
+    return NBReachableSeconds(NCE->Interface) + NBProbeSeconds(NCE->Interface);
+}
+
+VOID NBFastTimeout(VOID)
+{
+    ULONGLONG Now = KeQueryInterruptTime();
+    PNEIGHBOR_CACHE_ENTRY NCE;
+    UINT i;
+
+    for (i = 0; i <= NB_HASHMASK; i++) {
+        TcpipAcquireSpinLockAtDpcLevel(&NeighborCache[i].Lock);
+        for (NCE = NeighborCache[i].Cache; NCE; NCE = NCE->Next) {
+            if ((NCE->State & NUD_PERMANENT) || !(NCE->State & (NUD_INCOMPLETE | NUD_STALE)) ||
+                Now < NCE->NextSolicit)
+                continue;
+            NBSendSolicit(NCE);
+            NCE->NextSolicit = Now + (ULONGLONG)NCE->Interface->RetransmitTime * 10000;
+        }
+        TcpipReleaseSpinLockFromDpcLevel(&NeighborCache[i].Lock);
+    }
+}
+
 VOID NBTimeout(VOID)
 /*
  * FUNCTION: Neighbor address cache timeout handler
@@ -108,14 +174,14 @@ VOID NBTimeout(VOID)
              (NCE = *PrevNCE) != NULL;) {
             if (NCE->State & NUD_INCOMPLETE)
             {
-                /* Solicit for an address */
-                NBSendSolicit(NCE);
                 if (NCE->EventTimer == 0)
                 {
                     NCE->EventCount++;
                     if (NCE->EventCount == ARP_INCOMPLETE_TIMEOUT)
                     {
                         NBFlushPacketQueue(NCE, NDIS_STATUS_NETWORK_UNREACHABLE);
+                        if (NCE->Address.Type == IP_ADDRESS_V4)
+                            PathUnreachable(NCE->Interface, NCE->Address.Address.IPv4Address);
                         NCE->EventCount = 0;
                     }
                 }
@@ -126,17 +192,16 @@ VOID NBTimeout(VOID)
                 ASSERT(!(NCE->State & NUD_PERMANENT));
                 NCE->EventCount++;
 
-                if ((NCE->EventCount > ARP_RATE &&
-                     NCE->EventCount % ARP_TIMEOUT_RETRANSMISSION == 0) ||
-                    (NCE->EventCount == ARP_RATE))
+                if (!(NCE->State & (NUD_INCOMPLETE | NUD_STALE)) &&
+                    NCE->EventCount >= NBReachableSeconds(NCE->Interface))
                 {
                     /* We haven't gotten a packet from them in
                      * EventCount seconds so we mark them as stale
                      * and solicit now */
                     NCE->State |= NUD_STALE;
-                    NBSendSolicit(NCE);
+                    NCE->NextSolicit = 0;
                 }
-                if (NCE->EventTimer - NCE->EventCount == 0) {
+                if (NCE->EventCount >= NBEntryLifetime(NCE)) {
                     /* Unlink and destroy the NCE */
                     *PrevNCE = NCE->Next;
 
@@ -145,16 +210,18 @@ VOID NBTimeout(VOID)
                     {
                         /* We couldn't get an address to this IP at all */
                         Status = NDIS_STATUS_HOST_UNREACHABLE;
+                        if (NCE->Address.Type == IP_ADDRESS_V4)
+                            PathUnreachable(NCE->Interface, NCE->Address.Address.IPv4Address);
                     }
                     else
                     {
                         /* This guy was stale for way too long */
-                        Status = NDIS_STATUS_REQUEST_ABORTED;
+                        Status = NDIS_STATUS_HOST_UNREACHABLE;
                     }
 
                     NBFlushPacketQueue(NCE, Status);
-
-                    ExFreePoolWithTag(NCE, NCE_TAG);
+                    NCE->Removed = TRUE;
+                    NBDereferenceNeighbor(NCE);
 
                     continue;
                 }
@@ -204,8 +271,8 @@ VOID NBShutdown(VOID)
 
           /* Flush wait queue */
 	  NBFlushPacketQueue( CurNCE, NDIS_STATUS_NOT_ACCEPTED );
-
-          ExFreePoolWithTag(CurNCE, NCE_TAG);
+          CurNCE->Removed = TRUE;
+          NBDereferenceNeighbor(CurNCE);
 
 	  CurNCE = NextNCE;
       }
@@ -234,6 +301,59 @@ VOID NBSendSolicit(PNEIGHBOR_CACHE_ENTRY NCE)
                 NCE->Interface);
 }
 
+/* An address that just became usable resolves the neighbors that were waiting for it at once */
+VOID NBSolicitIncomplete(PIP_INTERFACE Interface)
+{
+    ULONGLONG Now = KeQueryInterruptTime();
+    PNEIGHBOR_CACHE_ENTRY NCE;
+    KIRQL OldIrql;
+    ULONG i;
+
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+    for (i = 0; i <= NB_HASHMASK; ++i)
+    {
+        TcpipAcquireSpinLockAtDpcLevel(&NeighborCache[i].Lock);
+        for (NCE = NeighborCache[i].Cache; NCE; NCE = NCE->Next)
+        {
+            if (NCE->Interface != Interface || (NCE->State & NUD_PERMANENT) || !(NCE->State & NUD_INCOMPLETE))
+                continue;
+            NBSendSolicit(NCE);
+            NCE->NextSolicit = Now + (ULONGLONG)Interface->RetransmitTime * 10000;
+        }
+        TcpipReleaseSpinLockFromDpcLevel(&NeighborCache[i].Lock);
+    }
+    KeLowerIrql(OldIrql);
+}
+
+VOID NBInvalidateNeighborsForInterface(PIP_INTERFACE Interface)
+{
+    KIRQL OldIrql;
+    PNEIGHBOR_CACHE_ENTRY NCE;
+    ULONG i;
+
+    KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+    for (i = 0; i <= NB_HASHMASK; ++i)
+    {
+        TcpipAcquireSpinLockAtDpcLevel(&NeighborCache[i].Lock);
+        for (NCE = NeighborCache[i].Cache; NCE; NCE = NCE->Next)
+        {
+            if (NCE->Interface != Interface)
+                continue;
+
+            NBFlushPacketQueue(NCE, NDIS_STATUS_NETWORK_UNREACHABLE);
+            if (!(NCE->State & NUD_PERMANENT))
+            {
+                NCE->State = NUD_INCOMPLETE;
+                NCE->EventCount = 0;
+                if (NCE->EventTimer)
+                    NCE->EventTimer = ARP_INCOMPLETE_TIMEOUT;
+            }
+        }
+        TcpipReleaseSpinLockFromDpcLevel(&NeighborCache[i].Lock);
+    }
+    KeLowerIrql(OldIrql);
+}
+
 VOID NBDestroyNeighborsForInterface(PIP_INTERFACE Interface)
 {
     KIRQL OldIrql;
@@ -254,8 +374,9 @@ VOID NBDestroyNeighborsForInterface(PIP_INTERFACE Interface)
                 /* Unlink and destroy the NCE */
                 *PrevNCE = NCE->Next;
 
-                NBFlushPacketQueue(NCE, NDIS_STATUS_REQUEST_ABORTED);
-                ExFreePoolWithTag(NCE, NCE_TAG);
+                NBFlushPacketQueue(NCE, NDIS_STATUS_NETWORK_UNREACHABLE);
+                NCE->Removed = TRUE;
+                NBDereferenceNeighbor(NCE);
 
                 continue;
             }
@@ -294,6 +415,7 @@ PNEIGHBOR_CACHE_ENTRY NBAddNeighbor(
  */
 {
   PNEIGHBOR_CACHE_ENTRY NCE;
+  PNEIGHBOR_CACHE_ENTRY ExistingNCE;
   ULONG HashValue;
   KIRQL OldIrql;
   IP_ADDRESS InternalAddress;
@@ -310,6 +432,14 @@ PNEIGHBOR_CACHE_ENTRY NBAddNeighbor(
   if (NCE == NULL)
     {
       TI_DbgPrint(MIN_TRACE, ("Insufficient resources.\n"));
+      return NULL;
+    }
+
+  RtlZeroMemory(NCE, sizeof(*NCE));
+
+  if (!IPReferenceInterface(Interface))
+    {
+      ExFreePoolWithTag(NCE, NCE_TAG);
       return NULL;
     }
 
@@ -330,6 +460,7 @@ PNEIGHBOR_CACHE_ENTRY NBAddNeighbor(
   NCE->State = State;
   NCE->EventTimer = EventTimer;
   NCE->EventCount = 0;
+  NCE->NextSolicit = KeQueryInterruptTime() + (ULONGLONG)Interface->RetransmitTime * 10000;
   InitializeListHead( &NCE->PacketQueue );
 
   TI_DbgPrint(MID_TRACE,("NCE: %x\n", NCE));
@@ -340,12 +471,40 @@ PNEIGHBOR_CACHE_ENTRY NBAddNeighbor(
   HashValue ^= HashValue >> 4;
   HashValue &= NB_HASHMASK;
 
-  TcpipAcquireSpinLock(&NeighborCache[HashValue].Lock, &OldIrql);
+  TcpipAcquireSpinLock(&InterfaceListLock, &OldIrql);
 
+  if (!Interface->Registered)
+    {
+      TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
+      IPDereferenceInterface(Interface);
+      ExFreePoolWithTag(NCE, NCE_TAG);
+      return NULL;
+    }
+
+  TcpipAcquireSpinLockAtDpcLevel(&NeighborCache[HashValue].Lock);
+
+  for (ExistingNCE = NeighborCache[HashValue].Cache;
+       ExistingNCE != NULL;
+       ExistingNCE = ExistingNCE->Next)
+    {
+      if (ExistingNCE->Interface == Interface &&
+          AddrIsEqual(&ExistingNCE->Address, &InternalAddress))
+        {
+          NBReferenceNeighbor(ExistingNCE);
+          TcpipReleaseSpinLockFromDpcLevel(&NeighborCache[HashValue].Lock);
+          TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
+          IPDereferenceInterface(Interface);
+          ExFreePoolWithTag(NCE, NCE_TAG);
+          return ExistingNCE;
+        }
+    }
+
+  NCE->RefCount = 2;
   NCE->Next = NeighborCache[HashValue].Cache;
   NeighborCache[HashValue].Cache = NCE;
 
-  TcpipReleaseSpinLock(&NeighborCache[HashValue].Lock, OldIrql);
+  TcpipReleaseSpinLockFromDpcLevel(&NeighborCache[HashValue].Lock);
+  TcpipReleaseSpinLock(&InterfaceListLock, OldIrql);
 
   return NCE;
 }
@@ -376,6 +535,12 @@ VOID NBUpdateNeighbor(
     HashValue &= NB_HASHMASK;
 
     TcpipAcquireSpinLock(&NeighborCache[HashValue].Lock, &OldIrql);
+
+    if (NCE->Removed)
+    {
+        TcpipReleaseSpinLock(&NeighborCache[HashValue].Lock, OldIrql);
+        return;
+    }
 
     RtlCopyMemory(NCE->LinkAddress, LinkAddress, NCE->LinkAddressLength);
     NCE->State = State;
@@ -413,7 +578,11 @@ NBResetNeighborTimeout(PIP_ADDRESS Address)
     {
          if (AddrIsEqual(Address, &NCE->Address))
          {
-             NCE->EventCount = 0;
+             if (!(NCE->State & NUD_INCOMPLETE))
+             {
+                 NCE->EventCount = 0;
+                 NCE->State &= ~NUD_STALE;
+             }
              break;
          }
     }
@@ -439,7 +608,6 @@ PNEIGHBOR_CACHE_ENTRY NBLocateNeighbor(
   PNEIGHBOR_CACHE_ENTRY NCE;
   UINT HashValue;
   KIRQL OldIrql;
-  PIP_INTERFACE FirstInterface;
   IP_ADDRESS InternalAddress;
 
   TI_DbgPrint(DEBUG_NCACHE, ("Called. Address (0x%X).\n", Address));
@@ -458,51 +626,18 @@ PNEIGHBOR_CACHE_ENTRY NBLocateNeighbor(
 
   TcpipAcquireSpinLock(&NeighborCache[HashValue].Lock, &OldIrql);
 
-  /* If there's no adapter specified, we'll look for a match on
-   * each one. */
-  if (Interface == NULL)
+  NCE = NeighborCache[HashValue].Cache;
+  while (NCE != NULL)
   {
-      FirstInterface = GetDefaultInterface();
-      Interface = FirstInterface;
-  }
-  else
-  {
-      FirstInterface = NULL;
-  }
-
-  do
-  {
-      NCE = NeighborCache[HashValue].Cache;
-      while (NCE != NULL)
+      if ((Interface == NULL || NCE->Interface == Interface) &&
+          AddrIsEqual(&InternalAddress, &NCE->Address))
       {
-         if (NCE->Interface == Interface &&
-             AddrIsEqual(&InternalAddress, &NCE->Address))
-         {
-             break;
-         }
-
-         NCE = NCE->Next;
-      }
-
-      if (NCE != NULL)
+          ASSERT(!NCE->Removed);
+          NBReferenceNeighbor(NCE);
           break;
-  }
-  while ((FirstInterface != NULL) &&
-         ((Interface = GetDefaultInterface()) != FirstInterface));
-
-  if ((NCE == NULL) && (FirstInterface != NULL))
-  {
-      /* This time we'll even match loopback NCEs */
-      NCE = NeighborCache[HashValue].Cache;
-      while (NCE != NULL)
-      {
-         if (AddrIsEqual(&InternalAddress, &NCE->Address))
-         {
-             break;
-         }
-
-         NCE = NCE->Next;
       }
+
+      NCE = NCE->Next;
   }
 
   TcpipReleaseSpinLock(&NeighborCache[HashValue].Lock, OldIrql);
@@ -536,7 +671,7 @@ PNEIGHBOR_CACHE_ENTRY NBFindOrCreateNeighbor(
   if (NCE == NULL)
     {
         TI_DbgPrint(MID_TRACE,("BCAST: %s\n", A2S(&Interface->Broadcast)));
-        if( AddrIsEqual(Address, &Interface->Broadcast) ||
+        if( IsInterfaceBroadcast(Interface, Address) ||
             AddrIsUnspecified(Address) ) {
             TI_DbgPrint(MID_TRACE,("Packet targeted at broadcast addr\n"));
             NCE = NBAddNeighbor(Interface, Address, NULL,
@@ -591,12 +726,22 @@ BOOLEAN NBQueuePacket(
   Packet->Complete = PacketComplete;
   Packet->Context = PacketContext;
   Packet->Packet = NdisPacket;
+
+  if (NCE->Removed)
+    {
+      TcpipReleaseSpinLock(&NeighborCache[HashValue].Lock, OldIrql);
+      PacketComplete(PacketContext, NdisPacket, NDIS_STATUS_HOST_UNREACHABLE);
+      ExFreePoolWithTag(Packet, NEIGHBOR_PACKET_TAG);
+      return TRUE;
+    }
+
   InsertTailList( &NCE->PacketQueue, &Packet->Next );
 
   TcpipReleaseSpinLock(&NeighborCache[HashValue].Lock, OldIrql);
 
-  if( !(NCE->State & NUD_INCOMPLETE) )
+  if( !(NCE->State & NUD_INCOMPLETE) ) {
       NBSendPackets( NCE );
+  }
 
   return TRUE;
 }
@@ -636,8 +781,9 @@ VOID NBRemoveNeighbor(
           /* Found it, now unlink it from the list */
           *PrevNCE = CurNCE->Next;
 
-	  NBFlushPacketQueue( CurNCE, NDIS_STATUS_REQUEST_ABORTED );
-          ExFreePoolWithTag(CurNCE, NCE_TAG);
+	  NBFlushPacketQueue( CurNCE, NDIS_STATUS_HOST_UNREACHABLE );
+          CurNCE->Removed = TRUE;
+          NBDereferenceNeighbor(CurNCE);
 
 	  break;
         }
@@ -648,7 +794,8 @@ VOID NBRemoveNeighbor(
 
 ULONG NBCopyNeighbors
 (PIP_INTERFACE Interface,
- PIPARP_ENTRY ArpTable)
+ PIPARP_ENTRY ArpTable,
+ ULONG Capacity)
 {
   PNEIGHBOR_CACHE_ENTRY CurNCE;
   KIRQL OldIrql;
@@ -660,8 +807,8 @@ ULONG NBCopyNeighbors
 	   CurNCE;
 	   CurNCE = CurNCE->Next ) {
 	  if( CurNCE->Interface == Interface &&
-              !AddrIsEqual( &CurNCE->Address, &CurNCE->Interface->Unicast ) ) {
-	      if( ArpTable ) {
+              !IsInterfaceAddress( Interface, &CurNCE->Address ) ) {
+	      if( ArpTable && Size < Capacity ) {
 		  ArpTable[Size].Index = Interface->Index;
 		  ArpTable[Size].AddrSize = CurNCE->LinkAddressLength;
 		  RtlCopyMemory

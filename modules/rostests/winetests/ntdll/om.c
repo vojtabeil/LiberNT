@@ -47,8 +47,9 @@
 #define SEMAPHORE_QUERY_STATE           0x0001
 
 /* These are here because Wine's headers aren't compatible */
-#define RTL_CONSTANT_STRING(s) { sizeof(s) - sizeof(s[0]), sizeof(s), (void*)s }
+#ifndef NT_SUCCESS
 #define NT_SUCCESS(Status)              (((NTSTATUS)(Status)) >= 0)
+#endif
 #define NT_ERROR(Status)                ((((ULONG)(Status)) >> 30) == 3)
 #endif
 
@@ -2407,7 +2408,7 @@ static void test_object_types(void)
             if (!wcscmp(tests[i].name, L"IoCompletionReserve") ||
                 !wcscmp(tests[i].name, L"UserApcReserve"))
             {
-                skip("%s not implemented before Win7\n", tests[i].name);
+                skip("%s not implemented before Win7\n", wine_dbgstr_w(tests[i].name));
                 break;
             }
         }

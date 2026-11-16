@@ -41,7 +41,11 @@ static const char * const debug_classes[] = { "fixme", "err", "warn", "trace" };
 
 #define MAX_DEBUG_OPTIONS 256
 
+#if DBG
 static unsigned char default_flags = (1 << __WINE_DBCL_ERR) | (1 << __WINE_DBCL_FIXME);
+#else
+static unsigned char default_flags = 0;
+#endif
 static int nb_debug_options = -1;
 static struct __wine_debug_channel debug_options[MAX_DEBUG_OPTIONS];
 
@@ -261,6 +265,7 @@ static void debug_init(void)
 /* varargs wrapper for funcs.dbg_vprintf */
 int wine_dbg_printf( const char *format, ... )
 {
+#if DBG
     int ret;
     va_list valist;
 
@@ -268,6 +273,29 @@ int wine_dbg_printf( const char *format, ... )
     ret = funcs.dbg_vprintf( format, valist );
     va_end(valist);
     return ret;
+#else
+    (void)format;
+    return -1;
+#endif
+}
+
+/* va_list wrapper for funcs.dbg_vlog */
+int wine_dbg_vlog( enum __wine_debug_class cls, struct __wine_debug_channel *channel,
+                   const char *func, const char *format, va_list args )
+{
+    if (!(__wine_dbg_get_channel_flags( channel ) & (1 << cls))) return -1;
+
+    if (*format == '\1')
+    {
+        format++;
+        func = NULL;
+    }
+    return funcs.dbg_vlog( cls, channel, NULL, func, 0, format, args );
+}
+
+int __cdecl __wine_dbg_output( const char *str )
+{
+    return wine_dbg_printf( "%s", str );
 }
 
 /* printf with temp buffer allocation */

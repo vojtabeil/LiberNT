@@ -35,15 +35,6 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(dbgeng);
 
-#ifdef __REACTOS__
-extern NTSTATUS WINAPI NtSuspendProcess(HANDLE handle);
-extern NTSTATUS WINAPI NtResumeProcess(HANDLE handle);
-#define EnumProcessModulesEx(a, b, c, d, e) EnumProcessModules(a, b, c, d)
-
-#define LIST_MODULES_DEFAULT 0x00
-#define LIST_MODULES_32BIT 0x01
-#endif
-
 struct module_info
 {
     DEBUG_MODULE_PARAMETERS params;
@@ -145,10 +136,6 @@ static HRESULT debug_target_init_modules_info(struct target_process *target)
     DWORD needed;
     BOOL wow64;
     DWORD filter = LIST_MODULES_DEFAULT;
-#ifdef __REACTOS__
-    (DWORD)filter;
-    (BOOL)wow64;
-#endif
 
     if (target->modules.initialized)
         return S_OK;
@@ -582,6 +569,10 @@ static HRESULT STDMETHODCALLTYPE debugclient_DetachProcesses(IDebugClient7 *ifac
 
 static HRESULT STDMETHODCALLTYPE debugclient_EndSession(IDebugClient7 *iface, ULONG flags)
 {
+#ifdef __REACTOS__
+    if (flags == DEBUG_END_ACTIVE_DETACH)
+        return debugclient_DetachProcesses(iface);
+#endif
     FIXME("%p, %#lx stub.\n", iface, flags);
 
     return E_NOTIMPL;
@@ -3056,6 +3047,9 @@ static HRESULT STDMETHODCALLTYPE debugcontrol_IsPointer64Bit(IDebugControl4 *ifa
         case IMAGE_FILE_MACHINE_IA64:
         case IMAGE_FILE_MACHINE_AMD64:
         case IMAGE_FILE_MACHINE_ARM64:
+#ifdef __REACTOS__
+        case IMAGE_FILE_MACHINE_RISCV64:
+#endif
             hr = S_OK;
             break;
         default:

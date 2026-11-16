@@ -1,8 +1,5 @@
 
 
-remove_definitions(-D_WIN32_WINNT=0x502)
-add_definitions(-D_WIN32_WINNT=0x600)
-
 spec2def(portcls.sys portcls.spec ADD_IMPORTLIB)
 
 list(APPEND SOURCE
@@ -43,6 +40,7 @@ list(APPEND SOURCE
     registry.cpp
     resource.cpp
     service_group.cpp
+    streamres.cpp
     undoc.cpp
     unregister.cpp
     version.cpp)
@@ -55,10 +53,6 @@ add_library(portcls MODULE
     ${PCH_SKIP_SOURCE}
     portcls.rc
     ${CMAKE_CURRENT_BINARY_DIR}/portcls.def)
-
-if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
-    target_compile_options(portcls PRIVATE "-Wno-missing-braces")
-endif()
 
 target_link_libraries(portcls libcntpr ${PSEH_LIB})
 set_module_type(portcls kernelmodedriver ENTRYPOINT 0 )

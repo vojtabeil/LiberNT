@@ -28,11 +28,11 @@ RtlIsValidOemCharacter(IN PWCHAR Char);
 static BOOLEAN
 RtlpIsShortIllegal(const WCHAR Char)
 {
-    return (Char < 128 && (RtlpShortIllegals[Char / 32] & (1 << (Char % 32))));
+    return (Char < 128 && (RtlpShortIllegals[Char / 32] & (1U << (Char % 32))));
 }
 
 static USHORT
-RtlpGetCheckSum(PUNICODE_STRING Name)
+RtlpGetCheckSum(PCUNICODE_STRING Name)
 {
     PWCHAR CurrentChar;
     USHORT Hash;
@@ -73,12 +73,31 @@ RtlpGetCheckSum(PUNICODE_STRING Name)
     return Hash;
 }
 
+static ULONG
+RtlpGetShortNameLength(PCWSTR Name, ULONG Length, ULONG OemBytes)
+{
+    ULONG Index;
+    ULONG CharBytes;
+
+    if (!NlsMbOemCodePageTag)
+        return min(Length, OemBytes);
+
+    for (Index = 0; Index < Length; Index++)
+    {
+        CharBytes = HIBYTE(NlsUnicodeToMbOemTable[Name[Index]]) ? 2 : 1;
+        if (CharBytes > OemBytes)
+            break;
+        OemBytes -= CharBytes;
+    }
+    return Index;
+}
+
 /*
  * @implemented
  */
-VOID
+NTSTATUS
 NTAPI
-RtlGenerate8dot3Name(IN PUNICODE_STRING Name,
+RtlGenerate8dot3Name(IN PCUNICODE_STRING Name,
                      IN BOOLEAN AllowExtendedCharacters,
                      IN OUT PGENERATE_NAME_CONTEXT Context,
                      OUT PUNICODE_STRING Name8dot3)
@@ -87,16 +106,23 @@ RtlGenerate8dot3Name(IN PUNICODE_STRING Name,
     ULONG IndexLength;
     ULONG Index;
     ULONG DotPos;
+    ULONG Start;
     WCHAR IndexBuffer[8];
     WCHAR Char;
     USHORT Checksum;
 
+    if (Context->LastIndexValue >= 1000000)
+        return STATUS_FILE_SYSTEM_LIMITATION;
+
     if (!Context->NameLength)
     {
+        Start = 0;
+        while (Start < Length && Name->Buffer[Start] == L'.')
+            Start++;
         DotPos = Length;
 
         /* Find last dot in Name */
-        for (Index = 0; Index < Length; Index++)
+        for (Index = Start; Index < Length; Index++)
         {
             if (Name->Buffer[Index] == L'.')
                 DotPos = Index;
@@ -104,7 +130,7 @@ RtlGenerate8dot3Name(IN PUNICODE_STRING Name,
 
         /* Copy name. OEM string length can't exceed 6. */
         UCHAR OemSizeLeft = 6;
-        for (Index = 0; (Index < DotPos) && OemSizeLeft; Index++)
+        for (Index = Start; (Index < DotPos) && OemSizeLeft; Index++)
         {
             Char = Name->Buffer[Index];
 
@@ -211,7 +237,9 @@ RtlGenerate8dot3Name(IN PUNICODE_STRING Name,
     if (Context->NameLength)
     {
         /* Copy name buffer */
-        Length = Context->NameLength * sizeof(WCHAR);
+        Length = RtlpGetShortNameLength(Context->NameBuffer,
+                                       Context->NameLength,
+                                       8 - IndexLength) * sizeof(WCHAR);
         RtlCopyMemory(Name8dot3->Buffer, Context->NameBuffer, Length);
         Name8dot3->Length = Length;
     }
@@ -227,12 +255,15 @@ RtlGenerate8dot3Name(IN PUNICODE_STRING Name,
     if (Context->ExtensionLength)
     {
         /* Copy extension buffer */
-        Length = Context->ExtensionLength * sizeof(WCHAR);
+        Length = RtlpGetShortNameLength(Context->ExtensionBuffer,
+                                       Context->ExtensionLength,
+                                       4) * sizeof(WCHAR);
         RtlCopyMemory(Name8dot3->Buffer + (Name8dot3->Length / sizeof(WCHAR)),
                       Context->ExtensionBuffer,
                       Length);
         Name8dot3->Length += Length;
     }
+    return STATUS_SUCCESS;
 }
 
 
@@ -273,7 +304,7 @@ RtlIsNameLegalDOS8Dot3(IN PCUNICODE_STRING Name,
     if ((OemName->Length > 12) || (OemName->Buffer == NULL)) return FALSE;
 
     /* a starting . is invalid, except for . and .. */
-    if (OemName->Buffer[0] == '.')
+    if (OemName->Length > 0 && OemName->Buffer[0] == '.')
     {
         if (OemName->Length != 1 && (OemName->Length != 2 || OemName->Buffer[1] != '.')) return FALSE;
         if (NameContainsSpaces) *NameContainsSpaces = FALSE;

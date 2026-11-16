@@ -20,6 +20,10 @@
  *
  */
 
+#ifdef __REACTOS__
+#include "precomp.h"
+#endif
+
 #include <stdarg.h>
 #include <stdlib.h>
 #include <time.h>
@@ -33,9 +37,13 @@
 #include "winerror.h"
 #include "winternl.h"
 #include "winnls.h"
+#include "winuser.h"
 #include "fileapi.h"
+#include "native_machine.h"
 
+#ifndef __REACTOS__
 #undef DeleteFile  /* needed for FILE_DISPOSITION_INFO */
+#endif
 
 static HANDLE (WINAPI *pFindFirstFileExA)(LPCSTR,FINDEX_INFO_LEVELS,LPVOID,FINDEX_SEARCH_OPS,LPVOID,DWORD);
 static BOOL (WINAPI *pReplaceFileW)(LPCWSTR, LPCWSTR, LPCWSTR, DWORD, LPVOID, LPVOID);
@@ -2499,17 +2507,7 @@ static BOOL create_fake_dll( LPCSTR filename )
 
     nt = (IMAGE_NT_HEADERS *)(buffer + lfanew);
     nt->Signature = IMAGE_NT_SIGNATURE;
-#if defined __i386__
-    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_I386;
-#elif defined __x86_64__
-    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_AMD64;
-#elif defined __arm__
-    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_ARMNT;
-#elif defined __aarch64__
-    nt->FileHeader.Machine = IMAGE_FILE_MACHINE_ARM64;
-#else
-# error You must specify the machine type
-#endif
+    nt->FileHeader.Machine = WINETEST_IMAGE_FILE_MACHINE;
     nt->FileHeader.NumberOfSections = 1;
     nt->FileHeader.SizeOfOptionalHeader = sizeof(IMAGE_OPTIONAL_HEADER);
     nt->FileHeader.Characteristics = IMAGE_FILE_DLL | IMAGE_FILE_EXECUTABLE_IMAGE;
@@ -3094,6 +3092,10 @@ static void test_FindFirstFile_wildcards(void)
     WIN32_FIND_DATAA find_data;
     HANDLE handle;
     int i;
+#ifdef __REACTOS__
+    char fs_name[16] = "";
+    BOOL is_fat;
+#endif
     static const char* files[] = {
         "..a", "..a.a", ".a", ".a..a", ".a.a", ".aaa",
         "a", "a..a", "a.a", "a.a.a", "aa", "aaa", "aaaa", " .a"
@@ -3199,6 +3201,10 @@ static void test_FindFirstFile_wildcards(void)
     SetCurrentDirectoryA("test-dir");
     for (i = 0; i < ARRAY_SIZE(files); ++i)
         _lclose(_lcreat(files[i], 0));
+#ifdef __REACTOS__
+    GetVolumeInformationA(NULL, NULL, 0, NULL, NULL, NULL, fs_name, sizeof(fs_name));
+    is_fat = !strncmp(fs_name, "FAT", 3);
+#endif
 
     for (i = 0; i < ARRAY_SIZE(tests); ++i)
     {
@@ -3208,6 +3214,15 @@ static void test_FindFirstFile_wildcards(void)
 
         strcpy(missing, tests[i].result);
         correct[0] = incorrect[0] = 0;
+#ifdef __REACTOS__
+        if (is_fat && (tests[i].pattern[0] == '?' || tests[i].pattern[0] == '>') &&
+            strspn(tests[i].pattern + 1, ". ") == strlen(tests[i].pattern + 1))
+        {
+            char *dotdot = strstr(missing, ", '..'");
+
+            if (dotdot) memmove(dotdot, dotdot + 6, strlen(dotdot + 6) + 1);
+        }
+#endif
 
         handle = FindFirstFileA(tests[i].pattern, &find_data);
         if (handle != INVALID_HANDLE_VALUE)
@@ -3405,12 +3420,6 @@ static void test_async_file_errors(void)
     HANDLE hFile;
     LPVOID lpBuffer = HeapAlloc(GetProcessHeap(), 0, 4096);
     OVERLAPPED ovl;
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: test_async_file_errors() crashes on ReactOS!\n");
-        return;
-    }
-#endif
     ovl.Offset = 0;
     ovl.OffsetHigh = 0;
     ovl.hEvent = hSem;
@@ -4959,18 +4968,10 @@ static void test_WriteFileGather(void)
     ok( ret, "GetQueuedCompletionStatus failed err %lu\n", GetLastError());
     ok( povl == &ovl, "wrong ovl %p\n", povl );
 
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: Calls to GetOverlappedResult hang on ReactOS!\n");
-    } else {
-#endif
     tx = 0;
     br = GetOverlappedResult( hfile, &ovl, &tx, TRUE );
     ok( br == TRUE, "GetOverlappedResult failed: %lu\n", GetLastError() );
     ok( tx == si.dwPageSize, "got unexpected bytes transferred: %lu\n", tx );
-#ifdef __REACTOS__
-    }
-#endif
 
     ResetEvent( evt );
 
@@ -4989,18 +4990,10 @@ static void test_WriteFileGather(void)
     ok( ret, "GetQueuedCompletionStatus failed err %lu\n", GetLastError());
     ok( povl == &ovl, "wrong ovl %p\n", povl );
 
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: Calls to GetOverlappedResult hang on ReactOS!\n");
-    } else {
-#endif
     tx = 0;
     br = GetOverlappedResult( hfile, &ovl, &tx, TRUE );
     ok( br == TRUE, "GetOverlappedResult failed: %lu\n", GetLastError() );
     ok( tx == si.dwPageSize, "got unexpected bytes transferred: %lu\n", tx );
-#ifdef __REACTOS__
-    }
-#endif
 
     ok( memcmp( rbuf1, wbuf, si.dwPageSize ) == 0,
             "data was not read into buffer\n" );
@@ -5060,18 +5053,10 @@ static void test_WriteFileGather(void)
     ok( ret, "GetQueuedCompletionStatus failed err %lu\n", GetLastError() );
     ok( povl == &ovl, "wrong ovl %p\n", povl );
 
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: Calls to GetOverlappedResult hang on ReactOS!\n");
-    } else {
-#endif
     tx = 0;
     br = GetOverlappedResult( hfile, &ovl, &tx, TRUE );
     ok( br == TRUE, "GetOverlappedResult failed: %lu\n", GetLastError() );
     ok( tx == si.dwPageSize, "got unexpected bytes transferred: %lu\n", tx );
-#ifdef __REACTOS__
-    }
-#endif
 
     ok( memcmp( rbuf1, wbuf, si.dwPageSize ) == 0,
             "data was not read into buffer\n" );
@@ -5096,18 +5081,10 @@ static void test_WriteFileGather(void)
     ok( ret, "GetQueuedCompletionStatus failed err %lu\n", GetLastError() );
     ok( povl == &ovl, "wrong ovl %p\n", povl );
 
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: Calls to GetOverlappedResult hang on ReactOS!\n");
-    } else {
-#endif
     tx = 0;
     br = GetOverlappedResult( hfile, &ovl, &tx, TRUE );
     ok( br == TRUE, "GetOverlappedResult failed: %lu\n", GetLastError() );
     ok( tx == si.dwPageSize / 2, "got unexpected bytes transferred: %lu\n", tx );
-#ifdef __REACTOS__
-    }
-#endif
 
     ok( memcmp( rbuf1, wbuf, si.dwPageSize / 2 ) == 0,
             "invalid data was read into buffer\n" );
@@ -5128,17 +5105,9 @@ static void test_WriteFileGather(void)
         ok(br, "GetQueuedCompletionStatus failed, err %lu.\n", GetLastError());
         ok(povl == &ovl, "Wrong ovl %p.\n", povl);
 
-#ifdef __REACTOS__
-    if (is_reactos()) {
-        ok(FALSE, "FIXME: Calls to GetOverlappedResult hang on ReactOS!\n");
-    } else {
-#endif
         br = GetOverlappedResult(hfile, &ovl, &tx, TRUE);
         ok(br, "GetOverlappedResult failed, err %lu.\n", GetLastError());
         ok(tx == si.dwPageSize, "Got unexpected size %lu.\n", tx);
-#ifdef __REACTOS__
-    }
-#endif
 
         ResetEvent(evt);
     }
@@ -5517,12 +5486,7 @@ static void test_SetFileInformationByHandle(void)
     HANDLE file;
     BOOL ret;
 
-#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600
-    /* FIXME: SetFileInformationByHandle is a STUB on ReactOS. */
-    if (is_reactos() || !pSetFileInformationByHandle)
-#else
     if (!pSetFileInformationByHandle)
-#endif
     {
         win_skip("SetFileInformationByHandle is not supported\n");
         return;
@@ -5633,12 +5597,7 @@ static void test_SetFileRenameInfo(void)
     DWORD size;
     BOOL ret;
 
-#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600
-    /* FIXME: SetFileInformationByHandle is a STUB on ReactOS. */
-    if (is_reactos() || !pSetFileInformationByHandle)
-#else
     if (!pSetFileInformationByHandle)
-#endif
     {
         win_skip("SetFileInformationByHandle is not supported\n");
         return;
@@ -5698,7 +5657,8 @@ static void test_SetFileRenameInfo(void)
 
 static void test_GetFileAttributesExW(void)
 {
-    static const struct
+    WCHAR system_dir[MAX_PATH], extended_path[3 * MAX_PATH];
+    const struct
     {
         const WCHAR *path;
         DWORD expected_error;
@@ -5708,11 +5668,16 @@ static void test_GetFileAttributesExW(void)
         {L"\\\\?\\", ERROR_INVALID_NAME},
         {L"\\??\\", ERROR_INVALID_NAME},
         {L"\\DosDevices\\", ERROR_FILE_NOT_FOUND},
-        {L"\\\\?\\C:\\windows\\system32\\..\\system32\\kernel32.dll", ERROR_INVALID_NAME},
+        {extended_path, ERROR_INVALID_NAME},
     };
     WIN32_FILE_ATTRIBUTE_DATA info;
     DWORD error, test_idx;
     BOOL ret;
+
+    ret = GetSystemDirectoryW(system_dir, ARRAY_SIZE(system_dir));
+    ok(ret, "GetSystemDirectoryW failed, error %lu.\n", GetLastError());
+    if (!ret) return;
+    wsprintfW(extended_path, L"\\\\?\\%s\\..\\%s\\kernel32.dll", system_dir, wcsrchr(system_dir, '\\') + 1);
 
     for (test_idx = 0; test_idx < ARRAY_SIZE(tests); ++test_idx)
     {
@@ -5759,12 +5724,7 @@ static void test_post_completion(void)
     ok(!ret, "GetQueuedCompletionStatus succeeded\n");
     ok(GetLastError() == WAIT_TIMEOUT, "wrong error %lu\n", GetLastError());
 
-#if defined(__REACTOS__) && DLL_EXPORT_VERSION >= 0x600
-    /* FIXME: GetQueuedCompletionStatusEx is a STUB on ReactOS. */
-    if (is_reactos() || !pGetQueuedCompletionStatusEx)
-#else
     if (!pGetQueuedCompletionStatusEx)
-#endif
     {
         win_skip("GetQueuedCompletionStatusEx not available\n");
         CloseHandle( port );
@@ -6423,10 +6383,116 @@ static void test_eof(void)
     ok(ret, "failed to delete %s, error %lu\n", debugstr_a(filename), GetLastError());
 }
 
+#ifdef __REACTOS__
+static BOOL file_test_selected(const char *selection, const char *name)
+{
+    const char *end;
+    SIZE_T length = strlen(name);
+
+    if (!selection) return TRUE;
+    for (;;)
+    {
+        end = strchr(selection, ',');
+        if ((end ? (SIZE_T)(end - selection) : strlen(selection)) == length &&
+            !strncmp(selection, name, length))
+            return TRUE;
+        if (!end) return FALSE;
+        selection = end + 1;
+    }
+}
+
+static BOOL validate_file_tests(const char *selection)
+{
+    static const char *const names[] =
+    {
+        "test__hread",
+        "test__hwrite",
+        "test__lclose",
+        "test__lcreat",
+        "test__llseek",
+        "test__llopen",
+        "test__lread",
+        "test__lwrite",
+        "test_GetTempFileNameA",
+        "test_CopyFileA",
+        "test_CopyFileW",
+        "test_CopyFile2",
+        "test_CopyFileEx",
+        "test_CreateFile",
+        "test_CreateFileA",
+        "test_CreateFileW",
+        "test_CreateFile2",
+        "test_DeleteFileA",
+        "test_DeleteFileW",
+        "test_MoveFileA",
+        "test_MoveFileW",
+        "test_FindFirstFileA",
+        "test_FindNextFileA",
+        "test_FindFirstFile_wildcards",
+        "test_FindFirstFileExA",
+        "test_LockFile",
+        "test_file_sharing",
+        "test_offset_in_overlapped_structure",
+        "test_MapFile",
+        "test_GetFileType",
+        "test_async_file_errors",
+        "test_read_write",
+        "test_OpenFile",
+        "test_overlapped",
+        "test_RemoveDirectory",
+        "test_ReplaceFileA",
+        "test_ReplaceFileW",
+        "test_GetFileInformationByHandleEx",
+        "test_OpenFileById",
+        "test_SetFileValidData",
+        "test_WriteFileGather",
+        "test_file_access",
+        "test_GetFinalPathNameByHandleA",
+        "test_GetFinalPathNameByHandleW",
+        "test_SetFileInformationByHandle",
+        "test_SetFileRenameInfo",
+        "test_GetFileAttributesExW",
+        "test_post_completion",
+        "test_overlapped_read",
+        "test_file_readonly_access",
+        "test_find_file_stream",
+        "test_SetFileTime",
+        "test_ReOpenFile",
+        "test_hard_link",
+        "test_move_file",
+        "test_eof",
+    };
+    const char *end;
+    SIZE_T length;
+    unsigned int i;
+
+    if (!selection) return TRUE;
+    for (;;)
+    {
+        end = strchr(selection, ',');
+        length = end ? (SIZE_T)(end - selection) : strlen(selection);
+        for (i = 0; i < ARRAY_SIZE(names); ++i)
+            if (length == strlen(names[i]) && !strncmp(selection, names[i], length))
+                break;
+        if (!length || i == ARRAY_SIZE(names))
+        {
+            ok(0, "Unknown or empty ROS_FILE_TESTS entry.\n");
+            return FALSE;
+        }
+        if (!end) return TRUE;
+        selection = end + 1;
+    }
+}
+#endif
 START_TEST(file)
 {
     char temp_path[MAX_PATH];
     DWORD ret;
+#ifdef __REACTOS__
+    const char *selection = getenv("ROS_FILE_TESTS");
+
+    if (!validate_file_tests(selection)) return;
+#endif
 
     InitFunctionPointers();
 
@@ -6437,6 +6503,78 @@ START_TEST(file)
     ret = DeleteFileA(filename);
     ok(ret != 0, "DeleteFile error %lu\n", GetLastError());
 
+#ifdef __REACTOS__
+#define run_file_test(func, ...) do { \
+    if (file_test_selected(selection, #func)) { \
+        trace("Running %s...\n", #func); \
+        func(__VA_ARGS__); \
+    } \
+} while (0)
+    run_file_test(test__hread);
+    run_file_test(test__hwrite);
+    run_file_test(test__lclose);
+    run_file_test(test__lcreat);
+    run_file_test(test__llseek);
+    run_file_test(test__llopen);
+    run_file_test(test__lread);
+    run_file_test(test__lwrite);
+    run_file_test(test_GetTempFileNameA);
+    run_file_test(test_CopyFileA);
+    run_file_test(test_CopyFileW);
+    run_file_test(test_CopyFile2);
+    run_file_test(test_CopyFileEx);
+    run_file_test(test_CreateFile);
+    run_file_test(test_CreateFileA);
+    run_file_test(test_CreateFileW);
+    run_file_test(test_CreateFile2);
+    run_file_test(test_DeleteFileA);
+    run_file_test(test_DeleteFileW);
+    run_file_test(test_MoveFileA);
+    run_file_test(test_MoveFileW);
+    run_file_test(test_FindFirstFileA);
+    run_file_test(test_FindNextFileA);
+    run_file_test(test_FindFirstFile_wildcards);
+    run_file_test(test_FindFirstFileExA, FindExInfoStandard, 0, 0);
+    run_file_test(test_FindFirstFileExA, FindExInfoStandard, 0, FIND_FIRST_EX_CASE_SENSITIVE);
+    run_file_test(test_FindFirstFileExA, FindExInfoStandard, 0, FIND_FIRST_EX_LARGE_FETCH);
+    run_file_test(test_FindFirstFileExA, FindExInfoBasic, 0, 0);
+    run_file_test(test_FindFirstFileExA, FindExInfoStandard, FindExSearchLimitToDirectories, 0);
+    run_file_test(test_FindFirstFileExA, FindExInfoStandard, FindExSearchLimitToDirectories, FIND_FIRST_EX_CASE_SENSITIVE);
+    run_file_test(test_FindFirstFileExA, FindExInfoStandard, FindExSearchLimitToDirectories, FIND_FIRST_EX_LARGE_FETCH);
+    run_file_test(test_FindFirstFileExA, FindExInfoBasic, FindExSearchLimitToDirectories, 0);
+    run_file_test(test_LockFile);
+    run_file_test(test_file_sharing);
+    run_file_test(test_offset_in_overlapped_structure);
+    run_file_test(test_MapFile);
+    run_file_test(test_GetFileType);
+    run_file_test(test_async_file_errors);
+    run_file_test(test_read_write);
+    run_file_test(test_OpenFile);
+    run_file_test(test_overlapped);
+    run_file_test(test_RemoveDirectory);
+    run_file_test(test_ReplaceFileA);
+    run_file_test(test_ReplaceFileW);
+    run_file_test(test_GetFileInformationByHandleEx);
+    run_file_test(test_OpenFileById);
+    run_file_test(test_SetFileValidData);
+    run_file_test(test_WriteFileGather);
+    run_file_test(test_file_access);
+    run_file_test(test_GetFinalPathNameByHandleA);
+    run_file_test(test_GetFinalPathNameByHandleW);
+    run_file_test(test_SetFileInformationByHandle);
+    run_file_test(test_SetFileRenameInfo);
+    run_file_test(test_GetFileAttributesExW);
+    run_file_test(test_post_completion);
+    run_file_test(test_overlapped_read);
+    run_file_test(test_file_readonly_access);
+    run_file_test(test_find_file_stream);
+    run_file_test(test_SetFileTime);
+    run_file_test(test_ReOpenFile);
+    run_file_test(test_hard_link);
+    run_file_test(test_move_file);
+    run_file_test(test_eof);
+#undef run_file_test
+#else
     test__hread(  );
     test__hwrite(  );
     test__lclose(  );
@@ -6501,4 +6639,5 @@ START_TEST(file)
     test_hard_link();
     test_move_file();
     test_eof();
+#endif
 }

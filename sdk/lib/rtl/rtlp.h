@@ -8,6 +8,23 @@
 
 /* INCLUDES ******************************************************************/
 
+#if defined(_M_AMD64)
+#include "amd64/raise.h"
+#elif defined(_M_ARM64)
+#include "arm64/raise.h"
+#elif defined(_M_RISCV64)
+#include "riscv64/raise.h"
+#elif defined(_M_PPC)
+#include "ppc/raise.h"
+#endif
+
+#if defined(RTLP_RAISE_EXCEPTION_NEEDS_CALLER_CONTEXT) || defined(RTLP_RAISE_STATUS_NEEDS_CALLER_CONTEXT)
+/* Advance a captured context to the caller of the routine that captured it. */
+VOID
+NTAPI
+RtlpStepContextToCaller(_Inout_ PCONTEXT Context);
+#endif
+
 /* PAGED_CODE equivalent for user-mode RTL */
 #if DBG
 extern VOID FASTCALL CHECK_PAGED_CODE_RTL(char *file, int line);
@@ -16,7 +33,7 @@ extern VOID FASTCALL CHECK_PAGED_CODE_RTL(char *file, int line);
 #define PAGED_CODE_RTL()
 #endif
 
-#ifdef _PPC_
+#if defined(_PPC_) && defined(__BIG_ENDIAN__)
 #define SWAPD(x) ((((x)&0xff)<<24)|(((x)&0xff00)<<8)|(((x)>>8)&0xff00)|(((x)>>24)&0xff))
 #define SWAPW(x) ((((x)&0xff)<<8)|(((x)>>8)&0xff))
 #define SWAPQ(x) ((SWAPD((x)&0xffffffff) << 32) | (SWAPD((x)>>32)))
@@ -42,6 +59,24 @@ RtlpSafeCopyMemory(
    _Out_writes_bytes_all_(Length) VOID UNALIGNED *Destination,
    _In_reads_bytes_(Length) CONST VOID UNALIGNED *Source,
    _In_ SIZE_T Length);
+
+NTSTATUS
+NTAPI
+RtlpValidateSxsManifest(
+    _In_reads_(Length) PCWSTR Text,
+    _In_ SIZE_T Length,
+    _In_ BOOLEAN Utf16Source,
+    _In_ BOOLEAN ApplicationManifest);
+
+#ifdef _M_RISCV64
+/* Environment hooks for exception dispatch and unwinding. The reader must
+ * not rely on SEH: it runs inside the dispatcher itself. */
+NTSTATUS NTAPI RtlpRiscv64ReadMemory(PVOID Destination, const VOID *Source, SIZE_T Length);
+DECLSPEC_NORETURN VOID NTAPI RtlpRiscv64RaiseFatal(NTSTATUS Status);
+NTSTATUS NTAPI RtlpRiscv64UnwindUserException(ULONG_PTR ControlPc,
+    ULONG_PTR StackLow, ULONG_PTR StackHigh, PCONTEXT Context);
+VOID NTAPI RtlpRiscv64PrepareContextRestore(PCONTEXT Context);
+#endif
 
 #ifndef _BLDR_
 
@@ -106,6 +141,39 @@ RtlpFreeMemory(
 
 #ifndef _BLDR_
 
+typedef VOID (NTAPI *PRTLP_THREADPOOL_CALLBACK_DISPATCHER)(PVOID Callback, ULONG_PTR Argument0, ULONG_PTR Argument1, ULONG_PTR Argument2, ULONG_PTR Argument3, ULONG_PTR Argument4);
+
+VOID
+NTAPI
+RtlpSetThreadpoolCallbackDispatcher(
+    _In_opt_ PRTLP_THREADPOOL_CALLBACK_DISPATCHER Dispatcher);
+
+VOID
+NTAPI
+RtlpCallWaitOrTimerCallback(
+    _In_ WAITORTIMERCALLBACKFUNC Callback,
+    _In_opt_ PVOID Context,
+    _In_ BOOLEAN TimerOrWaitFired);
+
+VOID
+NTAPI
+RtlpCallWorkItemCallback(
+    _In_ WORKERCALLBACKFUNC Callback,
+    _In_opt_ PVOID Context);
+
+NTSTATUS
+NTAPI
+RtlWaitOnAddress(
+    _In_ const VOID *Address,
+    _In_ const VOID *CompareAddress,
+    _In_ SIZE_T AddressSize,
+    _In_opt_ const LARGE_INTEGER *Timeout);
+
+VOID
+NTAPI
+RtlWakeAddressAll(
+    _In_ const VOID *Address);
+
 KPROCESSOR_MODE
 NTAPI
 RtlpGetMode(VOID);
@@ -143,6 +211,12 @@ BOOLEAN
 NTAPI
 RtlpCheckForActiveDebugger(VOID);
 
+typedef BOOLEAN (NTAPI *PRTLP_DISPATCH_EXCEPTION_HOOK)(PEXCEPTION_RECORD ExceptionRecord,
+                                                        PCONTEXT ContextRecord,
+                                                        PBOOLEAN Handled);
+
+extern PRTLP_DISPATCH_EXCEPTION_HOOK RtlpDispatchExceptionHook;
+
 BOOLEAN
 NTAPI
 RtlpHandleDpcStackException(IN PEXCEPTION_REGISTRATION_RECORD RegistrationFrame,
@@ -174,6 +248,28 @@ RtlpClearInDbgPrint(
     VOID
 );
 
+BOOLEAN
+NTAPI
+RtlpDebugPrintWanted(
+    _Out_ PNTSTATUS Status
+);
+
+NTSTATUS
+NTAPI
+RtlpDebugPrint(
+    _In_ PSTRING DebugString,
+    _In_ ULONG ComponentId,
+    _In_ ULONG Level
+);
+
+ULONG
+NTAPI
+DebugPrint(
+    IN PSTRING DebugString,
+    IN ULONG ComponentId,
+    IN ULONG Level
+);
+
 /* i386/except.S */
 
 #ifdef _M_IX86
@@ -192,15 +288,50 @@ RtlpExecuteHandlerForUnwind(PEXCEPTION_RECORD ExceptionRecord,
                             PCONTEXT Context,
                             PVOID DispatcherContext,
                             PEXCEPTION_ROUTINE ExceptionHandler);
-#else
+#elif !defined(RTLP_EXECUTE_HANDLER_TAKES_ROUTINE)
 EXCEPTION_DISPOSITION
 NTAPI
-RtlpExecuteHandlerForUnwind(
-    _Inout_ struct _EXCEPTION_RECORD *ExceptionRecord,
-    _In_ PVOID EstablisherFrame,
-    _Inout_ struct _CONTEXT *ContextRecord,
-    _In_ PVOID DispatcherContext);
+RtlpExecuteHandlerForUnwind(_Inout_ struct _EXCEPTION_RECORD *ExceptionRecord, _In_ PVOID EstablisherFrame, _Inout_ struct _CONTEXT *ContextRecord, _In_ PVOID DispatcherContext);
 
+#endif
+
+/* <arch>/except_asm.S */
+
+#ifdef RTLP_EXECUTE_HANDLER_TAKES_ROUTINE
+EXCEPTION_DISPOSITION
+NTAPI
+RtlpExecuteHandlerForException(_Inout_ struct _EXCEPTION_RECORD *ExceptionRecord, _In_ PVOID EstablisherFrame, _Inout_ struct _CONTEXT *ContextRecord, _Inout_ PDISPATCHER_CONTEXT DispatcherContext, _In_ PEXCEPTION_ROUTINE ExceptionRoutine);
+
+EXCEPTION_DISPOSITION
+NTAPI
+RtlpExecuteHandlerForUnwind(_Inout_ struct _EXCEPTION_RECORD *ExceptionRecord, _In_ PVOID EstablisherFrame, _Inout_ struct _CONTEXT *ContextRecord, _Inout_ PDISPATCHER_CONTEXT DispatcherContext, _In_ PEXCEPTION_ROUTINE ExceptionRoutine);
+
+#endif
+
+#ifdef _M_ARM64
+
+/* arm64/except.c */
+
+EXCEPTION_DISPOSITION
+NTAPI
+RtlpExceptionHandler(_In_ struct _EXCEPTION_RECORD *ExceptionRecord, _In_ PVOID EstablisherFrame, _Inout_ struct _CONTEXT *ContextRecord, _Inout_ PVOID DispatcherContext);
+
+EXCEPTION_DISPOSITION
+NTAPI
+RtlpUnwindHandler(_In_ struct _EXCEPTION_RECORD *ExceptionRecord, _In_ PVOID EstablisherFrame, _Inout_ struct _CONTEXT *ContextRecord, _Inout_ PVOID DispatcherContext);
+
+VOID
+NTAPI
+RtlpArm64RestoreCollidedFrame(_Inout_ PDISPATCHER_CONTEXT DispatcherContext, _Out_ struct _CONTEXT *UnwindContext, _Out_writes_bytes_(NonVolatileRegistersLength) PVOID NonVolatileRegisters, _In_ ULONG NonVolatileRegistersLength, _Out_ PULONG64 EstablisherFrame);
+
+#endif
+
+#ifndef RTLP_RAISE_CONTEXT_FLAGS
+#define RTLP_RAISE_CONTEXT_FLAGS CONTEXT_FULL
+#endif
+
+#ifndef RTLP_RAISE_DEBUG_CONTEXT_FLAGS
+#define RTLP_RAISE_DEBUG_CONTEXT_FLAGS (CONTEXT_DEBUG_REGISTERS & ~CONTEXT_FULL)
 #endif
 
 VOID

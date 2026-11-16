@@ -128,10 +128,22 @@ static HRESULT register_ocxs_callback(HINF hinf, PCWSTR field, const void *arg)
         if (!SetupGetStringFieldW(&context, 1, buffer, ARRAY_SIZE(buffer), NULL))
             continue;
 
+        /* RegisterOCXs and UnRegisterOCXs sections can include lines that start with an at sign and
+         * do not have any discernable or documented effect */
+        if (buffer[0] == '@')
+        {
+            FIXME("Ignoring inf line %s\n", debugstr_w(buffer));
+            continue;
+        }
+
         hm = LoadLibraryExW(buffer, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
         if (hm)
         {
+#ifdef __REACTOS__
+            if (do_ocx_reg(hm, !arg, NULL, NULL) != S_OK)
+#else
             if (do_ocx_reg(hm, TRUE, NULL, NULL) != S_OK)
+#endif
                 hr = E_FAIL;
 
             FreeLibrary(hm);
@@ -339,6 +351,11 @@ static HRESULT adv_install(ADVInfo *info)
         return hr;
 
     OleInitialize(NULL);
+#ifdef __REACTOS__
+    hr = iterate_section_fields(info->hinf, info->install_sec,
+                                L"UnregisterOCXs", register_ocxs_callback, info);
+    if (hr == S_OK)
+#endif
     hr = iterate_section_fields(info->hinf, info->install_sec,
                                 L"RegisterOCXs", register_ocxs_callback, NULL);
     OleUninitialize();

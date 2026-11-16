@@ -1852,6 +1852,64 @@ KsDeviceRegisterAdapterObject(
 
 }
 
+KSDDKAPI
+NTSTATUS
+NTAPI
+KsDeviceRegisterThermalDispatch(
+    IN PKSDEVICE KsDevice,
+    IN PKSDEVICE_THERMAL_DISPATCH KsDeviceThermalDispatch)
+{
+    PKSIDEVICE_HEADER DeviceHeader;
+
+    if (KsDevice == NULL || KsDeviceThermalDispatch == NULL)
+        return STATUS_INVALID_DEVICE_REQUEST;
+
+    DeviceHeader = (PKSIDEVICE_HEADER)CONTAINING_RECORD(KsDevice, KSIDEVICE_HEADER, KsDevice);
+    DeviceHeader->ThermalDispatch = *KsDeviceThermalDispatch;
+    return STATUS_SUCCESS;
+}
+
+KSDDKAPI
+NTSTATUS
+NTAPI
+KsAcquireCachedMdl(
+    IN PIRP Irp,
+    IN REFGUID Guid,
+    IN PFNKSCANCELPINNEDMDL CancelRoutine,
+    IN PVOID CancelContext,
+    OUT PMDL *MdlAddr,
+    OUT PVOID *ReleaseContext)
+{
+    UNREFERENCED_PARAMETER(Guid);
+    UNREFERENCED_PARAMETER(CancelRoutine);
+    UNREFERENCED_PARAMETER(CancelContext);
+
+    if (MdlAddr == NULL || ReleaseContext == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    *MdlAddr = NULL;
+    *ReleaseContext = NULL;
+
+    if (Irp == NULL)
+        return STATUS_INVALID_PARAMETER;
+
+    return STATUS_NOT_FOUND;
+}
+
+KSDDKAPI
+NTSTATUS
+NTAPI
+KsReleaseCachedMdl(
+    IN REFGUID Guid,
+    IN PMDL MdlAddr,
+    IN HANDLE ReleaseContext)
+{
+    UNREFERENCED_PARAMETER(Guid);
+    UNREFERENCED_PARAMETER(MdlAddr);
+    UNREFERENCED_PARAMETER(ReleaseContext);
+    return STATUS_INVALID_PARAMETER;
+}
+
 
 /*
     @implemented
@@ -2550,7 +2608,7 @@ KsRegisterFilterWithNoKSPins(
     IN KSPIN_MEDIUM*  MediumList,
     IN GUID*  CategoryList OPTIONAL)
 {
-    ULONG Size, Index;
+    ULONG Index;
     NTSTATUS Status;
     PWSTR SymbolicLinkList;
     //PUCHAR Buffer;
@@ -2562,14 +2620,6 @@ KsRegisterFilterWithNoKSPins(
     {
         /* all these parameters are required */
         return STATUS_INVALID_PARAMETER;
-    }
-
-    /* calculate filter data value size */
-    Size = PinCount * sizeof(KSPIN_MEDIUM);
-    if (CategoryList)
-    {
-        /* add category list */
-        Size += PinCount * sizeof(GUID);
     }
 
     /* FIXME generate filter data blob */

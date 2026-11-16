@@ -65,7 +65,8 @@ NTSTATUS AddGenericHeaderIPv4(
     /* One fragment at offset 0 */
     IPHeader->FlagsFragOfs = 0;
     /* Time-to-Live */
-    IPHeader->Ttl = AddrFile->TTL;
+    IPHeader->Ttl = (DN2H(RemoteAddress->Address.IPv4Address) & 0xf0000000) == 0xe0000000 ?
+                   AddrFile->MulticastTTL : AddrFile->TTL;
     /* Protocol */
     IPHeader->Protocol = Protocol;
     /* Checksum is 0 (for later calculation of this) */
@@ -105,11 +106,55 @@ NTSTATUS BuildRawIpPacket(
 {
     NTSTATUS Status;
     PCHAR Payload;
+    PCHAR PacketData;
+    PIPv4_HEADER IPv4Header;
+    UINT AvailableSize;
+    UCHAR HeaderSize;
 
     TI_DbgPrint(MAX_TRACE, ("Called.\n"));
 
     /* FIXME: Assumes IPv4 */
     IPInitializePacket(Packet, IP_ADDRESS_V4);
+
+    if (AddrFile->HeaderIncl)
+    {
+        if (RemoteAddress->Type != IP_ADDRESS_V4 ||
+            DataLen < sizeof(IPv4_HEADER) ||
+            DataLen > 65535)
+            return STATUS_INVALID_PARAMETER;
+
+        Packet->TotalSize = DataLen;
+        Status = AllocatePacketWithBuffer(&Packet->NdisPacket, DataBuffer, DataLen);
+        if (!NT_SUCCESS(Status))
+            return Status;
+
+        AvailableSize = 0;
+        PacketData = NULL;
+        GetDataPtr(Packet->NdisPacket, 0, &PacketData, &AvailableSize);
+        if (!PacketData || AvailableSize < DataLen)
+        {
+            Packet->Free(Packet);
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        IPv4Header = (PIPv4_HEADER)PacketData;
+        HeaderSize = (IPv4Header->VerIHL & 0x0f) * 4;
+        if ((IPv4Header->VerIHL >> 4) != 4 ||
+            HeaderSize < sizeof(IPv4_HEADER) ||
+            HeaderSize > DataLen ||
+            ((WN2H(IPv4Header->FlagsFragOfs) & IPv4_FRAGOFS_MASK) << 3) + DataLen > 65535)
+        {
+            Packet->Free(Packet);
+            return STATUS_INVALID_PARAMETER;
+        }
+
+        Packet->Header = PacketData;
+        Packet->HeaderSize = HeaderSize;
+        Packet->Data = PacketData + HeaderSize;
+        Packet->MappedHeader = TRUE;
+        Packet->Flags |= IP_PACKET_FLAG_RAW;
+        return STATUS_SUCCESS;
+    }
 
     Packet->TotalSize = sizeof(IPv4_HEADER) + DataLen;
 
@@ -214,24 +259,60 @@ NTSTATUS RawIPSendDatagram(
     TI_DbgPrint(MID_TRACE,("About to get route to destination\n"));
 
     LocalAddress = AddrFile->Address;
-    if (AddrIsUnspecified(&LocalAddress))
+    if ((DN2H(RemoteAddress.Address.IPv4Address) & 0xf0000000) == 0xe0000000)
+    {
+        ULONG Selector = AddrFile->MulticastInterface;
+        if (!Selector) Selector = LocalAddress.Address.IPv4Address;
+        NCE = RouteGetMulticastRoute(&RemoteAddress, Selector);
+        if (!NCE)
+        {
+            UnlockObject(AddrFile);
+            return STATUS_NETWORK_UNREACHABLE;
+        }
+        if (AddrIsUnspecified(&LocalAddress)) GetInterfaceSourceAddress(NCE->Interface, &RemoteAddress, &NCE->Address, &LocalAddress);
+    }
+    else if (AddrFile->UnicastInterface)
+    {
+        PIP_INTERFACE Interface = GetMulticastInterface(AddrFile->UnicastInterface);
+
+        NCE = Interface ? RouteGetRouteOnInterface(&RemoteAddress, Interface) : NULL;
+        if (Interface)
+            IPDereferenceInterface(Interface);
+        if (!NCE)
+        {
+            UnlockObject(AddrFile);
+            return STATUS_INVALID_ADDRESS;
+        }
+        if (AddrIsUnspecified(&LocalAddress)) GetInterfaceSourceAddress(NCE->Interface, &RemoteAddress, &NCE->Address, &LocalAddress);
+    }
+    else if (AddrIsUnspecified(&LocalAddress))
     {
         /* If the local address is unspecified (0),
          * then use the unicast address of the
          * interface we're sending over
          */
-        if(!(NCE = RouteGetRouteToDestination( &RemoteAddress ))) {
+        NCE = RouteGetRouteToDestination( &RemoteAddress );
+        if(!NCE) {
             UnlockObject(AddrFile);
             return STATUS_NETWORK_UNREACHABLE;
         }
 
-        LocalAddress = NCE->Interface->Unicast;
+        GetInterfaceSourceAddress(NCE->Interface, &RemoteAddress, &NCE->Address, &LocalAddress);
     }
     else
     {
-        if(!(NCE = NBLocateNeighbor( &LocalAddress, NULL ))) {
+        PIP_INTERFACE Interface = AddrLocateInterface(&LocalAddress);
+
+        if (!Interface) {
             UnlockObject(AddrFile);
             return STATUS_INVALID_PARAMETER;
+        }
+
+        NCE = RouteGetRouteFromSource(&RemoteAddress, Interface);
+        IPDereferenceInterface(Interface);
+        if (!NCE) {
+            UnlockObject(AddrFile);
+            return STATUS_NETWORK_UNREACHABLE;
         }
     }
 
@@ -246,12 +327,15 @@ NTSTATUS RawIPSendDatagram(
 
     UnlockObject(AddrFile);
 
-    if( !NT_SUCCESS(Status) )
+    if( !NT_SUCCESS(Status) ) {
+        NBDereferenceNeighbor(NCE);
         return Status;
+    }
 
     TI_DbgPrint(MID_TRACE,("About to send datagram\n"));
 
     Status = IPSendDatagram(&Packet, NCE);
+    NBDereferenceNeighbor(NCE);
     if (!NT_SUCCESS(Status))
         return Status;
 
@@ -263,7 +347,7 @@ NTSTATUS RawIPSendDatagram(
 }
 
 
-VOID RawIpReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
+BOOLEAN RawIpReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
 /*
  * FUNCTION: Receives and queues a RawIp datagram
  * ARGUMENTS:
@@ -279,6 +363,7 @@ VOID RawIpReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
   PADDRESS_FILE AddrFile;
   PIP_ADDRESS DstAddress, SrcAddress;
   UINT DataSize;
+  BOOLEAN Delivered;
 
   TI_DbgPrint(MAX_TRACE, ("Called.\n"));
 
@@ -296,10 +381,10 @@ VOID RawIpReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
     TI_DbgPrint(MIN_TRACE, ("Discarded IPv6 datagram (%i bytes).\n", IPPacket->TotalSize));
 
     /* FIXME: IPv6 is not supported */
-    return;
+    return FALSE;
 
   default:
-    return;
+    return FALSE;
   }
 
   /* Locate a receive request on destination address file object
@@ -311,6 +396,7 @@ VOID RawIpReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
                              0,
                              IPv4Header->Protocol,
                              &SearchContext);
+  Delivered = AddrFile != NULL;
   if (AddrFile) {
     do {
       DGDeliverData(AddrFile,
@@ -319,7 +405,8 @@ VOID RawIpReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
                     0,
                     0,
                     IPPacket,
-                    DataSize);
+                    DataSize,
+                    Interface);
       DereferenceObject(AddrFile);
     } while ((AddrFile = AddrSearchNext(&SearchContext)) != NULL);
   } else {
@@ -331,6 +418,7 @@ VOID RawIpReceive(PIP_INTERFACE Interface, PIP_PACKET IPPacket)
     /* FIXME: Send ICMP reply */
   }
   TI_DbgPrint(MAX_TRACE, ("Leaving.\n"));
+  return Delivered;
 }
 
 
@@ -343,9 +431,6 @@ NTSTATUS RawIPStartup(VOID)
 {
   RtlZeroMemory(&UDPStats, sizeof(UDP_STATISTICS));
 
-  /* Register this protocol with IP layer */
-  IPRegisterProtocol(IPPROTO_RAW, RawIpReceive);
-
   return STATUS_SUCCESS;
 }
 
@@ -357,9 +442,6 @@ NTSTATUS RawIPShutdown(VOID)
  *     Status of operation
  */
 {
-  /* Deregister this protocol with IP layer */
-  IPRegisterProtocol(IPPROTO_RAW, NULL);
-
   return STATUS_SUCCESS;
 }
 

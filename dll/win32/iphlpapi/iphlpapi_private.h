@@ -1,6 +1,10 @@
 #ifndef IPPRIVATE_H
 #define IPPRIVATE_H
 
+#ifndef IPHLPAPI_DLL_LINKAGE
+#define IPHLPAPI_DLL_LINKAGE
+#endif
+
 #define NtCurrentTeb NtXCurrentTeb
 
 #include <stdio.h>
@@ -143,17 +147,9 @@ typedef enum _IPHLPAddrType {
 
 /** Prototypes **/
 NTSTATUS getNthIpEntity( HANDLE tcpFile, DWORD index, TDIEntityID *ent );
+NTSTATUS getIpEntityForIfIndex( HANDLE tcpFile, DWORD ifIndex, TDIEntityID *ent );
 NTSTATUS tdiGetIpAddrsForIpEntity( HANDLE tcpFile, TDIEntityID *ent,
 				   IPAddrEntry **addrs, PDWORD numAddrs );
-int GetLongestChildKeyName( HANDLE RegHandle );
-LONG OpenChildKeyRead( HANDLE RegHandle,
-		       PWCHAR ChildKeyName,
-		       PHKEY ReturnHandle );
-PWCHAR GetNthChildKeyName( HANDLE RegHandle, DWORD n );
-void ConsumeChildKeyName( PWCHAR Name );
-PWCHAR QueryRegistryValueString( HANDLE RegHandle, PWCHAR ValueName );
-PWCHAR *QueryRegistryValueStringMulti( HANDLE RegHandle, PWCHAR ValueName );
-void ConsumeRegValueString( PWCHAR NameServer );
 BOOL isInterface( TDIEntityID *if_maybe );
 BOOL hasArp( HANDLE tcpFile, TDIEntityID *arp_maybe );
 
@@ -165,8 +161,6 @@ NTSTATUS getIPAddrEntryForIf(HANDLE tcpFile,
                              char *name,
                              DWORD index,
                              IFInfo *ifInfo);
-DWORD TCPSendIoctl(HANDLE hDevice, DWORD dwIoControlCode, LPVOID lpInBuffer, PULONG pInBufferSize, LPVOID lpOutBuffer, PULONG pOutBufferSize);
-
 #include <w32api.h>
 /* This is here until we switch to version 2.5 of the mingw headers */
 #if (__W32API_MAJOR_VERSION < 2 || __W32API_MINOR_VERSION < 5)

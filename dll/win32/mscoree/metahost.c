@@ -50,10 +50,17 @@ static const struct ICLRRuntimeInfoVtbl CLRRuntimeInfoVtbl;
 #define NUM_RUNTIMES 4
 
 static struct CLRRuntimeInfo runtimes[NUM_RUNTIMES] = {
+#ifdef __REACTOS__
+    {{&CLRRuntimeInfoVtbl}, 1, 0, 3705, 0, STARTUP_CONCURRENT_GC, NULL},
+    {{&CLRRuntimeInfoVtbl}, 1, 1, 4322, 0, STARTUP_CONCURRENT_GC, NULL},
+    {{&CLRRuntimeInfoVtbl}, 2, 0, 50727, 0, STARTUP_CONCURRENT_GC, NULL},
+    {{&CLRRuntimeInfoVtbl}, 4, 0, 30319, 0, STARTUP_CONCURRENT_GC, NULL}
+#else
     {{&CLRRuntimeInfoVtbl}, 1, 0, 3705, 0},
     {{&CLRRuntimeInfoVtbl}, 1, 1, 4322, 0},
     {{&CLRRuntimeInfoVtbl}, 2, 0, 50727, 0},
     {{&CLRRuntimeInfoVtbl}, 4, 0, 30319, 0}
+#endif
 };
 
 static CRITICAL_SECTION runtime_list_cs;
@@ -83,6 +90,11 @@ static BOOL is_mono_shutdown;
 typedef struct _MonoProfilerDesc *MonoProfilerHandle;
 
 typedef void (CDECL *MonoProfilerRuntimeShutdownBeginCallback) (MonoProfiler *prof);
+#ifdef __REACTOS__
+typedef void (CDECL *MonoProfilerDomainUnloadingCallback) (MonoProfiler *prof, MonoDomain *domain);
+
+static LONG clr_disabled_notified;
+#endif
 
 MonoImage* (CDECL *mono_assembly_get_image)(MonoAssembly *assembly);
 MonoAssembly* (CDECL *mono_assembly_load_from)(MonoImage *image, const char *fname, MonoImageOpenStatus *status);
@@ -97,9 +109,12 @@ MonoMethod* (CDECL *mono_class_get_method_from_name)(MonoClass *klass, const cha
 static void (CDECL *mono_config_parse)(const char *filename);
 MonoDomain* (CDECL *mono_domain_get)(void);
 MonoDomain* (CDECL *mono_domain_get_by_id)(int id);
-BOOL (CDECL *mono_domain_set)(MonoDomain *domain,BOOL force);
 void (CDECL *mono_domain_set_config)(MonoDomain *domain,const char *base_dir,const char *config_file_name);
+#ifdef __REACTOS__
+void (CDECL *mono_free)(void *);
+#else
 static void (CDECL *mono_free)(void *);
+#endif
 MonoImage* (CDECL *mono_get_corlib)(void);
 static MonoImage* (CDECL *mono_image_open)(const char *fname, MonoImageOpenStatus *status);
 MonoImage* (CDECL *mono_image_open_from_module_handle)(HMODULE module_handle, char* fname, UINT has_entry_point, MonoImageOpenStatus* status);
@@ -116,6 +131,17 @@ void* (CDECL *mono_object_unbox)(MonoObject *obj);
 static MonoProfilerHandle (CDECL *mono_profiler_create)(MonoProfiler *prof);
 static void (CDECL *mono_profiler_install)(MonoProfiler *prof, MonoProfileFunc shutdown_callback);
 static void (CDECL *mono_profiler_set_runtime_shutdown_begin_callback)(MonoProfilerHandle handle, MonoProfilerRuntimeShutdownBeginCallback cb);
+#ifdef __REACTOS__
+static void (CDECL *mono_profiler_set_domain_unloading_callback)(MonoProfilerHandle handle, MonoProfilerDomainUnloadingCallback cb);
+int (CDECL *mono_domain_get_id)(MonoDomain *domain);
+static const char* (CDECL *mono_assembly_name_get_pubkeytoken)(MonoAssemblyName *aname);
+static MonoAssemblyName* (CDECL *mono_assembly_get_name)(MonoAssembly *assembly);
+
+static struct list app_assembly_bindings = LIST_INIT(app_assembly_bindings);
+static WCHAR *app_base_dir;
+static LONG app_bindings_set;
+static SRWLOCK app_bindings_lock = SRWLOCK_INIT;
+#endif
 MonoType* (CDECL *mono_reflection_type_from_name)(char *name, MonoImage *image);
 MonoObject* (CDECL *mono_runtime_invoke)(MonoMethod *method, void *obj, void **params, MonoObject **exc);
 void (CDECL *mono_runtime_object_init)(MonoObject *this_obj);
@@ -124,9 +150,13 @@ static void (CDECL *mono_set_crash_chaining)(BOOL chain_signals);
 static void (CDECL *mono_set_dirs)(const char *assembly_dir, const char *config_dir);
 static void (CDECL *mono_set_verbose_level)(DWORD level);
 MonoString* (CDECL *mono_string_new)(MonoDomain *domain, const char *str);
+#ifdef __REACTOS__
+char* (CDECL *mono_string_to_utf8)(MonoString *string_obj);
+#endif
 static char* (CDECL *mono_stringify_assembly_name)(MonoAssemblyName *aname);
-MonoThread* (CDECL *mono_thread_attach)(MonoDomain *domain);
 void (CDECL *mono_thread_manage)(void);
+MonoDomain* (CDECL *mono_threads_attach_coop)(MonoDomain *domain, void *attach_cookie);
+void (CDECL *mono_threads_detach_coop)(MonoDomain *orig_domain, void *attach_cookie);
 void (CDECL *mono_trace_set_print_handler)(MonoPrintCallback callback);
 void (CDECL *mono_trace_set_printerr_handler)(MonoPrintCallback callback);
 void (CDECL *mono_trace_set_log_handler)(MonoLogCallback callback, void *user_data);
@@ -141,6 +171,9 @@ static MonoAssembly* CDECL wine_mono_assembly_preload_hook_fn(MonoAssemblyName *
 static MonoAssembly* CDECL wine_mono_assembly_preload_hook_v2_fn(MonoAssemblyName *aname, char **assemblies_path, int *flags, void *user_data);
 
 static void CDECL mono_shutdown_callback_fn(MonoProfiler *prof);
+#ifdef __REACTOS__
+static void CDECL mono_domain_unloading_callback_fn(MonoProfiler *prof, MonoDomain *domain);
+#endif
 
 static MonoImage* CDECL image_open_module_handle_dummy(HMODULE module_handle,
     char* fname, UINT has_entry_point, MonoImageOpenStatus* status)
@@ -215,7 +248,6 @@ static HRESULT load_mono(LPCWSTR mono_path)
         LOAD_MONO_FUNCTION(mono_class_get_method_from_name);
         LOAD_MONO_FUNCTION(mono_domain_get);
         LOAD_MONO_FUNCTION(mono_domain_get_by_id);
-        LOAD_MONO_FUNCTION(mono_domain_set);
         LOAD_MONO_FUNCTION(mono_domain_set_config);
         LOAD_MONO_FUNCTION(mono_free);
         LOAD_MONO_FUNCTION(mono_get_corlib);
@@ -237,8 +269,12 @@ static HRESULT load_mono(LPCWSTR mono_path)
         LOAD_MONO_FUNCTION(mono_set_verbose_level);
         LOAD_MONO_FUNCTION(mono_stringify_assembly_name);
         LOAD_MONO_FUNCTION(mono_string_new);
-        LOAD_MONO_FUNCTION(mono_thread_attach);
+#ifdef __REACTOS__
+        LOAD_MONO_FUNCTION(mono_string_to_utf8);
+#endif
         LOAD_MONO_FUNCTION(mono_thread_manage);
+        LOAD_MONO_FUNCTION(mono_threads_attach_coop);
+        LOAD_MONO_FUNCTION(mono_threads_detach_coop);
 
 #undef LOAD_MONO_FUNCTION
 
@@ -255,6 +291,12 @@ static HRESULT load_mono(LPCWSTR mono_path)
         LOAD_OPT_MONO_FUNCTION(mono_profiler_create, NULL);
         LOAD_OPT_MONO_FUNCTION(mono_profiler_install, NULL);
         LOAD_OPT_MONO_FUNCTION(mono_profiler_set_runtime_shutdown_begin_callback, NULL);
+#ifdef __REACTOS__
+        LOAD_OPT_MONO_FUNCTION(mono_profiler_set_domain_unloading_callback, NULL);
+        LOAD_OPT_MONO_FUNCTION(mono_domain_get_id, NULL);
+        LOAD_OPT_MONO_FUNCTION(mono_assembly_name_get_pubkeytoken, NULL);
+        LOAD_OPT_MONO_FUNCTION(mono_assembly_get_name, NULL);
+#endif
         LOAD_OPT_MONO_FUNCTION(mono_set_crash_chaining, set_crash_chaining_dummy);
         LOAD_OPT_MONO_FUNCTION(mono_trace_set_print_handler, set_print_handler_dummy);
         LOAD_OPT_MONO_FUNCTION(mono_trace_set_printerr_handler, set_print_handler_dummy);
@@ -276,6 +318,10 @@ static HRESULT load_mono(LPCWSTR mono_path)
             /* Profiler API v2 */
             MonoProfilerHandle handle = mono_profiler_create(NULL);
             mono_profiler_set_runtime_shutdown_begin_callback(handle, mono_shutdown_callback_fn);
+#ifdef __REACTOS__
+            if (mono_profiler_set_domain_unloading_callback && mono_domain_get_id)
+                mono_profiler_set_domain_unloading_callback(handle, mono_domain_unloading_callback_fn);
+#endif
         }
         else if (mono_profiler_install != NULL)
         {
@@ -393,7 +439,18 @@ MonoDomain* get_root_domain(void)
 static void CDECL mono_shutdown_callback_fn(MonoProfiler *prof)
 {
     is_mono_shutdown = TRUE;
+#ifdef __REACTOS__
+    if (!InterlockedExchange(&clr_disabled_notified, TRUE))
+        RuntimeHost_NotifyEvent(Event_ClrDisabled, NULL);
+#endif
 }
+
+#ifdef __REACTOS__
+static void CDECL mono_domain_unloading_callback_fn(MonoProfiler *prof, MonoDomain *domain)
+{
+    RuntimeHost_NotifyEvent(Event_DomainUnload, (void *)(DWORD_PTR)mono_domain_get_id(domain));
+}
+#endif
 
 static HRESULT WINAPI thread_set_fn(void)
 {
@@ -433,6 +490,15 @@ static HRESULT CLRRuntimeInfo_GetRuntimeHost(CLRRuntimeInfo *This, RuntimeHost *
         return hr;
     }
 
+#ifdef __REACTOS__
+    hr = load_mono(mono_path);
+
+    if (SUCCEEDED(hr))
+        hr = RuntimeHost_Construct(This, &This->loaded_runtime);
+
+    if (SUCCEEDED(hr) && GlobalCLRMetaHost.callback)
+        GlobalCLRMetaHost.callback(&This->ICLRRuntimeInfo_iface, thread_set_fn, thread_unset_fn);
+#else
     if (GlobalCLRMetaHost.callback)
     {
         GlobalCLRMetaHost.callback(&This->ICLRRuntimeInfo_iface, thread_set_fn, thread_unset_fn);
@@ -442,6 +508,7 @@ static HRESULT CLRRuntimeInfo_GetRuntimeHost(CLRRuntimeInfo *This, RuntimeHost *
 
     if (SUCCEEDED(hr))
         hr = RuntimeHost_Construct(This, &This->loaded_runtime);
+#endif
 
     LeaveCriticalSection(&runtime_list_cs);
 
@@ -455,6 +522,10 @@ void expect_no_runtimes(void)
 {
     if (mono_handle && is_mono_started && !is_mono_shutdown)
     {
+#ifdef __REACTOS__
+        if (!InterlockedExchange(&clr_disabled_notified, TRUE))
+            RuntimeHost_NotifyEvent(Event_ClrDisabled, NULL);
+#endif
         ERR("Process exited with a Mono runtime loaded.\n");
         return;
     }
@@ -651,20 +722,96 @@ static HRESULT WINAPI CLRRuntimeInfo_IsLoadable(ICLRRuntimeInfo* iface,
     return E_NOTIMPL;
 }
 
+#ifdef __REACTOS__
+static HRESULT store_startup_flags(struct CLRRuntimeInfo *This, DWORD flags, BOOL set_config, LPCWSTR host_config_file)
+{
+    WCHAR *config = NULL;
+
+    if (set_config && host_config_file)
+    {
+        config = wcsdup(host_config_file);
+        if (!config)
+            return E_OUTOFMEMORY;
+    }
+
+    EnterCriticalSection(&runtime_list_cs);
+    This->startup_flags = flags;
+    if (set_config)
+    {
+        free(This->host_config_file);
+        This->host_config_file = config;
+    }
+    LeaveCriticalSection(&runtime_list_cs);
+
+    return S_OK;
+}
+
+HRESULT set_startup_flags(ICLRRuntimeInfo *iface, DWORD flags, BOOL set_config, LPCWSTR host_config_file)
+{
+    return store_startup_flags(impl_from_ICLRRuntimeInfo(iface), flags, set_config, host_config_file);
+}
+#endif
+
 static HRESULT WINAPI CLRRuntimeInfo_SetDefaultStartupFlags(ICLRRuntimeInfo* iface,
     DWORD dwStartupFlags, LPCWSTR pwzHostConfigFile)
 {
+#ifdef __REACTOS__
+    struct CLRRuntimeInfo *This = impl_from_ICLRRuntimeInfo(iface);
+    HRESULT hr;
+
+    TRACE("%p %lx %s\n", iface, dwStartupFlags, debugstr_w(pwzHostConfigFile));
+
+    if (pwzHostConfigFile)
+    {
+        hr = check_host_config_file(pwzHostConfigFile);
+        if (FAILED(hr))
+            return hr;
+    }
+
+    return store_startup_flags(This, dwStartupFlags, TRUE, pwzHostConfigFile);
+#else
     FIXME("%p %lx %s\n", iface, dwStartupFlags, debugstr_w(pwzHostConfigFile));
 
     return E_NOTIMPL;
+#endif
 }
 
 static HRESULT WINAPI CLRRuntimeInfo_GetDefaultStartupFlags(ICLRRuntimeInfo* iface,
     DWORD *pdwStartupFlags, LPWSTR pwzHostConfigFile, DWORD *pcchHostConfigFile)
 {
+#ifdef __REACTOS__
+    struct CLRRuntimeInfo *This = impl_from_ICLRRuntimeInfo(iface);
+    HRESULT hr = S_OK;
+    DWORD size;
+
+    TRACE("%p %p %p %p\n", iface, pdwStartupFlags, pwzHostConfigFile, pcchHostConfigFile);
+
+    if (!pdwStartupFlags && !pcchHostConfigFile)
+        return E_POINTER;
+
+    EnterCriticalSection(&runtime_list_cs);
+
+    if (pdwStartupFlags)
+        *pdwStartupFlags = This->startup_flags;
+
+    if (pcchHostConfigFile)
+    {
+        size = (This->host_config_file ? lstrlenW(This->host_config_file) : 0) + 1;
+        if (*pcchHostConfigFile < size)
+            hr = HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+        else if (pwzHostConfigFile)
+            lstrcpyW(pwzHostConfigFile, This->host_config_file ? This->host_config_file : L"");
+        *pcchHostConfigFile = size;
+    }
+
+    LeaveCriticalSection(&runtime_list_cs);
+
+    return hr;
+#else
     FIXME("%p %p %p %p\n", iface, pdwStartupFlags, pwzHostConfigFile, pcchHostConfigFile);
 
     return E_NOTIMPL;
+#endif
 }
 
 static HRESULT WINAPI CLRRuntimeInfo_BindAsLegacyV2Runtime(ICLRRuntimeInfo* iface)
@@ -710,11 +857,13 @@ HRESULT ICLRRuntimeInfo_GetRuntimeHost(ICLRRuntimeInfo *iface, RuntimeHost **res
 }
 
 #ifdef __i386__
-static const WCHAR libmono2_arch_dll[] = {'\\','b','i','n','\\','l','i','b','m','o','n','o','-','2','.','0','-','x','8','6','.','d','l','l',0};
+static const WCHAR libmono2_arch_dll[] = L"\\bin\\libmono-2.0-x86.dll";
 #elif defined(__x86_64__)
-static const WCHAR libmono2_arch_dll[] = {'\\','b','i','n','\\','l','i','b','m','o','n','o','-','2','.','0','-','x','8','6','_','6','4','.','d','l','l',0};
+static const WCHAR libmono2_arch_dll[] = L"\\bin\\libmono-2.0-x86_64.dll";
+#elif defined(__aarch64__)
+static const WCHAR libmono2_arch_dll[] = L"\\bin\\libmono-2.0-arm64.dll";
 #else
-static const WCHAR libmono2_arch_dll[] = {'\\','b','i','n','\\','l','i','b','m','o','n','o','-','2','.','0','.','d','l','l',0};
+static const WCHAR libmono2_arch_dll[] = L"\\bin\\libmono-2.0.dll";
 #endif
 
 static BOOL find_mono_dll(LPCWSTR path, LPWSTR dll_path)
@@ -791,15 +940,11 @@ static BOOL get_mono_path_registry(LPWSTR path)
 
 static BOOL get_mono_path_dos(const WCHAR *dir, LPWSTR path)
 {
-    static const WCHAR unix_prefix[] = {'\\','\\','?','\\','u','n','i','x','\\'};
     static const WCHAR basedir[] = L"\\wine-mono-" WINE_MONO_VERSION;
     LPWSTR dos_dir;
     WCHAR mono_dll_path[MAX_PATH];
     DWORD len;
     BOOL ret;
-
-    if (memcmp(dir, unix_prefix, sizeof(unix_prefix)) == 0)
-        return FALSE;  /* No drive letter for this directory */
 
     len = lstrlenW( dir ) + lstrlenW( basedir ) + 1;
     if (!(dos_dir = malloc( len * sizeof(WCHAR) ))) return FALSE;
@@ -815,52 +960,48 @@ static BOOL get_mono_path_dos(const WCHAR *dir, LPWSTR path)
     return ret;
 }
 
-#ifndef __REACTOS__
-static BOOL get_mono_path_unix(const char *unix_dir, LPWSTR path)
+static BOOL get_mono_path_unix(const WCHAR *unix_dir, LPWSTR path)
 {
-    static WCHAR * (CDECL *p_wine_get_dos_file_name)(const char*);
-    LPWSTR dos_dir;
-    BOOL ret;
+    WCHAR buffer[MAX_PATH];
+    HANDLE dir;
+    DWORD len;
 
-    if (!p_wine_get_dos_file_name)
-    {
-        p_wine_get_dos_file_name = (void*)GetProcAddress(GetModuleHandleA("kernel32"), "wine_get_dos_file_name");
-        if (!p_wine_get_dos_file_name)
-            return FALSE;
-    }
+    if (!get_mono_path_dos( unix_dir, buffer )) return FALSE;
 
-    dos_dir = p_wine_get_dos_file_name(unix_dir);
-    if (!dos_dir)
-        return FALSE;
+    /* try to get a DOS name for that directory */
 
-    ret = get_mono_path_dos( dos_dir, path);
-
-    HeapFree(GetProcessHeap(), 0, dos_dir);
-    return ret;
+    dir = CreateFileW( buffer, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                       NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, 0 );
+    if (dir == INVALID_HANDLE_VALUE) return FALSE;
+    len = GetFinalPathNameByHandleW( dir, buffer, ARRAY_SIZE(buffer), VOLUME_NAME_DOS );
+    CloseHandle( dir );
+    if (!len) return FALSE;
+    if (len > ARRAY_SIZE(buffer)) return FALSE;
+    if (buffer[5] != ':') return FALSE;
+    wcscpy( path, buffer + 4 );
+    return TRUE;
 }
-#endif
 
 static BOOL get_mono_path_datadir(LPWSTR path)
 {
-    static const WCHAR winedatadirW[] = {'W','I','N','E','D','A','T','A','D','I','R',0};
-    static const WCHAR winebuilddirW[] = {'W','I','N','E','B','U','I','L','D','D','I','R',0};
-    static const WCHAR unix_prefix[] = {'\\','?','?','\\','u','n','i','x','\\'};
-    static const WCHAR monoW[] = {'\\','m','o','n','o',0};
-    static const WCHAR dotdotmonoW[] = {'\\','.','.','\\','m','o','n','o',0};
     const WCHAR *data_dir, *suffix;
     WCHAR *package_dir;
     BOOL ret;
 
-    if ((data_dir = _wgetenv( winedatadirW )))
-        suffix = monoW;
-    else if ((data_dir = _wgetenv( winebuilddirW )))
-        suffix = dotdotmonoW;
+    if ((data_dir = _wgetenv( L"WINEDATADIR" )))
+        suffix = L"\\mono";
+    else if ((data_dir = _wgetenv( L"WINEBUILDDIR" )))
+        suffix = L"\\..\\mono";
     else
         return FALSE;
 
-    if (!wcsncmp( data_dir, unix_prefix, wcslen(unix_prefix) )) return FALSE;
+    if (!wcsncmp( data_dir, L"\\??\\unix", 8 )) return FALSE;
     data_dir += 4;  /* skip \??\ prefix */
     package_dir = malloc((wcslen(data_dir) + wcslen(suffix) + 1) * sizeof(WCHAR));
+#ifdef __REACTOS__
+    if (!package_dir)
+        RaiseException(STATUS_NO_MEMORY, EXCEPTION_NONCONTINUABLE, 0, NULL);
+#endif
     lstrcpyW( package_dir, data_dir );
     lstrcatW( package_dir, suffix );
 
@@ -873,19 +1014,13 @@ static BOOL get_mono_path_datadir(LPWSTR path)
 
 BOOL get_mono_path(LPWSTR path, BOOL skip_local)
 {
-#ifdef __REACTOS__
-    return (!skip_local && get_mono_path_local(path)) ||
-        get_mono_path_registry(path) ||
-        get_mono_path_datadir(path);
-#else
     return (!skip_local && get_mono_path_local(path)) ||
         get_mono_path_registry(path) ||
         get_mono_path_datadir(path) ||
-        get_mono_path_unix(INSTALL_DATADIR "/wine/mono", path) ||
+        get_mono_path_unix(L"\\\\?\\unix" INSTALL_DATADIR "/wine/mono", path) ||
         (strcmp(INSTALL_DATADIR, "/usr/share") &&
-         get_mono_path_unix("/usr/share/wine/mono", path)) ||
-        get_mono_path_unix("/opt/wine/mono", path);
-#endif
+         get_mono_path_unix(L"\\\\?\\unix/usr/share/wine/mono", path)) ||
+        get_mono_path_unix(L"\\\\?\\unix/opt/wine/mono", path);
 }
 
 struct InstalledRuntimeEnum
@@ -1738,6 +1873,139 @@ static MonoAssembly* mono_assembly_try_load(WCHAR *path)
     return result;
 }
 
+#ifdef __REACTOS__
+void set_app_assembly_bindings(struct list *bindings, const WCHAR *base_dir, SIZE_T base_dir_size)
+{
+    WCHAR *dir;
+
+    if (InterlockedCompareExchange(&app_bindings_set, TRUE, FALSE))
+        return;
+
+    dir = malloc((base_dir_size + 1) * sizeof(WCHAR));
+    if (dir)
+    {
+        memcpy(dir, base_dir, base_dir_size * sizeof(WCHAR));
+        dir[base_dir_size] = 0;
+    }
+
+    AcquireSRWLockExclusive(&app_bindings_lock);
+    app_base_dir = dir;
+    list_move_tail(&app_assembly_bindings, bindings);
+    ReleaseSRWLockExclusive(&app_bindings_lock);
+}
+
+void replace_app_assembly_bindings(struct list *bindings)
+{
+    assembly_binding *binding, *binding2;
+
+    AcquireSRWLockExclusive(&app_bindings_lock);
+    LIST_FOR_EACH_ENTRY_SAFE(binding, binding2, &app_assembly_bindings, assembly_binding, entry)
+    {
+        list_remove(&binding->entry);
+        free(binding->name);
+        free(binding->public_key_token);
+        free(binding->culture);
+        free(binding->code_base);
+        free(binding);
+    }
+    list_move_tail(&app_assembly_bindings, bindings);
+    app_bindings_set = TRUE;
+    ReleaseSRWLockExclusive(&app_bindings_lock);
+}
+
+static BOOL binding_matches(const assembly_binding *binding, const WCHAR *name, const WCHAR *token, const WCHAR *culture)
+{
+    if (_wcsicmp(binding->name, name))
+        return FALSE;
+    if (binding->public_key_token && _wcsicmp(binding->public_key_token, token ? token : L"null"))
+        return FALSE;
+    if (binding->culture && _wcsicmp(binding->culture, culture && culture[0] ? culture : L"neutral"))
+        return FALSE;
+    return TRUE;
+}
+
+static int compare_assembly_version(const WORD *a, const WORD *b)
+{
+    int i;
+
+    for (i = 0; i < 4; i++)
+        if (a[i] != b[i])
+            return a[i] < b[i] ? -1 : 1;
+    return 0;
+}
+
+static void get_assembly_name_version(MonoAssemblyName *aname, WORD version[4])
+{
+    version[0] = mono_assembly_name_get_version(aname, &version[1], &version[2], &version[3]);
+}
+
+static MonoAssembly* load_from_assembly_bindings(const WCHAR *name, const WCHAR *token,
+    const WCHAR *culture, WORD version[4])
+{
+    assembly_binding *binding;
+    WCHAR path[MAX_PATH];
+    const WCHAR *href = NULL;
+    MonoAssembly *result = NULL;
+
+    AcquireSRWLockShared(&app_bindings_lock);
+    LIST_FOR_EACH_ENTRY(binding, &app_assembly_bindings, assembly_binding, entry)
+    {
+        if (!binding->is_code_base && binding_matches(binding, name, token, culture) &&
+            compare_assembly_version(version, binding->low) >= 0 &&
+            compare_assembly_version(version, binding->high) <= 0)
+        {
+            memcpy(version, binding->target, sizeof(binding->target));
+            break;
+        }
+    }
+
+    if (token)
+    {
+        LIST_FOR_EACH_ENTRY(binding, &app_assembly_bindings, assembly_binding, entry)
+        {
+            if (binding->is_code_base && binding_matches(binding, name, token, culture) &&
+                !compare_assembly_version(version, binding->target))
+            {
+                href = binding->code_base;
+                break;
+            }
+        }
+    }
+
+    if (href)
+    {
+        if (!_wcsnicmp(href, L"file:///", 8))
+            lstrcpynW(path, href + 8, MAX_PATH);
+        else if (PathIsRelativeW(href) && app_base_dir)
+            PathCombineW(path, app_base_dir, href);
+        else
+            lstrcpynW(path, href, MAX_PATH);
+        ReleaseSRWLockShared(&app_bindings_lock);
+
+        TRACE("code base for %s: %s\n", debugstr_w(name), debugstr_w(path));
+        result = mono_assembly_try_load(path);
+        if (!result)
+            WARN("Could not load %s from its code base %s\n", debugstr_w(name), debugstr_w(path));
+        return result;
+    }
+
+    ReleaseSRWLockShared(&app_bindings_lock);
+    return NULL;
+}
+
+static BOOL assembly_version_matches(MonoAssembly *assembly, const WORD version[4])
+{
+    MonoAssemblyName *aname;
+    WORD found[4];
+
+    if (!mono_assembly_get_name || !(aname = mono_assembly_get_name(assembly)))
+        return TRUE;
+
+    get_assembly_name_version(aname, found);
+    return !compare_assembly_version(found, version);
+}
+#endif
+
 static MonoAssembly* CDECL mono_assembly_preload_hook_fn(MonoAssemblyName *aname, char **assemblies_path, void *user_data)
 {
     int flags = 0;
@@ -1769,6 +2037,12 @@ static MonoAssembly* CDECL wine_mono_assembly_preload_hook_v2_fn(MonoAssemblyNam
     int i;
     static const WCHAR dotdllW[] = {'.','d','l','l',0};
     static const WCHAR dotexeW[] = {'.','e','x','e',0};
+#ifdef __REACTOS__
+    WCHAR tokenW[32] = {0}, *nameW;
+    int nameW_size;
+    BOOL have_token = FALSE;
+    WORD version[4];
+#endif
 
     stringname = mono_stringify_assembly_name(aname);
     assemblyname = mono_assembly_name_get_name(aname);
@@ -1786,6 +2060,30 @@ static MonoAssembly* CDECL wine_mono_assembly_preload_hook_v2_fn(MonoAssemblyNam
     if (!stringname || !assemblyname) return NULL;
 
     search_flags = get_assembly_search_flags(aname);
+#ifdef __REACTOS__
+    if (mono_assembly_name_get_pubkeytoken)
+    {
+        const char *token = mono_assembly_name_get_pubkeytoken(aname);
+
+        if (token)
+            MultiByteToWideChar(CP_UTF8, 0, token, -1, tokenW, ARRAY_SIZE(tokenW));
+        have_token = token && tokenW[0];
+    }
+    get_assembly_name_version(aname, version);
+    nameW_size = MultiByteToWideChar(CP_UTF8, 0, assemblyname, -1, NULL, 0);
+    nameW = malloc(nameW_size * sizeof(WCHAR));
+    if (nameW)
+    {
+        MultiByteToWideChar(CP_UTF8, 0, assemblyname, -1, nameW, nameW_size);
+        result = load_from_assembly_bindings(nameW, have_token ? tokenW : NULL, cultureW, version);
+        free(nameW);
+        if (result)
+        {
+            *flags |= WINE_PRELOAD_SET_GAC;
+            goto done;
+        }
+    }
+#endif
     if (private_path && (search_flags & ASSEMBLY_SEARCH_PRIVATEPATH) != 0)
     {
         stringnameW_size = MultiByteToWideChar(CP_UTF8, 0, assemblyname, -1, NULL, 0);
@@ -1822,6 +2120,16 @@ static MonoAssembly* CDECL wine_mono_assembly_preload_hook_v2_fn(MonoAssemblyNam
                 if (result) break;
             }
             free(stringnameW);
+#ifdef __REACTOS__
+            if (result && have_token && !assembly_version_matches(result, version))
+            {
+                WARN("%s has a different version than %u.%u.%u.%u\n", debugstr_w(path),
+                    version[0], version[1], version[2], version[3]);
+                result = NULL;
+                *flags |= WINE_PRELOAD_SKIP_PRIVATE_PATH;
+                goto done;
+            }
+#endif
             if (result) goto done;
         }
     }

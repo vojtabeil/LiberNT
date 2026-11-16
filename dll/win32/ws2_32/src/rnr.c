@@ -332,13 +332,21 @@ WSALookupServiceBeginW(IN LPWSAQUERYSETW lpqsRestrictions,
         return SOCKET_ERROR;
     }
 
-    /* Verify pointers */
+    /* Verify pointers. The service class id is optional: callers that query a
+     * namespace rather than a specific service leave it NULL. */
     if (IsBadWritePtr(lphLookup, sizeof(*lphLookup)) ||
         IsBadReadPtr(lpqsRestrictions, sizeof(*lpqsRestrictions)) ||
-        IsBadReadPtr(lpqsRestrictions->lpServiceClassId, sizeof(*lpqsRestrictions->lpServiceClassId)))
+        ((lpqsRestrictions->lpServiceClassId != NULL) &&
+         IsBadReadPtr(lpqsRestrictions->lpServiceClassId, sizeof(*lpqsRestrictions->lpServiceClassId))))
     {
         /* They are invalid; fail */
         SetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    if (lpqsRestrictions->dwSize < sizeof(*lpqsRestrictions))
+    {
+        SetLastError(WSAEINVAL);
         return SOCKET_ERROR;
     }
 
@@ -563,7 +571,7 @@ WSALookupServiceNextA(IN HANDLE hLookup,
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 INT
 WSPAPI
@@ -576,8 +584,53 @@ WSANSPIoctl(HANDLE hLookup,
             LPDWORD lpcbBytesReturned,
             LPWSACOMPLETION lpCompletion)
 {
+    PWSPROCESS Process;
+    PWSTHREAD Thread;
+    PNSQUERY Query = hLookup;
+    PNSQUERY_PROVIDER QueryProvider;
+    INT ErrorCode;
+
     DPRINT("WSANSPIoctl: %lx\n", hLookup);
-    return 0;
+
+    if ((ErrorCode = WsApiProlog(&Process, &Thread)) != ERROR_SUCCESS)
+    {
+        SetLastError(ErrorCode);
+        return SOCKET_ERROR;
+    }
+
+    if (IsBadWritePtr(lpcbBytesReturned, sizeof(*lpcbBytesReturned)))
+    {
+        SetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    if (IsBadReadPtr(Query, sizeof(*Query)) || !WsNqValidateAndReference(Query))
+    {
+        SetLastError(WSA_INVALID_HANDLE);
+        return SOCKET_ERROR;
+    }
+
+    QueryProvider = Query->ActiveProvider ? Query->ActiveProvider : Query->CurrentProvider;
+    if (QueryProvider && QueryProvider->Provider->Service.NSPIoctl)
+    {
+        ErrorCode = QueryProvider->Provider->Service.NSPIoctl(QueryProvider->LookupHandle,
+                                                              dwControlCode,
+                                                              lpvInBuffer,
+                                                              cbInBuffer,
+                                                              lpvOutBuffer,
+                                                              cbOutBuffer,
+                                                              lpcbBytesReturned,
+                                                              lpCompletion,
+                                                              &Thread->WahThreadId);
+    }
+    else
+    {
+        SetLastError(WSAEOPNOTSUPP);
+        ErrorCode = SOCKET_ERROR;
+    }
+
+    WsNqDereference(Query);
+    return ErrorCode;
 }
 
 /*
@@ -592,8 +645,61 @@ WSARemoveServiceClass(IN LPGUID lpServiceClassId)
     return SOCKET_ERROR;
 }
 
+typedef struct _WS_SET_SERVICE_CONTEXT
+{
+    PNSCATALOG Catalog;
+    LPWSAQUERYSETW RegInfo;
+    WSAESETSERVICEOP Operation;
+    DWORD ControlFlags;
+    BOOLEAN Succeeded;
+    INT ErrorCode;
+} WS_SET_SERVICE_CONTEXT, *PWS_SET_SERVICE_CONTEXT;
+
+static
+VOID
+WsSetServiceOnEntry(IN PWS_SET_SERVICE_CONTEXT Context,
+                    IN PNSCATALOG_ENTRY Entry)
+{
+    PNS_PROVIDER Provider;
+
+    if (!Entry->Provider && WsNcLoadProvider(Context->Catalog, Entry) != ERROR_SUCCESS)
+        return;
+    Provider = Entry->Provider;
+    if (!Provider || !Provider->Service.NSPSetService)
+        return;
+    if (Provider->Service.NSPSetService(&Provider->ProviderId,
+                                        NULL,
+                                        Context->RegInfo,
+                                        Context->Operation,
+                                        Context->ControlFlags) == ERROR_SUCCESS)
+    {
+        Context->Succeeded = TRUE;
+    }
+    else
+    {
+        Context->ErrorCode = GetLastError();
+    }
+}
+
+static
+BOOL
+WSAAPI
+WsSetServiceEnumerationProc(IN PVOID Context,
+                            IN PNSCATALOG_ENTRY Entry)
+{
+    PWS_SET_SERVICE_CONTEXT SetContext = Context;
+
+    if (Entry->Enabled &&
+        (SetContext->RegInfo->dwNameSpace == NS_ALL ||
+         SetContext->RegInfo->dwNameSpace == Entry->NamespaceId))
+    {
+        WsSetServiceOnEntry(SetContext, Entry);
+    }
+    return TRUE;
+}
+
 /*
- * @unimplemented
+ * @implemented
  */
 INT
 WSAAPI
@@ -601,13 +707,47 @@ WSASetServiceA(IN LPWSAQUERYSETA lpqsRegInfo,
                IN WSAESETSERVICEOP essOperation,
                IN DWORD dwControlFlags)
 {
-    DPRINT("WSASetServiceA: %lx\n", lpqsRegInfo);
-    SetLastError(WSAEINVAL);
+    LPWSAQUERYSETW UnicodeQuerySet = NULL;
+    SIZE_T UnicodeQuerySetSize = 0;
+    INT ErrorCode;
+
+    DPRINT("WSASetServiceA: %p\n", lpqsRegInfo);
+
+    if (IsBadReadPtr(lpqsRegInfo, sizeof(*lpqsRegInfo)))
+    {
+        SetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    ErrorCode = MapAnsiQuerySetToUnicode(lpqsRegInfo, &UnicodeQuerySetSize, UnicodeQuerySet);
+    if (ErrorCode == WSAEFAULT)
+    {
+        UnicodeQuerySet = HeapAlloc(WsSockHeap, 0, UnicodeQuerySetSize);
+        if (!UnicodeQuerySet)
+        {
+            SetLastError(WSA_NOT_ENOUGH_MEMORY);
+            return SOCKET_ERROR;
+        }
+        ErrorCode = MapAnsiQuerySetToUnicode(lpqsRegInfo, &UnicodeQuerySetSize, UnicodeQuerySet);
+        if (ErrorCode == ERROR_SUCCESS)
+        {
+            ErrorCode = WSASetServiceW(UnicodeQuerySet, essOperation, dwControlFlags);
+        }
+        else
+        {
+            SetLastError(ErrorCode);
+            ErrorCode = SOCKET_ERROR;
+        }
+        HeapFree(WsSockHeap, 0, UnicodeQuerySet);
+        return ErrorCode;
+    }
+
+    SetLastError(ErrorCode);
     return SOCKET_ERROR;
 }
 
 /*
- * @unimplemented
+ * @implemented
  */
 INT
 WSAAPI
@@ -615,8 +755,60 @@ WSASetServiceW(IN LPWSAQUERYSETW lpqsRegInfo,
                IN WSAESETSERVICEOP essOperation,
                IN DWORD dwControlFlags)
 {
-    DPRINT("WSASetServiceW: %lx\n", lpqsRegInfo);
-    SetLastError(WSAEINVAL);
+    WS_SET_SERVICE_CONTEXT Context;
+    PNSCATALOG_ENTRY CatalogEntry;
+    PWSPROCESS Process;
+    PWSTHREAD Thread;
+    INT ErrorCode;
+
+    DPRINT("WSASetServiceW: %p\n", lpqsRegInfo);
+
+    if ((ErrorCode = WsApiProlog(&Process, &Thread)) != ERROR_SUCCESS)
+    {
+        SetLastError(ErrorCode);
+        return SOCKET_ERROR;
+    }
+
+    if (IsBadReadPtr(lpqsRegInfo, sizeof(*lpqsRegInfo)))
+    {
+        SetLastError(WSAEFAULT);
+        return SOCKET_ERROR;
+    }
+
+    if (lpqsRegInfo->dwSize < sizeof(*lpqsRegInfo))
+    {
+        SetLastError(WSAEINVAL);
+        return SOCKET_ERROR;
+    }
+
+    RtlZeroMemory(&Context, sizeof(Context));
+    Context.Catalog = WsProcGetNsCatalog(Process);
+    Context.RegInfo = lpqsRegInfo;
+    Context.Operation = essOperation;
+    Context.ControlFlags = dwControlFlags;
+    Context.ErrorCode = WSASERVICE_NOT_FOUND;
+
+    if (lpqsRegInfo->lpNSProviderId)
+    {
+        if (WsNcGetCatalogFromProviderId(Context.Catalog,
+                                         lpqsRegInfo->lpNSProviderId,
+                                         &CatalogEntry) != ERROR_SUCCESS)
+        {
+            SetLastError(WSAEINVAL);
+            return SOCKET_ERROR;
+        }
+        WsSetServiceOnEntry(&Context, CatalogEntry);
+        WsNcEntryDereference(CatalogEntry);
+    }
+    else
+    {
+        WsNcEnumerateCatalogItems(Context.Catalog, WsSetServiceEnumerationProc, &Context);
+    }
+
+    if (Context.Succeeded)
+        return ERROR_SUCCESS;
+
+    SetLastError(Context.ErrorCode);
     return SOCKET_ERROR;
 }
 
@@ -719,11 +911,19 @@ NSProviderInfoFromContext(IN PNSCATALOG_ENTRY Entry,
     RtlMoveMemory(&infoW.NSProviderId,
         &Entry->ProviderId,
         sizeof(infoW.NSProviderId));
+
+    if (!Context->ProtocolBuffer)
+    {
+        Context->BufferUsed += size + size2;
+        Context->Count++;
+        return;
+    }
+
     if (size2)
     {
         /* Calculate ProviderName string pointer */
         infoW.lpszIdentifier = (LPWSTR)((ULONG_PTR)Context->ProtocolBuffer +
-            Context->BufferUsed + size);
+            Context->StringOffset);
     }
     else
     {
@@ -731,12 +931,12 @@ NSProviderInfoFromContext(IN PNSCATALOG_ENTRY Entry,
     }
 
     /* Check if we'll have space */
-    if ((Context->BufferUsed + size + size2) <=
-        (Context->BufferLength))
+    if ((Context->Count < Context->EntryCount) &&
+        ((Context->StringOffset + size2) <= (Context->BufferLength)))
     {
         /* Copy the data */
         RtlMoveMemory((PVOID)((ULONG_PTR)Context->ProtocolBuffer +
-            Context->BufferUsed),
+            Context->Count * size),
             &infoW,
             size);
         if (size2)
@@ -745,7 +945,7 @@ NSProviderInfoFromContext(IN PNSCATALOG_ENTRY Entry,
             if (Context->Unicode)
             {
                 RtlMoveMemory((PVOID)((ULONG_PTR)Context->ProtocolBuffer +
-                    Context->BufferUsed + size),
+                    Context->StringOffset),
                     Entry->ProviderName,
                     size2);
             }
@@ -757,7 +957,7 @@ NSProviderInfoFromContext(IN PNSCATALOG_ENTRY Entry,
                     Entry->ProviderName,
                     -1,
                     (LPSTR)((ULONG_PTR)Context->ProtocolBuffer +
-                        Context->BufferUsed + size),
+                        Context->StringOffset),
                     size2,
                     NULL,
                     NULL);
@@ -766,6 +966,7 @@ NSProviderInfoFromContext(IN PNSCATALOG_ENTRY Entry,
         }
 
         /* Increase the count */
+        Context->StringOffset += size2;
         Context->Count++;
     }
 }
@@ -777,13 +978,8 @@ NSProvidersEnumerationProc(PVOID EnumContext,
 {
     PNSPROVIDER_ENUM_CONTEXT Context = (PNSPROVIDER_ENUM_CONTEXT)EnumContext;
 
-    /* Calculate ProviderName string size */
-    INT size1 = Entry->ProviderName ? wcslen(Entry->ProviderName) + 1 : 0;
-    INT size2 = Context->Unicode ? size1 * sizeof(WCHAR) : size1 * sizeof(CHAR);
-
     /* Copy the information */
     NSProviderInfoFromContext(Entry, Context);
-    Context->BufferUsed += Context->Unicode ? (sizeof(WSANAMESPACE_INFOW)+size2) : (sizeof(WSANAMESPACE_INFOA)+size2);
 
     /* Continue enumeration */
     return TRUE;
@@ -816,7 +1012,7 @@ WSAEnumNameSpaceProvidersInternal(IN OUT LPDWORD lpdwBufferLength,
         return SOCKET_ERROR;
     }
 
-    Context.ProtocolBuffer = lpnspBuffer;
+    Context.ProtocolBuffer = NULL;
     Context.BufferLength = lpnspBuffer ? *lpdwBufferLength : 0;
     Context.BufferUsed = 0;
     Context.Count = 0;
@@ -824,6 +1020,18 @@ WSAEnumNameSpaceProvidersInternal(IN OUT LPDWORD lpdwBufferLength,
     Context.ErrorCode = ERROR_SUCCESS;
 
     WsNcEnumerateCatalogItems(Catalog, NSProvidersEnumerationProc, &Context);
+
+    if ((Context.ErrorCode == ERROR_SUCCESS) &&
+        (Context.BufferLength >= Context.BufferUsed) &&
+        (Context.Count != 0))
+    {
+        Context.ProtocolBuffer = lpnspBuffer;
+        Context.EntryCount = Context.Count;
+        Context.StringOffset = Context.Count * (Unicode ? sizeof(WSANAMESPACE_INFOW) : sizeof(WSANAMESPACE_INFOA));
+        Context.Count = 0;
+
+        WsNcEnumerateCatalogItems(Catalog, NSProvidersEnumerationProc, &Context);
+    }
 
     /* Get status */
     Status = Context.Count;

@@ -4,13 +4,16 @@ include_directories(include/internal/mingw-w64)
 list(APPEND MSVCRTEX_SOURCE
     ${CRT_STARTUP_SOURCE}
     math/sincos.c
+    math/exp2.c
+    math/exp2f.c
     misc/fltused.c
     misc/isblank.c
     misc/iswblank.c
     misc/ofmt_stub.c
     stdio/acrt_iob_func.c
-    recalloc.c
-    wcscpy_s.c)
+    stdio/ms_fwprintf.c
+    stdlib/_recalloc.c
+    startup/tlsatexit.c)
 
 if(DLL_EXPORT_VERSION LESS 0x600)
     list(APPEND MSVCRTEX_SOURCE
@@ -27,12 +30,27 @@ if(CMAKE_C_COMPILER_ID STREQUAL "Clang")
     list(APPEND MSVCRTEX_SOURCE
         math/round.c
         math/roundf.c
-        math/exp2.c
-        math/exp2f.c
+        math/trunc.c
+        math/truncf.c
         )
+    if(ARCH STREQUAL "amd64")
+        list(REMOVE_ITEM MSVCRTEX_SOURCE math/round.c math/roundf.c)
+        list(APPEND MSVCRTEX_SOURCE math/amd64/round.c math/amd64/roundf.c)
+    endif()
 endif()
 
 if(ARCH STREQUAL "i386")
+    # The x86 CRT does not export modff; libc++ still needs an out-of-line copy.
+    list(APPEND MSVCRTEX_SOURCE math/powf.c math/modff.c
+        math/acosf.c math/asinf.c math/atan2f.c math/atanf.c math/cosf.c math/coshf.c math/expf.c
+        math/fabsf.c math/fmodf.c math/log10f.c math/logf.c math/sinf.c math/sinhf.c math/tanf.c
+        math/tanhf.c)
+    if(MSVC)
+        set_source_files_properties(math/powf.c math/modff.c
+            math/acosf.c math/asinf.c math/atan2f.c math/atanf.c math/cosf.c math/coshf.c math/expf.c
+            math/fabsf.c math/fmodf.c math/log10f.c math/logf.c math/sinf.c math/sinhf.c math/tanf.c
+            math/tanhf.c PROPERTIES COMPILE_OPTIONS /wd4163)
+    endif()
     # Clang wants __aulldiv for its optimizations
     list(APPEND MSVCRTEX_ASM_SOURCE
         except/i386/chkstk_asm.s
@@ -40,6 +58,18 @@ if(ARCH STREQUAL "i386")
         math/i386/alldiv_asm.s
         math/i386/aulldiv_asm.s
         )
+    if(MSVC)
+        list(APPEND MSVCRTEX_ASM_SOURCE
+            math/i386/alldvrm_asm.s
+            math/i386/allmul_asm.s
+            math/i386/allrem_asm.s
+            math/i386/allshl_asm.s
+            math/i386/allshr_asm.s
+            math/i386/aulldvrm_asm.s
+            math/i386/aullrem_asm.s
+            math/i386/aullshr_asm.s
+            math/i386/ftoul2_legacy_asm.s)
+    endif()
     if (CMAKE_C_COMPILER_ID STREQUAL "Clang" AND NOT MSVC)
         list(APPEND MSVCRTEX_ASM_SOURCE
             math/i386/ceilf.S
@@ -51,7 +81,7 @@ if(ARCH STREQUAL "i386")
         list(APPEND MSVCRTEX_ASM_SOURCE
             except/i386/__CxxFrameHandler3.s
             math/i386/ftol2_asm.s
-            math/i386/ftoul2_legacy_asm.s)
+            math/i386/ftol2_sse_asm.s)
         list(APPEND MSVCRTEX_SOURCE
             except/i386/CxxHandleV8Frame.c)
     endif()
@@ -98,8 +128,10 @@ target_compile_definitions(msvcrtex PRIVATE _DLL _MSVCRTEX_)
 # msvcrtex depends on msvcrt and kernel32
 target_link_libraries(msvcrtex INTERFACE libmsvcrt libkernel32)
 
-if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
     target_compile_options(msvcrtex PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wno-main>)
+endif()
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR CMAKE_C_COMPILER_ID STREQUAL "Clang")
     if(LTCG)
         target_compile_options(msvcrtex PRIVATE -fno-lto)
     endif()
@@ -109,8 +141,6 @@ set_source_files_properties(startup/crtdll.c PROPERTIES COMPILE_DEFINITIONS CRTD
 set_source_files_properties(startup/crtexe.c
                             startup/wcrtexe.c PROPERTIES COMPILE_DEFINITIONS _M_CEE_PURE)
 
-if(NOT MSVC)
-    target_link_libraries(msvcrtex INTERFACE oldnames)
-endif()
+target_link_libraries(msvcrtex INTERFACE oldnames)
 
 add_dependencies(msvcrtex psdk asm)

@@ -19,10 +19,55 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include "config.h"
 #include "d3d9_private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d9);
+
+#ifdef __REACTOS__
+static const GUID reactos_dxva_surface_fence_guid = REACTOS_DXVA_SURFACE_FENCE_GUID_INIT;
+
+static HRESULT d3d9_surface_get_dxva_color_space(
+        IReactOSDxvaSurfaceFence *binding,
+        enum wined3d_yuv_color_space *color_space)
+{
+    DWORD flags;
+    HRESULT hr;
+
+    if (!color_space)
+        return D3DERR_INVALIDCALL;
+    if (FAILED(hr = IReactOSDxvaSurfaceFence_GetPresentationFlags(binding, &flags)))
+        return hr;
+    if (flags & ~REACTOS_DXVA_SURFACE_PRESENT_ALLOWED)
+        return D3DERR_INVALIDCALL;
+
+    if (flags & REACTOS_DXVA_SURFACE_PRESENT_BT709)
+        *color_space = flags & REACTOS_DXVA_SURFACE_PRESENT_LIMITED_RGB
+                ? WINED3D_YUV_BT709_LIMITED : WINED3D_YUV_BT709_FULL;
+    else
+        *color_space = flags & REACTOS_DXVA_SURFACE_PRESENT_LIMITED_RGB
+                ? WINED3D_YUV_BT601_LIMITED : WINED3D_YUV_BT601_FULL;
+    return D3D_OK;
+}
+
+static HRESULT d3d9_surface_detach_dxva_memory(struct d3d9_surface *surface)
+{
+    HRESULT hr;
+
+    if (!surface->dxva_shared_memory_bound)
+        return D3D_OK;
+
+    wined3d_mutex_lock();
+    hr = wined3d_texture_set_planar_memory(surface->wined3d_texture,
+            surface->sub_resource_idx, NULL, TRUE);
+    wined3d_mutex_unlock();
+    if (SUCCEEDED(hr))
+    {
+        surface->dxva_shared_memory_bound = FALSE;
+        surface->dxva_shared_generation = 0;
+    }
+    return hr;
+}
+#endif
 
 static inline struct d3d9_surface *impl_from_IDirect3DSurface9(IDirect3DSurface9 *iface)
 {
@@ -62,17 +107,17 @@ static ULONG WINAPI d3d9_surface_AddRef(IDirect3DSurface9 *iface)
     }
 
     refcount = InterlockedIncrement(&surface->resource.refcount);
-    TRACE("%p increasing refcount to %u.\n", iface, refcount);
+    TRACE("%p increasing refcount to %lu.\n", iface, refcount);
 
     if (refcount == 1)
     {
         if (surface->parent_device)
             IDirect3DDevice9Ex_AddRef(surface->parent_device);
-        wined3d_mutex_lock();
         if (surface->wined3d_rtv)
             wined3d_rendertarget_view_incref(surface->wined3d_rtv);
         wined3d_texture_incref(surface->wined3d_texture);
-        wined3d_mutex_unlock();
+        if (surface->swapchain)
+            wined3d_swapchain_incref(surface->swapchain);
     }
 
     return refcount;
@@ -98,17 +143,19 @@ static ULONG WINAPI d3d9_surface_Release(IDirect3DSurface9 *iface)
     }
 
     refcount = InterlockedDecrement(&surface->resource.refcount);
-    TRACE("%p decreasing refcount to %u.\n", iface, refcount);
+    TRACE("%p decreasing refcount to %lu.\n", iface, refcount);
 
     if (!refcount)
     {
         IDirect3DDevice9Ex *parent_device = surface->parent_device;
 
-        wined3d_mutex_lock();
         if (surface->wined3d_rtv)
             wined3d_rendertarget_view_decref(surface->wined3d_rtv);
+        if (surface->swapchain)
+            wined3d_swapchain_decref(surface->swapchain);
+        /* Releasing the texture may free the d3d9 object, so do not access it
+         * after releasing the texture. */
         wined3d_texture_decref(surface->wined3d_texture);
-        wined3d_mutex_unlock();
 
         /* Release the device last, as it may cause the device to be destroyed. */
         if (parent_device)
@@ -139,8 +186,52 @@ static HRESULT WINAPI d3d9_surface_SetPrivateData(IDirect3DSurface9 *iface, REFG
         const void *data, DWORD data_size, DWORD flags)
 {
     struct d3d9_surface *surface = impl_from_IDirect3DSurface9(iface);
-    TRACE("iface %p, guid %s, data %p, data_size %u, flags %#x.\n",
+#ifdef __REACTOS__
+    IReactOSDxvaSurfaceFence *binding;
+    enum wined3d_yuv_color_space color_space;
+    HRESULT hr;
+#endif
+    TRACE("iface %p, guid %s, data %p, data_size %lu, flags %#lx.\n",
             iface, debugstr_guid(guid), data, data_size, flags);
+
+#ifdef __REACTOS__
+    if (IsEqualGUID(guid, &reactos_dxva_surface_fence_guid))
+    {
+        if (!(flags & D3DSPD_IUNKNOWN) || data_size != sizeof(binding) ||
+                !(binding = (IReactOSDxvaSurfaceFence *)data))
+            return D3DERR_INVALIDCALL;
+        if (FAILED(hr = d3d9_surface_get_dxva_color_space(binding, &color_space)))
+            return hr;
+
+        wined3d_mutex_lock();
+        if (wined3d_private_store_get_private_data(
+                &surface->resource.private_store,
+                &reactos_dxva_surface_fence_guid))
+        {
+            hr = D3DERR_INVALIDCALL;
+        }
+        else if (SUCCEEDED(hr = wined3d_private_store_set_private_data(
+                &surface->resource.private_store, guid, data, data_size, flags)))
+        {
+            hr = wined3d_texture_set_yuv_color_space(
+                    surface->wined3d_texture, color_space);
+            if (FAILED(hr))
+            {
+                struct wined3d_private_data *entry;
+
+                entry = wined3d_private_store_get_private_data(
+                        &surface->resource.private_store, guid);
+                if (entry)
+                {
+                    wined3d_private_store_free_private_data(
+                            &surface->resource.private_store, entry);
+                }
+            }
+        }
+        wined3d_mutex_unlock();
+        return hr;
+    }
+#endif
 
     return d3d9_resource_set_private_data(&surface->resource, guid, data, data_size, flags);
 }
@@ -158,14 +249,22 @@ static HRESULT WINAPI d3d9_surface_GetPrivateData(IDirect3DSurface9 *iface, REFG
 static HRESULT WINAPI d3d9_surface_FreePrivateData(IDirect3DSurface9 *iface, REFGUID guid)
 {
     struct d3d9_surface *surface = impl_from_IDirect3DSurface9(iface);
+#ifdef __REACTOS__
+    HRESULT hr;
+#endif
     TRACE("iface %p, guid %s.\n", iface, debugstr_guid(guid));
 
+#ifdef __REACTOS__
+    if (IsEqualGUID(guid, &reactos_dxva_surface_fence_guid) &&
+            FAILED(hr = d3d9_surface_detach_dxva_memory(surface)))
+        return hr;
+#endif
     return d3d9_resource_free_private_data(&surface->resource, guid);
 }
 
 static DWORD WINAPI d3d9_surface_SetPriority(IDirect3DSurface9 *iface, DWORD priority)
 {
-    TRACE("iface %p, priority %u. Ignored on surfaces.\n", iface, priority);
+    TRACE("iface %p, priority %lu. Ignored on surfaces.\n", iface, priority);
     return 0;
 }
 
@@ -181,6 +280,10 @@ static void WINAPI d3d9_surface_PreLoad(IDirect3DSurface9 *iface)
 
     TRACE("iface %p.\n", iface);
 
+#ifdef __REACTOS__
+    if (FAILED(d3d9_surface_prepare_dxva_composition(surface, 0)))
+        return;
+#endif
     wined3d_mutex_lock();
     wined3d_resource_preload(wined3d_texture_get_resource(surface->wined3d_texture));
     wined3d_mutex_unlock();
@@ -223,15 +326,136 @@ static HRESULT WINAPI d3d9_surface_GetDesc(IDirect3DSurface9 *iface, D3DSURFACE_
 
     desc->Format = d3dformat_from_wined3dformat(wined3d_desc.format);
     desc->Type = D3DRTYPE_SURFACE;
-    desc->Usage = d3dusage_from_wined3dusage(wined3d_desc.usage);
+    desc->Usage = d3dusage_from_wined3dusage(wined3d_desc.usage, wined3d_desc.bind_flags);
     desc->Pool = d3dpool_from_wined3daccess(wined3d_desc.access, wined3d_desc.usage);
-    desc->MultiSampleType = wined3d_desc.multisample_type;
+    desc->MultiSampleType = d3dmultisample_type_from_wined3d(wined3d_desc.multisample_type);
     desc->MultiSampleQuality = wined3d_desc.multisample_quality;
     desc->Width = wined3d_desc.width;
     desc->Height = wined3d_desc.height;
 
     return D3D_OK;
 }
+
+#ifdef __REACTOS__
+HRESULT d3d9_surface_get_dxva_binding(struct d3d9_surface *surface,
+        IReactOSDxvaSurfaceFence **binding)
+{
+    DWORD size = sizeof(*binding);
+    HRESULT hr;
+
+    if (!surface || !binding)
+        return D3DERR_INVALIDCALL;
+    *binding = NULL;
+
+    hr = d3d9_resource_get_private_data(
+             &surface->resource,
+             &reactos_dxva_surface_fence_guid,
+             binding,
+             &size);
+    if (FAILED(hr) || size != sizeof(*binding) || !*binding)
+        return FAILED(hr) ? hr : D3DERR_INVALIDCALL;
+    return D3D_OK;
+}
+
+HRESULT d3d9_surface_prepare_dxva_fallback(struct d3d9_surface *surface,
+        DWORD flags)
+{
+    IReactOSDxvaSurfaceFence *binding;
+    HRESULT hr;
+
+    hr = d3d9_surface_get_dxva_binding(surface, &binding);
+    if (hr == D3DERR_NOTFOUND)
+        return D3D_OK;
+    if (FAILED(hr))
+        return hr;
+
+    if (FAILED(hr = d3d9_surface_detach_dxva_memory(surface)))
+    {
+        IReactOSDxvaSurfaceFence_Release(binding);
+        return hr;
+    }
+
+    hr = IReactOSDxvaSurfaceFence_PrepareFallback(binding, flags);
+    IReactOSDxvaSurfaceFence_Release(binding);
+    return hr;
+}
+
+HRESULT d3d9_surface_prepare_dxva_composition(struct d3d9_surface *surface,
+        DWORD flags)
+{
+    IReactOSDxvaSurfaceFence *binding;
+    REACTOS_DXVA_SURFACE_MEMORY memory;
+    struct wined3d_planar_memory_desc desc;
+    HRESULT hr;
+
+    hr = d3d9_surface_get_dxva_binding(surface, &binding);
+    if (hr == D3DERR_NOTFOUND)
+        return D3D_OK;
+    if (FAILED(hr))
+        return hr;
+
+    memset(&memory, 0, sizeof(memory));
+    hr = IReactOSDxvaSurfaceFence_GetSharedMemory(binding, flags, &memory);
+    if (hr == E_NOTIMPL)
+    {
+        hr = IReactOSDxvaSurfaceFence_PrepareFallback(binding, flags);
+        IReactOSDxvaSurfaceFence_Release(binding);
+        return hr;
+    }
+    if (FAILED(hr))
+    {
+        IReactOSDxvaSurfaceFence_Release(binding);
+        return hr;
+    }
+
+    if (!surface->dxva_shared_memory_bound ||
+            surface->dxva_shared_generation != memory.Generation)
+    {
+        memset(&desc, 0, sizeof(desc));
+        desc.data = memory.Data;
+        desc.size = memory.Size;
+        desc.width = memory.Width;
+        desc.height = memory.Height;
+        desc.row_pitch = memory.Pitch;
+        desc.storage_height = memory.StorageHeight;
+        desc.plane_count = memory.PlaneCount;
+        memcpy(desc.plane_offsets, memory.PlaneOffsets,
+                sizeof(desc.plane_offsets));
+        memcpy(desc.plane_pitches, memory.PlanePitches,
+                sizeof(desc.plane_pitches));
+
+        wined3d_mutex_lock();
+        hr = wined3d_texture_set_planar_memory(surface->wined3d_texture,
+                surface->sub_resource_idx, &desc,
+                !(memory.Flags & REACTOS_DXVA_SURFACE_MEMORY_DEFERRED_UPLOAD));
+        wined3d_mutex_unlock();
+        if (SUCCEEDED(hr))
+        {
+            surface->dxva_shared_memory_bound = TRUE;
+            surface->dxva_shared_generation = memory.Generation;
+        }
+    }
+    IReactOSDxvaSurfaceFence_Release(binding);
+    return hr;
+}
+
+HRESULT d3d9_surface_mark_dxva_consumed(struct d3d9_surface *surface,
+        DWORD flags)
+{
+    IReactOSDxvaSurfaceFence *binding;
+    HRESULT hr;
+
+    hr = d3d9_surface_get_dxva_binding(surface, &binding);
+    if (hr == D3DERR_NOTFOUND)
+        return D3D_OK;
+    if (FAILED(hr))
+        return hr;
+
+    hr = IReactOSDxvaSurfaceFence_MarkConsumed(binding, flags);
+    IReactOSDxvaSurfaceFence_Release(binding);
+    return hr;
+}
+#endif
 
 static HRESULT WINAPI d3d9_surface_LockRect(IDirect3DSurface9 *iface,
         D3DLOCKED_RECT *locked_rect, const RECT *rect, DWORD flags)
@@ -241,16 +465,24 @@ static HRESULT WINAPI d3d9_surface_LockRect(IDirect3DSurface9 *iface,
     struct wined3d_map_desc map_desc;
     HRESULT hr;
 
-    TRACE("iface %p, locked_rect %p, rect %s, flags %#x.\n",
+    TRACE("iface %p, locked_rect %p, rect %s, flags %#lx.\n",
             iface, locked_rect, wine_dbgstr_rect(rect), flags);
+
+#ifdef __REACTOS__
+    hr = d3d9_surface_prepare_dxva_fallback(
+             surface,
+             flags & D3DLOCK_DONOTWAIT
+                 ? REACTOS_DXVA_SURFACE_FENCE_DONOTWAIT
+                 : 0);
+    if (FAILED(hr))
+        return hr;
+#endif
 
     if (rect)
         wined3d_box_set(&box, rect->left, rect->top, rect->right, rect->bottom, 0, 1);
 
-    wined3d_mutex_lock();
     hr = wined3d_resource_map(wined3d_texture_get_resource(surface->wined3d_texture), surface->sub_resource_idx,
-            &map_desc, rect ? &box : NULL, wined3dmapflags_from_d3dmapflags(flags));
-    wined3d_mutex_unlock();
+            &map_desc, rect ? &box : NULL, wined3dmapflags_from_d3dmapflags(flags, 0));
 
     if (SUCCEEDED(hr))
     {
@@ -258,6 +490,8 @@ static HRESULT WINAPI d3d9_surface_LockRect(IDirect3DSurface9 *iface,
         locked_rect->pBits = map_desc.data;
     }
 
+    if (hr == E_INVALIDARG)
+        return D3DERR_INVALIDCALL;
     return hr;
 }
 
@@ -292,6 +526,11 @@ static HRESULT WINAPI d3d9_surface_GetDC(IDirect3DSurface9 *iface, HDC *dc)
     HRESULT hr;
 
     TRACE("iface %p, dc %p.\n", iface, dc);
+
+#ifdef __REACTOS__
+    if (FAILED(hr = d3d9_surface_prepare_dxva_fallback(surface, 0)))
+        return hr;
+#endif
 
     wined3d_mutex_lock();
     hr = wined3d_texture_get_dc(surface->wined3d_texture, surface->sub_resource_idx, dc);
@@ -344,7 +583,7 @@ static void STDMETHODCALLTYPE surface_wined3d_object_destroyed(void *parent)
 {
     struct d3d9_surface *surface = parent;
     d3d9_resource_cleanup(&surface->resource);
-    heap_free(surface);
+    free(surface);
 }
 
 static const struct wined3d_parent_ops d3d9_surface_wined3d_parent_ops =
@@ -352,18 +591,23 @@ static const struct wined3d_parent_ops d3d9_surface_wined3d_parent_ops =
     surface_wined3d_object_destroyed,
 };
 
-void surface_init(struct d3d9_surface *surface, struct wined3d_texture *wined3d_texture,
-        unsigned int sub_resource_idx, const struct wined3d_parent_ops **parent_ops)
+struct d3d9_surface *d3d9_surface_create(struct wined3d_texture *wined3d_texture,
+        unsigned int sub_resource_idx, IUnknown *container)
 {
     IDirect3DBaseTexture9 *texture;
+    struct d3d9_surface *surface;
+
+    if (!(surface = calloc(1, sizeof(*surface))))
+        return NULL;
 
     surface->IDirect3DSurface9_iface.lpVtbl = &d3d9_surface_vtbl;
     d3d9_resource_init(&surface->resource);
     surface->resource.refcount = 0;
     list_init(&surface->rtv_entry);
-    surface->container = wined3d_texture_get_parent(wined3d_texture);
+    surface->container = container;
     surface->wined3d_texture = wined3d_texture;
     surface->sub_resource_idx = sub_resource_idx;
+    surface->swapchain = wined3d_texture_get_swapchain(wined3d_texture);
 
     if (surface->container && SUCCEEDED(IUnknown_QueryInterface(surface->container,
             &IID_IDirect3DBaseTexture9, (void **)&texture)))
@@ -372,7 +616,11 @@ void surface_init(struct d3d9_surface *surface, struct wined3d_texture *wined3d_
         IDirect3DBaseTexture9_Release(texture);
     }
 
-    *parent_ops = &d3d9_surface_wined3d_parent_ops;
+    wined3d_texture_set_sub_resource_parent(wined3d_texture, sub_resource_idx,
+            surface, &d3d9_surface_wined3d_parent_ops);
+
+    TRACE("Created surface %p.\n", surface);
+    return surface;
 }
 
 static void STDMETHODCALLTYPE view_wined3d_object_destroyed(void *parent)
@@ -400,7 +648,7 @@ static const struct wined3d_parent_ops d3d9_view_wined3d_parent_ops =
 struct d3d9_device *d3d9_surface_get_device(const struct d3d9_surface *surface)
 {
     IDirect3DDevice9Ex *device;
-    device = surface->texture ? surface->texture->parent_device : surface->parent_device;
+    device = surface->texture ? &surface->texture->parent_device->IDirect3DDevice9Ex_iface : surface->parent_device;
     return impl_from_IDirect3DDevice9Ex(device);
 }
 
@@ -419,7 +667,7 @@ struct wined3d_rendertarget_view *d3d9_surface_acquire_rendertarget_view(struct 
     if (FAILED(hr = wined3d_rendertarget_view_create_from_sub_resource(surface->wined3d_texture,
             surface->sub_resource_idx, surface, &d3d9_view_wined3d_parent_ops, &surface->wined3d_rtv)))
     {
-        ERR("Failed to create rendertarget view, hr %#x.\n", hr);
+        ERR("Failed to create rendertarget view, hr %#lx.\n", hr);
         d3d9_surface_Release(&surface->IDirect3DSurface9_iface);
         return NULL;
     }
