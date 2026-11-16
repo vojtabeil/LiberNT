@@ -3094,6 +3094,12 @@ static LRESULT EDIT_WM_Char(EDITSTATE *es, WCHAR c)
 			}
 		}
 		break;
+#ifdef __REACTOS__
+	case 0x01: /* ^A */
+		/* The version 6 control selects everything, single-line or not, like its Select All item */
+		SendMessageW(es->hwndSelf, EM_SETSEL, 0, -1);
+		break;
+#endif
 	case 0x03: /* ^C */
 		if (!(es->style & ES_PASSWORD))
 		    SendMessageW(es->hwndSelf, WM_COPY, 0, 0);
