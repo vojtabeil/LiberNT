@@ -758,6 +758,12 @@ KeUpdateSystemTime(
     ULONGLONG InterruptTime;
     BOOLEAN ClockOwner;
 
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* As on Windows, a processor's interrupt count includes its clock interrupts;
+     * the x86 HALs bring the clock here without the device interrupt dispatcher */
+    Prcb->InterruptCount++;
+#endif
+
     /*
      * Exactly one processor moves the clock. The first one to tick claims the
      * job, rather than it being given to processor zero: a processor that is
@@ -1007,6 +1013,11 @@ KeUpdateRunTime(
     _In_opt_ PKTRAP_FRAME TrapFrame,
     _In_ KIRQL Irql)
 {
+#if defined(_M_IX86) || defined(_M_AMD64)
+    /* The clock interrupt of a processor that does not move the clock (KeUpdateSystemTime) */
+    KeGetCurrentPrcb()->InterruptCount++;
+#endif
+
     KiUpdateRunTime(TrapFrame, Irql, 1);
 }
 
