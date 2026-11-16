@@ -4865,6 +4865,16 @@ static RETURN_CODE handle_pipe_command(CMD_NODE *node)
 
     if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0))
         return ERROR_INVALID_FUNCTION;
+#ifdef __REACTOS__
+    /*
+     * Only the right side may hold the read end, and nobody but the two sides
+     * may keep the pipe open: when the reader ends early (type big | ver) the
+     * writer must fail with a broken pipe, as on Windows, instead of waiting
+     * forever for room in a pipe that this shell or the writer itself still
+     * could read.
+     */
+    SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
+#endif
     saved_output = GetStdHandle(STD_OUTPUT_HANDLE);
     SetStdHandle(STD_OUTPUT_HANDLE, write_pipe);
     return_code = spawn_pipe_sub_command(node->left, &lhs_child);
@@ -4873,8 +4883,19 @@ static RETURN_CODE handle_pipe_command(CMD_NODE *node)
     if (return_code == RETURN_CODE_CANT_LAUNCH && context) ExitProcess(255);
     if (return_code == NO_ERROR)
     {
+#ifdef __REACTOS__
+        HANDLE saved_input = GetStdHandle(STD_INPUT_HANDLE);
+
+        SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+#endif
         SetStdHandle(STD_INPUT_HANDLE, read_pipe);
         return_code = spawn_pipe_sub_command(node->right, &rhs_child);
+#ifdef __REACTOS__
+        /* The shell reads its own input again, and the right side now owns the read end */
+        SetStdHandle(STD_INPUT_HANDLE, saved_input);
+        CloseHandle(read_pipe);
+        read_pipe = NULL;
+#endif
         if (return_code == NO_ERROR)
         {
             HANDLE h[2] = {lhs_child, rhs_child};
@@ -4897,7 +4918,11 @@ static RETURN_CODE handle_pipe_command(CMD_NODE *node)
         }
         CloseHandle(lhs_child);
     }
+#ifdef __REACTOS__
+    if (read_pipe) CloseHandle(read_pipe);
+#else
     CloseHandle(read_pipe);
+#endif
 
     return errorlevel = return_code;
 }
