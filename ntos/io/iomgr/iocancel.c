@@ -210,6 +210,9 @@ IoCancelIrp(
     return TRUE;
 }
 
+/* Windows waits five minutes, in steps of 100 ms, for the requests of an exiting thread to cancel */
+#define IOP_CANCEL_TIMEOUT_STEPS 3000
+
 VOID
 NTAPI
 IoCancelThreadIo(
@@ -222,6 +225,7 @@ IoCancelThreadIo(
     KIRQL OldIrql;
 
     PAGED_CODE();
+    ASSERT(Thread == PsGetCurrentThread());
 
     IopCancelListIrps(&Thread->IrpList, &Thread->IrpListLock, &Filter);
 
@@ -232,18 +236,31 @@ IoCancelThreadIo(
         KeDelayExecutionThread(KernelMode, FALSE, &Interval);
 
         Attempts++;
-        if (Attempts < 10) continue;
 
-        KeAcquireSpinLock(&Thread->IrpListLock, &OldIrql);
-        for (Entry = Thread->IrpList.Flink; Entry != &Thread->IrpList; Entry = Entry->Flink)
-            DPRINT1("I/O: request %p would not cancel on thread exit\n", CONTAINING_RECORD(Entry, IRP, ThreadListEntry));
-        KeReleaseSpinLock(&Thread->IrpListLock, OldIrql);
+        /* A driver that keeps a request without a cancel routine never hears of the cancel, so the
+         * thread stops waiting for it; the request is finished without the thread when it completes */
+        if (Attempts >= IOP_CANCEL_TIMEOUT_STEPS)
+        {
+            IopDisassociateThreadIrp();
+            break;
+        }
+
+        if (Attempts % 10 != 0) continue;
+
+        /* Say once which requests hold the thread up, then keep offering them to a cancel routine */
+        if (Attempts == 10)
+        {
+            KeAcquireSpinLock(&Thread->IrpListLock, &OldIrql);
+            for (Entry = Thread->IrpList.Flink; Entry != &Thread->IrpList; Entry = Entry->Flink)
+                DPRINT1("I/O: request %p would not cancel on thread exit\n", CONTAINING_RECORD(Entry, IRP, ThreadListEntry));
+            KeReleaseSpinLock(&Thread->IrpListLock, OldIrql);
+        }
 
         Filter.Retry = TRUE;
         IopCancelListIrps(&Thread->IrpList, &Thread->IrpListLock, &Filter);
-
-        Attempts = 0;
     }
+
+    ASSERT(!IopThreadHasIrps(Thread));
 }
 
 VOID
