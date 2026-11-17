@@ -105,6 +105,11 @@ KiIdleLoop(VOID)
             HalClearSoftwareInterrupt(DISPATCH_LEVEL);
             KiRetireDpcList(Prcb);
         }
+        else
+        {
+            /* A request made only to have this processor look for a thread leaves nothing to retire: this pass answers it */
+            KiClearDpcInterruptRequested(Prcb);
+        }
 
         _disable();
         KiAcquirePrcbLock(Prcb);

@@ -402,6 +402,11 @@ KiDispatchInterrupt(VOID)
         KiRetireDpcListInDpcStack(Prcb, Prcb->DpcStack);
         Pcr->NtTib.ExceptionList = ExceptionList;
     }
+    else
+    {
+        /* The interrupt was asked for a thread switch alone; retiring the list is what otherwise marks the request served */
+        KiClearDpcInterruptRequested(Prcb);
+    }
 
     _enable();
     KiFinishDispatchInterrupt(Prcb);
