@@ -152,9 +152,12 @@ static void UserLogin(int client_socket)
 
   client->socket = client_socket;
   threadHandle = CreateThread(NULL, 0, UserLoginThread, client, 0, NULL);
-  if (threadHandle == NULL)
+  if (threadHandle == NULL) {
+    /* Nobody will serve this connection: drop it rather than leave the peer hanging */
+    telnetd_printf("Cannot start login thread, error %lu\n", GetLastError());
+    closesocket(client_socket);
     free(client);
-  else
+  } else
     CloseHandle(threadHandle);
 }
 
@@ -437,6 +440,9 @@ static void RunShell(client_t *client)
 
    client->hProcess = piProcInfo.hProcess;
    client->dwProcessId = piProcInfo.dwProcessId;
+
+   /* Only the process handle is used; the thread handle would keep the shell around after it exits */
+   CloseHandle(piProcInfo.hThread);
 
    telnetd_printf("New child created (groupid=%lu)\n", client->dwProcessId);
 
