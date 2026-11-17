@@ -146,6 +146,20 @@ session is open to whoever may connect to the VM on the host. Without it
 the enhanced session is refused. The session mirrors the console at its
 current resolution.
 
+One session drives the console at a time, and a new connection replaces it,
+as on a Windows console. The replaced client is told that another connection
+took over, so it does not reconnect on its own. The new session starts once
+the old one has released its keys. Virtual Machine Connection opens the
+enhanced session with a negotiation that fails on purpose and reconnects at
+once, so that reconnect must not be refused while the first connection is
+still closing.
+
+While another desktop has the input, such as the Winlogon desktop after
+Ctrl+Alt+Del or a locked console, input cannot be injected. The session stays
+connected and shows the screen, but drops input until the user's desktop is
+back (close that screen from the basic session). It then releases any keys
+whose release was lost.
+
 ## Client and file transfer
 
 Connect with a FreeRDP 3 client: `/sec:tls`, the configured user name and
