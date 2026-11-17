@@ -2354,6 +2354,68 @@ Platform:
     return STATUS_SUCCESS;
 }
 
+/*
+ * While a base address register holds all ones the function does not decode
+ * its range. A display adapter's range is the frame buffer the boot video
+ * driver draws to from other processors, and a hypervisor answers a write to
+ * an address nothing decodes with a fault instead of dropping it. Its
+ * registers are therefore sized with every other processor held still.
+ */
+typedef struct _PCI_BAR_PROBE
+{
+    PPDO_DEVICE_EXTENSION DeviceExtension;
+    ULONG Offset;
+    ULONG OriginalValue;
+    ULONG NewValue;
+    ULONG Initiator;
+    BOOLEAN Success;
+    volatile LONG Done;
+} PCI_BAR_PROBE, *PPCI_BAR_PROBE;
+
+static
+BOOLEAN
+PdoProbePciBar(
+    _Inout_ PPCI_BAR_PROBE Probe)
+{
+    ULONG AllOnes = MAXULONG;
+
+    /* Write all ones to determine which bits are held to zero */
+    if (PciPdoSetBusDataByOffset(Probe->DeviceExtension, &AllOnes, Probe->Offset, sizeof(ULONG)) != sizeof(ULONG))
+        return FALSE;
+
+    /* Get the range length */
+    if (PciPdoGetBusDataByOffset(Probe->DeviceExtension, &Probe->NewValue, Probe->Offset, sizeof(ULONG)) != sizeof(ULONG))
+        return FALSE;
+
+    /* Restore original value */
+    if (PciPdoSetBusDataByOffset(Probe->DeviceExtension, &Probe->OriginalValue, Probe->Offset, sizeof(ULONG)) != sizeof(ULONG))
+        return FALSE;
+
+    return TRUE;
+}
+
+static
+ULONG_PTR
+NTAPI
+PdoProbePciBarStalled(
+    _In_ ULONG_PTR Argument)
+{
+    PPCI_BAR_PROBE Probe = (PPCI_BAR_PROBE)Argument;
+
+    if (KeGetCurrentProcessorNumber() == Probe->Initiator)
+    {
+        Probe->Success = PdoProbePciBar(Probe);
+        InterlockedExchange(&Probe->Done, 1);
+    }
+    else
+    {
+        while (InterlockedCompareExchange(&Probe->Done, 0, 0) == 0)
+            YieldProcessor();
+    }
+
+    return 0;
+}
+
 static BOOLEAN
 PdoReadPciBar(PPDO_DEVICE_EXTENSION DeviceExtension,
               ULONG Offset,
@@ -2363,7 +2425,7 @@ PdoReadPciBar(PPDO_DEVICE_EXTENSION DeviceExtension,
     PPCI_DEVICE PciDevice = DeviceExtension->PciDevice;
     ULONG Index = (Offset - FIELD_OFFSET(PCI_COMMON_CONFIG, u.type0.BaseAddresses)) / sizeof(ULONG);
     ULONG Size;
-    ULONG AllOnes;
+    PCI_BAR_PROBE Probe;
     USHORT Segment = PciPdoGetSegment(DeviceExtension);
 
     ASSERT(Offset >= FIELD_OFFSET(PCI_COMMON_CONFIG, u.type0.BaseAddresses));
@@ -2388,39 +2450,36 @@ PdoReadPciBar(PPDO_DEVICE_EXTENSION DeviceExtension,
         return TRUE;
     }
 
-    /* Write all ones to determine which bits are held to zero */
-    AllOnes = MAXULONG;
-    Size = PciPdoSetBusDataByOffset(DeviceExtension,
-                                    &AllOnes,
-                                    Offset,
-                                    sizeof(ULONG));
-    if (Size != sizeof(ULONG))
+    Probe.DeviceExtension = DeviceExtension;
+    Probe.Offset = Offset;
+    Probe.OriginalValue = *OriginalValue;
+    Probe.NewValue = 0;
+    Probe.Success = FALSE;
+    Probe.Done = 0;
+
+    if ((PciDevice->PciConfig.BaseClass == PCI_CLASS_DISPLAY_CTLR) ||
+        (PciDevice->PciConfig.BaseClass == PCI_CLASS_PRE_20 && PciDevice->PciConfig.SubClass == PCI_SUBCLASS_PRE_20_VGA))
     {
-        DPRINT1("Wrong size %lu (seg %u)\n", Size, Segment);
+        KIRQL OldIrql;
+
+        /* The initiator must stay on its processor from here to the call */
+        KeRaiseIrql(DISPATCH_LEVEL, &OldIrql);
+        Probe.Initiator = KeGetCurrentProcessorNumber();
+        KeIpiGenericCall(PdoProbePciBarStalled, (ULONG_PTR)&Probe);
+        KeLowerIrql(OldIrql);
+    }
+    else
+    {
+        Probe.Success = PdoProbePciBar(&Probe);
+    }
+
+    if (!Probe.Success)
+    {
+        DPRINT1("Sizing the register at 0x%lx failed (seg %u)\n", Offset, Segment);
         return FALSE;
     }
 
-    /* Get the range length */
-    Size = PciPdoGetBusDataByOffset(DeviceExtension,
-                                    NewValue,
-                                    Offset,
-                                    sizeof(ULONG));
-    if (Size != sizeof(ULONG))
-    {
-        DPRINT1("Wrong size %lu (seg %u)\n", Size, Segment);
-        return FALSE;
-    }
-
-    /* Restore original value */
-    Size = PciPdoSetBusDataByOffset(DeviceExtension,
-                                    OriginalValue,
-                                    Offset,
-                                    sizeof(ULONG));
-    if (Size != sizeof(ULONG))
-    {
-        DPRINT1("Wrong size %lu (seg %u)\n", Size, Segment);
-        return FALSE;
-    }
+    *NewValue = Probe.NewValue;
 
     PciDevice->BarSize[Index] = *NewValue;
     PciDevice->BarSizeValid |= (UCHAR)(1 << Index);
