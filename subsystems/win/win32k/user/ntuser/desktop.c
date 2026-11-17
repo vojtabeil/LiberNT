@@ -1355,8 +1355,25 @@ DesktopWindowProc(PWND Wnd, UINT Msg, WPARAM wParam, LPARAM lParam, LRESULT *lRe
             return TRUE;
 
         case WM_DISPLAYCHANGE:
-            co_WinPosSetWindowPos(Wnd, 0, 0, 0, LOWORD(lParam), HIWORD(lParam), SWP_NOZORDER | SWP_NOACTIVATE);
+        {
+            /* Any process can broadcast WM_DISPLAYCHANGE, and a broadcast
+             * reaches the input desktop's window. Size the desktop to the
+             * screen the display settings now give, not to what the message
+             * says: a zero lParam left a desktop with no area. */
+            LONG cx = UserGetSystemMetrics(SM_CXVIRTUALSCREEN);
+            LONG cy = UserGetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+            if (LOWORD(lParam) != cx || HIWORD(lParam) != cy)
+                WARN("WM_DISPLAYCHANGE for %ux%u on a %ldx%ld screen\n", LOWORD(lParam), HIWORD(lParam), cx, cy);
+            if (cx > 0 && cy > 0)
+            {
+                co_WinPosSetWindowPos(Wnd, 0,
+                                      UserGetSystemMetrics(SM_XVIRTUALSCREEN),
+                                      UserGetSystemMetrics(SM_YVIRTUALSCREEN),
+                                      cx, cy, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
             return TRUE;
+        }
 
         case WM_ERASEBKGND:
             IntPaintDesktop((HDC)wParam);
@@ -1934,6 +1951,7 @@ IntPaintDesktopContent(HDC hDC)
     static WCHAR s_wszAssistance[64];
 
     RECTL Rect;
+    SIZE sz;
     HBRUSH DesktopBrush, PreviousBrush;
     HWND hWndDesktop;
     BOOL doPatBlt = TRUE;
@@ -1967,12 +1985,20 @@ IntPaintDesktopContent(HDC hDC)
             IntFreeScaledWallpaper();
         }
 
+        sz.cx = WndDesktop->rcWindow.right - WndDesktop->rcWindow.left;
+        sz.cy = WndDesktop->rcWindow.bottom - WndDesktop->rcWindow.top;
+
         /*
-         * Paint desktop background
+         * Paint desktop background.
+         * The wallpaper is laid out against the desktop window. A desktop or
+         * a bitmap with no area leaves nothing to lay it out against: fill
+         * and fit divide by the scaled size and tile steps by the bitmap
+         * size. The background colour stands in until both have a size.
          */
-        if (gspv.hbmWallpaper != NULL)
+        if (gspv.hbmWallpaper != NULL &&
+            sz.cx > 0 && sz.cy > 0 &&
+            (LONG)gspv.cxWallpaper > 0 && (LONG)gspv.cyWallpaper > 0)
         {
-            SIZE sz;
             int x, y;
             int scaledWidth = 0, scaledHeight = 0;
             int wallpaperX = 0, wallpaperY = 0, wallpaperWidth = 0, wallpaperHeight = 0;
@@ -1980,16 +2006,13 @@ IntPaintDesktopContent(HDC hDC)
             INT OldStretchMode = 0;
             BOOL RestoreStretchMode = FALSE;
 
-            sz.cx = WndDesktop->rcWindow.right - WndDesktop->rcWindow.left;
-            sz.cy = WndDesktop->rcWindow.bottom - WndDesktop->rcWindow.top;
-
             if (gspv.WallpaperMode == wmFit ||
                 gspv.WallpaperMode == wmFill)
             {
                 int scaleNum, scaleDen;
 
                 // Precision improvement over ((sz.cx / gspv.cxWallpaper) > (sz.cy / gspv.cyWallpaper))
-                if ((sz.cx * gspv.cyWallpaper) > (sz.cy * gspv.cxWallpaper))
+                if ((LONGLONG)sz.cx * gspv.cyWallpaper > (LONGLONG)sz.cy * gspv.cxWallpaper)
                 {
                     if (gspv.WallpaperMode == wmFit)
                     {
@@ -2018,6 +2041,10 @@ IntPaintDesktopContent(HDC hDC)
 
                 scaledWidth = EngMulDiv(gspv.cxWallpaper, scaleNum, scaleDen);
                 scaledHeight = EngMulDiv(gspv.cyWallpaper, scaleNum, scaleDen);
+
+                /* A very wide or tall bitmap can round down to no pixel on its short side */
+                scaledWidth = max(scaledWidth, 1);
+                scaledHeight = max(scaledHeight, 1);
 
                 if (gspv.WallpaperMode == wmFill)
                 {
