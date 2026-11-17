@@ -41,7 +41,18 @@
 typedef ULONG (__cdecl *DEBUG_PRINT)(const char *, ...);
 static DEBUG_PRINT DebugPrint;
 static HANDLE StopEvent;
-static volatile LONG ClientConnected;
+/* One session drives the console at a time; a new connection replaces it */
+typedef struct CLIENT_SESSION
+{
+    freerdp_peer *Peer;
+    BOOL Loopback;      /* the peer is the Hyper-V socket bridge */
+    HANDLE Replaced;    /* set when a newer connection takes over */
+} CLIENT_SESSION;
+#define MAX_CLIENT_THREADS 8
+static CRITICAL_SECTION SessionLock;
+static CLIENT_SESSION *CurrentSession;
+static HANDLE SessionSlot;
+static volatile LONG ClientThreads;
 static char BindAddress[64], AllowedPeer[64], Username[128], Password[256];
 static char Certificate[MAX_PATH], PrivateKey[MAX_PATH];
 #define MAX_INTERFACE_MACS 8
@@ -54,13 +65,12 @@ static BOOL AddressAdded;
 static WCHAR TransferRoot[MAX_PATH];
 static BOOL ClipboardEnabled;
 static BOOL Loopback, HvSocketTrust;
-/* The session's peer is the Hyper-V socket bridge (one session at a time) */
-static BOOL ClientIsLoopback;
 
 typedef struct DESKTOP_CONTEXT
 {
     rdpContext rdp;
     BOOL Authorized, Active, Suppressed, Refresh;
+    BOOL Loopback;      /* the peer is the Hyper-V socket bridge */
     int Width, Height;
     HDC ScreenDC, MemoryDC;
     HBITMAP Bitmap;
@@ -71,6 +81,8 @@ typedef struct DESKTOP_CONTEXT
     BYTE PlanarTile[2 * 64 * 32 * 4];
     BOOL Keys[512];
     DWORD MouseButtons;
+    /* Another desktop has the input or the screen (Ctrl+Alt+Del, a locked console) */
+    BOOL InputBlocked, CaptureBlocked;
     ULONGLONG Frames, Updates, Inputs;
     HANDLE Vcm;
     RDP_TRANSFER *Transfer;
@@ -168,6 +180,53 @@ static BOOL ConfigRelativePath(const char *config, char *path, size_t size)
     return TRUE;
 }
 
+/* Release the keys and mouse buttons the client left pressed */
+static void ReleaseHeldInput(DESKTOP_CONTEXT *ctx)
+{
+    unsigned i;
+    INPUT event = {0};
+    for (i = 0; i < 512; ++i)
+        if (ctx->Keys[i])
+        {
+            event.type = INPUT_KEYBOARD;
+            event.ki.wScan = i & 255;
+            event.ki.dwFlags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
+            if (i & 256) event.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+            if (SendInput(1, &event, sizeof(event)) == 1) ctx->Keys[i] = FALSE;
+        }
+    memset(&event, 0, sizeof(event));
+    event.type = INPUT_MOUSE;
+    if (ctx->MouseButtons & PTR_FLAGS_BUTTON1) event.mi.dwFlags |= MOUSEEVENTF_LEFTUP;
+    if (ctx->MouseButtons & PTR_FLAGS_BUTTON2) event.mi.dwFlags |= MOUSEEVENTF_RIGHTUP;
+    if (ctx->MouseButtons & PTR_FLAGS_BUTTON3) event.mi.dwFlags |= MOUSEEVENTF_MIDDLEUP;
+    if (event.mi.dwFlags && SendInput(1, &event, sizeof(event)) == 1) ctx->MouseButtons = 0;
+}
+
+/* SendInput fails while another desktop has the input: the Winlogon desktop after
+ * Ctrl+Alt+Del (also sent by the client, which win32k turns into the secure attention
+ * sequence) or a locked console. That must not end the session, or every reconnect
+ * fails the same way until someone clears that desktop on the basic console: drop the
+ * event and carry on. Key releases lost meanwhile are sent once input works again. */
+static BOOL Inject(DESKTOP_CONTEXT *ctx, INPUT *event)
+{
+    if (ctx->InputBlocked) ReleaseHeldInput(ctx);
+    if (SendInput(1, event, sizeof(*event)) != 1)
+    {
+        if (!ctx->InputBlocked)
+            Log("Input injection failed error=%lu: another desktop has the input; dropping input until it is back",
+                GetLastError());
+        ctx->InputBlocked = TRUE;
+        return FALSE;
+    }
+    if (ctx->InputBlocked)
+    {
+        ctx->InputBlocked = FALSE;
+        Log("Input injection works again");
+    }
+    ++ctx->Inputs;
+    return TRUE;
+}
+
 static BOOL Keyboard(rdpInput *input, UINT16 flags, UINT8 code)
 {
     DESKTOP_CONTEXT *ctx = (DESKTOP_CONTEXT *)input->context;
@@ -179,13 +238,8 @@ static BOOL Keyboard(rdpInput *input, UINT16 flags, UINT8 code)
     event.ki.dwFlags = KEYEVENTF_SCANCODE;
     if (flags & KBD_FLAGS_EXTENDED) event.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
     if (flags & KBD_FLAGS_RELEASE) event.ki.dwFlags |= KEYEVENTF_KEYUP;
-    if (SendInput(1, &event, sizeof(event)) != 1)
-    {
-        Log("Keyboard injection failed: scancode 0x%x flags 0x%x error=%lu", code, flags, GetLastError());
-        return FALSE;
-    }
-    ctx->Keys[index] = !(flags & KBD_FLAGS_RELEASE);
-    ++ctx->Inputs;
+    /* A press that did not get through is not held; a release that did not stays due */
+    if (Inject(ctx, &event)) ctx->Keys[index] = !(flags & KBD_FLAGS_RELEASE);
     return TRUE;
 }
 
@@ -197,7 +251,8 @@ static BOOL UnicodeKeyboard(rdpInput *input, UINT16 flags, UINT16 code)
     event.ki.wScan = code;
     event.ki.dwFlags = KEYEVENTF_UNICODE;
     if (flags & KBD_FLAGS_RELEASE) event.ki.dwFlags |= KEYEVENTF_KEYUP;
-    return SendInput(1, &event, sizeof(event)) == 1;
+    Inject((DESKTOP_CONTEXT *)input->context, &event);
+    return TRUE;
 }
 
 static BOOL Mouse(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y)
@@ -224,15 +279,12 @@ static BOOL Mouse(rdpInput *input, UINT16 flags, UINT16 x, UINT16 y)
         if (flags & PTR_FLAGS_BUTTON1) event.mi.dwFlags |= down ? MOUSEEVENTF_LEFTDOWN : MOUSEEVENTF_LEFTUP;
         if (flags & PTR_FLAGS_BUTTON2) event.mi.dwFlags |= down ? MOUSEEVENTF_RIGHTDOWN : MOUSEEVENTF_RIGHTUP;
         if (flags & PTR_FLAGS_BUTTON3) event.mi.dwFlags |= down ? MOUSEEVENTF_MIDDLEDOWN : MOUSEEVENTF_MIDDLEUP;
+    }
+    if (Inject(ctx, &event) && !(flags & (PTR_FLAGS_WHEEL | PTR_FLAGS_HWHEEL)))
+    {
         if (down) ctx->MouseButtons |= flags & (PTR_FLAGS_BUTTON1 | PTR_FLAGS_BUTTON2 | PTR_FLAGS_BUTTON3);
         else ctx->MouseButtons &= ~(flags & (PTR_FLAGS_BUTTON1 | PTR_FLAGS_BUTTON2 | PTR_FLAGS_BUTTON3));
     }
-    if (SendInput(1, &event, sizeof(event)) != 1)
-    {
-        Log("Mouse injection failed: flags 0x%x error=%lu", flags, GetLastError());
-        return FALSE;
-    }
-    ++ctx->Inputs;
     return TRUE;
 }
 
@@ -301,7 +353,7 @@ static BOOL PostConnect(freerdp_peer *peer)
      * bridge is trusted: only the Hyper-V host can open its channel, and like the basic
      * console of Virtual Machine Connection the session is open to whoever may connect
      * to the VM there. */
-    if (!(ClientIsLoopback && HvSocketTrust) &&
+    if (!(ctx->Loopback && HvSocketTrust) &&
         (!user || !password || strcmp(user, Username) || strcmp(password, Password)))
     {
         Log("Authentication rejected for peer %s", peer->hostname);
@@ -362,10 +414,18 @@ static BOOL Capture(DESKTOP_CONTEXT *ctx)
         ctx->Active = FALSE;
         return ctx->rdp.update->DesktopResize(&ctx->rdp);
     }
+    /* Like input, the capture can fail while another desktop is shown: skip the frame */
     if (!BitBlt(ctx->MemoryDC, 0, 0, ctx->Width, ctx->Height, ctx->ScreenDC, 0, 0, SRCCOPY | CAPTUREBLT))
     {
-        Log("Desktop capture failed error=%lu", GetLastError());
-        return FALSE;
+        if (!ctx->CaptureBlocked) Log("Desktop capture failed error=%lu; retrying", GetLastError());
+        ctx->CaptureBlocked = TRUE;
+        return TRUE;
+    }
+    if (ctx->CaptureBlocked)
+    {
+        ctx->CaptureBlocked = FALSE;
+        ctx->Refresh = TRUE;
+        Log("Desktop capture works again");
     }
     cursor.cbSize = sizeof(cursor);
     if (GetCursorInfo(&cursor) && (cursor.flags & CURSOR_SHOWING))
@@ -435,28 +495,12 @@ static BOOL Capture(DESKTOP_CONTEXT *ctx)
 static void ContextFree(freerdp_peer *peer, rdpContext *rdp)
 {
     DESKTOP_CONTEXT *ctx = (DESKTOP_CONTEXT *)rdp;
-    unsigned i;
-    INPUT event = {0};
     (void)peer;
     ClipboardStop(ctx->Clipboard);
     TransferStop(ctx->Transfer);
     if (ctx->Vcm) WTSCloseServer(ctx->Vcm);
     /* A disconnected controller must not leave Ctrl/Alt or mouse buttons held. */
-    for (i = 0; i < 512; ++i)
-        if (ctx->Keys[i])
-        {
-            event.type = INPUT_KEYBOARD;
-            event.ki.wScan = i & 255;
-            event.ki.dwFlags = KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP;
-            if (i & 256) event.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-            SendInput(1, &event, sizeof(event));
-        }
-    memset(&event, 0, sizeof(event));
-    event.type = INPUT_MOUSE;
-    if (ctx->MouseButtons & PTR_FLAGS_BUTTON1) event.mi.dwFlags |= MOUSEEVENTF_LEFTUP;
-    if (ctx->MouseButtons & PTR_FLAGS_BUTTON2) event.mi.dwFlags |= MOUSEEVENTF_RIGHTUP;
-    if (ctx->MouseButtons & PTR_FLAGS_BUTTON3) event.mi.dwFlags |= MOUSEEVENTF_MIDDLEUP;
-    if (event.mi.dwFlags) SendInput(1, &event, sizeof(event));
+    ReleaseHeldInput(ctx);
     Log("Session closed: frames=%llu updates=%llu input events=%llu", ctx->Frames, ctx->Updates, ctx->Inputs);
     FreeDesktopCapture(ctx);
     freerdp_bitmap_planar_context_free(ctx->Planar);
@@ -465,17 +509,39 @@ static void ContextFree(freerdp_peer *peer, rdpContext *rdp)
 
 static DWORD WINAPI ClientThread(void *arg)
 {
-    freerdp_peer *peer = arg;
+    CLIENT_SESSION *session = arg;
+    freerdp_peer *peer = session->Peer;
     rdpSettings *settings;
     rdpPrivateKey *key;
     rdpCertificate *cert;
-    DWORD count, status, started = GetTickCount(), lastFrame = 0;
+    DWORD count, status, started, lastFrame = 0;
     HANDLE events[32];
     DESKTOP_CONTEXT *ctx;
+    BOOL slot = FALSE;
+    /* A new connection replaces the current session, as on a Windows console: a client
+     * that reconnects, or one whose previous connection has not been torn down yet,
+     * must not be turned away. Virtual Machine Connection opens its enhanced session
+     * with a negotiation that fails on purpose and reconnects right away; refusing
+     * that reconnect while the first connection was still closing failed the whole
+     * enhanced session. */
+    EnterCriticalSection(&SessionLock);
+    if (CurrentSession) SetEvent(CurrentSession->Replaced);
+    CurrentSession = session;
+    LeaveCriticalSection(&SessionLock);
+    events[0] = SessionSlot; events[1] = session->Replaced; events[2] = StopEvent;
+    status = WaitForMultipleObjects(3, events, FALSE, 10000);
+    slot = status == WAIT_OBJECT_0 || status == WAIT_ABANDONED_0;
+    if (!slot)
+    {
+        if (status == WAIT_TIMEOUT) Log("Previous session did not end in time; connection dropped");
+        goto done;
+    }
+    started = GetTickCount();
     peer->ContextSize = sizeof(DESKTOP_CONTEXT);
     peer->ContextFree = ContextFree;
     if (!freerdp_peer_context_new(peer)) goto done;
     ctx = (DESKTOP_CONTEXT *)peer->context;
+    ctx->Loopback = session->Loopback;
     ctx->Vcm = WTSOpenServerA((LPSTR)peer->context);
     if (!ctx->Vcm) goto cleanup;
     settings = ctx->rdp.settings;
@@ -489,14 +555,14 @@ static DWORD WINAPI ClientThread(void *arg)
     /* Virtual Machine Connection's enhanced session, through hvsockbridge, closes the
      * connection when the server picks TLS; it accepts standard RDP security, as with
      * xrdp. The Hyper-V socket never leaves the host, so the loopback leg is unencrypted. */
-    if (ClientIsLoopback &&
+    if (ctx->Loopback &&
         (!freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, TRUE) ||
          !freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, FALSE) ||
          !freerdp_settings_set_bool(settings, FreeRDP_UseRdpSecurityLayer, TRUE) ||
          !freerdp_settings_set_uint32(settings, FreeRDP_EncryptionLevel, ENCRYPTION_LEVEL_NONE) ||
          !freerdp_settings_set_uint32(settings, FreeRDP_EncryptionMethods, ENCRYPTION_METHOD_NONE)))
         goto cleanup;
-    if (!ClientIsLoopback &&
+    if (!ctx->Loopback &&
         (!freerdp_settings_set_bool(settings, FreeRDP_RdpSecurity, FALSE) ||
          !freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, TRUE)))
         goto cleanup;
@@ -519,11 +585,24 @@ static DWORD WINAPI ClientThread(void *arg)
     for (;;)
     {
         events[0] = StopEvent;
-        count = peer->GetEventHandles(peer, events + 1, 30);
+        events[1] = session->Replaced;
+        count = peer->GetEventHandles(peer, events + 2, 29);
         if (!count) break;
-        events[++count] = WTSVirtualChannelManagerGetEventHandle(ctx->Vcm);
-        status = WaitForMultipleObjects(count + 1, events, FALSE, 100);
+        events[count + 2] = WTSVirtualChannelManagerGetEventHandle(ctx->Vcm);
+        status = WaitForMultipleObjects(count + 3, events, FALSE, 100);
         if (status == WAIT_OBJECT_0 || status == WAIT_FAILED) break;
+        if (status == WAIT_OBJECT_0 + 1)
+        {
+            /* Tell the client why, as Windows does: a client that only sees the connection
+             * drop reconnects automatically and takes the console back. */
+            Log("Session replaced by a new connection");
+            if (peer->activated)
+            {
+                freerdp_set_error_info(peer->context->rdp, ERRINFO_DISCONNECTED_BY_OTHER_CONNECTION);
+                peer->Close(peer);
+            }
+            break;
+        }
         if (!peer->CheckFileDescriptor(peer)) { Log("Session ended by the RDP transport"); break; }
         if (!WTSVirtualChannelManagerCheckFileDescriptor(ctx->Vcm)) { Log("Session ended by a virtual channel error"); break; }
         if (!ctx->Authorized && GetTickCount() - started > 30000) break;
@@ -538,7 +617,14 @@ cleanup:
     freerdp_peer_context_free(peer);
 done:
     freerdp_peer_free(peer);
-    InterlockedExchange(&ClientConnected, 0);
+    EnterCriticalSection(&SessionLock);
+    if (CurrentSession == session) CurrentSession = NULL;
+    LeaveCriticalSection(&SessionLock);
+    /* The next session starts once this one has released its keys and capture */
+    if (slot) ReleaseMutex(SessionSlot);
+    CloseHandle(session->Replaced);
+    free(session);
+    InterlockedDecrement(&ClientThreads);
     return 0;
 }
 
@@ -578,6 +664,7 @@ static BOOL PeerIsBridge(const struct sockaddr_in *peer)
 
 static BOOL Accepted(freerdp_listener *listener, freerdp_peer *peer)
 {
+    CLIENT_SESSION *session;
     HANDLE thread;
     struct sockaddr_in address;
     int length = sizeof(address);
@@ -594,11 +681,31 @@ static BOOL Accepted(freerdp_listener *listener, freerdp_peer *peer)
             return FALSE;
         }
     }
-    if (InterlockedCompareExchange(&ClientConnected, 1, 0)) return FALSE;
+    if (InterlockedIncrement(&ClientThreads) > MAX_CLIENT_THREADS)
+    {
+        InterlockedDecrement(&ClientThreads);
+        Log("Too many connections at once; connection refused");
+        return FALSE;
+    }
+    session = calloc(1, sizeof(*session));
+    if (session) session->Replaced = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!session || !session->Replaced)
+    {
+        free(session);
+        InterlockedDecrement(&ClientThreads);
+        return FALSE;
+    }
+    session->Peer = peer;
+    session->Loopback = address.sin_addr.s_addr == htonl(INADDR_LOOPBACK);
     /* The transport owns the socket once the client thread runs */
-    ClientIsLoopback = address.sin_addr.s_addr == htonl(INADDR_LOOPBACK);
-    thread = CreateThread(NULL, 0, ClientThread, peer, 0, NULL);
-    if (!thread) { InterlockedExchange(&ClientConnected, 0); return FALSE; }
+    thread = CreateThread(NULL, 0, ClientThread, session, 0, NULL);
+    if (!thread)
+    {
+        CloseHandle(session->Replaced);
+        free(session);
+        InterlockedDecrement(&ClientThreads);
+        return FALSE;
+    }
     CloseHandle(thread);
     return TRUE;
 }
@@ -694,6 +801,9 @@ int main(int argc, char **argv)
     if (!winpr_InitializeSSL(WINPR_SSL_INIT_DEFAULT)) return 1;
     StopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
     if (!StopEvent) return 1;
+    SessionSlot = CreateMutexA(NULL, FALSE, NULL);
+    if (!SessionSlot) return 1;
+    InitializeCriticalSection(&SessionLock);
     SetConsoleCtrlHandler(Stop, TRUE);
     listener = freerdp_listener_new();
     if (!listener) return 1;
@@ -728,7 +838,7 @@ int main(int argc, char **argv)
     }
     listener->Close(listener);
     SetEvent(StopEvent);
-    while (InterlockedCompareExchange(&ClientConnected, 0, 0)) Sleep(50);
+    while (InterlockedCompareExchange(&ClientThreads, 0, 0)) Sleep(50);
     freerdp_listener_free(listener);
     SetConsoleCtrlHandler(Stop, FALSE);
     CloseHandle(StopEvent); CloseHandle(singleton);
