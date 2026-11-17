@@ -20,6 +20,42 @@ BOOLEAN PspReaping;
 /* PRIVATE FUNCTIONS **********************************************************/
 
 /*
+ * A thread that leaves through RtlExitUserThread or ExitThread cannot release
+ * the stack it is still running on, so it marks its TEB and the stack is
+ * released here, on its way out of kernel mode for good. Without this every
+ * exited thread leaves its whole stack reservation behind, and a process that
+ * keeps starting threads runs out of address space.
+ */
+static
+VOID
+PspFreeUserStack(
+    _In_ PTEB Teb)
+{
+    PVOID StackBase = NULL;
+    SIZE_T Size = 0;
+
+    _SEH2_TRY
+    {
+#if (NTDDI_VERSION >= NTDDI_WIN7)
+        if (Teb->ReservedPad1)
+#elif (NTDDI_VERSION >= NTDDI_LONGHORN)
+        if (Teb->SpareBool1)
+#else
+        if (Teb->FreeStackOnTermination)
+#endif
+            StackBase = Teb->DeallocationStack;
+    }
+    _SEH2_EXCEPT(EXCEPTION_EXECUTE_HANDLER)
+    {
+        StackBase = NULL;
+    }
+    _SEH2_END;
+
+    if (StackBase != NULL)
+        ZwFreeVirtualMemory(NtCurrentProcess(), &StackBase, &Size, MEM_RELEASE);
+}
+
+/*
  * Whether the process has begun to go away. A caller that sees this is told
  * the process is terminating rather than being allowed to act on it.
  */
@@ -293,6 +329,9 @@ PspExitThread(
     Teb = Thread->Tcb.Teb;
     if (Teb != NULL)
     {
+        /* A process that lives on keeps its address space, so the stack goes now */
+        if (!LastThread) PspFreeUserStack(Teb);
+
         MmDeleteTeb(Process, Teb);
         Thread->Tcb.Teb = NULL;
     }
